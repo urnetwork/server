@@ -698,7 +698,7 @@ func TestScoreGateBoundariesInclusive(t *testing.T) {
 		stabilityOK: true,
 		resourcesOK: true,
 	}}
-	gates := buildScoreGates(baseline, candidate, replicates)
+	gates := buildScoreGates(baseline, candidate, replicates, "")
 	for name, gate := range gates {
 		if !gate.Passed {
 			t.Fatalf("inclusive boundary failed %s: %+v", name, gate)

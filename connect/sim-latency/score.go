@@ -48,29 +48,32 @@ var scoreLiveMetricNames = []string{
 // ScoreBaselineReplicate contains trusted same-round baseline diagnostics for
 // one replicate. The scorer recomputes every aggregate from these values.
 type ScoreBaselineReplicate struct {
-	RawScore                        float64                  `json:"raw_score"`
-	SuccessRate                     float64                  `json:"success_rate"`
-	RequestCount                    int64                    `json:"request_count"`
-	ReceivedBytes                   int64                    `json:"received_bytes"`
-	FindProvidersLoadP95Ms          float64                  `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05            float64                  `json:"findproviders_pool_p05"`
-	FindProvidersSampleSpanFraction float64                  `json:"findproviders_sample_span_fraction"`
-	LiveMetrics                     map[string]MetricSummary `json:"live_metrics,omitempty"`
+	WorkCoverage                    *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
+	RawScore                        float64                               `json:"raw_score"`
+	SuccessRate                     float64                               `json:"success_rate"`
+	RequestCount                    int64                                 `json:"request_count"`
+	ReceivedBytes                   int64                                 `json:"received_bytes"`
+	FindProvidersLoadP95Ms          float64                               `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64                               `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64                               `json:"findproviders_sample_span_fraction"`
+	LiveMetrics                     map[string]MetricSummary              `json:"live_metrics,omitempty"`
 }
 
 // ScoreBaselineManifest is the authenticated hidden-seed round contract
 // consumed by score. Replicates and takeover margin are deliberately data,
 // not CLI knobs: they are frozen once for a round after calibration.
 type ScoreBaselineManifest struct {
-	ScoreSchema      int                      `json:"score_schema"`
-	Kind             string                   `json:"kind"`
-	ScorerVersion    string                   `json:"scorer_version"`
-	RoundId          string                   `json:"round_id"`
-	ConfigSha256     string                   `json:"config_sha256"`
-	RequestTimeoutMs int64                    `json:"request_timeout_ms"`
-	RunFlags         map[string]string        `json:"run_flags"`
-	TakeoverMargin   float64                  `json:"takeover_margin"`
-	Replicates       []ScoreBaselineReplicate `json:"replicates"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	ScoreSchema        int                                  `json:"score_schema"`
+	Kind               string                               `json:"kind"`
+	ScorerVersion      string                               `json:"scorer_version"`
+	RoundId            string                               `json:"round_id"`
+	ConfigSha256       string                               `json:"config_sha256"`
+	RequestTimeoutMs   int64                                `json:"request_timeout_ms"`
+	RunFlags           map[string]string                    `json:"run_flags"`
+	TakeoverMargin     float64                              `json:"takeover_margin"`
+	Replicates         []ScoreBaselineReplicate             `json:"replicates"`
 }
 
 type AccountingSnapshot struct {
@@ -101,6 +104,7 @@ type ResourceReport struct {
 }
 
 type ScoreInputs struct {
+	WorkloadPath     string
 	Runs             []string
 	Stderr           []string
 	Accounting       []string
@@ -115,14 +119,17 @@ type ScoreInputs struct {
 // contract is derived from the first run and cross-checked across every
 // replicate before the manifest is emitted.
 type ScoreBaselineInputs struct {
-	Runs            []string
-	Stderr          []string
-	Accounting      []string
-	Samples         []string
-	ResourceReports []string
-	Markers         []string
-	RoundId         string
-	TakeoverMargin  float64
+	G2VolumePolicy     model.CompetitionG2VolumePolicy
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy
+	WorkloadPath       string
+	Runs               []string
+	Stderr             []string
+	Accounting         []string
+	Samples            []string
+	ResourceReports    []string
+	Markers            []string
+	RoundId            string
+	TakeoverMargin     float64
 }
 
 type ScoreEvalError struct {
@@ -137,44 +144,49 @@ type ScoreGate struct {
 }
 
 type ScoreReplicateDiagnostics struct {
-	EvaluationId                    string   `json:"evaluation_id"`
-	RawScore                        float64  `json:"raw_score"`
-	SuccessRate                     float64  `json:"success_rate"`
-	RequestCount                    int64    `json:"request_count"`
-	ReceivedBytes                   int64    `json:"received_bytes"`
-	ProviderEgressBytes             int64    `json:"provider_egress_bytes"`
-	AccountingCoverage              float64  `json:"accounting_coverage"`
-	FindProvidersSamples            int64    `json:"findproviders_samples"`
-	FindProvidersEmptyPools         int64    `json:"findproviders_empty_pools"`
-	FindProvidersLoadP95Ms          float64  `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05            float64  `json:"findproviders_pool_p05"`
-	FindProvidersSampleSpanFraction float64  `json:"findproviders_sample_span_fraction"`
-	StabilityFindings               []string `json:"stability_findings"`
-	ResourceFindings                []string `json:"resource_findings"`
+	WorkCoverage                    *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
+	EvaluationId                    string                                `json:"evaluation_id"`
+	RawScore                        float64                               `json:"raw_score"`
+	SuccessRate                     float64                               `json:"success_rate"`
+	RequestCount                    int64                                 `json:"request_count"`
+	ReceivedBytes                   int64                                 `json:"received_bytes"`
+	ProviderEgressBytes             int64                                 `json:"provider_egress_bytes"`
+	AccountingCoverage              float64                               `json:"accounting_coverage"`
+	FindProvidersSamples            int64                                 `json:"findproviders_samples"`
+	FindProvidersEmptyPools         int64                                 `json:"findproviders_empty_pools"`
+	FindProvidersLoadP95Ms          float64                               `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64                               `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64                               `json:"findproviders_sample_span_fraction"`
+	StabilityFindings               []string                              `json:"stability_findings"`
+	ResourceFindings                []string                              `json:"resource_findings"`
 }
 
 type ScoreAggregateDiagnostics struct {
-	RawScore                        float64 `json:"raw_score"`
-	SuccessRate                     float64 `json:"success_rate"`
-	RequestCount                    float64 `json:"request_count"`
-	ReceivedBytes                   float64 `json:"received_bytes"`
-	AccountingCoverage              float64 `json:"accounting_coverage,omitempty"`
-	FindProvidersLoadP95Ms          float64 `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05            float64 `json:"findproviders_pool_p05"`
-	FindProvidersSampleSpanFraction float64 `json:"findproviders_sample_span_fraction"`
+	WorkCoverage                    *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
+	RawScore                        float64                               `json:"raw_score"`
+	SuccessRate                     float64                               `json:"success_rate"`
+	RequestCount                    float64                               `json:"request_count"`
+	ReceivedBytes                   float64                               `json:"received_bytes"`
+	AccountingCoverage              float64                               `json:"accounting_coverage,omitempty"`
+	FindProvidersLoadP95Ms          float64                               `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64                               `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64                               `json:"findproviders_sample_span_fraction"`
 }
 
 type ScoreDiagnostics struct {
-	RoundId                  string                      `json:"round_id,omitempty"`
-	BaselineSha256           string                      `json:"baseline_sha256,omitempty"`
-	ReplicateCount           int                         `json:"replicate_count,omitempty"`
-	RequestTimeoutMs         int64                       `json:"request_timeout_ms,omitempty"`
-	TakeoverMargin           float64                     `json:"takeover_margin,omitempty"`
-	BaselineTakeoverRawMax   float64                     `json:"baseline_takeover_raw_max,omitempty"`
-	BaselineTakeoverEligible *bool                       `json:"baseline_takeover_eligible,omitempty"`
-	Baseline                 *ScoreAggregateDiagnostics  `json:"baseline,omitempty"`
-	Candidate                *ScoreAggregateDiagnostics  `json:"candidate,omitempty"`
-	Replicates               []ScoreReplicateDiagnostics `json:"replicates,omitempty"`
+	G2VolumePolicy           model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy       *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	ScorerVersion            string                               `json:"scorer_version,omitempty"`
+	RoundId                  string                               `json:"round_id,omitempty"`
+	BaselineSha256           string                               `json:"baseline_sha256,omitempty"`
+	ReplicateCount           int                                  `json:"replicate_count,omitempty"`
+	RequestTimeoutMs         int64                                `json:"request_timeout_ms,omitempty"`
+	TakeoverMargin           float64                              `json:"takeover_margin,omitempty"`
+	BaselineTakeoverRawMax   float64                              `json:"baseline_takeover_raw_max,omitempty"`
+	BaselineTakeoverEligible *bool                                `json:"baseline_takeover_eligible,omitempty"`
+	Baseline                 *ScoreAggregateDiagnostics           `json:"baseline,omitempty"`
+	Candidate                *ScoreAggregateDiagnostics           `json:"candidate,omitempty"`
+	Replicates               []ScoreReplicateDiagnostics          `json:"replicates,omitempty"`
 }
 
 type ScoreResult struct {
@@ -255,6 +267,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 			inputs.Markers[i],
 			baseline,
 			false,
+			inputs.WorkloadPath,
 		)
 		if err != nil {
 			return infrastructureScore(err)
@@ -269,12 +282,17 @@ func Score(inputs ScoreInputs) *ScoreResult {
 	baseAggregate := aggregateBaseline(baseline.Replicates)
 	candidateAggregate := aggregateCandidate(replicates)
 	significance := scoreSignificance(baseline.Replicates, replicates, baseline.TakeoverMargin)
-	gates := buildScoreGates(baseAggregate, candidateAggregate, replicates)
+	gates := buildScoreGates(baseAggregate, candidateAggregate, replicates, baseline.G2VolumePolicy)
+	if baseline.WorkCoveragePolicy != nil {
+		gates["G7_work_coverage"] = workCoverageGate(baseline.WorkCoveragePolicy, baseAggregate.WorkCoverage, candidateAggregate.WorkCoverage)
+	}
 	rawScore := candidateAggregate.RawScore
 	normalized := clampScore(100*baseAggregate.RawScore/rawScore, 1, 200)
 	takeoverRawMax := baseAggregate.RawScore * (1 - baseline.TakeoverMargin)
 
 	diagnostics := ScoreDiagnostics{
+		G2VolumePolicy:         baseline.G2VolumePolicy,
+		WorkCoveragePolicy:     baseline.WorkCoveragePolicy.Clone(),
 		RoundId:                baseline.RoundId,
 		BaselineSha256:         baselineSha256,
 		ReplicateCount:         len(replicates),
@@ -283,6 +301,9 @@ func Score(inputs ScoreInputs) *ScoreResult {
 		BaselineTakeoverRawMax: takeoverRawMax,
 		Baseline:               &baseAggregate.ScoreAggregateDiagnostics,
 		Candidate:              &candidateAggregate,
+	}
+	if baseline.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+		diagnostics.ScorerVersion = baseline.ScorerVersion
 	}
 	for _, replicate := range replicates {
 		diagnostics.Replicates = append(diagnostics.Replicates, replicate.diagnostics)
@@ -296,7 +317,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 		Significance:    significance,
 		Diagnostics:     diagnostics,
 	}
-	result.Placeable = allScoreGatesPass(gates)
+	result.Placeable = allScoreGatesPass(gates, baseline.WorkCoveragePolicy)
 	if !gates["G5_stability"].Passed {
 		result.Placeable = false
 		result.EvalError = &ScoreEvalError{
@@ -355,6 +376,10 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 	if !finite(inputs.TakeoverMargin) || inputs.TakeoverMargin < 0 || 0.5 < inputs.TakeoverMargin {
 		return nil, scoreError("invalid_baseline", "baseline takeover margin is outside [0, 0.5]")
 	}
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(inputs.G2VolumePolicy, inputs.WorkCoveragePolicy)
+	if err != nil {
+		return nil, scoreError("invalid_g2_volume_policy", "baseline g2 volume policy is unsupported")
+	}
 
 	first, _, err := readOfficialRunSidecar(inputs.Runs[0])
 	if err != nil {
@@ -372,6 +397,9 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 		inputs.TakeoverMargin,
 		nil,
 	)
+	contract.G2VolumePolicy = inputs.G2VolumePolicy
+	contract.WorkCoveragePolicy = inputs.WorkCoveragePolicy.Clone()
+	contract.ScorerVersion = scorerVersion
 
 	replicates := make([]ScoreBaselineReplicate, 0, want)
 	evaluationIds := map[string]bool{}
@@ -385,6 +413,7 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 			inputs.Markers[i],
 			contract,
 			true,
+			inputs.WorkloadPath,
 		)
 		if err != nil {
 			return nil, err
@@ -421,6 +450,7 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 			return nil, scoreError("baseline_gate_failed", "baseline replicate %d has an invalid measured workload", i+1)
 		}
 		replicates = append(replicates, ScoreBaselineReplicate{
+			WorkCoverage:                    diagnostic.WorkCoverage,
 			RawScore:                        diagnostic.RawScore,
 			SuccessRate:                     diagnostic.SuccessRate,
 			RequestCount:                    diagnostic.RequestCount,
@@ -487,7 +517,11 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 	if baseline.ScoreSchema != apexScoreSchema || baseline.Kind != scoreBaselineKind {
 		return scoreError("invalid_baseline", "baseline manifest has the wrong kind or score schema")
 	}
-	if baseline.ScorerVersion != officialScorerVersion {
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(baseline.G2VolumePolicy, baseline.WorkCoveragePolicy)
+	if err != nil {
+		return scoreError("invalid_g2_volume_policy", "baseline g2 volume policy is unsupported")
+	}
+	if baseline.ScorerVersion != scorerVersion {
 		return scoreError("scorer_version_mismatch", "baseline manifest requires a different scorer version")
 	}
 	if !scoreRoundIdPattern.MatchString(baseline.RoundId) {
@@ -509,6 +543,15 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 		return scoreError("invalid_baseline", "baseline replicate count must be odd and positive")
 	}
 	for _, replicate := range baseline.Replicates {
+		if baseline.WorkCoveragePolicy != nil {
+			coverage := replicate.WorkCoverage
+			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil ||
+				coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 {
+				return scoreError("invalid_baseline_coverage", "baseline coverage is missing or contains no completed expected work")
+			}
+		} else if replicate.WorkCoverage != nil {
+			return scoreError("unexpected_work_coverage", "historical baseline has prospective coverage diagnostics")
+		}
 		if !finitePositive(replicate.RawScore) ||
 			float64(baseline.RequestTimeoutMs) < replicate.RawScore ||
 			!finite(replicate.SuccessRate) || replicate.SuccessRate < 0.97 || 1 < replicate.SuccessRate ||
@@ -525,6 +568,9 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 				return err
 			}
 		}
+	}
+	if baseline.WorkCoveragePolicy != nil && aggregateBaseline(baseline.Replicates).WorkCoverage == nil {
+		return scoreError("invalid_baseline_coverage", "baseline replicates do not share one independent offered-work plan")
 	}
 	return nil
 }
@@ -609,6 +655,7 @@ func scoreLiveMetricsFromRows(runStats *RunStats, rows []resultRow) (map[string]
 }
 
 func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
+	workCoverage := []*model.CompetitionWorkCoverageSummary{}
 	rawScores := make([]float64, 0, len(replicates))
 	successRates := make([]float64, 0, len(replicates))
 	requestCounts := make([]float64, 0, len(replicates))
@@ -617,6 +664,7 @@ func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
 	poolP05s := make([]float64, 0, len(replicates))
 	sampleSpanFraction := math.Inf(1)
 	for _, replicate := range replicates {
+		workCoverage = append(workCoverage, replicate.WorkCoverage)
 		rawScores = append(rawScores, replicate.RawScore)
 		successRates = append(successRates, replicate.SuccessRate)
 		requestCounts = append(requestCounts, float64(replicate.RequestCount))
@@ -626,6 +674,7 @@ func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
 		sampleSpanFraction = math.Min(sampleSpanFraction, replicate.FindProvidersSampleSpanFraction)
 	}
 	return baselineAggregate{ScoreAggregateDiagnostics: ScoreAggregateDiagnostics{
+		WorkCoverage:                    medianWorkCoverage(workCoverage),
 		RawScore:                        scoreMedian(rawScores),
 		SuccessRate:                     scoreMedian(successRates),
 		RequestCount:                    scoreMedian(requestCounts),
@@ -637,6 +686,7 @@ func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
 }
 
 func aggregateCandidate(replicates []candidateReplicate) ScoreAggregateDiagnostics {
+	workCoverage := []*model.CompetitionWorkCoverageSummary{}
 	rawScores := make([]float64, 0, len(replicates))
 	successRates := make([]float64, 0, len(replicates))
 	requestCounts := make([]float64, 0, len(replicates))
@@ -647,6 +697,7 @@ func aggregateCandidate(replicates []candidateReplicate) ScoreAggregateDiagnosti
 	sampleSpanFraction := math.Inf(1)
 	for _, replicate := range replicates {
 		diagnostic := replicate.diagnostics
+		workCoverage = append(workCoverage, diagnostic.WorkCoverage)
 		rawScores = append(rawScores, diagnostic.RawScore)
 		successRates = append(successRates, diagnostic.SuccessRate)
 		requestCounts = append(requestCounts, float64(diagnostic.RequestCount))
@@ -663,6 +714,7 @@ func aggregateCandidate(replicates []candidateReplicate) ScoreAggregateDiagnosti
 		sampleSpanFraction = 0
 	}
 	return ScoreAggregateDiagnostics{
+		WorkCoverage:                    medianWorkCoverage(workCoverage),
 		RawScore:                        scoreMedian(rawScores),
 		SuccessRate:                     scoreMedian(successRates),
 		RequestCount:                    scoreMedian(requestCounts),
@@ -683,6 +735,7 @@ func buildScoreGates(
 	baseline baselineAggregate,
 	candidate ScoreAggregateDiagnostics,
 	replicates []candidateReplicate,
+	g2Policy model.CompetitionG2VolumePolicy,
 ) map[string]ScoreGate {
 	g1AbsoluteMin := 0.97
 	g1RelativeMin := baseline.SuccessRate - 0.01
@@ -692,8 +745,24 @@ func buildScoreGates(
 	requestMax := 1.05 * baseline.RequestCount
 	bytesMin := 0.95 * baseline.ReceivedBytes
 	bytesMax := 1.05 * baseline.ReceivedBytes
-	g2 := requestMin <= candidate.RequestCount && candidate.RequestCount <= requestMax &&
-		bytesMin <= candidate.ReceivedBytes && candidate.ReceivedBytes <= bytesMax
+	g2 := finitePositive(baseline.RequestCount) && finitePositive(baseline.ReceivedBytes) &&
+		finitePositive(candidate.RequestCount) && finitePositive(candidate.ReceivedBytes) &&
+		requestMin <= candidate.RequestCount && bytesMin <= candidate.ReceivedBytes
+	g2Details := map[string]any{
+		"candidate_requests": candidate.RequestCount,
+		"request_min":        requestMin,
+		"candidate_bytes":    candidate.ReceivedBytes,
+		"bytes_min":          bytesMin,
+	}
+	switch g2Policy {
+	case model.CompetitionG2VolumePolicyLegacy:
+		g2 = g2 && candidate.RequestCount <= requestMax && candidate.ReceivedBytes <= bytesMax
+		g2Details["request_max"], g2Details["bytes_max"] = requestMax, bytesMax
+	case model.CompetitionG2VolumePolicyMinimumWork:
+		g2Details["policy"] = g2Policy
+	default:
+		g2 = false
+	}
 
 	g3 := 0.95 <= candidate.AccountingCoverage
 
@@ -731,15 +800,8 @@ func buildScoreGates(
 			},
 		},
 		"G2_volume": {
-			Passed: g2,
-			Details: map[string]any{
-				"candidate_requests": candidate.RequestCount,
-				"request_min":        requestMin,
-				"request_max":        requestMax,
-				"candidate_bytes":    candidate.ReceivedBytes,
-				"bytes_min":          bytesMin,
-				"bytes_max":          bytesMax,
-			},
+			Passed:  g2,
+			Details: g2Details,
 		},
 		"G3_path_integrity": {
 			Passed: g3,
@@ -780,7 +842,12 @@ func buildScoreGates(
 	}
 }
 
-func allScoreGatesPass(gates map[string]ScoreGate) bool {
+func allScoreGatesPass(gates map[string]ScoreGate, coveragePolicies ...*model.CompetitionWorkCoveragePolicy) bool {
+	if len(coveragePolicies) != 0 && coveragePolicies[0] != nil {
+		if gate, ok := gates["G7_work_coverage"]; !ok || !gate.Passed {
+			return false
+		}
+	}
 	for _, name := range []string{
 		"G1_success",
 		"G2_volume",
@@ -816,6 +883,7 @@ func scoreReplicate(
 	markerPath string,
 	baseline *ScoreBaselineManifest,
 	captureLiveMetrics bool,
+	workloadPaths ...string,
 ) (candidateReplicate, error) {
 	var out candidateReplicate
 	// Read the trusted cgroup/process report first. It lets a crash/OOM remain a
@@ -882,6 +950,14 @@ func scoreReplicate(
 	if csvSha256 != runStats.ResultsCsvSha256 || csvBytes != runStats.ResultsCsvBytes {
 		return out, scoreError("results_identity_mismatch", "results CSV does not match the completed run manifest")
 	}
+	workloadPath := ""
+	if len(workloadPaths) == 1 {
+		workloadPath = workloadPaths[0]
+	}
+	workCoverage, err := scoreWorkCoverage(runStats, rows, workloadPath, baseline)
+	if err != nil {
+		return out, err
+	}
 	rowMetrics, err := scoreRows(rows, runStats)
 	if err != nil {
 		return out, err
@@ -942,6 +1018,7 @@ func scoreReplicate(
 	resourceFindings := preRunResourceFindings
 
 	out.diagnostics = ScoreReplicateDiagnostics{
+		WorkCoverage:                    workCoverage,
 		EvaluationId:                    runStats.EvaluationId,
 		RawScore:                        rowMetrics.RawScore,
 		SuccessRate:                     rowMetrics.SuccessRate,
@@ -981,10 +1058,24 @@ func sameArtifactPath(a string, b string) bool {
 }
 
 func validateRunContract(runStats *RunStats, baseline *ScoreBaselineManifest) error {
-	if runStats.Schema != runStatsSchema || runStats.Kind != runStatsKind {
+	wantSchema := runStatsSchema
+	if baseline.WorkCoveragePolicy != nil {
+		wantSchema = 3
+	}
+	if runStats.Schema != wantSchema || runStats.Kind != runStatsKind {
 		return scoreError("artifact_schema_mismatch", "official scoring requires a schema-2 run manifest")
 	}
-	if runStats.ScoreSchema != apexScoreSchema || runStats.ScorerVersion != officialScorerVersion {
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(runStats.G2VolumePolicy, runStats.WorkCoveragePolicy)
+	if err != nil {
+		return scoreError("invalid_g2_volume_policy", "run g2 volume policy is unsupported")
+	}
+	if runStats.G2VolumePolicy != baseline.G2VolumePolicy {
+		return scoreError("g2_volume_policy_mismatch", "run g2 volume policy does not match the authenticated baseline")
+	}
+	if !reflect.DeepEqual(runStats.WorkCoveragePolicy, baseline.WorkCoveragePolicy) {
+		return scoreError("work_coverage_policy_mismatch", "run coverage policy does not match the authenticated baseline")
+	}
+	if runStats.ScoreSchema != apexScoreSchema || runStats.ScorerVersion != scorerVersion || runStats.ScorerVersion != baseline.ScorerVersion {
 		return scoreError("scorer_version_mismatch", "run manifest uses a different score schema or scorer version")
 	}
 	if runStats.EvaluationId == "" {
@@ -1036,7 +1127,9 @@ func validateFinalMarker(path string, manifestBytes []byte, runStats *RunStats) 
 	}
 	manifestSha := fmt.Sprintf("%x", sha256.Sum256(manifestBytes))
 	if marker.Schema != 1 || marker.Kind != "sim-latency-complete" ||
-		marker.ScoreSchema != apexScoreSchema || marker.ScorerVersion != officialScorerVersion ||
+		marker.ScoreSchema != apexScoreSchema || marker.ScorerVersion != runStats.ScorerVersion ||
+		marker.G2VolumePolicy != runStats.G2VolumePolicy ||
+		!reflect.DeepEqual(marker.WorkCoveragePolicy, runStats.WorkCoveragePolicy) ||
 		marker.EvaluationId != runStats.EvaluationId ||
 		marker.RunManifestSha256 != manifestSha ||
 		marker.RunManifestBytes != int64(len(manifestBytes)) ||
@@ -1154,6 +1247,9 @@ func readScoreCSV(path string) ([]resultRow, string, int64, error) {
 		addDigestLine(line)
 		rows = append(rows, resultRow{
 			tStartMs: tStartMs,
+			client:   record[1],
+			path:     record[2],
+			depth:    int(depth),
 			status:   status,
 			bytes:    received,
 			ttfbMs:   ttfb,
@@ -1542,14 +1638,17 @@ func marshalScoreBaseline(baseline *ScoreBaselineManifest) ([]byte, error) {
 
 func runScoreBaseline(opts docopt.Opts) {
 	inputs := ScoreBaselineInputs{
-		Runs:            splitPaths(optString(opts, "--run", "")),
-		Stderr:          splitPaths(optString(opts, "--stderr", "")),
-		Accounting:      splitPaths(optString(opts, "--accounting", "")),
-		Samples:         splitPaths(optString(opts, "--samples", "")),
-		ResourceReports: splitPaths(optString(opts, "--resource-report", "")),
-		Markers:         splitPaths(optString(opts, "--marker", "")),
-		RoundId:         optString(opts, "--round-id", ""),
-		TakeoverMargin:  optFloat(opts, "--takeover-margin", math.NaN()),
+		G2VolumePolicy:     model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", "")),
+		WorkCoveragePolicy: coveragePolicyOption(opts),
+		WorkloadPath:       optString(opts, "--providers", ""),
+		Runs:               splitPaths(optString(opts, "--run", "")),
+		Stderr:             splitPaths(optString(opts, "--stderr", "")),
+		Accounting:         splitPaths(optString(opts, "--accounting", "")),
+		Samples:            splitPaths(optString(opts, "--samples", "")),
+		ResourceReports:    splitPaths(optString(opts, "--resource-report", "")),
+		Markers:            splitPaths(optString(opts, "--marker", "")),
+		RoundId:            optString(opts, "--round-id", ""),
+		TakeoverMargin:     optFloat(opts, "--takeover-margin", math.NaN()),
 	}
 	baseline, err := BuildScoreBaseline(inputs)
 	if err != nil {
@@ -1614,6 +1713,7 @@ func runScoreProgress(opts docopt.Opts) {
 
 func runScore(opts docopt.Opts) {
 	inputs := ScoreInputs{
+		WorkloadPath:     optString(opts, "--providers", ""),
 		Runs:             splitPaths(optString(opts, "--run", "")),
 		Stderr:           splitPaths(optString(opts, "--stderr", "")),
 		Accounting:       splitPaths(optString(opts, "--accounting", "")),

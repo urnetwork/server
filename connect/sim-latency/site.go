@@ -133,21 +133,37 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		self.writePage(w, sitePage{Size: siteWarmupBodyBytes})
 		return
 	}
-	remaining, ok := self.parsePath(r.URL.Path)
-	if !ok {
+	page, ok, err := self.describePage(r.URL.Path, r.URL.RequestURI(), func(source *rng, mean float64) (int, error) {
+		return source.geometricDepth(mean), nil
+	})
+	if !ok || err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	self.writePage(w, page)
+}
+
+// Generates descriptors from trusted seed/path inputs only, never a received
+// parent response. The legacy caller retains its exact depth draw sequence;
+// prospective inventories supply a bounded equivalent sampler.
+func (self *siteHandler) describePage(path, pageIdentity string, drawDepth func(*rng, float64) (int, error)) (sitePage, bool, error) {
+	remaining, ok := self.parsePath(path)
+	if !ok || drawDepth == nil {
+		return sitePage{}, false, nil
 	}
 
 	// The client gives each admitted crawl a stable query index. Include it in
 	// the root identity so depth and body-size sampling happen per crawl; child
 	// tokens carry that identity through the rest of the tree.
-	pageIdentity := r.URL.RequestURI()
 	pageRng := self.pathRng(pageIdentity)
 
-	if r.URL.Path == "/" {
+	if path == "/" {
 		// draw the crawl depth (mean K), capped
-		remaining = pageRng.geometricDepth(self.site.MeanDepth)
+		var err error
+		remaining, err = drawDepth(pageRng, self.site.MeanDepth)
+		if err != nil {
+			return sitePage{}, false, err
+		}
 		if siteMaxDepth < remaining {
 			remaining = siteMaxDepth
 		}
@@ -186,7 +202,7 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	self.writePage(w, sitePage{Urls: urls, Size: bodySize})
+	return sitePage{Urls: urls, Size: bodySize}, true, nil
 }
 
 // Writes the page header and deterministic padding shared by scored and

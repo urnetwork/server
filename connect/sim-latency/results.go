@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/urnetwork/server/model"
 )
 
 // Schema 2 adds the official-evaluation lifecycle fields. CSV columns remain
@@ -53,6 +55,9 @@ const throughputMinBytes = 1024 * 1024
 // resultRow is one parsed CSV row (the fields the metrics need).
 type resultRow struct {
 	tStartMs int64
+	client   string
+	path     string
+	depth    int
 	status   int
 	bytes    int64
 	ttfbMs   float64
@@ -77,8 +82,11 @@ type MetricSummary struct {
 // summaries. Loaded either from the side-car directly or recomputed from a
 // results CSV.
 type RunStats struct {
-	Schema int    `json:"schema"`
-	Kind   string `json:"kind"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	WorkCoverage       *workCoverageReport                  `json:"work_coverage,omitempty"`
+	Schema             int                                  `json:"schema"`
+	Kind               string                               `json:"kind"`
 	// the artifact path this was loaded from (set at load, kept on save)
 	Label string `json:"label,omitempty"`
 
@@ -480,6 +488,9 @@ func writeRunStats(path string, stats *RunStats) error {
 	if err != nil {
 		return err
 	}
+	if stats.WorkCoveragePolicy != nil && len(statsBytes)+1 > model.CompetitionWorkCoverageMaximumManifestBytes {
+		return fmt.Errorf("coverage run manifest exceeds its versioned artifact bound")
+	}
 	return writeAtomicFile(path, append(statsBytes, '\n'), 0o644)
 }
 
@@ -495,7 +506,7 @@ func readRunStats(path string) (*RunStats, error) {
 	if stats.Kind != runStatsKind {
 		return nil, fmt.Errorf("%s: kind %q is not a %s", path, stats.Kind, runStatsKind)
 	}
-	if stats.Schema < 1 || runStatsSchema < stats.Schema {
+	if stats.Schema < 1 || 3 < stats.Schema {
 		return nil, fmt.Errorf("%s: unsupported run artifact schema %d", path, stats.Schema)
 	}
 	return &stats, nil

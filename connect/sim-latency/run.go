@@ -31,16 +31,19 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/stats"
 )
 
 type RunOptions struct {
-	Epoch            int
-	SourceConfig     string
-	RepositoriesRoot string
-	ConfigPath       string
-	SiteHome         string
-	Ramp             time.Duration
+	G2VolumePolicy     model.CompetitionG2VolumePolicy
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy
+	Epoch              int
+	SourceConfig       string
+	RepositoriesRoot   string
+	ConfigPath         string
+	SiteHome           string
+	Ramp               time.Duration
 	// reliability history backfilled so providers are established without the
 	// ~8.4h cold-start warm-up (0 = pure organic warm-up)
 	Prewarm  time.Duration
@@ -84,7 +87,7 @@ func (self *RunOptions) fleetSettings() FleetSettings {
 	return *self.FleetSettings
 }
 
-const officialScorerVersion = "sim-latency-score/1"
+const officialScorerVersion = model.CompetitionScorerVersion
 const teardownTimeout = 20 * time.Second
 
 var runEvaluationIdPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -135,9 +138,21 @@ func waitPhase(ctx context.Context, duration time.Duration) error {
 	}
 }
 
+// Future coverage owns a standard-library monotonic clock inside protected
+// runner source. Historical omission retains the exact product clock value.
+func runClockNow(coverage *model.CompetitionWorkCoveragePolicy, productClock func() time.Time) time.Time {
+	if coverage != nil {
+		return time.Now()
+	}
+	return productClock()
+}
+
 func Run(options *RunOptions) (retErr error) {
 	if options == nil {
 		return incompleteError("invalid_options", "setup", errors.New("nil run options"))
+	}
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(options.G2VolumePolicy, options.WorkCoveragePolicy); err != nil {
+		return incompleteError("invalid_options", "setup", err)
 	}
 	if options.RequestTimeout <= 0 {
 		if options.Official {
@@ -307,10 +322,13 @@ func Run(options *RunOptions) (retErr error) {
 		if driver != nil {
 			summarizeRows(driver.resultRows(), runStats)
 			runStats.ResultsCsvSha256, runStats.ResultsCsvBytes = driver.csvIdentity()
+			if driver.workCoverage != nil {
+				runStats.WorkCoverage = driver.workCoverage.report()
+			}
 		} else if runStats.Metrics == nil {
 			runStats.Metrics = map[string]MetricSummary{}
 		}
-		runStats.CompletedUnixMs = server.NowUtc().UnixMilli()
+		runStats.CompletedUnixMs = runClockNow(options.WorkCoveragePolicy, server.NowUtc).UnixMilli()
 		runStats.CompletionState = "complete"
 		runStats.IncompleteCode = ""
 		runStats.IncompleteMessage = ""
@@ -537,11 +555,37 @@ func Run(options *RunOptions) (retErr error) {
 		return incompleteError("accounting_start_failed", "measurement setup", err)
 	}
 	providerAccountingStarted = true
-	measureStart := server.NowUtc()
+	// Precompute before opening the barrier, so inventory work cannot consume
+	// a candidate's offered admission time or its original crawl deadlines.
+	var coveragePlan *workCoveragePlan
+	if options.WorkCoveragePolicy != nil {
+		coveragePlan, err = buildWorkCoveragePlan(config, options.Duration, options.RequestTimeout, defaultWorkCoverageLimits())
+		if err != nil {
+			return incompleteError("work_inventory_invalid", "measurement setup", err)
+		}
+	}
+	measureStart := runClockNow(options.WorkCoveragePolicy, server.NowUtc)
 	measureEnd := measureStart.Add(options.Duration)
 	runStats.MeasureStartMs = measureStart.UnixMilli()
 	runStats.MeasureEndMs = measureEnd.UnixMilli()
 	logf("MEASURE WINDOW: [%d, %d] unix-ms", measureStart.UnixMilli(), measureEnd.UnixMilli())
+	startDriver := func() {
+		done := make(chan error, 1)
+		driverDone = done
+		go func() {
+			done <- runDriver(driver)
+			close(done)
+		}()
+	}
+	if coveragePlan != nil {
+		driver.workCoverage, err = newWorkCoverageCollector(coveragePlan, measureStart)
+		if err != nil {
+			return incompleteError("work_inventory_invalid", "measurement setup", err)
+		}
+		// Matchmaking probes and the fixed offered cohort share this barrier;
+		// a synchronous first probe may not shift the root arrival plan.
+		startDriver()
+	}
 	probeOffsets := matchmakingProbeOffsets(options.Duration)
 	if len(probeOffsets) < 2 || probeOffsets[0] != 0 {
 		return incompleteError(
@@ -565,18 +609,7 @@ func Run(options *RunOptions) (retErr error) {
 	matchmakingProbesDoneMutable := make(chan error, 1)
 	matchmakingProbesDone = matchmakingProbesDoneMutable
 	waitUntil := func(waitCtx context.Context, target time.Time) error {
-		remaining := target.Sub(server.NowUtc())
-		if remaining <= 0 {
-			return nil
-		}
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return nil
-		case <-waitCtx.Done():
-			return waitCtx.Err()
-		}
+		return waitPhase(waitCtx, target.Sub(runClockNow(options.WorkCoveragePolicy, server.NowUtc)))
 	}
 	go func() {
 		matchmakingProbesDoneMutable <- runMatchmakingProbes(
@@ -589,14 +622,11 @@ func Run(options *RunOptions) (retErr error) {
 		)
 		close(matchmakingProbesDoneMutable)
 	}()
-	driverDoneMutable := make(chan error, 1)
-	driverDone = driverDoneMutable
-	go func() {
-		driverDoneMutable <- runDriver(driver)
-		close(driverDoneMutable)
-	}()
+	if coveragePlan == nil {
+		startDriver()
+	}
 
-	measureRemaining := measureEnd.Sub(server.NowUtc())
+	measureRemaining := measureEnd.Sub(runClockNow(options.WorkCoveragePolicy, server.NowUtc))
 	if measureRemaining <= 0 {
 		return incompleteError(
 			"matchmaking_probe_timeout",
@@ -663,6 +693,10 @@ func Run(options *RunOptions) (retErr error) {
 // artifacts can be checked for comparability. The window, client counts,
 // and metrics are filled in as the run progresses.
 func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(options.G2VolumePolicy, options.WorkCoveragePolicy)
+	if err != nil {
+		return nil, err
+	}
 	configBytes, err := os.ReadFile(options.ConfigPath)
 	if err != nil {
 		return nil, err
@@ -678,28 +712,34 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 	if 1 < len(probeOffsets) {
 		probeInterval = (probeOffsets[1] - probeOffsets[0]).String()
 	}
+	schema := runStatsSchema
+	if options.WorkCoveragePolicy != nil {
+		schema = 3
+	}
 	return &RunStats{
-		Schema:           runStatsSchema,
-		Kind:             runStatsKind,
-		SourceEpoch:      options.Epoch,
-		ScoreSchema:      apexScoreSchema,
-		ScorerVersion:    officialScorerVersion,
-		EvaluationId:     options.EvaluationId,
-		Official:         options.Official,
-		RequestTimeoutMs: options.RequestTimeout.Milliseconds(),
-		ResourceReport:   options.ResourceReport,
-		AccountingReport: options.AccountingReport,
-		AccountingSource: options.AccountingSource,
-		FinalMarker:      options.FinalMarker,
-		CompletionState:  "running",
-		ConfigSha256:     fmt.Sprintf("%x", sha256.Sum256(configBytes)),
-		Seed:             config.Seed,
-		BuildRevision:    revision,
-		BuildModified:    modified,
-		Hostname:         hostname,
-		Os:               runtime.GOOS,
-		Arch:             runtime.GOARCH,
-		NumCpu:           runtime.NumCPU(),
+		G2VolumePolicy:     options.G2VolumePolicy,
+		WorkCoveragePolicy: options.WorkCoveragePolicy.Clone(),
+		Schema:             schema,
+		Kind:               runStatsKind,
+		SourceEpoch:        options.Epoch,
+		ScoreSchema:        apexScoreSchema,
+		ScorerVersion:      scorerVersion,
+		EvaluationId:       options.EvaluationId,
+		Official:           options.Official,
+		RequestTimeoutMs:   options.RequestTimeout.Milliseconds(),
+		ResourceReport:     options.ResourceReport,
+		AccountingReport:   options.AccountingReport,
+		AccountingSource:   options.AccountingSource,
+		FinalMarker:        options.FinalMarker,
+		CompletionState:    "running",
+		ConfigSha256:       fmt.Sprintf("%x", sha256.Sum256(configBytes)),
+		Seed:               config.Seed,
+		BuildRevision:      revision,
+		BuildModified:      modified,
+		Hostname:           hostname,
+		Os:                 runtime.GOOS,
+		Arch:               runtime.GOARCH,
+		NumCpu:             runtime.NumCPU(),
 		Flags: map[string]string{
 			"ramp":                       options.Ramp.String(),
 			"prewarm":                    options.Prewarm.String(),
@@ -879,14 +919,16 @@ func writeExclusiveAtomicFile(path string, content []byte, mode os.FileMode) (re
 }
 
 type runFinalMarker struct {
-	Schema            int    `json:"schema"`
-	Kind              string `json:"kind"`
-	ScoreSchema       int    `json:"score_schema"`
-	ScorerVersion     string `json:"scorer_version"`
-	EvaluationId      string `json:"evaluation_id"`
-	RunManifestSha256 string `json:"run_manifest_sha256"`
-	RunManifestBytes  int64  `json:"run_manifest_bytes"`
-	CompletedUnixMs   int64  `json:"completed_unix_ms"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	Schema             int                                  `json:"schema"`
+	Kind               string                               `json:"kind"`
+	ScoreSchema        int                                  `json:"score_schema"`
+	ScorerVersion      string                               `json:"scorer_version"`
+	EvaluationId       string                               `json:"evaluation_id"`
+	RunManifestSha256  string                               `json:"run_manifest_sha256"`
+	RunManifestBytes   int64                                `json:"run_manifest_bytes"`
+	CompletedUnixMs    int64                                `json:"completed_unix_ms"`
 }
 
 func writeFinalMarker(markerPath string, metaPath string, runStats *RunStats) error {
@@ -895,14 +937,16 @@ func writeFinalMarker(markerPath string, metaPath string, runStats *RunStats) er
 		return fmt.Errorf("read finalized run manifest: %w", err)
 	}
 	marker := runFinalMarker{
-		Schema:            1,
-		Kind:              "sim-latency-complete",
-		ScoreSchema:       apexScoreSchema,
-		ScorerVersion:     officialScorerVersion,
-		EvaluationId:      runStats.EvaluationId,
-		RunManifestSha256: fmt.Sprintf("%x", sha256.Sum256(manifestBytes)),
-		RunManifestBytes:  int64(len(manifestBytes)),
-		CompletedUnixMs:   runStats.CompletedUnixMs,
+		G2VolumePolicy:     runStats.G2VolumePolicy,
+		WorkCoveragePolicy: runStats.WorkCoveragePolicy.Clone(),
+		Schema:             1,
+		Kind:               "sim-latency-complete",
+		ScoreSchema:        apexScoreSchema,
+		ScorerVersion:      runStats.ScorerVersion,
+		EvaluationId:       runStats.EvaluationId,
+		RunManifestSha256:  fmt.Sprintf("%x", sha256.Sum256(manifestBytes)),
+		RunManifestBytes:   int64(len(manifestBytes)),
+		CompletedUnixMs:    runStats.CompletedUnixMs,
 	}
 	markerBytes, err := json.MarshalIndent(&marker, "", "  ")
 	if err != nil {

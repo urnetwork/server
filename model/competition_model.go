@@ -37,34 +37,54 @@ type CompetitionPatchPolicy struct {
 }
 
 type CompetitionEvaluationPolicy struct {
-	HardwareId              string  `json:"hardware_id" yaml:"hardware_id"`
-	HostQualificationSha256 string  `json:"host_qualification_sha256" yaml:"host_qualification_sha256"`
-	ConfigLocalSha256       string  `json:"config_local_sha256" yaml:"config_local_sha256"`
-	VaultLocalSha256        string  `json:"vault_local_sha256" yaml:"vault_local_sha256"`
-	SimulatorSha256         string  `json:"simulator_sha256" yaml:"simulator_sha256"`
-	ScorerSha256            string  `json:"scorer_sha256" yaml:"scorer_sha256"`
-	ProviderCount           int     `json:"provider_count" yaml:"provider_count"`
-	ClientPoolSize          int     `json:"client_pool_size" yaml:"client_pool_size"`
-	ArrivalsPerMinute       int     `json:"arrivals_per_minute" yaml:"arrivals_per_minute"`
-	QualityWindowSize       int     `json:"quality_window_size" yaml:"quality_window_size"`
-	ExchangeHosts           int     `json:"exchange_hosts" yaml:"exchange_hosts"`
-	FleetShards             int     `json:"fleet_shards" yaml:"fleet_shards"`
-	SiteListen              string  `json:"site_listen" yaml:"site_listen"`
-	ApiPort                 int     `json:"api_port" yaml:"api_port"`
-	RampMs                  int64   `json:"ramp_ms" yaml:"ramp_ms"`
-	PrewarmMs               int64   `json:"prewarm_ms" yaml:"prewarm_ms"`
-	SettleMs                int64   `json:"settle_ms" yaml:"settle_ms"`
-	ClientWarmupTimeoutMs   int64   `json:"client_warmup_timeout_ms" yaml:"client_warmup_timeout_ms"`
-	DurationMs              int64   `json:"duration_ms" yaml:"duration_ms"`
-	RequestTimeoutMs        int64   `json:"request_timeout_ms" yaml:"request_timeout_ms"`
-	PipelineIntervalMs      int64   `json:"pipeline_interval_ms" yaml:"pipeline_interval_ms"`
-	TestTimeoutMs           int64   `json:"test_timeout_ms" yaml:"test_timeout_ms"`
-	AnnounceTimeoutMs       int64   `json:"announce_timeout_ms" yaml:"announce_timeout_ms"`
-	ImpairmentEnabled       bool    `json:"impairment_enabled" yaml:"impairment_enabled"`
-	Replicates              int     `json:"replicates" yaml:"replicates"`
-	TakeoverMargin          float64 `json:"takeover_margin" yaml:"takeover_margin"`
-	QueueLimit              int     `json:"queue_limit" yaml:"queue_limit"`
-	ScoreTimeoutSeconds     int     `json:"score_timeout_seconds" yaml:"score_timeout_seconds"`
+	G2VolumePolicy          CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty" yaml:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy      *CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty" yaml:"work_coverage_policy,omitempty"`
+	HardwareId              string                         `json:"hardware_id" yaml:"hardware_id"`
+	HostQualificationSha256 string                         `json:"host_qualification_sha256" yaml:"host_qualification_sha256"`
+	ConfigLocalSha256       string                         `json:"config_local_sha256" yaml:"config_local_sha256"`
+	VaultLocalSha256        string                         `json:"vault_local_sha256" yaml:"vault_local_sha256"`
+	SimulatorSha256         string                         `json:"simulator_sha256" yaml:"simulator_sha256"`
+	ScorerSha256            string                         `json:"scorer_sha256" yaml:"scorer_sha256"`
+	ProviderCount           int                            `json:"provider_count" yaml:"provider_count"`
+	ClientPoolSize          int                            `json:"client_pool_size" yaml:"client_pool_size"`
+	ArrivalsPerMinute       int                            `json:"arrivals_per_minute" yaml:"arrivals_per_minute"`
+	QualityWindowSize       int                            `json:"quality_window_size" yaml:"quality_window_size"`
+	ExchangeHosts           int                            `json:"exchange_hosts" yaml:"exchange_hosts"`
+	FleetShards             int                            `json:"fleet_shards" yaml:"fleet_shards"`
+	SiteListen              string                         `json:"site_listen" yaml:"site_listen"`
+	ApiPort                 int                            `json:"api_port" yaml:"api_port"`
+	RampMs                  int64                          `json:"ramp_ms" yaml:"ramp_ms"`
+	PrewarmMs               int64                          `json:"prewarm_ms" yaml:"prewarm_ms"`
+	SettleMs                int64                          `json:"settle_ms" yaml:"settle_ms"`
+	ClientWarmupTimeoutMs   int64                          `json:"client_warmup_timeout_ms" yaml:"client_warmup_timeout_ms"`
+	DurationMs              int64                          `json:"duration_ms" yaml:"duration_ms"`
+	RequestTimeoutMs        int64                          `json:"request_timeout_ms" yaml:"request_timeout_ms"`
+	PipelineIntervalMs      int64                          `json:"pipeline_interval_ms" yaml:"pipeline_interval_ms"`
+	TestTimeoutMs           int64                          `json:"test_timeout_ms" yaml:"test_timeout_ms"`
+	AnnounceTimeoutMs       int64                          `json:"announce_timeout_ms" yaml:"announce_timeout_ms"`
+	ImpairmentEnabled       bool                           `json:"impairment_enabled" yaml:"impairment_enabled"`
+	Replicates              int                            `json:"replicates" yaml:"replicates"`
+	TakeoverMargin          float64                        `json:"takeover_margin" yaml:"takeover_margin"`
+	QueueLimit              int                            `json:"queue_limit" yaml:"queue_limit"`
+	ScoreTimeoutSeconds     int                            `json:"score_timeout_seconds" yaml:"score_timeout_seconds"`
+}
+
+// Copies the optional prospective leaf without sharing mutable configuration.
+func (self CompetitionEvaluationPolicy) Clone() CompetitionEvaluationPolicy {
+	self.WorkCoveragePolicy = self.WorkCoveragePolicy.Clone()
+	return self
+}
+
+// Independent JSON allocations retain policy value equality; nil stays nil.
+func (self CompetitionEvaluationPolicy) Equal(other CompetitionEvaluationPolicy) bool {
+	if (self.WorkCoveragePolicy == nil) != (other.WorkCoveragePolicy == nil) {
+		return false
+	}
+	if self.WorkCoveragePolicy != nil && *self.WorkCoveragePolicy != *other.WorkCoveragePolicy {
+		return false
+	}
+	self.WorkCoveragePolicy, other.WorkCoveragePolicy = nil, nil
+	return self == other
 }
 
 type CompetitionSeasonPolicy struct {
@@ -296,6 +316,21 @@ func ValidateCompetitionScore(score *CompetitionScoreResult) error {
 	}
 	if score.Gates == nil {
 		return errors.New("score gates are missing")
+	}
+	requiredGates, err := CompetitionScoreRequiredGateNames(score)
+	if err != nil {
+		return err
+	}
+	if _, prospective := score.Diagnostics["work_coverage_policy"]; prospective {
+		for _, name := range requiredGates {
+			gate, ok := score.Gates[name]
+			if !ok || gate.Details == nil {
+				return errors.New("coverage score is missing its mandatory versioned gate surface")
+			}
+			if score.Placeable && !gate.Passed {
+				return errors.New("placeable coverage score contradicts a mandatory gate")
+			}
+		}
 	}
 	if err := validateCompetitionScoreSignificance(score.Significance); err != nil {
 		return err

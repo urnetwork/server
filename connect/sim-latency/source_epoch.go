@@ -15,12 +15,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/model"
 	"gopkg.in/yaml.v3"
 )
 
@@ -96,14 +98,16 @@ func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 }
 
 type sourceEpoch struct {
-	Epoch                         int                 `yaml:"epoch"`
-	Kind                          string              `yaml:"kind"`
-	SignificantImprovementPercent float64             `yaml:"significant_improvement_percent"`
-	WinnerJobId                   string              `yaml:"winner_job_id,omitempty"`
-	WinnerSignificance            *sourceSignificance `yaml:"winner_significance,omitempty"`
-	PromotedFromEpoch             *int                `yaml:"promoted_from_epoch,omitempty"`
-	PromotedAt                    string              `yaml:"promoted_at,omitempty"`
-	Repositories                  sourceRepositories  `yaml:"repositories"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy      `yaml:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy            *model.CompetitionWorkCoveragePolicy `yaml:"work_coverage_policy,omitempty"`
+	Epoch                         int                                  `yaml:"epoch"`
+	Kind                          string                               `yaml:"kind"`
+	SignificantImprovementPercent float64                              `yaml:"significant_improvement_percent"`
+	WinnerJobId                   string                               `yaml:"winner_job_id,omitempty"`
+	WinnerSignificance            *sourceSignificance                  `yaml:"winner_significance,omitempty"`
+	PromotedFromEpoch             *int                                 `yaml:"promoted_from_epoch,omitempty"`
+	PromotedAt                    string                               `yaml:"promoted_at,omitempty"`
+	Repositories                  sourceRepositories                   `yaml:"repositories"`
 }
 
 // sourceSignificance preserves the winning evaluation statistics that define
@@ -154,17 +158,20 @@ type evaluatorSourceLock struct {
 	DevelopmentSnapshot bool `json:"development_snapshot"`
 	// Only a newly qualified trusted image may opt into repository-wide
 	// candidates. Omission preserves every historical server-only identity.
-	CandidatePathBase string            `json:"candidate_path_base,omitempty"`
-	Repositories      map[string]string `json:"repositories"`
+	CandidatePathBase  string                               `json:"candidate_path_base,omitempty"`
+	Repositories       map[string]string                    `json:"repositories"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 }
 
 type sourceRecord struct {
-	Schema                        int               `json:"schema"`
-	Staging                       bool              `json:"staging,omitempty"`
-	Epoch                         int               `json:"epoch"`
-	Branch                        string            `json:"branch"`
-	SignificantImprovementPercent float64           `json:"significant_improvement_percent"`
-	Repositories                  map[string]string `json:"repositories"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy            *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	Schema                        int                                  `json:"schema"`
+	Staging                       bool                                 `json:"staging,omitempty"`
+	Epoch                         int                                  `json:"epoch"`
+	Branch                        string                               `json:"branch"`
+	SignificantImprovementPercent float64                              `json:"significant_improvement_percent"`
+	Repositories                  map[string]string                    `json:"repositories"`
 }
 
 // readSourceFile bounds operator configuration before parsing it.
@@ -261,6 +268,9 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		return errors.New("source config must contain baseline epoch 0 and at most six promoted epochs")
 	}
 	for epochIndex, epoch := range manifest.EvaluationSource.Epochs {
+		if epoch.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy || epoch.WorkCoveragePolicy != nil {
+			return errors.New("historical schema-one source cannot carry a prospective scoring policy")
+		}
 		if epoch.Repositories.OperatorProxy.Commit != "" {
 			return errors.New("source cannot include retired operator-proxy")
 		}
@@ -392,7 +402,9 @@ func (self *sourceManifest) epoch(epochNumber int) (*sourceEpoch, error) {
 			return nil, err
 		}
 		return &sourceEpoch{
-			Epoch: epochNumber, Kind: generation.Kind,
+			G2VolumePolicy:     generation.G2VolumePolicy,
+			WorkCoveragePolicy: generation.WorkCoveragePolicy,
+			Epoch:              epochNumber, Kind: generation.Kind,
 			SignificantImprovementPercent: generation.SignificantImprovementPercent,
 			Repositories:                  generation.Repositories,
 		}, nil
@@ -446,6 +458,10 @@ func loadEvaluatorSourceLockForMode(path string, staging bool) (*evaluatorSource
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, errors.New("evaluator source lock contains trailing data")
 	}
+	coverage, err := model.CompetitionWorkCoveragePolicyFromSourceJson(lockBytes)
+	if err != nil || !reflect.DeepEqual(coverage, lock.WorkCoveragePolicy) {
+		return nil, errors.New("evaluator source lock has an ambiguous coverage policy")
+	}
 	if lock.Schema != 1 {
 		return nil, errors.New("evaluator source lock schema must be 1")
 	}
@@ -479,6 +495,9 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 		sourceLock, err = loadEvaluatorSourceLockForMode(sourceLockPath, manifest.Staging)
 		if err != nil {
 			return fmt.Errorf("load evaluator source lock: %w", err)
+		}
+		if !reflect.DeepEqual(sourceLock.WorkCoveragePolicy, epoch.WorkCoveragePolicy) {
+			return errors.New("evaluator source lock coverage differs from its immutable generation")
 		}
 	}
 	for _, repository := range sourceRepositoryNamesForMode(manifest.Staging) {
@@ -683,12 +702,16 @@ func runSourceCheck(opts docopt.Opts) {
 			fatalf("source epoch config: %s", err)
 		}
 		result := struct {
-			Schema                        int     `json:"schema"`
-			Staging                       bool    `json:"staging,omitempty"`
-			Branch                        string  `json:"branch"`
-			Epoch                         int     `json:"epoch"`
-			SignificantImprovementPercent float64 `json:"significant_improvement_percent"`
+			G2VolumePolicy                model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+			WorkCoveragePolicy            *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+			Schema                        int                                  `json:"schema"`
+			Staging                       bool                                 `json:"staging,omitempty"`
+			Branch                        string                               `json:"branch"`
+			Epoch                         int                                  `json:"epoch"`
+			SignificantImprovementPercent float64                              `json:"significant_improvement_percent"`
 		}{
+			G2VolumePolicy:                epoch.G2VolumePolicy,
+			WorkCoveragePolicy:            epoch.WorkCoveragePolicy,
 			Schema:                        1,
 			Staging:                       manifest.Staging,
 			Branch:                        manifest.EvaluationSource.Branch,
@@ -741,6 +764,8 @@ func runSourceRecord(opts docopt.Opts) {
 		fatalf("source record measured dependency graph: %s", err)
 	}
 	result := sourceRecord{
+		G2VolumePolicy:                epoch.G2VolumePolicy,
+		WorkCoveragePolicy:            epoch.WorkCoveragePolicy,
 		Schema:                        1,
 		Staging:                       manifest.Staging,
 		Epoch:                         epochNumber,
@@ -787,6 +812,8 @@ func runStagingSourceCheck(opts docopt.Opts) {
 		fatalf("staging source config: %s", err)
 	}
 	result := sourceRecord{
+		G2VolumePolicy:                epoch.G2VolumePolicy,
+		WorkCoveragePolicy:            epoch.WorkCoveragePolicy,
 		Schema:                        1,
 		Epoch:                         epochNumber,
 		Branch:                        stagingEvaluationSourceBranch,
