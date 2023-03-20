@@ -13,7 +13,7 @@ import psycopg2.extras
 psycopg2.extras.register_uuid()
 
 # Connect to your postgres DB
-conn = psycopg2.connect(dbname='bringyour', user='bringyour', password='lawgiver-insole-truck-splutter', host='172.28.208.21')
+conn = psycopg2.connect(dbname='bringyour', user='bringyour', password='quantum-ocelot-velour-ignorant', host='172.28.208.16')
 
 
 """
