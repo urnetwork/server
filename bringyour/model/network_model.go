@@ -1,4 +1,4 @@
-
+package model
 
 // return object is bool and, if not available, suggestions for available variants
 
@@ -24,6 +24,55 @@ func CreateNetwork() {
 func RemoveNetwork() {
 
 }
+
+
+
+type NetworkCheckArgs struct {
+	name string
+}
+
+type NetworkCheckResult struct {
+	available bool
+}
+
+
+func NetworkCheck(check *NetworkCheckArgs) (*NetworkCheckResult, error) {
+	// fixme
+	return nil, nil
+}
+
+
+
+type NetworkCreateArgs struct {
+	userName *string
+	userAuth *string
+	authJwt *string
+	password string
+	networkName string
+	terms bool
+}
+
+type NetworkCreateResult struct {
+	network *NetworkCreateResultNetwork
+	validatonRequired *NetworkCreateResultValidation
+}
+
+type NetworkCreateResultNetwork struct {
+	byJwt *string
+	name *string
+}
+
+type NetworkCreateResultValidation struct {
+	userAuth string
+}
+
+
+func NetworkCreate(create *NetworkCreate) (*NetworkCreateResult, error) {
+	// fixme
+	return nil, nil
+}
+
+
 
 
 // bringyour
