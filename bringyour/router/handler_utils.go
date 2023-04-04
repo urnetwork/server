@@ -3,11 +3,13 @@ package router
 import (
 	"net/http"
 	"encoding/json"
+
+	"bringyour.com/bringyour"
 )
 
 
 // wraps an implementation function using json in/out
-func WrapWithJson[T any, R any](impl func(T)(*R, error), w http.ResponseWriter, req *http.Request) {
+func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(*R, error), w http.ResponseWriter, req *http.Request) {
 	var input T
 
 	var err error
@@ -18,8 +20,10 @@ func WrapWithJson[T any, R any](impl func(T)(*R, error), w http.ResponseWriter, 
         return
     }
 
+    session := bringyour.NewClientSessionFromRequest(req)
+
     var result *R
-	result, err = impl(input)
+	result, err = impl(input, session)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -34,3 +38,9 @@ func WrapWithJson[T any, R any](impl func(T)(*R, error), w http.ResponseWriter, 
     w.Write(responseJson)
 }
 
+
+func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(*R, error), w http.ResponseWriter, req *http.Request) {
+	WrapWithJson(func (arg T, _ *bringyour.ClientSession)(*R, error) {
+		return impl(arg)
+	}, w, req)
+}

@@ -1,17 +1,10 @@
 package model
 
-// a create network session id to hold the auth of a network create in progress
 
+import (
 
-// user_id, network_id, auth_type, email, phone, auth_jwt, name
-// unique email
-// unique phone
-
-// network_id, network_name
-// unique network_name
-
-
-// fixme convert jwt to network_id
+	"bringyour.com/bringyour"
+)
 
 
 type AuthLoginArgs struct {
@@ -36,8 +29,52 @@ type AuthLoginResultNetwork struct {
 }
 
 
-func AuthLogin(login *AuthLoginArgs) (*AuthLoginResult, error) {
+// fixme add ClientSession to all model functions
+func AuthLogin(login *AuthLoginArgs, session *bringyour.ClientSession) (*AuthLoginResult, error) {
 	// fixme
+
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session.clientIpv4)
+	if !allow {
+		return nil, error("")
+	}
+
+	if login.userAuth != nil {
+		// var networkId Ulid
+		// var userId Ulid
+		var authType string
+		// select authType where userAuth = ?
+		if authType == nil {
+			// new network
+		}
+		else {
+			// return authAllowed = authTyope
+		}
+	}
+	else if authJwt != nil {
+		authJwt := ParseAuthJwt(login.authJwt, login.authJwtType)
+		if authJwt != nil {
+			var authType string
+			// select authType where userAuth = ?
+			if authType == nil {
+				// new network
+			}
+			else if authType == authJwt.authType {
+				// successful login, return a by jwt
+				byJwt = CreateByJwt(network_id, user_id)
+			}
+			else {
+				// return authAllowed = authTyope
+			}
+		}
+	}
+
+	// if userAuth, check if there is an existing user and network
+	// if jwt, validate that the jwt are valid, then check if there is an existing user and network
+
+	// todo sql
+	
+	// SetUserAuthAttemptSuccess(userAuthAttemptId, true)
+
 	return nil, nil
 }
 
@@ -45,6 +82,7 @@ func AuthLogin(login *AuthLoginArgs) (*AuthLoginResult, error) {
 
 type AuthLoginWithPasswordArgs struct {
 	userAuth string
+	password string
 }
 
 type AuthLoginWithPasswordResult struct {
@@ -67,7 +105,22 @@ type AuthLoginWithPasswordResultValidationError struct {
 }
 
 
-func AuthLoginWithPassword(loginWithPassword *AuthLoginWithPasswordArgs) (*AuthLoginWithPasswordResult, error) {
+func AuthLoginWithPassword(
+	loginWithPassword *AuthLoginWithPasswordArgs,
+	session *bringyour.ClientSession,
+) (*AuthLoginWithPasswordResult, error) {
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session.clientIpv4)
+	if !allow {
+		return nil, error("")
+	}
+
+	passwordHash := computePasswordHash(loginWithPassword.password)
+
+	// select user_id, passwordHash, validated
+
+	// list of network_ids where the user is associated
+	// expect list to be length 1
+
 	// fixme
 	return nil, nil
 }
@@ -88,7 +141,7 @@ type AuthValidateResultNetwork struct {
 }
 
 
-func AuthValidate(validate *AuthValidateArgs) (*AuthValidateResult, error) {
+func AuthValidate(validate *AuthValidateArgs, session *bringyour.ClientSession) (*AuthValidateResult, error) {
 	// fixme
 	return nil, nil
 }
@@ -104,6 +157,19 @@ type AuthValidateSendResult struct {
 }
 
 
+func AuthValidateSend(
+	validateSend *model.AuthValidateSendArgs,
+	session *bringyour.ClientSession,
+) (model.AuthValidateSendResult, error) {
+	// lookup userAuth type
+	// send either email or sms
+	// fixme
+	return nil, nil
+}
+
+
+
+
 
 type AuthPasswordResetArgs struct {
 	userAuth string
@@ -111,6 +177,19 @@ type AuthPasswordResetArgs struct {
 
 type AuthPasswordResetResult struct {
 }
+
+
+func AuthPasswordReset(
+	validateSend *model.AuthPasswordResetArgs,
+	session *bringyour.ClientSession,
+) (model.AuthPasswordResetResult, error) {
+	// lookup userAuth type
+	// send either email or sms
+	// fixme
+	return nil, nil
+}
+
+
 
 
 
@@ -123,7 +202,7 @@ type AuthPasswordSetResult struct {
 	
 }
 
-func AuthPasswordSet(passwordSet *AuthPasswordSetArgs) (*AuthPasswordSetResult, error) {
+func AuthPasswordSet(passwordSet *AuthPasswordSetArgs, session *bringyour.ClientSession) (*AuthPasswordSetResult, error) {
 	// fixme
 	return nil, nil
 }

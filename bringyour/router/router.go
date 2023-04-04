@@ -8,31 +8,7 @@ import (
 )
 
 
-// /login/check   gives a userAuth and gets back the status
-
-/*
-/stats/last-90
-/auth/login
-/auth/login-with-password
-/auth/validate
-/auth/validate-send
-/auth/password-reset
-/auth/password-set
-/auth/network-check
-/auth/network-create
-/preferences/set
-/feedback/send
-*/
-
-// handler takes the regex match results from the path
-// handler can have methods get, post, delete, etc
-
-
-
-
-
-
-// inspired by https://benhoyt.com/writings/go-routing/
+// regex table approach inspired by https://benhoyt.com/writings/go-routing/
 
 type Route struct {
 	method  string

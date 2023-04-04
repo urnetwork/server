@@ -174,13 +174,18 @@ func ApplyMigrations() {
 }
 
 var migrations = []any{
+	newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
+		'provider_offline',
+		'provider_online_superspeed',
+		'provider_online_not_superspeed'
+	)`),
 	newSqlMigration(`
 		CREATE TABLE audit_provider_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type VARCHAR(32) NOT NULL,
+			event_type audit_provider_event_type NOT NULL,
 			event_details VARCHAR(1024) NULL,
 			country_name VARCHAR(128) NULL,
 			region_name VARCHAR(128) NULL,
@@ -192,13 +197,18 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_provider_event_stats_device_id ON audit_provider_event (event_time, device_id, event_id)
 	`),
+	newSqlMigration(`CREATE TYPE audit_extender_event_type AS ENUM (
+		'extender_offline',
+		'extender_online_superspeed',
+		'extender_online_not_superspeed'
+	)`),
 	newSqlMigration(`
 		CREATE TABLE audit_extender_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
-			event_type VARCHAR(32) NOT NULL,
+			event_type audit_extender_event_type NOT NULL,
 			event_details VARCHAR(32) NULL,
 
 			PRIMARY KEY (event_id)
@@ -207,12 +217,16 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_extender_event_stats_extender_id ON audit_extender_event (event_time, extender_id, event_id)
 	`),
+	newSqlMigration(`CREATE TYPE audit_network_event_type AS ENUM (
+		'network_created',
+		'network_deleted'
+	)`),
 	newSqlMigration(`
 		CREATE TABLE audit_network_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
-			event_type VARCHAR(32) NOT NULL,
+			event_type audit_network_event_type NOT NULL,
 			event_details VARCHAR(32) NULL,
 
 			PRIMARY KEY (event_id)
@@ -221,13 +235,17 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_network_event_stats_network_id ON audit_network_event (event_time, network_id, event_id)
 	`),
+	newSqlMigration(`CREATE TYPE audit_device_event_type AS ENUM (
+		'device_added',
+		'device_removed'
+	)`),
 	newSqlMigration(`
 		CREATE TABLE audit_device_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type VARCHAR(32) NOT NULL,
+			event_type audit_device_event_type NOT NULL,
 			event_details VARCHAR(32) NULL,
 
 			PRIMARY KEY (event_time, device_id, event_id),
@@ -237,6 +255,9 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id)
 	`),
+	newSqlMigration(`CREATE TYPE audit_contract_event_type AS ENUM (
+		'contract_closed_success'
+	)`),
 	newSqlMigration(`
 		CREATE TABLE audit_contract_event (
 			event_id uuid NOT NULL,
@@ -248,7 +269,7 @@ var migrations = []any{
 			provider_device_id uuid NOT NULL,
 			extender_network_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
-			event_type VARCHAR(32) NOT NULL,
+			event_type audit_contract_event_type NOT NULL,
 			event_details VARCHAR(32) NULL,
 			transfer_bytes BIGINT NOT NULL DEFAULT 0,
 			transfer_packets BIGINT NOT NULL DEFAULT 0,
@@ -261,5 +282,89 @@ var migrations = []any{
 	`),
 	newSqlMigration(`
 		CREATE INDEX audit_contract_event_stats_extender_id ON audit_contract_event (event_time, extender_id, transfer_bytes, transfer_packets)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE network (
+			network_id uuid NOT NULL,
+			network_name VARCHAR(256) NOT NULL,
+			admin_user_id uuid NOT NULL,
+
+			PRIMARY KEY (network_id),
+			UNIQUE (network_name)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TYPE auth_type AS ENUM (
+			'password',
+			'apple',
+			'google'
+		)
+	`),
+	// password_hash: 32-bit argon2 hash digest
+	newSqlMigration(`
+		CREATE TABLE network_user (
+			user_id uuid NOT NULL,
+			user_name VARCHAR(128) NOT NULL,
+			auth_type auth_type NOT NULL,
+			user_auth VARCHAR(256) NULL,
+			password_hash VARCHAR(64) NULL,
+			auth_jwt VARCHAR(1024) NULL,
+			validated BOOL NOT NULL DEFAULT false,
+
+			PRIMARY KEY (user_id)
+		)
+	`),
+	// an attempt any of:
+	// - network create
+	// - login
+	// - password login
+	// - reset
+	// - validation
+	// client_ipv4: 4 bytes stored in dot notation
+	newSqlMigration(`
+		CREATE TABLE user_auth_attempt (
+			user_auth_attempt_id uuid NOT NULL,
+			user_auth VARCHAR(256) NULL,
+			attempt_time timestamp NOT NULL DEFAULT now(),
+			client_ipv4 VARCHAR(16) NOT NULL,
+			success BOOL NOT NULL,
+
+			PRIMARY KEY (user_auth_attempt_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX user_auth_attempt_client_ipv4 ON user_auth_attempt (client_ipv4, attempt_time)
+	`),
+	newSqlMigration(`
+		CREATE INDEX user_auth_attempt_user_auth ON user_auth_attempt (user_auth, attempt_time)
+	`),
+	newSqlMigration(`
+		CREATE TABLE user_auth_reset (
+			user_auth_reset_id uuid NOT NULL,
+			user_id uuid NOT NULL,
+			reset_time timestamp NOT NULL DEFAULT now(),
+			reset_code VARCHAR(128) NOT NULL,
+			used BOOL NOT NULL DEFAULT false,
+
+			PRIMARY KEY (user_auth_reset_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX user_auth_reset_user_id ON user_auth_reset (user_id, reset_time)
+	`),
+	newSqlMigration(`
+		CREATE TABLE user_auth_validate (
+			user_auth_validate_id uuid NOT NULL,
+			user_id uuid NOT NULL,
+			validate_time timestamp NOT NULL DEFAULT now(),
+			validate_code VARCHAR(16) NOT NULL,
+			used BOOL NOT NULL DEFAULT false,
+
+			PRIMARY KEY (user_auth_validate_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX user_auth_validate_user_id ON user_auth_validate (user_id, validate_time)
 	`),
 }
