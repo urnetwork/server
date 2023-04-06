@@ -1,44 +1,34 @@
 package model
 
-// return object is bool and, if not available, suggestions for available variants
 
-func IsNetworkAvailable() {
+import (
+	"encoding/json"
 
-	// store   network_id, char, count
-	// similarity score is: sum for each char, count_a - abs(count_a - count_b)
-	// consider similarity scores len - 3, len + 3
-	// load full network names
-	// then do a filter with edit distance on prefix len 6
-	// then do full edit distance
-
-}
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/ulid"
+)
 
 
-// associate with a create network session id
 
-func CreateNetwork() {
-
-}
-
-
-func RemoveNetwork() {
-
-}
+networkNameSearch := bringyour.NewSearch("network_name", bringyour.SearchTypeFull)
 
 
 
 type NetworkCheckArgs struct {
-	name string
+	NetworkName string
 }
 
 type NetworkCheckResult struct {
-	available bool
+	Available bool
 }
 
-
 func NetworkCheck(check *NetworkCheckArgs) (*NetworkCheckResult, error) {
-	// fixme
-	return nil, nil
+	taken := networkNameSearch.AnyAround(check.NetworkName, 3)
+
+	result := &NetworkCheckResult{
+		Available: !taken
+	}
+	return result, nil
 }
 
 
@@ -55,21 +45,191 @@ type NetworkCreateArgs struct {
 type NetworkCreateResult struct {
 	network *NetworkCreateResultNetwork
 	validatonRequired *NetworkCreateResultValidation
+	error NetworkCreateResultError
 }
 
 type NetworkCreateResultNetwork struct {
 	byJwt *string
-	name *string
+	networkName *string
 }
 
 type NetworkCreateResultValidation struct {
 	userAuth string
 }
 
+type NetworkCreateResultError struct {
+	message string
+}
 
-func NetworkCreate(create *NetworkCreate) (*NetworkCreateResult, error) {
-	// fixme
-	return nil, nil
+
+func NetworkCreate(create *NetworkCreate, session *bringyour.ClientSession) (*NetworkCreateResult, error) {
+	userAuth, _ := normalUserAuthV1(create.userAuth)
+
+	var userAuthAttemptId *ulid.ULID
+	if session != nil {
+		var allow bool
+		userAuthAttemptId, allow = UserAuthAttempt(userAuth, *session)
+		if !allow {
+			return nil, maxUserAuthAttemptsError()
+		}
+	}
+
+	taken := networkNameSearch.AnyAround(create.NetworkName, 3)
+
+	if taken {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: "Network name not available."
+			}
+		}
+		return result, nil
+	}
+
+	if !terms {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: "The terms of service and privacy policy must be accepted."
+			}
+		}
+		return result, nil
+	}
+
+
+
+	if userAuth != nil {
+		// validate the user does not exist
+
+		var userId pgtype.UUID
+		bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+			conn.Exec(
+				`
+					SELECT user_id FROM network_user WHERE user_auth = $1
+				`,
+				userAuth,
+			)
+			if conn.Next() {
+				conn.Scan(&userId)
+			}
+		})
+
+		if !userId.Valid {
+			userId := ulid.Make()
+			networkId := ulid.Make()
+
+			passwordSalt := createPasswordSalt()
+			passwordHash := computePasswordHashV1([]byte(create.Password), passwordSalt)
+
+			bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
+				conn.Exec(
+					`
+						INSERT INTO TABLE network_user
+						(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+						VALUES ($1, $2, $3, $4, $5, $6)
+					`,
+					ulid.ToPg(userId),
+					create.UserName,
+					AuthTypePassword,
+					userAuth,
+					passwordHash,
+					passwordSalt,
+				)
+
+				conn.Exec(
+					`
+						INSERT INTO TABLE network
+						(network_id, network_name, admin_user_id)
+						VALUES ($1, $2, $3)
+					`,
+					ulid.ToPg(networkId),
+					create.NetworkName,
+					ulid.ToPg(userId),
+				)
+			})
+
+			networkNameSearch.Add(create.NetworkName, networkId)
+			// fixme log an audit event that account created and terms were accepted with a client ip with the auth type
+
+			result := &NetworkCreateResultNetwork{
+				ValidatonRequired: &NetworkCreateResultValidation{
+					UserAuth: userAuth,
+				},
+				Network: &NetworkCreateResultNetwork{
+					NetworkName: create.NetworkName
+				}
+			}
+			return result, nil
+		}
+	} else if create.authJwt != nil {
+		authJwt := ParseAuthJwt(create.AuthJwt, create.AuthJwtType)
+		if authJwt != nil {
+			// validate the user does not exist
+
+			var userId pgtype.UUID
+			bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+				conn.Exec(
+					`
+						SELECT user_id FROM network_user WHERE user_auth = $1
+					`,
+					authJwt.userAuth,
+				)
+				if conn.Next() {
+					conn.Scan(&userId)
+				}
+			})
+
+			if !userId.Valid {
+				userId := ulid.Make()
+				networkId := ulid.Make()
+
+				bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
+					conn.Exec(
+						`
+							INSERT INTO TABLE network_user
+							(user_id, user_name, auth_type, user_auth, auth_jwt)
+							VALUES ($1, $2, $3, $4, $5, $6)
+						`,
+						ulid.ToPg(userId),
+						create.UserName,
+						authJwt.authType,
+						userAuth,
+						create.AuthJwt,
+					)
+
+					conn.Exec(
+						`
+							INSERT INTO TABLE network
+							(network_id, network_name, admin_user_id)
+							VALUES ($1, $2, $3)
+						`,
+						ulid.ToPg(networkId),
+						create.NetworkName,
+						ulid.ToPg(userId),
+					)
+				})
+
+				networkNameSearch.Add(create.NetworkName, networkId)
+				// fixme log an audit event that account created and terms were accepted with a client ip with the auth jwt type
+
+				SetUserAuthAttemptSuccess(userAuthAttemptId, true)
+
+				// successful login
+				byJwt := CreateByJwt(
+					networkId,
+					userId,
+					create.NetworkName,
+				)
+
+				result := &NetworkCreateResultNetwork{
+					Network: &NetworkCreateResultNetwork{
+						ByJwt: byJwt.String()
+					}
+				}
+				return result, nil
+			}
+		}
+	}
+	
+	return nil, error("Invalid login.")
 }
 
 

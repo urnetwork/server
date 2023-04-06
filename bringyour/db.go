@@ -295,26 +295,35 @@ var migrations = []any{
 		)
 	`),
 	newSqlMigration(`
+		CREATE INDEX network_admin_user_id ON network (admin_user_id, network_id)
+	`),
+
+	newSqlMigration(`
 		CREATE TYPE auth_type AS ENUM (
 			'password',
 			'apple',
 			'google'
 		)
 	`),
-	// password_hash: 32-bit argon2 hash digest
+	// password_hash: 32-byte argon2 hash digest
+	// password_salt: 32-byte random
 	newSqlMigration(`
 		CREATE TABLE network_user (
 			user_id uuid NOT NULL,
 			user_name VARCHAR(128) NOT NULL,
 			auth_type auth_type NOT NULL,
 			user_auth VARCHAR(256) NULL,
-			password_hash VARCHAR(64) NULL,
+			password_hash bytea NULL,
+			password_salt bytea NULL,
 			auth_jwt VARCHAR(1024) NULL,
 			validated BOOL NOT NULL DEFAULT false,
 
 			PRIMARY KEY (user_id)
+			UNIQUE (user_auth)
 		)
 	`),
+	// the index of user_auth is covered by the unique index
+
 	// an attempt any of:
 	// - network create
 	// - login
@@ -339,20 +348,24 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX user_auth_attempt_user_auth ON user_auth_attempt (user_auth, attempt_time)
 	`),
+	// reset_code: 64-byte hex
+	// reset codes must be globally unique because of the way they are used
 	newSqlMigration(`
 		CREATE TABLE user_auth_reset (
 			user_auth_reset_id uuid NOT NULL,
 			user_id uuid NOT NULL,
 			reset_time timestamp NOT NULL DEFAULT now(),
-			reset_code VARCHAR(128) NOT NULL,
+			reset_code VARCHAR(256) NOT NULL,
 			used BOOL NOT NULL DEFAULT false,
 
-			PRIMARY KEY (user_auth_reset_id)
+			PRIMARY KEY (user_auth_reset_id),
+			UNIQUE (reset_code)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX user_auth_reset_user_id ON user_auth_reset (user_id, reset_time)
+		CREATE INDEX user_auth_reset_user_id ON user_auth_reset (user_id, reset_code)
 	`),
+	// validate_code: 4-byte hex 
 	newSqlMigration(`
 		CREATE TABLE user_auth_validate (
 			user_auth_validate_id uuid NOT NULL,
@@ -361,10 +374,11 @@ var migrations = []any{
 			validate_code VARCHAR(16) NOT NULL,
 			used BOOL NOT NULL DEFAULT false,
 
-			PRIMARY KEY (user_auth_validate_id)
+			PRIMARY KEY (user_auth_validate_id),
+			UNIQUE (user_id, validate_code)
 		)
 	`),
-	newSqlMigration(`
-		CREATE INDEX user_auth_validate_user_id ON user_auth_validate (user_id, validate_time)
-	`),
+	// newSqlMigration(`
+	// 	CREATE INDEX user_auth_validate_user_id ON user_auth_validate (user_id, validate_code)
+	// `),
 }

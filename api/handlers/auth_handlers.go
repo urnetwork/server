@@ -10,7 +10,7 @@ import (
 
 
 func AuthLogin(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(model.AuthLogin, w, r)
+	router.WrapWithJson(controller.AuthLogin, w, r)
 }
 
 func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +32,6 @@ func AuthPasswordReset(w http.ResponseWriter, r *http.Request) {
 func AuthPasswordSet(w http.ResponseWriter, r *http.Request) {
     router.WrapWithJson(controller.AuthPasswordSet, w, r)
 }
-
 
 func AuthNetworkCheck(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithJsonIgnoreSession(model.NetworkCheck, w, r)

@@ -9,7 +9,7 @@ import (
 
 
 // wraps an implementation function using json in/out
-func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(*R, error), w http.ResponseWriter, req *http.Request) {
+func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error), w http.ResponseWriter, req *http.Request) {
 	var input T
 
 	var err error
@@ -22,7 +22,7 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(*R, error
 
     session := bringyour.NewClientSessionFromRequest(req)
 
-    var result *R
+    var result R
 	result, err = impl(input, session)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -39,8 +39,8 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(*R, error
 }
 
 
-func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(*R, error), w http.ResponseWriter, req *http.Request) {
-	WrapWithJson(func (arg T, _ *bringyour.ClientSession)(*R, error) {
+func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(R, error), w http.ResponseWriter, req *http.Request) {
+	WrapWithJson(func (arg T, _ *bringyour.ClientSession)(R, error) {
 		return impl(arg)
 	}, w, req)
 }

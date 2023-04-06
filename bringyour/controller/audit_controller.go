@@ -1,3 +1,4 @@
+package controller
 
 
 func AddSampleEvents(intervalSeconds int) {
