@@ -2,11 +2,12 @@ package model
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 
 	"golang.org/x/crypto/argon2"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/ulid"
+	// "bringyour.com/bringyour"
+	// "bringyour.com/bringyour/ulid"
 )
 
 
@@ -20,7 +21,7 @@ const (
 
 
 // BE CAREFUL do not change without a backwards-compatible migration
-passwordPepper := []byte("t1me4atoporita")
+var passwordPepper = []byte("t1me4atoporita")
 
 
 // BE CAREFUL do not change without a backwards-compatible migration
@@ -53,11 +54,11 @@ func createPasswordSalt() []byte {
 
 func createValidateCode() string {
 	validateCode := make([]byte, 4)
-	_, err := rand.Read(validateCodeBytes)
+	_, err := rand.Read(validateCode)
 	if err != nil {
 		panic(err)
 	}
-	return hex(validateCode)
+	return hex.EncodeToString(validateCode)
 }
 
 func createResetCode() string {
@@ -66,5 +67,9 @@ func createResetCode() string {
 	if err != nil {
 		panic(err)
 	}
-	return hex(resetCode)
+	return hex.EncodeToString(resetCode)
 }
+
+
+
+

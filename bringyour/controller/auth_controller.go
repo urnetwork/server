@@ -1,13 +1,15 @@
 package controller
 
 import (
+	"errors"
 
-	"bringyour.com/ulid"
-	"bringyour.com/model"
+	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour/ulid"
+	"bringyour.com/bringyour/model"
 )
 
 
-func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*model.AuthLoginResult, error) {
+func AuthLogin(login model.AuthLoginArgs, session *bringyour.ClientSession) (*model.AuthLoginResult, error) {
 	// fixme
 	/*
 	userAuth, userAuthType := normalUserAuthV1(login.userAuth)
@@ -24,14 +26,14 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*model.Au
 
 
 func AuthLoginWithPassword(
-	loginWithPassword AuthLoginWithPasswordArgs,
-	session *bringyour.ClientSession
+	loginWithPassword model.AuthLoginWithPasswordArgs,
+	session *bringyour.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
-	result, err := model.AuthLoginWithPassword(loginWithPassword)
+	result, err := model.AuthLoginWithPassword(loginWithPassword, session)
 	// if validation required, send it
 	if result != nil && result.ValidationRequired != nil {
 		validateSend := AuthValidateSendArgs{
-			UserAuth: result.ValidationRequired.UserAuth
+			UserAuth: result.ValidationRequired.UserAuth,
 		}
 		AuthValidateSend(validateSend, session)
 	}
@@ -47,31 +49,34 @@ type AuthValidateSendResult struct {
 }
 
 func AuthValidateSend(
-	validateSend model.AuthValidateSendArgs,
-	session *bringyour.ClientSession
+	validateSend AuthValidateSendArgs,
+	session *bringyour.ClientSession,
 ) (*AuthValidateSendResult, error) {
-	userAuth, userAuthType := model.NormalUserAuthV1(validateSend.UserAuth)
+	userAuth, userAuthType := model.NormalUserAuthV1(&validateSend.UserAuth)
 
-	validateCreateCode := AuthValidateCreateCodeArgs{
-		UserAuth: userAuth
+	validateCreateCode := model.AuthValidateCreateCodeArgs{
+		UserAuth: *userAuth,
 	}
 	validateCreateCodeResult, err := model.AuthValidateCreateCode(validateCreateCode, session)
-	if validateCreateCodeResult != nil && validateCreateCodeResult.ValidateCode != nil {	
+	if err != nil {
+		return nil, err
+	}
+	if validateCreateCodeResult.ValidateCode != nil {	
 		switch userAuthType {
 		case model.UserAuthTypeEmail:
 			sendAccountEmail(
-				userAuth,
-				createValidateBodyHtml(validateCreateCodeResult.ValidateCode),
+				*userAuth,
+				createValidateBodyHtml(*validateCreateCodeResult.ValidateCode),
 			)
 		case model.UserAuthTypePhone:
 			sendAccountSms(
-				userAuth,
-				createValidateBodyText(validateCreateCodeResult.ValidateCode),
+				*userAuth,
+				createValidateBodyText(*validateCreateCodeResult.ValidateCode),
 			)		
 		}
 	}
 
-	return nil, error("Invalid login.")
+	return nil, errors.New("Invalid login.")
 }
 
 func createValidateBodyHtml(validateCode string) string {
@@ -86,38 +91,41 @@ func createValidateBodyText(validateCode string) string {
 
 
 type AuthPasswordResetArgs struct {
-	userAuth string
+	UserAuth string `json:"userAuth"`
 }
 
 type AuthPasswordResetResult struct {
 }
 
 func AuthPasswordReset(
-	reset model.AuthPasswordResetArgs,
-	session *bringyour.ClientSession
+	reset AuthPasswordResetArgs,
+	session *bringyour.ClientSession,
 ) (*AuthPasswordResetResult, error) {
-	userAuth, userAuthType := model.NormalUserAuthV1(reset.UserAuth)
+	userAuth, userAuthType := model.NormalUserAuthV1(&reset.UserAuth)
 
-	resetCreateCode := AuthResetCreateCodeArgs{
-		UserAuth: userAuth
+	resetCreateCode := model.AuthPasswordResetCreateCodeArgs{
+		UserAuth: *userAuth,
 	}
-	resetCreateCodeResult, err := model.AuthResetCreateCode(resetCreateCode, session)
-	if resetCreateCodeResult != nil && resetCreateCodeResult.ResetCode != nil {	
+	resetCreateCodeResult, err := model.AuthPasswordResetCreateCode(resetCreateCode, session)
+	if err != nil {
+		return nil, err
+	}
+	if resetCreateCodeResult.ResetCode != nil {	
 		switch userAuthType {
 		case model.UserAuthTypeEmail:
 			sendAccountEmail(
-				userAuth,
-				createResetBodyHtml(validateCreateCodeResult.ResetCode),
+				*userAuth,
+				createResetBodyHtml(*resetCreateCodeResult.ResetCode),
 			)
 		case model.UserAuthTypePhone:
 			sendAccountSms(
-				userAuth,
-				createResetBodyText(validateCreateCodeResult.ResetCode),
+				*userAuth,
+				createResetBodyText(*resetCreateCodeResult.ResetCode),
 			)		
 		}
 	}
 
-	return nil, error("Invalid login.")
+	return nil, errors.New("Invalid login.")
 }
 
 func createResetBodyHtml(resetCode string) string {
@@ -134,19 +142,18 @@ func createResetBodyText(resetCode string) string {
 type AuthPasswordSetResult struct {
 }
 
-func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs) (*AuthPasswordSetResult, error) {
-	passwordSetResult, err := model.AuthPasswordSet(passwordSet)
-	if passwordSetResult != nil {
-		SendAccountMessage(
-			passwordSetResult.NetworkId,
-			createPasswordSetNoticeBodyHtml(),
-			createPasswordSetNoticeBodyText(),
-		)
-		safePasswordSetResult := &AuthPasswordSetResult{}
-		return safePasswordSetResult, nil
+func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *bringyour.ClientSession) (*AuthPasswordSetResult, error) {
+	passwordSetResult, err := model.AuthPasswordSet(passwordSet, session)
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, error("Invalid login.")
+	SendAccountMessage(
+		passwordSetResult.NetworkId,
+		createPasswordSetNoticeBodyHtml(),
+		createPasswordSetNoticeBodyText(),
+	)
+	safePasswordSetResult := &AuthPasswordSetResult{}
+	return safePasswordSetResult, nil
 }
 
 func createPasswordSetNoticeBodyHtml() string {

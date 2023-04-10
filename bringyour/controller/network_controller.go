@@ -1,15 +1,21 @@
 package controller
 
+import (
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+)
+
 
 func NetworkCreate(
-	create model.NetworkCreate,
-	session *bringyour.ClientSession
-) (*NetworkCreateResult, error) {
-	result, err := model.NetworkCreate(create, session)
+	networkCreate model.NetworkCreateArgs,
+	session *bringyour.ClientSession,
+) (*model.NetworkCreateResult, error) {
+	result, err := model.NetworkCreate(networkCreate, session)
 	// if validation required, send it
 	if result != nil && result.ValidationRequired != nil {
 		validateSend := AuthValidateSendArgs{
-			UserAuth: result.ValidationRequired.UserAuth
+			UserAuth: result.ValidationRequired.UserAuth,
 		}
 		AuthValidateSend(validateSend, session)
 	}

@@ -2,10 +2,13 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
+	"strings"
 
 	"bringyour.com/bringyour"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // compute stats (number of days)
@@ -66,12 +69,16 @@ type Stats struct {
 
 
 
-func ComputeStats90() Stats {
+func ComputeStats90() *Stats {
 	// fixme
 	bringyour.Db(func (context context.Context, conn *pgxpool.Conn) {
 
 	})
 
+	// fixme
+	return nil
+
+/*
 	`
 	SELECT t.day, t.device_id, audit_provider_event.event_id, audit_provider_event.event_type, audit_provider_event.country_name, audit_provider_event.region_name, audit_provider_event.city_name
 
@@ -221,34 +228,54 @@ func ComputeStats90() Stats {
 
 	;
 	`
-
+*/
 }
 
 
-func ExportStats(stats Stats) {
-	// set into redis
-	json := json.Marshal(stats)
+func ExportStats(lookback int, stats Stats) {
+	statsJson, err := json.Marshal(stats)
+	if err != nil {
+		panic(err)
+	}
 
-}
-
-func GetExportedStatsJson(lookback int) string {
-	Redis(func(context Context, client Client) {
-
+	bringyour.Redis(func(context context.Context, client *redis.Client) {
+		client.Set(context, fmt.Sprintf("stats.last-%d", lookback), statsJson, 0)
 	})
-	// read from redis
 }
 
-func GetExportedStats(lookback int) Stats {
-	statsJson := GetExportedStatsJson()
-	// convert to stats
+func GetExportedStatsJson(lookback int) *string {
+	var statsJson *string
+	bringyour.Redis(func(context context.Context, client *redis.Client) {
+		value, err := client.Get(context, fmt.Sprint("stats.last-%d", lookback)).Result()
+		if err != nil {
+			statsJson = nil
+		} else {
+			statsJson = &value
+		}
+	})
+	return statsJson
+}
+
+func GetExportedStats(lookback int) *Stats {
+	statsJson := GetExportedStatsJson(lookback)
+	if statsJson == nil {
+		return nil
+	}
+
+	var stats Stats
+	err := json.NewDecoder(strings.NewReader(*statsJson)).Decode(&stats)
+    if err != nil {
+        return nil
+    }
+    return &stats
 }
 
 
 
 
 
-
-
+// fixme
+/*
 type AuditProviderCheck struct {
 
 }
@@ -305,7 +332,7 @@ func AddEvent(event interface{}) {
 		panic("Event type not recognized: %T", v)
 	}
 }
-
+*/
 
 
 

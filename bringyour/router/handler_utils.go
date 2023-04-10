@@ -3,8 +3,10 @@ package router
 import (
 	"net/http"
 	"encoding/json"
+	"reflect"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
 )
 
 
@@ -21,6 +23,18 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
     }
 
     session := bringyour.NewClientSessionFromRequest(req)
+
+    // look for AuthArgs
+    inputMeta := reflect.ValueOf(input).Elem()
+    byJwtField := inputMeta.FieldByName("ByJwt")
+	if byJwtField == (reflect.Value{}) {
+		byJwt := jwt.ParseByJwt(byJwtField.String())
+    	if byJwt == nil {
+    		http.Error(w, err.Error(), http.StatusInternalServerError)
+        	return
+    	}
+    	session.ByJwt = byJwt
+	}
 
     var result R
 	result, err = impl(input, session)

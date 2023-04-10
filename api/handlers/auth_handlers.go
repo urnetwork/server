@@ -1,11 +1,11 @@
 package handlers
 
 import (
-	"context"
 	"net/http"
-	"encoding/json"
 
-	"bringyour.com/bringyour"
+    "bringyour.com/bringyour/model"
+    "bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/router"
 )
 
 

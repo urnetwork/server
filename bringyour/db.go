@@ -381,4 +381,40 @@ var migrations = []any{
 	// newSqlMigration(`
 	// 	CREATE INDEX user_auth_validate_user_id ON user_auth_validate (user_id, validate_code)
 	// `),
+
+	newSqlMigration(`
+		CREATE TABLE account_feedback (
+			feedback_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			user_id uuid NOT NULL,
+			feedback_time timestamp NOT NULL DEFAULT now(),
+			uses_personal BOOL NOT NULL DEFAULT false,
+			uses_business BOOL NOT NULL DEFAULT false,
+			needs_private BOOL NOT NULL DEFAULT false,
+			needs_safe BOOL NOT NULL DEFAULT false,
+			needs_global BOOL NOT NULL DEFAULT false,
+			needs_collaborate BOOL NOT NULL DEFAULT false,
+			needs_app_control BOOL NOT NULL DEFAULT false,
+			needs_block_data_brokers BOOL NOT NULL DEFAULT false,
+			needs_block_ads BOOL NOT NULL DEFAULT false,
+			needs_focus BOOL NOT NULL DEFAULT false,
+			needs_connect_servers BOOL NOT NULL DEFAULT false,
+			needs_run_servers BOOL NOT NULL DEFAULT false,
+			needs_prevent_cyber BOOL NOT NULL DEFAULT false,
+			needs_audit BOOL NOT NULL DEFAULT false,
+			needs_zero_trust BOOL NOT NULL DEFAULT false,
+			needs_visualize BOOL NOT NULL DEFAULT false,
+			needs_other TEXT NULL,
+
+			PRIMARY KEY (feedback_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE account_preferences (
+			network_id uuid NOT NULL,
+			product_updates BOOL NOT NULL DEFAULT false,
+
+			PRIMARY KEY (network_id)
+		)
+	`),
 }
