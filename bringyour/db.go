@@ -4,6 +4,8 @@ import (
 	"sync"
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	// "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,38 +13,62 @@ import (
 
 
 
-type SafePool struct {
+type SafePgPool struct {
 	mutex sync.Mutex
 	pool *pgxpool.Pool
 }
-func (self SafePool) init() {
-	//   - pool_max_conns: integer greater than 0
-//   - pool_min_conns: integer 0 or greater
-//   - pool_max_conn_lifetime: duration string
-//   - pool_max_conn_idle_time: duration string
-//   - pool_health_check_period: duration string
-//   - pool_max_conn_lifetime_jitter: duration string
-	// postgres://jack:secret@pg.example.com:5432/mydb?sslmode=verify-ca&pool_max_conns=10
-	// fixme
-	postgresUrl := ""
-	var err error
-	self.pool, err = pgxpool.New(context.Background(), postgresUrl)
-	if err != nil {
-		panic(fmt.Sprintf("Unable to connect to database: %s", err))
-	}
+func (self SafePgPool) open() *pgxpool.Pool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if self.pool == nil {
+		// see the Config struct for human understandable docs
+		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
+		options := map[string]string{
+			"sslmode": "disable",
+			"pool_max_conns": strconv.Itoa(32),
+			"pool_min_conns": strconv.Itoa(4),
+			"pool_max_conn_lifetime": "8h",
+			"pool_max_conn_lifetime_jitter": "1h",
+			"pool_max_conn_idle_time": "60s",
+			"pool_health_check_period": "1h",
+		}
+		optionsPairs := []string{}
+		for key, value := range options {
+			optionsPairs = append(optionsPairs, fmt.Sprintf("%s=%s", key, value))
+		}
+		optionsString := strings.Join(optionsPairs, "&")
 
+		postgresUrl := fmt.Sprintf(
+			"postgres://%s:%s@%s/%s?%s",
+			"bringyour",
+			"pigsty-vesicle-trombone-vigour",
+			"192.168.208.135:5432",
+			"bringyour",
+			optionsString,
+		)
+
+		var err error
+		self.pool, err = pgxpool.New(context.Background(), postgresUrl)
+		if err != nil {
+			panic(fmt.Sprintf("Unable to connect to database: %s", err))
+		}
+	}
+	return self.pool
+}
+func (self SafePgPool) close() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	if self.pool != nil {
+		self.pool.Close()
+		self.pool = nil
+	}
 }
 
-var safePool *SafePool = &SafePool{}
-
+var safePool *SafePgPool = &SafePgPool{}
 
 func pool() *pgxpool.Pool {
-	safePool.mutex.Lock()
-	defer safePool.mutex.Unlock()
-	if safePool.pool == nil {
-		safePool.init()
-	}
-	return safePool.pool
+	return safePool.open()
 }
 
 
@@ -59,7 +85,7 @@ func newDbRetryOptions(rerunOnError bool) *DbRetryOptions {
 
 
 
-func Db(callback func(context.Context, *pgxpool.Conn), options ...any) error {
+func Db(callback func(context.Context, *pgxpool.Conn), options ...any) {
 	// fixme rerun callback on disconnect with a new connection
 
 	context := context.Background()
@@ -71,7 +97,7 @@ func Db(callback func(context.Context, *pgxpool.Conn), options ...any) error {
 
 	conn, err = pool().Acquire(context)
 	if err != nil {
-		return err
+		panic(err)
 	}
 
 	err = conn.Ping(context)
@@ -79,18 +105,17 @@ func Db(callback func(context.Context, *pgxpool.Conn), options ...any) error {
 		// take the bad connection out of the pool
 		pgxConn := conn.Hijack()
 		pgxConn.Close(context)
-		return err
+		panic(err)
 	}
 
 	defer conn.Release()
 	callback(context, conn)
-	return nil
 }
 
 
-func Tx(callback func(context.Context, *pgxpool.Conn), options ...any) error {
+func Tx(callback func(context.Context, *pgxpool.Conn), options ...any) {
 	// fixme
-	return Db(callback)
+	Db(callback)
 }
 
 
@@ -119,7 +144,7 @@ func newCodeMigration(callback func(context.Context, *pgxpool.Conn)) *CodeMigrat
 
 
 
-func ApplyMigrations() {
+func ApplyDbMigrations() {
 	Tx(func(context context.Context, conn *pgxpool.Conn) {
 		conn.Exec(
 			context,
@@ -156,9 +181,9 @@ func ApplyMigrations() {
 		)
 		for i := endVersionNumber; i < len(migrations); i += 1 {
 			switch v := migrations[i].(type) {
-				case SqlMigration:
+				case *SqlMigration:
 					conn.Exec(context, v.sql)
-				case CodeMigration:
+				case *CodeMigration:
 					v.callback(context, conn)
 				default:
 					panic(fmt.Sprintf("Unknown migration type %T", v))

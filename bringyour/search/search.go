@@ -23,7 +23,7 @@ type Search struct {
 
 func NewSearch(realmName string, searchType SearchType) *Search {
 	// fixme
-	return nil
+	return &Search{}
 }
 
 

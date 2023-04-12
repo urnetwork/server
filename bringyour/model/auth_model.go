@@ -36,11 +36,13 @@ type AuthArgs struct {
 
 
 
-func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.ULID, bool) {
+func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.ULID, bool) {
 	// insert attempt with success false
 	// select attempts by userAuth in past 1 hour
 	// select attempts by clientIp in past 1 hour
 	// if more than 10 failed in any, return false
+
+	bringyour.Logger().Printf("UserAuthAttempt 1")
 
 	attemptLookbackCount := 100
 	// 1 hour
@@ -54,7 +56,10 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.U
 		ipv4DotNotation = session.ClientIpv4DotNotation()
 	}
 
+	bringyour.Logger().Printf("UserAuthAttempt 2")
+
 	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+		bringyour.Logger().Printf("UserAuthAttempt 3")
 		conn.Exec(
 			context,
 			`
@@ -67,6 +72,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.U
 			ipv4DotNotation,
 			false,
 		)
+		bringyour.Logger().Printf("UserAuthAttempt 4")
 	})
 
 	type UserAuthAttemptResult struct {
@@ -98,13 +104,17 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.U
 		return failedCount <= attemptFailedCountThreshold
 	}
 
+	bringyour.Logger().Printf("UserAuthAttempt 5")
 
 	if userAuth != nil {
+		bringyour.Logger().Printf("UserAuthAttempt 6")
 		// lookback by user auth
 		var attempts []UserAuthAttemptResult
 		bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+			bringyour.Logger().Printf("UserAuthAttempt 7")
 			result, err := conn.Query(
 				context,
+				// FIXME SYNTAX
 				`
 					SELECT 
 						attempt_time,
@@ -124,7 +134,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.U
 			attempts = parseAttempts(result)
 		})
 		if !passesThreshold(attempts) {
-			return userAuthAttemptId, false
+			return &userAuthAttemptId, false
 		}
 	}
 
@@ -153,11 +163,11 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (ulid.U
 			attempts = parseAttempts(result)
 		})
 		if !passesThreshold(attempts) {
-			return userAuthAttemptId, false
+			return &userAuthAttemptId, false
 		}
 	}
 
-	return userAuthAttemptId, true
+	return &userAuthAttemptId, true
 }
 
 func SetUserAuthAttemptSuccess(userAuthAttemptId ulid.ULID, success bool) {
@@ -187,13 +197,14 @@ type AuthLoginArgs struct {
 }
 
 type AuthLoginResult struct {
-	AuthAllowed *[]string `json:"authAllowed"`
-	Error *AuthLoginResultError `json:"error"`
-	Network *AuthLoginResultNetwork `json:"network"`
+	UserName *string `json:"userName,omitempty"`
+	AuthAllowed *[]string `json:"authAllowed,omitempty"`
+	Error *AuthLoginResultError `json:"error,omitempty"`
+	Network *AuthLoginResultNetwork `json:"network,omitempty"`
 }
 
 type AuthLoginResultError struct {
-	SuggestedUserAuth *string `json:"suggestedUserAuth"`
+	SuggestedUserAuth *string `json:"suggestedUserAuth,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -204,19 +215,10 @@ type AuthLoginResultNetwork struct {
 func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
-	if userAuth == nil {
-		result := &AuthLoginResult{
-			Error: &AuthLoginResultError{
-				Message: "Invalid user auth.",
-			},
-		}
-		return result, nil
-	}
-
 	var userAuthAttemptId *ulid.ULID
 	if session != nil {
 		var allow bool
-		*userAuthAttemptId, allow = UserAuthAttempt(userAuth, session)
+		userAuthAttemptId, allow = UserAuthAttempt(userAuth, session)
 		if !allow {
 			return nil, maxUserAuthAttemptsError()
 		}
@@ -251,7 +253,8 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 			return result, nil
 		}
 	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
-		authJwt := ParseAuthJwt(*login.AuthJwt, *login.AuthJwtType)
+		bringyour.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
+		authJwt := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
 		if authJwt != nil {
 			var userId pgtype.UUID
 			var authType *string
@@ -264,7 +267,7 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 						SELECT
 							network_user.user_id AS user_id,
 							network_user.auth_type AS auth_type,
-							network.network_id AS network_id
+							network.network_id AS network_id,
 							network.network_name AS network_name
 						FROM network_user
 						INNER JOIN network ON network.admin_user_id = network_user.user_id
@@ -282,8 +285,10 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 
 			if authType == nil {
 				// new user
-				return &AuthLoginResult{}, nil
-			} else if *authType == authJwt.AuthType {
+				return &AuthLoginResult{
+					UserName: &authJwt.UserName,
+				}, nil
+			} else if AuthType(*authType) == authJwt.AuthType {
 				if userAuthAttemptId != nil {
 					SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
 				}
@@ -320,9 +325,9 @@ type AuthLoginWithPasswordArgs struct {
 }
 
 type AuthLoginWithPasswordResult struct {
-	ValidationRequired *AuthLoginWithPasswordResultValidation `json:"validationRequired"`
-	Network *AuthLoginWithPasswordResultNetwork `json:"network"`
-	Error *AuthLoginWithPasswordResultError `json:"error"`
+	ValidationRequired *AuthLoginWithPasswordResultValidation `json:"validationRequired,omitempty"`
+	Network *AuthLoginWithPasswordResultNetwork `json:"network,omitempty"`
+	Error *AuthLoginWithPasswordResultError `json:"error,omitempty"`
 }
 
 type AuthLoginWithPasswordResultValidation struct {
@@ -330,8 +335,8 @@ type AuthLoginWithPasswordResultValidation struct {
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
-	ByJwt *string `json:"byJwt"`
-	NetworkName *string `json:"name"`
+	ByJwt *string `json:"byJwt,omitempty"`
+	NetworkName *string `json:"name,omitempty"`
 }
 
 type AuthLoginWithPasswordResultError struct {
@@ -397,7 +402,7 @@ func AuthLoginWithPassword(
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), *passwordSalt)
 	if bytes.Equal(*passwordHash, loginPasswordHash) {
 		if userValidated {
-			SetUserAuthAttemptSuccess(userAuthAttemptId, true)
+			SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
 
 			// success
 			byJwt := jwt.NewByJwt(
@@ -436,8 +441,8 @@ type AuthValidateArgs struct {
 }
 
 type AuthValidateResult struct {
-	Network *AuthValidateResultNetwork `json:"network"`
-	Error *AuthValidateResultError `json:"error"`
+	Network *AuthValidateResultNetwork `json:"network,omitempty"`
+	Error *AuthValidateResultError `json:"error,omitempty"`
 }
 
 type AuthValidateResultNetwork struct {
@@ -527,7 +532,7 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 			)
 		})
 
-		SetUserAuthAttemptSuccess(userAuthAttemptId, true)
+		SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
 
 		byJwt := jwt.NewByJwt(
 			*ulid.FromPg(networkId),
@@ -558,8 +563,8 @@ type AuthValidateCreateCodeArgs struct {
 }
 
 type AuthValidateCreateCodeResult struct {
-	ValidateCode *string `json:"validateCode"`
-	Error *AuthValidateCreateCodeError `json:"error"`
+	ValidateCode *string `json:"validateCode,omitempty"`
+	Error *AuthValidateCreateCodeError `json:"error,omitempty"`
 }
 
 type AuthValidateCreateCodeError struct {
@@ -647,8 +652,8 @@ type AuthPasswordResetCreateCodeArgs struct {
 }
 
 type AuthPasswordResetCreateCodeResult struct {
-	ResetCode *string `json:"resetCode"`
-	Error *AuthPasswordResetCreateCodeError `json:"error"`
+	ResetCode *string `json:"resetCode,omitempty"`
+	Error *AuthPasswordResetCreateCodeError `json:"error,omitempty"`
 }
 
 type AuthPasswordResetCreateCodeError struct {
@@ -816,7 +821,7 @@ func AuthPasswordSet(
 			)
 		})
 
-		SetUserAuthAttemptSuccess(userAuthAttemptId, true)
+		SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
 
 		result := &AuthPasswordSetResult{
 			NetworkId: *ulid.FromPg(networkId),

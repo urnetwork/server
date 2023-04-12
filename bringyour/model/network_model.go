@@ -22,7 +22,7 @@ var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
 
 
 type NetworkCheckArgs struct {
-	NetworkName string  `json:"network_name"`
+	NetworkName string  `json:"networkName"`
 }
 
 type NetworkCheckResult struct {
@@ -40,28 +40,28 @@ func NetworkCheck(check *NetworkCheckArgs) (*NetworkCheckResult, error) {
 
 
 type NetworkCreateArgs struct {
-	UserName *string `json:"user_name"`
-	UserAuth *string `json:"user_auth"`
-	AuthJwt *string `json:"auth_jwt"`
-	AuthJwtType *string `json:"auth_jwt_type"`
+	UserName *string `json:"userName"`
+	UserAuth *string `json:"userAuth"`
+	AuthJwt *string `json:"authJwt"`
+	AuthJwtType *string `json:"authJwtType"`
 	Password string `json:"password"`
-	NetworkName string `json:"network_name"`
+	NetworkName string `json:"networkName"`
 	Terms bool `json:"terms"`
 }
 
 type NetworkCreateResult struct {
-	Network *NetworkCreateResultNetwork `json:"network"`
-	ValidationRequired *NetworkCreateResultValidation `json:"validation_required"`
-	Error *NetworkCreateResultError `json:"error"`
+	Network *NetworkCreateResultNetwork `json:"network,omitempty"`
+	ValidationRequired *NetworkCreateResultValidation `json:"validationRequired,omitempty"`
+	Error *NetworkCreateResultError `json:"error,omitempty"`
 }
 
 type NetworkCreateResultNetwork struct {
-	ByJwt *string `json:"by_jwt"`
-	NetworkName *string `json:"network_name"`
+	ByJwt *string `json:"byJwt,omitempty"`
+	NetworkName *string `json:"networkName,omitempty"`
 }
 
 type NetworkCreateResultValidation struct {
-	UserAuth string `json:"user_auth"`
+	UserAuth string `json:"userAuth"`
 }
 
 type NetworkCreateResultError struct {
@@ -74,7 +74,7 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 	var userAuthAttemptId *ulid.ULID
 	if session != nil {
 		var allow bool
-		*userAuthAttemptId, allow = UserAuthAttempt(userAuth, session)
+		userAuthAttemptId, allow = UserAuthAttempt(userAuth, session)
 		if !allow {
 			return nil, maxUserAuthAttemptsError()
 		}
@@ -129,7 +129,7 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 
 			if !userId.Valid {
 				createdUserId := ulid.Make()
-				*createdNetworkId = ulid.Make()
+				createdNetworkId = bringyour.Ptr(ulid.Make())
 
 				passwordSalt := createPasswordSalt()
 				passwordHash := computePasswordHashV1([]byte(networkCreate.Password), passwordSalt)
@@ -177,7 +177,7 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 			return result, nil
 		}
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
-		authJwt := ParseAuthJwt(*networkCreate.AuthJwt, *networkCreate.AuthJwtType)
+		authJwt := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
 		if authJwt != nil {
 			// validate the user does not exist
 
@@ -205,8 +205,8 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 				}
 
 				if !userId.Valid {
-					*createdUserId = ulid.Make()
-					*createdNetworkId = ulid.Make()
+					createdUserId = bringyour.Ptr(ulid.Make())
+					createdNetworkId = bringyour.Ptr(ulid.Make())
 
 					conn.Exec(
 						context,

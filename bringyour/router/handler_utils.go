@@ -16,26 +16,36 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
 
 	var err error
 
+	bringyour.Logger().Printf("Decoding request\n")
 	err = json.NewDecoder(req.Body).Decode(&input)
     if err != nil {
+    	bringyour.Logger().Printf("Decoding error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
 
+    var debugInputJson []byte
+    debugInputJson, err = json.Marshal(input)
+    if err == nil {
+        bringyour.Logger().Printf("Decoded input %s\n", string(debugInputJson))
+    }
+
+
     session := bringyour.NewClientSessionFromRequest(req)
 
     // look for AuthArgs
-    inputMeta := reflect.ValueOf(input).Elem()
-    byJwtField := inputMeta.FieldByName("ByJwt")
-	if byJwtField == (reflect.Value{}) {
-		byJwt := jwt.ParseByJwt(byJwtField.String())
-    	if byJwt == nil {
+    inputMeta := reflect.ValueOf(&input).Elem()
+    byJwtField := reflect.Indirect(inputMeta).FieldByName("ByJwt")
+	if byJwtField != (reflect.Value{}) {
+		byJwt, err := jwt.ParseByJwt(byJwtField.String())
+    	if err != nil {
     		http.Error(w, err.Error(), http.StatusInternalServerError)
         	return
     	}
     	session.ByJwt = byJwt
 	}
 
+	bringyour.Logger().Printf("Handling %s\n", impl)
     var result R
 	result, err = impl(input, session)
 	if err != nil {
@@ -43,11 +53,13 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
         return
 	}
 
-	responseJson, err := json.Marshal(result)
+	var responseJson []byte
+	responseJson, err = json.Marshal(result)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
+    bringyour.Logger().Printf("Response %s\n", responseJson)
     w.Header().Set("Content-Type", "application/json")
     w.Write(responseJson)
 }

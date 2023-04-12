@@ -3,10 +3,12 @@ package model
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"net/mail"
 
 	"golang.org/x/crypto/argon2"
+	"github.com/nyaruka/phonenumbers"
 
-	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
 	// "bringyour.com/bringyour/ulid"
 )
 
@@ -26,8 +28,33 @@ var passwordPepper = []byte("t1me4atoporita")
 
 // BE CAREFUL do not change without a backwards-compatible migration
 func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
+	if userAuth == nil {
+		return nil, UserAuthTypeNone
+	}
 
-	return nil, UserAuthTypeNone	
+	bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
+
+	var emailAddress *mail.Address
+	var phoneNumber *phonenumbers.PhoneNumber
+	var err error
+
+	emailAddress, err = mail.ParseAddress(*userAuth)
+	if err == nil {
+		// fixme trim out common alias like gmail + and domains
+		normalEmailAddress := emailAddress.Address
+		bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
+		return &normalEmailAddress, UserAuthTypeEmail
+	}
+
+	phoneNumber, err = phonenumbers.Parse(*userAuth, "US")
+	if err == nil {
+		normalPhoneNumber := phonenumbers.Format(phoneNumber, phonenumbers.INTERNATIONAL)
+		bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
+		return &normalPhoneNumber, UserAuthTypePhone
+	}
+
+	// not recognized
+	return nil, UserAuthTypeNone
 }
 
 // BE CAREFUL do not change without a backwards-compatible migration
