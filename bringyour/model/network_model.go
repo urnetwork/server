@@ -5,10 +5,6 @@ import (
 	"errors"
 	"context"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/pgtype"
-
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/search"
@@ -105,39 +101,42 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 	if userAuth != nil {
 		// validate the user does not exist
 
-		var createdNetworkId *ulid.ULID
+		created := false
+		var createdNetworkId ulid.ULID
 		
-		bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-			var result pgx.Rows
+		bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+			var result bringyour.PgResult
 			var err error
 
-			var userId pgtype.UUID
+			var userId bringyour.PgUUID
 
-			result, err = conn.Query(
+			result, err = tx.Query(
 				context,
 				`
 					SELECT user_id FROM network_user WHERE user_auth = $1
 				`,
 				userAuth,
 			)
-			if err != nil {
-				panic(err)
-			}
-			if result.Next() {
-				result.Scan(&userId)
-			}
+			bringyour.With(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(
+						result.Scan(&userId),
+					)
+				}
+			})
 
 			if !userId.Valid {
+				created = true
 				createdUserId := ulid.Make()
-				createdNetworkId = bringyour.Ptr(ulid.Make())
+				createdNetworkId = ulid.Make()
 
 				passwordSalt := createPasswordSalt()
 				passwordHash := computePasswordHashV1([]byte(networkCreate.Password), passwordSalt)
 
-				conn.Exec(
+				_, err = tx.Exec(
 					context,
 					`
-						INSERT INTO TABLE network_user
+						INSERT INTO network_user
 						(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
 						VALUES ($1, $2, $3, $4, $5, $6)
 					`,
@@ -148,22 +147,24 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 					passwordHash,
 					passwordSalt,
 				)
+				bringyour.Raise(err)
 
-				conn.Exec(
+				_, err = tx.Exec(
 					context,
 					`
-						INSERT INTO TABLE network
+						INSERT INTO network
 						(network_id, network_name, admin_user_id)
 						VALUES ($1, $2, $3)
 					`,
-					ulid.ToPg(createdNetworkId),
+					ulid.ToPg(&createdNetworkId),
 					networkCreate.NetworkName,
 					ulid.ToPg(&createdUserId),
 				)
+				bringyour.Raise(err)
 			}
 		})
-		if createdNetworkId != nil {
-			networkNameSearch.Add(networkCreate.NetworkName, *createdNetworkId)
+		if created {
+			networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
 			// fixme log an audit event that account created and terms were accepted with a client ip with the auth type
 
 			result := &NetworkCreateResult{
@@ -181,62 +182,75 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 		if authJwt != nil {
 			// validate the user does not exist
 
-			var createdNetworkId *ulid.ULID
-			var createdUserId *ulid.ULID
+			created := false
+			var createdNetworkId ulid.ULID
+			var createdUserId ulid.ULID
 
-			bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-				var result pgx.Rows
+			bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+				var result bringyour.PgResult
 				var err error
 
-				var userId pgtype.UUID
+				var userId bringyour.PgUUID
 
-				result, err = conn.Query(
+				result, err = tx.Query(
 					context,
 					`
 						SELECT user_id FROM network_user WHERE user_auth = $1
 					`,
 					authJwt.UserAuth,
 				)
-				if err != nil {
-					panic(err)
-				}
-				if result.Next() {
-					result.Scan(&userId)
-				}
+				bringyour.With(result, err, func() {
+					if result.Next() {
+						bringyour.Raise(
+							result.Scan(&userId),
+						)
+					}
+				})
 
 				if !userId.Valid {
-					createdUserId = bringyour.Ptr(ulid.Make())
-					createdNetworkId = bringyour.Ptr(ulid.Make())
+					bringyour.Logger().Printf("JWT Creating a new network\n")
 
-					conn.Exec(
+					created = true
+					createdUserId = ulid.Make()
+					createdNetworkId = ulid.Make()
+
+					var err error
+
+					_, err = tx.Exec(
 						context,
 						`
-							INSERT INTO TABLE network_user
+							INSERT INTO network_user
 							(user_id, user_name, auth_type, user_auth, auth_jwt)
-							VALUES ($1, $2, $3, $4, $5, $6)
+							VALUES ($1, $2, $3, $4, $5)
 						`,
-						ulid.ToPg(createdUserId),
+						ulid.ToPg(&createdUserId),
 						networkCreate.UserName,
 						authJwt.AuthType,
-						userAuth,
+						authJwt.UserAuth,
 						networkCreate.AuthJwt,
 					)
+					if err != nil {
+						panic(err)
+					}
 
-					conn.Exec(
+					_, err = tx.Exec(
 						context,
 						`
-							INSERT INTO TABLE network
+							INSERT INTO network
 							(network_id, network_name, admin_user_id)
 							VALUES ($1, $2, $3)
 						`,
-						ulid.ToPg(createdNetworkId),
+						ulid.ToPg(&createdNetworkId),
 						networkCreate.NetworkName,
-						ulid.ToPg(createdUserId),
+						ulid.ToPg(&createdUserId),
 					)
+					if err != nil {
+						panic(err)
+					}
 				}
 			})
-			if createdNetworkId != nil {
-				networkNameSearch.Add(networkCreate.NetworkName, *createdNetworkId)
+			if created {
+				networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
 				// fixme log an audit event that account created and terms were accepted with a client ip with the auth jwt type
 
 				if userAuthAttemptId != nil {
@@ -245,8 +259,8 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 
 				// successful login
 				byJwt := jwt.NewByJwt(
-					*createdNetworkId,
-					*createdUserId,
+					createdNetworkId,
+					createdUserId,
 					networkCreate.NetworkName,
 				)
 				byJwtSigned := byJwt.Sign()

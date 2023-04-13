@@ -3,13 +3,8 @@ package model
 import (
 	"context"
 
-	// "github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	// "github.com/jackc/pgx/v5/pgtype"
-
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/ulid"
-	// "bringyour.com/bringyour/jwt"
 )
 
 
@@ -22,17 +17,18 @@ type PreferencesSetResult struct {
 }
 
 func PreferencesSet(preferencesSet PreferencesSetArgs, session *bringyour.ClientSession) (*PreferencesSetResult, error) {
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
-		conn.Exec(
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
 			context,
 			`
 				INSERT INTO account_preferences (network_id, product_updates)
 				VALUES ($1, $2)
-				ON CONFLICT UPDATE SET product_updates = $2
+				ON CONFLICT (network_id) DO UPDATE SET product_updates = $2
 			`,
 			ulid.ToPg(&session.ByJwt.NetworkId),
 			preferencesSet.ProductUpdates,
 		)
+		bringyour.Raise(err)
 	})
 
 	result := &PreferencesSetResult{}
@@ -72,9 +68,9 @@ type FeedbackSendResult struct {
 
 
 func FeedbackSend(feedbackSend FeedbackSendArgs, session *bringyour.ClientSession) (*FeedbackSendResult, error) {
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		feedbackId := ulid.Make()
-		conn.Exec(
+		_, err := conn.Exec(
 			context,
 			`
 				INSERT INTO account_feedback
@@ -123,6 +119,7 @@ func FeedbackSend(feedbackSend FeedbackSendArgs, session *bringyour.ClientSessio
 			feedbackSend.Needs.Visualize,
 			feedbackSend.Needs.Other,
 		)
+		bringyour.Raise(err)
 	})
 
 	result := &FeedbackSendResult{}

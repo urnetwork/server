@@ -42,6 +42,7 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
     		http.Error(w, err.Error(), http.StatusInternalServerError)
         	return
     	}
+    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
     	session.ByJwt = byJwt
 	}
 

@@ -4,13 +4,7 @@ package model
 import (
 	"errors"
 	"context"
-	// "encoding/json"
 	"bytes"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/pgtype"
-	// "github.com/jackc/pgx/v5/pgconn"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/ulid"
@@ -32,8 +26,6 @@ const (
 type AuthArgs struct {
 	ByJwt string  `json:"byJwt"`
 }
-
-
 
 
 func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.ULID, bool) {
@@ -58,7 +50,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 
 	bringyour.Logger().Printf("UserAuthAttempt 2")
 
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		bringyour.Logger().Printf("UserAuthAttempt 3")
 		conn.Exec(
 			context,
@@ -80,12 +72,14 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 		success bool
 	}
 
-	parseAttempts := func(result pgx.Rows)([]UserAuthAttemptResult) {
+	parseAttempts := func(result bringyour.PgResult)([]UserAuthAttemptResult) {
 		attempts := []UserAuthAttemptResult{}
 		var attemptTime int64
 		var success bool
 		for result.Next() {
-			result.Scan(&attemptTime, &success)
+			bringyour.Raise(
+				result.Scan(&attemptTime, &success),
+			)
 			attempts = append(attempts, UserAuthAttemptResult{
 				attemptTime: attemptTime,
 				success: success,
@@ -110,17 +104,16 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 		bringyour.Logger().Printf("UserAuthAttempt 6")
 		// lookback by user auth
 		var attempts []UserAuthAttemptResult
-		bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+		bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 			bringyour.Logger().Printf("UserAuthAttempt 7")
 			result, err := conn.Query(
 				context,
-				// FIXME SYNTAX
 				`
 					SELECT 
 						attempt_time,
 						success
 					FROM user_auth_attempt
-					WHERE user_auth = $1 AND now() - INTERVAL($2 seconds) <= attempt_time
+					WHERE user_auth = $1 AND now() - INTERVAL '1 seconds' * $2 <= attempt_time
 					ORDER BY attempt_time DESC
 					LIMIT $3
 				`,
@@ -128,10 +121,9 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 				attemptLookbackSeconds,
 				attemptLookbackCount,
 			)
-			if err != nil {
-				panic(err)
-			}
-			attempts = parseAttempts(result)
+			bringyour.With(result, err, func() {
+				attempts = parseAttempts(result)
+			})
 		})
 		if !passesThreshold(attempts) {
 			return &userAuthAttemptId, false
@@ -141,7 +133,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 	clientIpv4DotNotation := session.ClientIpv4DotNotation()
 	if clientIpv4DotNotation != nil {
 		var attempts []UserAuthAttemptResult
-		bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+		bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 			result, err := conn.Query(
 				context,
 				`
@@ -149,7 +141,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 						attempt_time,
 						success
 					FROM user_auth_attempt
-					WHERE client_ipv4 = $1 AND now() - INTERVAL($2 seconds) <= attempt_time
+					WHERE client_ipv4 = $1 AND now() - INTERVAL '1 seconds' * $2 <= attempt_time
 					ORDER BY attempt_time DESC
 					LIMIT $3
 				`,
@@ -157,10 +149,9 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 				attemptLookbackSeconds,
 				attemptLookbackCount,
 			)
-			if err != nil {
-				panic(err)
-			}
-			attempts = parseAttempts(result)
+			bringyour.With(result, err, func() {
+				attempts = parseAttempts(result)
+			})
 		})
 		if !passesThreshold(attempts) {
 			return &userAuthAttemptId, false
@@ -171,7 +162,7 @@ func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.
 }
 
 func SetUserAuthAttemptSuccess(userAuthAttemptId ulid.ULID, success bool) {
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		conn.Exec(
 			context,
 			`
@@ -198,6 +189,7 @@ type AuthLoginArgs struct {
 
 type AuthLoginResult struct {
 	UserName *string `json:"userName,omitempty"`
+	UserAuth *string `json:"userAuth,omitempty"`
 	AuthAllowed *[]string `json:"authAllowed,omitempty"`
 	Error *AuthLoginResultError `json:"error,omitempty"`
 	Network *AuthLoginResultNetwork `json:"network,omitempty"`
@@ -226,7 +218,7 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 
 	if userAuth != nil {
 		var authType *string
-		bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+		bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 			result, err := conn.Query(
 				context,
 				`
@@ -234,20 +226,24 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 				`,
 				userAuth,
 			)
-			if err != nil {
-				panic(err)
-			}
-			if result.Next() {
-				result.Scan(&authType)
-			}
+			bringyour.With(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(
+						result.Scan(&authType),
+					)
+				}
+			})
 		})
 		if authType == nil {
 			// new user
-			result := &AuthLoginResult{}
+			result := &AuthLoginResult{
+				UserAuth: userAuth,
+			}
 			return result, nil
 		} else {
 			// existing user
 			result := &AuthLoginResult{
+				UserAuth: userAuth,
 				AuthAllowed: &[]string{*authType},
 			}
 			return result, nil
@@ -256,11 +252,12 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 		bringyour.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
 		authJwt := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
 		if authJwt != nil {
-			var userId pgtype.UUID
+			var userId bringyour.PgUUID
 			var authType *string
-			var networkId pgtype.UUID
+			var networkId bringyour.PgUUID
 			var networkName *string
-			bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+			bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
+				bringyour.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 				result, err := conn.Query(
 					context,
 					`
@@ -275,12 +272,13 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 					`,
 					authJwt.UserAuth,
 				)
-				if err != nil {
-					panic(err)
-				}
-				if result.Next() {
-					result.Scan(&userId, &authType, &networkId)
-				}
+				bringyour.With(result, err, func() {
+					if result.Next() {
+						bringyour.Raise(
+							result.Scan(&userId, &authType, &networkId, &networkName),
+						)
+					}
+				})
 			})
 
 			if authType == nil {
@@ -363,14 +361,14 @@ func AuthLoginWithPassword(
 		return nil, maxUserAuthAttemptsError()
 	}
 
-	var userId pgtype.UUID
+	var userId bringyour.PgUUID
 	var passwordHash *[]byte
 	var passwordSalt *[]byte
 	var userValidated bool
-	var networkId pgtype.UUID
+	var networkId bringyour.PgUUID
 	var networkName *string
 
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		result, err := conn.Query(
 			context,
 			`
@@ -379,7 +377,7 @@ func AuthLoginWithPassword(
 					network_user.password_hash AS password_hash,
 					network_user.password_salt AS password_salt,
 					network_user.validated AS validated,
-					network.network_id AS network_id
+					network.network_id AS network_id,
 					network.network_name AS network_name
 				FROM network_user
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
@@ -387,18 +385,20 @@ func AuthLoginWithPassword(
 			`,
 			userAuth,
 		)
-		if err != nil {
-			panic(err)
-		}
-		if result.Next() {
-			result.Scan(&userId, &passwordHash, &passwordSalt, &networkId, &networkName)
-		}
+		bringyour.With(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(
+					result.Scan(&userId, &passwordHash, &passwordSalt, &userValidated, &networkId, &networkName),
+				)
+			}
+		})
 	})
 
 	if !userId.Valid {
 		return nil, errors.New("User does not exist.")
 	}
 
+	bringyour.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), *passwordSalt)
 	if bytes.Equal(*passwordHash, loginPasswordHash) {
 		if userValidated {
@@ -430,7 +430,14 @@ func AuthLoginWithPassword(
 		}
 	}
 
-	return nil, errors.New("Invalid login.")
+	result := &AuthLoginWithPasswordResult{
+		Error: &AuthLoginWithPasswordResultError{
+			Message: "Invalid user or password.",
+		},
+	}
+	return result, nil
+
+	// return nil, errors.New("Invalid login.")
 }
 
 
@@ -473,12 +480,12 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 	// 4 hours
 	validateValidSeconds := 60 * 60 * 4
 
-	var userId pgtype.UUID
-	var userAuthValidateId pgtype.UUID
-	var networkId pgtype.UUID
+	var userId bringyour.PgUUID
+	var userAuthValidateId bringyour.PgUUID
+	var networkId bringyour.PgUUID
 	var networkName *string
 
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		result, err := conn.Query(
 			context,
 			`
@@ -492,7 +499,7 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 					user_auth_validate.user_id = network_user.user_id AND 
 					user_auth_validate.validate_code = $1 AND
 					used = false AND
-					now() - ($2 seconds) <= user_auth_validate.validate_time
+					now() - INTERVAL '1 seconds' * $2 <= user_auth_validate.validate_time
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $3
 			`,
@@ -500,19 +507,22 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 			validateValidSeconds,
 			userAuth,
 		)
-		if err != nil {
-			panic(err)
-		}
-		if result.Next() {
-			result.Scan(&userId, &userAuthValidateId, &networkId, &networkName)
-		}
+		bringyour.With(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(
+					result.Scan(&userId, &userAuthValidateId, &networkId, &networkName),
+				)
+			}
+		})
 	})
 
 	if userAuthValidateId.Valid {
 		// validated
 
-		bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-			conn.Exec(
+		bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+			var err error
+
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE network_user
@@ -521,7 +531,9 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 				`,
 				userId,
 			)
-			conn.Exec(
+			bringyour.Raise(err)
+
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE user_auth_validate
@@ -530,6 +542,7 @@ func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (
 				`,
 				userAuthValidateId,
 			)
+			bringyour.Raise(err)
 		})
 
 		SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
@@ -586,31 +599,33 @@ func AuthValidateCreateCode(
 		return result, nil
 	}
 
-	var validateCode *string
+	created := false
+	var validateCode string
 
-	bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-		var result pgx.Rows
+	bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+		var result bringyour.PgResult
 		var err error
 
-		var userId pgtype.UUID
-		result, err = conn.Query(
+		var userId bringyour.PgUUID
+		result, err = tx.Query(
 			context,
 			`
 				SELECT user_id FROM network_user WHERE user_auth = $1
 			`,
 			userAuth,
 		)
-		if err != nil {
-			panic(err)
-		}
-		if result.Next() {
-			result.Scan(&userId)
-		}
+		bringyour.With(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(
+					result.Scan(&userId),
+				)
+			}
+		})
 
 		if userId.Valid {
 			// delete existing codes and create a new code
 
-			conn.Exec(
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE user_auth_validate
@@ -619,10 +634,12 @@ func AuthValidateCreateCode(
 				`,
 				userId,
 			)
+			bringyour.Raise(err)
 
+			created = true
 			userAuthValidateId := ulid.Make()
-			*validateCode = createValidateCode()
-			conn.Exec(
+			validateCode = createValidateCode()
+			_, err = tx.Exec(
 				context,
 				`
 					INSERT INTO user_auth_validate
@@ -633,12 +650,13 @@ func AuthValidateCreateCode(
 				userId,
 				validateCode,
 			)
+			bringyour.Raise(err)
 		}
 	})
 
-	if validateCode != nil {
+	if created {
 		result := &AuthValidateCreateCodeResult{
-			ValidateCode: validateCode,
+			ValidateCode: &validateCode,
 		}
 		return result, nil
 	}
@@ -675,31 +693,33 @@ func AuthPasswordResetCreateCode(
 		return result, nil
 	}
 
-	var resetCode *string
+	created := false
+	var resetCode string
 
-	bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-		var result pgx.Rows
+	bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+		var result bringyour.PgResult
 		var err error
 
-		var userId pgtype.UUID
-		result, err = conn.Query(
+		var userId bringyour.PgUUID
+		result, err = tx.Query(
 			context,
 			`
 				SELECT user_id FROM network_user WHERE user_auth = $1
 			`,
 			userAuth,
 		)
-		if err != nil {
-			panic(err)
-		}
-		if result.Next() {
-			result.Scan(&userId)
-		}
+		bringyour.With(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(
+					result.Scan(&userId),
+				)
+			}
+		})
 
 		if userId.Valid {
 			// delete existing codes and create a new code
 
-			conn.Exec(
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE user_auth_reset
@@ -708,10 +728,12 @@ func AuthPasswordResetCreateCode(
 				`,
 				userId,
 			)
+			bringyour.Raise(err)
 
+			created = true
 			userAuthResetId := ulid.Make()
-			*resetCode = createResetCode()
-			conn.Exec(
+			resetCode = createResetCode()
+			_, err = tx.Exec(
 				context,
 				`
 					INSERT INTO user_auth_reset
@@ -722,12 +744,13 @@ func AuthPasswordResetCreateCode(
 				userId,
 				resetCode,
 			)
+			bringyour.Raise(err)
 		}
 	})
 
-	if resetCode != nil {
+	if created {
 		result := &AuthPasswordResetCreateCodeResult{
-			ResetCode: resetCode,
+			ResetCode: &resetCode,
 		}
 		return result, nil
 	}
@@ -759,12 +782,12 @@ func AuthPasswordSet(
 	// 4 hours
 	resetValidSeconds := 60 * 60 * 4
 
-	var userId pgtype.UUID
-	var userAuthResetId pgtype.UUID
-	var networkId pgtype.UUID
+	var userId bringyour.PgUUID
+	var userAuthResetId bringyour.PgUUID
+	var networkId bringyour.PgUUID
 	var networkName *string
 
-	bringyour.Db(func(context context.Context, conn *pgxpool.Conn) {
+	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		result, err := conn.Query(
 			context,
 			`
@@ -778,18 +801,19 @@ func AuthPasswordSet(
 					user_auth_reset.user_id = network_user.user_id AND 
 					user_auth_reset.reset_code = $1 AND
 					used = false AND
-					now() - ($2 seconds) <= user_auth_reset.reset_time
+					now() - INTERVAL '1 seconds' * $2 <= user_auth_reset.reset_time
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 			`,
 			passwordSet.ResetCode,
 			resetValidSeconds,
 		)
-		if err != nil {
-			panic(err)
-		}
-		if result.Next() {
-			result.Scan(&userId, &userAuthResetId, &networkId, &networkName)
-		}
+		bringyour.With(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(
+					result.Scan(&userId, &userAuthResetId, &networkId, &networkName),
+				)
+			}
+		})
 	})
 
 	if userAuthResetId.Valid {
@@ -798,8 +822,10 @@ func AuthPasswordSet(
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(passwordSet.Password), passwordSalt)
 
-		bringyour.Tx(func(context context.Context, conn *pgxpool.Conn) {
-			conn.Exec(
+		bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+			var err error
+
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE network_user
@@ -810,7 +836,9 @@ func AuthPasswordSet(
 				passwordSalt,
 				userId,
 			)
-			conn.Exec(
+			bringyour.Raise(err)
+
+			_, err = tx.Exec(
 				context,
 				`
 					UPDATE user_auth_reset
@@ -819,6 +847,7 @@ func AuthPasswordSet(
 				`,
 				userAuthResetId,
 			)
+			bringyour.Raise(err)
 		})
 
 		SetUserAuthAttemptSuccess(*userAuthAttemptId, true)

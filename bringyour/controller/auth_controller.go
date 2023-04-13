@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"errors"
+	// "errors"
 
 	"bringyour.com/bringyour"
 	// "bringyour.com/bringyour/ulid"
@@ -46,6 +46,7 @@ type AuthValidateSendArgs struct {
 }
 
 type AuthValidateSendResult struct {
+	UserAuth string `json:"userAuth"`
 }
 
 func AuthValidateSend(
@@ -76,7 +77,10 @@ func AuthValidateSend(
 		}
 	}
 
-	return nil, errors.New("Invalid login.")
+	result := &AuthValidateSendResult{
+		UserAuth: *userAuth,
+	}
+	return result, nil
 }
 
 func createValidateBodyHtml(validateCode string) string {
@@ -95,6 +99,7 @@ type AuthPasswordResetArgs struct {
 }
 
 type AuthPasswordResetResult struct {
+	UserAuth string `json:"userAuth"`
 }
 
 func AuthPasswordReset(
@@ -125,7 +130,10 @@ func AuthPasswordReset(
 		}
 	}
 
-	return nil, errors.New("Invalid login.")
+	result := &AuthPasswordResetResult{
+		UserAuth: *userAuth,
+	}
+	return result, nil
 }
 
 func createResetBodyHtml(resetCode string) string {

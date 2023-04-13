@@ -7,22 +7,31 @@ import (
 	"strconv"
 	"strings"
 
-	// "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 
+// type aliases to simplify user code
+type PgConn = *pgxpool.Conn
+type PgTx = pgx.Tx
+type PgResult = pgx.Rows
+type PgUUID = pgtype.UUID
 
-type SafePgPool struct {
+
+type safePgPool struct {
 	mutex sync.Mutex
 	pool *pgxpool.Pool
 }
-func (self SafePgPool) open() *pgxpool.Pool {
+func (self *safePgPool) open() *pgxpool.Pool {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	if self.pool == nil {
+		Logger().Printf("Db init\n")
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
+		// fixme use Config struct?
 		options := map[string]string{
 			"sslmode": "disable",
 			"pool_max_conns": strconv.Itoa(32),
@@ -46,6 +55,7 @@ func (self SafePgPool) open() *pgxpool.Pool {
 			"bringyour",
 			optionsString,
 		)
+		Logger().Printf("Db url %d %s\n", postgresUrl)
 
 		var err error
 		self.pool, err = pgxpool.New(context.Background(), postgresUrl)
@@ -55,7 +65,7 @@ func (self SafePgPool) open() *pgxpool.Pool {
 	}
 	return self.pool
 }
-func (self SafePgPool) close() {
+func (self *safePgPool) close() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -65,7 +75,7 @@ func (self SafePgPool) close() {
 	}
 }
 
-var safePool *SafePgPool = &SafePgPool{}
+var safePool *safePgPool = &safePgPool{}
 
 func pool() *pgxpool.Pool {
 	return safePool.open()
@@ -85,7 +95,7 @@ func newDbRetryOptions(rerunOnError bool) *DbRetryOptions {
 
 
 
-func Db(callback func(context.Context, *pgxpool.Conn), options ...any) {
+func Db(callback func(context.Context, PgConn), options ...any) {
 	// fixme rerun callback on disconnect with a new connection
 
 	context := context.Background()
@@ -99,23 +109,62 @@ func Db(callback func(context.Context, *pgxpool.Conn), options ...any) {
 	if err != nil {
 		panic(err)
 	}
+	defer conn.Release()
 
 	err = conn.Ping(context)
 	if err != nil {
 		// take the bad connection out of the pool
 		pgxConn := conn.Hijack()
 		pgxConn.Close(context)
+		// fixme retry if error
 		panic(err)
 	}
 
-	defer conn.Release()
 	callback(context, conn)
 }
 
 
-func Tx(callback func(context.Context, *pgxpool.Conn), options ...any) {
-	// fixme
-	Db(callback)
+func Tx(callback func(context.Context, PgTx), options ...any) {
+	// context := context.Background()
+
+	// var tx pgx.Tx
+	// var err error
+
+	// // fixme retry if error
+
+	// tx, err = pool().Begin(context)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer func() {
+	// 	err := recover()
+	// 	if err == nil {
+	// 		tx.Commit(context)
+	// 	} else {
+	// 		tx.Rollback(context)
+	// 	}
+	// }()
+
+	// callback(context, tx)
+
+	Db(func (context context.Context, conn PgConn) {
+		txOptions := pgx.TxOptions{}
+		tx, err := conn.BeginTx(context, txOptions)
+		if err != nil {
+			panic(err)
+		}
+		defer func() {
+			err := recover()
+			if err == nil {
+				Logger().Printf("Db commit\n")
+				tx.Commit(context)
+			} else {
+				tx.Rollback(context)
+				panic(err)
+			}
+		}()
+		callback(context, tx)
+	}, options...)
 }
 
 
@@ -133,9 +182,9 @@ func newSqlMigration(sql string) *SqlMigration {
 
 // important these migration functions must be idempotent
 type CodeMigration struct {
-	callback func(context.Context, *pgxpool.Conn)
+	callback func(context.Context, PgTx)
 }
-func newCodeMigration(callback func(context.Context, *pgxpool.Conn)) *CodeMigration {
+func newCodeMigration(callback func(context.Context, PgTx)) *CodeMigration {
 	return &CodeMigration{
 		callback: callback,
 	}
@@ -145,8 +194,8 @@ func newCodeMigration(callback func(context.Context, *pgxpool.Conn)) *CodeMigrat
 
 
 func ApplyDbMigrations() {
-	Tx(func(context context.Context, conn *pgxpool.Conn) {
-		conn.Exec(
+	Tx(func(context context.Context, tx PgTx) {
+		tx.Exec(
 			context,
 			`
 			CREATE TABLE IF NOT EXISTS migration_audit (
@@ -160,7 +209,7 @@ func ApplyDbMigrations() {
 	})
 
 	var endVersionNumber int
-	Db(func(context context.Context, conn *pgxpool.Conn) {
+	Db(func(context context.Context, conn PgConn) {
 		var endVersionNumber int
 		conn.QueryRow(
 			context,
@@ -173,8 +222,8 @@ func ApplyDbMigrations() {
 	})
 
 
-	Tx(func(context context.Context, conn *pgxpool.Conn) {
-		conn.Exec(
+	Tx(func(context context.Context, tx PgTx) {
+		tx.Exec(
 			context,
 			`INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
 			endVersionNumber,
@@ -182,14 +231,15 @@ func ApplyDbMigrations() {
 		for i := endVersionNumber; i < len(migrations); i += 1 {
 			switch v := migrations[i].(type) {
 				case *SqlMigration:
-					conn.Exec(context, v.sql)
+					_, err := tx.Exec(context, v.sql)
+					Raise(err)
 				case *CodeMigration:
-					v.callback(context, conn)
+					v.callback(context, tx)
 				default:
 					panic(fmt.Sprintf("Unknown migration type %T", v))
 			}
 		}
-		conn.Exec(
+		tx.Exec(
 			context,
 			`INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
 			endVersionNumber,
@@ -340,10 +390,10 @@ var migrations = []any{
 			user_auth VARCHAR(256) NULL,
 			password_hash bytea NULL,
 			password_salt bytea NULL,
-			auth_jwt VARCHAR(1024) NULL,
+			auth_jwt TEXT NULL,
 			validated BOOL NOT NULL DEFAULT false,
 
-			PRIMARY KEY (user_id)
+			PRIMARY KEY (user_id),
 			UNIQUE (user_auth)
 		)
 	`),

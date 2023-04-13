@@ -9,11 +9,15 @@ import (
 )
 
 
-type SafeRedisClient struct {
+// type aliases to simplify user code
+type RedisClient = *redis.Client
+
+
+type safeRedisClient struct {
 	mutex sync.Mutex
 	client *redis.Client
 }
-func (self SafeRedisClient) open() *redis.Client {
+func (self *safeRedisClient) open() *redis.Client {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -36,7 +40,7 @@ func (self SafeRedisClient) open() *redis.Client {
 	}
 	return self.client
 }
-func (self SafeRedisClient) close() {
+func (self *safeRedisClient) close() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -47,7 +51,7 @@ func (self SafeRedisClient) close() {
 }
 
 
-var safeClient *SafeRedisClient = &SafeRedisClient{}
+var safeClient *safeRedisClient = &safeRedisClient{}
 
 func client() *redis.Client {
 	return safeClient.open()
@@ -55,7 +59,7 @@ func client() *redis.Client {
 
 
 
-func Redis(callback func(context context.Context, client *redis.Client)) {
+func Redis(callback func(context context.Context, client RedisClient)) {
 	// From the go-redis code:
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.
