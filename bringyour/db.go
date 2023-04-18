@@ -492,4 +492,37 @@ var migrations = []any{
 			PRIMARY KEY (network_id)
 		)
 	`),
+
+	newSqlMigration(`
+		CREATE TABLE search_value (
+			realm VARCHAR(16) NOT NULL,
+			value_id uuid NOT NULL,
+			value VARCHAR(1024) NOT NULL,
+
+			PRIMARY KEY(value_id),
+			UNIQUE (realm, value)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE search_projection (
+			realm VARCHAR(16) NOT NULL,
+		    dim CHAR(1) NOT NULL,
+		    elen SMALLINT NOT NULL,
+		    dord SMALLINT NOT NULL,
+		    dlen SMALLINT NOT NULL,
+		    vlen SMALLINT NOT NULL,
+		    value_id UUID NOT NULL,
+		    alias SMALLINT NOT NULL DEFAULT 0,
+
+		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX search_projection_value_id ON search_projection (value_id)
+	`),
+
 }

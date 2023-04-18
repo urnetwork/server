@@ -207,6 +207,15 @@ type AuthLoginResultNetwork struct {
 func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
+	if userAuth == nil {
+		result := &AuthLoginResult{
+			Error: &AuthLoginResultError{
+				Message: "Invalid email or phone number.",
+			},
+		}
+		return result, nil
+	}
+
 	var userAuthAttemptId *ulid.ULID
 	if session != nil {
 		var allow bool

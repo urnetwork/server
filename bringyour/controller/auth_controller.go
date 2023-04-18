@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	// "errors"
 
 	"bringyour.com/bringyour"
@@ -67,7 +68,9 @@ func AuthValidateSend(
 		case model.UserAuthTypeEmail:
 			sendAccountEmail(
 				*userAuth,
+				"Verify your email",
 				createValidateBodyHtml(*validateCreateCodeResult.ValidateCode),
+				createValidateBodyText(*validateCreateCodeResult.ValidateCode),
 			)
 		case model.UserAuthTypePhone:
 			sendAccountSms(
@@ -85,12 +88,12 @@ func AuthValidateSend(
 
 func createValidateBodyHtml(validateCode string) string {
 	// fixme
-	return ""
+	return fmt.Sprintf("%s", validateCode)
 }
 
 func createValidateBodyText(validateCode string) string {
 	// fixme
-	return ""
+	return fmt.Sprintf("%s", validateCode)
 }
 
 
@@ -120,7 +123,9 @@ func AuthPasswordReset(
 		case model.UserAuthTypeEmail:
 			sendAccountEmail(
 				*userAuth,
+				"Reset your password",
 				createResetBodyHtml(*resetCreateCodeResult.ResetCode),
+				createResetBodyText(*resetCreateCodeResult.ResetCode),
 			)
 		case model.UserAuthTypePhone:
 			sendAccountSms(
@@ -138,12 +143,12 @@ func AuthPasswordReset(
 
 func createResetBodyHtml(resetCode string) string {
 	// fixme
-	return ""
+	return fmt.Sprintf("<a href=\"https://bringyour.com?resetCode=%s\">Reset password</a>", resetCode)
 }
 
 func createResetBodyText(resetCode string) string {
 	// fixme
-	return ""
+	return fmt.Sprintf("https://bringyour.com?resetCode=%s", resetCode)
 }
 
 

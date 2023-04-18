@@ -47,7 +47,7 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	}
 
 	phoneNumber, err = phonenumbers.Parse(*userAuth, "US")
-	if err == nil {
+	if err == nil && phonenumbers.IsPossibleNumber(phoneNumber) {
 		normalPhoneNumber := phonenumbers.Format(phoneNumber, phonenumbers.INTERNATIONAL)
 		bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
 		return &normalPhoneNumber, UserAuthTypePhone
