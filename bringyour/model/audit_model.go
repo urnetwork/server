@@ -7,29 +7,30 @@ import (
 	"strings"
 
 	"bringyour.com/bringyour"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 )
 
-// compute stats (number of days)
-//    uses the audit tables
-// publish stats to redis (number of days)
-
-
-// host: 192.168.208.135
-// user: bringyour
-// password: inning-volcano-prod-piddle
-// db: bringyour
-
-
-// SELECT now() - interval '7 days';
-
-// provider daily stats
+type AuditEventType string
+const (
+	AuditEventTypeProviderOffline AuditEventType = "provider_offline"
+	AuditEventTypeProviderOnlineSuperspeed AuditEventType = "provider_online_superspeed"
+	AuditEventTypeProviderOnlineNotSuperspeed AuditEventType = "provider_online_not_superspeed"
+	AuditEventTypeExtenderOffline AuditEventType = "extender_offline"
+	AuditEventTypeExtenderOnlineSuperspeed AuditEventType = "extender_online_superspeed"
+	AuditEventTypeExtenderOnlineNotSuperspeed AuditEventType = "extender_online_not_superspeed"
+	AuditEventTypeNetworkCreated AuditEventType = "network_created"
+	AuditEventTypeNetworkDeleted AuditEventType = "network_deleted"
+	AuditEventTypeDeviceAdded AuditEventType = "device_added"
+	AuditEventTypeDeviceRemoved AuditEventType = "device_removed"
+	AuditEventTypeContractClosedSuccess AuditEventType = "contract_closed_success"
+)
 
 
 type Stats struct {
+	// fixme
 	// time
 	// lookback
+	Lookback int
+	AsOf int64
 
 	AllTransferData map[string]int64 `json:"allTransferData"`
     AllTransferSummary int64 `json:"allTransferSummary"`
@@ -70,8 +71,34 @@ type Stats struct {
 
 
 func ComputeStats90() *Stats {
-	// fixme
-	bringyour.Db(func (context context.Context, conn *pgxpool.Conn) {
+	lookback := 90
+
+	stats := &Stats{
+		Lookback: lookback,
+		AsOf: Now(),
+	}
+
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		// provider daily stats + cities, regions, countries
+		computerStatsProvider(stats, context, conn)
+
+		// extender daily stats
+		computeStatsExtender(stats, context, conn)
+
+		// network daily stats
+		computeStatsNetwork(stats, context, conn)
+
+		// device daily stats
+		computeStatsDevice(stats, context, conn)
+
+		// all transfer
+		computeStatsTransfer(stats, context, conn)
+
+		// all packets
+		computeStatsPackets(stats, context, conn)
+
+		// extender transfer
+		computeStatsExtenderTransfer(stats, context, conn)
 
 	})
 
@@ -79,138 +106,6 @@ func ComputeStats90() *Stats {
 	return nil
 
 /*
-	`
-	SELECT t.day, t.device_id, audit_provider_event.event_id, audit_provider_event.event_type, audit_provider_event.country_name, audit_provider_event.region_name, audit_provider_event.city_name
-
-	FROM (
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, device_id, MAX(event_id::varchar) AS max_event_id FROM audit_provider_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('provider_offline', 'provider_online_superspeed', 'provider_online_not_superspeed')
-	GROUP BY day, device_id
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, device_id, MAX(event_id::varchar) AS max_event_id FROM audit_provider_event
-	WHERE event_time < now() - interval '90 days'
-	GROUP BY device_id
-
-	) t
-
-	INNER JOIN audit_provider_event ON t.max_event_id::uuid = audit_provider_event.event_id
-	;
-
-	`
-
-	// extender daily stats
-	`
-	SELECT t.day, t.extender_id, audit_extender_event.event_id, audit_extender_event.event_type
-
-	FROM (
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, extender_id, MAX(event_id::varchar) AS max_event_id FROM audit_extender_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('extender_offline', 'extender_online_superspeed', 'extender_online_not_superspeed')
-	GROUP BY day, extender_id
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, extender_id, MAX(event_id::varchar) AS max_event_id FROM audit_extender_event
-	WHERE event_time < now() - interval '90 days'
-	GROUP BY extender_id
-
-	) t
-
-	INNER JOIN audit_extender_event ON t.max_event_id::uuid = audit_extender_event.event_id
-	;
-	`
-
-
-	// network daily stats
-	`
-	SELECT t.day, t.network_id, audit_network_event.event_id, audit_network_event.event_type
-
-	FROM (
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, network_id, MAX(event_id::varchar) AS max_event_id FROM audit_network_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('network_created', 'network_deleted')
-	GROUP BY day, network_id
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, network_id, MAX(event_id::varchar) AS max_event_id FROM audit_network_event
-	WHERE event_time < now() - interval '90 days'
-	GROUP BY network_id
-
-	) t
-
-	INNER JOIN audit_network_event ON t.max_event_id::uuid = audit_network_event.event_id
-	;
-	`
-
-
-	// device daily stats
-
-	`
-	SELECT t.day, t.device_id, audit_device_event.event_id, audit_device_event.event_type
-
-	FROM (
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, device_id, MAX(event_id::varchar) AS max_event_id FROM audit_device_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('device_added', 'device_removed')
-	GROUP BY day, device_id
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, device_id, MAX(event_id::varchar) AS max_event_id FROM audit_device_event
-	WHERE event_time < now() - interval '90 days'
-	GROUP BY device_id
-
-	) t
-
-	INNER JOIN audit_device_event ON t.max_event_id::uuid = audit_device_event.event_id
-	;
-	`
-
-
-	// all transfer
-
-	`
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, SUM(transfer_bytes) AS net_transfer_bytes FROM audit_contract_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('contract_closed_success')
-	GROUP BY day
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, SUM(transfer_bytes) AS net_transfer_bytes FROM audit_contract_event
-	WHERE event_time < now() - interval '90 days' AND event_type IN ('contract_closed_success')
-
-	;
-	`
-
-
-	// all packets
-
-	`
-
-	SELECT to_char(event_time, 'YYYY-MM-DD') AS day, SUM(transfer_packets) AS net_transfer_packets FROM audit_contract_event
-	WHERE event_time <= now() AND now() - interval '90 days' <= event_time AND event_type IN ('contract_closed_success')
-	GROUP BY day
-
-
-	UNION ALL
-
-	SELECT '0000-00-00' AS day, SUM(transfer_packets) AS net_transfer_packets FROM audit_contract_event
-	WHERE event_time < now() - interval '90 days' AND event_type IN ('contract_closed_success')
-
-	;
-	`
-
-
 
 	// extender transfer
 
@@ -231,6 +126,319 @@ func ComputeStats90() *Stats {
 */
 }
 
+func computeStatsProvider(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				t.day AS day,
+				t.device_id AS device_id,
+				audit_provider_event.event_id AS event_id,
+				audit_provider_event.event_type AS event_type,
+				audit_provider_event.country_name AS country_name,
+				audit_provider_event.region_name AS region_name,
+				audit_provider_event.city_name AS city_name
+			FROM (
+				SELECT
+					to_char(event_time, 'YYYY-MM-DD') AS day,
+					device_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_provider_event
+				WHERE
+					now() - interval '1 days' * @lookback <= event_time AND
+					event_type IN (
+						@eventTypeProviderOffline,
+						@eventTypeProviderOnlineSuperspeed,
+						@eventTypeProviderOnlineNotSuperspeed
+					)
+				GROUP BY day, device_id
+
+				UNION ALL
+
+				SELECT
+					'0000-00-00' AS day,
+					device_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_provider_event
+				WHERE
+					event_time < now() - interval '1 days' * @lookback AND
+					event_type IN (
+						@eventTypeProviderOffline,
+						@eventTypeProviderOnlineSuperspeed,
+						@eventTypeProviderOnlineNotSuperspeed
+					)
+				GROUP BY device_id
+			) t
+			INNER JOIN audit_provider_event ON t.max_event_id::uuid = audit_provider_event.event_id
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeProviderOffline": AuditEventTypeProviderOffline,
+			"eventTypeProviderOnlineSuperspeed": AuditEventTypeProviderOnlineSuperspeed,
+			"eventTypeProviderOnlineNotSuperspeed": AuditEventTypeProviderOnlineNotSuperspeed,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsExtender(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				t.day AS day,
+				t.extender_id AS extender_id,
+				audit_extender_event.event_id AS event_id,
+				audit_extender_event.event_type AS event_type
+			FROM (
+				SELECT
+					to_char(event_time, 'YYYY-MM-DD') AS day,
+					extender_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_extender_event
+				WHERE
+					now() - interval '1 days' * @lookback <= event_time AND
+					event_type IN (
+						@eventTypeExtenderOffline,
+						@eventTypeExtenderOnlineSuperspeed,
+						@eventTypeExtenderOnlineNotSuperspeed
+					)
+				GROUP BY day, extender_id
+
+				UNION ALL
+
+				SELECT
+					'0000-00-00' AS day,
+					extender_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_extender_event
+				WHERE
+					event_time < now() - interval '1 days' * @lookback AND
+					event_type IN (
+						@eventTypeExtenderOffline,
+						@eventTypeExtenderOnlineSuperspeed,
+						@eventTypeExtenderOnlineNotSuperspeed
+					)
+				GROUP BY extender_id
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeExtenderOffline": AuditEventTypeExtenderOffline,
+			"eventTypeExtenderOnlineSuperspeed": AuditEventTypeExtenderOnlineSuperspeed,
+			"eventTypeExtenderOnlineNotSuperspeed": AuditEventTypeExtenderOnlineNotSuperspeed,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsNetwork(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				t.day,
+				t.network_id,
+				audit_network_event.event_id,
+				audit_network_event.event_type
+			FROM (
+				SELECT
+					to_char(event_time, 'YYYY-MM-DD') AS day,
+					network_id, MAX(event_id::varchar) AS max_event_id
+				FROM audit_network_event
+				WHERE
+					now() - interval '1 days' * @lookback <= event_time AND
+					event_type IN (
+						@eventTypeNetworkCreated,
+						@eventTypeNetworkDeleted
+					)
+				GROUP BY day, network_id
+
+				UNION ALL
+
+				SELECT
+					'0000-00-00' AS day,
+					network_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_network_event
+				WHERE
+					event_time < now() - interval '1 days' * @lookback AND
+					event_type IN (
+						@eventTypeNetworkCreated,
+						@eventTypeNetworkDeleted
+					)
+				GROUP BY network_id
+			) t
+			INNER JOIN audit_network_event ON t.max_event_id::uuid = audit_network_event.event_id
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeNetworkCreated": AuditEventTypeNetworkCreated,
+			"eventTypeNetworkDeleted": AuditEventTypeNetworkDeleted,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsDevice(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				t.day AS day,
+				t.device_id AS device_id,
+				audit_device_event.event_id AS event_id,
+				audit_device_event.event_type AS event_type
+			FROM (
+				SELECT
+					to_char(event_time, 'YYYY-MM-DD') AS day,
+					device_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_device_event
+				WHERE
+					now() - interval '1 days' * @lookback <= event_time AND
+					event_type IN (
+						@eventTypeDeviceAdded,
+						@eventTypeDeviceRemoved
+					)
+				GROUP BY day, device_id
+
+				UNION ALL
+
+				SELECT
+					'0000-00-00' AS day,
+					device_id,
+					MAX(event_id::varchar) AS max_event_id
+				FROM audit_device_event
+				WHERE
+					event_time < now() - interval '1 days' * @lookback AND
+					event_type IN (
+						@eventTypeDeviceAdded,
+						@eventTypeDeviceRemoved
+					)
+				GROUP BY device_id
+			) t
+			INNER JOIN audit_device_event ON t.max_event_id::uuid = audit_device_event.event_id
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeDeviceAdded": AuditEventTypeDeviceAdded,
+			"eventTypeDeviceRemoved": AuditEventTypeDeviceRemoved,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsTransfer(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				to_char(event_time, 'YYYY-MM-DD') AS day,
+				SUM(transfer_bytes) AS net_transfer_bytes
+			FROM audit_contract_event
+			WHERE
+				now() - interval '1 days' * @lookback <= event_time AND
+				event_type IN (@eventTypeContractClosedSuccess)
+			GROUP BY day
+
+			UNION ALL
+
+			SELECT
+				'0000-00-00' AS day,
+				SUM(transfer_bytes) AS net_transfer_bytes
+			FROM audit_contract_event
+			WHERE
+				event_time < now() - interval '1 days' * @lookback AND
+				event_type IN (@eventTypeContractClosedSuccess)
+
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsPackets(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				to_char(event_time, 'YYYY-MM-DD') AS day,
+				SUM(transfer_packets) AS net_transfer_packets
+			FROM audit_contract_event
+			WHERE
+				event_time <= now() AND
+				now() - interval '1 days' * @lookback <= event_time AND
+				event_type IN (@eventTypeContractClosedSuccess)
+			GROUP BY day
+
+			UNION ALL
+
+			SELECT
+				'0000-00-00' AS day,
+				SUM(transfer_packets) AS net_transfer_packets
+			FROM audit_contract_event
+			WHERE
+				event_time < now() - interval '1 days' * @lookback AND
+				event_type IN (@eventTypeContractClosedSuccess)
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+func computeStatsExtenderTransfer(stats *Stats, context context.Context, conn bringyour.PgConn) {
+	result, err := conn.Query(
+		context,
+		`
+			SELECT
+				to_char(event_time, 'YYYY-MM-DD') AS day,
+				SUM(transfer_bytes) AS net_transfer_bytes
+			FROM audit_contract_event
+			WHERE
+				now() - interval '1 days' * @lookback <= event_time AND
+				extender_id IS NOT NULL AND
+				event_type IN (@eventTypeContractClosedSuccess)
+			GROUP BY day
+
+			UNION ALL
+
+			SELECT
+				'0000-00-00' AS day,
+				SUM(transfer_bytes) AS net_transfer_bytes
+			FROM audit_contract_event
+			WHERE
+				event_time < now() - interval '1 days' * @lookback AND
+				event_type IN (@eventTypeContractClosedSuccess)
+		`,
+		bringyour.PgNamedArgs{
+			"lookback": stats.Lookback,
+			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
+		},
+	)
+	bringyour.With(result, err, func() {
+		// fixme parse
+	})
+}
+
+
 
 func ExportStats(lookback int, stats Stats) {
 	statsJson, err := json.Marshal(stats)
@@ -238,14 +446,14 @@ func ExportStats(lookback int, stats Stats) {
 		panic(err)
 	}
 
-	bringyour.Redis(func(context context.Context, client *redis.Client) {
+	bringyour.Redis(func(context context.Context, client bringyour.RedisClient) {
 		client.Set(context, fmt.Sprintf("stats.last-%d", lookback), statsJson, 0)
 	})
 }
 
 func GetExportedStatsJson(lookback int) *string {
 	var statsJson *string
-	bringyour.Redis(func(context context.Context, client *redis.Client) {
+	bringyour.Redis(func(context context.Context, client bringyour.RedisClient) {
 		value, err := client.Get(context, fmt.Sprint("stats.last-%d", lookback)).Result()
 		if err != nil {
 			statsJson = nil
