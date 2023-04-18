@@ -207,15 +207,6 @@ type AuthLoginResultNetwork struct {
 func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
-	if userAuth == nil {
-		result := &AuthLoginResult{
-			Error: &AuthLoginResultError{
-				Message: "Invalid email or phone number.",
-			},
-		}
-		return result, nil
-	}
-
 	var userAuthAttemptId *ulid.ULID
 	if session != nil {
 		var allow bool
@@ -225,7 +216,16 @@ func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLogi
 		}
 	}
 
-	if userAuth != nil {
+	if login.UserAuth != nil {
+		if userAuth == nil {
+			result := &AuthLoginResult{
+				Error: &AuthLoginResultError{
+					Message: "Invalid email or phone number.",
+				},
+			}
+			return result, nil
+		}
+
 		var authType *string
 		bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 			result, err := conn.Query(

@@ -17,6 +17,7 @@ import (
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
 type PgResult = pgx.Rows
+type PgNamedArgs = pgx.NamedArgs
 type PgUUID = pgtype.UUID
 
 
@@ -105,19 +106,24 @@ func Db(callback func(context.Context, PgConn), options ...any) {
 
 	// fixme retry if error
 
-	conn, err = pool().Acquire(context)
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Release()
+	for attempts := 0; attempts < 8; attempts += 1 {
+		conn, err = pool().Acquire(context)
+		if err != nil {
+			panic(err)
+		}
+		defer conn.Release()
 
-	err = conn.Ping(context)
-	if err != nil {
-		// take the bad connection out of the pool
-		pgxConn := conn.Hijack()
-		pgxConn.Close(context)
-		// fixme retry if error
-		panic(err)
+		err = conn.Ping(context)
+		if err != nil {
+			// take the bad connection out of the pool
+			pgxConn := conn.Hijack()
+			pgxConn.Close(context)
+			conn = nil
+		}
+		break
+	}
+	if conn == nil {
+		panic("Could not acquire connection.")
 	}
 
 	callback(context, conn)
@@ -498,31 +504,31 @@ var migrations = []any{
 			realm VARCHAR(16) NOT NULL,
 			value_id uuid NOT NULL,
 			value VARCHAR(1024) NOT NULL,
+			alias INT NOT NULL DEFAULT 0,
 
-			PRIMARY KEY(value_id),
-			UNIQUE (realm, value)
+			PRIMARY KEY(value_id, alias)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id)
+		CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id, alias)
 	`),
 
 	newSqlMigration(`
 		CREATE TABLE search_projection (
 			realm VARCHAR(16) NOT NULL,
-		    dim CHAR(1) NOT NULL,
+		    dim SMALLINT NOT NULL,
 		    elen SMALLINT NOT NULL,
 		    dord SMALLINT NOT NULL,
 		    dlen SMALLINT NOT NULL,
 		    vlen SMALLINT NOT NULL,
-		    value_id UUID NOT NULL,
-		    alias SMALLINT NOT NULL DEFAULT 0,
+		    value_id uuid NOT NULL,
+		    alias INT NOT NULL DEFAULT 0,
 
-		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id)
+		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, alias)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX search_projection_value_id ON search_projection (value_id)
+		CREATE INDEX search_projection_value_id ON search_projection (value_id, alias)
 	`),
 
 }

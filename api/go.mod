@@ -17,6 +17,7 @@ require (
 	github.com/nyaruka/phonenumbers v1.1.6 // indirect
 	github.com/redis/go-redis/v9 v9.0.3 // indirect
 	golang.org/x/crypto v0.6.0 // indirect
+	golang.org/x/exp v0.0.0-20230321023759-10a507213a29 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.5.0 // indirect
 	golang.org/x/text v0.7.0 // indirect

@@ -98,8 +98,17 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 
 
 
-	if userAuth != nil {
+	if networkCreate.UserAuth != nil {
 		// validate the user does not exist
+
+		if userAuth == nil {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Invalid email or phone number.",
+				},
+			}
+			return result, nil
+		}
 
 		created := false
 		var createdNetworkId ulid.ULID
@@ -178,9 +187,12 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 			return result, nil
 		}
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
+		bringyour.Logger().Printf("Parsing JWT\n")
 		authJwt := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
 		if authJwt != nil {
 			// validate the user does not exist
+
+			bringyour.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
 
 			created := false
 			var createdNetworkId ulid.ULID
@@ -247,6 +259,8 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSes
 					if err != nil {
 						panic(err)
 					}
+				} else {
+					bringyour.Logger().Printf("User already exists\n")
 				}
 			})
 			if created {
