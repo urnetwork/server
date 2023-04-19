@@ -5,8 +5,10 @@ import (
     "fmt"
     "os"
     "strconv"
+    "encoding/json"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/ulid"
 )
@@ -16,6 +18,8 @@ import (
 // todo search <realm> <type> around <distance> <value>
 // todo search <realm> <type> remove <value>
 // todo search <realm> <type> clear
+// todo stats compute
+// todo stats export
 
 
 func main() {
@@ -29,6 +33,8 @@ func main() {
 		commandDb()
 	case "search":
 		commandSearch()
+	case "stats":
+		commandStats()
 	}
 }
 
@@ -88,5 +94,33 @@ func commandSearch() {
 		usage()
 	}
 
+}
+
+
+func commandStats() {
+	if len(os.Args) < 3 {
+		usage()
+		return
+	}
+
+	switch os.Args[2] {
+	case "compute":
+		stats := model.ComputeStats(90)
+		statsJson, err := json.MarshalIndent(stats, "", "  ")
+	    bringyour.Raise(err)
+	    bringyour.Logger().Printf("%s\n", statsJson)
+	case "export":
+		stats := model.ComputeStats(90)
+		model.ExportStats(stats)
+	case "import":
+		stats := model.GetExportedStats(90)
+		if stats != nil {
+			statsJson, err := json.MarshalIndent(stats, "", "  ")
+		    bringyour.Raise(err)
+		    bringyour.Logger().Printf("%s\n", statsJson)
+		}
+	default:
+		usage()
+	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 // type aliases to simplify user code
 type RedisClient = *redis.Client
+const RedisNil = redis.Nil
 
 
 type safeRedisClient struct {
@@ -64,5 +65,6 @@ func Redis(callback func(context context.Context, client RedisClient)) {
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.
 	context := context.Background()
-    callback(context, client())
+	client := client()
+    callback(context, client)
 }
