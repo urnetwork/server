@@ -23,11 +23,16 @@ func (self *safeRedisClient) open() *redis.Client {
 	defer self.mutex.Unlock()
 
 	if self.client == nil {
+		redisKeys := KeysRed.RequireSimpleResource("redis.yml")
+
 		// see https://github.com/redis/go-redis/blob/master/options.go#L31
 		options := &redis.Options{
-	        Addr: "192.168.208.135:6379",
-	        Password: "",
-	        DB: 0,
+			Addr: redisKeys.RequireString("authority"),
+	        Password: redisKeys.RequireString("password"),
+	        DB: redisKeys.RequireInt("db"),
+	        // Addr: "192.168.208.135:6379",
+	        // Password: "",
+	        // DB: 0,
 	        MaxRetries: 32,
 	        MinIdleConns: 4,
 			MaxIdleConns: 32,

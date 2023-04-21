@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/jwt"
@@ -64,7 +65,7 @@ type NetworkCreateResultError struct {
 	Message string `json:"message"`
 }
 
-func NetworkCreate(networkCreate NetworkCreateArgs, session *bringyour.ClientSession) (*NetworkCreateResult, error) {
+func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSession) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
 
 	var userAuthAttemptId *ulid.ULID

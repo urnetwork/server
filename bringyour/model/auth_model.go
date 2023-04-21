@@ -7,6 +7,7 @@ import (
 	"bytes"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/jwt"
 )
@@ -28,7 +29,7 @@ type AuthArgs struct {
 }
 
 
-func UserAuthAttempt(userAuth *string, session *bringyour.ClientSession) (*ulid.ULID, bool) {
+func UserAuthAttempt(userAuth *string, session *session.ClientSession) (*ulid.ULID, bool) {
 	// insert attempt with success false
 	// select attempts by userAuth in past 1 hour
 	// select attempts by clientIp in past 1 hour
@@ -204,7 +205,7 @@ type AuthLoginResultNetwork struct {
 	ByJwt string `json:"byJwt"`
 }
 
-func AuthLogin(login AuthLoginArgs, session *bringyour.ClientSession) (*AuthLoginResult, error) {
+func AuthLogin(login AuthLoginArgs, session *session.ClientSession) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
 	var userAuthAttemptId *ulid.ULID
@@ -352,7 +353,7 @@ type AuthLoginWithPasswordResultError struct {
 
 func AuthLoginWithPassword(
 	loginWithPassword AuthLoginWithPasswordArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthLoginWithPasswordResult, error) {
 	userAuth, _ := NormalUserAuthV1(&loginWithPassword.UserAuth)
 
@@ -469,7 +470,7 @@ type AuthValidateResultError struct {
 	Message string `json:"message"`
 }
 
-func AuthValidate(validate AuthValidateArgs, session *bringyour.ClientSession) (*AuthValidateResult, error) {
+func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*AuthValidateResult, error) {
 	userAuth, _ := NormalUserAuthV1(&validate.UserAuth)
 
 	if userAuth == nil {
@@ -595,7 +596,7 @@ type AuthValidateCreateCodeError struct {
 
 func AuthValidateCreateCode(
 	validateCreateCode AuthValidateCreateCodeArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthValidateCreateCodeResult, error) {
 	userAuth, _ := NormalUserAuthV1(&validateCreateCode.UserAuth)
 
@@ -689,7 +690,7 @@ type AuthPasswordResetCreateCodeError struct {
 
 func AuthPasswordResetCreateCode(
 	resetCreateCode AuthPasswordResetCreateCodeArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthPasswordResetCreateCodeResult, error) {
 	userAuth, _ := NormalUserAuthV1(&resetCreateCode.UserAuth)
 
@@ -781,7 +782,7 @@ type AuthPasswordSetResult struct {
 
 func AuthPasswordSet(
 	passwordSet AuthPasswordSetArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthPasswordSetResult, error) {
 	userAuthAttemptId, allow := UserAuthAttempt(nil, session)
 	if !allow {

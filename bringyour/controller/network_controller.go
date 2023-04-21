@@ -2,14 +2,15 @@ package controller
 
 import (
 
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
 
 
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*model.NetworkCreateResult, error) {
 	result, err := model.NetworkCreate(networkCreate, session)
 	// if validation required, send it

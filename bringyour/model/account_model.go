@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/ulid"
 )
 
@@ -16,7 +17,7 @@ type PreferencesSetArgs struct {
 type PreferencesSetResult struct {
 }
 
-func PreferencesSet(preferencesSet PreferencesSetArgs, session *bringyour.ClientSession) (*PreferencesSetResult, error) {
+func PreferencesSet(preferencesSet PreferencesSetArgs, session *session.ClientSession) (*PreferencesSetResult, error) {
 	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		_, err := conn.Exec(
 			context,
@@ -67,7 +68,7 @@ type FeedbackSendResult struct {
 }
 
 
-func FeedbackSend(feedbackSend FeedbackSendArgs, session *bringyour.ClientSession) (*FeedbackSendResult, error) {
+func FeedbackSend(feedbackSend FeedbackSendArgs, session *session.ClientSession) (*FeedbackSendResult, error) {
 	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
 		feedbackId := ulid.Make()
 		_, err := conn.Exec(

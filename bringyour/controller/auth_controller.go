@@ -4,13 +4,14 @@ import (
 	"fmt"
 	// "errors"
 
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/model"
 )
 
 
-func AuthLogin(login model.AuthLoginArgs, session *bringyour.ClientSession) (*model.AuthLoginResult, error) {
+func AuthLogin(login model.AuthLoginArgs, session *session.ClientSession) (*model.AuthLoginResult, error) {
 	// fixme
 	/*
 	userAuth, userAuthType := normalUserAuthV1(login.userAuth)
@@ -28,7 +29,7 @@ func AuthLogin(login model.AuthLoginArgs, session *bringyour.ClientSession) (*mo
 
 func AuthLoginWithPassword(
 	loginWithPassword model.AuthLoginWithPasswordArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
 	result, err := model.AuthLoginWithPassword(loginWithPassword, session)
 	// if validation required, send it
@@ -52,7 +53,7 @@ type AuthValidateSendResult struct {
 
 func AuthValidateSend(
 	validateSend AuthValidateSendArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthValidateSendResult, error) {
 	userAuth, userAuthType := model.NormalUserAuthV1(&validateSend.UserAuth)
 
@@ -107,7 +108,7 @@ type AuthPasswordResetResult struct {
 
 func AuthPasswordReset(
 	reset AuthPasswordResetArgs,
-	session *bringyour.ClientSession,
+	session *session.ClientSession,
 ) (*AuthPasswordResetResult, error) {
 	userAuth, userAuthType := model.NormalUserAuthV1(&reset.UserAuth)
 
@@ -155,7 +156,7 @@ func createResetBodyText(resetCode string) string {
 type AuthPasswordSetResult struct {
 }
 
-func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *bringyour.ClientSession) (*AuthPasswordSetResult, error) {
+func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.ClientSession) (*AuthPasswordSetResult, error) {
 	passwordSetResult, err := model.AuthPasswordSet(passwordSet, session)
 	if err != nil {
 		return nil, err

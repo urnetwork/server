@@ -6,12 +6,13 @@ import (
 	"reflect"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/jwt"
 )
 
 
 // wraps an implementation function using json in/out
-func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error), w http.ResponseWriter, req *http.Request) {
+func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), w http.ResponseWriter, req *http.Request) {
 	var input T
 
 	var err error
@@ -33,7 +34,7 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
 	    }
 
 
-    session := bringyour.NewClientSessionFromRequest(req)
+    session := session.NewClientSessionFromRequest(req)
 
     // look for AuthArgs
     inputMeta := reflect.ValueOf(&input).Elem()
@@ -69,7 +70,7 @@ func WrapWithJson[T any, R any](impl func(T, *bringyour.ClientSession)(R, error)
 
 
 func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(R, error), w http.ResponseWriter, req *http.Request) {
-	WrapWithJson(func (arg T, _ *bringyour.ClientSession)(R, error) {
+	WrapWithJson(func (arg T, _ *session.ClientSession)(R, error) {
 		return impl(arg)
 	}, w, req)
 }
