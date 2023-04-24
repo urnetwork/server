@@ -27,11 +27,13 @@ func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), 
 
 
     // debugging
+    // {{ fixme use LogJson
 	    var debugInputJson []byte
 	    debugInputJson, err = json.Marshal(input)
 	    if err == nil {
 	        bringyour.Logger().Printf("Decoded input %s\n", string(debugInputJson))
 	    }
+	// }}
 
 
     session := session.NewClientSessionFromRequest(req)

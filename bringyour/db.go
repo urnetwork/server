@@ -181,5 +181,18 @@ func Tx(callback func(context.Context, PgTx), options ...any) {
 }
 
 
+type Closeable interface {
+	Close()
+	Err() error
+}
+
+func With[T Closeable](t T, err error, callback func()) {
+	Raise(err)
+	defer t.Close()
+	callback()
+	if err := t.Err(); err != nil {
+		panic(err)
+	}
+}
 
 

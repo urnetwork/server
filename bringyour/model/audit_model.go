@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"math"
+	"sort"
 
 	"golang.org/x/exp/maps"
 
@@ -235,15 +236,19 @@ func computeStatsProvider(stats *Stats, context context.Context, conn bringyour.
 		for result.Next() {
 			result.Scan(&day, &deviceIdPg, &networkIdPg, &eventType, &countryName, &regionName, &cityName)
 
+			bringyour.Logger().Printf("FOUND GEO \"%s\" \"%s\" \"%s\"\n", countryName, regionName, cityName)
+
 			if day != activeDay {
 				exportActive()
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					bringyour.Logger().Printf("%s <> %s\n", packDay, day)
 					activeDay = packDay
 					exportActive()
 				}
 				activeDay = day
 			}
+
+			bringyour.Logger().Printf("NEXT\n")
 
 			// update the active providers
 			deviceId := *ulid.FromPg(deviceIdPg)
@@ -269,9 +274,11 @@ func computeStatsProvider(stats *Stats, context context.Context, conn bringyour.
 				}
 				activeProviders[deviceId] = providerState
 			}
+
+			bringyour.Logger().Printf("NEXT 2\n")
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			bringyour.Logger().Printf("%s <> %s\n", packDay, endDay)
 			activeDay = packDay
 			exportActive()
@@ -372,7 +379,7 @@ func computeStatsExtender(stats *Stats, context context.Context, conn bringyour.
 
 			if day != activeDay {
 				exportActive()
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					exportActive()
 				}
@@ -399,7 +406,7 @@ func computeStatsExtender(stats *Stats, context context.Context, conn bringyour.
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			exportActive()
 		}
@@ -479,7 +486,7 @@ func computeStatsNetwork(stats *Stats, context context.Context, conn bringyour.P
 
 			if day != activeDay {
 				exportActive()
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					exportActive()
 				}
@@ -496,7 +503,7 @@ func computeStatsNetwork(stats *Stats, context context.Context, conn bringyour.P
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			exportActive()
 		}
@@ -575,7 +582,7 @@ func computeStatsDevice(stats *Stats, context context.Context, conn bringyour.Pg
 
 			if day != activeDay {
 				exportActive()
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					exportActive()
 				}
@@ -592,7 +599,7 @@ func computeStatsDevice(stats *Stats, context context.Context, conn bringyour.Pg
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			exportActive()
 		}
@@ -647,7 +654,7 @@ func computeStatsTransfer(stats *Stats, context context.Context, conn bringyour.
 			result.Scan(&day, &netTransferBytes)
 
 			if day != activeDay {
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					allTransferData[activeDay] = 0
 				}
@@ -656,7 +663,7 @@ func computeStatsTransfer(stats *Stats, context context.Context, conn bringyour.
 
 			allTransferData[activeDay] += netTransferBytes
 		}
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			allTransferData[activeDay] = 0
 		}
@@ -713,7 +720,7 @@ func computeStatsPackets(stats *Stats, context context.Context, conn bringyour.P
 			result.Scan(&day, &netTransferPackets)
 
 			if day != activeDay {
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					allPacketsData[activeDay] = 0
 				}
@@ -722,7 +729,7 @@ func computeStatsPackets(stats *Stats, context context.Context, conn bringyour.P
 
 			allPacketsData[activeDay] += netTransferPackets
 		}
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			allPacketsData[activeDay] = 0
 		}
@@ -781,7 +788,7 @@ func computeStatsExtenderTransfer(stats *Stats, context context.Context, conn br
 			result.Scan(&day, &netTransferBytes)
 
 			if day != activeDay {
-				for packDay := nextDay(activeDay); packDay != day; packDay = nextDay(activeDay) {
+				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					extenderTransferData[activeDay] = 0
 				}
@@ -790,7 +797,7 @@ func computeStatsExtenderTransfer(stats *Stats, context context.Context, conn br
 
 			extenderTransferData[activeDay] += netTransferBytes
 		}
-		for packDay := nextDay(activeDay); packDay != endDay; packDay = nextDay(activeDay) {
+		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			extenderTransferData[activeDay] = 0
 		}
@@ -808,6 +815,7 @@ func computeStatsExtenderTransfer(stats *Stats, context context.Context, conn br
 func summary(data map[string]int) int {
 	k := 3
 	days := maps.Keys(data)
+	sort.Strings(days)
 	summaryDays := days[bringyour.MaxInt(0, len(days) - k):]
 	values := make([]int, len(summaryDays))
 	for i := 0; i < len(summaryDays); i += 1 {
@@ -885,71 +893,298 @@ func GetExportedStats(lookback int) *Stats {
 }
 
 
-
-
-
-// fixme
-/*
-type AuditProviderCheck struct {
-
-}
-func newAuditProviderCheck() *AuditProviderCheck {
-
+type AuditEvent struct {
+	EventId ulid.ULID
+	EventTime time.Time
+	EventType AuditEventType
+	EventDetails *string
 }
 
 
-type AuditExtenderCheck struct {
+type AuditProviderEvent struct {
+	AuditEvent
 
+	NetworkId ulid.ULID
+	DeviceId ulid.ULID
+	CountryName string
+	RegionName string
+	CityName string
 }
-func newAuditExtenderCheck() {
+func NewAuditProviderEvent(eventType AuditEventType) *AuditProviderEvent {
+	eventId := ulid.Make()
+	eventTime := time.Now()
+	return &AuditProviderEvent{
+		AuditEvent: AuditEvent{
+			EventId: eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+		NetworkId: ulid.Nil,
+		DeviceId: ulid.Nil,
+		CountryName: "",
+		RegionName: "",
+		CityName: "",
+	}
+}
 
+
+type AuditExtenderEvent struct {
+	AuditEvent
+
+	NetworkId ulid.ULID
+	ExtenderId ulid.ULID
+}
+func NewAuditExtenderEvent(eventType AuditEventType) *AuditExtenderEvent {
+	eventId := ulid.Make()
+	eventTime := time.Now()
+	return &AuditExtenderEvent{
+		AuditEvent: AuditEvent{
+			EventId: eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+		NetworkId: ulid.Nil,
+		ExtenderId: ulid.Nil,
+	}
 }
 
 
 type AuditNetworkEvent struct {
+	AuditEvent
 
+	NetworkId ulid.ULID
 }
-func newAuditNetworkEvent() {
-
+func NewAuditNetworkEvent(eventType AuditEventType) *AuditExtenderEvent {
+	eventId := ulid.Make()
+	eventTime := time.Now()
+	return &AuditExtenderEvent{
+		AuditEvent: AuditEvent{
+			EventId: eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+		NetworkId: ulid.Nil,
+	}
 }
 
 
 type AuditDeviceEvent struct {
+	AuditEvent
 
+	NetworkId ulid.ULID
+	DeviceId ulid.ULID
 }
-func newAuditDeviceEvent() {
-
+func NewAuditDeviceEvent(eventType AuditEventType) *AuditDeviceEvent {
+	eventId := ulid.Make()
+	eventTime := time.Now()
+	return &AuditDeviceEvent{
+		AuditEvent: AuditEvent{
+			EventId: eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+		NetworkId: ulid.Nil,
+		DeviceId: ulid.Nil,
+	}
 }
 
 
 type AuditContractEvent struct {
+	AuditEvent
 
+	ContractId ulid.ULID
+	ClientNetworkId ulid.ULID
+	ClientDeviceId ulid.ULID
+	ProviderNetworkId ulid.ULID
+	ProviderDeviceId ulid.ULID
+	ExtenderNetworkId *ulid.ULID
+	ExtenderId *ulid.ULID
+	TransferBytes int64
+	TransferPackets int64
 }
-func newAuditContractEvent() {
-
-}
-
-
-func AddEvent(event interface{}) {
-	switch v := event.(type) {
-	case AuditProviderCheck:
-		Db(func(context Context, conn Conn) {
-			conn.insert(`
-				INSERT INTO Foo
-			`)
-		})
-	case AuditExtenderCheck:
-	case AuditNetworkEvent:
-	case AuditDeviceEvent:
-	case AuditContractEvent:
-	default:
-		panic("Event type not recognized: %T", v)
+func NewAuditContractEvent(eventType AuditEventType) *AuditContractEvent {
+	eventId := ulid.Make()
+	eventTime := time.Now()
+	return &AuditContractEvent{
+		AuditEvent: AuditEvent{
+			EventId: eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+		ContractId: ulid.Nil,
+		ClientNetworkId: ulid.Nil,
+		ClientDeviceId: ulid.Nil,
+		ProviderNetworkId: ulid.Nil,
+		ProviderDeviceId: ulid.Nil,
+		// ExtenderNetworkId: ulid.Nil,
+		// ExtenderId: ulid.Nil,
+		TransferBytes: 0,
+		TransferPackets: 0,
 	}
 }
-*/
 
 
-
-
-
-
+func AddAuditEvent(event interface{}) {
+	switch v := event.(type) {
+	case *AuditProviderEvent:
+		AddAuditProviderEvent(v)
+	case *AuditExtenderEvent:
+		AddAuditExtenderEvent(v)
+	case *AuditNetworkEvent:
+		AddAuditNetworkEvent(v)
+	case *AuditDeviceEvent:
+		AddAuditDeviceEvent(v)
+	case *AuditContractEvent:
+		AddAuditContractEvent(v)
+	default:
+		panic(fmt.Sprintf("Event type not recognized: %T", v))
+	}
+}
+func AddAuditProviderEvent(event *AuditProviderEvent) {
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
+			context,
+			`
+			INSERT INTO audit_provider_event
+			(
+				event_id,
+				event_time,
+				network_id,
+				device_id,
+				event_type,
+				event_details,
+				country_name,
+				region_name,
+				city_name
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			`,
+			ulid.ToPg(&event.EventId),
+			event.EventTime,
+			ulid.ToPg(&event.NetworkId),
+			ulid.ToPg(&event.DeviceId),
+			event.EventType,
+			event.EventDetails,
+			event.CountryName,
+			event.RegionName,
+			event.CityName,
+		)
+		bringyour.Raise(err)
+	})
+}
+func AddAuditExtenderEvent(event *AuditExtenderEvent) {
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
+			context,
+			`
+			INSERT INTO audit_extender_event
+			(
+				event_id,
+				event_time,
+				network_id,
+				extender_id,
+				event_type,
+				event_details
+			)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			ulid.ToPg(&event.EventId),
+			event.EventTime,
+			ulid.ToPg(&event.NetworkId),
+			ulid.ToPg(&event.ExtenderId),
+			event.EventType,
+			event.EventDetails,
+		)
+		bringyour.Raise(err)
+	})
+}
+func AddAuditNetworkEvent(event *AuditNetworkEvent) {
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
+			context,
+			`
+			INSERT INTO audit_network_event
+			(
+				event_id,
+				event_time,
+				network_id,
+				event_type,
+				event_details
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			`,
+			ulid.ToPg(&event.EventId),
+			event.EventTime,
+			ulid.ToPg(&event.NetworkId),
+			event.EventType,
+			event.EventDetails,
+		)
+		bringyour.Raise(err)
+	})
+}
+func AddAuditDeviceEvent(event *AuditDeviceEvent) {
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
+			context,
+			`
+			INSERT INTO audit_device_event
+			(
+				event_id,
+				event_time,
+				network_id,
+				device_id,
+				event_type,
+				event_details
+			)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			ulid.ToPg(&event.EventId),
+			event.EventTime,
+			ulid.ToPg(&event.NetworkId),
+			ulid.ToPg(&event.DeviceId),
+			event.EventType,
+			event.EventDetails,
+		)
+		bringyour.Raise(err)
+	})
+}
+func AddAuditContractEvent(event *AuditContractEvent) {
+	bringyour.Db(func (context context.Context, conn bringyour.PgConn) {
+		_, err := conn.Exec(
+			context,
+			`
+			INSERT INTO audit_contract_event
+			(
+				event_id,
+				event_time,
+				contract_id,
+				client_network_id,
+				client_device_id,
+				provider_network_id,
+				provider_device_id,
+				extender_network_id,
+				extender_id,
+				event_type,
+				event_details,
+				transfer_bytes,
+				transfer_packets
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			`,
+			ulid.ToPg(&event.EventId),
+			event.EventTime,
+			ulid.ToPg(&event.ContractId),
+			ulid.ToPg(&event.ClientNetworkId),
+			ulid.ToPg(&event.ClientDeviceId),
+			ulid.ToPg(&event.ProviderNetworkId),
+			ulid.ToPg(&event.ProviderDeviceId),
+			ulid.ToPg(event.ExtenderNetworkId),
+			ulid.ToPg(event.ExtenderId),
+			event.EventType,
+			event.EventDetails,
+			event.TransferBytes,
+			event.TransferPackets,
+		)
+		bringyour.Raise(err)
+	})
+}

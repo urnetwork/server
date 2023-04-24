@@ -4,6 +4,7 @@ package model
 import (
 	"errors"
 	"context"
+	"encoding/json"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -174,8 +175,9 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 			}
 		})
 		if created {
+			auditNetworkCreate(networkCreate, session, createdNetworkId)
+
 			networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
-			// fixme log an audit event that account created and terms were accepted with a client ip with the auth type
 
 			result := &NetworkCreateResult{
 				ValidationRequired: &NetworkCreateResultValidation{
@@ -265,8 +267,9 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 				}
 			})
 			if created {
+				auditNetworkCreate(networkCreate, session, createdNetworkId)
+
 				networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
-				// fixme log an audit event that account created and terms were accepted with a client ip with the auth jwt type
 
 				if userAuthAttemptId != nil {
 					SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
@@ -290,4 +293,27 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 	}
 	
 	return nil, errors.New("Invalid login.")
+}
+
+func auditNetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSession, networkId ulid.ULID) {
+	type Details struct {
+		NetworkCreate NetworkCreateArgs `json:"networkCreate"`
+		ClientIpv4 *string `json:"clientIpv4"`
+	}
+
+	details := Details{
+		NetworkCreate: networkCreate,
+		ClientIpv4: session.ClientIpv4DotNotation(),
+	}
+
+	detailsJson, err := json.Marshal(details)
+    if err != nil {
+        panic(err)
+    }
+    detailsJsonString := string(detailsJson)
+
+	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
+	auditNetworkEvent.NetworkId = networkId
+	auditNetworkEvent.EventDetails = &detailsJsonString
+	AddAuditEvent(auditNetworkEvent)
 }

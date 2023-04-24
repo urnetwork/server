@@ -34,15 +34,7 @@ func MinInt(values... int) int {
 
 
 
-type Closeable interface {
-	Close()
-}
 
-func With[T Closeable](t T, err error, callback func()) {
-	Raise(err)
-	defer t.Close()
-	callback()
-}
 
 func Raise(err error) {
 	if err != nil {

@@ -85,22 +85,24 @@ func ApplyDbMigrations() {
 }
 
 var migrations = []any{
-	newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
-		'provider_offline',
-		'provider_online_superspeed',
-		'provider_online_not_superspeed'
-	)`),
+	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
+	// 	'provider_offline',
+	// 	'provider_online_superspeed',
+	// 	'provider_online_not_superspeed'
+	// )`),
+	// newSqlMigration(`CREATE TYPE audit_event_type AS VARCHAR(64)`),
+	// newSqlMigration(`CREATE TYPE audit_event_details_type AS TEXT`),
 	newSqlMigration(`
 		CREATE TABLE audit_provider_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type audit_provider_event_type NOT NULL,
-			event_details VARCHAR(1024) NULL,
-			country_name VARCHAR(128) NULL,
-			region_name VARCHAR(128) NULL,
-			city_name VARCHAR(128) NULL,
+			event_type VARCHAR(64) NOT NULL,
+			event_details TEXT NULL,
+			country_name VARCHAR(128) NOT NULL,
+			region_name VARCHAR(128) NOT NULL,
+			city_name VARCHAR(128) NOT NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -108,19 +110,19 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_provider_event_stats_device_id ON audit_provider_event (event_time, device_id, event_id)
 	`),
-	newSqlMigration(`CREATE TYPE audit_extender_event_type AS ENUM (
-		'extender_offline',
-		'extender_online_superspeed',
-		'extender_online_not_superspeed'
-	)`),
+	// newSqlMigration(`CREATE TYPE audit_extender_event_type AS ENUM (
+	// 	'extender_offline',
+	// 	'extender_online_superspeed',
+	// 	'extender_online_not_superspeed'
+	// )`),
 	newSqlMigration(`
 		CREATE TABLE audit_extender_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
-			event_type audit_extender_event_type NOT NULL,
-			event_details VARCHAR(32) NULL,
+			event_type VARCHAR(64) NOT NULL,
+			event_details TEXT NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -128,17 +130,17 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_extender_event_stats_extender_id ON audit_extender_event (event_time, extender_id, event_id)
 	`),
-	newSqlMigration(`CREATE TYPE audit_network_event_type AS ENUM (
-		'network_created',
-		'network_deleted'
-	)`),
+	// newSqlMigration(`CREATE TYPE audit_network_event_type AS ENUM (
+	// 	'network_created',
+	// 	'network_deleted'
+	// )`),
 	newSqlMigration(`
 		CREATE TABLE audit_network_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
-			event_type audit_network_event_type NOT NULL,
-			event_details VARCHAR(32) NULL,
+			event_type VARCHAR(64) NOT NULL,
+			event_details TEXT NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -146,18 +148,18 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_network_event_stats_network_id ON audit_network_event (event_time, network_id, event_id)
 	`),
-	newSqlMigration(`CREATE TYPE audit_device_event_type AS ENUM (
-		'device_added',
-		'device_removed'
-	)`),
+	// newSqlMigration(`CREATE TYPE audit_device_event_type AS ENUM (
+	// 	'device_added',
+	// 	'device_removed'
+	// )`),
 	newSqlMigration(`
 		CREATE TABLE audit_device_event (
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type audit_device_event_type NOT NULL,
-			event_details VARCHAR(32) NULL,
+			event_type VARCHAR(64) NOT NULL,
+			event_details TEXT NULL,
 
 			PRIMARY KEY (event_time, device_id, event_id),
 			UNIQUE (event_id)
@@ -166,9 +168,9 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id)
 	`),
-	newSqlMigration(`CREATE TYPE audit_contract_event_type AS ENUM (
-		'contract_closed_success'
-	)`),
+	// newSqlMigration(`CREATE TYPE audit_contract_event_type AS ENUM (
+	// 	'contract_closed_success'
+	// )`),
 	newSqlMigration(`
 		CREATE TABLE audit_contract_event (
 			event_id uuid NOT NULL,
@@ -178,10 +180,10 @@ var migrations = []any{
 			client_device_id uuid NOT NULL,
 			provider_network_id uuid NOT NULL,
 			provider_device_id uuid NOT NULL,
-			extender_network_id uuid NOT NULL,
-			extender_id uuid NOT NULL,
-			event_type audit_contract_event_type NOT NULL,
-			event_details VARCHAR(32) NULL,
+			extender_network_id uuid NULL,
+			extender_id uuid NULL,
+			event_type VARCHAR(64) NOT NULL,
+			event_details TEXT NULL,
 			transfer_bytes BIGINT NOT NULL DEFAULT 0,
 			transfer_packets BIGINT NOT NULL DEFAULT 0,
 
@@ -192,7 +194,8 @@ var migrations = []any{
 		CREATE INDEX audit_contract_event_stats ON audit_contract_event (event_time, transfer_bytes, transfer_packets)
 	`),
 	newSqlMigration(`
-		CREATE INDEX audit_contract_event_stats_extender_id ON audit_contract_event (event_time, extender_id, transfer_bytes, transfer_packets)
+		CREATE INDEX audit_contract_event_stats_extender_id
+		ON audit_contract_event (event_time, extender_id, transfer_bytes, transfer_packets)
 	`),
 
 	newSqlMigration(`

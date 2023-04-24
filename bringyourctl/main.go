@@ -9,6 +9,7 @@ import (
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/ulid"
 )
@@ -119,6 +120,8 @@ func commandStats() {
 		    bringyour.Raise(err)
 		    bringyour.Logger().Printf("%s\n", statsJson)
 		}
+	case "add":
+		controller.AddSampleEvents(4 * 60)
 	default:
 		usage()
 	}

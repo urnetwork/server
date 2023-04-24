@@ -316,6 +316,7 @@ func AuthLogin(login AuthLoginArgs, session *session.ClientSession) (*AuthLoginR
 			} else {
 				// existing user, different auth type
 				result := &AuthLoginResult{
+					UserAuth: &authJwt.UserAuth,
 					AuthAllowed: &[]string{*authType},
 				}
 				return result, nil

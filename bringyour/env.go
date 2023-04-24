@@ -336,7 +336,3 @@ func latestVersionPath(basePath string) (string, error) {
 
 	return "", errors.New("No semver dirs found.")
 }
-
-
-
-
