@@ -43,23 +43,37 @@ const (
 
 type EnvResolver struct {
 	mutex sync.Mutex
+	resolved bool
 	envName *string
+	version *string
 }
 
 func NewEnvResolver() *EnvResolver {
 	return &EnvResolver{}
 }
 
-func (self *EnvResolver) Name() string {
+func (self *EnvResolver) resolve() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
-	if self.envName == nil {
+	if !self.resolved {
 		envName := LatestEnv()
+		version := LatestVersion()
 		self.envName = &envName
-		Logger().Printf("Env: resolved env is \"%s\"", envName)
+		self.version = &version
+		Logger().Printf("Env: resolved env is \"%s\" and version \"%s\"", envName, version)
+		self.resolved = true
 	}
+}
+
+func (self *EnvResolver) EnvName() string {
+	self.resolve()
 	return *self.envName
+}
+
+func (self *EnvResolver) Version() string {
+	self.resolve()
+	return *self.version
 }
 
 
@@ -80,7 +94,7 @@ func (self *Resolver) BasePath() string {
 	if self.basePath == nil {
 		basePath := LatestBasePath(self.keysType)
 		self.basePath = &basePath
-		Logger().Printf("Env: %s %s resolved base path is \"%s\"", Env.Name(), self.keysType, basePath)
+		Logger().Printf("Env: %s %s resolved base path is \"%s\"", Env.EnvName(), self.keysType, basePath)
 	}
 	return *self.basePath
 }
@@ -251,6 +265,7 @@ var DefaultBringYourHome = func()(string) {
 }()
 var DefaultKeysHome = "/srv/bringyour"
 var DefaultEnv = "local"
+var DefaultVersion = "0.0.0-local"
 
 
 func BringYourHome() string {
@@ -276,13 +291,21 @@ func LatestEnv() string {
 	// look for $BRINGYOUR_HOME/.env
 	// if not, default "local"
 
-
 	envPath := path.Join(BringYourHome(), ".env")
 	bytes, err := os.ReadFile(envPath)
 	if err == nil {
 		return strings.TrimSpace(string(bytes))
 	}
 	return DefaultEnv
+}
+
+func LatestVersion() string {
+	envPath := path.Join(BringYourHome(), ".version")
+	bytes, err := os.ReadFile(envPath)
+	if err == nil {
+		return strings.TrimSpace(string(bytes))
+	}
+	return DefaultVersion
 }
 
 func LatestBasePath(keysType KeysType) string {
@@ -301,7 +324,7 @@ func LatestBasePath(keysType KeysType) string {
 	}
 
 	// look for multienv
-	keysTypeHome := path.Join(keysHome, string(keysType), Env.Name())
+	keysTypeHome := path.Join(keysHome, string(keysType), Env.EnvName())
 	Logger().Printf("TEST %s\n", keysTypeHome)
 	if fileInfo, err := os.Stat(keysTypeHome); os.IsNotExist(err) || !fileInfo.IsDir() {
 		// single env

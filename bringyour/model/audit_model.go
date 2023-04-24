@@ -426,10 +426,9 @@ func computeStatsNetwork(stats *Stats, context context.Context, conn bringyour.P
 		context,
 		`
 			SELECT
-				t.day,
-				t.network_id,
-				audit_network_event.event_id,
-				audit_network_event.event_type
+				t.day AS day,
+				t.network_id AS network_id,
+				audit_network_event.event_type AS event_type
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,
@@ -523,7 +522,6 @@ func computeStatsDevice(stats *Stats, context context.Context, conn bringyour.Pg
 			SELECT
 				t.day AS day,
 				t.device_id AS device_id,
-				audit_device_event.event_id AS event_id,
 				audit_device_event.event_type AS event_type
 			FROM (
 				SELECT
@@ -954,10 +952,10 @@ type AuditNetworkEvent struct {
 
 	NetworkId ulid.ULID
 }
-func NewAuditNetworkEvent(eventType AuditEventType) *AuditExtenderEvent {
+func NewAuditNetworkEvent(eventType AuditEventType) *AuditNetworkEvent {
 	eventId := ulid.Make()
 	eventTime := time.Now()
-	return &AuditExtenderEvent{
+	return &AuditNetworkEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,
 			EventTime: eventTime,

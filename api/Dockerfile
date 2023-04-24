@@ -1,8 +1,20 @@
 FROM ubuntu:22.04
 # https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
 ARG TARGETPLATFORM
-ENV MESSAGE api
-COPY bin/$TARGETPLATFORM/echo /usr/local/bin/echo
+
+# see https://docs.docker.com/develop/develop-images/dockerfile_best-practices/
+RUN apt-get update && apt-get install -y \
+	ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN update-ca-certificates
+
+COPY bin/$TARGETPLATFORM/api /usr/local/bin/bringyour-api
+ENV BRINGYOUR_HOME /bringyour
+RUN mkdir -p $BRINGYOUR_HOME
+RUN echo -n "canary" > $BRINGYOUR_HOME/.env
+RUN echo -n "2023.01.1-local" > $BRINGYOUR_HOME/.version
+
+# fixme copy .env and .version into the BRINGYOUR_HOME dir
 EXPOSE 80
 STOPSIGNAL SIGTERM
-CMD ["/usr/local/bin/echo", "--port", "80", ";"]
+CMD ["/usr/local/bin/bringyour-api", "-p", "80"]

@@ -188,6 +188,13 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 				},
 			}
 			return result, nil
+		} else {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Account might already exist. Please start over.",
+				},
+			}
+			return result, nil
 		}
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
 		bringyour.Logger().Printf("Parsing JWT\n")
@@ -285,6 +292,13 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt: &byJwtSigned,
+					},
+				}
+				return result, nil
+			} else {
+				result := &NetworkCreateResult{
+					Error: &NetworkCreateResultError{
+						Message: "Account might already exist. Please log in again.",
 					},
 				}
 				return result, nil
