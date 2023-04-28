@@ -16,6 +16,7 @@ import (
 
 
 var routes = []*router.Route{
+	router.NewRoute("GET", "/health", handlers.Health),
 	router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
 	router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
 	router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),

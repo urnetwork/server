@@ -9,9 +9,11 @@ RUN apt-get update && apt-get install -y \
 RUN update-ca-certificates
 
 COPY bin/$TARGETPLATFORM/api /usr/local/bin/bringyour-api
-ENV BRINGYOUR_HOME /bringyour
+# HOME is /root on our base container
+ENV BRINGYOUR_HOME /root/bringyour
 RUN mkdir -p $BRINGYOUR_HOME
-RUN echo -n "canary" > $BRINGYOUR_HOME/.env
+# note the .env and .settings.yml are typically from the mounted keys home
+# RUN echo -n "canary" > $BRINGYOUR_HOME/.env
 RUN echo -n "2023.01.1-local" > $BRINGYOUR_HOME/.version
 
 # fixme copy .env and .version into the BRINGYOUR_HOME dir

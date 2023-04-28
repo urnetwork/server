@@ -57,12 +57,30 @@ func (self *EnvResolver) resolve() {
 	defer self.mutex.Unlock()
 
 	if !self.resolved {
+		self.loadEnvSettings()
 		envName := LatestEnv()
 		version := LatestVersion()
 		self.envName = &envName
 		self.version = &version
 		Logger().Printf("Env: resolved env is \"%s\" and version \"%s\"", envName, version)
 		self.resolved = true
+	}
+}
+func (self *EnvResolver) loadEnvSettings() {
+	// set environment variables
+	settingsObj := LatestEnvSettings()
+	if envObj, ok := settingsObj["env"]; ok {
+		switch v := envObj.(type) {
+		case map[string]interface{}:
+			for key, value := range v {
+				switch w := value.(type) {
+				case string:
+					os.Setenv(key, w)
+				default:
+					Logger().Printf("Env settings unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
+				}
+			}
+		}
 	}
 }
 
@@ -158,12 +176,17 @@ func (self *SimpleResource) Parse() map[string]interface{} {
 	if self.parsedObj != nil {
 		return *self.parsedObj
 	}
-	bytes, err := os.ReadFile(self.resPath)
+	var bytes []byte
+	var err error
+	bytes, err = os.ReadFile(self.resPath)
 	if err != nil {
 		panic(err)
 	}
 	obj := map[string]interface{}{}
-	yaml.Unmarshal(bytes, &obj)
+	err = yaml.Unmarshal(bytes, &obj)
+	if err != nil {
+		panic(err)
+	}
 	self.parsedObj = &obj
 	return obj
 }
@@ -285,27 +308,63 @@ func KeysHome() string {
 }
 
 
+func envValuePath(name string) (string, error) {
+	valuePath := path.Join(BringYourHome(), name)
+	if _, err := os.Stat(valuePath); err == nil {
+		return valuePath, nil
+	}
+	valuePath = path.Join(KeysHome(), name)
+	if _, err := os.Stat(valuePath); err == nil {
+		return valuePath, nil
+	}
+	return "", errors.New(fmt.Sprintf("Env value \"%s\" does not exist", name))
+}
+
+func envValueString(name string, defaultValue string) string {
+	valuePath, err := envValuePath(name)
+	if err != nil {
+		return defaultValue
+	}
+	bytes, err := os.ReadFile(valuePath)
+	if err != nil {
+		return defaultValue
+	}
+	return strings.TrimSpace(string(bytes))
+}
+
+func envValueYml(name string, defaultValue map[string]interface{}) map[string]interface{} {
+	valuePath, err := envValuePath(name)
+	if err != nil {
+		return defaultValue
+	}
+	bytes, err := os.ReadFile(valuePath)
+	if err != nil {
+		return defaultValue
+	}
+	obj := map[string]interface{}{}
+	err = yaml.Unmarshal(bytes, &obj)
+	if err != nil {
+		return defaultValue
+	}
+	return obj
+}
+
+
 func LatestEnv() string {
 	// env var BRINGYOUR_HOME
 	// (default ~/bringyour)
 	// look for $BRINGYOUR_HOME/.env
 	// if not, default "local"
 
-	envPath := path.Join(BringYourHome(), ".env")
-	bytes, err := os.ReadFile(envPath)
-	if err == nil {
-		return strings.TrimSpace(string(bytes))
-	}
-	return DefaultEnv
+	return envValueString(".env", DefaultEnv)
 }
 
 func LatestVersion() string {
-	envPath := path.Join(BringYourHome(), ".version")
-	bytes, err := os.ReadFile(envPath)
-	if err == nil {
-		return strings.TrimSpace(string(bytes))
-	}
-	return DefaultVersion
+	return envValueString(".version", DefaultVersion)
+}
+
+func LatestEnvSettings() map[string]interface{} {
+	return envValueYml(".settings.yml", map[string]interface{}{})
 }
 
 func LatestBasePath(keysType KeysType) string {

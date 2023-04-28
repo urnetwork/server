@@ -6,6 +6,21 @@ import (
 )
 
 
+/*
+Use manual editing to fix or backport changes.
+
+To list all tables in Postgres:
+
+```
+SELECT * FROM pg_catalog.pg_tables
+WHERE schemaname NOT IN  ('pg_catalog', 'information_schema')
+```
+
+
+*/
+
+
+
 type SqlMigration struct {
 	sql string
 }
