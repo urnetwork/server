@@ -1,2 +1,6 @@
 **/bin
 **/.DS_Store
+
+# binaries
+bringyourctl/bringyourctl
+api/api

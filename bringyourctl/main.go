@@ -1,11 +1,11 @@
 package main
 
 import (
-	// "flag"
     "fmt"
     "os"
-    "strconv"
     "encoding/json"
+
+    "github.com/docopt/docopt-go"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -14,116 +14,132 @@ import (
 	"bringyour.com/bringyour/ulid"
 )
 
-// todo db migrate
-// todo search <realm> <type> add <value>
-// todo search <realm> <type> around <distance> <value>
-// todo search <realm> <type> remove <value>
-// todo search <realm> <type> clear
-// todo stats compute
-// todo stats export
+
+type CtlArgs struct {
+	SearchRealm string `docopt:"--realm"`
+	SearchType string `docopt:"--type"`
+	SearchDistance int `docopt:"--distance"`
+}
 
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		return
+		usage := `BringYour control.
+
+Usage:
+  bringyourctl db migrate
+  bringyourctl search --realm=<realm> --type=<type> add <value>
+  bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
+  bringyourctl search --realm=<realm> --type=<type> remove <value>
+  bringyourctl search --realm=<realm> --type=<type> clear
+  bringyourctl stats compute
+  bringyourctl stats export
+  bringyourctl stats import
+  bringyourctl stats add
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+  -r --realm=<realm>  Search realm.
+  -t --type=<type>    Search type.
+  -d, --distance=<distance>  Search distance.`
+
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.Env.Version())
+	if err != nil {
+		panic(err)
 	}
 
-	switch os.Args[1] {
-	case "db":
-		commandDb()
-	case "search":
-		commandSearch()
-	case "stats":
-		commandStats()
+	args := CtlArgs{}
+	opts.Bind(&args)
+
+	if db, _ := opts.Bool("db"); db {
+		if _, migrate := opts["migrate"]; migrate {
+			dbMigrate(opts, args)
+		}
+	} else if search, _ := opts.Bool("search"); search {
+		if add, _ := opts.Bool("add"); add {
+			searchAdd(opts, args)
+		} else if around, _ := opts.Bool("around"); around {
+			searchAround(opts, args)
+		} else if remove, _ := opts.Bool("remove"); remove {
+			searchRemove(opts, args)
+		} else if clear, _ := opts.Bool("clear"); clear {
+			searchClear(opts, args)
+		}
+	} else if stats, _ := opts.Bool("stats"); stats {
+		if compute, _ := opts.Bool("compute"); compute {
+			statsCompute(opts, args)
+		} else if export, _ := opts.Bool("export"); export {
+			statsExport(opts, args)
+		} else if import_, _ := opts.Bool("import"); import_ {
+			statsImport(opts, args)
+		} else if add, _ := opts.Bool("add"); add {
+			statsAdd(opts, args)
+		}
 	}
 }
 
-func usage() {
-	fmt.Printf("Invalid command\n")
+
+func dbMigrate(opts docopt.Opts, args CtlArgs) {
+	bringyour.Logger().Printf("Applying DB migrations ...\n")
+	bringyour.ApplyDbMigrations()
 }
 
 
-func commandDb() {
-	if len(os.Args) < 3 {
-		usage()
-		return
-	}
-
-	switch os.Args[2] {
-	case "migrate":
-		bringyour.ApplyDbMigrations()
-	default:
-		usage()
-	}
-}
-
-func commandSearch() {
-
-	// remove the router prefix
-	args := os.Args[2:]
-	fmt.Printf("ARGS %s\n", args)
-
-	if len(args) < 3 {
-		usage()
-		return
-	}
-
-	realm := args[0]
-	searchType := args[1]
+func searchAdd(opts docopt.Opts, args CtlArgs) {
 	searchService := search.NewSearch(
-		realm,
-		search.SearchType(searchType),
+		args.SearchRealm,
+		search.SearchType(args.SearchType),
 	)
 
-	switch args[2] {
-	case "add":
-		value := args[3]
-		valueId := ulid.Make()
-		searchService.Add(value, valueId)
-	case "around":
-		distance, _ := strconv.Atoi(args[3])
-		value := args[4]
-		searchResults := searchService.Around(value, distance)
-		for _, searchResult := range searchResults {
-			fmt.Printf("%d %s %s\n", searchResult.ValueDistance, searchResult.Value, searchResult.ValueId)
-		}
-	case "remove":
-		// value := args[2]
-	case "clear":
-	default:
-		usage()
-	}
+	value, _ := opts.String("<value>")
+	valueId := ulid.Make()
+	searchService.Add(value, valueId)
+}
 
+func searchAround(opts docopt.Opts, args CtlArgs) {
+	searchService := search.NewSearch(
+		args.SearchRealm,
+		search.SearchType(args.SearchType),
+	)
+
+	value, _ := opts.String("<value>")
+	searchResults := searchService.Around(value, args.SearchDistance)
+	for _, searchResult := range searchResults {
+		fmt.Printf("%d %s %s\n", searchResult.ValueDistance, searchResult.Value, searchResult.ValueId)
+	}
+}
+
+func searchRemove(opts docopt.Opts, args CtlArgs) {
+	// fixme
+}
+
+func searchClear(opts docopt.Opts, args CtlArgs) {
+	// fixme
 }
 
 
-func commandStats() {
-	if len(os.Args) < 3 {
-		usage()
-		return
-	}
+func statsCompute(opts docopt.Opts, args CtlArgs) {
+	stats := model.ComputeStats(90)
+	statsJson, err := json.MarshalIndent(stats, "", "  ")
+    bringyour.Raise(err)
+    bringyour.Logger().Printf("%s\n", statsJson)
+}
 
-	switch os.Args[2] {
-	case "compute":
-		stats := model.ComputeStats(90)
+func statsExport(opts docopt.Opts, args CtlArgs) {
+	stats := model.ComputeStats(90)
+	model.ExportStats(stats)
+}
+
+func statsImport(opts docopt.Opts, args CtlArgs) {
+	stats := model.GetExportedStats(90)
+	if stats != nil {
 		statsJson, err := json.MarshalIndent(stats, "", "  ")
 	    bringyour.Raise(err)
 	    bringyour.Logger().Printf("%s\n", statsJson)
-	case "export":
-		stats := model.ComputeStats(90)
-		model.ExportStats(stats)
-	case "import":
-		stats := model.GetExportedStats(90)
-		if stats != nil {
-			statsJson, err := json.MarshalIndent(stats, "", "  ")
-		    bringyour.Raise(err)
-		    bringyour.Logger().Printf("%s\n", statsJson)
-		}
-	case "add":
-		controller.AddSampleEvents(4 * 60)
-	default:
-		usage()
 	}
+}
+
+func statsAdd(opts docopt.Opts, args CtlArgs) {
+	controller.AddSampleEvents(4 * 60)
 }
 
