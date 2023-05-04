@@ -2,5 +2,6 @@
 **/.DS_Store
 
 # binaries
+client/build
 bringyourctl/bringyourctl
 api/api
