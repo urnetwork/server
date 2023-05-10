@@ -2,7 +2,8 @@
 
 
 
-all: clean build_android build_ios
+all: clean build_android 
+	#build_ios
 
 clean:
 	rm -rf build
@@ -14,7 +15,7 @@ build_android:
 build_ios:
 	mkdir -p build/ios
 	# -prefix com.bringyour.network.client
-	gomobile bind -target=ios -iosversion 15.0 -o build/ios/Client.xcframework
+	gomobile bind -target=ios -iosversion 14.0 -o build/ios/Client.xcframework
 
 init:
 	go install golang.org/x/mobile/cmd/gomobile@latest
