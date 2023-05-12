@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/mobile/gl"
 
+	// "bringyour.com/client"
 	"bringyour.com/client/endpoint"
 )
 
@@ -25,10 +26,19 @@ type GLViewController interface {
 	Stop()
 }
 
+type GLViewDrawController interface {
+	draw(g gl.Context)
+	drawLoopOpen(endpoints *endpoint.Endpoints)
+	drawLoopClose(endpoints *endpoint.Endpoints)
+}
 
+
+// fixme set the clear color
 type glViewController struct {
+	glInitialized bool
 	glContext gl.Context
 	glWorker gl.Worker
+
 	// unix millis
 	drawStartTime int64
 
@@ -43,66 +53,106 @@ type glViewController struct {
 	loopMutex sync.Mutex
 	loopStop *context.CancelFunc
 
+	drawController GLViewDrawController
 }
+
+func newGLViewController() *glViewController {
+	return &glViewController{
+		glInitialized: false,
+		width: 0,
+		height: 0,
+		frameRate: 0,
+		updateEvents: make(chan func(), 64),
+	}
+}
+
 // mirror GLSurfaceView.Renderer
 func (self *glViewController) SurfaceCreated() {
 	self.glContext, self.glWorker = gl.NewContext()
+	// self.glInitialized = true
 }
 func (self *glViewController) SurfaceChanged(width int32, height int32) {
-	self.width = width
-	self.height = height
+	self.drawLoopUpdate(func() {
+		self.width = width
+		self.height = height
+	})
 }
 func (self *glViewController) DrawFrame() {
+	// if !self.glInitialized {
+	// 	self.glContext, self.glWorker = gl.NewContext()
+	// 	self.glInitialized = true
+	// }
+
 	self.drawStartTime = time.Now().UnixMilli()
-	self.draw()
+	if self.drawController != nil {
+		self.drawController.draw(self.glContext)
+	}
 
 	workAvailable := self.glWorker.WorkAvailable()
+	drainLoop:
 	for {
 		select {
 		case <-workAvailable:
 			self.glWorker.DoWork()
 		// use default for non-blocking receive
 		default:
-			break
+			break drainLoop
 		}
 	}
 }
-func (self *glViewController) draw() {
-	// composited types should redefine this
-}
 
-func (self *glViewController) drawLoopOpen(endpoints *endpoint.Endpoints) {
-	self.frameRate = 24
-}
+// // fixme figure out how to use the composed struct "override"
+// func (self *glViewController) draw(g gl.Context) {
+// 	// composited types should redefine this
+// 	client.Logger().Printf("draw base\n")
 
-func (self *glViewController) drawLoopClose(endpoints *endpoint.Endpoints) {
-}
+// 	g.ClearColor(255, 0, 0, 1.0)
+// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+// }
+
+// func (self *glViewController) drawLoopOpen(endpoints *endpoint.Endpoints) {
+// 	self.frameRate = 24
+// 	// composited types should redefine this
+// }
+
+// func (self *glViewController) drawLoopClose(endpoints *endpoint.Endpoints) {
+// 	// composited types should redefine this
+// }
 
 func (self *glViewController) drawLoopUpdate(change func()) {
-	self.updateEvents <- change
+	select {
+	    case self.updateEvents <- change:
+	    	// ok
+	    default:
+	    	// dropped due to back pressure
+	}
 }
 
 
 func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.Endpoints, callback GLViewCallback) {
 	loop := func() {
+		loop:
 		for {
 			self.drawStartTime = time.Now().UnixMilli()
-			self.draw()
+			// self.draw()
 			if callback != nil {
 		  		callback.Update()
 		  	}
 
 			for {
 				drainUpdateEvents := func() {
+					drainLoop:
 					for {
 						select {
 						case change := <-self.updateEvents:
 					  		change()
 					  	default:
-					  		break
+					  		break drainLoop
 						}
 					}
 				}
+
+				drainUpdateEvents()
 
 				if 0 < self.frameRate {
 					now := time.Now().UnixMilli()
@@ -114,7 +164,7 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 					timeout := nextDrawTime - now
 					select {
 					case <-ctx.Done():
-				  		return
+				  		break loop
 				  	case change := <-self.updateEvents:
 				  		change()
 				  		drainUpdateEvents()
@@ -125,7 +175,7 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 				} else {
 					select {
 					case <-ctx.Done():
-				  		return
+				  		break loop
 				  	case change := <-self.updateEvents:
 				  		change()
 				  		drainUpdateEvents()
@@ -136,9 +186,11 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 		}
 	}
 
-	self.drawLoopOpen(endpoints)
-	loop()
-	self.drawLoopClose(endpoints)
+	if self.drawController != nil {
+		self.drawController.drawLoopOpen(endpoints)
+		loop()
+		self.drawController.drawLoopClose(endpoints)
+	}
 }
 func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLViewCallback) {
 	self.loopMutex.Lock()
@@ -149,6 +201,7 @@ func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLVi
 		self.loopStop = &stop
 
 		go func() {
+			// see https://github.com/golang/go/wiki/LockOSThread
 			runtime.LockOSThread()
 			self.drawLoop(ctx, endpoints, callback)
 		}()

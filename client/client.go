@@ -2,6 +2,8 @@ package client
 
 
 import (
+	"log"
+	"fmt"
 // 	"runtime"
 // 	"time"
 // 	"sync"
@@ -9,6 +11,21 @@ import (
 
 // 	"golang.org/x/mobile/gl"
 )
+
+
+var logger = log.Default()
+
+func Logger() *log.Logger {
+	return logger
+}
+
+func LogFn(tag string) func(string, ...any) {
+	return func(format string, a ...any) {
+		m := fmt.Sprintf(format, a...)
+		Logger().Printf("%s: %s\n", tag, m)
+	}
+}
+
 
 
 // fixme
