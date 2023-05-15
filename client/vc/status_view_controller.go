@@ -45,7 +45,7 @@ func (self *StatusViewController) draw(g gl.Context) {
 
 	svLog("draw")
 
-	g.ClearColor(255, 0, 0, 1.0)
+	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 
 	// g.glBegin(gl.GL_QUADS);

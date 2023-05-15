@@ -29,7 +29,7 @@ func NewConnectViewController() *ConnectViewController {
 func (self *ConnectViewController) draw(g gl.Context) {
 	cvcLog("draw")
 
-	g.ClearColor(0, 0, 255, 1.0)
+	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 }
 

@@ -29,7 +29,7 @@ func NewProvideViewController() *ProvideViewController {
 func (self *ProvideViewController) draw(g gl.Context) {
 	pvcLog("draw")
 
-	g.ClearColor(0, 255, 0, 1.0)
+	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 }
 

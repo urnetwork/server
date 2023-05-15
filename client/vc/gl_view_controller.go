@@ -9,9 +9,12 @@ import (
 
 	"golang.org/x/mobile/gl"
 
-	// "bringyour.com/client"
+	"bringyour.com/client"
 	"bringyour.com/client/endpoint"
 )
+
+
+var glvcLog = client.LogFn("gl_view_controller")
 
 
 type GLViewCallback interface {
@@ -19,14 +22,17 @@ type GLViewCallback interface {
 }
 
 type GLViewController interface {
+	// assumes an opaque surface
+	SetBackgroundColor(r, g, b float32)
 	SurfaceCreated()
-	SurfaceChanged(width int32, height int32)
+	SurfaceChanged(width, height int32)
 	DrawFrame()
 	Start(endpoints *endpoint.Endpoints, callback GLViewCallback)
 	Stop()
 }
 
-type GLViewDrawController interface {
+
+type glViewDrawController interface {
 	draw(g gl.Context)
 	drawLoopOpen(endpoints *endpoint.Endpoints)
 	drawLoopClose(endpoints *endpoint.Endpoints)
@@ -35,35 +41,47 @@ type GLViewDrawController interface {
 
 // fixme set the clear color
 type glViewController struct {
-	glInitialized bool
 	glContext gl.Context
 	glWorker gl.Worker
+
+	drawMutex sync.Mutex
+
+	loopStop *context.CancelFunc
+	drawController glViewDrawController
 
 	// unix millis
 	drawStartTime int64
 
+	updateNotice chan bool
+
+	// draw state. Change this using `drawUpdate`
+	bgRed float32
+	bgBlue float32
+	bgGreen float32
 	width int32
 	height int32
-	
 	frameRate float32
 	
-	updateEvents chan func()
-
-
-	loopMutex sync.Mutex
-	loopStop *context.CancelFunc
-
-	drawController GLViewDrawController
+	
 }
 
 func newGLViewController() *glViewController {
 	return &glViewController{
-		glInitialized: false,
 		width: 0,
 		height: 0,
 		frameRate: 0,
-		updateEvents: make(chan func(), 64),
+		updateNotice: make(chan bool, 1),
 	}
+}
+
+func (self *glViewController) SetBackgroundColor(r, g, b float32) {
+	glvcLog("set background color (%.1f, %.1f, %.1f)", r, g, b)
+
+	self.drawUpdate(func() {
+		self.bgRed = r
+		self.bgGreen = g
+		self.bgBlue = b
+	})
 }
 
 // mirror GLSurfaceView.Renderer
@@ -72,7 +90,7 @@ func (self *glViewController) SurfaceCreated() {
 	// self.glInitialized = true
 }
 func (self *glViewController) SurfaceChanged(width int32, height int32) {
-	self.drawLoopUpdate(func() {
+	self.drawUpdate(func() {
 		self.width = width
 		self.height = height
 	})
@@ -82,6 +100,9 @@ func (self *glViewController) DrawFrame() {
 	// 	self.glContext, self.glWorker = gl.NewContext()
 	// 	self.glInitialized = true
 	// }
+
+	self.drawMutex.Lock()
+	defer self.drawMutex.Unlock()
 
 	self.drawStartTime = time.Now().UnixMilli()
 	if self.drawController != nil {
@@ -119,12 +140,16 @@ func (self *glViewController) DrawFrame() {
 // 	// composited types should redefine this
 // }
 
-func (self *glViewController) drawLoopUpdate(change func()) {
+func (self *glViewController) drawUpdate(change func()) {
+	self.drawMutex.Lock()
+	defer self.drawMutex.Unlock()
+
+	change()
+
 	select {
-	    case self.updateEvents <- change:
-	    	// ok
-	    default:
-	    	// dropped due to back pressure
+	case self.updateNotice <- true:
+	default:
+		// already notified
 	}
 }
 
@@ -134,26 +159,12 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 		loop:
 		for {
 			self.drawStartTime = time.Now().UnixMilli()
-			// self.draw()
 			if callback != nil {
 		  		callback.Update()
 		  	}
 
+		  	wait:
 			for {
-				drainUpdateEvents := func() {
-					drainLoop:
-					for {
-						select {
-						case change := <-self.updateEvents:
-					  		change()
-					  	default:
-					  		break drainLoop
-						}
-					}
-				}
-
-				drainUpdateEvents()
-
 				if 0 < self.frameRate {
 					now := time.Now().UnixMilli()
 					nextDrawTime := self.drawStartTime + int64(1000 / self.frameRate)
@@ -165,21 +176,17 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 					select {
 					case <-ctx.Done():
 				  		break loop
-				  	case change := <-self.updateEvents:
-				  		change()
-				  		drainUpdateEvents()
-				  		// continue
+				  	case <-self.updateNotice:
+				  		continue wait
 				  	case <-time.After(time.Duration(timeout) * time.Millisecond):
-				  		// continue
+				  		continue wait
 					}
 				} else {
 					select {
 					case <-ctx.Done():
 				  		break loop
-				  	case change := <-self.updateEvents:
-				  		change()
-				  		drainUpdateEvents()
-				  		// continue
+				  	case <-self.updateNotice:
+				  		continue wait
 					}
 				}
 			}
@@ -193,8 +200,8 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 	}
 }
 func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLViewCallback) {
-	self.loopMutex.Lock()
-	defer self.loopMutex.Unlock()
+	self.drawMutex.Lock()
+	defer self.drawMutex.Unlock()
 
 	if self.loopStop == nil {
 		ctx, stop := context.WithCancel(context.Background())
@@ -208,8 +215,8 @@ func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLVi
 	}
 }
 func (self *glViewController) Stop() {
-	self.loopMutex.Lock()
-	defer self.loopMutex.Unlock()
+	self.drawMutex.Lock()
+	defer self.drawMutex.Unlock()
 
 	if self.loopStop != nil {
 		(*self.loopStop)()
