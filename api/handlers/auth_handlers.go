@@ -17,12 +17,12 @@ func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithJson(controller.AuthLoginWithPassword, w, r)
 }
 
-func AuthValidate(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(model.AuthValidate, w, r)
+func AuthVerify(w http.ResponseWriter, r *http.Request) {
+    router.WrapWithJson(model.AuthVerify, w, r)
 }
 
-func AuthValidateSend(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthValidateSend, w, r)
+func AuthVerifySend(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithJson(controller.AuthVerifySend, w, r)
 }
 
 func AuthPasswordReset(w http.ResponseWriter, r *http.Request) {

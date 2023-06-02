@@ -49,7 +49,7 @@ type NetworkCreateArgs struct {
 
 type NetworkCreateResult struct {
 	Network *NetworkCreateResultNetwork `json:"network,omitempty"`
-	ValidationRequired *NetworkCreateResultValidation `json:"validationRequired,omitempty"`
+	VerificationRequired *NetworkCreateResultVerification `json:"verificationRequired,omitempty"`
 	Error *NetworkCreateResultError `json:"error,omitempty"`
 }
 
@@ -58,7 +58,7 @@ type NetworkCreateResultNetwork struct {
 	NetworkName *string `json:"networkName,omitempty"`
 }
 
-type NetworkCreateResultValidation struct {
+type NetworkCreateResultVerification struct {
 	UserAuth string `json:"userAuth"`
 }
 
@@ -180,7 +180,7 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 			networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
 
 			result := &NetworkCreateResult{
-				ValidationRequired: &NetworkCreateResultValidation{
+				VerificationRequired: &NetworkCreateResultVerification{
 					UserAuth: *userAuth,
 				},
 				Network: &NetworkCreateResultNetwork{

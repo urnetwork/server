@@ -334,12 +334,12 @@ type AuthLoginWithPasswordArgs struct {
 }
 
 type AuthLoginWithPasswordResult struct {
-	ValidationRequired *AuthLoginWithPasswordResultValidation `json:"validationRequired,omitempty"`
+	VerificationRequired *AuthLoginWithPasswordResultVerification `json:"verificationRequired,omitempty"`
 	Network *AuthLoginWithPasswordResultNetwork `json:"network,omitempty"`
 	Error *AuthLoginWithPasswordResultError `json:"error,omitempty"`
 }
 
-type AuthLoginWithPasswordResultValidation struct {
+type AuthLoginWithPasswordResultVerification struct {
 	UserAuth string `json:"userAuth"`
 }
 
@@ -375,7 +375,7 @@ func AuthLoginWithPassword(
 	var userId bringyour.PgUUID
 	var passwordHash *[]byte
 	var passwordSalt *[]byte
-	var userValidated bool
+	var userVerified bool
 	var networkId bringyour.PgUUID
 	var networkName *string
 
@@ -387,7 +387,7 @@ func AuthLoginWithPassword(
 					network_user.user_id AS user_id,
 					network_user.password_hash AS password_hash,
 					network_user.password_salt AS password_salt,
-					network_user.validated AS validated,
+					network_user.verified AS verified,
 					network.network_id AS network_id,
 					network.network_name AS network_name
 				FROM network_user
@@ -399,7 +399,7 @@ func AuthLoginWithPassword(
 		bringyour.With(result, err, func() {
 			if result.Next() {
 				bringyour.Raise(
-					result.Scan(&userId, &passwordHash, &passwordSalt, &userValidated, &networkId, &networkName),
+					result.Scan(&userId, &passwordHash, &passwordSalt, &userVerified, &networkId, &networkName),
 				)
 			}
 		})
@@ -412,7 +412,7 @@ func AuthLoginWithPassword(
 	bringyour.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), *passwordSalt)
 	if bytes.Equal(*passwordHash, loginPasswordHash) {
-		if userValidated {
+		if userVerified {
 			SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
 
 			// success
@@ -430,7 +430,7 @@ func AuthLoginWithPassword(
 			return result, nil
 		} else {
 			result := &AuthLoginWithPasswordResult{
-				ValidationRequired: &AuthLoginWithPasswordResultValidation{
+				VerificationRequired: &AuthLoginWithPasswordResultVerification{
 					UserAuth: *userAuth,
 				},
 				Network: &AuthLoginWithPasswordResultNetwork{
@@ -453,30 +453,30 @@ func AuthLoginWithPassword(
 
 
 
-type AuthValidateArgs struct {
+type AuthVerifyArgs struct {
 	UserAuth string `json:"userAuth"`
-	ValidateCode string `json:"validateCode"`
+	VerifyCode string `json:"verifyCode"`
 }
 
-type AuthValidateResult struct {
-	Network *AuthValidateResultNetwork `json:"network,omitempty"`
-	Error *AuthValidateResultError `json:"error,omitempty"`
+type AuthVerifyResult struct {
+	Network *AuthVerifyResultNetwork `json:"network,omitempty"`
+	Error *AuthVerifyResultError `json:"error,omitempty"`
 }
 
-type AuthValidateResultNetwork struct {
+type AuthVerifyResultNetwork struct {
 	ByJwt string `json:"byJwt"`
 }
 
-type AuthValidateResultError struct {
+type AuthVerifyResultError struct {
 	Message string `json:"message"`
 }
 
-func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*AuthValidateResult, error) {
-	userAuth, _ := NormalUserAuthV1(&validate.UserAuth)
+func AuthVerify(verify AuthVerifyArgs, session *session.ClientSession) (*AuthVerifyResult, error) {
+	userAuth, _ := NormalUserAuthV1(&verify.UserAuth)
 
 	if userAuth == nil {
-		result := &AuthValidateResult{
-			Error: &AuthValidateResultError{
+		result := &AuthVerifyResult{
+			Error: &AuthVerifyResultError{
 				Message: "Invalid user auth.",
 			},
 		}
@@ -489,10 +489,10 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 	}
 
 	// 4 hours
-	validateValidSeconds := 60 * 60 * 4
+	verifyValidSeconds := 60 * 60 * 4
 
 	var userId bringyour.PgUUID
-	var userAuthValidateId bringyour.PgUUID
+	var userAuthVerifyId bringyour.PgUUID
 	var networkId bringyour.PgUUID
 	var networkName *string
 
@@ -502,33 +502,33 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 			`
 				SELECT
 					network_user.user_id AS user_id,
-					user_auth_validate.user_auth_validate_id AS user_auth_validate_id,
+					user_auth_verify.user_auth_verify_id AS user_auth_verify_id,
 					network.network_id AS network_id,
 					network.network_name AS network_name
 				FROM network_user
-				INNER JOIN user_auth_validate ON
-					user_auth_validate.user_id = network_user.user_id AND 
-					user_auth_validate.validate_code = $1 AND
+				INNER JOIN user_auth_verify ON
+					user_auth_verify.user_id = network_user.user_id AND 
+					user_auth_verify.verify_code = $1 AND
 					used = false AND
-					now() - INTERVAL '1 seconds' * $2 <= user_auth_validate.validate_time
+					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $3
 			`,
-			validate.ValidateCode,
-			validateValidSeconds,
+			verify.VerifyCode,
+			verifyValidSeconds,
 			userAuth,
 		)
 		bringyour.With(result, err, func() {
 			if result.Next() {
 				bringyour.Raise(
-					result.Scan(&userId, &userAuthValidateId, &networkId, &networkName),
+					result.Scan(&userId, &userAuthVerifyId, &networkId, &networkName),
 				)
 			}
 		})
 	})
 
-	if userAuthValidateId.Valid {
-		// validated
+	if userAuthVerifyId.Valid {
+		// verified
 
 		bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
 			var err error
@@ -537,7 +537,7 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 				context,
 				`
 					UPDATE network_user
-					SET validated = true
+					SET verified = true
 					WHERE user_id = $1
 				`,
 				userId,
@@ -547,11 +547,11 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 			_, err = tx.Exec(
 				context,
 				`
-					UPDATE user_auth_validate
+					UPDATE user_auth_verify
 					SET used = true
-					WHERE user_auth_validate_id = $1
+					WHERE user_auth_verify_id = $1
 				`,
-				userAuthValidateId,
+				userAuthVerifyId,
 			)
 			bringyour.Raise(err)
 		})
@@ -563,15 +563,15 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 			*ulid.FromPg(userId),
 			*networkName,
 		)
-		result := &AuthValidateResult{
-			Network: &AuthValidateResultNetwork{
+		result := &AuthVerifyResult{
+			Network: &AuthVerifyResultNetwork{
 				ByJwt: byJwt.Sign(),
 			},
 		}
 		return result, nil
 	} else {
-		result := &AuthValidateResult{
-			Error: &AuthValidateResultError{
+		result := &AuthVerifyResult{
+			Error: &AuthVerifyResultError{
 				Message: "Invalid code.",
 			},
 		}
@@ -582,28 +582,28 @@ func AuthValidate(validate AuthValidateArgs, session *session.ClientSession) (*A
 
 
 
-type AuthValidateCreateCodeArgs struct {
+type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"userAuth"`
 }
 
-type AuthValidateCreateCodeResult struct {
-	ValidateCode *string `json:"validateCode,omitempty"`
-	Error *AuthValidateCreateCodeError `json:"error,omitempty"`
+type AuthVerifyCreateCodeResult struct {
+	VerifyCode *string `json:"verifyCode,omitempty"`
+	Error *AuthVerifyCreateCodeError `json:"error,omitempty"`
 }
 
-type AuthValidateCreateCodeError struct {
+type AuthVerifyCreateCodeError struct {
 	Message string `json:"message"`
 }
 
-func AuthValidateCreateCode(
-	validateCreateCode AuthValidateCreateCodeArgs,
+func AuthVerifyCreateCode(
+	verifyCreateCode AuthVerifyCreateCodeArgs,
 	session *session.ClientSession,
-) (*AuthValidateCreateCodeResult, error) {
-	userAuth, _ := NormalUserAuthV1(&validateCreateCode.UserAuth)
+) (*AuthVerifyCreateCodeResult, error) {
+	userAuth, _ := NormalUserAuthV1(&verifyCreateCode.UserAuth)
 
 	if userAuth == nil {
-		result := &AuthValidateCreateCodeResult{
-			Error: &AuthValidateCreateCodeError{
+		result := &AuthVerifyCreateCodeResult{
+			Error: &AuthVerifyCreateCodeError{
 				Message: "Invalid user auth.",
 			},
 		}
@@ -611,7 +611,7 @@ func AuthValidateCreateCode(
 	}
 
 	created := false
-	var validateCode string
+	var verifyCode string
 
 	bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
 		var result bringyour.PgResult
@@ -639,7 +639,7 @@ func AuthValidateCreateCode(
 			_, err = tx.Exec(
 				context,
 				`
-					UPDATE user_auth_validate
+					UPDATE user_auth_verify
 					SET used = true
 					WHERE user_id = $1
 				`,
@@ -648,26 +648,26 @@ func AuthValidateCreateCode(
 			bringyour.Raise(err)
 
 			created = true
-			userAuthValidateId := ulid.Make()
-			validateCode = createValidateCode()
+			userAuthVerifyId := ulid.Make()
+			verifyCode = createVerifyCode()
 			_, err = tx.Exec(
 				context,
 				`
-					INSERT INTO user_auth_validate
-					(user_auth_validate_id, user_id, validate_code)
+					INSERT INTO user_auth_verify
+					(user_auth_verify_id, user_id, verify_code)
 					VALUES ($1, $2, $3)
 				`,
-				ulid.ToPg(&userAuthValidateId),
+				ulid.ToPg(&userAuthVerifyId),
 				userId,
-				validateCode,
+				verifyCode,
 			)
 			bringyour.Raise(err)
 		}
 	})
 
 	if created {
-		result := &AuthValidateCreateCodeResult{
-			ValidateCode: &validateCode,
+		result := &AuthVerifyCreateCodeResult{
+			VerifyCode: &verifyCode,
 		}
 		return result, nil
 	}

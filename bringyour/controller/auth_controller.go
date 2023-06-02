@@ -32,69 +32,69 @@ func AuthLoginWithPassword(
 	session *session.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
 	result, err := model.AuthLoginWithPassword(loginWithPassword, session)
-	// if validation required, send it
-	if result != nil && result.ValidationRequired != nil {
-		validateSend := AuthValidateSendArgs{
-			UserAuth: result.ValidationRequired.UserAuth,
+	// if verification required, send it
+	if result != nil && result.VerificationRequired != nil {
+		verifySend := AuthVerifySendArgs{
+			UserAuth: result.VerificationRequired.UserAuth,
 		}
-		AuthValidateSend(validateSend, session)
+		AuthVerifySend(verifySend, session)
 	}
 	return result, err
 }
 
 
-type AuthValidateSendArgs struct {
+type AuthVerifySendArgs struct {
 	UserAuth string `json:"userAuth"`
 }
 
-type AuthValidateSendResult struct {
+type AuthVerifySendResult struct {
 	UserAuth string `json:"userAuth"`
 }
 
-func AuthValidateSend(
-	validateSend AuthValidateSendArgs,
+func AuthVerifySend(
+	verifySend AuthVerifySendArgs,
 	session *session.ClientSession,
-) (*AuthValidateSendResult, error) {
-	userAuth, userAuthType := model.NormalUserAuthV1(&validateSend.UserAuth)
+) (*AuthVerifySendResult, error) {
+	userAuth, userAuthType := model.NormalUserAuthV1(&verifySend.UserAuth)
 
-	validateCreateCode := model.AuthValidateCreateCodeArgs{
+	verifyCreateCode := model.AuthVerifyCreateCodeArgs{
 		UserAuth: *userAuth,
 	}
-	validateCreateCodeResult, err := model.AuthValidateCreateCode(validateCreateCode, session)
+	verifyCreateCodeResult, err := model.AuthVerifyCreateCode(verifyCreateCode, session)
 	if err != nil {
 		return nil, err
 	}
-	if validateCreateCodeResult.ValidateCode != nil {	
+	if verifyCreateCodeResult.VerifyCode != nil {	
 		switch userAuthType {
 		case model.UserAuthTypeEmail:
 			sendAccountEmail(
 				*userAuth,
 				"Verify your email",
-				createValidateBodyHtml(*validateCreateCodeResult.ValidateCode),
-				createValidateBodyText(*validateCreateCodeResult.ValidateCode),
+				createVerifyBodyHtml(*verifyCreateCodeResult.VerifyCode),
+				createVerifyBodyText(*verifyCreateCodeResult.VerifyCode),
 			)
 		case model.UserAuthTypePhone:
 			sendAccountSms(
 				*userAuth,
-				createValidateBodyText(*validateCreateCodeResult.ValidateCode),
+				createVerifyBodyText(*verifyCreateCodeResult.VerifyCode),
 			)		
 		}
 	}
 
-	result := &AuthValidateSendResult{
+	result := &AuthVerifySendResult{
 		UserAuth: *userAuth,
 	}
 	return result, nil
 }
 
-func createValidateBodyHtml(validateCode string) string {
+func createVerifyBodyHtml(verifyCode string) string {
 	// fixme
-	return fmt.Sprintf("%s", validateCode)
+	return fmt.Sprintf("%s", verifyCode)
 }
 
-func createValidateBodyText(validateCode string) string {
+func createVerifyBodyText(verifyCode string) string {
 	// fixme
-	return fmt.Sprintf("%s", validateCode)
+	return fmt.Sprintf("%s", verifyCode)
 }
 
 

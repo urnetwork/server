@@ -26,6 +26,7 @@ func main() {
 		usage := `BringYour control.
 
 Usage:
+	bringyourctl db version
   bringyourctl db migrate
   bringyourctl search --realm=<realm> --type=<type> add <value>
   bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
@@ -52,7 +53,9 @@ Options:
 	opts.Bind(&args)
 
 	if db, _ := opts.Bool("db"); db {
-		if _, migrate := opts["migrate"]; migrate {
+		if version, _ := opts.Bool("version"); version {
+			dbVersion(opts, args)
+		} else if migrate, _ := opts.Bool("migrate"); migrate {
 			dbMigrate(opts, args)
 		}
 	} else if search, _ := opts.Bool("search"); search {
@@ -76,6 +79,12 @@ Options:
 			statsAdd(opts, args)
 		}
 	}
+}
+
+
+func dbVersion(opts docopt.Opts, args CtlArgs) {
+	version := bringyour.DbVersion()
+	bringyour.Logger().Printf("Current DB version: %d\n", version)
 }
 
 

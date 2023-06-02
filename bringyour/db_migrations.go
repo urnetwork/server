@@ -42,9 +42,7 @@ func newCodeMigration(callback func(context.Context, PgTx)) *CodeMigration {
 }
 
 
-
-
-func ApplyDbMigrations() {
+func DbVersion() int {
 	Tx(func(context context.Context, tx PgTx) {
 		tx.Exec(
 			context,
@@ -61,7 +59,6 @@ func ApplyDbMigrations() {
 
 	var endVersionNumber int
 	Db(func(context context.Context, conn PgConn) {
-		var endVersionNumber int
 		conn.QueryRow(
 			context,
 			`
@@ -72,6 +69,12 @@ func ApplyDbMigrations() {
 		).Scan(&endVersionNumber)
 	})
 
+	return endVersionNumber
+}
+
+
+func ApplyDbMigrations() {
+	endVersionNumber := DbVersion()
 
 	Tx(func(context context.Context, tx PgTx) {
 		tx.Exec(
@@ -294,7 +297,7 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE INDEX user_auth_reset_user_id ON user_auth_reset (user_id, reset_code)
 	`),
-	// validate_code: 4-byte hex 
+	// DROPPED and recreated as `user_auth_verify` (see below)
 	newSqlMigration(`
 		CREATE TABLE user_auth_validate (
 			user_auth_validate_id uuid NOT NULL,
@@ -377,6 +380,27 @@ var migrations = []any{
 	`),
 	newSqlMigration(`
 		CREATE INDEX search_projection_value_id ON search_projection (value_id, alias)
+	`),
+
+	// RENAME `validate` to `verify`
+	newSqlMigration(`
+		ALTER TABLE network_user RENAME COLUMN validated TO verified
+	`),
+	newSqlMigration(`
+		DROP TABLE user_auth_validate
+	`),
+	// verify_code: 4-byte hex 
+	newSqlMigration(`
+		CREATE TABLE user_auth_verify (
+			user_auth_verify_id uuid NOT NULL,
+			user_id uuid NOT NULL,
+			verify_time timestamp NOT NULL DEFAULT now(),
+			verify_code VARCHAR(16) NOT NULL,
+			used BOOL NOT NULL DEFAULT false,
+
+			PRIMARY KEY (user_auth_verify_id),
+			UNIQUE (user_id, verify_code)
+		)
 	`),
 
 }

@@ -79,13 +79,13 @@ func createPasswordSalt() []byte {
 	return passwordSalt
 }
 
-func createValidateCode() string {
-	validateCode := make([]byte, 4)
-	_, err := rand.Read(validateCode)
+func createVerifyCode() string {
+	verifyCode := make([]byte, 4)
+	_, err := rand.Read(verifyCode)
 	if err != nil {
 		panic(err)
 	}
-	return hex.EncodeToString(validateCode)
+	return hex.EncodeToString(verifyCode)
 }
 
 func createResetCode() string {

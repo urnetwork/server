@@ -13,12 +13,12 @@ func NetworkCreate(
 	session *session.ClientSession,
 ) (*model.NetworkCreateResult, error) {
 	result, err := model.NetworkCreate(networkCreate, session)
-	// if validation required, send it
-	if result != nil && result.ValidationRequired != nil {
-		validateSend := AuthValidateSendArgs{
-			UserAuth: result.ValidationRequired.UserAuth,
+	// if verification required, send it
+	if result != nil && result.VerificationRequired != nil {
+		verifySend := AuthVerifySendArgs{
+			UserAuth: result.VerificationRequired.UserAuth,
 		}
-		AuthValidateSend(validateSend, session)
+		AuthVerifySend(verifySend, session)
 	}
 	return result, err
 }
