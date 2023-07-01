@@ -76,3 +76,4 @@ func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(R, error), w http.Resp
 		return impl(arg)
 	}, w, req)
 }
+

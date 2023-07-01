@@ -31,7 +31,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 	if self.pool == nil {
 		Logger().Printf("Db init\n")
 
-		dbKeys := KeysRed.RequireSimpleResource("pg.yml")
+		dbKeys := Vault.RequireSimpleResource("pg.yml")
 
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103

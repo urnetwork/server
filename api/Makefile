@@ -1,16 +1,26 @@
 
 
-all: build image
+all: clean build image
+
+clean:
+	rm -rf build
 
 build:
-	# https://www.digitalocean.com/community/tutorials/how-to-build-go-executables-for-multiple-platforms-on-ubuntu-16-04
-	env GOOS=linux GOARCH=arm64 go build -o bin/linux/arm64/
-	env GOOS=linux GOARCH=amd64 go build -o bin/linux/amd64/
-	env GOOS=darwin GOARCH=arm64 go build -o bin/darwin/arm64/
-	env GOOS=darwin GOARCH=amd64 go build -o bin/darwin/amd64/
+	env GOOS=linux GOARCH=arm64 go build -o build/linux/arm64/
+	env GOOS=linux GOARCH=amd64 go build -o build/linux/amd64/
+	env GOOS=darwin GOARCH=arm64 go build -o build/darwin/arm64/
+	env GOOS=darwin GOARCH=amd64 go build -o build/darwin/amd64/
 
 image:
-	docker buildx build --platform linux/arm64/v8,linux/amd64 . -t bringyour/canary-api:2023.01.1 --no-cache --push
+	docker buildx build --progress=plain \
+		--build-arg warp_env=${WARP_ENV} \
+		--platform linux/arm64/v8,linux/amd64 \
+		-t ${WARP_DOCKER_NAMESPACE}/${WARP_ENV}-api:${WARP_VERSION} \
+		--no-cache \
+		--push \
+		.
+
+# 	docker buildx build --platform linux/arm64/v8,linux/amd64 . -t bringyour/canary-api:2023.01.1 --no-cache --push
 
 
 # docker run --name api-beta -p 7481:80 --network warpsbs bringyour/canary-api:2023.01.1

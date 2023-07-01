@@ -22,7 +22,7 @@ import (
 
 
 var byPrivateKey = func()(*rsa.PrivateKey) {
-	keyPem := bringyour.KeysRed.RequireBytes("tls/bringyour_com/bringyour_com.key")
+	keyPem := bringyour.Vault.RequireBytes("tls/bringyour.com/bringyour.com.key")
 	block, _ := pem.Decode(keyPem)
     parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
     return parseResult.(*rsa.PrivateKey)

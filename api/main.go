@@ -16,7 +16,7 @@ import (
 
 
 var routes = []*router.Route{
-	router.NewRoute("GET", "/health", handlers.Health),
+	router.NewRoute("GET", "/status", router.WarpStatus),
 	router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
 	router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
 	router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
@@ -44,7 +44,7 @@ Options:
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.Env.Version())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
@@ -60,8 +60,8 @@ Options:
 
 	bringyour.Logger().Printf(
 		"Serving %s %s on *:%d\n",
-		bringyour.Env.EnvName(),
-		bringyour.Env.Version(),
+		bringyour.RequireEnv(),
+		bringyour.RequireVersion(),
 		args.Port,
 	)
 

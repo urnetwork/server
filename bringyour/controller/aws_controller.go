@@ -110,7 +110,7 @@ func sendAccountSms(phoneNumber string, bodyText string) error {
     snsService := sns.New(awsSession)
 
 	input := &sns.PublishInput{
-		Message: &phoneNumber,
+		Message: &bodyText,
 		PhoneNumber: &phoneNumber,
 	}
 

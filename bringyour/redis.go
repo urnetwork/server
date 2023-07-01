@@ -23,7 +23,7 @@ func (self *safeRedisClient) open() *redis.Client {
 	defer self.mutex.Unlock()
 
 	if self.client == nil {
-		redisKeys := KeysRed.RequireSimpleResource("redis.yml")
+		redisKeys := Vault.RequireSimpleResource("redis.yml")
 
 		// see https://github.com/redis/go-redis/blob/master/options.go#L31
 		options := &redis.Options{
