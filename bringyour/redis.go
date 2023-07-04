@@ -65,7 +65,7 @@ func client() *redis.Client {
 
 
 
-func Redis(callback func(context context.Context, client RedisClient)) {
+func Redis(callback func(context.Context, RedisClient)) {
 	// From the go-redis code:
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.

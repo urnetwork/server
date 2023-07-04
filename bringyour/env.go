@@ -40,22 +40,53 @@ var DefaultWarpHome = "/srv/warp"
 
 
 func init() {
-    if res, err := Site.SimpleResource("settings.yml"); err == nil {
-        settingsObj := res.Parse()
-        if envObj, ok := settingsObj["env_vars"]; ok {
-            switch v := envObj.(type) {
-            case map[string]any:
-                for key, value := range v {
-                    switch w := value.(type) {
-                    case string:
-                        os.Setenv(key, w)
-                    default:
-                        Logger().Printf("Env settings unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
-                    }
+    settingsObj := GetSettings()
+    Logger().Printf("Found settings %s\n", settingsObj)
+    if envObj, ok := settingsObj["env_vars"]; ok {
+        switch v := envObj.(type) {
+        case map[string]any:
+            for key, value := range v {
+                switch w := value.(type) {
+                case string:
+                    os.Setenv(key, w)
+                default:
+                    Logger().Printf("Env settings unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
                 }
             }
         }
     }
+}
+
+
+func GetSettings() map[string]any {
+    // merge in order of precedence (last has precedence)
+    // - config/settings.yml[all]
+    // - config/settings.yml[host]
+    // - site/settings.yml
+    settingsName := "settings.yml"
+
+    settingsObj := map[string]any{}
+    if res, err := Config.SimpleResource(settingsName); err == nil {
+        configSettingsObj := res.Parse()
+        if allSettingsObj, ok := configSettingsObj["all"]; ok {
+            switch v := allSettingsObj.(type) {
+            case map[string]any:
+                maps.Copy(settingsObj, v)
+            }
+        }
+        if hostSettingsObj, ok := configSettingsObj[RequireHost()]; ok {
+            switch v := hostSettingsObj.(type) {
+            case map[string]any:
+                maps.Copy(settingsObj, v)
+            }
+        }
+    }
+
+    if res, err := Site.SimpleResource(settingsName); err == nil {
+        maps.Copy(settingsObj, res.Parse())
+    }
+
+    return settingsObj
 }
 
 
@@ -131,12 +162,33 @@ func resolveMultiHome(root string) []string {
 }
 
 
+func Host() (string, error) {
+    host := os.Getenv("WARP_HOST")
+    if host != "" {
+        return host, nil
+    }
+    host, err := os.Hostname()
+    if err == nil {
+        return host, nil
+    }
+    return "", errors.New("WARP_HOST not set")
+}
+
+func RequireHost() string {
+    host, err := Host()
+    if err != nil {
+        panic(err)
+    }
+    return host
+}
+
+
 func Env() (string, error) {
     env := os.Getenv("WARP_ENV")
-    if env == "" {
-        return "", errors.New("WARP_ENV not set")
+    if env != "" {
+        return env, nil
     }
-    return env, nil
+    return "", errors.New("WARP_ENV not set")
 }
 
 func RequireEnv() string {
@@ -150,10 +202,10 @@ func RequireEnv() string {
 
 func Version() (string, error) {
     version := os.Getenv("WARP_VERSION")
-    if version == "" {
-        return "", errors.New("WARP_VERSION not set")
+    if version != "" {
+        return version, nil
     }
-    return version, nil
+    return "", errors.New("WARP_VERSION not set")
 }
 
 func RequireVersion() string {
@@ -167,10 +219,10 @@ func RequireVersion() string {
 
 func ConfigVersion() (string, error) {
     configVersion := os.Getenv("WARP_CONFIG_VERSION")
-    if configVersion == "" {
-        return "", errors.New("WARP_CONFIG_VERSION not set")
+    if configVersion != "" {
+        return configVersion, nil
     }
-    return configVersion, nil
+    return "", errors.New("WARP_CONFIG_VERSION not set")
 }
 
 func RequireConfigVersion() string {
@@ -266,10 +318,10 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 
 type SimpleResource struct {
     resPath string
-    parsedObj *map[string]interface{}
+    parsedObj *map[string]any
 }
 
-func (self *SimpleResource) Parse() map[string]interface{} {
+func (self *SimpleResource) Parse() map[string]any {
     if self.parsedObj != nil {
         return *self.parsedObj
     }
@@ -279,7 +331,7 @@ func (self *SimpleResource) Parse() map[string]interface{} {
     if err != nil {
         panic(err)
     }
-    obj := map[string]interface{}{}
+    obj := map[string]any{}
     err = yaml.Unmarshal(bytes, &obj)
     if err != nil {
         panic(err)
@@ -333,11 +385,11 @@ func translateString(value string) string {
 }
 
 
-func getAll[T any](obj map[string]interface{}, objPath []string, out *[]T) {
+func getAll[T any](obj map[string]any, objPath []string, out *[]T) {
     values := []T{}
 
-    var collect func(interface{}, []string)
-    collect = func(relValue interface{}, relObjPath []string) {
+    var collect func(any, []string)
+    collect = func(relValue any, relObjPath []string) {
         if len(relObjPath) == 0 {
             switch v := relValue.(type) {
                 case T:
@@ -346,11 +398,11 @@ func getAll[T any](obj map[string]interface{}, objPath []string, out *[]T) {
             }
         } else {
             switch v := relValue.(type) {
-            case []interface{}:
+            case []any:
                 for _, value := range v {
                     collect(value, relObjPath)
                 }
-            case map[string]interface{}:
+            case map[string]any:
                 value, ok := v[relObjPath[0]]
                 if !ok {
                     return

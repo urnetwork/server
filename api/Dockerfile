@@ -19,4 +19,4 @@ RUN mkdir -p $BRINGYOUR_HOME
 
 EXPOSE 80
 STOPSIGNAL SIGTERM
-CMD ["/usr/local/bin/bringyour-api", "-p", "80"]
+CMD ["/usr/local/sbin/bringyour-api", "-p", "80"]
