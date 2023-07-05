@@ -22,6 +22,8 @@ import (
 
 
 var byPrivateKey = func()(*rsa.PrivateKey) {
+	// FIXME RequireBytesAllVersions returns a list of content for all versions
+	// FIXME it's required to check older version in case of key reissuance
 	keyPem := bringyour.Vault.RequireBytes("tls/bringyour.com/bringyour.com.key")
 	block, _ := pem.Decode(keyPem)
     parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)

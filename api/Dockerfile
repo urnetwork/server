@@ -13,9 +13,7 @@ RUN update-ca-certificates
 
 COPY build/$TARGETPLATFORM/api /usr/local/sbin/bringyour-api
 
-# HOME is /root on our base container
-ENV BRINGYOUR_HOME /root/bringyour
-RUN mkdir -p $BRINGYOUR_HOME
+RUN ln -s /srv/warp/vault/.aws /root/.aws
 
 EXPOSE 80
 STOPSIGNAL SIGTERM

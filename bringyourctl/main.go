@@ -44,7 +44,7 @@ Options:
   -t --type=<type>    Search type.
   -d, --distance=<distance>  Search distance.`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.Env.Version())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
