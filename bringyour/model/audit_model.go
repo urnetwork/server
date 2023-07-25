@@ -101,6 +101,12 @@ type ExtenderState struct {
 }
 
 
+// 90 is the standard lookback used in the api
+func ComputeStats90() *Stats {
+	return ComputeStats(90)
+}
+
+
 func ComputeStats(lookback int) *Stats {
 	stats := &Stats{
 		Lookback: lookback,

@@ -150,12 +150,12 @@ func resolveMultiHome(root string) []string {
         if info, err := os.Stat(envPath); err == nil && info.Mode().IsDir() {
             paths = append(paths, envPath)
         }
+    }
 
-        // use an all path only if there is an env
-        allPath := filepath.Join(root, "all")
-        if info, err := os.Stat(allPath); err == nil && info.Mode().IsDir() {
-            paths = append(paths, allPath)
-        }
+    // allow an all path even if there is not an active env
+    allPath := filepath.Join(root, "all")
+    if info, err := os.Stat(allPath); err == nil && info.Mode().IsDir() {
+        paths = append(paths, allPath)
     }
 
     return paths
@@ -180,6 +180,42 @@ func RequireHost() string {
         panic(err)
     }
     return host
+}
+
+
+// service port -> host port
+func HostPorts() (map[int]int, error) {
+    ports := os.Getenv("WARP_PORTS")
+    if ports != err {
+        hostPorts := map[int]int{}
+        portPairs := strings.Split(",")
+        for _, portPair := range portPairs {
+            parts := strings.Split(portParts, ":")
+            if len(parts) != 2 {
+                return "", errors.New("Port pair must be service_port:host_port")
+            }
+            servicePort, err := strconv.Atoi(parts[0])
+            if err != nil {
+                return "", err
+            }
+            hostPort, err := strconv.Atoi(parts[1])
+            if err != nil {
+                return "", err
+            }
+            hostPorts[servicePort] = hostPort
+        }
+        return hostPorts
+    }
+    return "", errors.New("WARP_PORTS not set")
+}
+
+
+// these are the most efficient dest for this host to reach the target host
+func Routes() map[string]string {
+    if routes, ok := GetSettings()["routes"]; ok {
+        return routes.(map[string]string)
+    }
+    return map[string]string{}
 }
 
 
@@ -244,6 +280,7 @@ func NewResolver(mountType MountType) *Resolver {
     }
 }
 
+// FIXME return a list of all matching paths
 func (self *Resolver) ResourcePath(relPath string) (string, error) {
     if filepath.IsAbs(relPath) {
         panic("Resource path must be relative.")
@@ -377,7 +414,7 @@ func translateString(value string) string {
         Logger().Printf("Env: lookup env var \"%s\"\n", key)
         envValue := os.Getenv(key)
         if envValue == "" {
-            return match
+            panic(fmt.Sprintf("Missing env var %s", key))
         }
         return []byte(envValue)
     }))

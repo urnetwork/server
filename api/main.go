@@ -1,38 +1,20 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"net/http"
-	"os"
+    "fmt"
+    "net/http"
+    "os"
 
-	"github.com/docopt/docopt-go"
-	
-	"bringyour.com/api/handlers"
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/router"
+    "github.com/docopt/docopt-go"
+    
+    "bringyour.com/service/api/handlers"
+    "bringyour.com/bringyour"
+    "bringyour.com/bringyour/router"
 )
 
 
-
-var routes = []*router.Route{
-	router.NewRoute("GET", "/status", router.WarpStatus),
-	router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
-	router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
-	router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
-	router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
-	router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
-	router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
-	router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
-	router.NewRoute("POST", "/auth/network-check", handlers.AuthNetworkCheck),
-	router.NewRoute("POST", "/auth/network-create", handlers.AuthNetworkCreate),
-	router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
-	router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
-}
-
-
 func main() {
-	usage := `BringYour API server.
+    usage := `BringYour API server.
 
 Usage:
   api [--port=<port>]
@@ -44,28 +26,40 @@ Options:
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
-	if err != nil {
-		panic(err)
-	}
+    opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+    if err != nil {
+        panic(err)
+    }
 
-	type ApiArgs struct {
-		Port int `docopt:"--port"`
-	}
+    routes := []*router.Route{
+        router.NewRoute("GET", "/status", router.WarpStatus),
+        router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
+        router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
+        router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
+        router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
+        router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
+        router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
+        router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
+        router.NewRoute("POST", "/auth/network-check", handlers.AuthNetworkCheck),
+        router.NewRoute("POST", "/auth/network-create", handlers.AuthNetworkCreate),
+        router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
+        router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
+    }
 
-	// bringyour.Logger().Printf("%s\n", opts)
+    // bringyour.Logger().Printf("%s\n", opts)
 
-	args := ApiArgs{}
-	opts.Bind(&args)
+    port, _ := opts.Int("--port")
 
-	bringyour.Logger().Printf(
-		"Serving %s %s on *:%d\n",
-		bringyour.RequireEnv(),
-		bringyour.RequireVersion(),
-		args.Port,
-	)
+    bringyour.Logger().Printf(
+        "Serving %s %s on *:%d\n",
+        bringyour.RequireEnv(),
+        bringyour.RequireVersion(),
+        port,
+    )
 
-	routerHandler := router.NewRouter(routes)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", args.Port), routerHandler))
+    routerHandler := router.NewRouter(routes)
+    err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
+
+    bringyour.Logger().Fatal(err)
 }
 

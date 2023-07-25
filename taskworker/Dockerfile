@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
-COPY build/$TARGETPLATFORM/connect /usr/local/sbin/bringyour-connect
+COPY build/$TARGETPLATFORM/taskworker /usr/local/sbin/bringyour-taskworker
 
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
 EXPOSE 80
 STOPSIGNAL SIGTERM
-CMD ["/usr/local/sbin/bringyour-connect", "-p", "80"]
+CMD ["/usr/local/sbin/bringyour-taskworker", "-p", "80"]

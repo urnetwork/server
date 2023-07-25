@@ -128,7 +128,7 @@ func searchClear(opts docopt.Opts, args CtlArgs) {
 
 
 func statsCompute(opts docopt.Opts, args CtlArgs) {
-	stats := model.ComputeStats(90)
+	stats := model.ComputeStats90()
 	statsJson, err := json.MarshalIndent(stats, "", "  ")
     bringyour.Raise(err)
     bringyour.Logger().Printf("%s\n", statsJson)
