@@ -88,6 +88,10 @@ func createVerifyCode() string {
 	return hex.EncodeToString(verifyCode)
 }
 
+func TestCreateVerifyCode() string {
+	return createVerifyCode()
+}
+
 func createResetCode() string {
 	resetCode := make([]byte, 64)
 	_, err := rand.Read(resetCode)

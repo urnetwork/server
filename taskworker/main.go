@@ -12,6 +12,7 @@ import (
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/router"
     "bringyour.com/bringyour/model"
+    "bringyour.com/bringyour/controller"
 )
 
 
@@ -25,6 +26,31 @@ func (self *TaskWorker) stats() {
         model.ExportStats(stats)
 
         self.quitEvent.WaitForSet(60 * time.Second)
+    }
+}
+
+func (self *TaskWorker) warmEmail() {
+    // send a continuous verification code message to a bunch of popular email providers
+    emails := []string{
+        "reallilwidget@gmail.com",
+        "reallilwidget@protonmail.com",
+        "reallilwidget@aol.com",
+        "reallilwidget@gmx.com",
+        "reallilwidget@outlook.com",
+        "reallilwidget@yahoo.com",
+        "reallilwidget@yandex.com",
+        "reallilwidget@zohomail.com",
+        // todo replace with reallilwidget@icloud.com
+        "xcolwell@icloud.com",
+    }
+    // todo add icloud.com, mail.com, hushmail, mailfence, tutanota
+
+    for !self.quitEvent.IsSet() {
+        for _, email := range emails {
+            controller.TestAuthVerifyCode(email)
+        }
+
+        self.quitEvent.WaitForSet(15 * time.Minute)
     }
 }
 
@@ -54,7 +80,7 @@ Options:
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    worker := startTaskWorker(quitEvent)
+    startTaskWorker(quitEvent)
     
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
@@ -70,7 +96,7 @@ Options:
     )
 
     routerHandler := router.NewRouter(routes)
-    err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
+    err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
     bringyour.Logger().Fatal(err)
 }
 
@@ -82,6 +108,7 @@ func startTaskWorker(quitEvent *bringyour.Event) *TaskWorker {
     }
 
     go worker.stats()
+    go worker.warmEmail()
 
     return worker
 }

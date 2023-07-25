@@ -7,6 +7,7 @@ import (
     "errors"
     "fmt"
     "regexp"
+    "strconv"
 
     "golang.org/x/exp/maps"
 
@@ -185,28 +186,27 @@ func RequireHost() string {
 
 // service port -> host port
 func HostPorts() (map[int]int, error) {
-    ports := os.Getenv("WARP_PORTS")
-    if ports != err {
+    if ports := os.Getenv("WARP_PORTS"); ports != "" {
         hostPorts := map[int]int{}
-        portPairs := strings.Split(",")
+        portPairs := strings.Split(ports, ",")
         for _, portPair := range portPairs {
-            parts := strings.Split(portParts, ":")
+            parts := strings.Split(portPair, ":")
             if len(parts) != 2 {
-                return "", errors.New("Port pair must be service_port:host_port")
+                return nil, errors.New("Port pair must be service_port:host_port")
             }
             servicePort, err := strconv.Atoi(parts[0])
             if err != nil {
-                return "", err
+                return nil, err
             }
             hostPort, err := strconv.Atoi(parts[1])
             if err != nil {
-                return "", err
+                return nil, err
             }
             hostPorts[servicePort] = hostPort
         }
-        return hostPorts
+        return hostPorts, nil
     }
-    return "", errors.New("WARP_PORTS not set")
+    return nil, errors.New("WARP_PORTS not set")
 }
 
 

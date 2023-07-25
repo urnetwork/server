@@ -1,7 +1,6 @@
 package bringyour
 
 import (
-    "sync"
     "time"
     "os"
     "os/signal"
@@ -26,19 +25,19 @@ func (self *Event) Set() {
 
 func (self *Event) IsSet() bool {
     select {
-        case <- self.set:
-            return true
-        case default:
-            return false
+    case <- self.set:
+        return true
+    default:
+        return false
     }
 }
 
 func (self *Event) WaitForSet(timeout time.Duration) bool {
     select {
-        case <- self.interrupt:
-            return true
-        case <- time.After(timeout):
-            return false
+    case <- self.set:
+        return true
+    case <- time.After(timeout):
+        return false
     }
 }
 
@@ -50,12 +49,11 @@ func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
     go func() {
         for {
             select {
-            case sig, ok := <- stopSignal:
-                if ok {
-                    self.Set()
-                } else {
+            case _, ok := <- stopSignal:
+                if !ok {
                     return
                 }
+                self.Set()
             }
         }
     }()

@@ -104,6 +104,34 @@ func createVerifyBodyText(verifyCode string) string {
 }
 
 
+func TestAuthVerifyCode(userAuth string) {
+    normalUserAuth, userAuthType := model.NormalUserAuthV1(&userAuth)
+
+    verifyCode := model.TestCreateVerifyCode()
+
+    switch userAuthType {
+    case model.UserAuthTypeEmail:
+        err := sendAccountEmail(
+            *normalUserAuth,
+            "Verify your email",
+            createVerifyBodyHtml(verifyCode),
+            createVerifyBodyText(verifyCode),
+        )
+        if err != nil {
+            bringyour.Logger().Printf("Error sending email: %s\n", err)
+        }
+    case model.UserAuthTypePhone:
+        err := sendAccountSms(
+            *normalUserAuth,
+            createVerifyBodyText(verifyCode),
+        )
+        if err != nil {
+            bringyour.Logger().Printf("Error sending sms: %s\n", err)
+        }
+    }
+}
+
+
 type AuthPasswordResetArgs struct {
     UserAuth string `json:"userAuth"`
 }
