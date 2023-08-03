@@ -40,10 +40,9 @@ func (self *TaskWorker) warmEmail() {
         "reallilwidget@yahoo.com",
         "reallilwidget@yandex.com",
         "reallilwidget@zohomail.com",
-        // todo replace with reallilwidget@icloud.com
-        "xcolwell@icloud.com",
+        "reallilwidget@icloud.com",
     }
-    // todo add icloud.com, mail.com, hushmail, mailfence, tutanota
+    // todo add mail.com, hushmail, mailfence, tutanota
 
     for !self.quitEvent.IsSet() {
         for _, email := range emails {
