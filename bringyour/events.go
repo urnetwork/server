@@ -5,27 +5,36 @@ import (
     "os"
     "os/signal"
     "syscall"
+    "context"
 )
 
 
 
 type Event struct {
-    set chan bool
+    // set chan bool
+    ctx context.Context
+    cancel context.CancelFunc
 }
 
 func NewEvent() *Event {
+    return NewEventWithContext(context.Background())
+}
+
+func NewEventWithContext(ctx context.Context) *Event {
+    cancelCtx, cancel := context.WithCancel(ctx)
     return &Event{
-        set: make(chan bool, 0),
+        ctx: cancelCtx,
+        cancel: cancel,
     }
 }
 
 func (self *Event) Set() {
-    close(self.set)
+    self.cancel()
 }
 
 func (self *Event) IsSet() bool {
     select {
-    case <- self.set:
+    case <- self.ctx.Done():
         return true
     default:
         return false
@@ -34,7 +43,7 @@ func (self *Event) IsSet() bool {
 
 func (self *Event) WaitForSet(timeout time.Duration) bool {
     select {
-    case <- self.set:
+    case <- self.ctx.Done():
         return true
     case <- time.After(timeout):
         return false

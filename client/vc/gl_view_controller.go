@@ -10,7 +10,6 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/client"
-	"bringyour.com/client/endpoint"
 )
 
 
@@ -27,15 +26,15 @@ type GLViewController interface {
 	SurfaceCreated()
 	SurfaceChanged(width, height int32)
 	DrawFrame()
-	Start(endpoints *endpoint.Endpoints, callback GLViewCallback)
+	Start(callback GLViewCallback)
 	Stop()
 }
 
 
 type glViewDrawController interface {
 	draw(g gl.Context)
-	drawLoopOpen(endpoints *endpoint.Endpoints)
-	drawLoopClose(endpoints *endpoint.Endpoints)
+	drawLoopOpen()
+	drawLoopClose()
 }
 
 
@@ -154,7 +153,7 @@ func (self *glViewController) drawUpdate(change func()) {
 }
 
 
-func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.Endpoints, callback GLViewCallback) {
+func (self *glViewController) drawLoop(ctx context.Context, callback GLViewCallback) {
 	loop := func() {
 		loop:
 		for {
@@ -194,12 +193,12 @@ func (self *glViewController) drawLoop(ctx context.Context, endpoints *endpoint.
 	}
 
 	if self.drawController != nil {
-		self.drawController.drawLoopOpen(endpoints)
+		self.drawController.drawLoopOpen()
 		loop()
-		self.drawController.drawLoopClose(endpoints)
+		self.drawController.drawLoopClose()
 	}
 }
-func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLViewCallback) {
+func (self *glViewController) Start(callback GLViewCallback) {
 	self.drawMutex.Lock()
 	defer self.drawMutex.Unlock()
 
@@ -210,7 +209,7 @@ func (self *glViewController) Start(endpoints *endpoint.Endpoints, callback GLVi
 		go func() {
 			// see https://github.com/golang/go/wiki/LockOSThread
 			runtime.LockOSThread()
-			self.drawLoop(ctx, endpoints, callback)
+			self.drawLoop(ctx, callback)
 		}()
 	}
 }

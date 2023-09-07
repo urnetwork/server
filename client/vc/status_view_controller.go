@@ -5,11 +5,10 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/client"
-	"bringyour.com/client/endpoint"
 )
 
 
-var svLog = client.LogFn("status_view_controller")
+var svcLog = client.LogFn("status_view_controller")
 
 
 type StatusViewController struct {
@@ -43,7 +42,7 @@ func (self *StatusViewController) draw(g gl.Context) {
 	// CreateBuffer
 	// BindBuffer
 
-	svLog("draw")
+	// svcLog("draw")
 
 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
@@ -60,9 +59,17 @@ func (self *StatusViewController) draw(g gl.Context) {
     // glEnd();
 }
 
-func (self *StatusViewController) drawLoopOpen(endpoints *endpoint.Endpoints) {
+
+func (self *StatusViewController) drawLoopOpen() {
 	self.frameRate = 24
 }
 
-func (self *StatusViewController) drawLoopClose(endpoints *endpoint.Endpoints) {
+
+func (self *StatusViewController) drawLoopClose() {
+}
+
+
+func (self *StatusViewController) Close() {
+	// FIXME
+	svcLog("close")
 }

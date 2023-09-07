@@ -3,11 +3,11 @@ package main
 import (
     "net/http"
 
-    "google.golang.org/protobuf/proto"
+    // "google.golang.org/protobuf/proto"
 
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour/router"
-    "bringyour.com/protocol"
+    // "bringyour.com/bringyour/model"
+    // "bringyour.com/bringyour/router"
+    // "bringyour.com/protocol"
 )
 
 
@@ -21,6 +21,16 @@ import (
 // terminal reads frames from websocket
 // if command message, handle it, ack it
 // if pack, either send it to a connected client, or forward to another terminal
+
+
+type Terminal struct {
+
+}
+
+
+func NewTerminal() *Terminal {
+    return &Terminal{}
+}
 
 
 func (self *Terminal) Connect(w http.ResponseWriter, r *http.Request) {

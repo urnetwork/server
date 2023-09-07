@@ -1,7 +1,7 @@
 package main
 
 import (
-    "time"
+    // "time"
     "fmt"
     "net/http"
     "os"
@@ -11,7 +11,7 @@ import (
     
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/router"
-    "bringyour.com/bringyour/model"
+    // "bringyour.com/bringyour/model"
 )
 
 
@@ -35,16 +35,18 @@ Options:
 
     // bringyour.Logger().Printf("%s\n", opts)
 
+    // FIXME event should have a context
     quitEvent := bringyour.NewEvent()
 
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    connectRouter := NewConnectRouter(quitEvent)
+    // FIXME
+    // connectRouter := NewConnectRouter(quitEvent.context)
 
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
-        router.NewRoute("GET", "/", connectRouter.Connect),
+        // router.NewRoute("GET", "/", connectRouter.Connect),
     }
 
     port, _ := opts.Int("--port")
@@ -57,6 +59,7 @@ Options:
     )
 
     routerHandler := router.NewRouter(routes)
-    err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-    bringyour.Logger().Fatal(err)
+    if err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler); err != nil {
+        bringyour.Logger().Fatal(err)
+    }
 }

@@ -5,7 +5,6 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/client"
-	"bringyour.com/client/endpoint"
 )
 
 
@@ -27,16 +26,21 @@ func NewProvideViewController() *ProvideViewController {
 
 
 func (self *ProvideViewController) draw(g gl.Context) {
-	pvcLog("draw")
+	// pvcLog("draw")
 
 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 }
 
-func (self *ProvideViewController) drawLoopOpen(endpoints *endpoint.Endpoints) {
+func (self *ProvideViewController) drawLoopOpen() {
 	self.frameRate = 24
 }
 
-func (self *ProvideViewController) drawLoopClose(endpoints *endpoint.Endpoints) {
+func (self *ProvideViewController) drawLoopClose() {
 }
 
+func (self *ProvideViewController) Close() {
+	// FIXME
+
+	pvcLog("close")
+}

@@ -1,10 +1,20 @@
 module bringyour.com/client
 
-go 1.20
+go 1.21
 
 require (
+	bringyour.com/connect v0.0.0 // indirect
+	bringyour.com/protocol v0.0.0 // indirect
+	github.com/google/gopacket v1.1.19 // indirect
+	github.com/oklog/ulid/v2 v2.1.0 // indirect
+	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/mobile v0.0.0-20230427221453-e8d11dd0ba41 // indirect
-	golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4 // indirect
-	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
-	golang.org/x/tools v0.1.12 // indirect
+	golang.org/x/mod v0.11.0 // indirect
+	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/tools v0.2.0 // indirect
+	google.golang.org/protobuf v1.31.0 // indirect
 )
+
+replace bringyour.com/connect v0.0.0 => ../../connect/connect
+
+replace bringyour.com/protocol v0.0.0 => ../../connect/protocol/build/bringyour.com/protocol
