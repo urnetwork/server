@@ -12,12 +12,16 @@ type Ipv4 [4]byte
 
 
 type ClientSession struct {
+	// FIXME
+	Ctx context.Context
 	ClientIpv4 *Ipv4
 	ByJwt *jwt.ByJwt
 }
 
-func NewClientSessionFromRequest(req *http.Request) *ClientSession {
-	session := ClientSession{}
+func NewClientSessionFromRequest(ctx context.Context, req *http.Request) *ClientSession {
+	session := ClientSession{
+		Ctx: ctx,
+	}
 	
 	clientIpv4DotNotation := req.Header.Get("X-Forwarded-For")
 	if clientIpv4DotNotation != "" {

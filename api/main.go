@@ -42,6 +42,12 @@ Options:
         router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
         router.NewRoute("POST", "/auth/network-check", handlers.AuthNetworkCheck),
         router.NewRoute("POST", "/auth/network-create", handlers.AuthNetworkCreate),
+
+        // FIXME
+        router.NewRoute("POST", "/network/auth-client", handlers.NetworkClient),
+        router.NewRoute("POST", "/network/remove-client", handlers.NetworkRemoveClient),
+        router.NewRoute("POST", "/network/clients", handlers.NetworkClient),
+        
         router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
         router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
     }

@@ -184,6 +184,26 @@ func RequireHost() string {
 }
 
 
+func Block() (string, error) {
+
+}
+
+
+func RequireBlock() string {
+
+}
+
+
+func Service() (string, error) {
+
+}
+
+
+func RequireService() string {
+
+}
+
+
 // service port -> host port
 func HostPorts() (map[int]int, error) {
     if ports := os.Getenv("WARP_PORTS"); ports != "" {
@@ -280,8 +300,15 @@ func NewResolver(mountType MountType) *Resolver {
     }
 }
 
-// FIXME return a list of all matching paths
 func (self *Resolver) ResourcePath(relPath string) (string, error) {
+    paths, err := ResourcePaths(relPath)
+    if err != nil {
+        return nil, err
+    }
+    return paths[0], nil
+}
+
+func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
     if filepath.IsAbs(relPath) {
         panic("Resource path must be relative.")
     }
@@ -298,10 +325,12 @@ func (self *Resolver) ResourcePath(relPath string) (string, error) {
         panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
     }
 
+    paths := []string{}
+
     for _, home := range homes {
-        resPath := filepath.Join(home, relPath)
-        if info, err := os.Stat(resPath); err == nil && info.Mode().IsRegular() {
-            return resPath, nil
+        path := filepath.Join(home, relPath)
+        if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+            paths = append(paths, path)
         }
     }
 
@@ -309,24 +338,28 @@ func (self *Resolver) ResourcePath(relPath string) (string, error) {
     // at each directory level, look for <dir>/<version>, and iterate them in descending order
     for _, home := range homes {
         if path, err := versionLookup(home, strings.Split(relPath, "/")); err == nil {
-            return path, nil
+            paths = append(paths, path)
         }
     }
 
-    return "", errors.New(fmt.Sprintf("Resource not found in %s (%s)", self.mountType, relPath))
+    if len(paths) == 0 {
+        return nil, errors.New(fmt.Sprintf("Resource not found in %s (%s)", self.mountType, relPath))
+    }
+
+    return paths, nil
 }
 
 func (self *Resolver) RequirePath(relPath string) string {
-    resPath, err := self.ResourcePath(relPath)
+    path, err := self.ResourcePath(relPath)
     if err != nil {
         panic(err)
     }
-    return resPath
+    return path
 }
 
 func (self *Resolver) RequireBytes(relPath string) []byte {
-    resPath := self.RequirePath(relPath)
-    bytes, err := os.ReadFile(resPath)
+    path := self.RequirePath(relPath)
+    bytes, err := os.ReadFile(path)
     if err != nil {
         panic(err)
     }
@@ -335,12 +368,12 @@ func (self *Resolver) RequireBytes(relPath string) []byte {
 
 // list indexes are not in the res path; instead, each element is expanded out into the value array
 func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
-    resPath, err := self.ResourcePath(relPath)
+    path, err := self.ResourcePath(relPath)
     if err != nil {
         return nil, err
     }
     return &SimpleResource{
-        resPath: resPath,
+        path: path,
     }, nil
 }
 
@@ -354,7 +387,7 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 
 
 type SimpleResource struct {
-    resPath string
+    path string
     parsedObj *map[string]any
 }
 
@@ -364,7 +397,7 @@ func (self *SimpleResource) Parse() map[string]any {
     }
     var bytes []byte
     var err error
-    bytes, err = os.ReadFile(self.resPath)
+    bytes, err = os.ReadFile(self.path)
     if err != nil {
         panic(err)
     }
@@ -377,25 +410,25 @@ func (self *SimpleResource) Parse() map[string]any {
     return obj
 }
 
-func (self *SimpleResource) RequireInt(resPath ...string) int {
+func (self *SimpleResource) RequireInt(path ...string) int {
     values := []int{}
-    getAll(self.Parse(), resPath, &values)
+    getAll(self.Parse(), path, &values)
     if len(values) != 1 {
         panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
     }
     value := values[0]
-    Logger().Printf("Env: %s[%s] = %d\n", self.resPath, strings.Join(resPath, " "), value)
+    Logger().Printf("Env: %s[%s] = %d\n", self.path, strings.Join(path, " "), value)
     return value
 }
 
-func (self *SimpleResource) RequireString(resPath ...string) string {
+func (self *SimpleResource) RequireString(path ...string) string {
     values := []string{}
-    getAll(self.Parse(), resPath, &values)
+    getAll(self.Parse(), path, &values)
     if len(values) != 1 {
         panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
     }
     value := translateString(values[0])
-    Logger().Printf("Env: %s[%s] = %s\n", self.resPath, strings.Join(resPath, " "), value)
+    Logger().Printf("Env: %s[%s] = %s\n", self.path, strings.Join(path, " "), value)
     return value
 }
 

@@ -18,7 +18,9 @@ type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
 type PgResult = pgx.Rows
 type PgNamedArgs = pgx.NamedArgs
-type PgUUID = pgtype.UUID
+
+// FIXME Id should just be Pg Scanner/Valuer compatible, then we can just Id everywhere
+// type PgUUID = pgtype.UUIDw
 
 
 type safePgPool struct {
@@ -92,52 +94,119 @@ func pool() *pgxpool.Pool {
 
 
 type DbRetryOptions struct {
-	// rerun the entire callback on error
-	rerunOnError bool
+	// rerun the entire callback on commit error
+	rerunOnCommitError bool
+	rerunOnDisconnect bool
+	// this only works if the conflict, e.g. an ID, is changed on each run
+	// the BY coding style will generate the id in the callback, so this is generally considered safe
+	rerunOnConstraintError bool
+	retryTimeout time.Duration
 }
-func newDbRetryOptions(rerunOnError bool) *DbRetryOptions {
+// this is the default for `Db` and `Tx`
+func OptRetryDefault() DbRetryOptions {
 	return &DbRetryOptions{
-		rerunOnError: rerunOnError,
+		rerunOnCommitError: true,
+		rerunOnConnectionError: true,
+		rerunOnConstraintError: true,
+		retryTimeout: 200 * time.Millisecond,
+	}
+}
+func OptNoRetry() DbRetryOptions {
+	return &DbRetryOptions{
+		rerunOnCommitError: false,
+		rerunOnConnectionError: false,
+		rerunOnConstraintError: false,
 	}
 }
 
 
+const TxSerializable = pgx.Serializable
 
-func Db(callback func(context.Context, PgConn), options ...any) {
+
+
+func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 	// fixme rerun callback on disconnect with a new connection
 
-	context := context.Background()
+	retryOptions := OptRetryDefault()
+	for _, option := range options {
+		switch v := option.(type) {
+		case DbRetryOptions:
+			retryOptions = v
+	}
 
-	var conn *pgxpool.Conn
-	var err error
+	// context := context.Background()
+
+	// var conn *pgxpool.Conn
+	// var connErr error
 
 	// fixme retry if error
 
-	for attempts := 0; attempts < 8; attempts += 1 {
-		conn, err = pool().Acquire(context)
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Release()
 
-		err = conn.Ping(context)
-		if err != nil {
+	for {
+		var pgErr pgx.PgError
+		conn, connErr := pool().Acquire(context)
+		if connErr != nil {
+			if retryOptions != nil && retryOptions.rerunOnConnectionError {
+				select {
+				case <- ctx.Done():
+					return errors.New("Done")
+				case time.After(retryOptions.retryTimeout):
+				}
+			}
+			return connErr
+		}
+
+		connErr = conn.Ping(context)
+		if connErr != nil {
 			// take the bad connection out of the pool
 			pgxConn := conn.Hijack()
 			pgxConn.Close(context)
 			conn = nil
-		}
-		break
-	}
-	if conn == nil {
-		panic("Could not acquire connection.")
-	}
 
-	callback(context, conn)
+			f retryOptions != nil && retryOptions.rerunOnConnectionError {
+				select {
+				case <- ctx.Done():
+					return errors.New("Done")
+				case time.After(retryOptions.retryTimeout):
+				}
+			}
+			return connErr
+		}
+
+		func() {
+			defer func() {
+				if err := recover(); err != nil {
+					switch v := err.(type) {
+					case pgx.PgError:
+						pgErr = v
+					default:
+						panic(err)
+					}
+				}
+			}()
+			defer conn.Release()
+			callback(context, conn)
+		}()
+
+		if pgErr != nil {
+			if pgErr.ConstraintName != "" && retryOptions != nil && retryOptions.rerunOnConstraintError {
+				select {
+				case <- ctx.Done():
+					return errors.New("Done")
+				case time.After(retryOptions.retryTimeout):
+				}
+				LOG("constraint", pgErr)
+				continue
+			}
+			return pgErr
+		}
+
+		return nil
+	}
 }
 
 
-func Tx(callback func(context.Context, PgTx), options ...any) {
+func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 	// context := context.Background()
 
 	// var tx pgx.Tx
@@ -160,39 +229,97 @@ func Tx(callback func(context.Context, PgTx), options ...any) {
 
 	// callback(context, tx)
 
-	Db(func (context context.Context, conn PgConn) {
-		txOptions := pgx.TxOptions{}
-		tx, err := conn.BeginTx(context, txOptions)
-		if err != nil {
-			panic(err)
+	retryOptions := OptRetryDefault()
+	// by default use RepeatableRead isolation
+	// https://www.postgresql.org/docs/current/transaction-iso.html
+	txOptions := pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead,
+		AccessMode: pgx.ReadWrite,
+		DeferrableMode: pgx.NotDeferrable,
+	}
+	for _, option := range options {
+		switch v := option.(type) {
+		case DbRetryOptions:
+			retryOptions = v
+		case pgx.TxOptions:
+			txOptions = v
+		case pgx.TxIsoLevel:
+			txOptions.IsoLevel = v
+		case pgx.TxAccessMode:
+			txOptions.AccessMode = v
+		case pgx.TxDeferrableMode:
+			txOptions.DeferrableMode = v
 		}
-		defer func() {
-			err := recover()
-			if err == nil {
-				Logger().Printf("Db commit\n")
-				tx.Commit(context)
-			} else {
-				tx.Rollback(context)
-				panic(err)
+	}
+
+	for {
+		var commitErr error
+		err := Db(ctx, func (context context.Context, conn PgConn) {
+			tx, err := conn.BeginTx(context, txOptions)
+			if err != nil {
+				return err
 			}
-		}()
-		callback(context, tx)
-	}, options...)
-}
-
-
-type Closeable interface {
-	Close()
-	Err() error
-}
-
-func With[T Closeable](t T, err error, callback func()) {
-	Raise(err)
-	defer t.Close()
-	callback()
-	if err := t.Err(); err != nil {
-		panic(err)
+			defer func() {
+				if err := recover(); err != nil {
+					if rollbackErr := tx.Rollback(context); rollbackErr != nil {
+						panic(rollbackErr)
+					}
+					panic(err)
+				}
+			}()
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						switch v := err.(type) {
+						case pgx.PgError:
+							pgErr = v
+						default:
+							panic(err)
+						}
+					}
+				}()
+				callback(context, tx)
+			}()
+			Logger().Printf("Db commit\n")
+			commitErr := tx.Commit(context)
+		}, options...)
+		if err != nil {
+			return err
+		}
+		if commitErr != nil {
+			if retryOptions != nil && retryOptions.rerunOnCommitError {
+				select {
+				case <- ctx.Done():
+					return errors.New("Done")
+				case time.After(retryOptions.retryTimeout):
+				}
+				LOG("commit")
+				continue
+			}
+			return commitErr
+		}
+		return nil
 	}
 }
 
+
+// the return of many pgx operations is (r, error) where r conforms to the interface below
+// type DbResult interface {
+// 	Close()
+// 	Err() error
+// }
+
+func WithPgResult(r PgResult, err error, callback any) {
+	Raise(err)
+	defer r.Close()
+	switch v := callback.(type) {
+	case func():
+		v()
+	case func(PgResult):
+		v(r)
+	default:
+		panic(errors.New(fmt.Sprintf("Unknown callback: %s", callback)))
+	}
+	Raise(r.Err())
+}
 

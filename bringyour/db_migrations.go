@@ -116,11 +116,11 @@ var migrations = []any{
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type VARCHAR(64) NOT NULL,
-			event_details TEXT NULL,
-			country_name VARCHAR(128) NOT NULL,
-			region_name VARCHAR(128) NOT NULL,
-			city_name VARCHAR(128) NOT NULL,
+			event_type varchar(64) NOT NULL,
+			event_details text NULL,
+			country_name varchar(128) NOT NULL,
+			region_name varchar(128) NOT NULL,
+			city_name varchar(128) NOT NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -139,8 +139,8 @@ var migrations = []any{
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			extender_id uuid NOT NULL,
-			event_type VARCHAR(64) NOT NULL,
-			event_details TEXT NULL,
+			event_type varchar(64) NOT NULL,
+			event_details text NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -157,8 +157,8 @@ var migrations = []any{
 			event_id uuid NOT NULL,
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
-			event_type VARCHAR(64) NOT NULL,
-			event_details TEXT NULL,
+			event_type varchar(64) NOT NULL,
+			event_details text NULL,
 
 			PRIMARY KEY (event_id)
 		)
@@ -176,8 +176,8 @@ var migrations = []any{
 			event_time timestamp NOT NULL DEFAULT now(),
 			network_id uuid NOT NULL,
 			device_id uuid NOT NULL,
-			event_type VARCHAR(64) NOT NULL,
-			event_details TEXT NULL,
+			event_type varchar(64) NOT NULL,
+			event_details text NULL,
 
 			PRIMARY KEY (event_time, device_id, event_id),
 			UNIQUE (event_id)
@@ -200,12 +200,12 @@ var migrations = []any{
 			provider_device_id uuid NOT NULL,
 			extender_network_id uuid NULL,
 			extender_id uuid NULL,
-			event_type VARCHAR(64) NOT NULL,
-			event_details TEXT NULL,
-			transfer_bytes BIGINT NOT NULL DEFAULT 0,
-			transfer_packets BIGINT NOT NULL DEFAULT 0,
+			event_type varchar(64) NOT NULL,
+			event_details text NULL,
+			transfer_bytes bigint NOT NULL DEFAULT 0,
+			transfer_packets bigint NOT NULL DEFAULT 0,
 
-			UNIQUE (event_id)
+			PRIMARY KEY (event_id)
 		)
 	`),
 	newSqlMigration(`
@@ -219,7 +219,7 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE network (
 			network_id uuid NOT NULL,
-			network_name VARCHAR(256) NOT NULL,
+			network_name varchar(256) NOT NULL,
 			admin_user_id uuid NOT NULL,
 
 			PRIMARY KEY (network_id),
@@ -242,13 +242,13 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE network_user (
 			user_id uuid NOT NULL,
-			user_name VARCHAR(128) NOT NULL,
+			user_name varchar(128) NOT NULL,
 			auth_type auth_type NOT NULL,
-			user_auth VARCHAR(256) NULL,
+			user_auth varchar(256) NULL,
 			password_hash bytea NULL,
 			password_salt bytea NULL,
-			auth_jwt TEXT NULL,
-			validated BOOL NOT NULL DEFAULT false,
+			auth_jwt text NULL,
+			validated bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (user_id),
 			UNIQUE (user_auth)
@@ -266,10 +266,10 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE user_auth_attempt (
 			user_auth_attempt_id uuid NOT NULL,
-			user_auth VARCHAR(256) NULL,
+			user_auth varchar(256) NULL,
 			attempt_time timestamp NOT NULL DEFAULT now(),
-			client_ipv4 VARCHAR(16) NOT NULL,
-			success BOOL NOT NULL,
+			client_ipv4 varchar(16) NOT NULL,
+			success bool NOT NULL,
 
 			PRIMARY KEY (user_auth_attempt_id)
 		)
@@ -287,8 +287,8 @@ var migrations = []any{
 			user_auth_reset_id uuid NOT NULL,
 			user_id uuid NOT NULL,
 			reset_time timestamp NOT NULL DEFAULT now(),
-			reset_code VARCHAR(256) NOT NULL,
-			used BOOL NOT NULL DEFAULT false,
+			reset_code varchar(256) NOT NULL,
+			used bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (user_auth_reset_id),
 			UNIQUE (reset_code)
@@ -303,8 +303,8 @@ var migrations = []any{
 			user_auth_validate_id uuid NOT NULL,
 			user_id uuid NOT NULL,
 			validate_time timestamp NOT NULL DEFAULT now(),
-			validate_code VARCHAR(16) NOT NULL,
-			used BOOL NOT NULL DEFAULT false,
+			validate_code varchar(16) NOT NULL,
+			used bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (user_auth_validate_id),
 			UNIQUE (user_id, validate_code)
@@ -320,23 +320,23 @@ var migrations = []any{
 			network_id uuid NOT NULL,
 			user_id uuid NOT NULL,
 			feedback_time timestamp NOT NULL DEFAULT now(),
-			uses_personal BOOL NOT NULL DEFAULT false,
-			uses_business BOOL NOT NULL DEFAULT false,
-			needs_private BOOL NOT NULL DEFAULT false,
-			needs_safe BOOL NOT NULL DEFAULT false,
-			needs_global BOOL NOT NULL DEFAULT false,
-			needs_collaborate BOOL NOT NULL DEFAULT false,
-			needs_app_control BOOL NOT NULL DEFAULT false,
-			needs_block_data_brokers BOOL NOT NULL DEFAULT false,
-			needs_block_ads BOOL NOT NULL DEFAULT false,
-			needs_focus BOOL NOT NULL DEFAULT false,
-			needs_connect_servers BOOL NOT NULL DEFAULT false,
-			needs_run_servers BOOL NOT NULL DEFAULT false,
-			needs_prevent_cyber BOOL NOT NULL DEFAULT false,
-			needs_audit BOOL NOT NULL DEFAULT false,
-			needs_zero_trust BOOL NOT NULL DEFAULT false,
-			needs_visualize BOOL NOT NULL DEFAULT false,
-			needs_other TEXT NULL,
+			uses_personal bool NOT NULL DEFAULT false,
+			uses_business bool NOT NULL DEFAULT false,
+			needs_private bool NOT NULL DEFAULT false,
+			needs_safe bool NOT NULL DEFAULT false,
+			needs_global bool NOT NULL DEFAULT false,
+			needs_collaborate bool NOT NULL DEFAULT false,
+			needs_app_control bool NOT NULL DEFAULT false,
+			needs_block_data_brokers bool NOT NULL DEFAULT false,
+			needs_block_ads bool NOT NULL DEFAULT false,
+			needs_focus bool NOT NULL DEFAULT false,
+			needs_connect_servers bool NOT NULL DEFAULT false,
+			needs_run_servers bool NOT NULL DEFAULT false,
+			needs_prevent_cyber bool NOT NULL DEFAULT false,
+			needs_audit bool NOT NULL DEFAULT false,
+			needs_zero_trust bool NOT NULL DEFAULT false,
+			needs_visualize bool NOT NULL DEFAULT false,
+			needs_other text NULL,
 
 			PRIMARY KEY (feedback_id)
 		)
@@ -344,7 +344,7 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE account_preferences (
 			network_id uuid NOT NULL,
-			product_updates BOOL NOT NULL DEFAULT false,
+			product_updates bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (network_id)
 		)
@@ -352,10 +352,10 @@ var migrations = []any{
 
 	newSqlMigration(`
 		CREATE TABLE search_value (
-			realm VARCHAR(16) NOT NULL,
+			realm varchar(16) NOT NULL,
 			value_id uuid NOT NULL,
-			value VARCHAR(1024) NOT NULL,
-			alias INT NOT NULL DEFAULT 0,
+			value varchar(1024) NOT NULL,
+			alias int NOT NULL DEFAULT 0,
 
 			PRIMARY KEY(value_id, alias)
 		)
@@ -366,14 +366,14 @@ var migrations = []any{
 
 	newSqlMigration(`
 		CREATE TABLE search_projection (
-			realm VARCHAR(16) NOT NULL,
-		    dim SMALLINT NOT NULL,
-		    elen SMALLINT NOT NULL,
-		    dord SMALLINT NOT NULL,
-		    dlen SMALLINT NOT NULL,
-		    vlen SMALLINT NOT NULL,
+			realm varchar(16) NOT NULL,
+		    dim smallint NOT NULL,
+		    elen smallint NOT NULL,
+		    dord smallint NOT NULL,
+		    dlen smallint NOT NULL,
+		    vlen smallint NOT NULL,
 		    value_id uuid NOT NULL,
-		    alias INT NOT NULL DEFAULT 0,
+		    alias int NOT NULL DEFAULT 0,
 
 		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, alias)
 		)
@@ -395,12 +395,279 @@ var migrations = []any{
 			user_auth_verify_id uuid NOT NULL,
 			user_id uuid NOT NULL,
 			verify_time timestamp NOT NULL DEFAULT now(),
-			verify_code VARCHAR(16) NOT NULL,
-			used BOOL NOT NULL DEFAULT false,
+			verify_code varchar(16) NOT NULL,
+			used bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (user_auth_verify_id),
 			UNIQUE (user_id, verify_code)
 		)
 	`),
 
+	newSqlMigration(`
+		CREATE TABLE network_client (
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			active bool NOT NULL DEFAULT true,
+			description varchar(256) NULL,
+			device_spec varchar(64) NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			auth_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (client_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_network_id_active ON network_client (network_id, active)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_network_id_created_time ON network_client (network_id, created_time)
+	`),
+
+
+	newSqlMigration(`
+		CREATE TYPE provide_mode AS ENUM (
+			'network',
+		    'ff',
+		    'public',
+		    'stream'
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE provide_config (
+			client_id uuid NOT NULL,
+			provide_mode provide_mode NULL,
+
+			PRIMARY KEY (client_id)
+		)
+	`),
+
+
+	newSqlMigration(`
+		CREATE TABLE network_client_connection (
+			client_id uuid NOT NULL,
+			connection_id uuid NOT NULL,
+			connected bool NOT NULL DEFAULT true,
+			connect_time timestamp NOT NULL,
+			disconnect_time timestamp NULL,
+			connection_host varchar(128) NOT NULL,
+			connection_service varchar(128) NOT NULL,
+			connection_block varchar(128) NOT NULL,
+
+			PRIMARY KEY (connection_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_client_connection_client_id_connected ON network_client_connection (client_id, connected)
+	`),
+
+
+	newSqlMigration(`
+		CREATE TABLE network_client_resident (
+			client_id uuid NOT NULL,
+			instance_id uuid NOT NULL,
+			resident_id uuid NULL,
+			resident_host varchar(128) NULL,
+			resident_service varchar(128) NULL,
+			resident_block varchar(128) NULL,
+
+			PRIMARY KEY (client_id),
+			UNIQUE (resident_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX network_client_resident_host_port ON network_client_resident (resident_host, resident_id)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE network_client_resident_port (
+			client_id uuid NOT NULL,
+			resident_id uuid NOT NULL,
+			resident_internal_port int NOT NULL,
+
+			PRIMARY KEY (client_id, resident_id, resident_internal_port)
+		)
+	`),
+
+
+
+
+
+	// prepay can be used to pay for a fixed duration with crypto
+	newSqlMigration(`
+		CREATE TYPE payment_type AS ENUM (
+			'google',
+			'apple',
+			'stripe',
+			'prepay'
+		)
+	`),
+
+	// Product SKUs (tracked in the SKUs sheet)
+	// 3g: 300GiB per month
+	// 1t: 1TiB per month
+	// 6t: 6TiB per month
+	// meterg: paid at the per-GiB metered rate
+	newSqlMigration(`
+		CREATE TYPE product_sku AS ENUM (
+			'3g',
+			'1t',
+			'6t',
+			'meterg'
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE subscription (
+			subscription_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			payment_type payment_type NOT NULL,
+			product_sku product_sku NOT NULL,
+			active bool NOT NULL DEFAULT true,
+			start_time timestamp NOT NULL DEFAULT now(),
+			end_time timestamp NOT NULL,
+
+			-- Google
+			google_purchase_token text NULL,
+			google_purchase_signature text NULL,
+
+			PRIMARY KEY (subscription_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX subscription_network_id_active_end_time ON subscription (network_id, active, end_time)
+	`),
+
+	// net_revenue_cents is how much was received for this balance (revenue - intermediary fees) 
+	newSqlMigration(`
+		CREATE TABLE transfer_balance (
+			balance_id uuid NOT NULL,
+			subscription_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			active bool DEFAULT true,
+			start_time timestamp NOT NULL DEFAULT now(),
+			end_time timestamp NOT NULL,
+			balance_bytes bigint NOT NULL,
+			net_revenue_nano_cents bigint NOT NULL,
+
+			PRIMARY KEY (balance_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_balance_network_id_active_end_time ON transfer_balance (network_id, active, end_time)
+	`),
+
+
+	// creating an escrow must deduct the balances in the same transaction
+	// settling an escrow must put `payout_bytes` into the target account_balances, and `balance_bytes - payout_bytes` back into the origin balance
+	// primary key is (contract_id, balance_id) because there can be multiple balances used per contract_id
+	newSqlMigration(`
+		CREATE TABLE transfer_escrow (
+			contract_id uuid NOT NULL,
+			balance_id uuid NOT NULL,
+			balance_bytes bigint NOT NULL,
+			
+			escrow_date timestamp NOT NULL DEFAULT now(),
+			
+			settled bool NOT NULL DEFAULT false,
+			settle_date timestamp NULL,
+			payout_bytes bigint NULL,
+
+			swept,
+			sweep_date,
+
+
+
+			PRIMARY KEY (contract_id, balance_id)
+		)
+	`),
+
+	`
+	(settled, swept, contract_id, balance_id)
+	`
+
+
+	// note the unpaid balance is `provided_balance_bytes - paid_balance_bytes`
+	// this equals SUM(transfer_escrow_sweep.payout_bytes) where payment_id IS NULL
+	// the cents to pay out is SUM(transfer_escrow_sweep.net_revenue_cents)
+	newSqlMigration(`
+		CREATE TABLE account_balance (
+			network_id uuid NOT NULL,
+			provided_balance_bytes bigint NOT NULL DEFAULT 0,
+			paid_balance_bytes, bigint NOT NULL DEFAULT 0,
+
+			PRIMARY KEY (network_id)
+		)
+	`),
+
+	// sweeps escrow value into an account
+	// the payment_id is the payment the swept value was paid out using
+	// the value of the unpaid balance needs to go back to the escrows to where the balance came from
+	// the cents contribution of each escrow is `(escrow.payout_bytes / balance.balance_bytes) * balance.net_revenue_cents`
+	//
+	// payment flow:
+	// 1. create an `account_payment` entry which is `complete=false`
+	// 2. associate unpaid `transfer_escrow_sweep` to that payment_id
+	// 3. complete the payment with the final amount, and update the `payment_record` for the pending payment
+	// 4. when the payment is complete, mark the payment `complete=true`
+	newSqlMigration(`
+		CREATE TABLE transfer_escrow_sweep (
+			contract_id uuid NOT NULL,
+			balance_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			payout_bytes bigint NOT NULL,
+			net_revenue_nano_cents bigint NOT NULL,
+
+			payment_id uuid NULL,
+
+			PRIMARY KEY (contract_id, balance_id, network_id)
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)
+	`),
+
+
+	// circle uses the circle sdk for usdc
+	newSqlMigration(`
+		CREATE TYPE wallet_type AS ENUM (
+			'circle'
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE account_wallet (
+			wallet_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			wallet_type wallet_type NOT NULL,
+			wallet_address TEXT NOT NULL,
+			active bool NOT NULL DEFAULT true,
+
+			PRIMARY KEY (wallet_id)
+		)
+	`),
+
+
+	// payment record is what was submitted to the payment processor
+	// payment receipt is the receipt from the payment processor
+	newSqlMigration(`
+		CREATE TABLE account_payment (
+			payment_id uuid NOT NULL,
+			wallet_id uuid NOT NULL,
+			nano_cents bigint NOT NULL,
+			token_type VARCHAR(16) NOT NULL,
+			token_amount double precision NOT NULL,
+			payment_time timestamp NOT NULL DEFAULT now(),
+			payment_record TEXT NULL,
+			payment_receipt TEXT NULL,
+			complete bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (payment_id)
+		)
+	`)
 }

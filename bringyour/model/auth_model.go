@@ -272,10 +272,10 @@ func AuthLogin(login AuthLoginArgs, session *session.ClientSession) (*AuthLoginR
 					context,
 					`
 						SELECT
-							network_user.user_id AS user_id,
-							network_user.auth_type AS auth_type,
-							network.network_id AS network_id,
-							network.network_name AS network_name
+							network_user.user_id,
+							network_user.auth_type,
+							network.network_id,
+							network.network_name
 						FROM network_user
 						INNER JOIN network ON network.admin_user_id = network_user.user_id
 						WHERE user_auth = $1
@@ -384,12 +384,12 @@ func AuthLoginWithPassword(
 			context,
 			`
 				SELECT
-					network_user.user_id AS user_id,
-					network_user.password_hash AS password_hash,
-					network_user.password_salt AS password_salt,
-					network_user.verified AS verified,
-					network.network_id AS network_id,
-					network.network_name AS network_name
+					network_user.user_id,
+					network_user.password_hash,
+					network_user.password_salt,
+					network_user.verified,
+					network.network_id,
+					network.network_name
 				FROM network_user
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $1
@@ -501,10 +501,10 @@ func AuthVerify(verify AuthVerifyArgs, session *session.ClientSession) (*AuthVer
 			context,
 			`
 				SELECT
-					network_user.user_id AS user_id,
-					user_auth_verify.user_auth_verify_id AS user_auth_verify_id,
-					network.network_id AS network_id,
-					network.network_name AS network_name
+					network_user.user_id,
+					user_auth_verify.user_auth_verify_id,
+					network.network_id,
+					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_verify ON
 					user_auth_verify.user_id = network_user.user_id AND 
@@ -803,10 +803,10 @@ func AuthPasswordSet(
 			context,
 			`
 				SELECT
-					network_user.user_id AS user_id,
-					user_auth_reset.user_auth_reset_id AS user_auth_reset_id,
-					network.network_id AS network_id,
-					network.network_name AS network_name
+					network_user.user_id,
+					user_auth_reset.user_auth_reset_id,
+					network.network_id,
+					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_reset ON
 					user_auth_reset.user_id = network_user.user_id AND 

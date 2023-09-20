@@ -152,13 +152,13 @@ func computeStatsProvider(stats *Stats, context context.Context, conn bringyour.
 		context,
 		`
 			SELECT
-				t.day AS day,
-				t.device_id AS device_id,
-				audit_provider_event.network_id AS network_id,
-				audit_provider_event.event_type AS event_type,
-				audit_provider_event.country_name AS country_name,
-				audit_provider_event.region_name AS region_name,
-				audit_provider_event.city_name AS city_name
+				t.day,
+				t.device_id,
+				audit_provider_event.network_id,
+				audit_provider_event.event_type,
+				audit_provider_event.country_name,
+				audit_provider_event.region_name,
+				audit_provider_event.city_name
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,
@@ -311,10 +311,10 @@ func computeStatsExtender(stats *Stats, context context.Context, conn bringyour.
 		context,
 		`
 			SELECT
-				t.day AS day,
-				t.extender_id AS extender_id,
-				audit_extender_event.network_id AS network_id,
-				audit_extender_event.event_type AS event_type
+				t.day,
+				t.extender_id,
+				audit_extender_event.network_id,
+				audit_extender_event.event_type
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,
@@ -432,9 +432,9 @@ func computeStatsNetwork(stats *Stats, context context.Context, conn bringyour.P
 		context,
 		`
 			SELECT
-				t.day AS day,
-				t.network_id AS network_id,
-				audit_network_event.event_type AS event_type
+				t.day,
+				t.network_id,
+				audit_network_event.event_type
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,
@@ -526,9 +526,9 @@ func computeStatsDevice(stats *Stats, context context.Context, conn bringyour.Pg
 		context,
 		`
 			SELECT
-				t.day AS day,
-				t.device_id AS device_id,
-				audit_device_event.event_type AS event_type
+				t.day,
+				t.device_id,
+				audit_device_event.event_type
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,

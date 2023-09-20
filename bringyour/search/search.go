@@ -86,16 +86,16 @@ func (self Search) Around(query string, distance int) []*SearchResult {
 		sqlParts,
 		`
 			SELECT
-				search_sim_possible.value_id AS value_id,
-				search_sim_possible.alias AS alias,
+				search_sim_possible.value_id,
+				search_sim_possible.alias,
 				search_value_alias.value AS alias_value,
-				search_value.value AS value
+				search_value.value
 			FROM
 			(
 				SELECT
 					value_id,
 					alias,
-					SUM(sim) as sim 
+					SUM(sim) AS sim 
 				FROM
 				(
 		`,

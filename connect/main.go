@@ -46,7 +46,7 @@ Options:
 
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
-        // router.NewRoute("GET", "/", connectRouter.Connect),
+        router.NewRoute("GET", "/", Connect),
     }
 
     port, _ := opts.Int("--port")

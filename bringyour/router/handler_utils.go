@@ -40,6 +40,8 @@ func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), 
 
     // look for AuthArgs
     inputMeta := reflect.ValueOf(&input).Elem()
+    // FIXME should this be passed as BEARER auth?
+    // FIXME allow ByJwt as a legacy
     byJwtField := reflect.Indirect(inputMeta).FieldByName("ByJwt")
 	if byJwtField != (reflect.Value{}) {
 		byJwt, err := jwt.ParseByJwt(byJwtField.String())
