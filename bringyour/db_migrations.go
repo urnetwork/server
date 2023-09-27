@@ -33,9 +33,9 @@ func newSqlMigration(sql string) *SqlMigration {
 
 // important these migration functions must be idempotent
 type CodeMigration struct {
-	callback func(context.Context, PgTx)
+	callback func(context.Context)
 }
-func newCodeMigration(callback func(context.Context, PgTx)) *CodeMigration {
+func newCodeMigration(callback func(context.Context)) *CodeMigration {
 	return &CodeMigration{
 		callback: callback,
 	}
@@ -73,9 +73,10 @@ func DbVersion() int {
 }
 
 
-func ApplyDbMigrations() {
+func ApplyDbMigrations(ctx context.Context) {
 	endVersionNumber := DbVersion()
 
+	// FIXME apply each migration in its own transaction
 	Tx(func(context context.Context, tx PgTx) {
 		tx.Exec(
 			context,
@@ -101,6 +102,7 @@ func ApplyDbMigrations() {
 		)
 	})
 }
+
 
 var migrations = []any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
@@ -310,9 +312,6 @@ var migrations = []any{
 			UNIQUE (user_id, validate_code)
 		)
 	`),
-	// newSqlMigration(`
-	// 	CREATE INDEX user_auth_validate_user_id ON user_auth_validate (user_id, validate_code)
-	// `),
 
 	newSqlMigration(`
 		CREATE TABLE account_feedback (
@@ -442,7 +441,6 @@ var migrations = []any{
 		)
 	`),
 
-
 	newSqlMigration(`
 		CREATE TABLE network_client_connection (
 			client_id uuid NOT NULL,
@@ -453,15 +451,89 @@ var migrations = []any{
 			connection_host varchar(128) NOT NULL,
 			connection_service varchar(128) NOT NULL,
 			connection_block varchar(128) NOT NULL,
+			ip_str varchar(40) NOT NULL,
 
 			PRIMARY KEY (connection_id)
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX network_client_connection_client_id_connected ON network_client_connection (client_id, connected)
 	`),
 
+	newSqlMigration(`
+		CREATE TYPE location_type AS ENUM (
+			'city',
+		    'region',
+		    'country'
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE location (
+			location_id uuid NOT NULL,
+			location_type location_type NOT NULL,
+			name VARCHAR(128) NOT NULL,
+			city_location_id uuid NULL,
+			region_location_id uuid NULL,
+			country_location_id uuid NULL,
+			country_code CHAR(2) NULL,
+
+			PRIMARY KEY (location_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX location_type_country_code_name ON location (location_type, country_code, name, country_location_id, region_location_id, location_id)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE location_group (
+			location_group_id uuid NOT NULL,
+			name VARCHAR(128) NOT NULL,
+			recommended bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (location_group_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX location_group_name ON location_group (name, location_group_id)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE location_group_member (
+			location_group_id uuid NOT NULL,
+			location_id uuid NOT NULL,
+
+			PRIMARY KEY (location_group_id, location_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX location_group_member_location_id ON location_group_member (location_id, location_group_id)
+	`),
+
+	// this denormalizes to speed up finding client_ids by location
+	// (connection_id, client_id)
+	// (city_location_id, region_location_id, country_location_id)
+	newSqlMigration(`
+		CREATE TABLE network_client_location (
+			connection_id uuid NOT NULL,
+			client_id uuid NOT NULL,
+			city_location_id uuid NOT NULL,
+			region_location_id uuid NOT NULL,
+			country_location_id uuid NOT NULL,
+
+			PRIMARY KEY (connection_id)
+		)
+	`),
+	// 3 separate indexes: city location id, region, country
+	newSqlMigration(`
+		CREATE INDEX network_client_location_city_client_id ON network_client_location (city_location_id, client_id)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_location_region_client_id ON network_client_location (region_location_id, client_id)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_client_location_country_client_id ON network_client_location (country_location_id, client_id)
+	`),
 
 	newSqlMigration(`
 		CREATE TABLE network_client_resident (
@@ -476,7 +548,6 @@ var migrations = []any{
 			UNIQUE (resident_id)
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX network_client_resident_host_port ON network_client_resident (resident_host, resident_id)
 	`),
@@ -490,10 +561,6 @@ var migrations = []any{
 			PRIMARY KEY (client_id, resident_id, resident_internal_port)
 		)
 	`),
-
-
-
-
 
 	// prepay can be used to pay for a fixed duration with crypto
 	newSqlMigration(`
@@ -561,6 +628,29 @@ var migrations = []any{
 		CREATE INDEX transfer_balance_network_id_active_end_time ON transfer_balance (network_id, active, end_time)
 	`),
 
+
+	newSqlMigration(`
+		CREATE TABLE transfer_contract (
+			contract_id uuid NOT NULL,
+			source_id uuid NOT NULL,
+			destination_id uuid NOT NULL,
+			open bool NOT NULL DEFAULT true,
+			transfer_bytes bigint NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			close_time timetamp NULL,
+
+			PRIMARY KEY (contract_id),
+		)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_contract_source_id ON transfer_contract (source_id, destination_id, contract_id)
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_contract_destination_id ON transfer_contract (destination_id, source_id, contract_id)
+	`),
+	
 
 	// creating an escrow must deduct the balances in the same transaction
 	// settling an escrow must put `payout_bytes` into the target account_balances, and `balance_bytes - payout_bytes` back into the origin balance
@@ -669,5 +759,7 @@ var migrations = []any{
 
 			PRIMARY KEY (payment_id)
 		)
-	`)
+	`),
+
+	newCodeMigration(model.AddDefaultLocations)
 }

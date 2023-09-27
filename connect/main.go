@@ -35,18 +35,22 @@ Options:
 
     // bringyour.Logger().Printf("%s\n", opts)
 
-    // FIXME event should have a context
-    quitEvent := bringyour.NewEvent()
+    cancelCtx, cancel := context.WithCancel(context.Background)
+    defer cancel()
+
+    quitEvent := bringyour.NewEvent(cancelCtx)
 
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    // FIXME
-    // connectRouter := NewConnectRouter(quitEvent.context)
+    exchange := NewExchangeFromEnv(cancelCtx)
+    defer exchange.Close()
+
+    connectHandler := NewConnectHandler(cancelCtx, exchange)
 
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
-        router.NewRoute("GET", "/", Connect),
+        router.NewRoute("GET", "/", connectHandler.Connect),
     }
 
     port, _ := opts.Int("--port")

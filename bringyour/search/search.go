@@ -70,12 +70,20 @@ func NewSearch(realm string, searchType SearchType) *Search {
 	}
 }
 
-func (self Search) AnyAround(query string, distance int) bool {
+func (self *Search) AnyAround(query string, distance int) bool {
 	results := self.Around(query, distance)
 	return 0 < len(results)
 }
 
-func (self Search) Around(query string, distance int) []*SearchResult {
+func (self *Search) AroundIds(query string, distance int) map[Id]*SearchResult {
+	results := map[Id]*SearchResult{}
+	for _, result := range self.Around(query, distance) {
+		results[result.ValueId] = result
+	}
+	return results
+}
+
+func (self *Search) Around(query string, distance int) []*SearchResult {
 	projection := computeProjection(query)
 
 	sqlParts := []string{}
@@ -244,106 +252,110 @@ func (self Search) Around(query string, distance int) []*SearchResult {
 	return maps.Values(matches)
 }
 
-func (self Search) Add(value string, valueId ulid.ULID) {
-    bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
-    	var err error
+func (self *Search) Add(ctx context.Context, value string, valueId ulid.ULID) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    	self.AddInTx(ctx, value, valueId, tx)
+    })
+}
 
-    	_, err = tx.Exec(
-    		context,
+func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID, tx bringyour.PgTx) {
+	var err error
+
+	_, err = tx.Exec(
+		context,
+		`
+    		DELETE FROM search_projection
+    		USING search_value
+    		WHERE
+    			search_projection.value_id = search_value.value_id AND
+    			search_value.realm = $1 AND
+    			search_value.value = $2 AND
+    			search_value.alias = 0
+		`,
+		self.realm,
+		value,
+	)
+	bringyour.Raise(err)
+
+	_, err = tx.Exec(
+		context,
+		`
+    		DELETE FROM search_value a
+    		USING search_value b
+    		WHERE
+    			a.value_id = b.value_id AND
+    			b.realm = $1 AND
+    			b.value = $2 AND
+    			b.alias = 0
+		`,
+		self.realm,
+		value,
+	)
+	bringyour.Raise(err)
+
+	insertOne := func(value string, alias int) {
+		_, err = tx.Exec(
+			context,
     		`
-	    		DELETE FROM search_projection
-	    		USING search_value
-	    		WHERE
-	    			search_projection.value_id = search_value.value_id AND
-	    			search_value.realm = $1 AND
-	    			search_value.value = $2 AND
-	    			search_value.alias = 0
+	    		INSERT INTO search_value
+	    		(realm, value_id, value, alias)
+	    		VALUES
+	    		($1, $2, $3, $4)
     		`,
     		self.realm,
+    		ulid.ToPg(&valueId),
     		value,
+    		alias,
     	)
     	bringyour.Raise(err)
 
-    	_, err = tx.Exec(
-    		context,
-    		`
-	    		DELETE FROM search_value a
-	    		USING search_value b
-	    		WHERE
-	    			a.value_id = b.value_id AND
-	    			b.realm = $1 AND
-	    			b.value = $2 AND
-	    			b.alias = 0
-    		`,
-    		self.realm,
-    		value,
-    	)
-    	bringyour.Raise(err)
-
-    	insertOne := func(value string, alias int) {
-    		_, err = tx.Exec(
-    			context,
+    	projection := computeProjection(value)
+    	for dim, dlen := range projection.dims {
+    		elen := projection.vlen + projection.dord + dlen
+	    	_, err = tx.Exec(
+	    		context,
 	    		`
-		    		INSERT INTO search_value
-		    		(realm, value_id, value, alias)
+		    		INSERT INTO search_projection
+		    		(realm, dim, elen, dord, dlen, vlen, value_id, alias)
 		    		VALUES
-		    		($1, $2, $3, $4)
+		    		($1, $2, $3, $4, $5, $6, $7, $8)
 	    		`,
 	    		self.realm,
+	    		dim,
+	    		elen,
+	    		projection.dord,
+	    		dlen,
+	    		projection.vlen,
 	    		ulid.ToPg(&valueId),
-	    		value,
 	    		alias,
 	    	)
 	    	bringyour.Raise(err)
+	    }
+	}
 
-	    	projection := computeProjection(value)
-	    	for dim, dlen := range projection.dims {
-	    		elen := projection.vlen + projection.dord + dlen
-		    	_, err = tx.Exec(
-		    		context,
-		    		`
-			    		INSERT INTO search_projection
-			    		(realm, dim, elen, dord, dlen, vlen, value_id, alias)
-			    		VALUES
-			    		($1, $2, $3, $4, $5, $6, $7, $8)
-		    		`,
-		    		self.realm,
-		    		dim,
-		    		elen,
-		    		projection.dord,
-		    		dlen,
-		    		projection.vlen,
-		    		ulid.ToPg(&valueId),
-		    		alias,
-		    	)
-		    	bringyour.Raise(err)
-		    }
-    	}
-
-    	switch self.searchType {
-    	case SearchTypeFull:
-    		insertOne(value, 0)
-		case SearchTypePrefix:
-			// compute each prefix as a full search alias
-			alias := 0
-			for vlen := len(value) - 1; 0 < vlen; vlen -= 1 {
-				valuePrefix := value[:vlen]
+	switch self.searchType {
+	case SearchTypeFull:
+		insertOne(value, 0)
+	case SearchTypePrefix:
+		// compute each prefix as a full search alias
+		alias := 0
+		for vlen := len(value) - 1; 0 < vlen; vlen -= 1 {
+			valuePrefix := value[:vlen]
+			insertOne(valuePrefix, alias)
+			alias += 1
+		}
+	case SearchTypeSubstring:
+		// for each suffix, compute each prefix as a full search alias
+		alias := 0
+		for suffixVlen := len(value); 0 < suffixVlen; suffixVlen -= 1 {
+			suffix := value[len(value) - suffixVlen:]
+			for vlen := len(suffix); 0 < vlen; vlen -= 1 {
+				valuePrefix := suffix[:vlen]
 				insertOne(valuePrefix, alias)
 				alias += 1
 			}
-		case SearchTypeSubstring:
-			// for each suffix, compute each prefix as a full search alias
-			alias := 0
-			for suffixVlen := len(value); 0 < suffixVlen; suffixVlen -= 1 {
-				suffix := value[len(value) - suffixVlen:]
-				for vlen := len(suffix); 0 < vlen; vlen -= 1 {
-					valuePrefix := suffix[:vlen]
-					insertOne(valuePrefix, alias)
-					alias += 1
-				}
-			}
-    	}
-    })
+		}
+	}
 }
 
 

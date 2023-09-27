@@ -124,6 +124,7 @@ const TxSerializable = pgx.Serializable
 
 
 
+// FIXME by default Db Should be read-only
 func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 	// fixme rerun callback on disconnect with a new connection
 
@@ -321,5 +322,23 @@ func WithPgResult(r PgResult, err error, callback any) {
 		panic(errors.New(fmt.Sprintf("Unknown callback: %s", callback)))
 	}
 	Raise(r.Err())
+}
+
+// PgConn and PgTx conform to this
+type PgDb interface {
+	Query
+	Exec
+}
+
+
+// spec is `table_name(value_column_name)`
+func CreateTempTable[T any](ctx context.Context, db PgDb, spec string, ...values T) {
+
+}
+
+// many to one join table
+// spec is `table_name(key_column_name, value_column_name)`
+func CreateTempJoinTable[K any, V any](ctx context.Context, db PgDb, spec string, values map[K]V) {
+
 }
 

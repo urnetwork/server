@@ -31,33 +31,33 @@ const (
 // the total number active per network is also limited
 
 
-type NetworkAuthClientArgs struct {
+type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
 	ClientId *string `json:"clientId",omitempty`
 	Description string `json:"description"`
 	DeviceSpec string `json:"deviceSpec"`
 }
 
-type NetworkAuthClientResult struct {
+type AuthNetworkClientResult struct {
 	ByJwt *string `json:"byJwt,omitempty"`
 	Error *NetworkClientCreateError `json:"error,omitempty"`
 }
 
-type NetworkAuthClientError struct {
+type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
 	ClientLimitExceeded bool `json:"clientLimitExceeded"` 
 	Message string `json:"message"`
 }
 
-func NetworkAuthClient(
-	authClient NetworkAuthClientArgs,
+func AuthNetworkClient(
+	authClient AuthNetworkClientArgs,
 	session *session.ClientSession,
-) (*NetworkAuthClientResult, error) {
+) (*AuthNetworkClientResult, error) {
 	if session == nil {
 		return nil, errors.New("Auth required")
 	}
 
-	var authClientResult *NetworkAuthClientResult
+	var authClientResult *AuthNetworkClientResult
 	var authClientError error
 
 	if authClient.ClientId == nil {
@@ -81,8 +81,8 @@ func NetworkAuthClient(
 			})
 
 			if LimitClientIdsPer24Hours <= last24HourCount {
-				authClientResult = &NetworkAuthClientResult{
-					Error: &NetworkAuthClientError{
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
 						ClientLimitExceeded: true,
 						Message: "Too many new clients in the last 24 hours.",
 					}
@@ -107,8 +107,8 @@ func NetworkAuthClient(
 			})
 
 			if LimitClientIdsPerNetwork <= activeCount {
-				authClientResult = &NetworkAuthClientResult{
-					Error: &NetworkAuthClientError{
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
 						ClientLimitExceeded: true,
 						Message: "Too many active clients.",
 					}
@@ -139,7 +139,7 @@ func NetworkAuthClient(
 			)
 			bringyour.Raise(err)
 
-			authClientResult := &NetworkAuthClientResult{
+			authClientResult := &AuthNetworkClientResult{
 				ByJwt: session.ByJwt.WithClientId(clientId).Sign(),
 			}
 		}, bringyour.TxSerializable)
@@ -167,20 +167,20 @@ func NetworkAuthClient(
 			)
 			bringyour.Raise(err)
 			if tag.RowsAffected() != 1 {
-				authClientResult = &NetworkAuthClientResult{
-					Error: &NetworkAuthClientError{
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
 						Message: "Client does not exist.",
 					}
 				}
 				return
 			}
 
-			authClientResult := &NetworkAuthClientResult{
+			authClientResult := &AuthNetworkClientResult{
 				ByJwt: session.ByJwt.WithClientId(clientId).Sign(),
 			}
 		})
 
-		authClientResult := &NetworkAuthClientResult{
+		authClientResult := &AuthNetworkClientResult{
 			ByJwt: session.ByJwt.WithClientId(authClient.ClientId).Sign(),
 		}
 	}
@@ -189,27 +189,27 @@ func NetworkAuthClient(
 }
 
 
-type NetworkRemoveClientArgs struct {
+type RemoveNetworkClientArgs struct {
 	ClientId string `json:"clientId"`
 }
 
-type NetworkRemoveClientResult struct {
-	Error *NetworkRemoveClientError `json:"error,omitempty"`
+type RemoveNetworkClientResult struct {
+	Error *RemoveNetworkClientError `json:"error,omitempty"`
 }
 
-type NetworkRemoveClientError struct {
+type RemoveNetworkClientError struct {
 	Message string `json:"message"`
 }
 
-func NetworkRemoveClient(
-	removeClient NetworkRemoveClientArgs,
+func RemoveNetworkClient(
+	removeClient RemoveNetworkClientArgs,
 	session *session.ClientSession,
-) (*NetworkRemoveClientResult, error) {
+) (*RemoveNetworkClientResult, error) {
 	if session == nil {
 		return nil, errors.New("Auth required")
 	}
 
-	var removeClientResult *NetworkRemoveClientResult
+	var removeClientResult *RemoveNetworkClientResult
 	var removeClientErr error
 
 	// important: must check `network_id = session network_id`
@@ -225,15 +225,15 @@ func NetworkRemoveClient(
 		)
 		bringyour.Raise(err)
 		if tag.RowsAffected() != 1 {
-			removeClientResult = &NetworkRemoveClientResult{
-				Error: &NetworkRemoveClientError{
+			removeClientResult = &RemoveNetworkClientResult{
+				Error: &RemoveNetworkClientError{
 					Message: "Client does not exist.",
 				}
 			}
 			return
 		}
 
-		removeClientResult := &NetworkRemoveClientResult{}
+		removeClientResult := &RemoveNetworkClientResult{}
 	})
 
 	return removeClientResult, removeClientErr
@@ -519,6 +519,30 @@ func DisconnectNetworkClient(connectionId Id) error {
 }
 
 
+func IsNetworkClientConnected(connectionId Id) bool {
+	connected := false
+
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+		disconnectTime := time.Now()
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT connected FROM network_client_connection
+				WHERE connection_id = $1
+			`,
+			connectionId,
+		)
+		bringyour.WithDbResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&connected))
+			}
+		})
+	})
+
+	return connected
+}
+
+
 // the resident is a transport client that runs on the platform on behalf of a client
 // there is at most one resident per client, which is self-nominated by any endpoint
 // the nomination happens when the endpoint cannot communicate with the current resident
@@ -605,6 +629,19 @@ func GetResident(clientId Id) *NetworkClientResident {
 
 	// important: use serializable tx
 	bringyour.Tx(session.Ctx, func(conn bringyour.PgConn) {
+		resident = dbGetResident(session.Ctx, conn, clientId)
+	}, bringyour.TxSerializable)
+
+	return resident
+}
+
+func GetResidentWithInstance(clientId Id) *NetworkClientResident {
+	var resident *NetworkClientResident
+
+	// important: use serializable tx
+	bringyour.Tx(session.Ctx, func(conn bringyour.PgConn) {
+		// FIXME select the client where instance_id = $1
+
 		resident = dbGetResident(session.Ctx, conn, clientId)
 	}, bringyour.TxSerializable)
 
@@ -754,6 +791,4 @@ func RemoveResident(clientId Id, residentId Id) {
 		
 	}, bringyour.TxSerializable)
 }
-
-
 

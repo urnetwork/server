@@ -77,6 +77,17 @@ func PaymentSweep() {
 
 
 
+NewTransferPair
+
+// ascending order
+NewUnorderedTransferPair
+
+GetOpenContractIds
+
+// unordered transfer pairs as keys
+// map[model.TransferPair]map[Id]bool
+GetOpenContractIdsForSourceOrDestination
+
 
 
 
