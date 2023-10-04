@@ -1,6 +1,6 @@
 module bringyour.com/bringyour
 
-go 1.20
+go 1.21
 
 require (
 	github.com/aws/aws-sdk-go v1.44.331

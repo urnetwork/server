@@ -1,5 +1,20 @@
 package main
 
+import (
+    "context"
+    "time"
+    "net/http"
+
+    "github.com/gorilla/websocket"
+
+    "bringyour.com/bringyour"
+    "bringyour.com/bringyour/jwt"
+    "bringyour.com/bringyour/model"
+    "bringyour.com/bringyour/controller"
+    "bringyour.com/connect"
+    "bringyour.com/protocol"
+)
+
 
 const PingTimeout = 5 * time.Second
 const SyncConnectionTimeout = 60 * time.Second
@@ -36,19 +51,31 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
     cancelCtx, cancel := context.WithCancel(self.ctx)
 
-    close := func() {
+    closeHandle := func() {
         cancel()
         ws.Close()
     }
-    defer close()
+    defer closeHandle()
 
 
-    authBytes := ws.Read()
+    messageType, authFrameBytes, err := ws.ReadMessage()
+    if err != nil {
+        return
+    }
+    if messageType != websocket.BinaryMessage {
+        return
+    }
 
-    controlAuth := proto.ParseTransferFrame(authBytes)
+    message, err := connect.DecodeFrame(authFrameBytes)
+    if err != nil {
+        return
+    }
+    auth, ok := message.(*protocol.Auth)
+    if !ok {
+        return
+    }
 
-    byJwt, err := jwt.ParseByJwt(controlAuth.ByJwt)
-
+    byJwt, err := jwt.ParseByJwt(auth.ByJwt)
     if err != nil {
         return
     }
@@ -57,29 +84,46 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    client := model.GetNetworkClient(byJwt.ClientId)
+    instanceId, err := bringyour.IdFromSlice(auth.InstanceId)
+    if err != nil {
+        return
+    }
+
+    // verify the client is still part of the network
+    // this will fail for example if the client has been removed
+    client := model.GetNetworkClient(cancelCtx, *byJwt.ClientId)
     if client == nil || client.NetworkId != byJwt.NetworkId {
         return
     }
 
-    // FIXME use correct warp header
-    // find the client IP from the request header
-    ipStr := r.Headers.Get("X-IP")
+    // echo the auth message on successful auth
+    err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
+    if err != nil {
+        return
+    }
 
-    connectionId := controller.ConnectNetworkClient(byJwt.ClientId, ipStr)
-    defer model.DisconnectNetworkClient(connectionId)
+    // find the client ip:port from the request header
+    // `X-Forwarded-For` is added by the warp lb
+    clientAddress := r.Header.Get("X-Forwarded-For")
+    if clientAddress == "" {
+        // use the raw connection remote address
+        clientAddress = r.RemoteAddr
+    }
+
+    connectionId := controller.ConnectNetworkClient(cancelCtx, *byJwt.ClientId, clientAddress)
+    defer model.DisconnectNetworkClient(cancelCtx, connectionId)
 
     residentTransport := NewResidentTransport(
         cancelCtx,
         self.exchange,
-        byJwt.ClientId,
-        controlAuth.InstanceId,
+        *byJwt.ClientId,
+        instanceId,
     )
     defer residentTransport.Close()
 
     go func() {
     	// disconnect the client if the model marks the connection closed
-        defer close()
+        defer closeHandle()
 
     	for  {
     		select {
@@ -88,14 +132,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     		case <- time.After(SyncConnectionTimeout):
     		}
 
-    		if !model.IsNetworkClientConnected(connectionId) {
+    		if !model.IsNetworkClientConnected(cancelCtx, connectionId) {
     			return
     		}
     	}
     }()
 
     go func() {
-        defer close()
+        defer closeHandle()
 
     	for {
             messageType, message, err := ws.ReadMessage()
@@ -105,9 +149,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             switch messageType {
             case websocket.BinaryMessage:
                 select {
-                case cancelCtx.Done():
+                case <- cancelCtx.Done():
                     return
-                case residentSend <- message:
+                case residentTransport.send <- message:
                 }
             // else ignore
             }
@@ -120,14 +164,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         case <- cancelCtx.Done():
             return
         case message, ok := <- residentTransport.receive:
+            if !ok {
+                return
+            }
             if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
                 return
             }
-        case time.After(PingTimeout):
+        case <- time.After(PingTimeout):
             if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
                 return
             }
+        }
     }
-
-    
 }

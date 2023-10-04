@@ -6,11 +6,21 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+	"errors"
+	"regexp"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgconn"
+	// "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+
+/*
+`Db` runs in read-only mode
+`Tx` runs in read-write mode by default, which can be changed with `pgx.TxOptions`
+*/
 
 
 // type aliases to simplify user code
@@ -18,15 +28,19 @@ type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
 type PgResult = pgx.Rows
 type PgNamedArgs = pgx.NamedArgs
+type PgBatch = pgx.Batch
+type PgBatchResults = pgx.BatchResults
 
-// FIXME Id should just be Pg Scanner/Valuer compatible, then we can just Id everywhere
-// type PgUUID = pgtype.UUIDw
+
+const TxSerializable = pgx.Serializable
 
 
 type safePgPool struct {
+	ctx context.Context
 	mutex sync.Mutex
 	pool *pgxpool.Pool
 }
+
 func (self *safePgPool) open() *pgxpool.Pool {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -46,6 +60,8 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			"pool_max_conn_lifetime_jitter": "1h",
 			"pool_max_conn_idle_time": "60s",
 			"pool_health_check_period": "1h",
+			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
+			"default_transaction_read_only": "on",
 		}
 		optionsPairs := []string{}
 		for key, value := range options {
@@ -59,22 +75,27 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			dbKeys.RequireString("password"),
 			dbKeys.RequireString("authority"),
 			dbKeys.RequireString("db"),
-			// "bringyour",
-			// "pigsty-vesicle-trombone-vigour",
-			// "192.168.208.135:5432",
-			// "bringyour",
 			optionsString,
 		)
 		Logger().Printf("Db url %d %s\n", postgresUrl)
+		config, err := pgxpool.ParseConfig(postgresUrl)
+		if err != nil {
+			panic(fmt.Sprintf("Unable to parse url: %s", err))
+		}
+		config.AfterConnect = func(ctx context.Context, conn *pgx.Conn)(error) {
+			// use `Id` instead of the default UUID type
+			pgxRegisterIdType(conn.TypeMap())
+			return nil
+		}
 
-		var err error
-		self.pool, err = pgxpool.New(context.Background(), postgresUrl)
+		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
 			panic(fmt.Sprintf("Unable to connect to database: %s", err))
 		}
 	}
 	return self.pool
 }
+
 func (self *safePgPool) close() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -85,34 +106,37 @@ func (self *safePgPool) close() {
 	}
 }
 
-var safePool *safePgPool = &safePgPool{}
+var safePool *safePgPool = &safePgPool{
+	ctx: context.Background(),
+}
 
 func pool() *pgxpool.Pool {
 	return safePool.open()
 }
 
 
-
 type DbRetryOptions struct {
 	// rerun the entire callback on commit error
 	rerunOnCommitError bool
-	rerunOnDisconnect bool
+	rerunOnConnectionError bool
 	// this only works if the conflict, e.g. an ID, is changed on each run
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
 	rerunOnConstraintError bool
 	retryTimeout time.Duration
 }
+
 // this is the default for `Db` and `Tx`
 func OptRetryDefault() DbRetryOptions {
-	return &DbRetryOptions{
+	return DbRetryOptions{
 		rerunOnCommitError: true,
 		rerunOnConnectionError: true,
 		rerunOnConstraintError: true,
 		retryTimeout: 200 * time.Millisecond,
 	}
 }
+
 func OptNoRetry() DbRetryOptions {
-	return &DbRetryOptions{
+	return DbRetryOptions{
 		rerunOnCommitError: false,
 		rerunOnConnectionError: false,
 		rerunOnConstraintError: false,
@@ -120,55 +144,41 @@ func OptNoRetry() DbRetryOptions {
 }
 
 
-const TxSerializable = pgx.Serializable
-
-
-
-// FIXME by default Db Should be read-only
 func Db(ctx context.Context, callback func(PgConn), options ...any) error {
-	// fixme rerun callback on disconnect with a new connection
-
 	retryOptions := OptRetryDefault()
 	for _, option := range options {
 		switch v := option.(type) {
 		case DbRetryOptions:
 			retryOptions = v
+		}
 	}
 
-	// context := context.Background()
-
-	// var conn *pgxpool.Conn
-	// var connErr error
-
-	// fixme retry if error
-
-
 	for {
-		var pgErr pgx.PgError
-		conn, connErr := pool().Acquire(context)
+		var pgErr *pgconn.PgError
+		conn, connErr := pool().Acquire(ctx)
 		if connErr != nil {
-			if retryOptions != nil && retryOptions.rerunOnConnectionError {
+			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
-				case time.After(retryOptions.retryTimeout):
+				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
 			return connErr
 		}
 
-		connErr = conn.Ping(context)
+		connErr = conn.Ping(ctx)
 		if connErr != nil {
 			// take the bad connection out of the pool
 			pgxConn := conn.Hijack()
-			pgxConn.Close(context)
+			pgxConn.Close(ctx)
 			conn = nil
 
-			f retryOptions != nil && retryOptions.rerunOnConnectionError {
+			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
-				case time.After(retryOptions.retryTimeout):
+				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
 			return connErr
@@ -178,25 +188,25 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			defer func() {
 				if err := recover(); err != nil {
 					switch v := err.(type) {
-					case pgx.PgError:
-						pgErr = v
+					case pgconn.PgError:
+						pgErr = &v
 					default:
 						panic(err)
 					}
 				}
 			}()
 			defer conn.Release()
-			callback(context, conn)
+			callback(conn)
 		}()
 
 		if pgErr != nil {
-			if pgErr.ConstraintName != "" && retryOptions != nil && retryOptions.rerunOnConstraintError {
+			if pgErr.ConstraintName != "" && retryOptions.rerunOnConstraintError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
-				case time.After(retryOptions.retryTimeout):
+				case <- time.After(retryOptions.retryTimeout):
 				}
-				LOG("constraint", pgErr)
+				Logger().Printf("constraint error, retry (%s)", pgErr)
 				continue
 			}
 			return pgErr
@@ -208,28 +218,6 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 
 
 func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
-	// context := context.Background()
-
-	// var tx pgx.Tx
-	// var err error
-
-	// // fixme retry if error
-
-	// tx, err = pool().Begin(context)
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer func() {
-	// 	err := recover()
-	// 	if err == nil {
-	// 		tx.Commit(context)
-	// 	} else {
-	// 		tx.Rollback(context)
-	// 	}
-	// }()
-
-	// callback(context, tx)
-
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
@@ -255,14 +243,14 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 
 	for {
 		var commitErr error
-		err := Db(ctx, func (context context.Context, conn PgConn) {
-			tx, err := conn.BeginTx(context, txOptions)
+		err := Db(ctx, func (conn PgConn) {
+			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
-				return err
+				return
 			}
 			defer func() {
 				if err := recover(); err != nil {
-					if rollbackErr := tx.Rollback(context); rollbackErr != nil {
+					if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
 						panic(rollbackErr)
 					}
 					panic(err)
@@ -272,29 +260,29 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				defer func() {
 					if err := recover(); err != nil {
 						switch v := err.(type) {
-						case pgx.PgError:
-							pgErr = v
+						case pgconn.PgError:
+							commitErr = &v
 						default:
 							panic(err)
 						}
 					}
 				}()
-				callback(context, tx)
+				callback(tx)
 			}()
 			Logger().Printf("Db commit\n")
-			commitErr := tx.Commit(context)
+			commitErr = tx.Commit(ctx)
 		}, options...)
 		if err != nil {
 			return err
 		}
 		if commitErr != nil {
-			if retryOptions != nil && retryOptions.rerunOnCommitError {
+			if retryOptions.rerunOnCommitError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
-				case time.After(retryOptions.retryTimeout):
+				case <- time.After(retryOptions.retryTimeout):
 				}
-				LOG("commit")
+				Logger().Printf("commit")
 				continue
 			}
 			return commitErr
@@ -303,12 +291,6 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 	}
 }
 
-
-// the return of many pgx operations is (r, error) where r conforms to the interface below
-// type DbResult interface {
-// 	Close()
-// 	Err() error
-// }
 
 func WithPgResult(r PgResult, err error, callback any) {
 	Raise(err)
@@ -324,21 +306,154 @@ func WithPgResult(r PgResult, err error, callback any) {
 	Raise(r.Err())
 }
 
-// PgConn and PgTx conform to this
-type PgDb interface {
-	Query
-	Exec
+
+func BatchInTx(ctx context.Context, tx PgTx, callback func (*PgBatch), resultCallbacks ...func(PgBatchResults)) {
+	batch := &pgx.Batch{}
+	callback(batch)
+	results := tx.SendBatch(ctx, batch)
+	for _, resultCallback := range resultCallbacks {
+		resultCallback(results)
+	}
+	results.Close()
 }
 
 
 // spec is `table_name(value_column_name)`
-func CreateTempTable[T any](ctx context.Context, db PgDb, spec string, ...values T) {
-
+func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
+	tableSpec := parseTempTableSpec(spec)
+	var valueSqlType string
+	for _, value := range values {
+		switch v := any(value).(type) {
+		case Id:
+			valueSqlType = "uuid"
+		default:
+			panic(fmt.Errorf("Unknown SQL type for %v", v))
+		}
+		break
+	}
+	_, err := tx.Exec(ctx, fmt.Sprintf(
+		`
+			CREATE TEMPORARY TABLE %s (
+				%s %s NOT NULL,
+				PRIMARY KEY (%s)
+			)
+		`,
+		tableSpec.tableName,
+		tableSpec.valueColummName,
+		valueSqlType,
+		tableSpec.valueColummName,
+	))
+	Raise(err)
+	BatchInTx(ctx, tx, func (batch *PgBatch) {
+		for _, value := range values {
+			batch.Queue(
+				fmt.Sprintf(
+					`
+						INSERT INTO %s (%s) VALUES ($1)
+						ON CONFLICT IGNORE
+					`,
+					tableSpec.tableName,
+					tableSpec.valueColummName,
+				),
+				value,
+			)
+		}
+	})
 }
+
 
 // many to one join table
 // spec is `table_name(key_column_name, value_column_name)`
-func CreateTempJoinTable[K any, V any](ctx context.Context, db PgDb, spec string, values map[K]V) {
-
+func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, spec string, values map[K]V) {
+	tableSpec := parseTempJoinTableSpec(spec)
+	var keySqlType string
+	var valueSqlType string
+	for key, value := range values {
+		switch v := any(key).(type) {
+		case Id:
+			keySqlType = "uuid"
+		default:
+			panic(fmt.Errorf("Unknown SQL type for %v", v))
+		}
+		switch v := any(value).(type) {
+		case int:
+			valueSqlType = "int"
+		default:
+			panic(fmt.Errorf("Unknown SQL type for %v", v))
+		}
+		break
+	}
+	_, err := tx.Exec(ctx, fmt.Sprintf(
+		`
+			CREATE TEMPORARY TABLE %s (
+				%s %s NOT NULL,
+				%s %s NOT NULL,
+				PRIMARY KEY (%s)
+			)
+		`,
+		tableSpec.tableName,
+		tableSpec.keyColummName,
+		keySqlType,
+		tableSpec.valueColummName,
+		valueSqlType,
+		tableSpec.keyColummName,
+	))
+	Raise(err)
+	BatchInTx(ctx, tx, func (batch *PgBatch) {
+		for key, value := range values {
+			batch.Queue(
+				fmt.Sprintf(
+					`
+						INSERT INTO %s (%s, %s) VALUES ($1, $2)
+						ON CONFLICT IGNORE
+					`,
+					tableSpec.tableName,
+					tableSpec.keyColummName,
+					tableSpec.valueColummName,
+				),
+				key,
+				value,
+			)
+		}
+	})
 }
 
+
+type TempTableSpec struct {
+	tableName string
+	valueColummName string
+}
+
+// spec is `table_name(value_column_name)`
+func parseTempTableSpec(spec string) *TempTableSpec {
+	re := regexp.MustCompile("(\\w+)\\s*(?:\\s*(\\w+)\\s*)")
+	groups := re.FindStringSubmatch(spec)
+	if groups == nil {
+		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
+	}
+	return &TempTableSpec{
+		tableName: groups[1],
+		valueColummName: groups[2],
+	}
+}
+
+
+type TempJoinTableSpec struct {
+	tableName string
+	keyColummName string
+	valueColummName string
+}
+
+// spec is `table_name(key_column_name, value_column_name)`
+func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
+	re := regexp.MustCompile("(\\w+)\\s*(?:\\s*(\\w+),\\s*(\\w+)\\s*)")
+	groups := re.FindStringSubmatch(spec)
+	if groups == nil {
+		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
+	}
+	return &TempJoinTableSpec{
+		tableName: groups[1],
+		keyColummName: groups[2],
+		valueColummName: groups[3],
+	}
+}

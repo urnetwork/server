@@ -1,6 +1,7 @@
 package bringyour
 
 
+
 // func Ptr[T any](value T) *T {
 // 	return &value
 // }
@@ -48,16 +49,4 @@ func Raise(err error) {
 }
 
 
-
-
-func safeSend[T any](ctx context.Context, channel chan T, message T) (err error) {
-	defer func() {
-		err = recover()
-	}()
-	select {
-	case self.send <- message:
-	case ctx.Done():
-		return errors.New("Done.")
-	}
-}
 

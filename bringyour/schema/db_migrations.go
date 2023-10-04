@@ -3,6 +3,9 @@ package bringyour
 import (
 	"fmt"
 	"context"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
 )
 
 
@@ -42,10 +45,10 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 }
 
 
-func DbVersion() int {
-	Tx(func(context context.Context, tx PgTx) {
+func DbVersion(ctx context.Context) int {
+	Tx(ctx, func(tx PgTx) {
 		tx.Exec(
-			context,
+			ctx,
 			`
 			CREATE TABLE IF NOT EXISTS migration_audit (
 			    migration_time timestamp NOT NULL DEFAULT now(),
@@ -58,9 +61,9 @@ func DbVersion() int {
 	})
 
 	var endVersionNumber int
-	Db(func(context context.Context, conn PgConn) {
+	Db(ctx, func(conn PgConn) {
 		conn.QueryRow(
-			context,
+			ctx,
 			`
 			SELECT COALESCE(MAX(end_version_number), 0) AS max_end_version_number
 			FROM migration_audit
@@ -74,33 +77,34 @@ func DbVersion() int {
 
 
 func ApplyDbMigrations(ctx context.Context) {
-	endVersionNumber := DbVersion()
-
-	// FIXME apply each migration in its own transaction
-	Tx(func(context context.Context, tx PgTx) {
-		tx.Exec(
-			context,
-			`INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
-			endVersionNumber,
-		)
-		for i := endVersionNumber; i < len(migrations); i += 1 {
-			switch v := migrations[i].(type) {
-				case *SqlMigration:
-					_, err := tx.Exec(context, v.sql)
+	for i := DbVersion(ctx); i < len(migrations); i += 1 {
+		Tx(ctx, func(tx PgTx) {
+			tx.Exec(
+				ctx,
+				`INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
+				i,
+			)
+		})
+		switch v := migrations[i].(type) {
+			case *SqlMigration:
+				Tx(ctx, func(tx PgTx) {
+					_, err := tx.Exec(ctx, v.sql)
 					Raise(err)
-				case *CodeMigration:
-					v.callback(context, tx)
-				default:
-					panic(fmt.Sprintf("Unknown migration type %T", v))
-			}
+				})
+			case *CodeMigration:
+				v.callback(ctx)
+			default:
+				panic(fmt.Sprintf("Unknown migration type %T", v))
 		}
-		tx.Exec(
-			context,
-			`INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
-			endVersionNumber,
-			len(migrations),
-		)
-	})
+		Tx(ctx, func(tx PgTx) {
+			tx.Exec(
+				ctx,
+				`INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
+				i,
+				i + 1,
+			)
+		})
+	}
 }
 
 
@@ -422,7 +426,6 @@ var migrations = []any{
 		CREATE INDEX network_client_network_id_created_time ON network_client (network_id, created_time)
 	`),
 
-
 	newSqlMigration(`
 		CREATE TYPE provide_mode AS ENUM (
 			'network',
@@ -441,6 +444,9 @@ var migrations = []any{
 		)
 	`),
 
+	// `client_address` is ip:port
+	// ipv6 is at most 45 chars, plus 7 for the :port
+	// see https://stackoverflow.com/questions/166132/maximum-length-of-the-textual-representation-of-an-ipv6-address
 	newSqlMigration(`
 		CREATE TABLE network_client_connection (
 			client_id uuid NOT NULL,
@@ -451,13 +457,23 @@ var migrations = []any{
 			connection_host varchar(128) NOT NULL,
 			connection_service varchar(128) NOT NULL,
 			connection_block varchar(128) NOT NULL,
-			ip_str varchar(40) NOT NULL,
+			client_address varchar(52) NOT NULL,
 
 			PRIMARY KEY (connection_id)
 		)
 	`),
 	newSqlMigration(`
 		CREATE INDEX network_client_connection_client_id_connected ON network_client_connection (client_id, connected)
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE ip_location_lookup (
+			ip_address VARCHAR(45) NOT NULL,
+			lookup_time timestamp NOT NULL DEFAULT now(),
+			result_json TEXT NOT NULL,
+			
+			PRIMARY KEY (ip_address, lookup_time)
+		)
 	`),
 
 	newSqlMigration(`
@@ -603,7 +619,6 @@ var migrations = []any{
 			PRIMARY KEY (subscription_id)
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX subscription_network_id_active_end_time ON subscription (network_id, active, end_time)
 	`),
@@ -623,11 +638,9 @@ var migrations = []any{
 			PRIMARY KEY (balance_id)
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX transfer_balance_network_id_active_end_time ON transfer_balance (network_id, active, end_time)
 	`),
-
 
 	newSqlMigration(`
 		CREATE TABLE transfer_contract (
@@ -642,16 +655,13 @@ var migrations = []any{
 			PRIMARY KEY (contract_id),
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX transfer_contract_source_id ON transfer_contract (source_id, destination_id, contract_id)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX transfer_contract_destination_id ON transfer_contract (destination_id, source_id, contract_id)
 	`),
 	
-
 	// creating an escrow must deduct the balances in the same transaction
 	// settling an escrow must put `payout_bytes` into the target account_balances, and `balance_bytes - payout_bytes` back into the origin balance
 	// primary key is (contract_id, balance_id) because there can be multiple balances used per contract_id
@@ -667,19 +677,15 @@ var migrations = []any{
 			settle_date timestamp NULL,
 			payout_bytes bigint NULL,
 
-			swept,
-			sweep_date,
-
-
+			swept bool NOT NULL DEFAULT false,
+			sweep_date timestamp NULL,
 
 			PRIMARY KEY (contract_id, balance_id)
 		)
 	`),
-
-	`
-	(settled, swept, contract_id, balance_id)
-	`
-
+	newSqlMigration(`
+		CREATE INDEX transfer_escrow_settled_swept ON transfer_escrow (settled, swept, contract_id, balance_id)
+	`),
 
 	// note the unpaid balance is `provided_balance_bytes - paid_balance_bytes`
 	// this equals SUM(transfer_escrow_sweep.payout_bytes) where payment_id IS NULL
@@ -717,11 +723,9 @@ var migrations = []any{
 			PRIMARY KEY (contract_id, balance_id, network_id)
 		)
 	`),
-
 	newSqlMigration(`
 		CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)
 	`),
-
 
 	// circle uses the circle sdk for usdc
 	newSqlMigration(`
@@ -742,7 +746,6 @@ var migrations = []any{
 		)
 	`),
 
-
 	// payment record is what was submitted to the payment processor
 	// payment receipt is the receipt from the payment processor
 	newSqlMigration(`
@@ -761,5 +764,23 @@ var migrations = []any{
 		)
 	`),
 
-	newCodeMigration(model.AddDefaultLocations)
+	// column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
+	// index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
+	// newSqlMigration(`
+	// 	DROP INDEX user_auth_attempt_client_ipv4
+	// `),
+	// newSqlMigration(`
+	// 	ALTER TABLE user_auth_attempt DROP COLUMN client_ipv4
+	// `),
+	newSqlMigration(`
+		ALTER TABLE user_auth_attempt ADD COLUMN client_ip VARCHAR(45) NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE user_auth_attempt ADD COLUMN client_port int NULL
+	`),
+	newSqlMigration(`
+		CREATE INDEX user_auth_attempt_client_address ON user_auth_attempt (client_ip, client_port, attempt_time)
+	`),
+
+	newCodeMigration(model.AddDefaultLocations),
 }

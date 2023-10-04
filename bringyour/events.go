@@ -11,7 +11,6 @@ import (
 
 
 type Event struct {
-    // set chan bool
     ctx context.Context
     cancel context.CancelFunc
 }

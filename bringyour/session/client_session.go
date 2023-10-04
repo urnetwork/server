@@ -1,75 +1,43 @@
 package session
 
 import (
-	"fmt"
+	"context"
 	"net/http"
+	"strings"
+	"strconv"
 
 	"bringyour.com/bringyour/jwt"
 )
 
 
-type Ipv4 [4]byte
-
-
 type ClientSession struct {
-	// FIXME
 	Ctx context.Context
-	ClientIpv4 *Ipv4
+	Cancel context.CancelFunc
+	// ip:port
+	ClientAddress string
 	ByJwt *jwt.ByJwt
 }
 
-func NewClientSessionFromRequest(ctx context.Context, req *http.Request) *ClientSession {
-	session := ClientSession{
-		Ctx: ctx,
-	}
-	
-	clientIpv4DotNotation := req.Header.Get("X-Forwarded-For")
-	if clientIpv4DotNotation != "" {
-		var ipv4 Ipv4
-		_, err := fmt.Sscanf(
-			clientIpv4DotNotation,
-			"%u.%u.%u.%u",
-			&ipv4[0],
-			&ipv4[1],
-			&ipv4[2],
-			&ipv4[3],
-		)
-		if err == nil {
-			session.ClientIpv4 = &ipv4
-		}
-	}
-	if session.ClientIpv4 == nil {
-		// either the load balancer is not correctly configured or there is no load balancer
-		var ipv4 Ipv4
-		var port int
-		_, err := fmt.Sscanf(
-			req.RemoteAddr,
-			"%u.%u.%u.%u:%u",
-			&ipv4[0],
-			&ipv4[1],
-			&ipv4[2],
-			&ipv4[3],
-			&port,
-		)
-		if err == nil {
-			session.ClientIpv4 = &ipv4
-		}
+func NewClientSessionFromRequest(req *http.Request) *ClientSession {
+	cancelCtx, cancel := context.WithCancel(req.Context())
+
+	clientAddress := req.Header.Get("X-Forwarded-For")
+	if clientAddress == "" {
+		clientAddress = req.RemoteAddr
 	}
 
-	return &session
+	return &ClientSession{
+		Ctx: cancelCtx,
+		Cancel: cancel,
+		ClientAddress: clientAddress,
+	}
 }
 
-func (self ClientSession) ClientIpv4DotNotation() *string {
-	if self.ClientIpv4 == nil {
-		return nil
+func (self *ClientSession) ClientIpPort() (ip string, port int) {
+	parts := strings.Split(self.ClientAddress, ":")
+	ip = parts[0]
+	if 1 < len(parts) {
+		port, _ = strconv.Atoi(parts[1])
 	}
-
-	ipv4DotNotation := fmt.Sprintf(
-		"%u.%u.%u.%u",
-		self.ClientIpv4[0],
-		self.ClientIpv4[1],
-		self.ClientIpv4[2],
-		self.ClientIpv4[3],
-	)
-	return &ipv4DotNotation
+	return
 }

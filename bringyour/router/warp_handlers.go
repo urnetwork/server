@@ -1,10 +1,10 @@
 package router
 
 import (
+    "context"
     "net/http"
     "encoding/json"
     "fmt"
-    "context"
 
     "bringyour.com/bringyour"
 )
@@ -31,7 +31,7 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
         warpConfigVersion = nil
     }
 
-    status, err := collectStatus()
+    status, err := collectStatus(r.Context())
     if err != nil {
         status = fmt.Sprintf("error: %s", err.Error())
     }
@@ -52,10 +52,10 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func collectStatus() (string, error) {
+func collectStatus(ctx context.Context) (string, error) {
     // ping postgres
     var dbError error
-    bringyour.Db(func(ctx context.Context, conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         dbError = conn.Ping(ctx)
     })
     if dbError != nil {
@@ -64,7 +64,7 @@ func collectStatus() (string, error) {
 
     // ping redis
     var redisError error
-    bringyour.Redis(func(ctx context.Context, client bringyour.RedisClient) {
+    bringyour.Redis(ctx, func(client bringyour.RedisClient) {
         redisError = client.Ping(ctx).Err()
     })
     if redisError != nil {

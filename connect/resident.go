@@ -1,8 +1,20 @@
 package main
 
 import (
+	"context"
 	"math/rand"
 	"encoding/binary"
+	"sync"
+	"net"
+	"time"
+	"io"
+	"fmt"
+	"errors"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/connect"
+	"bringyour.com/protocol"
 )
 
 
@@ -20,12 +32,12 @@ const MaximumMessageSizeBytes = 2048
 // this is set high enough to limit the number of parallel contracts and avoid contract spam
 const MinContractTransferBytes = 8 * 1024 * 1024 * 1024
 
-const StartInternalPort = 7300
+const StartInternalPort = 5080
 const MaxConcurrentForwardsPerResident = 32
 
 const ResidentIdleTimeout = 5 * time.Minute
 const ForwardReconnectTimeout = 30 * time.Second
-const ResidentSyncTimeout =  = 30 * time.Second
+const ResidentSyncTimeout = 30 * time.Second
 const ForwardIdleTimeout = 1 * time.Minute
 const ContractSyncTimeout = 30 * time.Second
 const AbuseMinTimeout = 5 * time.Second
@@ -37,37 +49,37 @@ type ExchangeBuffer struct {
 	buffer []byte
 }
 
-func NewDefaultExchangeBuffer() &ExchangeBuffer {
+func NewDefaultExchangeBuffer() *ExchangeBuffer {
 	return &ExchangeBuffer{
 		buffer: make([]byte, MaximumMessageSizeBytes + 4),
 	} 
 }
 
-func NewReceiveOnlyExchangeBuffer() &ExchangeBuffer {
+func NewReceiveOnlyExchangeBuffer() *ExchangeBuffer {
 	return &ExchangeBuffer{
 		buffer: make([]byte, 33),
 	} 
 }
 
 func (self *ExchangeBuffer) WriteHeader(conn net.Conn, header *ExchangeHeader) error {
-	buffer[0:16] = header.ClientId
-	buffer[16:32] = header.ResidentId
-	buffer[32] = header.Op
+	copy(self.buffer[0:16], header.ClientId.Bytes())
+	copy(self.buffer[16:32], header.ResidentId.Bytes())
+	self.buffer[32] = byte(header.Op)
 
-	_, err := conn.Write(buffer[0:33])
+	_, err := conn.Write(self.buffer[0:33])
 	return err
 }
 
 func (self *ExchangeBuffer) ReadHeader(conn net.Conn) (*ExchangeHeader, error) {
-	if err := io.ReadFull(conn, buffer[0:33]); err != nil {
+	if _, err := io.ReadFull(conn, self.buffer[0:33]); err != nil {
 		return nil, err
 	}
 
 	return &ExchangeHeader{
-		ClientId: Id(buffer[0:16]),
-		ResidentId: Id(buffer[16:32]),
-		Op: ExchangeOp(buffer[32]),
-	}
+		ClientId: bringyour.Id(self.buffer[0:16]),
+		ResidentId: bringyour.Id(self.buffer[16:32]),
+		Op: ExchangeOp(self.buffer[32]),
+	}, nil
 }
 
 func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
@@ -77,19 +89,19 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		return errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumMessageSizeBytes, n))
 	}
 
-	binary.LittleEndian.PutUint32(buffer[0:4], uint32(n))
-	buffer[4:4+n] = transferFrameBytes
+	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
+	copy(self.buffer[4:4+n], transferFrameBytes)
 
-	_, err := conn.Write(buffer[0:4+n])
+	_, err := conn.Write(self.buffer[0:4+n])
 	return err
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	if err := conn.ReadFull(buffer[0:4]); err != nil {
+	if _, err := io.ReadFull(conn, self.buffer[0:4]); err != nil {
 		return nil, err
 	}
 
-	n = int(binary.LittleEndian.Uint32(buffer[0:4]))
+	n := int(binary.LittleEndian.Uint32(self.buffer[0:4]))
 	if MaximumMessageSizeBytes < n {
 		return nil, errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumMessageSizeBytes, n))
 	}
@@ -97,7 +109,7 @@ func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
 	// read into a new buffer
 	message := make([]byte, n)
 
-	if err := conn.ReadFull(message); err != nil {
+	if _, err := io.ReadFull(conn, message); err != nil {
 		return nil, err
 	}
 
@@ -107,11 +119,11 @@ func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
 
 func safeSend[T any](ctx context.Context, channel chan T, message T) (err error) {
 	defer func() {
-		err = recover()
+		err = recover().(error)
 	}()
 	select {
-	case self.send <- message:
-	case ctx.Done():
+	case channel <- message:
+	case <- ctx.Done():
 		return errors.New("Done.")
 	}
 }
@@ -128,30 +140,31 @@ const (
 
 
 type ExchangeHeader struct {
-	ClientId Id
-	ResidentId Id
+	ClientId bringyour.Id
+	ResidentId bringyour.Id
 	Op ExchangeOp
 }
 
 
 type ExchangeConnection struct {
 	ctx context.Context
-	cancel CancelFunc
+	cancel context.CancelFunc
 	conn net.Conn
-	sendBuffer &ExchangeBuffer
-	receiveBuffer &ExchangeBuffer
+	sendBuffer *ExchangeBuffer
+	receiveBuffer *ExchangeBuffer
 	send chan []byte
 	receive chan []byte
 }
 
 func NewExchangeConnection(
 	ctx context.Context,
-	clientId Id,
-	residentId Id,
+	clientId bringyour.Id,
+	residentId bringyour.Id,
 	host string,
 	port int,
 	op ExchangeOp,
 ) (*ExchangeConnection, error) {
+	// FIXME
 	conn, err := CONNECT()
 	if err != nil {
 		return err
@@ -248,12 +261,12 @@ func (self *ExchangeConnection) Close() {
 
 type ResidentTransport struct {	
 	ctx context.Context
-	cancel CancelFunc
+	cancel context.CancelFunc
 
 	exchange Exchange
 
-	clientId Id
-	instanceId Id
+	clientId bringyour.Id
+	instanceId bringyour.Id
 
 	send chan []byte
 	receive chan []byte
@@ -262,8 +275,8 @@ type ResidentTransport struct {
 func NewResidentTransport(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId Id,
-	instanceId Id,
+	clientId bringyour.Id,
+	instanceId bringyour.Id,
 ) *ResidentTransport {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentTransport{
@@ -357,12 +370,12 @@ func (self *ResidentTransport) Close() {
 
 type ResidentForward struct {	
 	ctx context.Context
-	cancel CancelFunc
+	cancel context.CancelFunc
 
 	exchange Exchange
 
-	clientId Id
-	instanceId Id
+	clientId bringyour.Id
+	instanceId bringyour.Id
 
 	send chan []byte
 }
@@ -370,7 +383,7 @@ type ResidentForward struct {
 func NewResidentForward(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId Id,
+	clientId bringyour.Id,
 ) *ResidentForward {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentTransport{
@@ -442,7 +455,7 @@ func (self *ResidentForward) Close() {
 // any time a resident is not reachable by a transport, the transport should nominate a local resident
 type Exchange struct {
 	ctx context.Context
-	cancel CancelFunc
+	cancel context.CancelFunc
 
 	host string
 	// any of the ports may be used
@@ -450,12 +463,12 @@ type Exchange struct {
 	// since each port allows at most 65k connections from another connect instance
 	ports []int
 
-	residentsLock RWMutex
+	residentsLock sync.RWMutex
 	// clientId -> Resident
-	residents map[Id]*Resident
+	residents map[bringyour.Id]*Resident
 }
 
-func (self *Exchange) NewExchange(ctx context.Context, host string, ports []int) {
+func NewExchange(ctx context.Context, host string, ports []int) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	exchange := &Exchange{
@@ -463,7 +476,7 @@ func (self *Exchange) NewExchange(ctx context.Context, host string, ports []int)
 		cancel: cancel,
 		host: host,
 		ports: ports,
-		residents: map[Id]*Resident{}
+		residents: map[Id]*Resident{},
 	}
 
 	go exchange.syncResidents()
@@ -472,7 +485,9 @@ func (self *Exchange) NewExchange(ctx context.Context, host string, ports []int)
 }
 
 // reads the host and port configuration from the env
-func (self *Exchange) NewExchangeFromEnv(ctx context.Context) {
+func NewExchangeFromEnv(ctx context.Context) *Exchange {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
 	host := env.Host()
 
 	// service port -> host port
@@ -483,9 +498,34 @@ func (self *Exchange) NewExchangeFromEnv(ctx context.Context) {
 	// the expected port usage is `number_of_residents * expected(number_of_destinations_per_resident)`,
 	// and at most `number_of_residents * MaxConcurrentForwardsPerResident`
 
+	ports := []int{}
+	servicePort := StartInternalPort
+	for {
+		hostPort, ok := hostPorts[servicePort]
+		if !ok {
+			break
+		}
+		ports = append(ports, hostPort)
+		servicePort += 1
+	}
+	if len(ports) == 0 {
+		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", StartInternalPort))
+	}
+
+	exchange := &Exchange{
+		ctx: cancelCtx,
+		cancel: cancel,
+		host: host,
+		ports: ports,
+		residents: map[Id]*Resident{},
+	}
+
+	go exchange.syncResidents()
+
+	return exchange
 }
 
-func (self *Exchange) NominateLocalResident(instanceId Id, residentIdToReplace *Id) error {
+func (self *Exchange) NominateLocalResident(instanceId bringyour.Id, residentIdToReplace *bringyour.Id) error {
 	resident := NewResident()
 	success := false
 	defer func() {
@@ -610,7 +650,7 @@ func (self *Exchange) syncResidents(ctx context.Context) {
 // there should be one local exchange per service
 func (self *Exchange) Run() {
 	defer func() {
-		var residentsCopy := map[Id]*Resident{}
+		residentsCopy := map[Id]*Resident{}
 		residentLock.WLock()
 		maps.Copy(residentsCopy, self.residents)
 		clear(self.residents)
@@ -648,7 +688,7 @@ func (self *Exchange) Run() {
 	cleanupLocalResidents()
 }
 
-func (self *ResidentManager) handleExchangeClient(conn net.Conn) {
+func (self *Exchange) handleExchangeClient(conn net.Conn) {
 	close := func() {
 		conn.Close()
 	}
@@ -746,23 +786,23 @@ func (self *Exchange) Close() {
 
 type Resident struct {
 	ctx context.Context
-	cancel CancelFunc
+	cancel context.CancelFunc
 
 	exchange *Exchange
 
-	clientId Id
-	instanceId Id
-	residentId Id
+	clientId bringyour.Id
+	instanceId bringyour.Id
+	residentId bringyour.Id
 
 	// the client id in the resident is always `connect.ControlId`
 	client *connect.Client
 
 	stateLock sync.Mutex
 
-	transports := map[*clientTransport]bool
+	transports map[*clientTransport]bool
 
 	// destination id -> forward
-	forwards := map[Id]*ClientForward
+	forwards map[bringyour.Id]*clientForward
 
 	lastActivityTime time.Time
 
@@ -773,9 +813,9 @@ type Resident struct {
 func NewResident(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId Id,
-	instanceId Id,
-	residentId Id
+	clientId bringyour.Id,
+	instanceId bringyour.Id,
+	residentId bringyour.Id,
 ) *Resident {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
@@ -812,8 +852,8 @@ func (self *Resident) cleanupForwards() {
 		// clean up forwards that have not been used after an idle timeout
 
 		self.stateLock.Lock()
-		forwardsToRemove := []*ClientForward{}
-		for _, forward := self.forwards {
+		forwardsToRemove := []*clientForward{}
+		for _, forward := range self.forwards {
 			if ForwardIdleTimeout <= time.Now() - forward.lastSendTime {
 				forwardsToRemove = append(forwardsToRemove, forward)
 			}
@@ -853,9 +893,9 @@ func (self *Resident) clientForward(sourceId_ connect.Id, destinationId_ connect
 	if ok {
 		forward.lastSendTime = time.Now()
 	} else if len(self.forwards) < MaxConcurrentForwardsPerResident {
-		forward = &ClientForward{
-			forward: NewResidentForward(self.ctx, self.exchange),
-			lastSendTime: time.Now(),
+		forward = newClientForward{
+			destinationId,
+			NewResidentForward(self.ctx, self.exchange),
 		}
 		self.forwards[destinationId] = forward
 	}
@@ -903,7 +943,6 @@ func (self *Resident) AddTransport(send chan []byte, receive chan []byte) func()
 	self.client.routeManager.updateTransport(transport.sendTransport, send)
 	self.client.routeManager.updateTransport(transport.receiveTransport, receive)
 	self.stateLock.Unlock()
-
 
 	return func() {
 		self.stateLock.Lock()
@@ -957,13 +996,13 @@ func (self *Resident) Close() {
 type contractManager struct {
 	ctx context.Context
 
-	clientId Id
+	clientId bringyour.Id
 
 	// unordered transfer pair -> contract ids
-	pairContractIds map[model.TransferPair]map[Id]bool
+	pairContractIds map[model.TransferPair]map[bringyour.Id]bool
 }
 
-func newContractManager(ctx context.Context, clientId Id) *contractManager {
+func newContractManager(ctx context.Context, clientId bringyour.Id) *contractManager {
 	contractManager := &contractManager {
 		ctx: ctx,
 		clientId: clientId,
@@ -990,7 +1029,7 @@ func (self *contractManager) syncContracts() {
 	}
 }
 
-func (self *contractManager) HasActiveContract(sourceId Id, destinationId Id) bool {
+func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
 	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
 
 	self.stateLock.Lock()
@@ -1012,9 +1051,13 @@ func (self *contractManager) HasActiveContract(sourceId Id, destinationId Id) bo
 	return 0 < len(contracts)
 }
 
-func (self *contractManager) CreateContract(sourceId Id, destinationId Id, transferBytes int) *TransferEscrow {
+func (self *contractManager) CreateContract(
+	sourceId bringyour.Id,
+	destinationId bringyour.Id,
+	transferBytes int,
+) *model.TransferEscrow {
 	contractTransferBytes := max(MinContractTransferBytes, transferBytes)
-	escrow := model.TransferEscrow(sourceId, destinationId, contractTransferBytes)
+	escrow := model.CreateTransferEscrow(sourceId, destinationId, contractTransferBytes)
 
 	// update the cache
 	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
@@ -1034,12 +1077,12 @@ func (self *contractManager) CreateContract(sourceId Id, destinationId Id, trans
 // each send on the forward updates the send time
 // the cleanup removes forwards that haven't been used in some time
 type clientForward struct {
-	destinationId Id
+	destinationId bringyour.Id
 	forward *ResidentForward
 	lastUpdateTime time.Time
 }
 
-func NewClientForward(destinationId Id, forward *ResidentForward) *clientForward {
+func newClientForward(destinationId bringyour.Id, forward *ResidentForward) *clientForward {
 	return &clientForward{
 		destinationId: destinationId,
 		forward: forward,
@@ -1058,13 +1101,13 @@ type clientTransport struct {
 }
 
 
-// conforms to connect.Transport
+// conforms to `connect.Transport`
 type clientSendTransport struct {
-	clientId Id
+	clientId bringyour.Id
 	send chan []byte
 }
 
-func newClientSendTransport(clientId Id, send chan []byte) *clientSendTransport {
+func newClientSendTransport(clientId bringyour.Id, send chan []byte) *clientSendTransport {
 	return &clientSendTransport{
 		clientId: clientId,
 		send: send,
@@ -1075,25 +1118,25 @@ func (self *clientSendTransport) Priority() int {
 	return 100
 }
 
-func (self *clientSendTransport) CanEvalRouteWeight(stats *RouteStats, remainingStats map[Transport]*RouteStats) bool {
+func (self *clientSendTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
 	return true
 }
 
-func (self *clientSendTransport) RouteWeight(stats *RouteStats, remainingStats map[Transport]*RouteStats) float32 {
+func (self *clientSendTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
 	// uniform weight
 	return 1.0 / float32(1 + len(remainingStats))
 }
 
-func (self *clientSendTransport) MatchesSend(destinationId Id) bool {
+func (self *clientSendTransport) MatchesSend(destinationId connect.Id) bool {
 	// send to client id only
-	return destinationId == self.clientId
+	return bringyour.Id(destinationId) == self.clientId
 }
 
-func (self *clientSendTransport) MatchesReceive(destinationId Id) bool {
+func (self *clientSendTransport) MatchesReceive(destinationId connect.Id) bool {
 	return false
 }
 
-func (self *clientSendTransport) Downgrade(sourceId Id) {
+func (self *clientSendTransport) Downgrade(sourceId connect.Id) {
 	// nothing to downgrade
 }
 
@@ -1102,13 +1145,13 @@ func (self *clientSendTransport) Close() {
 }
 
 
-// conforms to connect.Transport
+// conforms to `connect.Transport`
 type clientReceiveTransport struct {
-	clientId Id
+	clientId bringyour.Id
 	receive chan []byte
 }
 
-func newClientReceiveTransport(clientId Id, receive chan []byte) *clientReceiveTransport {
+func newClientReceiveTransport(clientId bringyour.Id, receive chan []byte) *clientReceiveTransport {
 	return &clientReceiveTransport{
 		clientId: clientId,
 		receive: receive,
@@ -1119,24 +1162,24 @@ func (self *clientReceiveTransport) Priority() int {
 	return 100
 }
 
-func (self *clientReceiveTransport) CanEvalRouteWeight(stats *RouteStats, remainingStats map[Transport]*RouteStats) bool {
+func (self *clientReceiveTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
 	return true
 }
 
-func (self *clientReceiveTransport) RouteWeight(stats *RouteStats, remainingStats map[Transport]*RouteStats) float32 {
+func (self *clientReceiveTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
 	// uniform weight
 	return 1.0 / float32(1 + len(remainingStats))
 }
 
-func (self *clientReceiveTransport) MatchesSend(destinationId Id) bool {
+func (self *clientReceiveTransport) MatchesSend(destinationId connect.Id) bool {
 	return false
 }
 
-func (self *clientReceiveTransport) MatchesReceive(destinationId Id) bool {
+func (self *clientReceiveTransport) MatchesReceive(destinationId connect.Id) bool {
 	return true
 }
 
-func (self *clientReceiveTransport) Downgrade(sourceId Id) {
+func (self *clientReceiveTransport) Downgrade(sourceId connect.Id) {
 	// nothing to downgrade
 }
 

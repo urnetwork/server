@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "fmt"
     "net/http"
     "os"
@@ -31,6 +32,8 @@ Options:
         panic(err)
     }
 
+    ctx, cancel := context.WithCancel(context.Background())
+
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
         router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
@@ -60,7 +63,7 @@ Options:
         port,
     )
 
-    routerHandler := router.NewRouter(routes)
+    routerHandler := router.NewRouter(ctx, routes)
     err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
     bringyour.Logger().Fatal(err)

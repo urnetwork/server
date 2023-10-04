@@ -28,15 +28,17 @@ type ctxKey struct{}
 
 
 type Router struct {
+	ctx context.Context
 	routes []*Route
 }
-func NewRouter(routes []*Route) *Router {
+func NewRouter(ctx context.Context, routes []*Route) *Router {
 	return &Router{
+		ctx: ctx,
 		routes: routes,
 	}
 }
 
-func (self Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var allow []string
 	for _, route := range self.routes {
 		matches := route.regex.FindStringSubmatch(r.URL.Path)
@@ -45,7 +47,7 @@ func (self Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				allow = append(allow, route.method)
 				continue
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, matches[1:])
+			ctx := context.WithValue(self.ctx, ctxKey{}, matches[1:])
 			route.handler(w, r.WithContext(ctx))
 			return
 		}

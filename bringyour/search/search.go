@@ -9,7 +9,6 @@ import (
 	"golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/ulid"
 )
 
 
@@ -31,7 +30,7 @@ type SearchResult struct {
 	Value string
 	Alias int
 	ValueAlias string
-	ValueId ulid.ULID
+	ValueId bringyour.Id
 	ValueDistance int
 }
 
@@ -70,20 +69,20 @@ func NewSearch(realm string, searchType SearchType) *Search {
 	}
 }
 
-func (self *Search) AnyAround(query string, distance int) bool {
-	results := self.Around(query, distance)
+func (self *Search) AnyAround(ctx context.Context, query string, distance int) bool {
+	results := self.Around(ctx, query, distance)
 	return 0 < len(results)
 }
 
-func (self *Search) AroundIds(query string, distance int) map[Id]*SearchResult {
-	results := map[Id]*SearchResult{}
-	for _, result := range self.Around(query, distance) {
+func (self *Search) AroundIds(ctx context.Context, query string, distance int) map[bringyour.Id]*SearchResult {
+	results := map[bringyour.Id]*SearchResult{}
+	for _, result := range self.Around(ctx, query, distance) {
 		results[result.ValueId] = result
 	}
 	return results
 }
 
-func (self *Search) Around(query string, distance int) []*SearchResult {
+func (self *Search) Around(ctx context.Context, query string, distance int) []*SearchResult {
 	projection := computeProjection(query)
 
 	sqlParts := []string{}
@@ -115,13 +114,13 @@ func (self *Search) Around(query string, distance int) []*SearchResult {
 			return fmt.Sprintf("dim_%d_%s", dim, name)
 		}
 
-		elenMin := bringyour.MaxInt(0, projection.vlen + projection.dord + dlen - 2 * distance)
+		elenMin := max(0, projection.vlen + projection.dord + dlen - 2 * distance)
 		elenMax := projection.vlen + projection.dord + dlen + 2 * distance
-		dordMin := bringyour.MaxInt(0, projection.dord - distance)
+		dordMin := max(0, projection.dord - distance)
 		dordMax := projection.dord + distance
-		vlenMin := bringyour.MaxInt(0, projection.vlen - distance)
+		vlenMin := max(0, projection.vlen - distance)
 		vlenMax := projection.vlen + distance
-		dlenMin := bringyour.MaxInt(0, dlen - distance)
+		dlenMin := max(0, dlen - distance)
 		dlenMax := dlen + distance
 
 		if 0 < i {
@@ -157,7 +156,7 @@ func (self *Search) Around(query string, distance int) []*SearchResult {
 		i += 1
 	}
 
-	simMin := bringyour.MaxInt(0, projection.vlen - distance)
+	simMin := max(0, projection.vlen - distance)
 	simMax := projection.vlen + distance
 
     sqlParts = append(
@@ -183,9 +182,9 @@ func (self *Search) Around(query string, distance int) []*SearchResult {
 		"distance": distance,
 	})
 
-	matches := map[ulid.ULID]*SearchResult{}
+	matches := map[bringyour.Id]*SearchResult{}
 
-	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		sql := strings.Join(sqlParts, " ")
 
 		/*
@@ -211,20 +210,18 @@ func (self *Search) Around(query string, distance int) []*SearchResult {
 		*/
 
     	result, err := conn.Query(
-    		context,
+    		ctx,
     		sql,
     		sqlArgs,
     	)
-    	bringyour.With(result, err, func() {
-    		var valueIdPg bringyour.PgUUID
+    	bringyour.WithPgResult(result, err, func() {
+    		var valueId bringyour.Id
     		var alias int
     		var valueAlias string
     		var value string
 
     		for result.Next() {
-    			result.Scan(&valueIdPg, &alias, &valueAlias, &value)
-
-    			valueId := *ulid.FromPg(valueIdPg)
+    			result.Scan(&valueId, &alias, &valueAlias, &value)
 
 				fmt.Printf("CANDIDATE %s\n", valueAlias)
     			valueDistance := EditDistance(query, valueAlias)
@@ -252,17 +249,17 @@ func (self *Search) Around(query string, distance int) []*SearchResult {
 	return maps.Values(matches)
 }
 
-func (self *Search) Add(ctx context.Context, value string, valueId ulid.ULID) {
+func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
     	self.AddInTx(ctx, value, valueId, tx)
     })
 }
 
-func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID, tx bringyour.PgTx) {
+func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, tx bringyour.PgTx) {
 	var err error
 
 	_, err = tx.Exec(
-		context,
+		ctx,
 		`
     		DELETE FROM search_projection
     		USING search_value
@@ -278,7 +275,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID
 	bringyour.Raise(err)
 
 	_, err = tx.Exec(
-		context,
+		ctx,
 		`
     		DELETE FROM search_value a
     		USING search_value b
@@ -295,7 +292,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID
 
 	insertOne := func(value string, alias int) {
 		_, err = tx.Exec(
-			context,
+			ctx,
     		`
 	    		INSERT INTO search_value
 	    		(realm, value_id, value, alias)
@@ -303,7 +300,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID
 	    		($1, $2, $3, $4)
     		`,
     		self.realm,
-    		ulid.ToPg(&valueId),
+    		valueId,
     		value,
     		alias,
     	)
@@ -313,7 +310,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID
     	for dim, dlen := range projection.dims {
     		elen := projection.vlen + projection.dord + dlen
 	    	_, err = tx.Exec(
-	    		context,
+	    		ctx,
 	    		`
 		    		INSERT INTO search_projection
 		    		(realm, dim, elen, dord, dlen, vlen, value_id, alias)
@@ -326,7 +323,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId ulid.ULID
 	    		projection.dord,
 	    		dlen,
 	    		projection.vlen,
-	    		ulid.ToPg(&valueId),
+	    		valueId,
 	    		alias,
 	    	)
 	    	bringyour.Raise(err)

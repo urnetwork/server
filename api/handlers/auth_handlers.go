@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 
     "bringyour.com/bringyour/model"
@@ -10,33 +11,40 @@ import (
 
 
 func AuthLogin(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthLogin, w, r)
+	router.WrapWithJson(ctx, controller.AuthLogin, w, r)
 }
+
 
 func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthLoginWithPassword, w, r)
+	router.WrapWithJson(ctx, controller.AuthLoginWithPassword, w, r)
 }
+
 
 func AuthVerify(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(model.AuthVerify, w, r)
+    router.WrapWithJson(ctx, model.AuthVerify, w, r)
 }
+
 
 func AuthVerifySend(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthVerifySend, w, r)
+	router.WrapWithJson(ctx, controller.AuthVerifySend, w, r)
 }
+
 
 func AuthPasswordReset(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthPasswordReset, w, r)
+	router.WrapWithJson(ctx, controller.AuthPasswordReset, w, r)
 }
+
 
 func AuthPasswordSet(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(controller.AuthPasswordSet, w, r)
+    router.WrapWithJson(ctx, controller.AuthPasswordSet, w, r)
 }
+
 
 func AuthNetworkCheck(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJsonIgnoreSession(model.NetworkCheck, w, r)
+	router.WrapWithJsonIgnoreSession(ctx, model.NetworkCheck, w, r)
 }
 
+
 func AuthNetworkCreate(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.NetworkCreate, w, r)
+	router.WrapWithJson(ctx, controller.NetworkCreate, w, r)
 }

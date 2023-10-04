@@ -1,7 +1,7 @@
 package search
 
 import (
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
 )
 
 
@@ -46,7 +46,7 @@ func EditDistance(a string, b string) int {
 			if a[alen - 1] == b[blen - 1] {
 				table[index(alen, blen)] = table[index(alen - 1, blen - 1)]
 			} else {
-				table[index(alen, blen)] = 1 + bringyour.MinInt(
+				table[index(alen, blen)] = 1 + min(
 					table[index(alen - 1, blen)],
 					table[index(alen, blen - 1)],
 					table[index(alen - 1, blen - 1)],

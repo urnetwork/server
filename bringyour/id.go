@@ -1,87 +1,91 @@
 package bringyour
 
+import (
+	"fmt"
+	"bytes"
+	"encoding/hex"
+	"errors"
+
+	"database/sql/driver"
+
+	"github.com/oklog/ulid/v2"
+	"github.com/jackc/pgx/v5/pgtype"
+	
+)
 
 
 type Id [16]byte
 
-
-func (self *Id) Udid() UUID {
-
+func NewId() Id {
+	return Id(ulid.Make())
 }
 
-func (self *Id) PgUdid() pgtype.UUID {
-
+func IdFromSlice(idBytes []byte) (Id, error) {
+	if len(idBytes) != 16 {
+		return Id{}, errors.New("Id must be 16 bytes")
+	}
+	return Id(idBytes), nil
 }
 
+func ParseId(idStr string) (id Id, err error) {
+	return parseUUID(idStr) 
+}
 
-// FIXME New use Ulid to generate a new Id
+func (self *Id) Bytes() []byte {
+	return self[0:16]
+}
 
+func (self *Id) String() string {
+	return encodeUUID(*self)
+}
 
-// FIXME add Marshal and Unmarshal for JSON
-// https://medium.com/picus-security-engineering/custom-json-marshaller-in-go-and-common-pitfalls-c43fa774db05
+// Scan implements the database/sql Scanner interface.
+func (dst *Id) Scan(src any) error {
+	if src == nil {
+		return fmt.Errorf("Scan with nil source not supported by Id (use *Id)")
+	}
 
-
-
-func FromPg(uuid pgtype.UUID) *Id {
-	if !UUID.Valid {
+	switch src := src.(type) {
+	case string:
+		buf, err := parseUUID(src)
+		if err != nil {
+			return err
+		}
+		*dst = buf
 		return nil
-	} else {
-		ulid := ULID(UUID.Bytes)
-		return &ulid
 	}
+
+	return fmt.Errorf("cannot scan %T", src)
 }
 
-// fixme handle ULID type also?
-func ToPg(id *Id) pgtype.UUID {
-	if ULID == nil {
-		return pgtype.UUID{
-			Valid: false,
-		}
-	} else {
-		return pgtype.UUID{
-			Bytes: [16]byte(*ULID),
-			Valid: true,
-		}
+// Value implements the database/sql/driver Valuer interface.
+func (src *Id) Value() (driver.Value, error) {
+	return encodeUUID(*src), nil
+}
+
+func (src *Id) MarshalJSON() ([]byte, error) {
+	var buff bytes.Buffer
+	buff.WriteByte('"')
+	buff.WriteString(encodeUUID(*src))
+	buff.WriteByte('"')
+	return buff.Bytes(), nil
+}
+
+func (dst *Id) UnmarshalJSON(src []byte) error {
+	if bytes.Equal(src, []byte("null")) {
+		return fmt.Errorf("Unmarshal with nil source not supported by Id (use *Id)")
 	}
-}
-
-
-// FIXME just merge Pg support into Id, so not translation is required when using Query/Exec/Scan
-
-
-
-
-/*
-package pgtype
-
-import (
-	"bytes"
-	"database/sql/driver"
-	"encoding/hex"
-	"fmt"
-)
-
-type UUIDScanner interface {
-	ScanUUID(v UUID) error
-}
-
-type UUIDValuer interface {
-	UUIDValue() (UUID, error)
-}
-
-type UUID struct {
-	Bytes [16]byte
-	Valid bool
-}
-
-func (b *UUID) ScanUUID(v UUID) error {
-	*b = v
+	if len(src) != 38 {
+		return fmt.Errorf("invalid length for UUID: %v", len(src))
+	}
+	buf, err := parseUUID(string(src[1 : len(src)-1]))
+	if err != nil {
+		return err
+	}
+	*dst = buf
 	return nil
 }
 
-func (b UUID) UUIDValue() (UUID, error) {
-	return b, nil
-}
 
 // parseUUID converts a string UUID in standard form to a byte array.
 func parseUUID(src string) (dst [16]byte, err error) {
@@ -104,168 +108,184 @@ func parseUUID(src string) (dst [16]byte, err error) {
 	return dst, err
 }
 
-// encodeUUID converts a uuid byte array to UUID standard string form.
+
 func encodeUUID(src [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
 
-// Scan implements the database/sql Scanner interface.
-func (dst *UUID) Scan(src any) error {
-	if src == nil {
-		*dst = UUID{}
-		return nil
-	}
 
-	switch src := src.(type) {
-	case string:
-		buf, err := parseUUID(src)
-		if err != nil {
-			return err
-		}
-		*dst = UUID{Bytes: buf, Valid: true}
-		return nil
-	}
-
-	return fmt.Errorf("cannot scan %T", src)
+func pgxRegisterIdType(typeMap *pgtype.Map) {
+	// for bringyour, `uuid` pgtype maps to `Id`
+	// in code, `*Id` is used for nullable values 
+	typeMap.RegisterType(&pgtype.Type{
+		Name: "uuid",
+		OID: pgtype.UUIDOID,
+		Codec: &PgIdCodec{},
+	})
 }
 
-// Value implements the database/sql/driver Valuer interface.
-func (src UUID) Value() (driver.Value, error) {
-	if !src.Valid {
-		return nil, nil
-	}
 
-	return encodeUUID(src.Bytes), nil
+type PgIdCodec struct{}
+
+func (self *PgIdCodec) FormatSupported(format int16) bool {
+	switch format {
+	case pgtype.TextFormatCode, pgtype.BinaryFormatCode:
+		return true
+	default:
+		return false
+	}
 }
 
-func (src UUID) MarshalJSON() ([]byte, error) {
-	if !src.Valid {
-		return []byte("null"), nil
-	}
-
-	var buff bytes.Buffer
-	buff.WriteByte('"')
-	buff.WriteString(encodeUUID(src.Bytes))
-	buff.WriteByte('"')
-	return buff.Bytes(), nil
+func (self *PgIdCodec) PreferredFormat() int16 {
+	return pgtype.BinaryFormatCode
 }
 
-func (dst *UUID) UnmarshalJSON(src []byte) error {
-	if bytes.Equal(src, []byte("null")) {
-		*dst = UUID{}
-		return nil
-	}
-	if len(src) != 38 {
-		return fmt.Errorf("invalid length for UUID: %v", len(src))
-	}
-	buf, err := parseUUID(string(src[1 : len(src)-1]))
-	if err != nil {
-		return err
-	}
-	*dst = UUID{Bytes: buf, Valid: true}
-	return nil
-}
-
-type UUIDCodec struct{}
-
-func (UUIDCodec) FormatSupported(format int16) bool {
-	return format == TextFormatCode || format == BinaryFormatCode
-}
-
-func (UUIDCodec) PreferredFormat() int16 {
-	return BinaryFormatCode
-}
-
-func (UUIDCodec) PlanEncode(m *Map, oid uint32, format int16, value any) EncodePlan {
-	if _, ok := value.(UUIDValuer); !ok {
+func (self *PgIdCodec) PlanEncode(m *pgtype.Map, oid uint32, format int16, value any) pgtype.EncodePlan {
+	switch value.(type) {
+	case Id, *Id:
+	default:
 		return nil
 	}
 
 	switch format {
-	case BinaryFormatCode:
-		return encodePlanUUIDCodecBinaryUUIDValuer{}
-	case TextFormatCode:
-		return encodePlanUUIDCodecTextUUIDValuer{}
+	case pgtype.BinaryFormatCode:
+		return encodePlanUUIDCodecBinaryIdValuer{}
+	case pgtype.TextFormatCode:
+		return encodePlanUUIDCodecTextIdValuer{}
 	}
 
 	return nil
 }
 
-type encodePlanUUIDCodecBinaryUUIDValuer struct{}
-
-func (encodePlanUUIDCodecBinaryUUIDValuer) Encode(value any, buf []byte) (newBuf []byte, err error) {
-	uuid, err := value.(UUIDValuer).UUIDValue()
-	if err != nil {
-		return nil, err
-	}
-
-	if !uuid.Valid {
-		return nil, nil
-	}
-
-	return append(buf, uuid.Bytes[:]...), nil
-}
-
-type encodePlanUUIDCodecTextUUIDValuer struct{}
-
-func (encodePlanUUIDCodecTextUUIDValuer) Encode(value any, buf []byte) (newBuf []byte, err error) {
-	uuid, err := value.(UUIDValuer).UUIDValue()
-	if err != nil {
-		return nil, err
-	}
-
-	if !uuid.Valid {
-		return nil, nil
-	}
-
-	return append(buf, encodeUUID(uuid.Bytes)...), nil
-}
-
-func (UUIDCodec) PlanScan(m *Map, oid uint32, format int16, target any) ScanPlan {
+func (self *PgIdCodec) PlanScan(m *pgtype.Map, oid uint32, format int16, target any) pgtype.ScanPlan {
 	switch format {
-	case BinaryFormatCode:
+	case pgtype.BinaryFormatCode:
 		switch target.(type) {
-		case UUIDScanner:
-			return scanPlanBinaryUUIDToUUIDScanner{}
-		case TextScanner:
+		case *Id, **Id:
+			return scanPlanBinaryUUIDToIdScanner{}
+		case pgtype.TextScanner:
 			return scanPlanBinaryUUIDToTextScanner{}
 		}
-	case TextFormatCode:
+	case pgtype.TextFormatCode:
 		switch target.(type) {
-		case UUIDScanner:
-			return scanPlanTextAnyToUUIDScanner{}
+		case *Id, **Id:
+			return scanPlanTextAnyToIdScanner{}
 		}
 	}
 
 	return nil
 }
 
-type scanPlanBinaryUUIDToUUIDScanner struct{}
-
-func (scanPlanBinaryUUIDToUUIDScanner) Scan(src []byte, dst any) error {
-	scanner := (dst).(UUIDScanner)
-
+func (self *PgIdCodec) DecodeDatabaseSQLValue(m *pgtype.Map, oid uint32, format int16, src []byte) (driver.Value, error) {
 	if src == nil {
-		return scanner.ScanUUID(UUID{})
+		return nil, nil
 	}
 
-	if len(src) != 16 {
-		return fmt.Errorf("invalid length for UUID: %v", len(src))
+	var id Id
+	err := codecScan(self, m, oid, format, src, &id)
+	if err != nil {
+		return nil, err
 	}
 
-	uuid := UUID{Valid: true}
-	copy(uuid.Bytes[:], src)
-
-	return scanner.ScanUUID(uuid)
+	return encodeUUID(id), nil
 }
+
+func (self *PgIdCodec) DecodeValue(m *pgtype.Map, oid uint32, format int16, src []byte) (any, error) {
+	if src == nil {
+		return nil, nil
+	}
+
+	var id Id
+	err := codecScan(self, m, oid, format, src, &id)
+	if err != nil {
+		return nil, err
+	}
+	return [16]byte(id), nil
+}
+
+
+type encodePlanUUIDCodecBinaryIdValuer struct{}
+
+func (encodePlanUUIDCodecBinaryIdValuer) Encode(value any, buf []byte) ([]byte, error) {
+	switch v := value.(type) {
+	case *Id:
+		if v == nil {
+			return nil, nil
+		}
+		newBuf := make([]byte, 16)
+		copy(newBuf, v[:])
+		return newBuf, nil
+	case Id:
+		newBuf := make([]byte, 16)
+		copy(newBuf, v[:])
+		return newBuf, nil
+	default:
+		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
+	}
+}
+
+
+type encodePlanUUIDCodecTextIdValuer struct{}
+
+func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, error) {
+	switch v := value.(type) {
+	case *Id:
+		if v == nil {
+			return nil, nil
+		}
+		newBuf := []byte{}
+		copy(newBuf, encodeUUID(*v))
+		return newBuf, nil
+	case Id:
+		newBuf := []byte{}
+		copy(newBuf, encodeUUID(v))
+		return newBuf, nil
+	default:
+		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
+	}
+}
+
+
+type scanPlanBinaryUUIDToIdScanner struct{}
+
+func (scanPlanBinaryUUIDToIdScanner) Scan(src []byte, dst any) error {
+	switch v := dst.(type) {
+	case **Id:
+		if src == nil {
+			*v = nil
+			return nil
+		}
+		if len(src) != 16 {
+			return fmt.Errorf("invalid length for UUID: %v", len(src))
+		}
+		id := Id{}
+		copy(id[:], src)
+		*v = &id
+		return nil
+	case *Id:
+		if src == nil {
+			return fmt.Errorf("Cannot scan a nil value into *Id (use **Id)")
+		}
+		if len(src) != 16 {
+			return fmt.Errorf("invalid length for UUID: %v", len(src))
+		}
+		id := Id{}
+		copy(id[:], src)
+		*v = id
+		return nil
+	default:
+		return fmt.Errorf("Unknown value %T (expected *Id or **Id)", v)
+	}
+}
+
 
 type scanPlanBinaryUUIDToTextScanner struct{}
 
 func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
-	scanner := (dst).(TextScanner)
+	scanner := dst.(pgtype.TextScanner)
 
 	if src == nil {
-		return scanner.ScanText(Text{})
+		return scanner.ScanText(pgtype.Text{})
 	}
 
 	if len(src) != 16 {
@@ -275,50 +295,49 @@ func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
 	var buf [16]byte
 	copy(buf[:], src)
 
-	return scanner.ScanText(Text{String: encodeUUID(buf), Valid: true})
+	return scanner.ScanText(pgtype.Text{String: encodeUUID(buf), Valid: true})
 }
 
-type scanPlanTextAnyToUUIDScanner struct{}
 
-func (scanPlanTextAnyToUUIDScanner) Scan(src []byte, dst any) error {
-	scanner := (dst).(UUIDScanner)
+type scanPlanTextAnyToIdScanner struct{}
 
-	if src == nil {
-		return scanner.ScanUUID(UUID{})
+func (scanPlanTextAnyToIdScanner) Scan(src []byte, dst any) error {
+	switch v := dst.(type) {
+	case **Id:
+		if src == nil {
+			*v = nil
+			return nil
+		}
+		buf, err := parseUUID(string(src))
+		if err != nil {
+			return err
+		}
+		id := Id(buf)
+		*v = &id
+		return nil
+	case *Id:
+		if src == nil {
+			return fmt.Errorf("Cannot scan a nil value into *Id (use **Id)")
+		}
+		buf, err := parseUUID(string(src))
+		if err != nil {
+			return err
+		}
+		id := Id(buf)
+		*v = id
+		return nil
+	default:
+		return fmt.Errorf("Unknown value %T (expected *Id or **Id)", v)
 	}
-
-	buf, err := parseUUID(string(src))
-	if err != nil {
-		return err
-	}
-
-	return scanner.ScanUUID(UUID{Bytes: buf, Valid: true})
 }
 
-func (c UUIDCodec) DecodeDatabaseSQLValue(m *Map, oid uint32, format int16, src []byte) (driver.Value, error) {
-	if src == nil {
-		return nil, nil
-	}
 
-	var uuid UUID
-	err := codecScan(c, m, oid, format, src, &uuid)
-	if err != nil {
-		return nil, err
+// copied from `pgtype.codecScan`
+func codecScan(codec pgtype.Codec, m *pgtype.Map, oid uint32, format int16, src []byte, dst any) error {
+	scanPlan := codec.PlanScan(m, oid, format, dst)
+	if scanPlan == nil {
+		return fmt.Errorf("PlanScan did not find a plan")
 	}
-
-	return encodeUUID(uuid.Bytes), nil
+	return scanPlan.Scan(src, dst)
 }
 
-func (c UUIDCodec) DecodeValue(m *Map, oid uint32, format int16, src []byte) (any, error) {
-	if src == nil {
-		return nil, nil
-	}
-
-	var uuid UUID
-	err := codecScan(c, m, oid, format, src, &uuid)
-	if err != nil {
-		return nil, err
-	}
-	return uuid.Bytes, nil
-}
-*/

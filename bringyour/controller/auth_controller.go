@@ -1,17 +1,20 @@
 package controller
 
 import (
+    // "context"
     "fmt"
     // "errors"
 
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/session"
-    // "bringyour.com/bringyour/ulid"
     "bringyour.com/bringyour/model"
 )
 
 
-func AuthLogin(login model.AuthLoginArgs, session *session.ClientSession) (*model.AuthLoginResult, error) {
+func AuthLogin(
+    login model.AuthLoginArgs,
+    session *session.ClientSession,
+) (*model.AuthLoginResult, error) {
     // fixme
     /*
     userAuth, userAuthType := normalUserAuthV1(login.userAuth)

@@ -175,6 +175,7 @@ func Host() (string, error) {
     return "", errors.New("WARP_HOST not set")
 }
 
+
 func RequireHost() string {
     host, err := Host()
     if err != nil {
@@ -185,22 +186,38 @@ func RequireHost() string {
 
 
 func Block() (string, error) {
-
+    block := os.Getenv("WARP_BLOCK")
+    if block != "" {
+        return block, nil
+    }
+    return "", errors.New("WARP_BLOCK not set")
 }
 
 
 func RequireBlock() string {
-
+    block, err := Block()
+    if err != nil {
+        panic(err)
+    }
+    return block
 }
 
 
 func Service() (string, error) {
-
+    service := os.Getenv("WARP_SERVICE")
+    if service != "" {
+        return service, nil
+    }
+    return "", errors.New("WARP_SERVICE not set")
 }
 
 
 func RequireService() string {
-
+    service, err := Service()
+    if err != nil {
+        panic(err)
+    }
+    return service
 }
 
 
@@ -301,9 +318,9 @@ func NewResolver(mountType MountType) *Resolver {
 }
 
 func (self *Resolver) ResourcePath(relPath string) (string, error) {
-    paths, err := ResourcePaths(relPath)
+    paths, err := self.ResourcePaths(relPath)
     if err != nil {
-        return nil, err
+        return "", err
     }
     return paths[0], nil
 }
@@ -464,7 +481,6 @@ func getAll[T any](obj map[string]any, objPath []string, out *[]T) {
             switch v := relValue.(type) {
                 case T:
                     values = append(values, v)
-                // fixme convert to T?
             }
         } else {
             switch v := relValue.(type) {

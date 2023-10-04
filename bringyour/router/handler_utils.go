@@ -3,7 +3,9 @@ package router
 import (
 	"net/http"
 	"encoding/json"
+	"encoding/base64"
 	"reflect"
+	"strings"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -11,8 +13,34 @@ import (
 )
 
 
+
+
+// FIXME
+// func WrapWithJsonNoArgs() {
+	
+// }
+
+
+// func Partial(
+// 	ctx context.Context,
+// 	impl func(context.Context, http.ResponseWriter, *http.Request),
+// ) func(http.ResponseWriter, *http.Request) {
+// 	return func(w http.ResponseWriter, req *http.Request) {
+// 		impl(ctx, w, req)
+// 	}
+// }
+
+
+// https://www.rfc-editor.org/rfc/rfc6750
+const authBearerPrefix = "Bearer "
+
+
 // wraps an implementation function using json in/out
-func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), w http.ResponseWriter, req *http.Request) {
+func WrapWithJson[T any, R any](
+	impl func(T, *session.ClientSession)(R, error),
+	w http.ResponseWriter,
+	req *http.Request,
+) {
 	var input T
 
 	var err error
@@ -28,29 +56,44 @@ func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), 
 
     // debugging
     // {{ fixme use LogJson
-	    var debugInputJson []byte
-	    debugInputJson, err = json.Marshal(input)
-	    if err == nil {
-	        bringyour.Logger().Printf("Decoded input %s\n", string(debugInputJson))
-	    }
+	    // var debugInputJson []byte
+	    // debugInputJson, err = json.Marshal(input)
+	    // if err == nil {
+	    //     bringyour.Logger().Printf("Decoded input %s\n", string(debugInputJson))
+	    // }
 	// }}
 
 
     session := session.NewClientSessionFromRequest(req)
 
-    // look for AuthArgs
-    inputMeta := reflect.ValueOf(&input).Elem()
-    // FIXME should this be passed as BEARER auth?
-    // FIXME allow ByJwt as a legacy
-    byJwtField := reflect.Indirect(inputMeta).FieldByName("ByJwt")
-	if byJwtField != (reflect.Value{}) {
-		byJwt, err := jwt.ParseByJwt(byJwtField.String())
-    	if err != nil {
-    		http.Error(w, err.Error(), http.StatusInternalServerError)
-        	return
+    if auth := req.Header.Get("Authorization"); auth != "" {
+    	if strings.HasPrefix(auth, authBearerPrefix) {
+    		if data, err := base64.StdEncoding.DecodeString(auth[:len(authBearerPrefix)]); err == nil {
+    			byJwt, err := jwt.ParseByJwt(string(data))
+    			if err != nil {
+		    		http.Error(w, err.Error(), http.StatusInternalServerError)
+		        	return
+		    	}
+		    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+    			session.ByJwt = byJwt
+    		}
     	}
-    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-    	session.ByJwt = byJwt
+    }
+
+    // (legacy) look for AuthArgs
+    // TODO deprecate when all clients migrate to `Authorization: Bearer`
+    if session.ByJwt == nil {
+	    inputMeta := reflect.ValueOf(&input).Elem()
+	    byJwtField := reflect.Indirect(inputMeta).FieldByName("ByJwt")
+		if byJwtField != (reflect.Value{}) {
+			byJwt, err := jwt.ParseByJwt(byJwtField.String())
+	    	if err != nil {
+	    		http.Error(w, err.Error(), http.StatusInternalServerError)
+	        	return
+	    	}
+	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+	    	session.ByJwt = byJwt
+		}
 	}
 
 	bringyour.Logger().Printf("Handling %s\n", impl)
@@ -73,9 +116,17 @@ func WrapWithJson[T any, R any](impl func(T, *session.ClientSession)(R, error), 
 }
 
 
-func WrapWithJsonIgnoreSession[T any, R any](impl func(T)(R, error), w http.ResponseWriter, req *http.Request) {
-	WrapWithJson(func (arg T, _ *session.ClientSession)(R, error) {
-		return impl(arg)
-	}, w, req)
+func WrapWithJsonIgnoreSession[T any, R any](
+	impl func(T)(R, error),
+	w http.ResponseWriter,
+	req *http.Request,
+) {
+	WrapWithJson(
+		func (arg T, _ *session.ClientSession)(R, error) {
+			return impl(arg)
+		},
+		w,
+		req,
+	)
 }
 

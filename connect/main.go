@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     // "time"
     "fmt"
     "net/http"
@@ -35,10 +36,10 @@ Options:
 
     // bringyour.Logger().Printf("%s\n", opts)
 
-    cancelCtx, cancel := context.WithCancel(context.Background)
+    cancelCtx, cancel := context.WithCancel(context.Background())
     defer cancel()
 
-    quitEvent := bringyour.NewEvent(cancelCtx)
+    quitEvent := bringyour.NewEventWithContext(cancelCtx)
 
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
@@ -62,7 +63,7 @@ Options:
         port,
     )
 
-    routerHandler := router.NewRouter(routes)
+    routerHandler := router.NewRouter(cancelCtx, routes)
     if err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler); err != nil {
         bringyour.Logger().Fatal(err)
     }

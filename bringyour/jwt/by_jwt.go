@@ -5,11 +5,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
     "encoding/pem"
+    "os"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/ulid"
 )
 
 
@@ -18,13 +18,13 @@ import (
 
 
 // the first key (most recent version) is used to sign new JWTs
-var byPrivateKeys := func() []*rsa.PrivateKey {
+var byPrivateKeys = func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
 	// `ResourcePaths` returns the version paths in descending order
 	// hence the `paths[0]` will be the most recent version
 	paths, err := bringyour.Vault.ResourcePaths("tls/bringyour.com/bringyour.com.key")
 	if err != nil {
-		panic
+		panic(err)
 	}
 	for _, path := range paths {
 		bytes, err := os.ReadFile(path)
@@ -36,7 +36,7 @@ var byPrivateKeys := func() []*rsa.PrivateKey {
 	    keys = append(keys, parseResult.(*rsa.PrivateKey))
 	}
 	return keys
-}
+}()
 
 
 func bySigningKey() *rsa.PrivateKey {
@@ -46,13 +46,13 @@ func bySigningKey() *rsa.PrivateKey {
 
 
 type ByJwt struct {
-	NetworkId ulid.ULID
-	UserId ulid.ULID
+	NetworkId bringyour.Id
+	UserId bringyour.Id
 	NetworkName string
-	ClientId *Id
+	ClientId *bringyour.Id
 }
 
-func (self ByJwt) Sign() string {
+func (self *ByJwt) Sign() string {
 	claims := gojwt.MapClaims{
 		"networkId": self.NetworkId.String(),
 		"userId": self.UserId.String(),
@@ -70,8 +70,17 @@ func (self ByJwt) Sign() string {
 	return jwtSigned
 }
 
+func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
+	return &ByJwt{
+		NetworkId: self.NetworkId,
+		UserId: self.UserId,
+		NetworkName: self.NetworkName,
+		ClientId: clientId,
+	}
+}
 
-func NewByJwt(networkId ulid.ULID, userId ulid.ULID, networkName string) *ByJwt {
+
+func NewByJwt(networkId bringyour.Id, userId bringyour.Id, networkName string) *ByJwt {
 	return &ByJwt{
 		NetworkId: networkId,
 		UserId: userId,
@@ -98,18 +107,17 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	claims := token.Claims.(gojwt.MapClaims)
 	
 	var networkIdString string		
-	var networkId ulid.ULID
+	var networkId bringyour.Id
 	var userIdString string
-	var userId ulid.ULID
+	var userId bringyour.Id
 	var networkName string
 	var ok bool
-	var err error
 
 	networkIdString, ok = claims["networkId"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	networkId, err = ulid.Parse(networkIdString)
+	networkId, err = bringyour.ParseId(networkIdString)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +125,7 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	userId, err = ulid.Parse(userIdString)
+	userId, err = bringyour.ParseId(userIdString)
 	if err != nil {
 		return nil, err
 	}

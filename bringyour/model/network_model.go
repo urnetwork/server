@@ -3,20 +3,18 @@ package model
 
 import (
 	"errors"
-	"context"
+	// "context"
 	"encoding/json"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/ulid"
+	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/jwt"
 )
 
 
-
 var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
-
 
 
 type NetworkCheckArgs struct {
@@ -27,8 +25,8 @@ type NetworkCheckResult struct {
 	Available bool  `json:"available"`
 }
 
-func NetworkCheck(check *NetworkCheckArgs) (*NetworkCheckResult, error) {
-	taken := networkNameSearch.AnyAround(check.NetworkName, 3)
+func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
+	taken := networkNameSearch.AnyAround(session.Ctx, check.NetworkName, 3)
 
 	result := &NetworkCheckResult{
 		Available: !taken,
@@ -66,19 +64,18 @@ type NetworkCreateResultError struct {
 	Message string `json:"message"`
 }
 
-func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSession) (*NetworkCreateResult, error) {
+func NetworkCreate(
+	networkCreate NetworkCreateArgs,
+	session *session.ClientSession,
+) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
 
-	var userAuthAttemptId *ulid.ULID
-	if session != nil {
-		var allow bool
-		userAuthAttemptId, allow = UserAuthAttempt(userAuth, session)
-		if !allow {
-			return nil, maxUserAuthAttemptsError()
-		}
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	if !allow {
+		return nil, maxUserAuthAttemptsError()
 	}
 
-	taken := networkNameSearch.AnyAround(networkCreate.NetworkName, 3)
+	taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 3)
 
 	if taken {
 		result := &NetworkCreateResult{
@@ -98,8 +95,6 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 		return result, nil
 	}
 
-
-
 	if networkCreate.UserAuth != nil {
 		// validate the user does not exist
 
@@ -113,71 +108,71 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 		}
 
 		created := false
-		var createdNetworkId ulid.ULID
+		var createdNetworkId bringyour.Id
 		
-		bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
+		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			var result bringyour.PgResult
 			var err error
 
-			var userId bringyour.PgUUID
+			var userId *bringyour.Id
 
 			result, err = tx.Query(
-				context,
+				session.Ctx,
 				`
 					SELECT user_id FROM network_user WHERE user_auth = $1
 				`,
 				userAuth,
 			)
-			bringyour.With(result, err, func() {
+			bringyour.WithPgResult(result, err, func() {
 				if result.Next() {
-					bringyour.Raise(
-						result.Scan(&userId),
-					)
+					bringyour.Raise(result.Scan(&userId))
 				}
 			})
 
-			if !userId.Valid {
-				created = true
-				createdUserId := ulid.Make()
-				createdNetworkId = ulid.Make()
-
-				passwordSalt := createPasswordSalt()
-				passwordHash := computePasswordHashV1([]byte(networkCreate.Password), passwordSalt)
-
-				_, err = tx.Exec(
-					context,
-					`
-						INSERT INTO network_user
-						(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
-						VALUES ($1, $2, $3, $4, $5, $6)
-					`,
-					ulid.ToPg(&createdUserId),
-					networkCreate.UserName,
-					AuthTypePassword,
-					userAuth,
-					passwordHash,
-					passwordSalt,
-				)
-				bringyour.Raise(err)
-
-				_, err = tx.Exec(
-					context,
-					`
-						INSERT INTO network
-						(network_id, network_name, admin_user_id)
-						VALUES ($1, $2, $3)
-					`,
-					ulid.ToPg(&createdNetworkId),
-					networkCreate.NetworkName,
-					ulid.ToPg(&createdUserId),
-				)
-				bringyour.Raise(err)
+			if userId == nil {
+				return
 			}
+
+			created = true
+			createdUserId := bringyour.NewId()
+			createdNetworkId = bringyour.NewId()
+
+			passwordSalt := createPasswordSalt()
+			passwordHash := computePasswordHashV1([]byte(networkCreate.Password), passwordSalt)
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network_user
+					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+					VALUES ($1, $2, $3, $4, $5, $6)
+				`,
+				createdUserId,
+				networkCreate.UserName,
+				AuthTypePassword,
+				userAuth,
+				passwordHash,
+				passwordSalt,
+			)
+			bringyour.Raise(err)
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network
+					(network_id, network_name, admin_user_id)
+					VALUES ($1, $2, $3)
+				`,
+				createdNetworkId,
+				networkCreate.NetworkName,
+				createdUserId,
+			)
+			bringyour.Raise(err)
 		})
 		if created {
-			auditNetworkCreate(networkCreate, session, createdNetworkId)
+			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-			networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
+			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId)
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -205,82 +200,74 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 			bringyour.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
 
 			created := false
-			var createdNetworkId ulid.ULID
-			var createdUserId ulid.ULID
+			var createdNetworkId bringyour.Id
+			var createdUserId bringyour.Id
 
-			bringyour.Tx(func(context context.Context, tx bringyour.PgTx) {
-				var result bringyour.PgResult
-				var err error
+			bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+				var userId *bringyour.Id
 
-				var userId bringyour.PgUUID
-
-				result, err = tx.Query(
-					context,
+				result, err := tx.Query(
+					session.Ctx,
 					`
 						SELECT user_id FROM network_user WHERE user_auth = $1
 					`,
 					authJwt.UserAuth,
 				)
-				bringyour.With(result, err, func() {
+				bringyour.WithPgResult(result, err, func() {
 					if result.Next() {
-						bringyour.Raise(
-							result.Scan(&userId),
-						)
+						bringyour.Raise(result.Scan(&userId))
 					}
 				})
 
-				if !userId.Valid {
-					bringyour.Logger().Printf("JWT Creating a new network\n")
-
-					created = true
-					createdUserId = ulid.Make()
-					createdNetworkId = ulid.Make()
-
-					var err error
-
-					_, err = tx.Exec(
-						context,
-						`
-							INSERT INTO network_user
-							(user_id, user_name, auth_type, user_auth, auth_jwt)
-							VALUES ($1, $2, $3, $4, $5)
-						`,
-						ulid.ToPg(&createdUserId),
-						networkCreate.UserName,
-						authJwt.AuthType,
-						authJwt.UserAuth,
-						networkCreate.AuthJwt,
-					)
-					if err != nil {
-						panic(err)
-					}
-
-					_, err = tx.Exec(
-						context,
-						`
-							INSERT INTO network
-							(network_id, network_name, admin_user_id)
-							VALUES ($1, $2, $3)
-						`,
-						ulid.ToPg(&createdNetworkId),
-						networkCreate.NetworkName,
-						ulid.ToPg(&createdUserId),
-					)
-					if err != nil {
-						panic(err)
-					}
-				} else {
+				if userId != nil {
 					bringyour.Logger().Printf("User already exists\n")
+					return
+				}
+
+				bringyour.Logger().Printf("JWT Creating a new network\n")
+
+				created = true
+				createdUserId = bringyour.NewId()
+				createdNetworkId = bringyour.NewId()
+
+				_, err = tx.Exec(
+					session.Ctx,
+					`
+						INSERT INTO network_user
+						(user_id, user_name, auth_type, user_auth, auth_jwt)
+						VALUES ($1, $2, $3, $4, $5)
+					`,
+					createdUserId,
+					networkCreate.UserName,
+					authJwt.AuthType,
+					authJwt.UserAuth,
+					networkCreate.AuthJwt,
+				)
+				if err != nil {
+					panic(err)
+				}
+
+				_, err = tx.Exec(
+					session.Ctx,
+					`
+						INSERT INTO network
+						(network_id, network_name, admin_user_id)
+						VALUES ($1, $2, $3)
+					`,
+					createdNetworkId,
+					networkCreate.NetworkName,
+					createdUserId,
+				)
+				if err != nil {
+					panic(err)
 				}
 			})
 			if created {
-				auditNetworkCreate(networkCreate, session, createdNetworkId)
+				auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-				networkNameSearch.Add(networkCreate.NetworkName, createdNetworkId)
+				networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId)
 
-				if userAuthAttemptId != nil {
-					SetUserAuthAttemptSuccess(*userAuthAttemptId, true)
-				}
+				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
 				// successful login
 				byJwt := jwt.NewByJwt(
@@ -309,15 +296,20 @@ func NetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSessi
 	return nil, errors.New("Invalid login.")
 }
 
-func auditNetworkCreate(networkCreate NetworkCreateArgs, session *session.ClientSession, networkId ulid.ULID) {
+
+func auditNetworkCreate(
+	networkCreate NetworkCreateArgs,
+	networkId bringyour.Id,
+	session *session.ClientSession,
+) {
 	type Details struct {
 		NetworkCreate NetworkCreateArgs `json:"networkCreate"`
-		ClientIpv4 *string `json:"clientIpv4"`
+		ClientAddress string `json:"clientAddress"`
 	}
 
 	details := Details{
 		NetworkCreate: networkCreate,
-		ClientIpv4: session.ClientIpv4DotNotation(),
+		ClientAddress: session.ClientAddress,
 	}
 
 	detailsJson, err := json.Marshal(details)
@@ -329,5 +321,5 @@ func auditNetworkCreate(networkCreate NetworkCreateArgs, session *session.Client
 	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
 	auditNetworkEvent.NetworkId = networkId
 	auditNetworkEvent.EventDetails = &detailsJsonString
-	AddAuditEvent(auditNetworkEvent)
+	AddAuditEvent(session.Ctx, auditNetworkEvent)
 }
