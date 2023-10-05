@@ -83,7 +83,8 @@ func PaymentSweep() {
 
 
 type TransferEscrow struct {
-
+	// FIXME
+	ContractId bringyour.Id
 }
 
 
@@ -97,6 +98,27 @@ type TransferPair struct {
 	// FIXME
 }
 
+func NewTransferPair(sourceId bringyour.Id, destinationId bringyour.Id) TransferPair {
+	// FIXME
+	return TransferPair{}
+}
+
+func NewUnorderedTransferPair(a bringyour.Id, b bringyour.Id) TransferPair {
+	// FIXME sort, store in ascending
+	return TransferPair{}
+}
+
+
+func GetOpenContractIds(sourceId bringyour.Id, destinationId bringyour.Id) []bringyour.Id {
+	// FIXME
+	return []bringyour.Id{}
+}
+
+
+func GetOpenContractIdsForSourceOrDestination(clientId bringyour.Id) map[TransferPair]map[bringyour.Id]bool {
+	// FIXME
+	return map[TransferPair]map[bringyour.Id]bool{}
+}
 
 
 /*

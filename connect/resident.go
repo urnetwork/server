@@ -890,8 +890,8 @@ func NewResident(
 		controlLimiter: newLimiter(cancelCtx, ControlMinTimeout),
 	}
 
-	client.AddReceiveCallback(resident.clientReceive)
-	client.AddForwardCallback(resident.clientForward)
+	client.AddReceiveCallback(resident.handleClientReceive)
+	client.AddForwardCallback(resident.handleClientForward)
 
 	go client.Run(clientRouteManager, clientContractManager)
 	go resident.cleanupForwards()
@@ -931,7 +931,7 @@ func (self *Resident) cleanupForwards() {
 }
 
 // connect.ForwardFunction
-func (self *Resident) clientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
+func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
 	self.updateActivity()
 
 	sourceId := bringyour.Id(sourceId_)
@@ -976,7 +976,7 @@ func (self *Resident) clientForward(sourceId_ connect.Id, destinationId_ connect
 }
 
 // connect.ReceiveFunction
-func (self *Resident) clientReceive(sourceId_ connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 	// these are messages to the control id
 	// use `client.Send` to send messages back to the client
 

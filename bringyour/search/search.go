@@ -290,9 +290,8 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	)
 	bringyour.Raise(err)
 
-	insertOne := func(value string, alias int) {
-		_, err = tx.Exec(
-			ctx,
+	insertOne := func(batch bringyour.PgBatch, value string, alias int) {
+		batch.Queue(
     		`
 	    		INSERT INTO search_value
 	    		(realm, value_id, value, alias)
@@ -304,13 +303,11 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
     		value,
     		alias,
     	)
-    	bringyour.Raise(err)
 
     	projection := computeProjection(value)
     	for dim, dlen := range projection.dims {
     		elen := projection.vlen + projection.dord + dlen
-	    	_, err = tx.Exec(
-	    		ctx,
+	    	batch.Queue(
 	    		`
 		    		INSERT INTO search_projection
 		    		(realm, dim, elen, dord, dlen, vlen, value_id, alias)
@@ -326,33 +323,34 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	    		valueId,
 	    		alias,
 	    	)
-	    	bringyour.Raise(err)
 	    }
 	}
 
-	switch self.searchType {
-	case SearchTypeFull:
-		insertOne(value, 0)
-	case SearchTypePrefix:
-		// compute each prefix as a full search alias
-		alias := 0
-		for vlen := len(value) - 1; 0 < vlen; vlen -= 1 {
-			valuePrefix := value[:vlen]
-			insertOne(valuePrefix, alias)
-			alias += 1
-		}
-	case SearchTypeSubstring:
-		// for each suffix, compute each prefix as a full search alias
-		alias := 0
-		for suffixVlen := len(value); 0 < suffixVlen; suffixVlen -= 1 {
-			suffix := value[len(value) - suffixVlen:]
-			for vlen := len(suffix); 0 < vlen; vlen -= 1 {
-				valuePrefix := suffix[:vlen]
-				insertOne(valuePrefix, alias)
+	bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+		switch self.searchType {
+		case SearchTypeFull:
+			insertOne(batch, value, 0)
+		case SearchTypePrefix:
+			// compute each prefix as a full search alias
+			alias := 0
+			for vlen := len(value) - 1; 0 < vlen; vlen -= 1 {
+				valuePrefix := value[:vlen]
+				insertOne(batch, valuePrefix, alias)
 				alias += 1
 			}
+		case SearchTypeSubstring:
+			// for each suffix, compute each prefix as a full search alias
+			alias := 0
+			for suffixVlen := len(value); 0 < suffixVlen; suffixVlen -= 1 {
+				suffix := value[len(value) - suffixVlen:]
+				for vlen := len(suffix); 0 < vlen; vlen -= 1 {
+					valuePrefix := suffix[:vlen]
+					insertOne(batch, valuePrefix, alias)
+					alias += 1
+				}
+			}
 		}
-	}
+	})
 }
 
 

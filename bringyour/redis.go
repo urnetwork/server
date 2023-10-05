@@ -14,6 +14,14 @@ type RedisClient = *redis.Client
 const RedisNil = redis.Nil
 
 
+// resets the connection pool
+// call this after changes to the env
+func RedisReset() {
+	safeClient.close()
+	safeClient = &safeRedisClient{}
+}
+
+
 type safeRedisClient struct {
 	mutex sync.Mutex
 	client *redis.Client
@@ -57,7 +65,7 @@ func (self *safeRedisClient) close() {
 }
 
 
-var safeClient *safeRedisClient = &safeRedisClient{}
+var safeClient = &safeRedisClient{}
 
 func client() *redis.Client {
 	return safeClient.open()

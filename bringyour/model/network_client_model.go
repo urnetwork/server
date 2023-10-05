@@ -671,18 +671,20 @@ func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResid
 	return resident
 }
 
-/*
-func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id) *NetworkClientResident {
+
+func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
 	// important: use serializable tx
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		resident = dbGetResidentInTx(session.Ctx, conn, clientId)
+		resident_ := dbGetResidentInTx(ctx, tx, clientId)
+		if resident.InstanceId == instanceId {
+			resident = resident_
+		}
 	}, bringyour.TxSerializable)
 
 	return resident
 }
-*/
 
 
 // replace an existing resident with the given, or if there was already a replacement, return it
@@ -756,27 +758,35 @@ func NominateResident(
 
 
 // if any of the ports overlap
-func GetResidentsForHostPort(ctx context.Context, host string, port int) []*NetworkClientResident {
+func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*NetworkClientResident {
 	residents := []*NetworkClientResident{}
 
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.CreateTempTableInTx(
+			ctx,
+			tx,
+			"resident_ports(resident_internal_port int)",
+			ports...,
+		)
+
 		result, err := tx.Query(
 			ctx,
 			`
 				SELECT
-					network_client_resident.client_id
+					DISTINCT network_client_resident.client_id
 				FROM network_client_resident
 
 				INNER JOIN network_client_resident_port ON
 					network_client_resident_port.client_id = network_client_resident.client_id AND
 					network_client_resident_port.resident_id = network_client_resident.resident_id AND
-					network_client_resident_port.resident_internal_port = $2
+
+				INNER JOIN resident_ports ON
+					resident_ports.resident_internal_port = network_client_resident_port.resident_internal_port
 
 				WHERE
 					resident_host = $1
 				`,
 			host,
-			port,
 		)
 		clientIds := []bringyour.Id{}
 		bringyour.WithPgResult(result, err, func() {

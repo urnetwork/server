@@ -212,13 +212,9 @@ func (encodePlanUUIDCodecBinaryIdValuer) Encode(value any, buf []byte) ([]byte, 
 		if v == nil {
 			return nil, nil
 		}
-		newBuf := make([]byte, 16)
-		copy(newBuf, v[:])
-		return newBuf, nil
+		return append(buf, v[:]...), nil
 	case Id:
-		newBuf := make([]byte, 16)
-		copy(newBuf, v[:])
-		return newBuf, nil
+		return append(buf, v[:]...), nil
 	default:
 		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
 	}
@@ -233,13 +229,9 @@ func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, er
 		if v == nil {
 			return nil, nil
 		}
-		newBuf := []byte{}
-		copy(newBuf, encodeUUID(*v))
-		return newBuf, nil
+		return append(buf, encodeUUID(*v)...), nil
 	case Id:
-		newBuf := []byte{}
-		copy(newBuf, encodeUUID(v))
-		return newBuf, nil
+		return append(buf, encodeUUID(v)...), nil
 	default:
 		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
 	}

@@ -28,11 +28,21 @@ type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
 type PgResult = pgx.Rows
 type PgNamedArgs = pgx.NamedArgs
-type PgBatch = pgx.Batch
+type PgBatch = *pgx.Batch
 type PgBatchResults = pgx.BatchResults
 
 
 const TxSerializable = pgx.Serializable
+
+
+// resets the connection pool
+// call this after changes to the env
+func PgReset() {
+	safePool.close()
+	safePool = &safePgPool{
+		ctx: context.Background(),
+	}
+}
 
 
 type safePgPool struct {
@@ -77,7 +87,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			dbKeys.RequireString("db"),
 			optionsString,
 		)
-		Logger().Printf("Db url %d %s\n", postgresUrl)
+		Logger().Printf("Db url %s\n", postgresUrl)
 		config, err := pgxpool.ParseConfig(postgresUrl)
 		if err != nil {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
@@ -106,7 +116,7 @@ func (self *safePgPool) close() {
 	}
 }
 
-var safePool *safePgPool = &safePgPool{
+var safePool = &safePgPool{
 	ctx: context.Background(),
 }
 
@@ -144,12 +154,32 @@ func OptNoRetry() DbRetryOptions {
 }
 
 
+type DbReadWriteOptions struct {
+	readOnly bool
+}
+
+func OptReadOnly() DbReadWriteOptions {
+	return DbReadWriteOptions{
+		readOnly: true,
+	}
+}
+
+func OptReadWrite() DbReadWriteOptions {
+	return DbReadWriteOptions{
+		readOnly: false,
+	}
+}
+
+
 func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 	retryOptions := OptRetryDefault()
+	rwOptions := OptReadOnly()
 	for _, option := range options {
 		switch v := option.(type) {
 		case DbRetryOptions:
 			retryOptions = v
+		case DbReadWriteOptions:
+			rwOptions = v
 		}
 	}
 
@@ -196,6 +226,13 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				}
 			}()
 			defer conn.Release()
+			if !rwOptions.readOnly {
+				// the default is read only, escalate to rw
+				_, err := conn.Exec(ctx, "SET default_transaction_read_only=off")
+				if err != nil {
+					panic(err)
+				}
+			}
 			callback(conn)
 		}()
 
@@ -307,7 +344,7 @@ func WithPgResult(r PgResult, err error, callback any) {
 }
 
 
-func BatchInTx(ctx context.Context, tx PgTx, callback func (*PgBatch), resultCallbacks ...func(PgBatchResults)) {
+func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch), resultCallbacks ...func(PgBatchResults)) {
 	batch := &pgx.Batch{}
 	callback(batch)
 	results := tx.SendBatch(ctx, batch)
@@ -318,19 +355,9 @@ func BatchInTx(ctx context.Context, tx PgTx, callback func (*PgBatch), resultCal
 }
 
 
-// spec is `table_name(value_column_name)`
+// spec is `table_name(value_column_name type)`
 func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
 	tableSpec := parseTempTableSpec(spec)
-	var valueSqlType string
-	for _, value := range values {
-		switch v := any(value).(type) {
-		case Id:
-			valueSqlType = "uuid"
-		default:
-			panic(fmt.Errorf("Unknown SQL type for %v", v))
-		}
-		break
-	}
 	_, err := tx.Exec(ctx, fmt.Sprintf(
 		`
 			CREATE TEMPORARY TABLE %s (
@@ -340,11 +367,11 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 		`,
 		tableSpec.tableName,
 		tableSpec.valueColummName,
-		valueSqlType,
+		tableSpec.valuePgType,
 		tableSpec.valueColummName,
 	))
 	Raise(err)
-	BatchInTx(ctx, tx, func (batch *PgBatch) {
+	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
 			batch.Queue(
 				fmt.Sprintf(
@@ -363,26 +390,9 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 
 
 // many to one join table
-// spec is `table_name(key_column_name, value_column_name)`
+// spec is `table_name(key_column_name type, value_column_name type)`
 func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, spec string, values map[K]V) {
 	tableSpec := parseTempJoinTableSpec(spec)
-	var keySqlType string
-	var valueSqlType string
-	for key, value := range values {
-		switch v := any(key).(type) {
-		case Id:
-			keySqlType = "uuid"
-		default:
-			panic(fmt.Errorf("Unknown SQL type for %v", v))
-		}
-		switch v := any(value).(type) {
-		case int:
-			valueSqlType = "int"
-		default:
-			panic(fmt.Errorf("Unknown SQL type for %v", v))
-		}
-		break
-	}
 	_, err := tx.Exec(ctx, fmt.Sprintf(
 		`
 			CREATE TEMPORARY TABLE %s (
@@ -393,13 +403,13 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		`,
 		tableSpec.tableName,
 		tableSpec.keyColummName,
-		keySqlType,
+		tableSpec.keyPgType,
 		tableSpec.valueColummName,
-		valueSqlType,
+		tableSpec.valuePgType,
 		tableSpec.keyColummName,
 	))
 	Raise(err)
-	BatchInTx(ctx, tx, func (batch *PgBatch) {
+	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for key, value := range values {
 			batch.Queue(
 				fmt.Sprintf(
@@ -422,11 +432,12 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 type TempTableSpec struct {
 	tableName string
 	valueColummName string
+	valuePgType string
 }
 
-// spec is `table_name(value_column_name)`
+// spec is `table_name(value_column_name type)`
 func parseTempTableSpec(spec string) *TempTableSpec {
-	re := regexp.MustCompile("(\\w+)\\s*(?:\\s*(\\w+)\\s*)")
+	re := regexp.MustCompile("(\\w+)\\s*\\(\\s*(\\w+)\\s+(.+)\\s*\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
@@ -434,6 +445,7 @@ func parseTempTableSpec(spec string) *TempTableSpec {
 	return &TempTableSpec{
 		tableName: groups[1],
 		valueColummName: groups[2],
+		valuePgType: groups[3],
 	}
 }
 
@@ -442,11 +454,13 @@ type TempJoinTableSpec struct {
 	tableName string
 	keyColummName string
 	valueColummName string
+	keyPgType string
+	valuePgType string
 }
 
-// spec is `table_name(key_column_name, value_column_name)`
+// spec is `table_name(key_column_name type, value_column_name type)`
 func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
-	re := regexp.MustCompile("(\\w+)\\s*(?:\\s*(\\w+),\\s*(\\w+)\\s*)")
+	re := regexp.MustCompile("(\\w+)\\s*\\(\\s*(\\w+)\\s+(.+)\\s*,\\s*(\\w+)\\s+(.+)\\s*\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
@@ -454,6 +468,8 @@ func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
 	return &TempJoinTableSpec{
 		tableName: groups[1],
 		keyColummName: groups[2],
-		valueColummName: groups[3],
+		keyPgType: groups[3],
+		valueColummName: groups[4],
+		valuePgType: groups[5],
 	}
 }

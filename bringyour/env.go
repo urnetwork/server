@@ -8,6 +8,7 @@ import (
     "fmt"
     "regexp"
     "strconv"
+    "sync"
 
     "golang.org/x/exp/maps"
 
@@ -246,6 +247,14 @@ func HostPorts() (map[int]int, error) {
     return nil, errors.New("WARP_PORTS not set")
 }
 
+func RequireHostPorts() map[int]int {
+    hostPorts, err := HostPorts()
+    if err != nil {
+        panic(err)
+    }
+    return hostPorts
+}
+
 
 // these are the most efficient dest for this host to reach the target host
 func Routes() map[string]string {
@@ -265,7 +274,7 @@ func Env() (string, error) {
 }
 
 func RequireEnv() string {
-    env, err := Version()
+    env, err := Env()
     if err != nil {
         panic(err)
     }
@@ -309,11 +318,40 @@ func RequireConfigVersion() string {
 
 type Resolver struct {
     mountType MountType
+
+    stateLock sync.Mutex
+    // relPath -> id -> value
+    relPathOverrides map[string]map[int][]byte
 }
 
 func NewResolver(mountType MountType) *Resolver {
     return &Resolver{
         mountType: mountType,
+        relPathOverrides: map[string]map[int][]byte{},
+    }
+}
+
+// locally override a file
+// the returned pop removes the single override, but does not affect other overwrites
+func (self *Resolver) PushSimpleResource(relPath string, value []byte) func() {
+    self.stateLock.Lock()
+    defer self.stateLock.Unlock()
+
+    overrides, ok := self.relPathOverrides[relPath]
+    if !ok {
+        overrides = map[int][]byte{}
+        self.relPathOverrides[relPath] = overrides
+    }
+    nextId := 0
+    for id, _ := range overrides {
+        nextId = max(nextId, id + 1)
+    }
+    overrides[nextId] = value
+
+    return func() {
+        self.stateLock.Lock()
+        defer self.stateLock.Unlock()
+        delete(overrides, nextId)
     }
 }
 
@@ -389,8 +427,24 @@ func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
     if err != nil {
         return nil, err
     }
+    override := func()([]byte) {
+        self.stateLock.Lock()
+        defer self.stateLock.Unlock()
+        if overrides, ok := self.relPathOverrides[relPath]; ok {
+            if len(overrides) == 0 {
+                return nil
+            }
+            maxId := 0
+            for id, _ := range overrides {
+                maxId = max(maxId, id)
+            }
+            return overrides[maxId]
+        }
+        return nil
+    }()
     return &SimpleResource{
         path: path,
+        override: override,
     }, nil
 }
 
@@ -405,6 +459,7 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 
 type SimpleResource struct {
     path string
+    override []byte
     parsedObj *map[string]any
 }
 
@@ -414,9 +469,14 @@ func (self *SimpleResource) Parse() map[string]any {
     }
     var bytes []byte
     var err error
-    bytes, err = os.ReadFile(self.path)
-    if err != nil {
-        panic(err)
+    if self.override != nil {
+        // use the override value
+        bytes = self.override
+    } else {
+        bytes, err = os.ReadFile(self.path)
+        if err != nil {
+            panic(err)
+        }
     }
     obj := map[string]any{}
     err = yaml.Unmarshal(bytes, &obj)

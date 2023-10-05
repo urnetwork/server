@@ -882,7 +882,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		)
 		bringyour.Raise(err)
 
-		bringyour.BatchInTx(ctx, tx, func(batch *bringyour.PgBatch) {
+		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 			for _, locationId := range locationGroup.MemberLocationIds {
 				batch.Queue(
 					`
@@ -934,7 +934,7 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 		)
 		bringyour.Raise(err)
 		
-		bringyour.BatchInTx(ctx, tx, func(batch *bringyour.PgBatch) {
+		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 			for _, locationId := range locationGroup.MemberLocationIds {
 				batch.Queue(
 					`
@@ -1077,7 +1077,7 @@ func FindActiveProviderLocations(
 		bringyour.CreateTempTableInTx(
 			session.Ctx,
 			tx,
-			"find_location_group_ids(location_group_id)",
+			"find_location_group_ids(location_group_id uuid)",
 			maps.Keys(locationGroupSearchResults)...,
 		)
 		result, err := tx.Query(
@@ -1101,7 +1101,7 @@ func FindActiveProviderLocations(
 		bringyour.CreateTempTableInTx(
 			session.Ctx,
 			tx,
-			"find_location_ids(location_id)",
+			"find_location_ids(location_id uuid)",
 			searchLocationIds...,
 		)
 
@@ -1207,7 +1207,7 @@ func FindActiveProviderLocations(
 		bringyour.CreateTempJoinTableInTx(
 			session.Ctx,
 			tx,
-			"result_location_ids(location_id, client_count)",
+			"result_location_ids(location_id uuid, client_count int)",
 			providerCount,
 		)
 		result, err = tx.Query(
@@ -1358,7 +1358,7 @@ func GetActiveProviderLocations(
 		bringyour.CreateTempJoinTableInTx(
 			session.Ctx,
 			tx,
-			"result_location_ids(location_id, client_count)",
+			"result_location_ids(location_id uuid, client_count int)",
 			providerCount,
 		)
 		result, err = tx.Query(
@@ -1472,7 +1472,7 @@ func FindLocations(
 		bringyour.CreateTempTableInTx(
 			ctx,
 			tx,
-			"find_location_group_ids(location_group_id)",
+			"find_location_group_ids(location_group_id uuid)",
 			maps.Keys(locationGroupSearchResults)...,
 		)
 		result, err := tx.Query(
@@ -1496,7 +1496,7 @@ func FindLocations(
 		bringyour.CreateTempTableInTx(
 			ctx,
 			tx,
-			"find_location_ids(location_id)",
+			"find_location_ids(location_id uuid)",
 			searchLocationIds...,
 		)
 
