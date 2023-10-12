@@ -9,6 +9,7 @@ import (
 	"time"
 	"errors"
 	"regexp"
+	"runtime/debug"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -133,6 +134,7 @@ type DbRetryOptions struct {
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
 	rerunOnConstraintError bool
 	retryTimeout time.Duration
+	endRetryTimeout time.Duration
 }
 
 // this is the default for `Db` and `Tx`
@@ -142,6 +144,7 @@ func OptRetryDefault() DbRetryOptions {
 		rerunOnConnectionError: true,
 		rerunOnConstraintError: true,
 		retryTimeout: 200 * time.Millisecond,
+		endRetryTimeout: 60 * time.Second,
 	}
 }
 
@@ -243,7 +246,8 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 					return errors.New("Done")
 				case <- time.After(retryOptions.retryTimeout):
 				}
-				Logger().Printf("constraint error, retry (%s)", pgErr)
+				Logger().Printf("Constraint error, retry (%s)\n", pgErr)
+				debug.PrintStack()
 				continue
 			}
 			return pgErr
@@ -278,6 +282,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 		}
 	}
 
+	endRetry := time.Now().Add(retryOptions.endRetryTimeout)
 	for {
 		var commitErr error
 		err := Db(ctx, func (conn PgConn) {
@@ -319,7 +324,16 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 					return errors.New("Done")
 				case <- time.After(retryOptions.retryTimeout):
 				}
-				Logger().Printf("commit")
+				if endRetry.Before(time.Now()) {
+					panic(commitErr)
+				}
+				switch v := commitErr.(type) {
+				case *pgconn.PgError:
+					Logger().Printf("Commit error, retry (%s) (%s)\n", v.SQLState(), v.Error())
+				default:
+					Logger().Printf("Commit error, retry (%s)\n", v)
+				}
+				debug.PrintStack()
 				continue
 			}
 			return commitErr
@@ -355,34 +369,116 @@ func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch), resultCall
 }
 
 
+
+type ComplexValue interface {
+	// unpack a complex value into individual values
+	Values() []any
+}
+
+
+// CreateTempTableInTxAllowDuplicates
+
+// FIXME support ComplexValue and multiple columns
 // spec is `table_name(value_column_name type)`
 func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
 	tableSpec := parseTempTableSpec(spec)
+
+	pgParts := []string{}
+	for i, valueColumnName := range tableSpec.valueColumnNames {
+		valuePgType := tableSpec.valuePgTypes[i]
+		valuePart := fmt.Sprintf("%s %s NOT NULL", valueColumnName, valuePgType)
+		pgParts = append(pgParts, valuePart)
+	}
+
+	pgPlaceholders := []string{}
+	i := 1
+	for range tableSpec.valueColumnNames {
+		pgPlaceholders = append(pgPlaceholders, fmt.Sprintf("$%d", i))
+		i += 1
+	}
+
 	_, err := tx.Exec(ctx, fmt.Sprintf(
 		`
 			CREATE TEMPORARY TABLE %s (
-				%s %s NOT NULL,
+				%s,
 				PRIMARY KEY (%s)
 			)
+			ON COMMIT DROP
 		`,
 		tableSpec.tableName,
-		tableSpec.valueColummName,
-		tableSpec.valuePgType,
-		tableSpec.valueColummName,
+		strings.Join(pgParts, ", "),
+		strings.Join(tableSpec.valueColumnNames, ", "),
 	))
 	Raise(err)
 	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
+			var pgValues = []any{}
+			pgValues = expandValue(value, pgValues)
+			if len(pgValues) != len(pgPlaceholders) {
+				panic(fmt.Errorf("Expected %d values but found %d.", len(pgPlaceholders), len(pgValues)))
+			}
 			batch.Queue(
 				fmt.Sprintf(
 					`
-						INSERT INTO %s (%s) VALUES ($1)
-						ON CONFLICT IGNORE
+						INSERT INTO %s (%s) VALUES (%s)
+						ON CONFLICT DO NOTHING
 					`,
 					tableSpec.tableName,
-					tableSpec.valueColummName,
+					strings.Join(tableSpec.valueColumnNames, ", "),
+					strings.Join(pgPlaceholders, ", "),
 				),
-				value,
+				pgValues...,
+			)
+		}
+	})
+}
+
+
+func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
+	tableSpec := parseTempTableSpec(spec)
+
+	pgParts := []string{}
+	for i, valueColumnName := range tableSpec.valueColumnNames {
+		valuePgType := tableSpec.valuePgTypes[i]
+		valuePart := fmt.Sprintf("%s %s NOT NULL", valueColumnName, valuePgType)
+		pgParts = append(pgParts, valuePart)
+	}
+
+	pgPlaceholders := []string{}
+	i := 1
+	for range tableSpec.valueColumnNames {
+		pgPlaceholders = append(pgPlaceholders, fmt.Sprintf("$%d", i))
+		i += 1
+	}
+
+	_, err := tx.Exec(ctx, fmt.Sprintf(
+		`
+			CREATE TEMPORARY TABLE %s (
+				%s
+			)
+			ON COMMIT DROP
+		`,
+		tableSpec.tableName,
+		strings.Join(pgParts, ", "),
+	))
+	Raise(err)
+	BatchInTx(ctx, tx, func (batch PgBatch) {
+		for _, value := range values {
+			var pgValues = []any{}
+			pgValues = expandValue(value, pgValues)
+			if len(pgValues) != len(pgPlaceholders) {
+				panic(fmt.Errorf("Expected %d values but found %d.", len(pgPlaceholders), len(pgValues)))
+			}
+			batch.Queue(
+				fmt.Sprintf(
+					`
+						INSERT INTO %s (%s) VALUES (%s)
+					`,
+					tableSpec.tableName,
+					strings.Join(tableSpec.valueColumnNames, ", "),
+					strings.Join(pgPlaceholders, ", "),
+				),
+				pgValues...,
 			)
 		}
 	})
@@ -390,86 +486,152 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 
 
 // many to one join table
-// spec is `table_name(key_column_name type, value_column_name type)`
+// spec is `table_name(key_column_name type[, ...] -> value_column_name type[, ...])`
 func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, spec string, values map[K]V) {
 	tableSpec := parseTempJoinTableSpec(spec)
+
+	pgParts := []string{}
+	for i, keyColumnName := range tableSpec.keyColumnNames {
+		keyPgType := tableSpec.keyPgTypes[i]
+		keyPart := fmt.Sprintf("%s %s NOT NULL", keyColumnName, keyPgType)
+		pgParts = append(pgParts, keyPart)
+	}
+	for i, valueColumnName := range tableSpec.valueColumnNames {
+		valuePgType := tableSpec.valuePgTypes[i]
+		valuePart := fmt.Sprintf("%s %s NOT NULL", valueColumnName, valuePgType)
+		pgParts = append(pgParts, valuePart)
+	}
+
+	columnNames := []string{}
+	columnNames = append(columnNames, tableSpec.keyColumnNames...)
+	columnNames = append(columnNames, tableSpec.valueColumnNames...)
+	pgPlaceholders := []string{}
+	i := 1
+	for range tableSpec.keyColumnNames {
+		pgPlaceholders = append(pgPlaceholders, fmt.Sprintf("$%d", i))
+		i += 1
+	}
+	for range tableSpec.valueColumnNames {
+		pgPlaceholders = append(pgPlaceholders, fmt.Sprintf("$%d", i))
+		i += 1
+	}
+
 	_, err := tx.Exec(ctx, fmt.Sprintf(
 		`
 			CREATE TEMPORARY TABLE %s (
-				%s %s NOT NULL,
-				%s %s NOT NULL,
+				%s,
 				PRIMARY KEY (%s)
 			)
+			ON COMMIT DROP
 		`,
 		tableSpec.tableName,
-		tableSpec.keyColummName,
-		tableSpec.keyPgType,
-		tableSpec.valueColummName,
-		tableSpec.valuePgType,
-		tableSpec.keyColummName,
+		strings.Join(pgParts, ", "),
+		strings.Join(tableSpec.keyColumnNames, ", "),
 	))
 	Raise(err)
 	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for key, value := range values {
+			var pgValues = []any{}
+			pgValues = expandValue(key, pgValues)
+			pgValues = expandValue(value, pgValues)
+			if len(pgValues) != len(pgPlaceholders) {
+				panic(fmt.Errorf("Expected %d values but found %d.", len(pgPlaceholders), len(pgValues)))
+			}
 			batch.Queue(
 				fmt.Sprintf(
 					`
-						INSERT INTO %s (%s, %s) VALUES ($1, $2)
-						ON CONFLICT IGNORE
+						INSERT INTO %s (%s) VALUES (%s)
+						ON CONFLICT DO NOTHING
 					`,
 					tableSpec.tableName,
-					tableSpec.keyColummName,
-					tableSpec.valueColummName,
+					strings.Join(columnNames, ", "),
+					strings.Join(pgPlaceholders, ", "),
 				),
-				key,
-				value,
+				pgValues...,
 			)
 		}
 	})
 }
 
 
+func expandValue[T any](value T, out []any) []any {
+	if v, ok := any(value).(ComplexValue); ok {
+		out = append(out, v.Values()...)
+	// value may be a struct, `&value` will convert it to an interface type
+	} else if v, ok := any(&value).(ComplexValue); ok {
+		out = append(out, v.Values()...)
+	} else {
+		out = append(out, value)
+	}
+	return out
+}
+
+
 type TempTableSpec struct {
 	tableName string
-	valueColummName string
-	valuePgType string
+	valueColumnNames []string
+	valuePgTypes []string
 }
 
 // spec is `table_name(value_column_name type)`
 func parseTempTableSpec(spec string) *TempTableSpec {
-	re := regexp.MustCompile("(\\w+)\\s*\\(\\s*(\\w+)\\s+(.+)\\s*\\)")
+	re := regexp.MustCompile("(\\w+)\\s*\\((.*)\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
 	}
+
+	valueColumnNames, valuePgTypes := parseSpec(groups[2])
+
 	return &TempTableSpec{
 		tableName: groups[1],
-		valueColummName: groups[2],
-		valuePgType: groups[3],
+		valueColumnNames: valueColumnNames,
+		valuePgTypes: valuePgTypes,
 	}
 }
 
 
 type TempJoinTableSpec struct {
 	tableName string
-	keyColummName string
-	valueColummName string
-	keyPgType string
-	valuePgType string
+	keyColumnNames []string
+	keyPgTypes []string
+	valueColumnNames []string
+	valuePgTypes []string
 }
 
-// spec is `table_name(key_column_name type, value_column_name type)`
+// spec is `table_name(key_column_name type[, ...] -> value_column_name type[, ...])`
 func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
-	re := regexp.MustCompile("(\\w+)\\s*\\(\\s*(\\w+)\\s+(.+)\\s*,\\s*(\\w+)\\s+(.+)\\s*\\)")
+	re := regexp.MustCompile("(\\w+)\\s*\\((.*)\\s*->\\s*(.*)\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
 	}
+
+	keyColumnNames, keyPgTypes := parseSpec(groups[2])
+	valueColumnNames, valuePgTypes := parseSpec(groups[3])
+
 	return &TempJoinTableSpec{
 		tableName: groups[1],
-		keyColummName: groups[2],
-		keyPgType: groups[3],
-		valueColummName: groups[4],
-		valuePgType: groups[5],
+		keyColumnNames: keyColumnNames,
+		keyPgTypes: keyPgTypes,
+		valueColumnNames: valueColumnNames,
+		valuePgTypes: valuePgTypes,
 	}
+}
+
+
+func parseSpec(spec string) (columnNames []string, pgTypes []string) {
+	re := regexp.MustCompile("\\s*(\\w+)\\s+([^,]+)\\s*,?")
+
+	for {
+		groups := re.FindStringSubmatch(spec)
+		if groups == nil {
+			break
+		}
+		columnNames = append(columnNames, groups[1])
+		pgTypes = append(pgTypes, groups[2])
+		spec = spec[len(groups[0]):]
+	}
+
+	return
 }

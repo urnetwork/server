@@ -1259,7 +1259,7 @@ func newLimiter(ctx context.Context, minTimeout time.Duration) *limiter {
 	return &limiter{
 		ctx: ctx,
 		minTimeout: minTimeout,
-		lastCheckTime: time.UnixMilli(0),
+		lastCheckTime: time.Time{},
 	}
 }
 

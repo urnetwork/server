@@ -83,6 +83,9 @@ func (self *Search) AroundIds(ctx context.Context, query string, distance int) m
 }
 
 func (self *Search) Around(ctx context.Context, query string, distance int) []*SearchResult {
+	// FIXME support value_variant
+	// FIXME tests
+
 	projection := computeProjection(query)
 
 	sqlParts := []string{}
@@ -94,6 +97,7 @@ func (self *Search) Around(ctx context.Context, query string, distance int) []*S
 		`
 			SELECT
 				search_sim_possible.value_id,
+				search_sim_possible.value_variant,
 				search_sim_possible.alias,
 				search_value_alias.value AS alias_value,
 				search_value.value
@@ -131,6 +135,7 @@ func (self *Search) Around(ctx context.Context, query string, distance int) []*S
 			`
 				SELECT
 					value_id,
+					value_variant,
 					alias,
 					LEAST(dlen, @` + id("dlen") + `) AS sim
 				FROM search_projection
@@ -168,10 +173,12 @@ func (self *Search) Around(ctx context.Context, query string, distance int) []*S
 	        ) search_sim_possible
 	        INNER JOIN search_value search_value_alias ON 
 	        	search_value_alias.value_id = search_sim_possible.value_id AND
+	        	search_value_alias.value_variant = search_sim_possible.value_variant AND
 	        	search_value_alias.alias = search_sim_possible.alias AND
 	        	ABS(LENGTH(search_value_alias.value) - search_sim_possible.sim) <= @distance
 	        INNER JOIN search_value ON 
 	        	search_value.value_id = search_value_alias.value_id AND
+	        	search_value.value_variant = search_value_alias.value_variant AND
 	        	search_value.alias = 0
         `,
     )
@@ -249,44 +256,42 @@ func (self *Search) Around(ctx context.Context, query string, distance int) []*S
 	return maps.Values(matches)
 }
 
-func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id) {
+func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id, valueVariant int) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	self.AddInTx(ctx, value, valueId, tx)
+    	self.AddInTx(ctx, value, valueId, valueVariant, tx)
     })
 }
 
-func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, tx bringyour.PgTx) {
+func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
 	var err error
 
 	_, err = tx.Exec(
 		ctx,
 		`
     		DELETE FROM search_projection
-    		USING search_value
     		WHERE
-    			search_projection.value_id = search_value.value_id AND
-    			search_value.realm = $1 AND
-    			search_value.value = $2 AND
-    			search_value.alias = 0
+    			realm = $1 AND
+    			value_id = $2 AND
+    			value_variant = $3
 		`,
 		self.realm,
-		value,
+		valueId,
+		valueVariant,
 	)
 	bringyour.Raise(err)
 
 	_, err = tx.Exec(
 		ctx,
 		`
-    		DELETE FROM search_value a
-    		USING search_value b
+    		DELETE FROM search_value
     		WHERE
-    			a.value_id = b.value_id AND
-    			b.realm = $1 AND
-    			b.value = $2 AND
-    			b.alias = 0
+    			realm = $1 AND
+				value_id = $2 AND
+				value_variant = $3
 		`,
 		self.realm,
-		value,
+		valueId,
+		valueVariant,
 	)
 	bringyour.Raise(err)
 
@@ -294,12 +299,13 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 		batch.Queue(
     		`
 	    		INSERT INTO search_value
-	    		(realm, value_id, value, alias)
+	    		(realm, value_id, value_variant, value, alias)
 	    		VALUES
-	    		($1, $2, $3, $4)
+	    		($1, $2, $3, $4, $5)
     		`,
     		self.realm,
     		valueId,
+    		valueVariant,
     		value,
     		alias,
     	)
@@ -310,9 +316,9 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	    	batch.Queue(
 	    		`
 		    		INSERT INTO search_projection
-		    		(realm, dim, elen, dord, dlen, vlen, value_id, alias)
+		    		(realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
 		    		VALUES
-		    		($1, $2, $3, $4, $5, $6, $7, $8)
+		    		($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	    		`,
 	    		self.realm,
 	    		dim,
@@ -321,6 +327,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	    		dlen,
 	    		projection.vlen,
 	    		valueId,
+	    		valueVariant,
 	    		alias,
 	    	)
 	    }

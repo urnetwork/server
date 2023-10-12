@@ -3,7 +3,6 @@ package router
 import (
 	"net/http"
 	"encoding/json"
-	"encoding/base64"
 	"reflect"
 	"strings"
 
@@ -29,10 +28,6 @@ import (
 // 		impl(ctx, w, req)
 // 	}
 // }
-
-
-// https://www.rfc-editor.org/rfc/rfc6750
-const authBearerPrefix = "Bearer "
 
 
 // wraps an implementation function using json in/out
@@ -65,20 +60,6 @@ func WrapWithJson[T any, R any](
 
 
     session := session.NewClientSessionFromRequest(req)
-
-    if auth := req.Header.Get("Authorization"); auth != "" {
-    	if strings.HasPrefix(auth, authBearerPrefix) {
-    		if data, err := base64.StdEncoding.DecodeString(auth[:len(authBearerPrefix)]); err == nil {
-    			byJwt, err := jwt.ParseByJwt(string(data))
-    			if err != nil {
-		    		http.Error(w, err.Error(), http.StatusInternalServerError)
-		        	return
-		    	}
-		    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-    			session.ByJwt = byJwt
-    		}
-    	}
-    }
 
     // (legacy) look for AuthArgs
     // TODO deprecate when all clients migrate to `Authorization: Bearer`

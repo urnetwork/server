@@ -14,7 +14,7 @@ import (
 	"bringyour.com/bringyour"
 )
 
-type AuditEventType string
+type AuditEventType = string
 const (
 	AuditEventTypeProviderOffline AuditEventType = "provider_offline"
 	AuditEventTypeProviderOnlineSuperspeed AuditEventType = "provider_online_superspeed"

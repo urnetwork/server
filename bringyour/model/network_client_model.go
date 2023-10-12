@@ -17,7 +17,7 @@ const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
 
-type ProvideMode string
+type ProvideMode = string
 const (
 	ProvideModeNetwork ProvideMode = "network"
 	ProvideModeFriendsAndFamily ProvideMode = "ff"
@@ -718,10 +718,10 @@ func NominateResident(
 				VALUES ($1, $2, $3, $4, $5, $6)
 				ON CONFLICT UPDATE
 				SET
-					instance_id = $1
-					resident_id = $2
-					resident_host = $3
-					resident_service = $4
+					instance_id = $1,
+					resident_id = $2,
+					resident_host = $3,
+					resident_service = $4,
 					resident_block = $5
 			`,
 			nomination.InstanceId,

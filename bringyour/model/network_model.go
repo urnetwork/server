@@ -172,7 +172,7 @@ func NetworkCreate(
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId)
+			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -265,7 +265,7 @@ func NetworkCreate(
 			if created {
 				auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-				networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId)
+				networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 

@@ -3,9 +3,6 @@ package bringyour
 import (
 	"fmt"
 	"context"
-
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
 )
 
 
@@ -54,7 +51,7 @@ func DbVersion(ctx context.Context) int {
 			    migration_time timestamp NOT NULL DEFAULT now(),
 			    start_version_number int NOT NULL,
 			    end_version_number int NULL,
-			    status VARCHAR(32) NOT NULL
+			    status varchar(32) NOT NULL
 			)
 			`,
 		)
@@ -87,6 +84,7 @@ func ApplyDbMigrations(ctx context.Context) {
 		})
 		switch v := migrations[i].(type) {
 			case *SqlMigration:
+				Logger().Printf("%s\n", v.sql)
 				Tx(ctx, func(tx PgTx) {
 					_, err := tx.Exec(ctx, v.sql)
 					Raise(err)
@@ -94,7 +92,7 @@ func ApplyDbMigrations(ctx context.Context) {
 			case *CodeMigration:
 				v.callback(ctx)
 			default:
-				panic(fmt.Sprintf("Unknown migration type %T", v))
+				panic(fmt.Errorf("Unknown migration type %T", v))
 		}
 		Tx(ctx, func(tx PgTx) {
 			tx.Exec(
@@ -107,6 +105,8 @@ func ApplyDbMigrations(ctx context.Context) {
 	}
 }
 
+
+// style: use varchar not ENUM
 
 var migrations = []any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
@@ -355,34 +355,39 @@ var migrations = []any{
 
 	newSqlMigration(`
 		CREATE TABLE search_value (
-			realm varchar(16) NOT NULL,
-			value_id uuid NOT NULL,
+			realm varchar(32) NOT NULL,
+			value_id uuid NOT NULL,	
+			value_variant int NOT NULL,
 			value varchar(1024) NOT NULL,
 			alias int NOT NULL DEFAULT 0,
 
-			PRIMARY KEY(value_id, alias)
+			PRIMARY KEY(realm, value_id, value_variant, alias)
 		)
 	`),
+	// newSqlMigration(`
+	// 	CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id, alias)
+	// `),
 	newSqlMigration(`
-		CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id, alias)
+		CREATE INDEX search_value_realm_value ON search_value (realm, value_id, value_variant, alias)
 	`),
 
 	newSqlMigration(`
 		CREATE TABLE search_projection (
-			realm varchar(16) NOT NULL,
+			realm varchar(32) NOT NULL,
 		    dim smallint NOT NULL,
 		    elen smallint NOT NULL,
 		    dord smallint NOT NULL,
 		    dlen smallint NOT NULL,
 		    vlen smallint NOT NULL,
 		    value_id uuid NOT NULL,
+		    value_variant int NOT NULL,
 		    alias int NOT NULL DEFAULT 0,
 
-		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, alias)
+		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX search_projection_value_id ON search_projection (value_id, alias)
+		CREATE INDEX search_projection_realm_value ON search_projection (realm, value_id, value_variant, alias)
 	`),
 
 	// RENAME `validate` to `verify`
@@ -423,22 +428,22 @@ var migrations = []any{
 		CREATE INDEX network_client_network_id_active ON network_client (network_id, active)
 	`),
 	newSqlMigration(`
-		CREATE INDEX network_client_network_id_created_time ON network_client (network_id, created_time)
+		CREATE INDEX network_client_network_id_create_time ON network_client (network_id, create_time)
 	`),
 
-	newSqlMigration(`
-		CREATE TYPE provide_mode AS ENUM (
-			'network',
-		    'ff',
-		    'public',
-		    'stream'
-		)
-	`),
+	// newSqlMigration(`
+	// 	CREATE TYPE provide_mode AS ENUM (
+	// 		'network',
+	// 	    'ff',
+	// 	    'public',
+	// 	    'stream'
+	// 	)
+	// `),
 
 	newSqlMigration(`
 		CREATE TABLE provide_config (
 			client_id uuid NOT NULL,
-			provide_mode provide_mode NULL,
+			provide_mode varchar(16) NULL,
 
 			PRIMARY KEY (client_id)
 		)
@@ -468,50 +473,50 @@ var migrations = []any{
 
 	newSqlMigration(`
 		CREATE TABLE ip_location_lookup (
-			ip_address VARCHAR(45) NOT NULL,
+			ip_address varchar(64) NOT NULL,
 			lookup_time timestamp NOT NULL DEFAULT now(),
-			result_json TEXT NOT NULL,
+			result_json text NOT NULL,
 			
 			PRIMARY KEY (ip_address, lookup_time)
 		)
 	`),
 
-	newSqlMigration(`
-		CREATE TYPE location_type AS ENUM (
-			'city',
-		    'region',
-		    'country'
-		)
-	`),
+	// newSqlMigration(`
+	// 	CREATE TYPE location_type AS ENUM (
+	// 		'city',
+	// 	    'region',
+	// 	    'country'
+	// 	)
+	// `),
 
 	newSqlMigration(`
 		CREATE TABLE location (
 			location_id uuid NOT NULL,
-			location_type location_type NOT NULL,
-			name VARCHAR(128) NOT NULL,
+			location_type varchar(16) NOT NULL,
+			location_name varchar(128) NOT NULL,
 			city_location_id uuid NULL,
 			region_location_id uuid NULL,
 			country_location_id uuid NULL,
-			country_code CHAR(2) NULL,
+			country_code char(2) NOT NULL,
 
 			PRIMARY KEY (location_id)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX location_type_country_code_name ON location (location_type, country_code, name, country_location_id, region_location_id, location_id)
+		CREATE INDEX location_type_country_code_name ON location (location_type, country_code, location_name, country_location_id, region_location_id, location_id)
 	`),
 
 	newSqlMigration(`
 		CREATE TABLE location_group (
 			location_group_id uuid NOT NULL,
-			name VARCHAR(128) NOT NULL,
-			recommended bool NOT NULL DEFAULT false,
+			location_group_name varchar(128) NOT NULL,
+			promoted bool NOT NULL DEFAULT false,
 
 			PRIMARY KEY (location_group_id)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX location_group_name ON location_group (name, location_group_id)
+		CREATE INDEX location_group_name ON location_group (location_group_name, location_group_id)
 	`),
 
 	newSqlMigration(`
@@ -578,62 +583,17 @@ var migrations = []any{
 		)
 	`),
 
-	// prepay can be used to pay for a fixed duration with crypto
-	newSqlMigration(`
-		CREATE TYPE payment_type AS ENUM (
-			'google',
-			'apple',
-			'stripe',
-			'prepay'
-		)
-	`),
-
-	// Product SKUs (tracked in the SKUs sheet)
-	// 3g: 300GiB per month
-	// 1t: 1TiB per month
-	// 6t: 6TiB per month
-	// meterg: paid at the per-GiB metered rate
-	newSqlMigration(`
-		CREATE TYPE product_sku AS ENUM (
-			'3g',
-			'1t',
-			'6t',
-			'meterg'
-		)
-	`),
-
-	newSqlMigration(`
-		CREATE TABLE subscription (
-			subscription_id uuid NOT NULL,
-			network_id uuid NOT NULL,
-			payment_type payment_type NOT NULL,
-			product_sku product_sku NOT NULL,
-			active bool NOT NULL DEFAULT true,
-			start_time timestamp NOT NULL DEFAULT now(),
-			end_time timestamp NOT NULL,
-
-			-- Google
-			google_purchase_token text NULL,
-			google_purchase_signature text NULL,
-
-			PRIMARY KEY (subscription_id)
-		)
-	`),
-	newSqlMigration(`
-		CREATE INDEX subscription_network_id_active_end_time ON subscription (network_id, active, end_time)
-	`),
-
 	// net_revenue_cents is how much was received for this balance (revenue - intermediary fees) 
 	newSqlMigration(`
 		CREATE TABLE transfer_balance (
 			balance_id uuid NOT NULL,
-			subscription_id uuid NOT NULL,
 			network_id uuid NOT NULL,
-			active bool DEFAULT true,
 			start_time timestamp NOT NULL DEFAULT now(),
 			end_time timestamp NOT NULL,
+			start_balance_bytes bigint NOT NULL,
 			balance_bytes bigint NOT NULL,
 			net_revenue_nano_cents bigint NOT NULL,
+			active bool GENERATED ALWAYS AS (0 < balance_bytes) STORED,
 
 			PRIMARY KEY (balance_id)
 		)
@@ -642,24 +602,54 @@ var migrations = []any{
 		CREATE INDEX transfer_balance_network_id_active_end_time ON transfer_balance (network_id, active, end_time)
 	`),
 
+	// newSqlMigration(`
+	// 	CREATE TYPE contract_outcome AS ENUM (
+	// 		'settled',
+	// 	    'dispute_resolved_to_source',
+	// 	    'dispute_resolved_to_destination' 
+	// 	)
+	// `),
+
 	newSqlMigration(`
 		CREATE TABLE transfer_contract (
 			contract_id uuid NOT NULL,
+			client_id uuid NOT NULL,
 			source_id uuid NOT NULL,
 			destination_id uuid NOT NULL,
 			open bool NOT NULL DEFAULT true,
 			transfer_bytes bigint NOT NULL,
 			create_time timestamp NOT NULL DEFAULT now(),
-			close_time timetamp NULL,
+			close_time timestamp NULL,
 
-			PRIMARY KEY (contract_id),
+			dispute bool NOT NULL DEFAULT false,
+			outcome varchar(32) NULL,
+
+			PRIMARY KEY (contract_id)
 		)
 	`),
 	newSqlMigration(`
-		CREATE INDEX transfer_contract_source_id ON transfer_contract (source_id, destination_id, contract_id)
+		CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)
 	`),
 	newSqlMigration(`
-		CREATE INDEX transfer_contract_destination_id ON transfer_contract (destination_id, source_id, contract_id)
+		CREATE INDEX transfer_contract_open_destination_id ON transfer_contract (open, destination_id, source_id, contract_id)
+	`),
+
+	// newSqlMigration(`
+	// 	CREATE TYPE contract_party AS ENUM (
+	// 		'source',
+	// 	    'destination'
+	// 	)
+	// `),
+
+	newSqlMigration(`
+		CREATE TABLE contract_close (
+			contract_id uuid NOT NULL,
+			close_time timestamp NOT NULL DEFAULT now(),
+			party varchar(16) NOT NULL,
+			used_transfer_bytes bigint NOT NULL,
+
+			PRIMARY KEY (contract_id, party)
+		)
 	`),
 	
 	// creating an escrow must deduct the balances in the same transaction
@@ -674,17 +664,11 @@ var migrations = []any{
 			escrow_date timestamp NOT NULL DEFAULT now(),
 			
 			settled bool NOT NULL DEFAULT false,
-			settle_date timestamp NULL,
+			settle_time timestamp NULL,
 			payout_bytes bigint NULL,
-
-			swept bool NOT NULL DEFAULT false,
-			sweep_date timestamp NULL,
 
 			PRIMARY KEY (contract_id, balance_id)
 		)
-	`),
-	newSqlMigration(`
-		CREATE INDEX transfer_escrow_settled_swept ON transfer_escrow (settled, swept, contract_id, balance_id)
 	`),
 
 	// note the unpaid balance is `provided_balance_bytes - paid_balance_bytes`
@@ -693,8 +677,10 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE account_balance (
 			network_id uuid NOT NULL,
-			provided_balance_bytes bigint NOT NULL DEFAULT 0,
-			paid_balance_bytes, bigint NOT NULL DEFAULT 0,
+			provided_bytes bigint NOT NULL DEFAULT 0,
+			provided_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
+			paid_bytes bigint NOT NULL DEFAULT 0,
+			paid_balance_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
 
 			PRIMARY KEY (network_id)
 		)
@@ -716,7 +702,8 @@ var migrations = []any{
 			balance_id uuid NOT NULL,
 			network_id uuid NOT NULL,
 			payout_bytes bigint NOT NULL,
-			net_revenue_nano_cents bigint NOT NULL,
+			payout_net_revenue_nano_cents bigint NOT NULL,
+			sweep_time timestamp NOT NULL DEFAULT now(),
 
 			payment_id uuid NULL,
 
@@ -728,21 +715,38 @@ var migrations = []any{
 	`),
 
 	// circle uses the circle sdk for usdc
-	newSqlMigration(`
-		CREATE TYPE wallet_type AS ENUM (
-			'circle'
-		)
-	`),
+	// newSqlMigration(`
+	// 	CREATE TYPE wallet_type AS ENUM (
+	// 		'circle_usdc_matic',
+	// 		'xch',
+	// 		'sol'
+	// 	)
+	// `),
 
 	newSqlMigration(`
 		CREATE TABLE account_wallet (
 			wallet_id uuid NOT NULL,
 			network_id uuid NOT NULL,
-			wallet_type wallet_type NOT NULL,
-			wallet_address TEXT NOT NULL,
+			wallet_type varchar(32) NOT NULL,
+			wallet_address text NOT NULL,
 			active bool NOT NULL DEFAULT true,
+			default_token_type varchar(16) NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
 
 			PRIMARY KEY (wallet_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX account_wallet_active_network_id ON account_wallet (active, network_id, wallet_id)
+	`),
+
+	// this is the preferred wallet for payout
+	newSqlMigration(`
+		CREATE TABLE payout_wallet (
+			network_id uuid NOT NULL,
+			wallet_id uuid NOT NULL,
+
+			PRIMARY KEY (network_id)
 		)
 	`),
 
@@ -751,17 +755,30 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE account_payment (
 			payment_id uuid NOT NULL,
+			payment_plan_id uuid NOT NULL,
 			wallet_id uuid NOT NULL,
-			nano_cents bigint NOT NULL,
-			token_type VARCHAR(16) NOT NULL,
+			payout_bytes bigint NOT NULL,
+			payout_nano_cents bigint NOT NULL,
+			min_sweep_time timestamp NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			payment_record text NULL,
+			token_type varchar(16) NOT NULL,
 			token_amount double precision NOT NULL,
-			payment_time timestamp NOT NULL DEFAULT now(),
-			payment_record TEXT NULL,
-			payment_receipt TEXT NULL,
-			complete bool NOT NULL DEFAULT false,
+			payment_time timestamp NULL,
+			
+			payment_receipt text NULL,
+			completed bool NOT NULL DEFAULT false,
+			complete_time timestamp NULL,
+
+			canceled bool NOT NULL DEFAULT false,
+			cancel_time timestamp NULL,
 
 			PRIMARY KEY (payment_id)
 		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX account_payment_payment_plan ON account_payment (payment_plan_id, payment_id)
 	`),
 
 	// column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
@@ -773,7 +790,7 @@ var migrations = []any{
 	// 	ALTER TABLE user_auth_attempt DROP COLUMN client_ipv4
 	// `),
 	newSqlMigration(`
-		ALTER TABLE user_auth_attempt ADD COLUMN client_ip VARCHAR(45) NULL
+		ALTER TABLE user_auth_attempt ADD COLUMN client_ip varchar(64) NULL
 	`),
 	newSqlMigration(`
 		ALTER TABLE user_auth_attempt ADD COLUMN client_port int NULL
@@ -782,5 +799,22 @@ var migrations = []any{
 		CREATE INDEX user_auth_attempt_client_address ON user_auth_attempt (client_ip, client_port, attempt_time)
 	`),
 
-	newCodeMigration(model.AddDefaultLocations),
+	newSqlMigration(`
+		CREATE TABLE transfer_balance_code (
+			balance_code_id uuid NOT NULL,
+			create_time timestamp NOT NULL,
+			start_time timestamp NOT NULL,
+			end_time timestamp NOT NULL,
+			balance_bytes bigint NOT NULL,
+			net_revenue_nano_cents bigint NOT NULL,
+			balance_code_secret varchar(128) NOT NULL,
+
+			redeem_time timestamp NULL,
+			redeem_balance_id uuid NULL,
+
+			PRIMARY KEY (balance_code_id),
+			UNIQUE (balance_code_secret)
+		)
+	`),
+
 }

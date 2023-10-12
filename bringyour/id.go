@@ -31,6 +31,15 @@ func ParseId(idStr string) (id Id, err error) {
 	return parseUUID(idStr) 
 }
 
+func (self *Id) Less(b Id) bool {
+	for i, a := range self {
+		if b[i] <= a {
+			return false
+		}
+	}
+	return true
+}
+
 func (self *Id) Bytes() []byte {
 	return self[0:16]
 }

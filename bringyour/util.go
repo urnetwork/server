@@ -1,5 +1,8 @@
 package bringyour
 
+import (
+	"time"
+)
 
 
 // func Ptr[T any](value T) *T {
@@ -36,6 +39,14 @@ package bringyour
 // }
 
 
+
+func MinTime(a time.Time, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	} else {
+		return b
+	}
+}
 
 
 

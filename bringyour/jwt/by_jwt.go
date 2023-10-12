@@ -47,8 +47,8 @@ func bySigningKey() *rsa.PrivateKey {
 
 type ByJwt struct {
 	NetworkId bringyour.Id
-	UserId bringyour.Id
 	NetworkName string
+	UserId *bringyour.Id
 	ClientId *bringyour.Id
 }
 
@@ -83,7 +83,7 @@ func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
 func NewByJwt(networkId bringyour.Id, userId bringyour.Id, networkName string) *ByJwt {
 	return &ByJwt{
 		NetworkId: networkId,
-		UserId: userId,
+		UserId: &userId,
 		NetworkName: networkName,
 	}
 }
@@ -136,7 +136,7 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 
 	jwt := &ByJwt{
 		NetworkId: networkId,
-		UserId: userId,
+		UserId: &userId,
 		NetworkName: networkName,
 	}
 	return jwt, nil

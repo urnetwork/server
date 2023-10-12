@@ -29,13 +29,19 @@ func DefaultTestEnv() *TestEnv {
 // in each test file, `func TestMain(m *testing.M) {(&bringyour.TestEnv{}).TestMain(m)}`
 // https://pkg.go.dev/testing
 func (self *TestEnv) TestMain(m *testing.M) {
-	teardown := self.setup(m)
+	teardown := self.setup()
 	defer teardown()
 	code := m.Run()
 	defer os.Exit(code)
 }
 
-func (self *TestEnv) setup(m *testing.M) func() {
+func (self *TestEnv) Run(callback func()) {
+	teardown := self.setup()
+	defer teardown()
+	callback()
+}
+
+func (self *TestEnv) setup() func() {
 	// tests are allowed only in the `local` env
 	env := RequireEnv()
 	if env != "local" {
@@ -112,9 +118,9 @@ db: %d`,
 		Raise(err)
 	})
 
-
-	// FIXME run the schema migrations
-
+	if self.ApplyDbMigrations {
+		ApplyDbMigrations(ctx)
+	}
 
 	return func() {
 		Redis(ctx, func(client RedisClient) {
@@ -134,7 +140,7 @@ db: %d`,
 				ctx,
 				fmt.Sprintf(
 					`
-						DROP DATABASE %s'
+						DROP DATABASE %s
 					`,
 					testPgDbName,
 				),
