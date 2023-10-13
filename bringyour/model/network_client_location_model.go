@@ -714,7 +714,6 @@ func CreateLocation(ctx context.Context, location *Location) {
 
     // region
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        bringyour.Logger().Printf("#### REGION 1\n")
         result, err := tx.Query(
             ctx,
             `

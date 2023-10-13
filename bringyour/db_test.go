@@ -268,8 +268,7 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 	for i := 0; i < n; i += 1 {
 		ids = append(ids, NewId())
 	}
-	testIds := map[Id]bool{}
-
+	
 	// now insert ids to trigger conflict
 	for i := 0; i < n; i += 1 {
 		j := -1
@@ -286,6 +285,69 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 		})
 	}
 
+	testIds := map[Id]bool{}
+	Tx(ctx, func(tx PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT a FROM test
+			`,
+		)
+		WithPgResult(result, err, func() {
+			for result.Next() {
+				var id Id
+				Raise(result.Scan(&id))
+				testIds[id] = true
+			}
+		})
+	})
+
+	assert.Equal(t, n, len(testIds))
+	for _, id := range ids {
+		_, ok := testIds[id]
+		assert.Equal(t, ok, true)
+	}
+})}
+
+
+func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
+    ctx := context.Background()
+
+    Db(ctx, func(conn PgConn) {
+		_, err := conn.Exec(
+			ctx,
+			`
+				CREATE TABLE test(a uuid NOT NULL, PRIMARY KEY (a))
+			`,
+		)
+		Raise(err)
+	}, OptReadWrite())
+
+
+	n := 10
+	ids := []Id{}
+	for i := 0; i < n; i += 1 {
+		ids = append(ids, NewId())
+	}
+	
+	// now insert ids to trigger conflict
+	for i := 0; i < n; i += 1 {
+		j := -1
+		Tx(ctx, func(tx PgTx) {
+			// increments on each retry until an ids[j] has not been inserted
+			// cause an error inside the transaction via `RaisePgResult`
+			j += 1
+			RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO test (a) VALUES ($1)
+				`,
+				ids[j],
+			))
+		})
+	}
+
+	testIds := map[Id]bool{}
 	Tx(ctx, func(tx PgTx) {
 		result, err := tx.Query(
 			ctx,

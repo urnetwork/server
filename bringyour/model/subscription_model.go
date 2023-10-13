@@ -99,8 +99,6 @@ func CreateBalanceCode(
         }
         secret := hex.EncodeToString(b)
 
-        bringyour.Logger().Printf("#### secret %s\n", secret)
-
         createTime := time.Now()
         // round down to 00:00 the day of create time
         startTime := time.Date(
@@ -227,8 +225,6 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
             time.Now(),
             balanceId,
         )
-
-        bringyour.Logger().Printf("#### Redeem 3\n")
 
         tx.Exec(
             session.Ctx,
@@ -471,8 +467,9 @@ type TransferEscrowBalance struct {
 
 func CreateTransferEscrow(
     ctx context.Context,
-    clientId bringyour.Id,
+    sourceNetworkId bringyour.Id,
     sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
     destinationId bringyour.Id,
     contractTransferBytes int,
 ) (transferEscrow *TransferEscrow, returnErr error) {
@@ -487,20 +484,15 @@ func CreateTransferEscrow(
                 SELECT
                     balance_id,
                     balance_bytes
-
                 FROM transfer_balance
-
-                INNER JOIN network_client ON
-                    network_client.client_id = $1
-
                 WHERE
-                    network_id = network_client.network_id AND
+                    network_id = $1 AND
                     active = true AND
-                    start_time <= $2 AND $2 < end_time AND
+                    start_time <= $2 AND $2 < end_time
 
-                ORDER BY end_time ASCENDING
+                ORDER BY end_time ASC
             `,
-            clientId,
+            sourceNetworkId,
             time.Now(),
         )
         // add up the balance_bytes until >= contractTransferBytes
@@ -532,7 +524,7 @@ func CreateTransferEscrow(
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "escrow(balance_id uuid, balance_bytes int)",
+            "escrow(balance_id uuid -> balance_bytes int)",
             escrow,
         )
 
@@ -541,10 +533,10 @@ func CreateTransferEscrow(
             `
                 UPDATE transfer_balance
                 SET
-                    balance_bytes = balance_bytes - escrow.balance_bytes
+                    balance_bytes = transfer_balance.balance_bytes - escrow.balance_bytes
                 FROM escrow
                 WHERE
-                    escrow.balance_id = transfer_balance.balance_id
+                    transfer_balance.balance_id = escrow.balance_id
             `,
         )
 
@@ -558,11 +550,32 @@ func CreateTransferEscrow(
                 )
                 SELECT
                     $1 AS contract_id,
-                    escrow.balance_id,
-                    escrow.balance_bytes
+                    balance_id,
+                    balance_bytes
                 FROM escrow
             `,
             contractId,
+        )
+
+        tx.Exec(
+            ctx,
+            `
+                INSERT INTO transfer_contract (
+                    contract_id,
+                    source_network_id,
+                    source_id,
+                    destination_network_id,
+                    destination_id,
+                    transfer_bytes
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+            `,
+            contractId,
+            sourceNetworkId,
+            sourceId,
+            destinationNetworkId,
+            destinationId,
+            contractTransferBytes,
         )
 
         balances := []*TransferEscrowBalance{}
@@ -679,18 +692,15 @@ func CloseContract(
                     party,
                     used_transfer_bytes
                 )
-                
                 SELECT
                     contract_id,
                     $2 AS party,
-                    MIN($3, transfer_contract.transfer_bytes) AS used_transfer_bytes
+                    LEAST($3, transfer_bytes) AS used_transfer_bytes
                 FROM transfer_contract
                 WHERE
                     contract_id = $1
-
-                ON CONFLICT UPDATE
+                ON CONFLICT (contract_id, party) DO UPDATE
                 SET
-                    party = $2,
                     used_transfer_bytes = $3
             `,
             contractId,
@@ -725,7 +735,7 @@ func CloseContract(
         })
 
         sourceUsedTransferBytes, sourceOk := closes[ContractPartySource]
-        destinationUsedTransferBytes, destinationOk := closes[ContractPartySource]
+        destinationUsedTransferBytes, destinationOk := closes[ContractPartyDestination]
 
         if sourceOk && destinationOk {
             diff := sourceUsedTransferBytes - destinationUsedTransferBytes
@@ -829,10 +839,10 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     transfer_balance.balance_id = transfer_escrow.balance_id
 
                 WHERE
-                    contract_id = $1 AND
-                    outcome IS NULL
+                    transfer_contract.contract_id = $1 AND
+                    transfer_contract.outcome IS NULL
 
-                ORDER BY transfer_balance.end_time ASCENDING
+                ORDER BY transfer_balance.end_time ASC
             `,
             contractId,
         )
@@ -885,12 +895,10 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             ctx,
             `
                 SELECT
-                    network_id
+                    destination_network_id
                 FROM transfer_contract
-                INNER JOIN network_client ON
-                    network_client.client_id = transfer_contract.destination_id
                 WHERE
-                    transfer_contract.contract_id = $1
+                    contract_id = $1
             `,
             contractId,
         )
@@ -909,90 +917,93 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "sweep(balance_id uuid, payout_bytes bigint)",
+            "sweep(balance_id uuid -> payout_bytes bigint)",
             sweep,
         )
 
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "sweep_net_revenue(balance_id uuid, payout_net_revenue_nano_cents bigint)",
+            "sweep_net_revenue(balance_id uuid -> payout_net_revenue_nano_cents bigint)",
             sweepNetRevenue,
         )
 
-        bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
-            batch.Queue(
-                `
-                    UPDATE transfer_contract
-                    SET
-                        outcome = settled
-                    WHERE
-                        contract_id = $1
-                `,
-            )
-
-            batch.Queue(
-                `
-                    UPDATE transfer_escrow
-                    SET
-                        settled = true,
-                        settle_time = $2,
-                        payout_bytes = sweep.payout_bytes
-                    FROM sweep
-                    WHERE
-                        contract_id = $1 AND
-                        balance_id = sweep.balance_id
-                `,
-                contractId,
-                time.Now(),
-            )
-
-            batch.Queue(
-                `
-                    INSERT INTO transfer_escrow_sweep (
-                        contract_id,
-                        balance_id,
-                        network_id,
-                        payout_bytes,
-                        payout_net_revenue_nano_cents
-                    )
-                    SELECT
-                        $1 AS contract_id,
-                        sweep.balance_id,
-                        $2 AS network_id,
-                        sweep.payout_bytes,
-                        sweep_net_revenue.payout_net_revenue_nano_cents
-                    FROM sweep
-
-                    INNER JOIN sweep_net_revenue ON
-                        sweep_net_revenue.balance_id = sweep.balance_id
-
-                    WHERE
-                        0 < sweep.payout_bytes
-                `,
-                contractId,
-                payoutNetworkId,
-            )
-
-            batch.Queue(
-                `
-                INSERT INTO account_balance (
-                    provided_bytes,
-                    provided_net_revenue_nano_cents
-                )
-                VALUES ($2, $3)
-                WHERE
-                    network_id = $1
-                ON CONFLICT UPDATE
+        bringyour.RaisePgResult(tx.Exec(
+        	ctx,
+            `
+                UPDATE transfer_contract
                 SET
-                    provided_bytes = provided_bytes + $2,
-                    provided_net_revenue_nano_cents = provided_net_revenue_nano_cents + $3
-                `,
-                payoutNetworkId,
-                netPayoutBytes,
-                netPayout,
+                    outcome = $2
+                WHERE
+                    contract_id = $1
+            `,
+            contractId,
+            ContractOutcomeSettled,
+        ))
+
+        bringyour.RaisePgResult(tx.Exec(
+        	ctx,
+            `
+                UPDATE transfer_escrow
+                SET
+                    settled = true,
+                    settle_time = $2,
+                    payout_bytes = sweep.payout_bytes
+                FROM sweep
+                WHERE
+                    transfer_escrow.contract_id = $1 AND
+                    transfer_escrow.balance_id = sweep.balance_id
+            `,
+            contractId,
+            time.Now(),
+        ))
+
+        bringyour.RaisePgResult(tx.Exec(
+        	ctx,
+            `
+                INSERT INTO transfer_escrow_sweep (
+                    contract_id,
+                    balance_id,
+                    network_id,
+                    payout_bytes,
+                    payout_net_revenue_nano_cents
+                )
+                SELECT
+                    $1 AS contract_id,
+                    sweep.balance_id,
+                    $2 AS network_id,
+                    sweep.payout_bytes,
+                    sweep_net_revenue.payout_net_revenue_nano_cents
+                FROM sweep
+
+                INNER JOIN sweep_net_revenue ON
+                    sweep_net_revenue.balance_id = sweep.balance_id
+
+                WHERE
+                    0 < sweep.payout_bytes
+            `,
+            contractId,
+            payoutNetworkId,
+        ))
+
+        bringyour.RaisePgResult(tx.Exec(
+        	ctx,
+            `
+            INSERT INTO account_balance (
+            	network_id,
+                provided_bytes,
+                provided_net_revenue_nano_cents
             )
-        })
+            VALUES ($1, $2, $3)
+            ON CONFLICT (network_id) DO UPDATE
+            SET
+                provided_bytes = account_balance.provided_bytes + $2,
+                provided_net_revenue_nano_cents = account_balance.provided_net_revenue_nano_cents + $3
+            `,
+            payoutNetworkId,
+            netPayoutBytes,
+            netPayout,
+        ))
     }, bringyour.TxSerializable)
 
     return
@@ -1251,7 +1262,7 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
                     wallet_id
                 )
                 VALUES ($1, $2)
-                ON CONFLICT UPDATE
+                ON CONFLICT DO UPDATE
                 SET
                     wallet_id = $2
             `,

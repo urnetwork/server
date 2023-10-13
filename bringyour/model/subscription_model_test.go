@@ -63,8 +63,11 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         Secret: balanceCode.Secret,
     }, sourceSession)
 
-    transferEscrow, err := CreateTransferEscrow(ctx, sourceId, sourceId, destinationId, 1024 * 1024)
-    assert.NotEqual(t, err, nil)
+    transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+    assert.Equal(t, err, nil)
+
+    contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
+    assert.Equal(t, contractIds, []bringyour.Id{transferEscrow.ContractId})
 
     usedTransferBytes := 1024
     CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
@@ -72,7 +75,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     paidBytes := usedTransferBytes
     paid := USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
 
-    contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
+    contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, len(contractIds), 0)
 
     // check that the payout is pending
@@ -105,7 +108,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
     for paid < MinWalletPayoutThreshold {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceId, sourceId, destinationId, 1024 * 1024)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
         assert.NotEqual(t, err, nil)
 
         usedTransferBytes = 1024
@@ -140,7 +143,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
     // repeat escrow until it fails due to no balance
     for {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceId, sourceId, destinationId, 1024 * 1024)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
         if netTransferBytes <= paidBytes {
             assert.NotEqual(t, err, nil)
             return

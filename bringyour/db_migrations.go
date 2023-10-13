@@ -84,7 +84,7 @@ func ApplyDbMigrations(ctx context.Context) {
 		})
 		switch v := migrations[i].(type) {
 			case *SqlMigration:
-				Logger().Printf("%s\n", v.sql)
+				// Logger().Printf("%s\n", v.sql)
 				Tx(ctx, func(tx PgTx) {
 					_, err := tx.Exec(ctx, v.sql)
 					Raise(err)
@@ -107,6 +107,7 @@ func ApplyDbMigrations(ctx context.Context) {
 
 
 // style: use varchar not ENUM
+// style: in queries with two+ tables, use fully qualified column names
 
 var migrations = []any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
@@ -613,8 +614,9 @@ var migrations = []any{
 	newSqlMigration(`
 		CREATE TABLE transfer_contract (
 			contract_id uuid NOT NULL,
-			client_id uuid NOT NULL,
+			source_network_id uuid NOT NULL,
 			source_id uuid NOT NULL,
+			destination_network_id uuid NOT NULL,
 			destination_id uuid NOT NULL,
 			open bool NOT NULL DEFAULT true,
 			transfer_bytes bigint NOT NULL,
