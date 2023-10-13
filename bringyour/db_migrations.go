@@ -618,7 +618,7 @@ var migrations = []any{
 			source_id uuid NOT NULL,
 			destination_network_id uuid NOT NULL,
 			destination_id uuid NOT NULL,
-			open bool NOT NULL DEFAULT true,
+			open bool GENERATED ALWAYS AS (dispute = false AND outcome IS NULL) STORED,
 			transfer_bytes bigint NOT NULL,
 			create_time timestamp NOT NULL DEFAULT now(),
 			close_time timestamp NULL,
@@ -682,7 +682,7 @@ var migrations = []any{
 			provided_bytes bigint NOT NULL DEFAULT 0,
 			provided_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
 			paid_bytes bigint NOT NULL DEFAULT 0,
-			paid_balance_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
+			paid_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
 
 			PRIMARY KEY (network_id)
 		)
@@ -765,8 +765,8 @@ var migrations = []any{
 			create_time timestamp NOT NULL DEFAULT now(),
 
 			payment_record text NULL,
-			token_type varchar(16) NOT NULL,
-			token_amount double precision NOT NULL,
+			token_type varchar(16) NULL,
+			token_amount double precision NULL,
 			payment_time timestamp NULL,
 			
 			payment_receipt text NULL,

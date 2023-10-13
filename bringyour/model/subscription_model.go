@@ -111,7 +111,7 @@ func CreateBalanceCode(
         // round up to 00:00 the next day of create time + duration
         endTime := startTime.Add(24 * time.Hour).Add(BalanceCodeDuration)
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO transfer_balance_code (
@@ -132,7 +132,7 @@ func CreateBalanceCode(
             balanceBytes,
             netRevenue,
             secret,
-        )
+        ))
 
         balanceCode = &BalanceCode{
             BalanceCodeId: balanceCodeId,
@@ -211,7 +211,7 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
 
         balanceId := bringyour.NewId()
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             session.Ctx,
             `
                 UPDATE transfer_balance_code
@@ -224,9 +224,9 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
             balanceCode.BalanceCodeId,
             time.Now(),
             balanceId,
-        )
+        ))
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             session.Ctx,
             `
                 INSERT INTO transfer_balance (
@@ -246,7 +246,7 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
             balanceCode.EndTime,
             balanceCode.BalanceBytes,
             balanceCode.NetRevenue,
-        )
+        ))
 
         redeemBalanceCodeResult.TransferBalance = &RedeemBalanceCodeTransferBalance{
             TransferBalanceId: balanceId,
@@ -394,7 +394,7 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         balanceId := bringyour.NewId()
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO transfer_balance (
@@ -415,7 +415,7 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
             transferBalance.StartBalanceBytes,
             transferBalance.BalanceBytes,
             transferBalance.NetRevenue,
-        )
+        ))
 
         transferBalance.BalanceId = balanceId
     })
@@ -510,14 +510,14 @@ func CreateTransferEscrow(
                 escrowBalanceBytes := min(contractTransferBytes - netEscrowBalanceBytes, balanceBytes)
                 escrow[balanceId] = escrowBalanceBytes
                 netEscrowBalanceBytes += escrowBalanceBytes
-                if netEscrowBalanceBytes <= contractTransferBytes {
+                if contractTransferBytes <= netEscrowBalanceBytes {
                     break
                 }
             }
         })
 
         if netEscrowBalanceBytes < contractTransferBytes {
-            returnErr = fmt.Errorf("Insufficient balance.")
+            returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceBytes)
             return
         }
 
@@ -528,7 +528,7 @@ func CreateTransferEscrow(
             escrow,
         )
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE transfer_balance
@@ -538,9 +538,9 @@ func CreateTransferEscrow(
                 WHERE
                     transfer_balance.balance_id = escrow.balance_id
             `,
-        )
+        ))
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO transfer_escrow (
@@ -555,9 +555,9 @@ func CreateTransferEscrow(
                 FROM escrow
             `,
             contractId,
-        )
+        ))
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO transfer_contract (
@@ -576,7 +576,7 @@ func CreateTransferEscrow(
             destinationNetworkId,
             destinationId,
             contractTransferBytes,
-        )
+        ))
 
         balances := []*TransferEscrowBalance{}
         for balanceId, escrowBalanceBytes := range escrow {
@@ -684,7 +684,7 @@ func CloseContract(
         }
 
         // make sure the reported amount does not exceed the contract value
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO contract_close (
@@ -706,7 +706,7 @@ func CloseContract(
             contractId,
             party,
             usedTransferBytes,
-        )
+        ))
 
         result, err = tx.Query(
             ctx,
@@ -752,7 +752,7 @@ func CloseContract(
     }
 
     if settle {
-        SettleEscrow(ctx, contractId, ContractOutcomeSettled)
+        returnErr = SettleEscrow(ctx, contractId, ContractOutcomeSettled)
     } else if dispute {
         SetContractDispute(ctx, contractId, true)
     }
@@ -819,6 +819,8 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             return
         }
 
+        bringyour.Logger().Printf("USED TRANSFER BYTES %d\n", usedTransferBytes)
+
 
         // order balances by end date, ascending
         // take from the earlier before the later
@@ -848,11 +850,13 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
         )
 
         // balance id -> payout bytes
-        sweep := map[bringyour.Id]int{}
+        sweepPayoutBytes := map[bringyour.Id]int{}
+        // balance id -> return bytes
+        sweepReturnBytes := map[bringyour.Id]int{}
         netPayoutBytes := 0
 
         // balance id -> payout net revenue
-        sweepNetRevenue := map[bringyour.Id]NanoCents{}
+        sweepPayout := map[bringyour.Id]NanoCents{}
         var netPayout NanoCents = 0
 
         bringyour.WithPgResult(result, err, func() {
@@ -869,17 +873,19 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 ))
 
                 payoutBytes := min(usedTransferBytes - netPayoutBytes, escrowBalanceBytes)
+                returnBytes := escrowBalanceBytes - payoutBytes
                 netPayoutBytes += payoutBytes
-                sweep[balanceId] = payoutBytes
+                sweepPayoutBytes[balanceId] = payoutBytes
+                sweepReturnBytes[balanceId] = returnBytes
                 payout := NanoCents(math.Round(
                     ProviderRevenueShare * float64(netRevenue) * float64(payoutBytes) / float64(startBalanceBytes),
                 ))
                 netPayout += payout
-                sweepNetRevenue[balanceId] = payout
+                sweepPayout[balanceId] = payout
             }
         })
 
-        if len(sweep) == 0 {
+        if len(sweepPayoutBytes) == 0 {
             returnErr = fmt.Errorf("Invalid contract.")
             return
         }
@@ -917,15 +923,22 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "sweep(balance_id uuid -> payout_bytes bigint)",
-            sweep,
+            "sweep_payout_bytes(balance_id uuid -> payout_bytes bigint)",
+            sweepPayoutBytes,
         )
 
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "sweep_net_revenue(balance_id uuid -> payout_net_revenue_nano_cents bigint)",
-            sweepNetRevenue,
+            "sweep_return_bytes(balance_id uuid -> return_bytes bigint)",
+            sweepReturnBytes,
+        )
+
+        bringyour.CreateTempJoinTableInTx(
+            ctx,
+            tx,
+            "sweep_payout(balance_id uuid -> payout_net_revenue_nano_cents bigint)",
+            sweepPayout,
         )
 
         bringyour.RaisePgResult(tx.Exec(
@@ -948,11 +961,11 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 SET
                     settled = true,
                     settle_time = $2,
-                    payout_bytes = sweep.payout_bytes
-                FROM sweep
+                    payout_bytes = sweep_payout_bytes.payout_bytes
+                FROM sweep_payout_bytes
                 WHERE
                     transfer_escrow.contract_id = $1 AND
-                    transfer_escrow.balance_id = sweep.balance_id
+                    transfer_escrow.balance_id = sweep_payout_bytes.balance_id
             `,
             contractId,
             time.Now(),
@@ -970,20 +983,32 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 )
                 SELECT
                     $1 AS contract_id,
-                    sweep.balance_id,
+                    sweep_payout_bytes.balance_id,
                     $2 AS network_id,
-                    sweep.payout_bytes,
-                    sweep_net_revenue.payout_net_revenue_nano_cents
-                FROM sweep
+                    sweep_payout_bytes.payout_bytes,
+                    sweep_payout.payout_net_revenue_nano_cents
+                FROM sweep_payout_bytes
 
-                INNER JOIN sweep_net_revenue ON
-                    sweep_net_revenue.balance_id = sweep.balance_id
+                INNER JOIN sweep_payout ON
+                    sweep_payout.balance_id = sweep_payout_bytes.balance_id
 
                 WHERE
-                    0 < sweep.payout_bytes
+                    0 < sweep_payout_bytes.payout_bytes
             `,
             contractId,
             payoutNetworkId,
+        ))
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                UPDATE transfer_balance
+                SET
+                    balance_bytes = transfer_balance.balance_bytes + sweep_return_bytes.return_bytes
+                FROM sweep_return_bytes
+                WHERE
+                    transfer_balance.balance_id = sweep_return_bytes.balance_id
+            `,
         ))
 
         bringyour.RaisePgResult(tx.Exec(
@@ -1012,7 +1037,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
 
 func SetContractDispute(ctx context.Context, contractId bringyour.Id, dispute bool) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE transfer_contract
@@ -1022,7 +1047,7 @@ func SetContractDispute(ctx context.Context, contractId bringyour.Id, dispute bo
                     contract_id = $1 AND
                     outcome IS NULL
             `,
-        )
+        ))
     })
 }
 
@@ -1180,7 +1205,7 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
         wallet.Active = true
         wallet.CreateTime = time.Now()
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO account_wallet (
@@ -1192,7 +1217,7 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
                     default_token_type,
                     create_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
             `,
             wallet.WalletId,
             wallet.NetworkId,
@@ -1201,7 +1226,7 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
             wallet.Active,
             wallet.DefaultTokenType,
             wallet.CreateTime,
-        )
+        ))
     })
 }
 
@@ -1254,7 +1279,7 @@ func FindActiveAccountWallets(
 
 func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO payout_wallet (
@@ -1262,13 +1287,13 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
                     wallet_id
                 )
                 VALUES ($1, $2)
-                ON CONFLICT DO UPDATE
+                ON CONFLICT (network_id) DO UPDATE
                 SET
                     wallet_id = $2
             `,
             networkId,
             walletId,
-        )
+        ))
     })
 }
 
@@ -1488,10 +1513,10 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             SELECT
                 transfer_escrow_sweep.contract_id,
                 transfer_escrow_sweep.balance_id,
-                transfer_escrow_sweep.payoutBytes,
+                transfer_escrow_sweep.payout_bytes,
                 transfer_escrow_sweep.payout_net_revenue_nano_cents,
                 transfer_escrow_sweep.sweep_time,
-                payout_wallet.wallet_id,
+                payout_wallet.wallet_id
 
             FROM transfer_escrow_sweep
 
@@ -1499,8 +1524,11 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                 account_payment.payment_id = transfer_escrow_sweep.payment_id
 
             INNER JOIN payout_wallet ON
-                payout_wallet.network_id = transfer_escrow_sweep.network_id AND
-                payout_wallet.active
+                payout_wallet.network_id = transfer_escrow_sweep.network_id
+
+            INNER JOIN account_wallet ON
+            	account_wallet.wallet_id = payout_wallet.wallet_id AND
+            	account_wallet.active = true
 
             WHERE
                 account_payment.payment_id IS NULL OR
@@ -1538,6 +1566,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                         WalletId: walletId,
                         CreateTime: time.Now(),
                     }
+                    walletPayments[walletId] = payment
                 }
                 payment.PayoutBytes += payoutBytes
                 payment.Payout += payoutNetRevenue
@@ -1563,14 +1592,16 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
         for walletId, payment := range walletPayments {
             // cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
             if payment.Payout < MinWalletPayoutThreshold && payoutExpirationTime.Before(payment.MinSweepTime) {
+                bringyour.Logger().Printf("Wallet does not meet threshold %d, %d\n", payment.Payout, MinWalletPayoutThreshold)
                 walletIdsToRemove = append(walletIdsToRemove, walletId)
             }
         }
         for _, walletId := range walletIdsToRemove {
+            bringyour.Logger().Printf("Removing wallet from this payment %s\n", walletId)
             delete(walletPayments, walletId)
         }
 
-        bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+        bringyour.Raise(bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
             for _, payment := range walletPayments {
                 batch.Queue(
                     `
@@ -1581,9 +1612,9 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                             payout_bytes,
                             payout_nano_cents,
                             min_sweep_time,
-                            create_time,
+                            create_time
                         )
-                        VALUES ($1, $2, $3, $4, $5)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
                     `,
                     payment.PaymentId,
                     payment.PaymentPlanId,
@@ -1594,7 +1625,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                     payment.CreateTime,
                 )
             }
-        })
+        }))
 
         bringyour.CreateTempJoinTableInTx(
             ctx,
@@ -1603,7 +1634,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             escrowPaymentIds,
         )
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE transfer_escrow_sweep
@@ -1614,7 +1645,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                     transfer_escrow_sweep.contract_id = payment_escrow_ids.contract_id AND
                     transfer_escrow_sweep.balance_id = payment_escrow_ids.balance_id
             `,
-        )
+        ))
 
         paymentPlan = &PaymentPlan{
             PaymentPlanId: paymentPlanId,
@@ -1638,7 +1669,7 @@ func SetPaymentRecord(
 ) (returnErr error) {
 
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        tag, err := tx.Exec(
+        tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE account_payment
@@ -1654,8 +1685,7 @@ func SetPaymentRecord(
             tokenType,
             tokenAmount,
             paymentRecord,
-        )
-        bringyour.Raise(err)
+        ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
             return 
@@ -1668,7 +1698,7 @@ func SetPaymentRecord(
 
 func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt string) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        tag, err := tx.Exec(
+        tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE account_payment
@@ -1683,14 +1713,13 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
             paymentId,
             paymentReceipt,
             time.Now(),
-        )
-        bringyour.Raise(err)
+        ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
             return
         }
 
-        tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE account_balance
@@ -1704,7 +1733,7 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
                     account_balance.network_id = account_wallet.network_id
             `,
             paymentId,
-        )
+        ))
     })
 
     return
@@ -1713,7 +1742,7 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
 
 func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        tag, err := tx.Exec(
+        tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 UPDATE account_payment
@@ -1726,8 +1755,7 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
             `,
             paymentId,
             time.Now(),
-        )
-        bringyour.Raise(err)
+        ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
             return 
@@ -1766,7 +1794,7 @@ func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult 
                 provided_bytes,
                 provided_net_revenue_nano_cents,
                 paid_bytes,
-                paid_balance_net_revenue_nano_cents
+                paid_net_revenue_nano_cents
             FROM account_balance
             WHERE
                 network_id = $1

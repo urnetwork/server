@@ -63,10 +63,13 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         Secret: balanceCode.Secret,
     }, sourceSession)
 
+    contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
+    assert.Equal(t, len(contractIds), 0)
+
     transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
     assert.Equal(t, err, nil)
 
-    contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
+    contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, contractIds, []bringyour.Id{transferEscrow.ContractId})
 
     usedTransferBytes := 1024
@@ -92,6 +95,14 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 
+    transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
+    netBalanceBytes := 0
+    for _, transferBalance := range transferBalances {
+        netBalanceBytes += transferBalance.BalanceBytes
+    }
+    assert.Equal(t, netBalanceBytes, netTransferBytes - paidBytes)
+
+
     wallet := &AccountWallet{
         NetworkId: destinationNetworkId,
         WalletType: WalletTypeCircleUsdcMatic,
@@ -107,17 +118,28 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 
 
+    usedTransferBytes = 1024 * 1024 * 1024
     for paid < MinWalletPayoutThreshold {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
-        assert.NotEqual(t, err, nil)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferBytes)
+        assert.Equal(t, err, nil)
 
-        usedTransferBytes = 1024
-        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
-        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
+        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
+        assert.Equal(t, err, nil)
+        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
+        assert.Equal(t, err, nil)
         paidBytes += usedTransferBytes
         paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
         bringyour.Logger().Printf("PAID %d %d\n", paidBytes, paid)
     }
+
+    contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
+    assert.Equal(t, len(contractIds), 0)
+
+    getAccountBalanceResult = GetAccountBalance(destinationSession)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, paidBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     paymentPlan = PlanPayments(ctx)
     assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
@@ -142,8 +164,14 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
     // repeat escrow until it fails due to no balance
+    usedTransferBytes = 1024 * 1024 * 1024
     for {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+        bringyour.Logger().Printf("USED TRANSFER BYTES %d\n", usedTransferBytes)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferBytes)
+        if err != nil && 1024 < usedTransferBytes {
+            usedTransferBytes = usedTransferBytes / 1024
+            continue
+        }
         if netTransferBytes <= paidBytes {
             assert.NotEqual(t, err, nil)
             return
@@ -151,7 +179,6 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
             assert.Equal(t, err, nil)
         }
 
-        usedTransferBytes = 1024
         CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
         CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
         paidBytes += usedTransferBytes
@@ -160,7 +187,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     }
     // at this point the balance should be fully used up
     
-    transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
+    transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
     assert.Equal(t, transferBalances, []*TransferBalance{})
 
     paymentPlan = PlanPayments(ctx)

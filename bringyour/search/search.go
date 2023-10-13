@@ -263,9 +263,7 @@ func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id,
 }
 
 func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
-	var err error
-
-	_, err = tx.Exec(
+	bringyour.RaisePgResult(tx.Exec(
 		ctx,
 		`
     		DELETE FROM search_projection
@@ -277,10 +275,9 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 		self.realm,
 		valueId,
 		valueVariant,
-	)
-	bringyour.Raise(err)
+	))
 
-	_, err = tx.Exec(
+	bringyour.RaisePgResult(tx.Exec(
 		ctx,
 		`
     		DELETE FROM search_value
@@ -292,8 +289,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 		self.realm,
 		valueId,
 		valueVariant,
-	)
-	bringyour.Raise(err)
+	))
 
 	insertOne := func(batch bringyour.PgBatch, value string, alias int) {
 		batch.Queue(
@@ -333,7 +329,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	    }
 	}
 
-	bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+	bringyour.Raise(bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 		switch self.searchType {
 		case SearchTypeFull:
 			insertOne(batch, value, 0)
@@ -357,7 +353,7 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 				}
 			}
 		}
-	})
+	}))
 }
 
 

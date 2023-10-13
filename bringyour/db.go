@@ -176,6 +176,7 @@ func OptReadWrite() DbReadWriteOptions {
 }
 
 
+/*
 type DbDebugOptions struct {
 	txCommitSeparately bool
 }
@@ -193,6 +194,7 @@ func OptDebugTx() DbDebugOptions {
 		txCommitSeparately: true,
 	}
 }
+*/
 
 
 func Db(ctx context.Context, callback func(PgConn), options ...any) error {
@@ -248,9 +250,13 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				if err := recover(); err != nil {
 					switch v := err.(type) {
 					case *pgconn.PgError:
-						pgErr = v
+						if v.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+							pgErr = v
+						} else {
+							panic(v)
+						}
 					default:
-						panic(err)
+						panic(v)
 					}
 				}
 			}()
@@ -278,7 +284,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				}
 				continue
 			}
-			return pgErr
+			panic(pgErr)
 		}
 
 		return nil
@@ -295,7 +301,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 		AccessMode: pgx.ReadWrite,
 		DeferrableMode: pgx.NotDeferrable,
 	}
-	debugOptions := OptNoDebug()
+	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
 		case DbRetryOptions:
@@ -308,23 +314,24 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 			txOptions.AccessMode = v
 		case pgx.TxDeferrableMode:
 			txOptions.DeferrableMode = v
-		case DbDebugOptions:
-			debugOptions = v
+		// case DbDebugOptions:
+		// 	debugOptions = v
 		}
 	}
 
 	retryEndTime := time.Now().Add(retryOptions.endRetryTimeout)
 	retryDebugTime := time.Now().Add(retryOptions.debugRetryTimeout)
 	for {
+		var pgErr *pgconn.PgError
 		var commitErr error
 		err := Db(ctx, func (conn PgConn) {
 			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
 				return
 			}
-			if debugOptions.txCommitSeparately {
-				tx = newDebugTx(tx, conn, txOptions)
-			}
+			// if debugOptions.txCommitSeparately {
+			// 	tx = newDebugTx(tx, conn, txOptions)
+			// }
 			defer func() {
 				if err := recover(); err != nil {
 					if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
@@ -338,15 +345,19 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 					if err := recover(); err != nil {
 						switch v := err.(type) {
 						case *pgconn.PgError:
-							commitErr = v
+							if v.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+								pgErr = v
+							} else {
+								panic(v)
+							}
 						default:
-							panic(err)
+							panic(v)
 						}
 					}
 				}()
 				callback(tx)
 			}()
-			if commitErr == nil {
+			if pgErr == nil {
 				// Logger().Printf("Db commit\n")
 				commitErr = tx.Commit(ctx)
 			} else {
@@ -358,7 +369,25 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 		if err != nil {
 			return err
 		}
-		if commitErr != nil {
+
+		if pgErr != nil {
+			if pgErr.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+				select {
+				case <- ctx.Done():
+					return errors.New("Done")
+				case <- time.After(retryOptions.retryTimeout):
+				}
+				if retryEndTime.Before(time.Now()) {
+					panic(pgErr)
+				}
+				Logger().Printf("Constraint error, retry (%v)\n", pgErr)
+				if retryDebugTime.Before(time.Now()) {
+					debug.PrintStack()
+				}
+				continue
+			}
+			panic(pgErr)
+		} else if commitErr != nil {
 			if retryOptions.rerunOnCommitError {
 				select {
 				case <- ctx.Done():
@@ -380,7 +409,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 	}
 }
 
-
+/*
 type debugTx struct {
 	conn PgConn
 	txOptions pgx.TxOptions
@@ -430,7 +459,7 @@ func (self *debugTx) Exec(ctx context.Context, sql string, arguments ...any) (co
 // 	self.commit(ctx)
 // 	return results
 // }
-
+*/
 
 func WithPgResult(r PgResult, err error, callback any) {
 	Raise(err)
@@ -453,13 +482,10 @@ func RaisePgResult[T any](result T, err error) T {
 }
 
 
-func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch), resultCallbacks ...func(PgBatchResults)) error {
+func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch)) error {
 	batch := &pgx.Batch{}
 	callback(batch)
 	results := tx.SendBatch(ctx, batch)
-	for _, resultCallback := range resultCallbacks {
-		resultCallback(results)
-	}
 	return results.Close()
 }
 
@@ -504,7 +530,7 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.valueColumnNames, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
 			var pgValues = []any{}
 			pgValues = expandValue(value, pgValues)
@@ -524,7 +550,7 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 				pgValues...,
 			)
 		}
-	})
+	}))
 }
 
 
@@ -555,7 +581,7 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 		tableSpec.tableName,
 		strings.Join(pgParts, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(value, pgValues)
@@ -574,7 +600,7 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 				pgValues...,
 			)
 		}
-	})
+	}))
 }
 
 
@@ -621,7 +647,7 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.keyColumnNames, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
 		for key, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(key, pgValues)
@@ -642,7 +668,7 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 				pgValues...,
 			)
 		}
-	})
+	}))
 }
 
 

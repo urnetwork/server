@@ -372,3 +372,7 @@ func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run
 })}
 
 
+// TODO test that a non-constraint error like a syntax error gets panic'd correctly
+
+
+
