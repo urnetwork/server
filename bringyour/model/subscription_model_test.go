@@ -58,7 +58,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-    balanceCode := CreateBalanceCode(ctx, netTransferBytes, netRevenue)
+    balanceCode := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "")
     RedeemBalanceCode(&RedeemBalanceCodeArgs{
         Secret: balanceCode.Secret,
     }, sourceSession)
@@ -66,7 +66,36 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, len(contractIds), 0)
 
-    transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+
+    // test that escrow prevents concurrent contracts
+
+    transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferBytes)
+    assert.Equal(t, err, nil)
+
+    transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
+    netBalanceBytes := 0
+    for _, transferBalance := range transferBalances {
+        netBalanceBytes += transferBalance.BalanceBytes
+    }
+    // nothing left
+    assert.Equal(t, netBalanceBytes, 0)
+
+    _, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferBytes)
+    assert.NotEqual(t, err, nil)
+
+    CloseContract(ctx, transferEscrow.ContractId, sourceId, 0)
+    CloseContract(ctx, transferEscrow.ContractId, destinationId, 0)
+
+    transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+    netBalanceBytes = 0
+    for _, transferBalance := range transferBalances {
+        netBalanceBytes += transferBalance.BalanceBytes
+    }
+    assert.Equal(t, netBalanceBytes, netTransferBytes)
+
+
+
+    transferEscrow, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
     assert.Equal(t, err, nil)
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
@@ -95,8 +124,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 
-    transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
-    netBalanceBytes := 0
+    transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+    netBalanceBytes = 0
     for _, transferBalance := range transferBalances {
         netBalanceBytes += transferBalance.BalanceBytes
     }
@@ -116,6 +145,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     // nothing to plan because the payout does not meet the min threshold
     paymentPlan := PlanPayments(ctx)
     assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+    assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 
     usedTransferBytes = 1024 * 1024 * 1024
@@ -129,7 +159,6 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         assert.Equal(t, err, nil)
         paidBytes += usedTransferBytes
         paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
-        bringyour.Logger().Printf("PAID %d %d\n", paidBytes, paid)
     }
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
@@ -166,10 +195,10 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     // repeat escrow until it fails due to no balance
     usedTransferBytes = 1024 * 1024 * 1024
     for {
-        bringyour.Logger().Printf("USED TRANSFER BYTES %d\n", usedTransferBytes)
         transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferBytes)
         if err != nil && 1024 < usedTransferBytes {
             usedTransferBytes = usedTransferBytes / 1024
+            bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferBytes)
             continue
         }
         if netTransferBytes <= paidBytes {
@@ -183,7 +212,6 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
         paidBytes += usedTransferBytes
         paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
-        bringyour.Logger().Printf("PAID %d %d\n", paidBytes, paid)
     }
     // at this point the balance should be fully used up
     

@@ -78,6 +78,8 @@ type BalanceCode struct {
     BalanceBytes int
     NetRevenue NanoCents
     Secret string
+    PurchaseRecord string
+    PurchaseEmail string
 }
 
 
@@ -86,6 +88,8 @@ func CreateBalanceCode(
     ctx context.Context,
     balanceBytes int,
     netRevenue NanoCents,
+    purchaseRecord string,
+    purchaseEmail string,
 ) *BalanceCode {
     var balanceCode *BalanceCode
 
@@ -121,9 +125,11 @@ func CreateBalanceCode(
                     end_time,
                     balance_bytes,
                     net_revenue_nano_cents,
-                    balance_code_secret
+                    balance_code_secret,
+                    purchase_record,
+                    purchase_email
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             `,
             balanceCodeId,
             createTime,
@@ -132,6 +138,8 @@ func CreateBalanceCode(
             balanceBytes,
             netRevenue,
             secret,
+            purchaseRecord,
+            purchaseEmail,
         ))
 
         balanceCode = &BalanceCode{
@@ -142,6 +150,8 @@ func CreateBalanceCode(
             BalanceBytes: balanceBytes,
             NetRevenue: netRevenue,
             Secret: secret,
+            PurchaseRecord: purchaseRecord,
+            PurchaseEmail: purchaseEmail,
         }
     })
 
@@ -337,9 +347,9 @@ type TransferBalance struct {
     StartTime time.Time
     EndTime time.Time
     StartBalanceBytes int
-    BalanceBytes int
     // how much money the platform made after subtracting fees
     NetRevenue NanoCents
+    BalanceBytes int
 }
 
 
@@ -357,8 +367,8 @@ func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*T
                     start_time,
                     end_time,
                     start_balance_bytes,
-                    balance_bytes,
-                    net_revenue_nano_cents
+                    net_revenue_nano_cents,
+                    balance_bytes
                 FROM transfer_balance
                 WHERE
                     network_id = $1 AND
@@ -378,8 +388,8 @@ func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*T
                     &transferBalance.StartTime,
                     &transferBalance.EndTime,
                     &transferBalance.StartBalanceBytes,
-                    &transferBalance.BalanceBytes,
                     &transferBalance.NetRevenue,
+                    &transferBalance.BalanceBytes,
                 ))
                 transferBalances = append(transferBalances, transferBalance)
             }
@@ -403,8 +413,8 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                     start_time,
                     end_time,
                     start_balance_bytes,
-                    balance_bytes,
-                    net_revenue_nano_cents
+                    net_revenue_nano_cents,
+                    balance_bytes
                 )
                 VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
             `,
@@ -413,8 +423,8 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
             transferBalance.StartTime,
             transferBalance.EndTime,
             transferBalance.StartBalanceBytes,
-            transferBalance.BalanceBytes,
             transferBalance.NetRevenue,
+            transferBalance.BalanceBytes,
         ))
 
         transferBalance.BalanceId = balanceId
@@ -524,7 +534,7 @@ func CreateTransferEscrow(
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "escrow(balance_id uuid -> balance_bytes int)",
+            "escrow(balance_id uuid -> balance_bytes bigint)",
             escrow,
         )
 
@@ -819,9 +829,6 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             return
         }
 
-        bringyour.Logger().Printf("USED TRANSFER BYTES %d\n", usedTransferBytes)
-
-
         // order balances by end date, ascending
         // take from the earlier before the later
         result, err := tx.Query(
@@ -849,15 +856,10 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             contractId,
         )
 
-        // balance id -> payout bytes
-        sweepPayoutBytes := map[bringyour.Id]int{}
-        // balance id -> return bytes
-        sweepReturnBytes := map[bringyour.Id]int{}
-        netPayoutBytes := 0
-
-        // balance id -> payout net revenue
-        sweepPayout := map[bringyour.Id]NanoCents{}
-        var netPayout NanoCents = 0
+        // balance id -> payout bytes, return bytes, payout
+        sweepPayouts := map[bringyour.Id]sweepPayout{}
+		var netPayoutBytes int = 0
+		var netPayout NanoCents = 0
 
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
@@ -875,17 +877,19 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 payoutBytes := min(usedTransferBytes - netPayoutBytes, escrowBalanceBytes)
                 returnBytes := escrowBalanceBytes - payoutBytes
                 netPayoutBytes += payoutBytes
-                sweepPayoutBytes[balanceId] = payoutBytes
-                sweepReturnBytes[balanceId] = returnBytes
                 payout := NanoCents(math.Round(
                     ProviderRevenueShare * float64(netRevenue) * float64(payoutBytes) / float64(startBalanceBytes),
                 ))
                 netPayout += payout
-                sweepPayout[balanceId] = payout
+                sweepPayouts[balanceId] = sweepPayout{
+                	payoutBytes: payoutBytes,
+                	returnBytes: returnBytes,
+                	payout: payout,
+                }
             }
         })
 
-        if len(sweepPayoutBytes) == 0 {
+        if len(sweepPayouts) == 0 {
             returnErr = fmt.Errorf("Invalid contract.")
             return
         }
@@ -923,22 +927,8 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
         bringyour.CreateTempJoinTableInTx(
             ctx,
             tx,
-            "sweep_payout_bytes(balance_id uuid -> payout_bytes bigint)",
-            sweepPayoutBytes,
-        )
-
-        bringyour.CreateTempJoinTableInTx(
-            ctx,
-            tx,
-            "sweep_return_bytes(balance_id uuid -> return_bytes bigint)",
-            sweepReturnBytes,
-        )
-
-        bringyour.CreateTempJoinTableInTx(
-            ctx,
-            tx,
-            "sweep_payout(balance_id uuid -> payout_net_revenue_nano_cents bigint)",
-            sweepPayout,
+            "sweep_payout(balance_id uuid -> payout_bytes bigint, return_bytes bigint, payout_net_revenue_nano_cents bigint)",
+            sweepPayouts,
         )
 
         bringyour.RaisePgResult(tx.Exec(
@@ -961,11 +951,11 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 SET
                     settled = true,
                     settle_time = $2,
-                    payout_bytes = sweep_payout_bytes.payout_bytes
-                FROM sweep_payout_bytes
+                    payout_bytes = sweep_payout.payout_bytes
+                FROM sweep_payout
                 WHERE
                     transfer_escrow.contract_id = $1 AND
-                    transfer_escrow.balance_id = sweep_payout_bytes.balance_id
+                    transfer_escrow.balance_id = sweep_payout.balance_id
             `,
             contractId,
             time.Now(),
@@ -983,17 +973,14 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 )
                 SELECT
                     $1 AS contract_id,
-                    sweep_payout_bytes.balance_id,
+                    sweep_payout.balance_id,
                     $2 AS network_id,
-                    sweep_payout_bytes.payout_bytes,
+                    sweep_payout.payout_bytes,
                     sweep_payout.payout_net_revenue_nano_cents
-                FROM sweep_payout_bytes
-
-                INNER JOIN sweep_payout ON
-                    sweep_payout.balance_id = sweep_payout_bytes.balance_id
+                FROM sweep_payout
 
                 WHERE
-                    0 < sweep_payout_bytes.payout_bytes
+                    0 < sweep_payout.payout_bytes
             `,
             contractId,
             payoutNetworkId,
@@ -1004,10 +991,10 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             `
                 UPDATE transfer_balance
                 SET
-                    balance_bytes = transfer_balance.balance_bytes + sweep_return_bytes.return_bytes
-                FROM sweep_return_bytes
+                    balance_bytes = transfer_balance.balance_bytes + sweep_payout.return_bytes
+                FROM sweep_payout
                 WHERE
-                    transfer_balance.balance_id = sweep_return_bytes.balance_id
+                    transfer_balance.balance_id = sweep_payout.balance_id
             `,
         ))
 
@@ -1032,6 +1019,17 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
     }, bringyour.TxSerializable)
 
     return
+}
+
+type sweepPayout struct {
+	payoutBytes int
+	returnBytes int
+	payout NanoCents
+}
+
+// `bringyour.ComplexValue`
+func (self *sweepPayout) Values() []any {
+	return []any{self.payoutBytes, self.returnBytes, self.payout}
 }
 
 
@@ -1498,6 +1496,8 @@ type PaymentPlan struct {
     PaymentPlanId bringyour.Id
     // wallet_id -> payment
     WalletPayments map[bringyour.Id]*AccountPayment
+    // these wallets have pending payouts but were not paid due to thresholds or other rules
+    WithheldWalletIds []bringyour.Id
 }
 
 
@@ -1592,12 +1592,10 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
         for walletId, payment := range walletPayments {
             // cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
             if payment.Payout < MinWalletPayoutThreshold && payoutExpirationTime.Before(payment.MinSweepTime) {
-                bringyour.Logger().Printf("Wallet does not meet threshold %d, %d\n", payment.Payout, MinWalletPayoutThreshold)
                 walletIdsToRemove = append(walletIdsToRemove, walletId)
             }
         }
         for _, walletId := range walletIdsToRemove {
-            bringyour.Logger().Printf("Removing wallet from this payment %s\n", walletId)
             delete(walletPayments, walletId)
         }
 
@@ -1650,6 +1648,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
         paymentPlan = &PaymentPlan{
             PaymentPlanId: paymentPlanId,
             WalletPayments: walletPayments,
+            WithheldWalletIds: walletIdsToRemove,
         }
     }, bringyour.TxSerializable)
 

@@ -362,14 +362,19 @@ var migrations = []any{
 			value varchar(1024) NOT NULL,
 			alias int NOT NULL DEFAULT 0,
 
+			vlen smallint GENERATED ALWAYS AS (LENGTH(value)) STORED,
+
 			PRIMARY KEY(realm, value_id, value_variant, alias)
 		)
 	`),
 	// newSqlMigration(`
 	// 	CREATE INDEX search_value_realm_value ON search_value (realm, value, value_id, alias)
 	// `),
+	// newSqlMigration(`
+	// 	CREATE INDEX search_value_realm_value ON search_value (realm, value_id, value_variant, alias)
+	// `),
 	newSqlMigration(`
-		CREATE INDEX search_value_realm_value ON search_value (realm, value_id, value_variant, alias)
+		CREATE INDEX search_value_realm_vlen ON search_value (realm, vlen)
 	`),
 
 	newSqlMigration(`
@@ -387,9 +392,9 @@ var migrations = []any{
 		    PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
 		)
 	`),
-	newSqlMigration(`
-		CREATE INDEX search_projection_realm_value ON search_projection (realm, value_id, value_variant, alias)
-	`),
+	// newSqlMigration(`
+	// 	CREATE INDEX search_projection_realm_value ON search_projection (realm, value_id, value_variant, alias)
+	// `),
 
 	// RENAME `validate` to `verify`
 	newSqlMigration(`
@@ -584,7 +589,7 @@ var migrations = []any{
 		)
 	`),
 
-	// net_revenue_cents is how much was received for this balance (revenue - intermediary fees) 
+	// net_revenue_nano_cents is how much was received for this balance (revenue - intermediary fees)
 	newSqlMigration(`
 		CREATE TABLE transfer_balance (
 			balance_id uuid NOT NULL,
@@ -592,8 +597,9 @@ var migrations = []any{
 			start_time timestamp NOT NULL DEFAULT now(),
 			end_time timestamp NOT NULL,
 			start_balance_bytes bigint NOT NULL,
-			balance_bytes bigint NOT NULL,
 			net_revenue_nano_cents bigint NOT NULL,
+
+			balance_bytes bigint NOT NULL,
 			active bool GENERATED ALWAYS AS (0 < balance_bytes) STORED,
 
 			PRIMARY KEY (balance_id)
@@ -811,12 +817,23 @@ var migrations = []any{
 			net_revenue_nano_cents bigint NOT NULL,
 			balance_code_secret varchar(128) NOT NULL,
 
+			purchase_record TEXT NOT NULL,
+			purchase_email VARCHAR(256) NOT NULL,
+
 			redeem_time timestamp NULL,
 			redeem_balance_id uuid NULL,
+
+			notify_count int NOT NULL DEFAULT 0,
+			next_notify_time timestamp NULL,
+
+			redeemed bool GENERATED ALWAYS AS (redeem_balance_id IS NOT NULL) STORED,
 
 			PRIMARY KEY (balance_code_id),
 			UNIQUE (balance_code_secret)
 		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX transfer_balance_code_redeemed_time ON transfer_balance_code (redeemed, end_time, next_notify_time)
 	`),
 
 }

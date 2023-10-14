@@ -32,12 +32,19 @@ func ParseId(idStr string) (id Id, err error) {
 }
 
 func (self *Id) Less(b Id) bool {
-	for i, a := range self {
-		if b[i] <= a {
-			return false
+	return self.Cmp(b) < 0
+}
+
+func (self *Id) Cmp(b Id) int {
+	for i, v := range self {
+		if v < b[i] {
+			return -1
+		}
+		if b[i] < v {
+			return 1
 		}
 	}
-	return true
+	return 0
 }
 
 func (self *Id) Bytes() []byte {
@@ -341,4 +348,5 @@ func codecScan(codec pgtype.Codec, m *pgtype.Map, oid uint32, format int16, src 
 	}
 	return scanPlan.Scan(src, dst)
 }
+
 

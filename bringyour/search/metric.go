@@ -30,10 +30,15 @@ func EditDistance(a string, b string) int {
         return table[(k, k)] + max(len(a) - k, len(b) - k)
     */
 
+    // FIXME only need to use O(MIN(n, m)) memory by using omly current and previous
+
+    n := len(a) + 1
+    m := len(b) + 1
+
 	index := func(alen int, blen int) int {
-		return alen + len(a) * blen
+		return alen + n * blen
 	}
-	table := make([]int, (len(a) + 1) * (len(b) + 1))
+	table := make([]int, n * m)
 	table[index(0, 0)] = 0
 	for alen := 1; alen <= len(a); alen += 1 {
 		table[index(alen, 0)] = alen
