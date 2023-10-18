@@ -1,7 +1,6 @@
 package handlers
 
 import (
-    "context"
     "net/http"
 
     "bringyour.com/bringyour/model"
@@ -10,11 +9,11 @@ import (
 
 
 func PreferencesSet(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(ctx, model.PreferencesSet, w, r)	
+    router.WrapWithInputRequireAuth(model.PreferencesSet, w, r)	
 }
 
 
 func FeedbackSend(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(ctx, model.FeedbackSend, w, r)   
+    router.WrapWithInputRequireAuth(model.FeedbackSend, w, r)   
 }
 

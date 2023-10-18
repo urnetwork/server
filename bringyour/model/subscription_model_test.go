@@ -58,7 +58,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-    balanceCode := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "")
+    balanceCode := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "", "")
     RedeemBalanceCode(&RedeemBalanceCodeArgs{
         Secret: balanceCode.Secret,
     }, sourceSession)

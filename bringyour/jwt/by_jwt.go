@@ -44,11 +44,16 @@ func bySigningKey() *rsa.PrivateKey {
 }
 
 
-
+// the bringyour authorization model is:
+// Network
+//   User
+//     Client
+// Trust verification happens at the user level.
+// A client is always tied to a user.
 type ByJwt struct {
 	NetworkId bringyour.Id
 	NetworkName string
-	UserId *bringyour.Id
+	UserId bringyour.Id
 	ClientId *bringyour.Id
 }
 
@@ -83,7 +88,7 @@ func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
 func NewByJwt(networkId bringyour.Id, userId bringyour.Id, networkName string) *ByJwt {
 	return &ByJwt{
 		NetworkId: networkId,
-		UserId: &userId,
+		UserId: userId,
 		NetworkName: networkName,
 	}
 }
@@ -136,8 +141,8 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 
 	jwt := &ByJwt{
 		NetworkId: networkId,
-		UserId: &userId,
 		NetworkName: networkName,
+		UserId: userId,
 	}
 	return jwt, nil
 	

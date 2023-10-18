@@ -15,7 +15,7 @@ import (
 )
 
 
-type AuthType string
+type AuthType = string
 
 const (
 	AuthTypePassword AuthType = "password"
@@ -23,12 +23,6 @@ const (
 	AuthTypeGoogle AuthType = "google"
 	AuthTypeBringYour AuthType = "bringyour"
 )
-
-
-// compose this type into all arguments that must have an auth
-type AuthArgs struct {
-	ByJwt string  `json:"byJwt"`
-}
 
 
 func UserAuthAttempt(
@@ -40,8 +34,6 @@ func UserAuthAttempt(
 	// select attempts by clientIp in past 1 hour
 	// if more than 10 failed in any, return false
 
-	bringyour.Logger().Printf("UserAuthAttempt 1")
-
 	attemptLookbackCount := 100
 	// 1 hour
 	attemptLookbackSeconds := 60 * 60
@@ -51,10 +43,7 @@ func UserAuthAttempt(
 
 	clientIp, clientPort := session.ClientIpPort()
 
-	bringyour.Logger().Printf("UserAuthAttempt 2")
-
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		bringyour.Logger().Printf("UserAuthAttempt 3")
 		tx.Exec(
 			session.Ctx,
 			`
@@ -68,7 +57,6 @@ func UserAuthAttempt(
 			clientPort,
 			false,
 		)
-		bringyour.Logger().Printf("UserAuthAttempt 4")
 	})
 
 	type UserAuthAttemptResult struct {
@@ -103,14 +91,10 @@ func UserAuthAttempt(
 		return failedCount <= attemptFailedCountThreshold
 	}
 
-	bringyour.Logger().Printf("UserAuthAttempt 5")
-
 	if userAuth != nil {
-		bringyour.Logger().Printf("UserAuthAttempt 6")
 		// lookback by user auth
 		var attempts []UserAuthAttemptResult
 		bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
-			bringyour.Logger().Printf("UserAuthAttempt 7")
 			result, err := conn.Query(
 				session.Ctx,
 				`
@@ -163,6 +147,7 @@ func UserAuthAttempt(
 	return userAuthAttemptId, true
 }
 
+
 func SetUserAuthAttemptSuccess(
 	ctx context.Context,
 	userAuthAttemptId bringyour.Id,
@@ -182,32 +167,33 @@ func SetUserAuthAttemptSuccess(
 	})
 }
 
+
 func maxUserAuthAttemptsError() error {
 	return errors.New("User auth attempts exceeded limits.")
 }
 
 
 type AuthLoginArgs struct {
-	UserAuth *string `json:"userAuth"`
-	AuthJwtType *string `json:"authJwtType"`
-	AuthJwt *string `json:"authJwt"`
+	UserAuth *string `json:"user_auth,omitempty"`
+	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+	AuthJwt *string `json:"auth_jwt,omitempty"`
 }
 
 type AuthLoginResult struct {
-	UserName *string `json:"userName,omitempty"`
-	UserAuth *string `json:"userAuth,omitempty"`
-	AuthAllowed *[]string `json:"authAllowed,omitempty"`
+	UserName *string `json:"user_name,omitempty"`
+	UserAuth *string `json:"user_auth,omitempty"`
+	AuthAllowed *[]string `json:"auth_allowed,omitempty"`
 	Error *AuthLoginResultError `json:"error,omitempty"`
 	Network *AuthLoginResultNetwork `json:"network,omitempty"`
 }
 
 type AuthLoginResultError struct {
-	SuggestedUserAuth *string `json:"suggestedUserAuth,omitempty"`
+	SuggestedUserAuth *string `json:"suggested_user_auth,omitempty"`
 	Message string `json:"message"`
 }
 
 type AuthLoginResultNetwork struct {
-	ByJwt string `json:"byJwt"`
+	ByJwt string `json:"by_jwt"`
 }
 
 func AuthLogin(
@@ -332,22 +318,22 @@ func AuthLogin(
 
 
 type AuthLoginWithPasswordArgs struct {
-	UserAuth string `json:"userAuth"`
+	UserAuth string `json:"user_auth"`
 	Password string `json:"password"`
 }
 
 type AuthLoginWithPasswordResult struct {
-	VerificationRequired *AuthLoginWithPasswordResultVerification `json:"verificationRequired,omitempty"`
+	VerificationRequired *AuthLoginWithPasswordResultVerification `json:"verification_required,omitempty"`
 	Network *AuthLoginWithPasswordResultNetwork `json:"network,omitempty"`
 	Error *AuthLoginWithPasswordResultError `json:"error,omitempty"`
 }
 
 type AuthLoginWithPasswordResultVerification struct {
-	UserAuth string `json:"userAuth"`
+	UserAuth string `json:"user_auth"`
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
-	ByJwt *string `json:"byJwt,omitempty"`
+	ByJwt *string `json:"by_jwt,omitempty"`
 	NetworkName *string `json:"name,omitempty"`
 }
 
@@ -462,8 +448,8 @@ func AuthLoginWithPassword(
 
 
 type AuthVerifyArgs struct {
-	UserAuth string `json:"userAuth"`
-	VerifyCode string `json:"verifyCode"`
+	UserAuth string `json:"user_auth"`
+	VerifyCode string `json:"verify_code"`
 }
 
 type AuthVerifyResult struct {
@@ -472,7 +458,7 @@ type AuthVerifyResult struct {
 }
 
 type AuthVerifyResultNetwork struct {
-	ByJwt string `json:"byJwt"`
+	ByJwt string `json:"by_jwt"`
 }
 
 type AuthVerifyResultError struct {
@@ -596,11 +582,11 @@ func AuthVerify(
 
 
 type AuthVerifyCreateCodeArgs struct {
-	UserAuth string `json:"userAuth"`
+	UserAuth string `json:"user_auth"`
 }
 
 type AuthVerifyCreateCodeResult struct {
-	VerifyCode *string `json:"verifyCode,omitempty"`
+	VerifyCode *string `json:"verify_code,omitempty"`
 	Error *AuthVerifyCreateCodeError `json:"error,omitempty"`
 }
 
@@ -693,7 +679,7 @@ type AuthPasswordResetCreateCodeArgs struct {
 }
 
 type AuthPasswordResetCreateCodeResult struct {
-	ResetCode *string `json:"resetCode,omitempty"`
+	ResetCode *string `json:"reset_code,omitempty"`
 	Error *AuthPasswordResetCreateCodeError `json:"error,omitempty"`
 }
 
@@ -782,7 +768,7 @@ func AuthPasswordResetCreateCode(
 
 
 type AuthPasswordSetArgs struct {
-	ResetCode string `json:"resetCode"`
+	ResetCode string `json:"reset_code"`
 	Password string `json:"password"`
 }
 

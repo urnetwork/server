@@ -31,48 +31,45 @@ const (
 
 
 type Stats struct {
-	// fixme
-	// time
-	// lookback
 	Lookback int `json:"lookback"`
-	CreatedTime int64 `json:"createdTime"`
+	CreatedTime int64 `json:"created_time"`
 
-	AllTransferData map[string]int `json:"allTransferData"`
-    AllTransferSummary int `json:"allTransferSummary"`
-    AllTransferSummaryRate int `json:"allTransferSummaryRate"`
+	AllTransferData map[string]int `json:"all_transfer_data"`
+    AllTransferSummary int `json:"all_transfer_summary"`
+    AllTransferSummaryRate int `json:"all_transfer_summary_rate"`
 
-    AllPacketsData map[string]int `json:"allPacketsData"`
-    AllPacketsSummary int `json:"allPacketsSummary"`
-    AllPacketsSummaryRate int `json:"allPacketsSummaryRate"`
+    AllPacketsData map[string]int `json:"all_packets_data"`
+    AllPacketsSummary int `json:"all_packets_summary"`
+    AllPacketsSummaryRate int `json:"all_packets_summary_rate"`
 
-    ProvidersData map[string]int `json:"providersData"`
-    ProvidersSuperspeedData map[string]int `json:"providersSuperspeedData"`
-    ProvidersSummary int `json:"providersSummary"`
-    ProvidersSummarySuperspeed int `json:"providersSummarySuperspeed"`
+    ProvidersData map[string]int `json:"providers_data"`
+    ProvidersSuperspeedData map[string]int `json:"providers_superspeed_data"`
+    ProvidersSummary int `json:"providers_summary"`
+    ProvidersSummarySuperspeed int `json:"providers_summary_superspeed"`
 
-    CountriesData map[string]int `json:"countriesData"`
-    CountriesSummary int `json:"countriesSummary"`
+    CountriesData map[string]int `json:"countries_data"`
+    CountriesSummary int `json:"countries_summary"`
 
-    RegionsData map[string]int `json:"regionsData"`
-    RegionsSummary int `json:"regionsSummary"`
+    RegionsData map[string]int `json:"regions_data"`
+    RegionsSummary int `json:"regions_summary"`
 
-    CitiesData map[string]int `json:"citiesData"`
-    CitiesSummary int `json:"citiesSummary"`
+    CitiesData map[string]int `json:"cities_data"`
+    CitiesSummary int `json:"cities_summary"`
 
-    ExtenderTransferData map[string]int `json:"extenderTransferData"`
-    ExtenderTransferSummary int `json:"extenderTransferSummary"`
-    ExtenderTransferSummaryRate int `json:"extenderTransferSummaryRate"`
+    ExtenderTransferData map[string]int `json:"extender_transfer_data"`
+    ExtenderTransferSummary int `json:"extender_transfer_summary"`
+    ExtenderTransferSummaryRate int `json:"extender_transfer_summary_rate"`
 
-    ExtendersData map[string]int `json:"extendersData"`
-    ExtendersSuperspeedData map[string]int `json:"extendersSuperspeedData"`
-    ExtendersSummary int `json:"extendersSummary"`
-    ExtendersSummarySuperspeed int `json:"extendersSummarySuperspeed"`
+    ExtendersData map[string]int `json:"extenders_data"`
+    ExtendersSuperspeedData map[string]int `json:"extenders_superspeed_data"`
+    ExtendersSummary int `json:"extenders_summary"`
+    ExtendersSummarySuperspeed int `json:"extenders_summary_superspeed"`
 
-    NetworksData map[string]int `json:"networksData"`
-    NetworksSummary int `json:"networksSummary"`
+    NetworksData map[string]int `json:"networks_data"`
+    NetworksSummary int `json:"networks_summary"`
 
-    DevicesData map[string]int `json:"devicesData"`
-    DevicesSummary int `json:"devicesSummary"`
+    DevicesData map[string]int `json:"devices_data"`
+    DevicesSummary int `json:"devices_summary"`
 
     // internal data that is not exported to json
 

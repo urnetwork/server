@@ -54,7 +54,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(allow) > 0 {
 		w.Header().Set("Allow", strings.Join(allow, ", "))
-		http.Error(w, "405 method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
 		return
 	}
 	http.NotFound(w, r)

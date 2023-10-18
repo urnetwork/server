@@ -976,7 +976,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 }
 
 // connect.ReceiveFunction
-func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+func (self *Resident) handleClientReceive(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 	// these are messages to the control id
 	// use `client.Send` to send messages back to the client
 
@@ -984,15 +984,65 @@ func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protoc
 	self.controlLimiter.delay()
 
 	for _, frame := range frames {
-		switch frame.MessageType {
-		case protocol.MessageType_TransferProvide:
+		message := connect.FromFrame(frame)
+		switch v := message.(type) {
+		case protocol.Provide:
+			var maxProvideMode ProvideMode			
+			for _, provideKey := range v.Keys {
+				maxProvideMode = max(maxProvideMode, provideKey.ProvideMode)
+				model.SetProvideSecretKey(self.ctx, self.clientId, provideKey.ProvideSecretKey)
+			}
+			model.SetProvideMode(self.ctx, self.clientId, maxProvideMode)
+
+		case protocol.CreateContract:
 			// FIXME
-		case protocol.MessageType_TransferCreateContract:
-			// FIXME always grant a contract from ControlId to any
+
+
+			contractId, err := self.contractManager.CreateContract(sourceId, v.DestinationId, v.TrasferByteCount)
+
+			result := CreateContractResult{}
+			if err != nil {
+				result.ContractError = err
+			} else {
+
+				// FIXME match the provide mode to the destination; can just use Public until FF is added
+
+				// FIXME sign the contract with a stored key for the provide mode level
+				storedContract := protocol.StoredContract{}
+
+				result.Contract = Contract{}
+			}
+
+			client.Send(result)
+
+		case protocol.CloseContract:
 			// FIXME
-		case protocol.MessageType_TransferCloseContract:
-			// FIXME
+
+			self.contractManager.CloseContract(v.ContractId, v.AckedByteCount)
+
+
+
 		}
+		// switch frame.MessageType {
+		// case protocol.MessageType_TransferProvide:
+		// 	// FIXME
+
+		// 	provide := connect.Provide{}
+
+
+		// case protocol.MessageType_TransferCreateContract:
+		// 	// FIXME always grant a contract from ControlId to any
+		// 	// FIXME
+		// 	contractmanager.CreateContract()
+
+		// 	client.Send()
+
+		// case protocol.MessageType_TransferCloseContract:
+		// 	// FIXME
+
+		// 	contractmanager.CloseContract
+
+		// }
 	}
 }
 
@@ -1073,7 +1123,7 @@ func newContractManager(ctx context.Context, clientId bringyour.Id) *contractMan
 	contractManager := &contractManager {
 		ctx: ctx,
 		clientId: clientId,
-		pairContractIds: model.GetOpenContractIdsForSourceOrDestination(clientId),
+		pairContractIds: model.GetOpenContractIdsForSourceOrDestination(ctx, clientId),
 	}
 
 	go contractManager.syncContracts()
@@ -1089,7 +1139,7 @@ func (self *contractManager) syncContracts() {
 		case <- time.After(ContractSyncTimeout):
 		}
 
-		pairContractIds_ := model.GetOpenContractIdsForSourceOrDestination(self.clientId)
+		pairContractIds_ := model.GetOpenContractIdsForSourceOrDestination(self.ctx, self.clientId)
 		self.stateLock.Lock()
 		self.pairContractIds = pairContractIds_
 		// if a contract was added between the sync and set, it will be looked up from the model on miss
@@ -1105,7 +1155,7 @@ func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinatio
 	self.stateLock.Unlock()
 
 	if !ok {
-		contractIds := model.GetOpenContractIds(sourceId, destinationId)
+		contractIds := model.GetOpenContractIds(self.ctx, sourceId, destinationId)
 		contracts := map[bringyour.Id]bool{}
 		for _, contractId := range contractIds {
 			contracts[contractId] = true
@@ -1123,9 +1173,30 @@ func (self *contractManager) CreateContract(
 	sourceId bringyour.Id,
 	destinationId bringyour.Id,
 	transferBytes int,
-) *model.TransferEscrow {
+) (*model.TransferEscrow, error) {
+	sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
+	if err != nil {
+		// the source is not a real client
+		return nil, err
+	}
+	destinationNetworkId, err := model.FindClientNetwork(self.ctx, destinationId)
+	if err != nil {
+		// the destination is not a real client
+		return nil, err
+	}
+	
 	contractTransferBytes := max(MinContractTransferBytes, transferBytes)
-	escrow := model.CreateTransferEscrow(sourceId, destinationId, contractTransferBytes)
+	escrow, err := model.CreateTransferEscrow(
+		self.ctx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	// update the cache
 	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
@@ -1138,8 +1209,11 @@ func (self *contractManager) CreateContract(
 	contracts[escrow.ContractId] = true
 	self.stateLock.Unlock()
 
-	return escrow
+	return escrow, nil
 }
+
+// FIXME CloseContract
+
 
 
 // each send on the forward updates the send time

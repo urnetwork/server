@@ -47,11 +47,11 @@ func AuthLoginWithPassword(
 
 
 type AuthVerifySendArgs struct {
-    UserAuth string `json:"userAuth"`
+    UserAuth string `json:"user_auth"`
 }
 
 type AuthVerifySendResult struct {
-    UserAuth string `json:"userAuth"`
+    UserAuth string `json:"user_auth"`
 }
 
 func AuthVerifySend(
@@ -141,11 +141,11 @@ func TestAuthVerifyCode(userAuth string) {
 
 
 type AuthPasswordResetArgs struct {
-    UserAuth string `json:"userAuth"`
+    UserAuth string `json:"user_auth"`
 }
 
 type AuthPasswordResetResult struct {
-    UserAuth string `json:"userAuth"`
+    UserAuth string `json:"user_auth"`
 }
 
 func AuthPasswordReset(

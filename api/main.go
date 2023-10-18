@@ -32,7 +32,9 @@ Options:
         panic(err)
     }
 
-    ctx, cancel := context.WithCancel(context.Background())
+    // FIXME signal cancel
+    cancelCtx, cancel := context.WithCancel(context.Background())
+    defer cancel()
 
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
@@ -50,6 +52,9 @@ Options:
         router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
         router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
         router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
+        router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
+        router.NewRoute("POST", "/pay/coinbase", handlers.CoinbaseWebhook),
+        router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)
@@ -63,7 +68,7 @@ Options:
         port,
     )
 
-    routerHandler := router.NewRouter(ctx, routes)
+    routerHandler := router.NewRouter(cancelCtx, routes)
     err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
     bringyour.Logger().Fatal(err)

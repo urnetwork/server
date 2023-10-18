@@ -10,8 +10,7 @@ import (
 
 
 type PreferencesSetArgs struct {
-	AuthArgs
-	ProductUpdates bool `json:"productUpdates"`
+	ProductUpdates bool `json:"product_updates"`
 }
 
 type PreferencesSetResult struct {
@@ -41,7 +40,6 @@ func PreferencesSet(
 
 
 type FeedbackSendArgs struct {
-	AuthArgs
 	Uses FeedbackSendUses `json:"uses"`
 	Needs FeedbackSendNeeds `json:"needs"`
 }
@@ -54,15 +52,15 @@ type FeedbackSendNeeds struct {
 	Safe bool `json:"safe"`
 	Global bool `json:"global"`
 	Collaborate bool `json:"collaborate"`
-	AppControl bool `json:"appControl"`
-	BlockDataBrokers bool `json:"blockDataBrokers"`
-	BlockAds bool `json:"blockAds"`
+	AppControl bool `json:"app_control"`
+	BlockDataBrokers bool `json:"block_data_brokers"`
+	BlockAds bool `json:"block_ads"`
 	Focus bool `json:"focus"`
-	ConnectServers bool `json:"connectServers"`
-	RunServers bool `json:"runServers"`
-	PreventCyber bool `json:"preventCyber"`
+	ConnectServers bool `json:"connect_servers"`
+	RunServers bool `json:"run_servers"`
+	PreventCyber bool `json:"prevent_cyber"`
 	Audit bool `json:"audit"`
-	ZeroTrust bool `json:"zeroTrust"`
+	ZeroTrust bool `json:"zero_trust"`
 	Visualize bool `json:"visualize"`
 	Other *string `json:"other"`
 }

@@ -4,14 +4,11 @@ import (
     "context"
     "time"
     "strings"
-    "regexp"
     "errors"
     "fmt"
     "math"
 
     "golang.org/x/exp/maps"
-
-    "github.com/mozillazg/go-unidecode"
 
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/search"
@@ -19,21 +16,11 @@ import (
 )
 
 
+const DefaultMaxDistanceFraction = float32(0.6)
+
+
 var locationSearch = search.NewSearch("location", search.SearchTypeSubstring)
 var locationGroupSearch = search.NewSearch("location_group", search.SearchTypeSubstring)
-
-
-// all location values and queries in the search index should use this
-func NormalizeForSearch(value string) string {
-    norm := strings.TrimSpace(value)
-    // convert unicode chars to their latin1 equivalents
-    norm = unidecode.Unidecode(value)
-    norm = strings.ToLower(norm)
-    // replace whitespace with a single space
-    re := regexp.MustCompile("\\s+")
-    norm = re.ReplaceAllString(norm, " ")
-    return norm
-}
 
 
 // called from db_migrations to add default locations and groups
@@ -534,9 +521,6 @@ func (self *Location) GuessLocationType() LocationType {
 }
 
 func (self *Location) String() string {
-    // <city> (<region>, <country>)
-    // <region> (<country>)
-    // <country> (<code>)
     switch self.LocationType {
     case LocationTypeCity:
         return fmt.Sprintf("%s (%s, %s)", self.City, self.Region, self.Country)
@@ -547,16 +531,7 @@ func (self *Location) String() string {
     }
 }
 
-
-// FIXME
 func (self *Location) SearchStrings() []string {
-    // <city>, <country>
-    // <city>, <code>
-    // <city>, <region>
-    // <region>, <country>
-    // <region>, <code>
-    // <country> (<code>)
-    // <code>
     switch self.LocationType {
     case LocationTypeCity:
         return []string{
@@ -703,7 +678,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
         // add to the search
         for i, searchStr := range countryLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, NormalizeForSearch(searchStr), locationId, i, tx)
+            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
     }, bringyour.TxSerializable)
 
@@ -787,7 +762,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
         // add to the search
         for i, searchStr := range regionLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, NormalizeForSearch(searchStr), locationId, i, tx)
+            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
     }, bringyour.TxSerializable)
 
@@ -879,7 +854,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
         // add to the search
         for i, searchStr := range cityLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, NormalizeForSearch(searchStr), locationId, i, tx)
+            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
     }, bringyour.TxSerializable)
 
@@ -1035,38 +1010,34 @@ type LocationGroupResult struct {
 
 
 type LocationResult struct {
-    LocationId bringyour.Id
-    LocationType LocationType
-    Name string
-    CityLocationId *bringyour.Id
-    RegionLocationId *bringyour.Id
-    CountryLocationId *bringyour.Id
-    CountryCode string
-    ProviderCount int
-    MatchDistance int
+    LocationId bringyour.Id `json:"location_id"`
+    LocationType LocationType `json:"location_type"`
+    Name string `json:"name"`
+    CityLocationId *bringyour.Id `json:"city_location_id,omitempty"`
+    RegionLocationId *bringyour.Id `json:"region_location_id,omitempty"`
+    CountryLocationId *bringyour.Id `json:"country_location_id,omitempty"`
+    CountryCode string `json:"country_code"`
+    ProviderCount int `json:"provider_count,omitempty"`
+    MatchDistance int `json:"match_distance,omitempty"`
 }
 
 
-const DefaultMaxDistanceFraction = float32(0.6)
-
-
 type FindLocationsArgs struct {
-    Query string
+    Query string `json:"query"`
     // the max search distance is `MaxDistanceFraction * len(Query)`
     // in other words `len(Query) * (1 - MaxDistanceFraction)` length the query must match
-    MaxDistanceFraction *float32
+    MaxDistanceFraction *float32 `json:"max_distance_fraction,omitempty"`
 }
 
 type FindLocationsResult struct {
     // this includes groups that show up in the location results
     // all `ProviderCount` are from inside the location results
     // groups are suggestions that can be used to broaden the search
-    Groups map[bringyour.Id]*LocationGroupResult
+    Groups map[bringyour.Id]*LocationGroupResult `json:"groups"`
     // this includes all parent locations that show up in the location results
     // every `CityId`, `RegionId`, `CountryId` will have an entry
-    Locations map[bringyour.Id]*LocationResult
+    Locations map[bringyour.Id]*LocationResult `json:"locations"`
 }
-
 
 // search for locations that match query
 // match clients for those locations with provide enabled available to `clientId`
@@ -1091,12 +1062,12 @@ func FindActiveProviderLocations(
     ))
     locationSearchResults := locationSearch.AroundIds(
         session.Ctx,
-        NormalizeForSearch(findLocations.Query),
+        search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
     locationGroupSearchResults := locationGroupSearch.AroundIds(
         session.Ctx,
-        NormalizeForSearch(findLocations.Query),
+        search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
 
@@ -1181,9 +1152,9 @@ func FindActiveProviderLocations(
 
                 FROM network_client_location
 
-                INNER JOIN provide_config ON
-                    provide_config.client_id = network_client_location.client_id AND
-                    provide_config.provide_mode = $1
+                INNER JOIN client_provide ON
+                    client_provide.client_id = network_client_location.client_id AND
+                    client_provide.provide_mode = $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id
@@ -1344,9 +1315,9 @@ func GetActiveProviderLocations(
 
                 FROM network_client_location
 
-                INNER JOIN provide_config ON
-                    provide_config.client_id = network_client_location.client_id AND
-                    provide_config.provide_mode = $1
+                INNER JOIN client_provide ON
+                    client_provide.client_id = network_client_location.client_id AND
+                    client_provide.provide_mode = $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id
@@ -1486,12 +1457,12 @@ func FindLocations(
     ))
     locationSearchResults := locationSearch.AroundIds(
         ctx,
-        NormalizeForSearch(findLocations.Query),
+        search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
     locationGroupSearchResults := locationGroupSearch.AroundIds(
         ctx,
-        NormalizeForSearch(findLocations.Query),
+        search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
 
@@ -1653,9 +1624,9 @@ func GetActiveProvidersForLocation(ctx context.Context, locationId bringyour.Id)
                 DISTINCT network_client_location.client_id
             FROM network_client_location
 
-            INNER JOIN provide_config ON
-                provide_config.client_id = network_client_location.client_id AND
-                provide_config.provide_mode = $1
+            INNER JOIN client_provide ON
+                client_provide.client_id = network_client_location.client_id AND
+                client_provide.provide_mode = $1
 
             INNER JOIN network_client_connection ON
                 network_client_connection.connection_id = network_client_location.connection_id
@@ -1697,9 +1668,9 @@ func GetActiveProvidersForLocationGroup(
                     DISTINCT network_client_location.client_id
                 FROM network_client_location
 
-                INNER JOIN provide_config ON
-                    provide_config.client_id = network_client_location.client_id AND
-                    provide_config.provide_mode = $1
+                INNER JOIN client_provide ON
+                    client_provide.client_id = network_client_location.client_id AND
+                    client_provide.provide_mode = $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id

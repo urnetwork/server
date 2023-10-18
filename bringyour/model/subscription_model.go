@@ -83,22 +83,74 @@ type BalanceCode struct {
 }
 
 
+func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bringyour.Id) (balanceCodeId bringyour.Id, returnErr error) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+            SELECT balance_code_id FROM transfer_balance_code
+            WHERE purchase_event_id = $1
+            `,
+            balanceCodeId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&balanceCodeId))
+            } else {
+            	returnErr = fmt.Errorf("Purchase event not found.")
+            }
+        })
+    })
+
+    return
+}
+
+
+// this user id is what is used for the api:
+// - create a user token
+// - list wallets
+// - create a wallet challenge
+func GetOrCreateCircleUserId(ctx context.Context, networkId bringyour.Id) bringyour.Id {
+	// FIXME
+}
+
+
 // typically called from a payment webhook
 func CreateBalanceCode(
     ctx context.Context,
     balanceBytes int,
     netRevenue NanoCents,
+    purchaseEventId string,
     purchaseRecord string,
     purchaseEmail string,
-) *BalanceCode {
-    var balanceCode *BalanceCode
-
+) (balanceCode *BalanceCode, returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        purchaseEventIdExists := false
+
+        result, err := tx.Query(
+            ctx,
+            `
+            SELECT balance_code_id FROM transfer_balance_code
+            WHERE purchase_event_id = $1
+            `,
+            purchaseEventId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                purchaseEventIdExists = true
+            }
+        })
+
+        if purchaseEventIdExists {
+            // the `purchaseEventId` was already converted into a balance code
+            returnErr = fmt.Errorf("Purchase event already exists.")
+            return
+        }
+
         balanceCodeId := bringyour.NewId()
 
         b := make([]byte, 48)
-        _, err := rand.Read(b)
-        if err != nil {
+        if _, err := rand.Read(b); err != nil {
             panic(err)
         }
         secret := hex.EncodeToString(b)
@@ -126,10 +178,11 @@ func CreateBalanceCode(
                     balance_bytes,
                     net_revenue_nano_cents,
                     balance_code_secret,
+                    purchase_event_id,
                     purchase_record,
                     purchase_email
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             `,
             balanceCodeId,
             createTime,
@@ -138,6 +191,7 @@ func CreateBalanceCode(
             balanceBytes,
             netRevenue,
             secret,
+            purchaseEventId,
             purchaseRecord,
             purchaseEmail,
         ))
@@ -155,28 +209,28 @@ func CreateBalanceCode(
         }
     })
 
-    return balanceCode
+    return
 }
 
 
 type RedeemBalanceCodeArgs struct {
-    Secret string
+    Secret string `json:"secret"`
 }
 
 type RedeemBalanceCodeResult struct {
-    TransferBalance *RedeemBalanceCodeTransferBalance
-    Error *RedeemBalanceCodeError
+    TransferBalance *RedeemBalanceCodeTransferBalance `json:"transfer_balance,omitempty"`
+    Error *RedeemBalanceCodeError `json:"error,omitempty"`
 }
 
 type RedeemBalanceCodeTransferBalance struct {
-    TransferBalanceId bringyour.Id
-    StartTime time.Time
-    EndTime time.Time
-    BalanceBytes int
+    TransferBalanceId bringyour.Id `json:"transfer_balance_id"`
+    StartTime time.Time `json:"start_time"`
+    EndTime time.Time `json:"end_time"`
+    BalanceBytes int `json:"balance_bytes"`
 }
 
 type RedeemBalanceCodeError struct {
-    Message string
+    Message string `json:"message"`
 }
 
 func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *session.ClientSession) *RedeemBalanceCodeResult {
@@ -271,22 +325,22 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
 
 
 type CheckBalanceCodeArgs struct {
-    Secret string
+    Secret string `json:"secret"`
 }
 
 type CheckBalanceCodeResult struct {
-    Balance *CheckBalanceCodeBalance
-    Error *CheckBalanceCodeError
+    Balance *CheckBalanceCodeBalance `json:"balance,omitempty"`
+    Error *CheckBalanceCodeError `json:"error,omitempty"`
 }
 
 type CheckBalanceCodeBalance struct {
-    StartTime time.Time
-    EndTime time.Time
-    BalanceBytes int
+    StartTime time.Time `json:"start_time"`
+    EndTime time.Time `json:"end_time"`
+    BalanceBytes int `json:"balance_bytes"`
 }
 
 type CheckBalanceCodeError struct {
-    Message string
+    Message string `json:"message"`
 }
 
 func CheckBalanceCode(checkBalanceCode *CheckBalanceCodeArgs, session *session.ClientSession) *CheckBalanceCodeResult {
@@ -1136,7 +1190,7 @@ func GetOpenContractIdsForSourceOrDestination(
 
 type WalletType = string
 const (
-    WalletTypeCircleUsdcMatic = "circle_usdc_matic"
+    WalletTypeCircleUserControlled = "circle_uc"
     WalletTypeXch = "xch"
     WalletTypeSol = "sol"
 )
@@ -1146,6 +1200,7 @@ type AccountWallet struct {
     WalletId bringyour.Id
     NetworkId bringyour.Id
     WalletType WalletType
+    Blockchain string
     WalletAddress string
     Active bool
     DefaultTokenType string
@@ -1161,6 +1216,7 @@ func dbGetAccountWallet(ctx context.Context, conn bringyour.PgConn, walletId bri
             SELECT
                 network_id,
                 wallet_type,
+                blockchain,
                 wallet_address,
                 active,
                 default_token_type,
@@ -1177,6 +1233,7 @@ func dbGetAccountWallet(ctx context.Context, conn bringyour.PgConn, walletId bri
             bringyour.Raise(result.Scan(
                 &wallet.NetworkId,
                 &wallet.WalletType,
+                &wallet.Blockchain,
                 &wallet.WalletAddress,
                 &wallet.Active,
                 &wallet.DefaultTokenType,
@@ -1210,16 +1267,18 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
                     wallet_id,
                     network_id,
                     wallet_type,
+                    blockchain,
                     wallet_address,
                     active,
                     default_token_type,
                     create_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
             wallet.WalletId,
             wallet.NetworkId,
             wallet.WalletType,
+            wallet.Blockchain,
             wallet.WalletAddress,
             wallet.Active,
             wallet.DefaultTokenType,

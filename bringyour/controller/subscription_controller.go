@@ -8,6 +8,18 @@ import (
 
 
 
+// app initially calls "get info"
+// then if no wallet, show a button to initialize wallet
+// if wallet, show a button to refresh, and to withdraw
+
+// FIXME FIXME
+// Get Circle UC wallet info
+// Circle UC wallet initialize
+// Circle UC wallet withdraw
+
+
+
+
 
 // run this every 15 minutes
 // circle.yml
@@ -34,14 +46,14 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
 func StripeWebhook() {
 
 
-	notifyBalanceCode()
+	// notifyBalanceCode()
 }
 
 
 // https://api.bringyour.com/pay/coinbase
 func CoinbaseWebhook() {
 
-	notifyBalanceCode()
+	// notifyBalanceCode()
 }
 
 

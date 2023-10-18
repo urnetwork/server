@@ -18,7 +18,7 @@ var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
 
 
 type NetworkCheckArgs struct {
-	NetworkName string  `json:"networkName"`
+	NetworkName string  `json:"network_name"`
 }
 
 type NetworkCheckResult struct {
@@ -36,28 +36,28 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 
 
 type NetworkCreateArgs struct {
-	UserName *string `json:"userName"`
-	UserAuth *string `json:"userAuth"`
-	AuthJwt *string `json:"authJwt"`
-	AuthJwtType *string `json:"authJwtType"`
-	Password string `json:"password"`
-	NetworkName string `json:"networkName"`
+	UserName string `json:"user_name"`
+	UserAuth *string `json:"user_auth,omitempty"`
+	AuthJwt *string `json:"auth_jwt,omitempty"`
+	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+	Password *string `json:"password,omitempty"`
+	NetworkName string `json:"network_name"`
 	Terms bool `json:"terms"`
 }
 
 type NetworkCreateResult struct {
 	Network *NetworkCreateResultNetwork `json:"network,omitempty"`
-	VerificationRequired *NetworkCreateResultVerification `json:"verificationRequired,omitempty"`
+	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error *NetworkCreateResultError `json:"error,omitempty"`
 }
 
 type NetworkCreateResultNetwork struct {
-	ByJwt *string `json:"byJwt,omitempty"`
-	NetworkName *string `json:"networkName,omitempty"`
+	ByJwt *string `json:"by_jwt,omitempty"`
+	NetworkName *string `json:"network_name,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
-	UserAuth string `json:"userAuth"`
+	UserAuth string `json:"user_auth"`
 }
 
 type NetworkCreateResultError struct {
@@ -138,7 +138,7 @@ func NetworkCreate(
 			createdNetworkId = bringyour.NewId()
 
 			passwordSalt := createPasswordSalt()
-			passwordHash := computePasswordHashV1([]byte(networkCreate.Password), passwordSalt)
+			passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -303,8 +303,8 @@ func auditNetworkCreate(
 	session *session.ClientSession,
 ) {
 	type Details struct {
-		NetworkCreate NetworkCreateArgs `json:"networkCreate"`
-		ClientAddress string `json:"clientAddress"`
+		NetworkCreate NetworkCreateArgs `json:"network_create"`
+		ClientAddress string `json:"client_address"`
 	}
 
 	details := Details{

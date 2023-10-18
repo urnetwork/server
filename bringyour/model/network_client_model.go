@@ -5,6 +5,7 @@ import (
 	"context"
 	// "bytes"
 	"time"
+	"fmt"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -17,12 +18,12 @@ const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
 
-type ProvideMode = string
+type ProvideMode = int
 const (
-	ProvideModeNetwork ProvideMode = "network"
-	ProvideModeFriendsAndFamily ProvideMode = "ff"
-	ProvideModePublic ProvideMode = "public"
-	ProvideModeStream ProvideMode = "stream"
+	ProvideModeNetwork ProvideMode = 0
+	ProvideModeFriendsAndFamily ProvideMode = 1
+	ProvideModePublic ProvideMode = 2
+	ProvideModeStream ProvideMode = 3
 )
 
 
@@ -32,26 +33,55 @@ const (
 // the total number active per network is also limited
 
 
+func FindClientNetwork(
+	ctx context.Context,
+	clientId bringyour.Id,
+) (networkId bringyour.Id, returnErr error) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network_id
+				FROM network_client
+				WHERE
+					client_id = $1
+			`,
+			clientId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&networkId))
+			} else {
+				returnErr = fmt.Errorf("Client does not exist.")
+			}
+		})
+	})
+
+	return
+}
+
+
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
-	ClientId *bringyour.Id `json:"clientId",omitempty`
+	ClientId *bringyour.Id `json:"client_id",omitempty`
 	Description string `json:"description"`
-	DeviceSpec string `json:"deviceSpec"`
+	DeviceSpec string `json:"device_spec"`
 }
 
 type AuthNetworkClientResult struct {
-	ByJwt *string `json:"byJwt,omitempty"`
+	ByJwt *string `json:"by_jwt,omitempty"`
 	Error *AuthNetworkClientError `json:"error,omitempty"`
 }
 
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
-	ClientLimitExceeded bool `json:"clientLimitExceeded"` 
+	ClientLimitExceeded bool `json:"client_limit_exceeded"` 
 	Message string `json:"message"`
 }
 
 func AuthNetworkClient(
-	authClient AuthNetworkClientArgs,
+	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
 ) (*AuthNetworkClientResult, error) {
 	if session == nil {
@@ -185,7 +215,7 @@ func AuthNetworkClient(
 
 
 type RemoveNetworkClientArgs struct {
-	ClientId bringyour.Id `json:"clientId"`
+	ClientId bringyour.Id `json:"client_id"`
 }
 
 type RemoveNetworkClientResult struct {
@@ -242,18 +272,18 @@ type NetworkClientsResult struct {
 type NetworkClientInfo struct {
 	NetworkClient
 	NetworkClientResident
-	ProvideMode *ProvideMode `json:"provideMode"`
+	ProvideMode *ProvideMode `json:"provide_mode"`
 	Connections []*NetworkClientConnection `json:"connections"`
 }
 
 type NetworkClientConnection struct {
-	ClientId bringyour.Id
-	ConnectionId bringyour.Id
-	ConnectTime time.Time
-	DisconnectTime time.Time
-	ConnectionHost string
-	ConnectionService string
-	ConnectionBlock string
+	ClientId bringyour.Id `json:"client_id"`
+	ConnectionId bringyour.Id `json:"connection_id"`
+	ConnectTime time.Time `json:"connect_time"`
+	DisconnectTime time.Time `json:"disconnect_time,omitempty"`
+	ConnectionHost string `json:"connection_host"`
+	ConnectionService string `json:"connection_service"`
+	ConnectionBlock string `json:"connection_block"`
 }
 
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
@@ -278,12 +308,12 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client_resident.resident_host,
 					network_client_resident.resident_service,
 					network_client_resident.resident_block,
-					provide_config.provide_mode
+					client_provide.provide_mode
 				FROM network_client
 				LEFT JOIN network_client_resident ON
 					network_client.client_id = network_client_resident.client_id
-				LEFT JOIN provide_config ON
-					network_client.client_id = provide_config.client_id
+				LEFT JOIN client_provide ON
+					network_client.client_id = client_provide.client_id
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true
@@ -396,13 +426,13 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 
 
 type NetworkClient struct {
-	ClientId bringyour.Id `json:"clientId"`
-	NetworkId bringyour.Id `json:"networkId"`
+	ClientId bringyour.Id `json:"client_id"`
+	NetworkId bringyour.Id `json:"network_id"`
 	Description string `json:"description"`
-	DeviceSpec string `json:"deviceSpec"`
+	DeviceSpec string `json:"device_spec"`
 
-	CreateTime time.Time `json:"createTime"`
-	AuthTime time.Time `json:"authTime"`
+	CreateTime time.Time `json:"create_time"`
+	AuthTime time.Time `json:"auth_time"`
 }
 
 
@@ -447,8 +477,6 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 }
 
 
-
-
 func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
 	var provideMode *ProvideMode
 
@@ -456,7 +484,7 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT provide_mode FROM provide_config
+				SELECT provide_mode FROM client_provide
 				WHERE client_id = $1
 			`,
 			clientId,
@@ -474,6 +502,29 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
 	return provideMode
 }
 
+// FIXME get provide key
+
+
+func SetProvideMode(ctx context.Context, clientId bringyour.Id, provideMode ProvideMode) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		tx.Exec(
+			ctx,
+			`
+				INSERT INTO client_provide (
+					client_id,
+					provide_mode
+				) VALUES ($1, $2)
+				ON CONFLICT (client_id) UPDATE
+				SET
+					provide_mode = $2
+			`,
+			clientId,
+			provideMode,
+		)
+	})
+}
+
+// FIXME set provide key
 
 
 // a client_id can have multiple connections to the platform
@@ -482,7 +533,6 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
 // if connect to the resident transport fails,
 // attempt claim local resident and start resident locally
 // if attempt claim fails, connect to the next (repeat until a successful connection)
-
 
 
 // returns a connection_id
@@ -583,13 +633,13 @@ func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bo
 // the nomination happens when the endpoint cannot communicate with the current resident
 
 type NetworkClientResident struct {
-	ClientId bringyour.Id `json:"clientId"`
-	InstanceId bringyour.Id `json:"clientId"`
-	ResidentId bringyour.Id `json:"residentId"`
-	ResidentHost string `json:"residentHost"`
-	ResidentService string `json:"residentService"`
-	ResidentBlock string `json:"residentBlock"`
-	ResidentInternalPorts []int `json:"residentInternalPorts"`
+	ClientId bringyour.Id `json:"client_id"`
+	InstanceId bringyour.Id `json:"client_id"`
+	ResidentId bringyour.Id `json:"resident_id"`
+	ResidentHost string `json:"resident_host"`
+	ResidentService string `json:"resident_service"`
+	ResidentBlock string `json:"resident_block"`
+	ResidentInternalPorts []int `json:"resident_internal_ports"`
 }
 
 

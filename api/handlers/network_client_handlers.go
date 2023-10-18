@@ -9,16 +9,16 @@ import (
 
 
 func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(ctx, model.AuthNetworkClient, w, r)
+	router.WrapWithInputRequireAuth(model.AuthNetworkClient, w, r)
 }
 
 
 func RemoveNetworkClient(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(ctx, model.RemoveNetworkClient, w, r)
+	router.WrapWithInputRequireAuth(model.RemoveNetworkClient, w, r)
 }
 
 
 func NetworkClients(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJsonNoArgs(ctx, model.GetNetworkClients, w, r)
+	router.WrapRequireAuth(model.GetNetworkClients, w, r)
 }
 
