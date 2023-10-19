@@ -84,7 +84,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    instanceId, err := bringyour.IdFromSlice(auth.InstanceId)
+    instanceId, err := bringyour.IdFromBytes(auth.InstanceId)
     if err != nil {
         return
     }

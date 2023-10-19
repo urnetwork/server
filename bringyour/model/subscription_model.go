@@ -88,8 +88,8 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bri
         result, err := tx.Query(
             ctx,
             `
-            SELECT balance_code_id FROM transfer_balance_code
-            WHERE purchase_event_id = $1
+                SELECT balance_code_id FROM transfer_balance_code
+                WHERE purchase_event_id = $1
             `,
             balanceCodeId,
         )
@@ -110,8 +110,51 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bri
 // - create a user token
 // - list wallets
 // - create a wallet challenge
-func GetOrCreateCircleUserId(ctx context.Context, networkId bringyour.Id) bringyour.Id {
-	// FIXME
+func GetOrCreateCircleUserId(
+    ctx context.Context,
+    networkId bringyour.Id,
+) (circleUserId bringyour.Id) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    circle_uc_user_id
+                FROM circle_uc
+                WHERE
+                    network_id = $1
+            `,
+            networkId,
+        )
+        set := false
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&circleUserId))
+                set = true
+            }
+        })
+
+        if set {
+            return
+        }
+
+        circleUserId = bringyour.NewId()
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                INSERT INTO circle_uc (
+                    network_id,
+                    circle_uc_user_id
+                )
+                VALUES ($1, $2)
+            `,
+            networkId,
+            circleUserId,
+        ))
+    })
+
+    return
 }
 
 
@@ -130,8 +173,8 @@ func CreateBalanceCode(
         result, err := tx.Query(
             ctx,
             `
-            SELECT balance_code_id FROM transfer_balance_code
-            WHERE purchase_event_id = $1
+                SELECT balance_code_id FROM transfer_balance_code
+                WHERE purchase_event_id = $1
             `,
             purchaseEventId,
         )
@@ -704,6 +747,44 @@ func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEs
 }
 
 
+// some clients - platform, friends and family, etc - do not need an escrow
+// typically `provide_mode < Public` does not use an escrow1
+func CreateContractNoEscrow(
+    ctx context.Context,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferBytes int,
+) (contractId bringyour.Id, returnErr error) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        contractId = bringyour.NewId()
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                INSERT INTO transfer_contract (
+                    contract_id,
+                    source_network_id,
+                    source_id,
+                    destination_network_id,
+                    destination_id,
+                    transfer_bytes
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+            `,
+            contractId,
+            sourceNetworkId,
+            sourceId,
+            destinationNetworkId,
+            destinationId,
+            contractTransferBytes,
+        ))
+    })
+    return
+}
+
+
 // this will create a close entry,
 // then settle if all parties agree, or set dispute if there is a dispute
 func CloseContract(
@@ -725,7 +806,8 @@ func CloseContract(
                     destination_id
                 FROM transfer_contract
                 WHERE
-                    contract_id = $1
+                    contract_id = $1 AND
+                    outcome IS NULL
             `,
             contractId,
         )
@@ -802,12 +884,45 @@ func CloseContract(
         destinationUsedTransferBytes, destinationOk := closes[ContractPartyDestination]
 
         if sourceOk && destinationOk {
-            diff := sourceUsedTransferBytes - destinationUsedTransferBytes
-            if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
-                settle = true
-            } else {
-                dispute = true
-            }
+        	hasEscrow := false
+
+        	result, err := tx.Query(
+        		ctx,
+        		`
+        			SELECT balance_id FROM transfer_escrow
+        			WHERE contract_id = $1
+        			LIMIT 1
+        		`,
+        		contractId,
+        	)
+        	bringyour.WithPgResult(result, err, func() {
+        		if result.Next() {
+        			hasEscrow = true
+        		}
+        	})
+
+        	if hasEscrow {
+	            diff := sourceUsedTransferBytes - destinationUsedTransferBytes
+	            if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
+	                settle = true
+	            } else {
+	                dispute = true
+	            }
+	        } else {
+	        	// nothing to settle, just close the transaction
+	        	bringyour.RaisePgResult(tx.Exec(
+		        	ctx,
+		            `
+		                UPDATE transfer_contract
+		                SET
+		                    outcome = $2
+		                WHERE
+		                    contract_id = $1
+		            `,
+		            contractId,
+		            ContractOutcomeSettled,
+		        ))
+	        }
         }
     })
 

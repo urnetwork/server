@@ -4,33 +4,9 @@ import (
 	// "bringyour.com/bringyour"
 )
 
-
+// https://en.wikipedia.org/wiki/Levenshtein_distance
 func EditDistance(a string, b string) int {
-	/*
-	# https://en.wikipedia.org/wiki/Levenshtein_distance
-        table = {}
-        # fixme need to use the full string length
-        k = min(len(a), len(b))
-
-        table[(0, 0)] = 0
-        for i in range(1, k+1):
-            table[(i, 0)] = i
-        for j in range(1, k+1):
-            table[(0, j)] = j
-        for i in range(1, k+1):
-            for j in range(1, k+1):
-                if a[i-1] == b[j-1]:
-                    table[(i, j)] = table[(i - 1, j - 1)]
-                else:
-                    table[(i, j)] = 1 + min(
-                        table[(i - 1, j)],
-                        table[(i, j - 1)],
-                        table[(i - 1, j - 1)]
-                    )
-        return table[(k, k)] + max(len(a) - k, len(b) - k)
-    */
-
-    // FIXME only need to use O(MIN(n, m)) memory by using omly current and previous
+    // TODO only need to use O(MIN(n, m)) memory by using omly current and previous
 
     n := len(a) + 1
     m := len(b) + 1

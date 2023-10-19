@@ -20,11 +20,19 @@ func NewId() Id {
 	return Id(ulid.Make())
 }
 
-func IdFromSlice(idBytes []byte) (Id, error) {
+func IdFromBytes(idBytes []byte) (Id, error) {
 	if len(idBytes) != 16 {
 		return Id{}, errors.New("Id must be 16 bytes")
 	}
 	return Id(idBytes), nil
+}
+
+func RequireIdFromBytes(idBytes []byte) Id {
+	id, err := IdFromBytes(idBytes)
+	if err != nil {
+		panic(err)
+	}
+	return id
 }
 
 func ParseId(idStr string) (id Id, err error) {

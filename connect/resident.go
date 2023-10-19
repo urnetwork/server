@@ -10,8 +10,12 @@ import (
 	"io"
 	"fmt"
 	"errors"
+	"crypto/hmac"
+	"crypto/sha256"
 
 	"golang.org/x/exp/maps"
+
+	"google.golang.org/protobuf/proto"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -46,6 +50,9 @@ const AbuseMinTimeout = 5 * time.Second
 const ControlMinTimeout = 200 * time.Millisecond
 
 const ExchangeConnectTimeout = 1 * time.Second
+
+
+var ControlId = bringyour.Id(connect.ControlId)
 
 
 // each call overwrites the internal buffer
@@ -930,7 +937,7 @@ func (self *Resident) cleanupForwards() {
 	}
 }
 
-// connect.ForwardFunction
+// `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
 	self.updateActivity()
 
@@ -975,75 +982,135 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 	// else drop the message
 }
 
-// connect.ReceiveFunction
+// `connect.ReceiveFunction`
 func (self *Resident) handleClientReceive(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 	// these are messages to the control id
 	// use `client.Send` to send messages back to the client
+
+	// the sourceId should always the clientId, by configuration
+	if self.clientId != bringyour.Id(sourceId) {
+		return
+	}
+	// the provideMode should always be `Network`, by configuration
+	// `Network` is the highest privilege in the user network
+	if model.ProvideMode(provideMode) != model.ProvideModeNetwork {
+		return
+	}
 
 	self.updateActivity()
 	self.controlLimiter.delay()
 
 	for _, frame := range frames {
-		message := connect.FromFrame(frame)
+		if message, err := connect.FromFrame(frame); err == nil {
 		switch v := message.(type) {
-		case protocol.Provide:
-			var maxProvideMode ProvideMode			
-			for _, provideKey := range v.Keys {
-				maxProvideMode = max(maxProvideMode, provideKey.ProvideMode)
-				model.SetProvideSecretKey(self.ctx, self.clientId, provideKey.ProvideSecretKey)
+			case *protocol.Provide:
+				self.controlProvide(v)
+
+			case *protocol.CreateContract:
+				self.controlCreateContract(v)
+
+			case *protocol.CloseContract:
+				self.controlCloseContract(v)
 			}
-			model.SetProvideMode(self.ctx, self.clientId, maxProvideMode)
-
-		case protocol.CreateContract:
-			// FIXME
-
-
-			contractId, err := self.contractManager.CreateContract(sourceId, v.DestinationId, v.TrasferByteCount)
-
-			result := CreateContractResult{}
-			if err != nil {
-				result.ContractError = err
-			} else {
-
-				// FIXME match the provide mode to the destination; can just use Public until FF is added
-
-				// FIXME sign the contract with a stored key for the provide mode level
-				storedContract := protocol.StoredContract{}
-
-				result.Contract = Contract{}
-			}
-
-			client.Send(result)
-
-		case protocol.CloseContract:
-			// FIXME
-
-			self.contractManager.CloseContract(v.ContractId, v.AckedByteCount)
-
-
-
 		}
-		// switch frame.MessageType {
-		// case protocol.MessageType_TransferProvide:
-		// 	// FIXME
-
-		// 	provide := connect.Provide{}
-
-
-		// case protocol.MessageType_TransferCreateContract:
-		// 	// FIXME always grant a contract from ControlId to any
-		// 	// FIXME
-		// 	contractmanager.CreateContract()
-
-		// 	client.Send()
-
-		// case protocol.MessageType_TransferCloseContract:
-		// 	// FIXME
-
-		// 	contractmanager.CloseContract
-
-		// }
 	}
+}
+
+func (self *Resident) controlProvide(provide *protocol.Provide) {
+	secretKeys := map[model.ProvideMode][]byte{}			
+	for _, provideKey := range provide.Keys {
+		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
+	}
+	model.SetProvide(self.ctx, self.clientId, secretKeys)
+}
+
+func (self *Resident) controlCreateContract(createContract *protocol.CreateContract) {
+	destinationId := bringyour.Id(createContract.DestinationId)
+
+	minRelationship := self.contractManager.GetProvideRelationship(self.clientId, destinationId)
+
+	maxProvideMode := self.contractManager.GetProvideMode(destinationId)
+	if maxProvideMode < minRelationship {
+		contractError := protocol.ContractError_NoPermission
+		result := &protocol.CreateContractResult{
+			Error: &contractError,
+		}
+		frame, err := connect.ToFrame(result)
+		bringyour.Raise(err)
+		self.client.Send(frame, connect.Id(self.clientId), nil)
+		return
+	}
+
+	provideSecretKey, err := model.GetProvideSecretKey(self.ctx, destinationId, minRelationship)
+	if err != nil {
+		contractError := protocol.ContractError_NoPermission
+		result := &protocol.CreateContractResult{
+			Error: &contractError,
+		}
+		frame, err := connect.ToFrame(result)
+		bringyour.Raise(err)
+		self.client.Send(frame, connect.Id(self.clientId), nil)
+		return
+	}
+
+	// if `minRelationship < Public`, use CreateContractNoEscrow
+	// else use CreateTransferEscrow
+	contractId, contractByteCount, err := self.contractManager.CreateContract(
+		self.clientId,
+		destinationId,
+		int(createContract.TransferByteCount),
+		minRelationship,
+	)
+
+	if err != nil {
+		contractError := protocol.ContractError_InsufficientBalance
+		result := &protocol.CreateContractResult{
+			Error: &contractError,
+		}
+		frame, err := connect.ToFrame(result)
+		bringyour.Raise(err)
+		self.client.Send(frame, connect.Id(self.clientId), nil)
+		return
+	}
+
+	storedContract := &protocol.StoredContract{
+		ContractId: contractId.Bytes(),
+		TransferByteCount: uint32(contractByteCount),
+		SourceId: self.clientId.Bytes(),
+		DestinationId: destinationId.Bytes(),
+	}
+	storedContractBytes, err := proto.Marshal(storedContract)
+	if err != nil {
+		contractError := protocol.ContractError_Setup
+		result := &protocol.CreateContractResult{
+			Error: &contractError,
+		}
+		frame, err := connect.ToFrame(result)
+		bringyour.Raise(err)
+		self.client.Send(frame, connect.Id(self.clientId), nil)
+		return
+	}
+	mac := hmac.New(sha256.New, provideSecretKey)
+	storedContractHmac := mac.Sum(storedContractBytes)
+
+	result := &protocol.CreateContractResult{
+		Contract: &protocol.Contract{
+			StoredContractBytes: storedContractBytes,
+			StoredContractHmac: storedContractHmac,
+			ProvideMode: protocol.ProvideMode(minRelationship),
+		},
+	}
+	frame, err := connect.ToFrame(result)
+	bringyour.Raise(err)
+	self.client.Send(frame, connect.Id(self.clientId), nil)
+}
+
+func (self *Resident) controlCloseContract(closeContract *protocol.CloseContract) {
+	self.contractManager.CloseContract(
+		bringyour.RequireIdFromBytes(closeContract.ContractId),
+		self.clientId,
+		int(closeContract.AckedByteCount),
+	)
 }
 
 func (self *Resident) AddTransport(send chan []byte, receive chan []byte) func() {
@@ -1147,6 +1214,35 @@ func (self *contractManager) syncContracts() {
 	}
 }
 
+// this is the "min" or most specific relationship
+func (self *contractManager) GetProvideRelationship(sourceId bringyour.Id, destinationId bringyour.Id) model.ProvideMode {
+	if sourceId == ControlId || destinationId == ControlId {
+		return model.ProvideModeNetwork
+	}
+
+	if sourceId == destinationId {
+		return model.ProvideModeNetwork
+	}
+
+	// TODO network and friends-and-family not implemented yet
+
+	return model.ProvideModePublic
+}
+
+func (self *contractManager) GetProvideMode(destinationId bringyour.Id) model.ProvideMode {
+
+	if destinationId == ControlId {
+		return model.ProvideModeNetwork
+	}
+
+	provideMode, err := model.GetProvideMode(self.ctx, destinationId)
+	if err != nil {
+		return model.ProvideModeNone
+	}
+	return provideMode
+}
+
+
 func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
 	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
 
@@ -1173,29 +1269,50 @@ func (self *contractManager) CreateContract(
 	sourceId bringyour.Id,
 	destinationId bringyour.Id,
 	transferBytes int,
-) (*model.TransferEscrow, error) {
+	provideMode model.ProvideMode,
+) (contractId bringyour.Id, contractTransferBytes int, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
 	if err != nil {
 		// the source is not a real client
-		return nil, err
+		returnErr = err
+		return
 	}
 	destinationNetworkId, err := model.FindClientNetwork(self.ctx, destinationId)
 	if err != nil {
 		// the destination is not a real client
-		return nil, err
+		returnErr = err
+		return
 	}
 	
-	contractTransferBytes := max(MinContractTransferBytes, transferBytes)
-	escrow, err := model.CreateTransferEscrow(
-		self.ctx,
-		sourceNetworkId,
-		sourceId,
-		destinationNetworkId,
-		destinationId,
-		contractTransferBytes,
-	)
-	if err != nil {
-		return nil, err
+	contractTransferBytes = max(MinContractTransferBytes, transferBytes)
+
+	if provideMode < model.ProvideModePublic {
+		contractId, err = model.CreateContractNoEscrow(
+			self.ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferBytes,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+	} else {
+		escrow, err := model.CreateTransferEscrow(
+			self.ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferBytes,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		contractId = escrow.ContractId
 	}
 
 	// update the cache
@@ -1206,14 +1323,33 @@ func (self *contractManager) CreateContract(
 		contracts := map[bringyour.Id]bool{}
 		self.pairContractIds[transferPair] = contracts
 	}
-	contracts[escrow.ContractId] = true
+	contracts[contractId] = true
 	self.stateLock.Unlock()
 
-	return escrow, nil
+	return
 }
 
-// FIXME CloseContract
+func (self *contractManager) CloseContract(
+	contractId bringyour.Id,
+	clientId bringyour.Id,
+	usedTransferBytes int,
+) error {
+	// update the cache
+	self.stateLock.Lock()
+	for transferPair, contracts := range self.pairContractIds {
+		if transferPair.A == clientId || transferPair.B == clientId {
+			delete(contracts, contractId)
+		}
+	}
+	self.stateLock.Unlock()
 
+	err := model.CloseContract(self.ctx, contractId, clientId, usedTransferBytes)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 
 // each send on the forward updates the send time

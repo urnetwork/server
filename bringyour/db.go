@@ -62,7 +62,6 @@ func (self *safePgPool) open() *pgxpool.Pool {
 
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
-		// fixme use Config struct?
 		options := map[string]string{
 			"sslmode": "disable",
 			"pool_max_conns": strconv.Itoa(32),
@@ -499,7 +498,6 @@ type ComplexValue interface {
 
 // CreateTempTableInTxAllowDuplicates
 
-// FIXME support ComplexValue and multiple columns
 // spec is `table_name(value_column_name type)`
 func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
 	tableSpec := parseTempTableSpec(spec)

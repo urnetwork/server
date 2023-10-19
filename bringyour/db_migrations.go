@@ -449,7 +449,7 @@ var migrations = []any{
         CREATE TABLE provide_key (
             client_id uuid NOT NULL,
             provide_mode int NOT NULL,
-            secret_key TEXT NOT NULL,
+            secret_key bytea NOT NULL,
 
             PRIMARY KEY (client_id, provide_mode)
         )
@@ -731,7 +731,6 @@ var migrations = []any{
     //  )
     // `),
 
-    // FIXME blockchain
     newSqlMigration(`
         CREATE TABLE account_wallet (
             wallet_id uuid NOT NULL,
@@ -756,7 +755,7 @@ var migrations = []any{
 	    	network_id,
 	    	circle_uc_user_id,
 
-	    	PRIMARY KEY (network)
+	    	PRIMARY KEY (network_id)
 	    )
     `),
 

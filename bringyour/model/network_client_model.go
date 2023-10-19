@@ -18,12 +18,14 @@ const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
 
+// aligns with `protocol.ProvideMode`
 type ProvideMode = int
 const (
-	ProvideModeNetwork ProvideMode = 0
-	ProvideModeFriendsAndFamily ProvideMode = 1
-	ProvideModePublic ProvideMode = 2
-	ProvideModeStream ProvideMode = 3
+	ProvideModeNone ProvideMode = 0
+	ProvideModeNetwork ProvideMode = 1
+	ProvideModeFriendsAndFamily ProvideMode = 2
+	ProvideModePublic ProvideMode = 3
+	ProvideModeStream ProvideMode = 4
 )
 
 
@@ -477,9 +479,7 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 }
 
 
-func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
-	var provideMode *ProvideMode
-
+func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode ProvideMode, returnErr error) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -491,23 +491,60 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) *ProvideMode {
 		)
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
-				var provideModeValue string
-				bringyour.Raise(result.Scan(&provideModeValue))
-				provideMode_ := ProvideMode(provideModeValue)
-				provideMode = &provideMode_
+				bringyour.Raise(result.Scan(&provideMode))
+			} else {
+				returnErr = fmt.Errorf("Client provide mode not set.")
 			}
 		})
 	})
-
-	return provideMode
+	return
 }
 
-// FIXME get provide key
+
+func GetProvideSecretKey(
+	ctx context.Context,
+	clientId bringyour.Id,
+	provideMode ProvideMode,
+) (secretKey []byte, returnErr error) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					secret_key
+				FROM provide_key
+				WHERE
+					client_id = $1 AND
+					provide_mode = $2
+			`,
+			clientId,
+			provideMode,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&secretKey))
+			} else {
+				returnErr = fmt.Errorf("Provide secret key not set.")
+			}
+		})
+	})
+	return
+}
 
 
-func SetProvideMode(ctx context.Context, clientId bringyour.Id, provideMode ProvideMode) {
+func SetProvide(
+	ctx context.Context,
+	clientId bringyour.Id,
+	secretKeys map[ProvideMode][]byte,
+) {
+	var maxProvideMode ProvideMode
+	for provideMode, _ := range secretKeys {
+		if maxProvideMode < provideMode {
+			maxProvideMode = provideMode
+		}
+	}
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO client_provide (
@@ -519,12 +556,37 @@ func SetProvideMode(ctx context.Context, clientId bringyour.Id, provideMode Prov
 					provide_mode = $2
 			`,
 			clientId,
-			provideMode,
-		)
+			maxProvideMode,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM provide_key
+			WHERE client_id = $1
+			`,
+			clientId,
+		))
+
+		bringyour.Raise(bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+			for provideMode, secretKey := range secretKeys {
+				batch.Queue(
+					`
+					INSERT INTO provide_key (
+						client_id,
+						provide_mode,
+						secret_key
+					)
+					VALUES ($1, $2, $3)
+					`,
+					clientId,
+					provideMode,
+					secretKey,
+				)
+			}
+		}))
 	})
 }
-
-// FIXME set provide key
 
 
 // a client_id can have multiple connections to the platform
