@@ -76,18 +76,23 @@ func DbVersion(ctx context.Context) int {
 func ApplyDbMigrations(ctx context.Context) {
     for i := DbVersion(ctx); i < len(migrations); i += 1 {
         Tx(ctx, func(tx PgTx) {
-            tx.Exec(
+            RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
                 i,
-            )
+            ))
         })
         switch v := migrations[i].(type) {
             case *SqlMigration:
-                // Logger().Printf("%s\n", v.sql)
                 Tx(ctx, func(tx PgTx) {
-                    _, err := tx.Exec(ctx, v.sql)
-                    Raise(err)
+                	defer func() {
+	            		if err := recover(); err != nil {
+	            			// print the sql for debugging
+	            			Logger().Printf("%s\n", v.sql)
+	            			panic(err)
+	            		}
+	            	}()
+                    RaisePgResult(tx.Exec(ctx, v.sql))
                 })
             case *CodeMigration:
                 v.callback(ctx)
@@ -95,12 +100,12 @@ func ApplyDbMigrations(ctx context.Context) {
                 panic(fmt.Errorf("Unknown migration type %T", v))
         }
         Tx(ctx, func(tx PgTx) {
-            tx.Exec(
+            RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
                 i,
                 i + 1,
-            )
+            ))
         })
     }
 }
@@ -752,8 +757,8 @@ var migrations = []any{
     //  `circle_uc_user_id` is the user_id for the circle user-controlled platform
     newSqlMigration(`
 	    CREATE TABLE circle_uc (
-	    	network_id,
-	    	circle_uc_user_id,
+	    	network_id uuid NOT NULL,
+	    	circle_uc_user_id uuid NOT NULL,
 
 	    	PRIMARY KEY (network_id)
 	    )
@@ -802,12 +807,9 @@ var migrations = []any{
 
     // column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
     // index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
-    // newSqlMigration(`
-    //  DROP INDEX user_auth_attempt_client_ipv4
-    // `),
-    // newSqlMigration(`
-    //  ALTER TABLE user_auth_attempt DROP COLUMN client_ipv4
-    // `),
+    newSqlMigration(`
+    	ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
+    `),
     newSqlMigration(`
         ALTER TABLE user_auth_attempt ADD COLUMN client_ip varchar(64) NULL
     `),

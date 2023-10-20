@@ -4,7 +4,7 @@ import (
     "context"
     "time"
     "strings"
-    "errors"
+    // "errors"
     "fmt"
     "math"
 
@@ -507,17 +507,17 @@ type Location struct {
     CountryLocationId bringyour.Id
 }
 
-func (self *Location) GuessLocationType() LocationType {
+func (self *Location) GuessLocationType() (LocationType, error) {
     if self.City != "" {
-        return LocationTypeCity
+        return LocationTypeCity, nil
     }
     if self.Region != "" {
-        return LocationTypeRegion
+        return LocationTypeRegion, nil
     }
     if self.CountryCode != "" {
-        return LocationTypeCountry
+        return LocationTypeCountry, nil
     }
-    panic(errors.New("Unknown location type."))
+    return "", fmt.Errorf("Unknown location type.")
 }
 
 func (self *Location) String() string {
@@ -984,9 +984,8 @@ func SetConnectionLocation(
                 FROM network_client_connection
                 WHERE connection_id = $1
                 INNER JOIN location ON location.location_id = $2
-                ON CONFLICT UPDATE
+                ON CONFLICT (connection_id) DO UPDATE
                 SET
-                    /* connection_id is the conflicting key */
                     client_id = network_client_connection.client_id,
                     city_location_id = location.city_location_id,
                     region_location_id = location.region_location_id,

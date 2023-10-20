@@ -87,7 +87,10 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 		Region: ipInfoResult.Region,
 		CountryCode: ipInfoResult.CountryCode,
 	}
-	location.LocationType = location.GuessLocationType()
+	location.LocationType, err = location.GuessLocationType()
+	if err != nil {
+		return nil, err
+	}
 
 	return location, nil
 }

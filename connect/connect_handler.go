@@ -39,6 +39,8 @@ func NewConnectHandler(ctx context.Context, exchange *Exchange) *ConnectHandler 
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+    bringyour.Logger().Printf("CONNECT\b")
+
     upgrader := websocket.Upgrader{
         ReadBufferSize: 1024,
         WriteBufferSize: 1024,
@@ -121,7 +123,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     )
     defer residentTransport.Close()
 
-    go func() {
+    go bringyour.HandleError(func() {
     	// disconnect the client if the model marks the connection closed
         defer closeHandle()
 
@@ -136,7 +138,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     			return
     		}
     	}
-    }()
+    }, cancel)
 
     go func() {
         defer closeHandle()

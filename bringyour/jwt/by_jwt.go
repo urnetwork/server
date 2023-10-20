@@ -59,12 +59,12 @@ type ByJwt struct {
 
 func (self *ByJwt) Sign() string {
 	claims := gojwt.MapClaims{
-		"networkId": self.NetworkId.String(),
-		"userId": self.UserId.String(),
-		"networkName": self.NetworkName,
+		"network_id": self.NetworkId.String(),
+		"user_id": self.UserId.String(),
+		"network_name": self.NetworkName,
 	}
 	if self.ClientId != nil {
-		claims["clientId"] = self.ClientId.String()
+		claims["client_id"] = self.ClientId.String()
 	}
 	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
 
@@ -111,40 +111,46 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 
 	claims := token.Claims.(gojwt.MapClaims)
 	
-	var networkIdString string		
 	var networkId bringyour.Id
-	var userIdString string
 	var userId bringyour.Id
 	var networkName string
-	var ok bool
-
-	networkIdString, ok = claims["networkId"].(string)
+	var clientId *bringyour.Id
+	
+	networkIdStr, ok := claims["network_id"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	networkId, err = bringyour.ParseId(networkIdString)
+	networkId, err = bringyour.ParseId(networkIdStr)
 	if err != nil {
 		return nil, err
 	}
-	userIdString, ok = claims["userId"].(string)
+	userIdStr, ok := claims["user_id"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	userId, err = bringyour.ParseId(userIdString)
+	userId, err = bringyour.ParseId(userIdStr)
 	if err != nil {
 		return nil, err
 	}
-	networkName, ok = claims["networkName"].(string)
+	networkName, ok = claims["network_name"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
+	clientIdStr, ok := claims["client_id"].(string)
+	// client_id is optional
+	if ok {
+		clientId_, err := bringyour.ParseId(clientIdStr)
+		if err != nil {
+			return nil, err
+		}
+		clientId = &clientId_
+	}
 
-	jwt := &ByJwt{
+	return &ByJwt{
 		NetworkId: networkId,
 		NetworkName: networkName,
 		UserId: userId,
-	}
-	return jwt, nil
-	
+		ClientId: clientId,
+	}, nil
 }
 

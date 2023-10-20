@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "fmt"
     "os"
     "encoding/json"
@@ -82,14 +83,14 @@ Options:
 
 
 func dbVersion(opts docopt.Opts, args CtlArgs) {
-    version := bringyour.DbVersion()
+    version := bringyour.DbVersion(context.Background())
     bringyour.Logger().Printf("Current DB version: %d\n", version)
 }
 
 
 func dbMigrate(opts docopt.Opts, args CtlArgs) {
     bringyour.Logger().Printf("Applying DB migrations ...\n")
-    bringyour.ApplyDbMigrations()
+    bringyour.ApplyDbMigrations(context.Background())
 }
 
 
@@ -101,7 +102,7 @@ func searchAdd(opts docopt.Opts, args CtlArgs) {
 
     value, _ := opts.String("<value>")
     valueId := bringyour.NewId()
-    searchService.Add(value, valueId)
+    searchService.Add(context.Background(), value, valueId, 0)
 }
 
 func searchAround(opts docopt.Opts, args CtlArgs) {
@@ -111,7 +112,7 @@ func searchAround(opts docopt.Opts, args CtlArgs) {
     )
 
     value, _ := opts.String("<value>")
-    searchResults := searchService.Around(value, args.SearchDistance)
+    searchResults := searchService.Around(context.Background(), value, args.SearchDistance)
     for _, searchResult := range searchResults {
         fmt.Printf("%d %s %s\n", searchResult.ValueDistance, searchResult.Value, searchResult.ValueId)
     }
@@ -127,19 +128,20 @@ func searchClear(opts docopt.Opts, args CtlArgs) {
 
 
 func statsCompute(opts docopt.Opts, args CtlArgs) {
-    stats := model.ComputeStats90()
+    stats := model.ComputeStats90(context.Background())
     statsJson, err := json.MarshalIndent(stats, "", "  ")
     bringyour.Raise(err)
     bringyour.Logger().Printf("%s\n", statsJson)
 }
 
 func statsExport(opts docopt.Opts, args CtlArgs) {
-    stats := model.ComputeStats(90)
-    model.ExportStats(stats)
+    ctx := context.Background()
+    stats := model.ComputeStats(ctx, 90)
+    model.ExportStats(ctx, stats)
 }
 
 func statsImport(opts docopt.Opts, args CtlArgs) {
-    stats := model.GetExportedStats(90)
+    stats := model.GetExportedStats(context.Background(), 90)
     if stats != nil {
         statsJson, err := json.MarshalIndent(stats, "", "  ")
         bringyour.Raise(err)
@@ -148,6 +150,6 @@ func statsImport(opts docopt.Opts, args CtlArgs) {
 }
 
 func statsAdd(opts docopt.Opts, args CtlArgs) {
-    controller.AddSampleEvents(4 * 60)
+    controller.AddSampleEvents(context.Background(), 4 * 60)
 }
 

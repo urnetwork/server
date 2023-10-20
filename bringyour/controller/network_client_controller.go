@@ -16,7 +16,9 @@ func ConnectNetworkClient(
 ) bringyour.Id {
 	connectionId := model.ConnectNetworkClient(ctx, clientId, clientAddress)
 	parts := strings.Split(clientAddress, ":")
-	go setConnectionLocation(ctx, connectionId, parts[0])
+	go bringyour.HandleError(
+		func() {setConnectionLocation(ctx, connectionId, parts[0])},
+	)
 	return connectionId
 }
 

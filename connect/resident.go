@@ -216,7 +216,7 @@ func NewExchangeConnection(
 		send: make(chan []byte),
 		receive: make(chan []byte),
 	}
-	go connection.Run()
+	go bringyour.HandleError(connection.Run, cancel)
 
 	return connection, nil
 }
@@ -272,7 +272,7 @@ func (self *ExchangeConnection) Run() {
 }
 
 func (self *ExchangeConnection) Close() {
-	close(self.send)
+	self.cancel()
 }
 
 
@@ -305,7 +305,7 @@ func NewResidentTransport(
 		send: make(chan []byte),
 		receive: make(chan []byte),
 	}
-	go transport.Run()
+	go bringyour.HandleError(transport.Run, cancel)
 	return transport
 }
 
@@ -393,7 +393,7 @@ func (self *ResidentTransport) Run() {
 }
 
 func (self *ResidentTransport) Close() {
-	close(self.send)
+	self.cancel()
 }
 
 
@@ -421,7 +421,7 @@ func NewResidentForward(
 		clientId: clientId,
 		send: make(chan []byte),
 	}
-	go transport.Run()
+	go bringyour.HandleError(transport.Run, cancel)
 	return transport
 }
 
@@ -482,7 +482,7 @@ func (self *ResidentForward) Run() {
 }
 
 func (self *ResidentForward) Close() {
-	close(self.send)
+	self.cancel()
 }
 
 
@@ -515,7 +515,7 @@ func NewExchange(ctx context.Context, host string, ports []int) *Exchange {
 		residents: map[bringyour.Id]*Resident{},
 	}
 
-	go exchange.syncResidents()
+	go bringyour.HandleError(exchange.syncResidents, cancel)
 
 	return exchange
 }
@@ -556,7 +556,7 @@ func NewExchangeFromEnv(ctx context.Context) *Exchange {
 		residents: map[bringyour.Id]*Resident{},
 	}
 
-	go exchange.syncResidents()
+	go bringyour.HandleError(exchange.syncResidents, cancel)
 
 	return exchange
 }
@@ -736,7 +736,10 @@ func (self *Exchange) Run() {
 				if err != nil {
 					return
 				}
-				go self.handleExchangeClient(socket)
+				go bringyour.HandleError(
+					func() {self.handleExchangeClient(socket)},
+					self.Close,
+				)
 			}
 		}()
 	}
@@ -878,7 +881,7 @@ func NewResident(
 ) *Resident {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	client := connect.NewClientWithDefaults(connect.ControlId, cancelCtx)
+	client := connect.NewClientWithDefaults(cancelCtx, connect.ControlId)
 
 	clientRouteManager := connect.NewRouteManager(client)
 	clientContractManager := connect.NewContractManagerWithDefaults(client)
@@ -890,7 +893,7 @@ func NewResident(
 		client: client,
 		clientRouteManager: clientRouteManager,
 		clientContractManager: clientContractManager,
-		contractManager: newContractManager(cancelCtx, clientId),
+		contractManager: newContractManager(cancelCtx, cancel, clientId),
 		transports: map[*clientTransport]bool{},
 		forwards: map[bringyour.Id]*clientForward{},
 		abuseLimiter: newLimiter(cancelCtx, AbuseMinTimeout),
@@ -900,8 +903,11 @@ func NewResident(
 	client.AddReceiveCallback(resident.handleClientReceive)
 	client.AddForwardCallback(resident.handleClientForward)
 
-	go client.Run(clientRouteManager, clientContractManager)
-	go resident.cleanupForwards()
+	go bringyour.HandleError(
+		func() {client.Run(clientRouteManager, clientContractManager)},
+		cancel,
+	)
+	go bringyour.HandleError(resident.cleanupForwards, cancel)
 
 	return resident
 }
@@ -1178,6 +1184,7 @@ func (self *Resident) Close() {
 
 type contractManager struct {
 	ctx context.Context
+	cancel context.CancelFunc
 
 	clientId bringyour.Id
 
@@ -1186,14 +1193,19 @@ type contractManager struct {
 	pairContractIds map[model.TransferPair]map[bringyour.Id]bool
 }
 
-func newContractManager(ctx context.Context, clientId bringyour.Id) *contractManager {
+func newContractManager(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	clientId bringyour.Id,
+) *contractManager {
 	contractManager := &contractManager {
 		ctx: ctx,
+		cancel: cancel,
 		clientId: clientId,
 		pairContractIds: model.GetOpenContractIdsForSourceOrDestination(ctx, clientId),
 	}
 
-	go contractManager.syncContracts()
+	go bringyour.HandleError(contractManager.syncContracts, cancel)
 
 	return contractManager
 }
@@ -1300,19 +1312,32 @@ func (self *contractManager) CreateContract(
 			return
 		}
 	} else {
-		escrow, err := model.CreateTransferEscrow(
+		// check if there is already an unused escrow for the parameters
+		contractIds := model.GetOpenTransferEscrowsOrderedByCreateTime(
 			self.ctx,
-			sourceNetworkId,
 			sourceId,
-			destinationNetworkId,
 			destinationId,
 			contractTransferBytes,
 		)
-		if err != nil {
-			returnErr = err
-			return
+		if 2 <= len(contractIds) {
+			// allow at most two open contracts at a time
+			// use the most recent
+			contractId = contractIds[len(contractIds) - 1]
+		} else {
+			escrow, err := model.CreateTransferEscrow(
+				self.ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				contractTransferBytes,
+			)
+			if err != nil {
+				returnErr = err
+				return
+			}
+			contractId = escrow.ContractId
 		}
-		contractId = escrow.ContractId
 	}
 
 	// update the cache

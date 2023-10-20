@@ -35,7 +35,8 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	var byJwt *jwt.ByJwt
 	if auth := req.Header.Get("Authorization"); auth != "" {
     	if strings.HasPrefix(auth, authBearerPrefix) {
-    		if data, err := base64.StdEncoding.DecodeString(auth[:len(authBearerPrefix)]); err == nil {
+    		jwtBase64 := auth[len(authBearerPrefix):]
+    		if data, err := base64.StdEncoding.DecodeString(jwtBase64); err == nil {
     			byJwt, err = jwt.ParseByJwt(string(data))
     			if err != nil {
     				return nil, err

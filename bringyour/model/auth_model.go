@@ -7,6 +7,7 @@ import (
 	"bytes"
 	// "strings"
 	// "strconv"
+	"time"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -44,7 +45,7 @@ func UserAuthAttempt(
 	clientIp, clientPort := session.ClientIpPort()
 
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO user_auth_attempt
@@ -56,27 +57,23 @@ func UserAuthAttempt(
 			clientIp,
 			clientPort,
 			false,
-		)
+		))
 	})
 
 	type UserAuthAttemptResult struct {
-		attemptTime int64
+		attemptTime time.Time
 		success bool
 	}
 
 	parseAttempts := func(result bringyour.PgResult)([]UserAuthAttemptResult) {
 		attempts := []UserAuthAttemptResult{}
-		var attemptTime int64
-		var success bool
 		for result.Next() {
+			var attempt UserAuthAttemptResult
 			bringyour.Raise(result.Scan(
-				&attemptTime,
-				&success,
+				&attempt.attemptTime,
+				&attempt.success,
 			))
-			attempts = append(attempts, UserAuthAttemptResult{
-				attemptTime: attemptTime,
-				success: success,
-			})
+			attempts = append(attempts, attempt)
 		}
 		return attempts
 	}
@@ -154,7 +151,7 @@ func SetUserAuthAttemptSuccess(
 	success bool,
 ) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				UPDATE user_auth_attempt
@@ -163,7 +160,7 @@ func SetUserAuthAttemptSuccess(
 			`,
 			success,
 			userAuthAttemptId,
-		)
+		))
 	})
 }
 
@@ -538,9 +535,7 @@ func AuthVerify(
 
 	// verified
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		var err error
-
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network_user
@@ -548,10 +543,9 @@ func AuthVerify(
 				WHERE user_id = $1
 			`,
 			userId,
-		)
-		bringyour.Raise(err)
+		))
 
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE user_auth_verify
@@ -559,8 +553,7 @@ func AuthVerify(
 				WHERE user_auth_verify_id = $1
 			`,
 			userAuthVerifyId,
-		)
-		bringyour.Raise(err)
+		))
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -635,7 +628,7 @@ func AuthVerifyCreateCode(
 		}
 		
 		// delete existing codes and create a new code
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE user_auth_verify
@@ -643,13 +636,12 @@ func AuthVerifyCreateCode(
 				WHERE user_id = $1
 			`,
 			userId,
-		)
-		bringyour.Raise(err)
+		))
 
 		created = true
 		userAuthVerifyId := bringyour.NewId()
 		verifyCode = createVerifyCode()
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO user_auth_verify
@@ -659,8 +651,7 @@ func AuthVerifyCreateCode(
 			userAuthVerifyId,
 			userId,
 			verifyCode,
-		)
-		bringyour.Raise(err)
+		))
 	})
 
 	if created {
@@ -728,7 +719,7 @@ func AuthPasswordResetCreateCode(
 		}
 
 		// delete existing codes and create a new code
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE user_auth_reset
@@ -736,13 +727,12 @@ func AuthPasswordResetCreateCode(
 				WHERE user_id = $1
 			`,
 			userId,
-		)
-		bringyour.Raise(err)
+		))
 
 		created = true
 		userAuthResetId := bringyour.NewId()
 		resetCode = createResetCode()
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO user_auth_reset
@@ -752,8 +742,7 @@ func AuthPasswordResetCreateCode(
 			userAuthResetId,
 			userId,
 			resetCode,
-		)
-		bringyour.Raise(err)
+		))
 	})
 
 	if created {
@@ -836,9 +825,7 @@ func AuthPasswordSet(
 	passwordHash := computePasswordHashV1([]byte(passwordSet.Password), passwordSalt)
 
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		var err error
-
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network_user
@@ -848,10 +835,9 @@ func AuthPasswordSet(
 			passwordHash,
 			passwordSalt,
 			userId,
-		)
-		bringyour.Raise(err)
+		))
 
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE user_auth_reset
@@ -859,8 +845,7 @@ func AuthPasswordSet(
 				WHERE user_auth_reset_id = $1
 			`,
 			userAuthResetId,
-		)
-		bringyour.Raise(err)
+		))
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)

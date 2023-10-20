@@ -2,6 +2,7 @@ package bringyour
 
 import (
 	"time"
+	"runtime/debug"
 )
 
 
@@ -57,6 +58,21 @@ func Raise(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+
+// this is meant to handle unexpected errors and do some cleanup
+func HandleError(do func(), handlers ...func()) {
+	defer func() {
+		if err := recover(); err != nil {
+			Logger().Printf("Unexpected error (%s)\n", err)
+			debug.PrintStack()
+			for _, handler := range handlers {
+				handler()
+			}
+		}
+	}()
+	do()
 }
 
 

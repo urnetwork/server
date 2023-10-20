@@ -85,14 +85,7 @@ type AuthNetworkClientError struct {
 func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
-) (*AuthNetworkClientResult, error) {
-	if session == nil {
-		return nil, errors.New("Auth required")
-	}
-
-	var authClientResult *AuthNetworkClientResult
-	var authClientError error
-
+) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
 		// important: use serializable tx for rate limits
 		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
@@ -100,15 +93,16 @@ func AuthNetworkClient(
 				session.Ctx,
 				`
 					SELECT COUNT(client_id) FROM network_client
-					WHERE network_id = $1 AND $1 <= create_time
+					WHERE network_id = $1 AND $2 <= create_time
 				`,
 				session.ByJwt.NetworkId,
 				time.Now(),
 			)
 			var last24HourCount int
 			bringyour.WithPgResult(result, err, func() {
-				result.Next()
-				bringyour.Raise(result.Scan(&last24HourCount))
+				if result.Next() {
+					bringyour.Raise(result.Scan(&last24HourCount))
+				}
 			})
 
 			if LimitClientIdsPer24Hours <= last24HourCount {
@@ -156,7 +150,7 @@ func AuthNetworkClient(
 						description,
 						device_spec,
 						create_time,
-						auth_time,
+						auth_time
 					)
 					VALUES ($1, $2, $3, $4, $5, $5)
 				`,
@@ -212,7 +206,7 @@ func AuthNetworkClient(
 		})
 	}
 
-	return authClientResult, authClientError
+	return
 }
 
 
@@ -232,10 +226,6 @@ func RemoveNetworkClient(
 	removeClient RemoveNetworkClientArgs,
 	session *session.ClientSession,
 ) (*RemoveNetworkClientResult, error) {
-	if session == nil {
-		return nil, errors.New("Auth required")
-	}
-
 	var removeClientResult *RemoveNetworkClientResult
 	var removeClientErr error
 
@@ -289,10 +279,6 @@ type NetworkClientConnection struct {
 }
 
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
-	if session == nil {
-		return nil, errors.New("Auth required")
-	}
-
 	var clientsResult *NetworkClientsResult
 	var clientsErr error
 
@@ -454,7 +440,6 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 				FROM network_client
 				WHERE
 					client_id = $1 AND
-					networkd_id = $2 AND
 					active = true
 			`,
 			clientId,
@@ -469,7 +454,7 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 					&networkClient.Description,
 					&networkClient.DeviceSpec,
 					&networkClient.CreateTime,
-					&networkClient.DeviceSpec,
+					&networkClient.AuthTime,
 				))
 			}
 		})
@@ -720,7 +705,7 @@ func dbGetResidentInTx(
 				resident_id,
 				resident_host,
 				resident_service,
-				resident_block,
+				resident_block
 			FROM network_client_resident
 			WHERE client_id = $1
 		`,
@@ -789,8 +774,7 @@ func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanc
 
 	// important: use serializable tx
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		resident_ := dbGetResidentInTx(ctx, tx, clientId)
-		if resident.InstanceId == instanceId {
+		if resident_ := dbGetResidentInTx(ctx, tx, clientId); resident_ != nil && resident_.InstanceId == instanceId {
 			resident = resident_
 		}
 	}, bringyour.TxSerializable)
@@ -821,6 +805,7 @@ func NominateResident(
 			ctx,
 			`
 				INSERT INTO network_client_resident (
+					client_id,
 					instance_id,
 					resident_id,
 					resident_host,
@@ -828,14 +813,15 @@ func NominateResident(
 					resident_block
 				)
 				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT UPDATE
+				ON CONFLICT (client_id) DO UPDATE
 				SET
-					instance_id = $1,
-					resident_id = $2,
-					resident_host = $3,
-					resident_service = $4,
-					resident_block = $5
+					instance_id = $2,
+					resident_id = $3,
+					resident_host = $4,
+					resident_service = $5,
+					resident_block = $6
 			`,
+			nomination.ClientId,
 			nomination.InstanceId,
 			nomination.ResidentId,
 			nomination.ResidentHost,
@@ -851,7 +837,7 @@ func NominateResident(
 					INSERT INTO network_client_resident_port (
 						client_id,
 						resident_id,
-						resident_internal_port,
+						resident_internal_port
 					)
 					VALUES ($1, $2, $3)
 				`,
@@ -890,7 +876,7 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 
 				INNER JOIN network_client_resident_port ON
 					network_client_resident_port.client_id = network_client_resident.client_id AND
-					network_client_resident_port.resident_id = network_client_resident.resident_id AND
+					network_client_resident_port.resident_id = network_client_resident.resident_id
 
 				INNER JOIN resident_ports ON
 					resident_ports.resident_internal_port = network_client_resident_port.resident_internal_port
@@ -928,13 +914,7 @@ func RemoveResident(
 		_, err := tx.Exec(
 			ctx,
 			`
-			UPDATE network_client_resident
-			SET
-				instance_id = NULL,
-				resident_id = NULL,
-				resident_host = NULL,
-				resident_service = NULL,
-				resident_block = NULL
+			DELETE FROM network_client_resident
 			WHERE
 				client_id = $1 AND
 				resident_id = $2

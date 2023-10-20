@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"fmt"
+
+	"bringyour.com/bringyour"
 )
 
 
@@ -15,6 +18,7 @@ type Route struct {
 	regex   *regexp.Regexp
 	handler http.HandlerFunc
 }
+
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 	return &Route{
 		method: method,
@@ -22,6 +26,12 @@ func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 		handler: handler,
 	}
 }
+
+func (self *Route) String() string {
+	return fmt.Sprintf("%s %s", self.method, self.regex)
+}
+
+
 
 
 type ctxKey struct{}
@@ -38,6 +48,7 @@ func NewRouter(ctx context.Context, routes []*Route) *Router {
 	}
 }
 
+// `http.Handler`
 func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var allow []string
 	for _, route := range self.routes {
@@ -48,7 +59,15 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			ctx := context.WithValue(self.ctx, ctxKey{}, matches[1:])
-			route.handler(w, r.WithContext(ctx))
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						// suppress the error
+						bringyour.Logger().Printf("Unhandled error from route %s (%s)\n", route.String(), err)
+					}
+				}()
+				route.handler(w, r.WithContext(ctx))
+			}()
 			return
 		}
 	}

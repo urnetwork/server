@@ -704,6 +704,57 @@ func CreateTransferEscrow(
 }
 
 
+// contract_ids ordered by create time with:
+// - at least `contractTransferBytes` available
+// - not closed by any party
+// - with transfer escrow
+func GetOpenTransferEscrowsOrderedByCreateTime(
+    ctx context.Context,
+    sourceId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferBytes int,
+) []bringyour.Id {
+    contractIds := []bringyour.Id{}
+
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    DISTINCT transfer_contract.contract_id
+                FROM transfer_contract
+
+                LEFT OUTER JOIN contract_close ON
+                    contract_close.contract_id = transfer_contract.contract_id
+
+                INNER JOIN transfer_escrow ON
+                    transfer_escrow.contract_id = transfer_contract.contract_id
+
+                WHERE
+                    transfer_contract.source_id = $1 AND
+                    transfer_contract.destination_id = $2 AND
+                    transfer_contract.transfer_bytes <= $3 AND
+                    contract_close.contract_id IS NULL
+
+                ORDER BY transfer_contract.create_time ASC
+            `,
+            sourceId,
+            destinationId,
+            contractTransferBytes,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var contractId bringyour.Id
+                bringyour.Raise(result.Scan(&contractId))
+                contractIds = append(contractIds, contractId)
+            }
+        })
+    })
+    
+    return contractIds
+}
+
+
 func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEscrow *TransferEscrow) {
     bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(

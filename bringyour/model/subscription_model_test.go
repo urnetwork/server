@@ -58,7 +58,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-    balanceCode := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "", "")
+    balanceCode, err := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "", "")
+    assert.Equal(t, err, nil)
     RedeemBalanceCode(&RedeemBalanceCodeArgs{
         Secret: balanceCode.Secret,
     }, sourceSession)
@@ -134,7 +135,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
     wallet := &AccountWallet{
         NetworkId: destinationNetworkId,
-        WalletType: WalletTypeCircleUsdcMatic,
+        WalletType: WalletTypeCircleUserControlled,
+        Blockchain: "matic",
         WalletAddress: "",
         DefaultTokenType: "usdc",
     }

@@ -129,7 +129,7 @@ func NetworkCreate(
 				}
 			})
 
-			if userId == nil {
+			if userId != nil {
 				return
 			}
 

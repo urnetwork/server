@@ -35,8 +35,8 @@ func RequireIdFromBytes(idBytes []byte) Id {
 	return id
 }
 
-func ParseId(idStr string) (id Id, err error) {
-	return parseUUID(idStr) 
+func ParseId(idStr string) (Id, error) {
+	return parseUuid(idStr) 
 }
 
 func (self *Id) Less(b Id) bool {
@@ -60,7 +60,7 @@ func (self *Id) Bytes() []byte {
 }
 
 func (self *Id) String() string {
-	return encodeUUID(*self)
+	return encodeUuid(*self)
 }
 
 // Scan implements the database/sql Scanner interface.
@@ -71,7 +71,7 @@ func (dst *Id) Scan(src any) error {
 
 	switch src := src.(type) {
 	case string:
-		buf, err := parseUUID(src)
+		buf, err := parseUuid(src)
 		if err != nil {
 			return err
 		}
@@ -84,13 +84,13 @@ func (dst *Id) Scan(src any) error {
 
 // Value implements the database/sql/driver Valuer interface.
 func (src *Id) Value() (driver.Value, error) {
-	return encodeUUID(*src), nil
+	return encodeUuid(*src), nil
 }
 
 func (src *Id) MarshalJSON() ([]byte, error) {
 	var buff bytes.Buffer
 	buff.WriteByte('"')
-	buff.WriteString(encodeUUID(*src))
+	buff.WriteString(encodeUuid(*src))
 	buff.WriteByte('"')
 	return buff.Bytes(), nil
 }
@@ -102,7 +102,7 @@ func (dst *Id) UnmarshalJSON(src []byte) error {
 	if len(src) != 38 {
 		return fmt.Errorf("invalid length for UUID: %v", len(src))
 	}
-	buf, err := parseUUID(string(src[1 : len(src)-1]))
+	buf, err := parseUuid(string(src[1 : len(src)-1]))
 	if err != nil {
 		return err
 	}
@@ -111,8 +111,8 @@ func (dst *Id) UnmarshalJSON(src []byte) error {
 }
 
 
-// parseUUID converts a string UUID in standard form to a byte array.
-func parseUUID(src string) (dst [16]byte, err error) {
+// parseUuid converts a string UUID in standard form to a byte array.
+func parseUuid(src string) (dst [16]byte, err error) {
 	switch len(src) {
 	case 36:
 		src = src[0:8] + src[9:13] + src[14:18] + src[19:23] + src[24:]
@@ -133,7 +133,7 @@ func parseUUID(src string) (dst [16]byte, err error) {
 }
 
 
-func encodeUUID(src [16]byte) string {
+func encodeUuid(src [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
 
@@ -211,7 +211,7 @@ func (self *PgIdCodec) DecodeDatabaseSQLValue(m *pgtype.Map, oid uint32, format 
 		return nil, err
 	}
 
-	return encodeUUID(id), nil
+	return encodeUuid(id), nil
 }
 
 func (self *PgIdCodec) DecodeValue(m *pgtype.Map, oid uint32, format int16, src []byte) (any, error) {
@@ -253,9 +253,9 @@ func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, er
 		if v == nil {
 			return nil, nil
 		}
-		return append(buf, encodeUUID(*v)...), nil
+		return append(buf, encodeUuid(*v)...), nil
 	case Id:
-		return append(buf, encodeUUID(v)...), nil
+		return append(buf, encodeUuid(v)...), nil
 	default:
 		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
 	}
@@ -311,7 +311,7 @@ func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
 	var buf [16]byte
 	copy(buf[:], src)
 
-	return scanner.ScanText(pgtype.Text{String: encodeUUID(buf), Valid: true})
+	return scanner.ScanText(pgtype.Text{String: encodeUuid(buf), Valid: true})
 }
 
 
@@ -324,7 +324,7 @@ func (scanPlanTextAnyToIdScanner) Scan(src []byte, dst any) error {
 			*v = nil
 			return nil
 		}
-		buf, err := parseUUID(string(src))
+		buf, err := parseUuid(string(src))
 		if err != nil {
 			return err
 		}
@@ -335,7 +335,7 @@ func (scanPlanTextAnyToIdScanner) Scan(src []byte, dst any) error {
 		if src == nil {
 			return fmt.Errorf("Cannot scan a nil value into *Id (use **Id)")
 		}
-		buf, err := parseUUID(string(src))
+		buf, err := parseUuid(string(src))
 		if err != nil {
 			return err
 		}
