@@ -51,6 +51,8 @@ const ControlMinTimeout = 200 * time.Millisecond
 
 const ExchangeConnectTimeout = 1 * time.Second
 
+const NomateLocationResidentTimeout = 1 * time.Second
+
 
 var ControlId = bringyour.Id(connect.ControlId)
 
@@ -182,6 +184,7 @@ func NewExchangeConnection(
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
+		bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR CONNECT %s\n", err)
 		return nil, err
 	}
 
@@ -194,6 +197,7 @@ func NewExchangeConnection(
 		ResidentId: residentId,
 	})
 	if err != nil {
+		bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR WRITE HEADER %s\n", err)
 		return nil, err
 	}
 
@@ -201,6 +205,7 @@ func NewExchangeConnection(
 	// else the connection is closed
 	_, err = sendBuffer.ReadHeader(ctx, conn)
 	if err != nil {
+		bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR READ HEADER %s\n", err)
 		return nil, err
 	}
 
@@ -233,8 +238,8 @@ func (self *ExchangeConnection) Run() {
 	// only a transport connection will receive messages
 	switch self.op {
 	case ExchangeOpTransport:
-		go func() {
-			defer closeConnection()
+		go bringyour.HandleError(func() {
+			defer self.cancel()
 			for {
 				select {
 				case <- self.ctx.Done():
@@ -251,9 +256,9 @@ func (self *ExchangeConnection) Run() {
 				case self.receive <- message:
 				}
 			}
-		}()
+		}, self.cancel)
 	default:
-		close(self.receive)
+		// do nothing for receive
 	}
 
 	for {
@@ -323,41 +328,47 @@ func (self *ResidentTransport) Run() {
 		}
 		defer closeHandle()
 
-		go func() {
+		go bringyour.HandleError(func() {
 			defer closeHandle()
 			// read
 			for {
 				select {
 				case message, ok := <- connection.receive:
 					if !ok {
+						bringyour.Logger().Printf("READ 1\n")
 						// need a new connection
 						return
 					}
 					if err := safeSend(self.ctx, self.receive, message); err != nil {
+						bringyour.Logger().Printf("READ 1\n")
 						// transport closed
 						closeTransport()
 						return
 					}
 				case <- self.ctx.Done():
+					bringyour.Logger().Printf("READ 3\n")
 					return
 				}
 			}
-		}()
+		}, self.cancel)
 
 		// write
 		for {
 			select {
 			case message, ok := <- self.send:
 				if !ok {
+					bringyour.Logger().Printf("WRITE 1\n")
 					// transport closed
 					closeTransport()
 					return
 				}
 				if err := safeSend(self.ctx, connection.send, message); err != nil {
+					bringyour.Logger().Printf("WRITE 2\n")
 					// need a new connection
 					return
 				}
 			case <- self.ctx.Done():
+				bringyour.Logger().Printf("WRITE 3\n")
 				return
 			}
 		}
@@ -365,6 +376,7 @@ func (self *ResidentTransport) Run() {
 
 	for {
 		resident := model.GetResidentWithInstance(self.ctx, self.clientId, self.instanceId)
+		bringyour.Logger().Printf("EXCHANGE FOUND RESIDENT %+v\n", resident)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -376,13 +388,17 @@ func (self *ResidentTransport) Run() {
 				ExchangeOpTransport,
 			)
 			if err == nil {
+				bringyour.Logger().Printf("EXCHANGE CONNECTION ENTER\n")
 				handle(exchangeConnection)
+				bringyour.Logger().Printf("EXCHANGE CONNECTION EXIT\n")
+			} else {
+				bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR: %s\n", err)
 			}
 		}
 		select {
 		case <- self.ctx.Done():
 			return
-		default:
+		case <- time.After(NomateLocationResidentTimeout):
 		}
 		var residentIdToReplace *bringyour.Id
 		if resident != nil {
@@ -515,15 +531,13 @@ func NewExchange(ctx context.Context, host string, ports []int) *Exchange {
 		residents: map[bringyour.Id]*Resident{},
 	}
 
-	go bringyour.HandleError(exchange.syncResidents, cancel)
+	go bringyour.HandleError(exchange.Run, cancel)
 
 	return exchange
 }
 
 // reads the host and port configuration from the env
 func NewExchangeFromEnv(ctx context.Context) *Exchange {
-	cancelCtx, cancel := context.WithCancel(ctx)
-
 	host := bringyour.RequireHost()
 
 	// service port -> host port
@@ -548,17 +562,9 @@ func NewExchangeFromEnv(ctx context.Context) *Exchange {
 		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", StartInternalPort))
 	}
 
-	exchange := &Exchange{
-		ctx: cancelCtx,
-		cancel: cancel,
-		host: host,
-		ports: ports,
-		residents: map[bringyour.Id]*Resident{},
-	}
+	bringyour.Logger().Printf("FOUND EXCHANGE PORTS %s\n", ports)
 
-	go bringyour.HandleError(exchange.syncResidents, cancel)
-
-	return exchange
+	return NewExchange(ctx, host, ports)
 }
 
 func (self *Exchange) NominateLocalResident(
@@ -580,23 +586,41 @@ func (self *Exchange) NominateLocalResident(
 			resident.Close()
 			self.residentsLock.Lock()
 			if currentResident, ok := self.residents[clientId]; ok && currentResident == resident {
+				bringyour.Logger().Printf("DELETE LOCAL RESIDENT %s %s\n", clientId.String(), resident)
 				delete(self.residents, clientId)
 			}
 			self.residentsLock.Unlock()
 		}
 	}()
 
+	var nominate bool
+	var replacedResident *Resident
+
 	// make sure the new resident is local before nominating
 	// this will prevent failed connections from other exchanges if the nomination succeeds
 	self.residentsLock.Lock()
 	currentResident, ok := self.residents[clientId]
-	localReplaced := !ok && residentIdToReplace == nil || ok && residentIdToReplace != nil && currentResident.residentId == *residentIdToReplace
-	if localReplaced {
+	
+	if ok && instanceId != currentResident.instanceId {
+		nominate = true
+	} else if !ok {
+		nominate = residentIdToReplace == nil
+	} else {
+		nominate = residentIdToReplace != nil && currentResident.residentId == *residentIdToReplace
+	}
+	if nominate {
+		bringyour.Logger().Printf("SET LOCAL RESIDENT %s %s\n", clientId.String(), resident)
+		replacedResident = currentResident
 		self.residents[clientId] = resident
 	}
 	self.residentsLock.Unlock()
 
-	if localReplaced {
+	if nominate {
+		if replacedResident != nil {
+			replacedResident.Close()
+			model.RemoveResident(self.ctx, replacedResident.clientId, replacedResident.residentId)
+		}
+
 		nominated := model.NominateResident(self.ctx, residentIdToReplace, &model.NetworkClientResident{
 			ClientId: clientId,
 			InstanceId: instanceId,
@@ -606,6 +630,7 @@ func (self *Exchange) NominateLocalResident(
 			ResidentBlock: bringyour.RequireBlock(),
 			ResidentInternalPorts: self.ports,
 		})
+		bringyour.Logger().Printf("NOMINATED RESIDENT %s <> %s\n", nominated.ResidentId.String(), resident.residentId.String())
 		if nominated.ResidentId == resident.residentId {
 			success = true
 		}
@@ -673,12 +698,13 @@ func (self *Exchange) syncResidents() {
 		}
 		self.residentsLock.Unlock()
 
-		for _, residentForHostPort := range residentsForHostPortToRemove {
-			model.RemoveResident(self.ctx, residentForHostPort.ClientId, residentForHostPort.ResidentId)
-		}
-
 		for _, resident := range residentsToClose {
 			resident.Close()
+			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
+		}
+
+		for _, residentForHostPort := range residentsForHostPortToRemove {
+			model.RemoveResident(self.ctx, residentForHostPort.ClientId, residentForHostPort.ResidentId)
 		}
 
 
@@ -695,8 +721,8 @@ func (self *Exchange) syncResidents() {
 		self.residentsLock.Unlock()
 
 		for _, resident := range residentsToRemove {
-			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
 			resident.Close()
+			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
 		}
 	}
 }
@@ -716,11 +742,14 @@ func (self *Exchange) Run() {
 		}
 	}()
 
-	for _, port := range self.ports {
-		go func() {
+	for _, port_ := range self.ports {
+		port := port_
+		go bringyour.HandleError(func() {
+			bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d", port)
 			// leave host part empty to listen on all available interfaces
-			server, err := net.Listen("tcp", fmt.Sprintf("%d", port))
+			server, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
+				bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ERROR %s", port, err)
 				return
 			}
 			defer server.Close()
@@ -734,6 +763,7 @@ func (self *Exchange) Run() {
 
 				socket, err := server.Accept()
 				if err != nil {
+					bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ACCEPT ERROR %s", port, err)
 					return
 				}
 				go bringyour.HandleError(
@@ -741,7 +771,7 @@ func (self *Exchange) Run() {
 					self.Close,
 				)
 			}
-		}()
+		}, self.cancel)
 	}
 
 	self.syncResidents()
@@ -753,23 +783,29 @@ func (self *Exchange) handleExchangeClient(conn net.Conn) {
 	}
 	defer closeClient()
 
+	bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT\n")
+
 	receiveBuffer := NewReceiveOnlyExchangeBuffer()
 
 	header, err := receiveBuffer.ReadHeader(self.ctx, conn)
 	if err != nil {
+		bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT READ HEADER ERROR %s\n", err)
 		return
 	}
 
 	self.residentsLock.RLock()
 	resident, ok := self.residents[header.ClientId]
+	bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %s\n", self.residents)
 	self.residentsLock.RUnlock()
 
 	if !ok || resident.residentId != header.ResidentId {
+		bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT MISSING RESIDENT %s %s (%s, %s) \n", header.ClientId.String(), header.ResidentId.String(), ok, resident)
 		return
 	}
 
 	// echo back the header
 	if err := receiveBuffer.WriteHeader(self.ctx, conn, header); err != nil {
+		bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT WRITE HEADER ERROR %s\n", err)
 		return
 	}
 
@@ -777,11 +813,8 @@ func (self *Exchange) handleExchangeClient(conn net.Conn) {
 	case ExchangeOpTransport:
 		send := make(chan []byte)
 		receive := make(chan []byte)
-		go func() {
-			defer func() {
-				close(send)
-				closeClient()
-			}()
+		go bringyour.HandleError(func() {
+			defer closeClient()
 
 			sendBuffer := NewDefaultExchangeBuffer()
 			for {
@@ -797,7 +830,7 @@ func (self *Exchange) handleExchangeClient(conn net.Conn) {
 					return
 				}
 			}
-		}()
+		}, self.cancel)
 		closeTransport := resident.AddTransport(send, receive)
 		defer closeTransport()
 
@@ -890,6 +923,9 @@ func NewResident(
 		ctx: cancelCtx,
 		cancel: cancel,
 		exchange: exchange,
+		clientId: clientId,
+		instanceId: instanceId,
+		residentId: residentId,
 		client: client,
 		clientRouteManager: clientRouteManager,
 		clientContractManager: clientContractManager,

@@ -140,7 +140,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     	}
     }, cancel)
 
-    go func() {
+    go bringyour.HandleError(func() {
         defer closeHandle()
 
     	for {
@@ -158,7 +158,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             // else ignore
             }
         }
-    }()
+    }, cancel)
 
 
     for {

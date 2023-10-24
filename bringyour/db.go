@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	// "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgerrcode"
 )
 
 
@@ -131,7 +132,7 @@ type DbRetryOptions struct {
 	rerunOnConnectionError bool
 	// this only works if the conflict, e.g. an ID, is changed on each run
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
-	rerunOnConstraintError bool
+	rerunOnTransientError bool
 	retryTimeout time.Duration
 	endRetryTimeout time.Duration
 	debugRetryTimeout time.Duration
@@ -142,10 +143,10 @@ func OptRetryDefault() DbRetryOptions {
 	return DbRetryOptions{
 		rerunOnCommitError: true,
 		rerunOnConnectionError: true,
-		rerunOnConstraintError: true,
+		rerunOnTransientError: true,
 		retryTimeout: 1 * time.Second,
-		endRetryTimeout: 10 * time.Second,
-		debugRetryTimeout: 30 * time.Second,
+		endRetryTimeout: 60 * time.Second,
+		debugRetryTimeout: 0 * time.Second,
 	}
 }
 
@@ -153,7 +154,7 @@ func OptNoRetry() DbRetryOptions {
 	return DbRetryOptions{
 		rerunOnCommitError: false,
 		rerunOnConnectionError: false,
-		rerunOnConstraintError: false,
+		rerunOnTransientError: false,
 	}
 }
 
@@ -194,6 +195,22 @@ func OptDebugTx() DbDebugOptions {
 	}
 }
 */
+
+
+// transient errors can be resolved by either
+// - changing the parameters of the query to avoid constraint conflicts
+// - chaning the timing of the query to avoid rollbacks
+// https://www.postgresql.org/docs/current/mvcc-serialization-failure-handling.html
+// https://www.postgresql.org/docs/current/errcodes-appendix.html
+func isTransient(pgErr *pgconn.PgError) bool {
+	if pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) {
+		return true
+	}
+	if pgerrcode.IsTransactionRollback(pgErr.Code) {
+		return true
+	}
+	return false
+}
 
 
 func Db(ctx context.Context, callback func(PgConn), options ...any) error {
@@ -244,12 +261,15 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			return connErr
 		}
 
+		Logger().Printf("DB OPEN\n")
+		// debug.PrintStack()
+
 		func() {
 			defer func() {
 				if err := recover(); err != nil {
 					switch v := err.(type) {
 					case *pgconn.PgError:
-						if v.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+						if isTransient(v) && retryOptions.rerunOnTransientError {
 							pgErr = v
 						} else {
 							panic(v)
@@ -260,6 +280,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				}
 			}()
 			defer conn.Release()
+			defer Logger().Printf("DB CLOSE\n")
 			if !rwOptions.readOnly {
 				// the default is read only, escalate to rw
 				RaisePgResult(conn.Exec(ctx, "SET default_transaction_read_only=off"))
@@ -268,7 +289,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 		}()
 
 		if pgErr != nil {
-			if pgErr.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
@@ -277,7 +298,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				if retryEndTime.Before(time.Now()) {
 					panic(pgErr)
 				}
-				Logger().Printf("Constraint error, retry (%v)\n", pgErr)
+				Logger().Printf("Transient error, retry (%v)\n", pgErr)
 				if retryDebugTime.Before(time.Now()) {
 					debug.PrintStack()
 				}
@@ -344,7 +365,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 					if err := recover(); err != nil {
 						switch v := err.(type) {
 						case *pgconn.PgError:
-							if v.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+							if isTransient(v) && retryOptions.rerunOnTransientError {
 								pgErr = v
 							} else {
 								panic(v)
@@ -370,7 +391,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 		}
 
 		if pgErr != nil {
-			if pgErr.ConstraintName != "" && retryOptions.rerunOnConstraintError {
+			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
 					return errors.New("Done")
@@ -379,7 +400,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				if retryEndTime.Before(time.Now()) {
 					panic(pgErr)
 				}
-				Logger().Printf("Constraint error, retry (%v)\n", pgErr)
+				Logger().Printf("Transient error, retry (%v)\n", pgErr)
 				if retryDebugTime.Before(time.Now()) {
 					debug.PrintStack()
 				}

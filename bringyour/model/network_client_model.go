@@ -634,9 +634,9 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 				UPDATE network_client_connection
 				SET
 					connected = false,
-					disconnect_time = $1
+					disconnect_time = $2
 				WHERE
-					connection_id = $2
+					connection_id = $1
 			`,
 			connectionId,
 			disconnectTime,
@@ -757,13 +757,26 @@ func dbGetResidentInTx(
 }
 
 
+func dbGetResidentWithInstanceInTx(
+	ctx context.Context,
+	tx bringyour.PgTx,
+	clientId bringyour.Id,
+	instanceId bringyour.Id,
+) *NetworkClientResident {
+	resident := dbGetResidentInTx(ctx, tx, clientId)
+	if resident != nil && resident.InstanceId == instanceId {
+		return resident
+	}
+	return nil
+}
+
+
 func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	// important: use serializable tx
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentInTx(ctx, tx, clientId)
-	}, bringyour.TxSerializable)
+	})
 
 	return resident
 }
@@ -772,12 +785,9 @@ func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResid
 func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	// important: use serializable tx
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		if resident_ := dbGetResidentInTx(ctx, tx, clientId); resident_ != nil && resident_.InstanceId == instanceId {
-			resident = resident_
-		}
-	}, bringyour.TxSerializable)
+		resident = dbGetResidentWithInstanceInTx(ctx, tx, clientId, instanceId)
+	})
 
 	return resident
 }
@@ -791,16 +801,17 @@ func NominateResident(
 ) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	// important: use serializable tx
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		resident = dbGetResidentInTx(ctx, tx, nomination.ClientId)
+	bringyour.Logger().Printf("NOMINATE")
 
-		if resident != nil && (residentIdToReplace == nil || resident.ResidentId != *residentIdToReplace) {
+	// important: use serializable tx
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		resident = dbGetResidentWithInstanceInTx(ctx, tx, nomination.ClientId, nomination.InstanceId)
+
+		if resident != nil && residentIdToReplace != nil && *residentIdToReplace == resident.ResidentId {
 			// already replaced
 			return
 		}
 
-		nomination.ResidentId = bringyour.NewId()
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -830,6 +841,19 @@ func NominateResident(
 		)
 		bringyour.Raise(err)
 
+		_, err = tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_client_resident_port
+				WHERE
+					client_id = $1 AND
+					resident_id = $2
+			`,
+			nomination.ClientId,
+			nomination.ResidentId,
+		)
+		bringyour.Raise(err)
+
 		for _, port := range nomination.ResidentInternalPorts {
 			_, err = tx.Exec(
 				ctx,
@@ -849,7 +873,7 @@ func NominateResident(
 		}
 
 		resident = nomination
-	}, bringyour.TxSerializable)
+	}, bringyour.TxSerializable))
 
 	return resident
 }
@@ -899,7 +923,7 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 			resident := dbGetResidentInTx(ctx, tx, clientId)
 			residents = append(residents, resident)
 		}
-	}, bringyour.TxSerializable)
+	})
 	
 	return residents
 }
@@ -910,7 +934,7 @@ func RemoveResident(
 	clientId bringyour.Id,
 	residentId bringyour.Id,
 ) {
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -936,6 +960,6 @@ func RemoveResident(
 			residentId,
 		)
 		bringyour.Raise(err)
-	}, bringyour.TxSerializable)
+	}))
 }
 
