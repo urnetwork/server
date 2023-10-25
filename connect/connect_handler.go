@@ -54,6 +54,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     cancelCtx, cancel := context.WithCancel(self.ctx)
 
     closeHandle := func() {
+        bringyour.Logger().Printf("NETWORK CLIENT CLOSE HANDLE\n",)
         cancel()
         ws.Close()
     }
@@ -135,6 +136,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     		}
 
     		if !model.IsNetworkClientConnected(cancelCtx, connectionId) {
+                bringyour.Logger().Printf("NETWORK CLIENT DISCONNECTED\n",)
     			return
     		}
     	}
@@ -145,6 +147,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
     	for {
             messageType, message, err := ws.ReadMessage()
+            bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
             if err != nil {
                 return
             }
@@ -169,11 +172,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             if !ok {
                 return
             }
+            bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
             if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
+                bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
                 return
             }
         case <- time.After(PingTimeout):
             if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+                bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
                 return
             }
         }

@@ -536,7 +536,7 @@ func SetProvide(
 					client_id,
 					provide_mode
 				) VALUES ($1, $2)
-				ON CONFLICT (client_id) UPDATE
+				ON CONFLICT (client_id) DO UPDATE
 				SET
 					provide_mode = $2
 			`,
@@ -807,7 +807,10 @@ func NominateResident(
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentWithInstanceInTx(ctx, tx, nomination.ClientId, nomination.InstanceId)
 
-		if resident != nil && residentIdToReplace != nil && *residentIdToReplace == resident.ResidentId {
+		if residentIdToReplace != nil && (resident == nil || resident.ResidentId != *residentIdToReplace) {
+			// already replaced
+			return
+		} else if residentIdToReplace == nil && resident != nil {
 			// already replaced
 			return
 		}
