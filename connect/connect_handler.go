@@ -53,12 +53,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
     cancelCtx, cancel := context.WithCancel(self.ctx)
 
-    closeHandle := func() {
+    defer func() {
         bringyour.Logger().Printf("NETWORK CLIENT CLOSE HANDLE\n",)
         cancel()
         ws.Close()
-    }
-    defer closeHandle()
+    }()
 
 
     messageType, authFrameBytes, err := ws.ReadMessage()
@@ -122,11 +121,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         *byJwt.ClientId,
         instanceId,
     )
-    defer residentTransport.Close()
+    
 
     go bringyour.HandleError(func() {
     	// disconnect the client if the model marks the connection closed
-        defer closeHandle()
+        
 
     	for  {
     		select {
@@ -143,7 +142,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     }, cancel)
 
     go bringyour.HandleError(func() {
-        defer closeHandle()
+        // close the transport in the send
+        defer residentTransport.Close()
 
     	for {
             messageType, message, err := ws.ReadMessage()

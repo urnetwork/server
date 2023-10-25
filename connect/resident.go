@@ -54,6 +54,8 @@ const ExchangeConnectTimeout = 1 * time.Second
 const NomateLocationResidentTimeout = 1 * time.Second
 
 const ClientDrainTimeout = 30 * time.Second
+const TransportDrainTimeout = 30 * time.Second
+const ForwardTimeout = 200 * time.Millisecond
 
 
 var ControlId = bringyour.Id(connect.ControlId)
@@ -1005,6 +1007,8 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		select {
 		case <- self.ctx.Done():
 		case forward.send <- transferFrameBytes:
+		case <- time.After(ForwardTimeout):
+			// drop the message
 		}
 	}
 	// else drop the message
@@ -1098,6 +1102,7 @@ func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContrac
 		int(createContract.TransferByteCount),
 		minRelationship,
 	)
+	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", int(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
 
 	if err != nil {
 		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR INSUFFICIENT BALANCE\n")
@@ -1113,7 +1118,7 @@ func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContrac
 
 	storedContract := &protocol.StoredContract{
 		ContractId: contractId.Bytes(),
-		TransferByteCount: uint32(contractByteCount),
+		TransferByteCount: uint64(contractByteCount),
 		SourceId: sourceId.Bytes(),
 		DestinationId: destinationId.Bytes(),
 	}
@@ -1178,16 +1183,19 @@ func (self *Resident) AddTransport() (send chan[] byte, receive chan[] byte, clo
 		self.stateLock.Lock()
 		self.clientRouteManager.RemoveTransport(transport.sendTransport)
 		self.clientRouteManager.RemoveTransport(transport.receiveTransport)
-		_, ok := self.transports[transport]
-		// the transport may have already beenr removed and closed
-		if ok {
-			delete(self.transports, transport)
-		}
+		delete(self.transports, transport)
 		self.stateLock.Unlock()
 
-		if ok {
-			transport.Close()
-		}
+		// transport.Close()
+
+		go func() {
+			select {
+			case <- time.After(TransportDrainTimeout):
+			}
+
+			close(send)
+			close(receive)
+		}()
 	}
 
 	return
@@ -1235,6 +1243,7 @@ func (self *Resident) Close() {
 		select {
 		case <- time.After(ClientDrainTimeout):
 		}
+
 		self.client.Close()
 	}()
 }
@@ -1443,10 +1452,10 @@ type clientTransport struct {
 	receiveTransport *clientReceiveTransport
 }
 
-func (self *clientTransport) Close() {
-	self.sendTransport.Close()
-	self.receiveTransport.Close()
-}
+// func (self *clientTransport) Close() {
+// 	self.sendTransport.Close()
+// 	self.receiveTransport.Close()
+// }
 
 
 // conforms to `connect.Transport`
@@ -1488,9 +1497,9 @@ func (self *clientSendTransport) Downgrade(sourceId connect.Id) {
 	// nothing to downgrade
 }
 
-func (self *clientSendTransport) Close() {
-	close(self.send)
-}
+// func (self *clientSendTransport) Close() {
+// 	close(self.send)
+// }
 
 
 // conforms to `connect.Transport`
@@ -1531,9 +1540,9 @@ func (self *clientReceiveTransport) Downgrade(sourceId connect.Id) {
 	// nothing to downgrade
 }
 
-func (self *clientReceiveTransport) Close() {
-	close(self.receive)
-}
+// func (self *clientReceiveTransport) Close() {
+// 	close(self.receive)
+// }
 
 
 type limiter struct {
