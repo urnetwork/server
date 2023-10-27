@@ -457,7 +457,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 		case err := <- end:
 			assert.Equal(t, err, nil)
 		case <- time.After(60 * time.Second):
-			t.Fail()
+			t.FailNow()
 		}
 	}
 

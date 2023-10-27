@@ -774,9 +774,9 @@ func dbGetResidentWithInstanceInTx(
 func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentInTx(ctx, tx, clientId)
-	})
+	}))
 
 	return resident
 }
@@ -785,9 +785,9 @@ func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResid
 func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentWithInstanceInTx(ctx, tx, clientId, instanceId)
-	})
+	}))
 
 	return resident
 }
@@ -807,12 +807,14 @@ func NominateResident(
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentWithInstanceInTx(ctx, tx, nomination.ClientId, nomination.InstanceId)
 
-		if residentIdToReplace != nil && (resident == nil || resident.ResidentId != *residentIdToReplace) {
-			// already replaced
-			return
-		} else if residentIdToReplace == nil && resident != nil {
-			// already replaced
-			return
+		if resident != nil {
+			if residentIdToReplace != nil && resident.ResidentId != *residentIdToReplace {
+				// already replaced
+				return
+			} else if residentIdToReplace == nil {
+				// already replaced
+				return
+			}
 		}
 
 		_, err := tx.Exec(
