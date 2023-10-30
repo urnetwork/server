@@ -252,7 +252,7 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 
 	matches := map[bringyour.Id]*SearchResult{}
 
-	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		sql := strings.Join(sqlParts, " ")
 
 		candidateCount := 0
@@ -288,15 +288,15 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
     	})
 
     	stats.CandidateCount = candidateCount
-    })
+    }))
 
 	return maps.Values(matches)
 }
 
 func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id, valueVariant int) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
     	self.AddInTx(ctx, value, valueId, valueVariant, tx)
-    })
+    }))
 }
 
 func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {

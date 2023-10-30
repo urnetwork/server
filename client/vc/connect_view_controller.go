@@ -2,7 +2,11 @@ package vc
 
 
 import (
+	"context"
+
 	"golang.org/x/mobile/gl"
+
+	"bringyour.com/connect"
 
 	"bringyour.com/client"
 )
@@ -12,12 +16,21 @@ var cvcLog = client.LogFn("connect_view_controller")
 
 
 type ConnectViewController struct {
+	ctx context.Context
+	cancel context.CancelFunc
+	client *connect.Client
+
 	glViewController
 }
 
 
-func NewConnectViewController() *ConnectViewController {
+func NewConnectViewController(ctx context.Context, client *connect.Client) *ConnectViewController {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
 	vc := &ConnectViewController{
+		ctx: cancelCtx,
+		cancel: cancel,
+		client: client,
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc
@@ -40,6 +53,7 @@ func (self *ConnectViewController) drawLoopClose() {
 }
 
 func (self *ConnectViewController) Close() {
-	// FIXME
 	cvcLog("close")
+
+	self.cancel()
 }

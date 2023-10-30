@@ -2,7 +2,11 @@ package vc
 
 
 import (
+	"context"
+
 	"golang.org/x/mobile/gl"
+
+	"bringyour.com/connect"
 
 	"bringyour.com/client"
 )
@@ -12,18 +16,29 @@ var pvcLog = client.LogFn("provide_view_controller")
 
 
 type ProvideViewController struct {
+	ctx context.Context
+	cancel context.CancelFunc
+	
+	client *connect.Client
+
+	router client.Router
+
 	glViewController
 }
 
+func NewProvideViewController(ctx context.Context, client *connect.Client, router client.Router) *ProvideViewController {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
-func NewProvideViewController() *ProvideViewController {
 	vc := &ProvideViewController{
+		ctx: cancelCtx,
+		cancel: cancel,
+		client: client,
+		router: router,
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc
 	return vc
 }
-
 
 func (self *ProvideViewController) draw(g gl.Context) {
 	// pvcLog("draw")
@@ -40,7 +55,7 @@ func (self *ProvideViewController) drawLoopClose() {
 }
 
 func (self *ProvideViewController) Close() {
-	// FIXME
-
 	pvcLog("close")
+
+	self.cancel()
 }

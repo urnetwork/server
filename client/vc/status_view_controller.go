@@ -2,7 +2,11 @@ package vc
 
 
 import (
+	"context"
+
 	"golang.org/x/mobile/gl"
+
+	"bringyour.com/connect"
 
 	"bringyour.com/client"
 )
@@ -12,22 +16,29 @@ var svcLog = client.LogFn("status_view_controller")
 
 
 type StatusViewController struct {
+	ctx context.Context
+	cancel context.CancelFunc
+
+	client *connect.Client
 
 	// glInitialized bool
 
 	glViewController
 }
 
+func NewStatusViewController(ctx context.Context, client *connect.Client) *StatusViewController {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
-func NewStatusViewController() *StatusViewController {
 	vc := &StatusViewController{
+		ctx: cancelCtx,
+		cancel: cancel,
+		client: client,
 		// glInitialized: false,
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc
 	return vc
 }
-
 
 func (self *StatusViewController) draw(g gl.Context) {
 	// draw something
@@ -59,17 +70,15 @@ func (self *StatusViewController) draw(g gl.Context) {
     // glEnd();
 }
 
-
 func (self *StatusViewController) drawLoopOpen() {
 	self.frameRate = 24
 }
 
-
 func (self *StatusViewController) drawLoopClose() {
 }
 
-
 func (self *StatusViewController) Close() {
-	// FIXME
 	svcLog("close")
+
+	self.cancel()
 }

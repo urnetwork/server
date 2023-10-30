@@ -20,7 +20,7 @@ func PreferencesSet(
 	preferencesSet PreferencesSetArgs,
 	session *session.ClientSession,
 ) (*PreferencesSetResult, error) {
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			session.Ctx,
 			`
@@ -32,7 +32,7 @@ func PreferencesSet(
 			preferencesSet.ProductUpdates,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 
 	result := &PreferencesSetResult{}
 	return result, nil
@@ -73,7 +73,7 @@ func FeedbackSend(
 	feedbackSend FeedbackSendArgs,
 	session *session.ClientSession,
 ) (*FeedbackSendResult, error) {
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		feedbackId := bringyour.NewId()
 		_, err := tx.Exec(
 			session.Ctx,
@@ -125,7 +125,7 @@ func FeedbackSend(
 			feedbackSend.Needs.Other,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 
 	result := &FeedbackSendResult{}
 	return result, nil

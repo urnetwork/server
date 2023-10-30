@@ -613,7 +613,7 @@ func CreateLocation(ctx context.Context, location *Location) {
     }
 
     // country
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -680,7 +680,7 @@ func CreateLocation(ctx context.Context, location *Location) {
         for i, searchStr := range countryLocation.SearchStrings() {
             locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
-    }, bringyour.TxSerializable)
+    }, bringyour.TxSerializable))
 
     if location.LocationType == LocationTypeCountry {
         *location = *countryLocation
@@ -688,7 +688,7 @@ func CreateLocation(ctx context.Context, location *Location) {
     }
 
     // region
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -764,7 +764,7 @@ func CreateLocation(ctx context.Context, location *Location) {
         for i, searchStr := range regionLocation.SearchStrings() {
             locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
-    }, bringyour.TxSerializable)
+    }, bringyour.TxSerializable))
 
     if location.LocationType == LocationTypeRegion {
         *location = *regionLocation
@@ -772,7 +772,7 @@ func CreateLocation(ctx context.Context, location *Location) {
     }
 
     // city
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -856,7 +856,7 @@ func CreateLocation(ctx context.Context, location *Location) {
         for i, searchStr := range cityLocation.SearchStrings() {
             locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
         }
-    }, bringyour.TxSerializable)
+    }, bringyour.TxSerializable))
 
     *location = *cityLocation
 }
@@ -871,7 +871,7 @@ type LocationGroup struct {
 
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         locationGroup.LocationGroupId = bringyour.NewId()
 
         _, err := tx.Exec(
@@ -905,14 +905,14 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
                 )
             }
         })
-    }, bringyour.TxSerializable)
+    }, bringyour.TxSerializable))
 }
 
 
 func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool {
     success := false
 
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag, err := tx.Exec(
             ctx,
             `
@@ -959,7 +959,7 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
         })
 
         success = true
-    }, bringyour.TxSerializable)
+    }, bringyour.TxSerializable))
 
     return success
 }
@@ -970,7 +970,7 @@ func SetConnectionLocation(
     connectionId bringyour.Id,
     locationId bringyour.Id,
 ) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         _, err := tx.Exec(
             ctx,
             `
@@ -995,7 +995,7 @@ func SetConnectionLocation(
             locationId,
         )
         bringyour.Raise(err)
-    })
+    }))
 }
 
 
@@ -1073,7 +1073,7 @@ func FindActiveProviderLocations(
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
     
-    bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         searchLocationIds := []bringyour.Id{}
         copy(searchLocationIds, maps.Keys(locationSearchResults))
         // extend the locations with the search group members
@@ -1287,7 +1287,7 @@ func FindActiveProviderLocations(
                 locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
             }
         })
-    })
+    }))
 
     return &FindLocationsResult{
         Locations: locationResults,
@@ -1302,7 +1302,7 @@ func GetActiveProviderLocations(
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
 
-    bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             session.Ctx,
             `
@@ -1430,7 +1430,7 @@ func GetActiveProviderLocations(
                 locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
             }
         })
-    })
+    }))
 
     return &FindLocationsResult{
         Locations: locationResults,
@@ -1468,7 +1468,7 @@ func FindLocations(
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
     
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         searchLocationIds := []bringyour.Id{}
         copy(searchLocationIds, maps.Keys(locationSearchResults))
         // extend the locations with the search group members
@@ -1603,7 +1603,7 @@ func FindLocations(
                 locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
             }
         })
-    })
+    }))
 
     return &FindLocationsResult{
         Locations: locationResults,
@@ -1615,7 +1615,7 @@ func FindLocations(
 func GetActiveProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bringyour.Id {
     clientIds := []bringyour.Id{}
 
-    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1647,7 +1647,7 @@ func GetActiveProvidersForLocation(ctx context.Context, locationId bringyour.Id)
                 clientIds = append(clientIds, clientId)
             }
         })
-    })
+    }))
 
     return clientIds
 }
@@ -1659,7 +1659,7 @@ func GetActiveProvidersForLocationGroup(
 ) []bringyour.Id {
     clientIds := []bringyour.Id{}
 
-    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1703,7 +1703,7 @@ func GetActiveProvidersForLocationGroup(
                 clientIds = append(clientIds, clientId)
             }
         })
-    })
+    }))
 
     return clientIds
 }
@@ -1715,7 +1715,7 @@ func GetLatestIpLocationLookupResult(
     earliestResultTime time.Time,
 ) string {
     var resultJson string
-    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1734,7 +1734,7 @@ func GetLatestIpLocationLookupResult(
                 bringyour.Raise(result.Scan(&resultJson))
             }
         })
-    })
+    }))
     return resultJson
 }
 
@@ -1744,7 +1744,7 @@ func SetIpLocationLookupResult(
     ipStr string,
     result string,
 ) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         _, err := tx.Exec(
             ctx,
             `
@@ -1758,6 +1758,6 @@ func SetIpLocationLookupResult(
             result,
         )
         bringyour.Raise(err)
-    })
+    }))
 }
 

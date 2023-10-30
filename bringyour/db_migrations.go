@@ -214,18 +214,18 @@ var migrations = []any{
             extender_id uuid NULL,
             event_type varchar(64) NOT NULL,
             event_details text NULL,
-            transfer_bytes bigint NOT NULL DEFAULT 0,
+            transfer_byte_count bigint NOT NULL DEFAULT 0,
             transfer_packets bigint NOT NULL DEFAULT 0,
 
             PRIMARY KEY (event_id)
         )
     `),
     newSqlMigration(`
-        CREATE INDEX audit_contract_event_stats ON audit_contract_event (event_time, transfer_bytes, transfer_packets)
+        CREATE INDEX audit_contract_event_stats ON audit_contract_event (event_time, transfer_byte_count, transfer_packets)
     `),
     newSqlMigration(`
         CREATE INDEX audit_contract_event_stats_extender_id
-        ON audit_contract_event (event_time, extender_id, transfer_bytes, transfer_packets)
+        ON audit_contract_event (event_time, extender_id, transfer_byte_count, transfer_packets)
     `),
 
     newSqlMigration(`
@@ -601,11 +601,11 @@ var migrations = []any{
             network_id uuid NOT NULL,
             start_time timestamp NOT NULL DEFAULT now(),
             end_time timestamp NOT NULL,
-            start_balance_bytes bigint NOT NULL,
+            start_balance_byte_count bigint NOT NULL,
             net_revenue_nano_cents bigint NOT NULL,
 
-            balance_bytes bigint NOT NULL,
-            active bool GENERATED ALWAYS AS (0 < balance_bytes) STORED,
+            balance_byte_count bigint NOT NULL,
+            active bool GENERATED ALWAYS AS (0 < balance_byte_count) STORED,
 
             PRIMARY KEY (balance_id)
         )
@@ -630,7 +630,7 @@ var migrations = []any{
             destination_network_id uuid NOT NULL,
             destination_id uuid NOT NULL,
             open bool GENERATED ALWAYS AS (dispute = false AND outcome IS NULL) STORED,
-            transfer_bytes bigint NOT NULL,
+            transfer_byte_count bigint NOT NULL,
             create_time timestamp NOT NULL DEFAULT now(),
             close_time timestamp NULL,
 
@@ -659,40 +659,40 @@ var migrations = []any{
             contract_id uuid NOT NULL,
             close_time timestamp NOT NULL DEFAULT now(),
             party varchar(16) NOT NULL,
-            used_transfer_bytes bigint NOT NULL,
+            used_transfer_byte_count bigint NOT NULL,
 
             PRIMARY KEY (contract_id, party)
         )
     `),
     
     // creating an escrow must deduct the balances in the same transaction
-    // settling an escrow must put `payout_bytes` into the target account_balances, and `balance_bytes - payout_bytes` back into the origin balance
+    // settling an escrow must put `payout_byte_count` into the target account_balances, and `balance_byte_count - payout_byte_count` back into the origin balance
     // primary key is (contract_id, balance_id) because there can be multiple balances used per contract_id
     newSqlMigration(`
         CREATE TABLE transfer_escrow (
             contract_id uuid NOT NULL,
             balance_id uuid NOT NULL,
-            balance_bytes bigint NOT NULL,
+            balance_byte_count bigint NOT NULL,
             
             escrow_date timestamp NOT NULL DEFAULT now(),
             
             settled bool NOT NULL DEFAULT false,
             settle_time timestamp NULL,
-            payout_bytes bigint NULL,
+            payout_byte_count bigint NULL,
 
             PRIMARY KEY (contract_id, balance_id)
         )
     `),
 
-    // note the unpaid balance is `provided_balance_bytes - paid_balance_bytes`
-    // this equals SUM(transfer_escrow_sweep.payout_bytes) where payment_id IS NULL
+    // note the unpaid balance is `provided_balance_byte_count - paid_balance_byte_count`
+    // this equals SUM(transfer_escrow_sweep.payout_byte_count) where payment_id IS NULL
     // the cents to pay out is SUM(transfer_escrow_sweep.net_revenue_cents)
     newSqlMigration(`
         CREATE TABLE account_balance (
             network_id uuid NOT NULL,
-            provided_bytes bigint NOT NULL DEFAULT 0,
+            provided_byte_count bigint NOT NULL DEFAULT 0,
             provided_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
-            paid_bytes bigint NOT NULL DEFAULT 0,
+            paid_byte_count bigint NOT NULL DEFAULT 0,
             paid_net_revenue_nano_cents bigint NOT NULL DEFAULT 0,
 
             PRIMARY KEY (network_id)
@@ -702,7 +702,7 @@ var migrations = []any{
     // sweeps escrow value into an account
     // the payment_id is the payment the swept value was paid out using
     // the value of the unpaid balance needs to go back to the escrows to where the balance came from
-    // the cents contribution of each escrow is `(escrow.payout_bytes / balance.balance_bytes) * balance.net_revenue_cents`
+    // the cents contribution of each escrow is `(escrow.payout_byte_count / balance.balance_byte_count) * balance.net_revenue_cents`
     //
     // payment flow:
     // 1. create an `account_payment` entry which is `complete=false`
@@ -714,7 +714,7 @@ var migrations = []any{
             contract_id uuid NOT NULL,
             balance_id uuid NOT NULL,
             network_id uuid NOT NULL,
-            payout_bytes bigint NOT NULL,
+            payout_byte_count bigint NOT NULL,
             payout_net_revenue_nano_cents bigint NOT NULL,
             sweep_time timestamp NOT NULL DEFAULT now(),
 
@@ -781,7 +781,7 @@ var migrations = []any{
             payment_id uuid NOT NULL,
             payment_plan_id uuid NOT NULL,
             wallet_id uuid NOT NULL,
-            payout_bytes bigint NOT NULL,
+            payout_byte_count bigint NOT NULL,
             payout_nano_cents bigint NOT NULL,
             min_sweep_time timestamp NOT NULL,
             create_time timestamp NOT NULL DEFAULT now(),
@@ -826,7 +826,7 @@ var migrations = []any{
             create_time timestamp NOT NULL,
             start_time timestamp NOT NULL,
             end_time timestamp NOT NULL,
-            balance_bytes bigint NOT NULL,
+            balance_byte_count bigint NOT NULL,
             net_revenue_nano_cents bigint NOT NULL,
             balance_code_secret varchar(128) NOT NULL,
 

@@ -28,15 +28,18 @@ import (
 // we use one socket per client transport because the socket will block based on the slowest destination
 
 
+type ByteCount = model.ByteCount
 
+
+// a single exchange message size is encoded as an `int32`
 // because message must be serialized/deserialized from memory,
 // there is a global limit on the size per message
 // messages above this size will be ignored from clients and the exchange
-const MaximumMessageSizeBytes = 2048
+const MaximumExchangeMessageByteCount = int(2048)
 
 // 8Gib minimum contract
 // this is set high enough to limit the number of parallel contracts and avoid contract spam
-const MinContractTransferBytes = 8 * 1024 * 1024 * 1024
+const MinContractTransferByteCount = ByteCount(8 * 1024 * 1024 * 1024)
 
 const StartInternalPort = 5080
 const MaxConcurrentForwardsPerResident = 32
@@ -49,7 +52,7 @@ const ContractSyncTimeout = 30 * time.Second
 const AbuseMinTimeout = 5 * time.Second
 const ControlMinTimeout = 200 * time.Millisecond
 
-const ExchangeConnectTimeout = 30 * time.Second
+const ExchangeConnectTimeout = 1 * time.Second
 
 // const NominateLocalResidentTimeout = 1 * time.Second
 
@@ -75,7 +78,7 @@ type ExchangeBuffer struct {
 
 func NewDefaultExchangeBuffer() *ExchangeBuffer {
 	return &ExchangeBuffer{
-		buffer: make([]byte, MaximumMessageSizeBytes + 4),
+		buffer: make([]byte, MaximumExchangeMessageByteCount + 4),
 	} 
 }
 
@@ -119,8 +122,8 @@ func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, tra
 
 	n := len(transferFrameBytes)
 
-	if MaximumMessageSizeBytes < n {
-		return errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumMessageSizeBytes, n))
+	if MaximumExchangeMessageByteCount < n {
+		return errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumExchangeMessageByteCount, n))
 	}
 
 	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
@@ -143,8 +146,8 @@ func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]b
 	}
 
 	n := int(binary.LittleEndian.Uint32(self.buffer[0:4]))
-	if MaximumMessageSizeBytes < n {
-		return nil, errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumMessageSizeBytes, n))
+	if MaximumExchangeMessageByteCount < n {
+		return nil, errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumExchangeMessageByteCount, n))
 	}
 
 	// read into a new buffer
@@ -1354,10 +1357,10 @@ func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContrac
 	contractId, contractByteCount, err := self.contractManager.CreateContract(
 		sourceId,
 		destinationId,
-		int(createContract.TransferByteCount),
+		ByteCount(createContract.TransferByteCount),
 		minRelationship,
 	)
-	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", int(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
+	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
 
 	if err != nil {
 		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR INSUFFICIENT BALANCE\n")
@@ -1409,7 +1412,7 @@ func (self *Resident) controlCloseContract(sourceId bringyour.Id, closeContract 
 	self.contractManager.CloseContract(
 		bringyour.RequireIdFromBytes(closeContract.ContractId),
 		sourceId,
-		int(closeContract.AckedByteCount),
+		ByteCount(closeContract.AckedByteCount),
 	)
 }
 
@@ -1635,9 +1638,9 @@ func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinatio
 func (self *contractManager) CreateContract(
 	sourceId bringyour.Id,
 	destinationId bringyour.Id,
-	transferBytes int,
+	transferByteCount ByteCount,
 	provideMode model.ProvideMode,
-) (contractId bringyour.Id, contractTransferBytes int, returnErr error) {
+) (contractId bringyour.Id, contractTransferByteCount ByteCount, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
 	if err != nil {
 		// the source is not a real client
@@ -1651,7 +1654,7 @@ func (self *contractManager) CreateContract(
 		return
 	}
 	
-	contractTransferBytes = max(MinContractTransferBytes, transferBytes)
+	contractTransferByteCount = max(MinContractTransferByteCount, transferByteCount)
 
 	if provideMode < model.ProvideModePublic {
 		contractId, err = model.CreateContractNoEscrow(
@@ -1660,20 +1663,26 @@ func (self *contractManager) CreateContract(
 			sourceId,
 			destinationNetworkId,
 			destinationId,
-			contractTransferBytes,
+			contractTransferByteCount,
 		)
 		if err != nil {
 			returnErr = err
 			return
 		}
 	} else {
+		// FIXME companion contract support
+		// FIXME
+		// FIXME the payment hole around this will be fixed with stream ids
+		// if there is an escrow contract in the opposite direction, without an existing companion contract,
+		// create the escrow using the opposite direction as the payer
+
 		escrow, err := model.CreateTransferEscrow(
 			self.ctx,
 			sourceNetworkId,
 			sourceId,
 			destinationNetworkId,
 			destinationId,
-			contractTransferBytes,
+			contractTransferByteCount,
 		)
 		if err != nil {
 			returnErr = err
@@ -1699,7 +1708,7 @@ func (self *contractManager) CreateContract(
 func (self *contractManager) CloseContract(
 	contractId bringyour.Id,
 	clientId bringyour.Id,
-	usedTransferBytes int,
+	usedTransferByteCount ByteCount,
 ) error {
 	// update the cache
 	self.stateLock.Lock()
@@ -1710,7 +1719,7 @@ func (self *contractManager) CloseContract(
 	}
 	self.stateLock.Unlock()
 
-	err := model.CloseContract(self.ctx, contractId, clientId, usedTransferBytes)
+	err := model.CloseContract(self.ctx, contractId, clientId, usedTransferByteCount)
 	if err != nil {
 		return err
 	}

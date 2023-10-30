@@ -83,6 +83,7 @@ type Stats struct {
     ActiveDevices map[bringyour.Id]bool
 }
 
+
 type ProviderState struct {
 	networkId bringyour.Id
 	superspeed bool
@@ -90,6 +91,7 @@ type ProviderState struct {
 	regionName string
 	cityName string
 }
+
 
 type ExtenderState struct {
 	networkId bringyour.Id
@@ -109,7 +111,7 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		CreatedTime: time.Now().UnixMilli(),
 	}
 
-	bringyour.Db(ctx, func (conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(ctx, func (conn bringyour.PgConn) {
 		bringyour.Logger().Printf("ComputeStats90 computeStatsProvider\n")
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
@@ -137,10 +139,11 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		bringyour.Logger().Printf("ComputeStats90 computeStatsExtenderTransfer\n")
 		// extender transfer
 		computeStatsExtenderTransfer(ctx, stats, conn)
-	})
+	}))
 
 	return stats
 }
+
 
 func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
@@ -300,6 +303,7 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 	})
 }
 
+
 func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
@@ -420,6 +424,7 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgCo
 	})
 }
 
+
 func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
@@ -512,6 +517,7 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgCon
 	    stats.ActiveNetworks = activeNetworks
 	})
 }
+
 
 func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
@@ -607,6 +613,7 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn
 	})
 }
 
+
 func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
@@ -673,6 +680,7 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgCo
 	})
 }
 
+
 func computeStatsPackets(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
     startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
@@ -738,6 +746,7 @@ func computeStatsPackets(ctx context.Context, stats *Stats, conn bringyour.PgCon
 	    stats.AllTransferSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60 * 60 * 24)))
 	})
 }
+
 
 func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
 	startDay, endDay := dayRange(stats.Lookback)
@@ -821,6 +830,7 @@ func summary(data map[string]int) int {
 	return maxValue
 }
 
+
 func dayRange(lookback int) (string, string) {
 	// this should be running in the same tz as postgres
 	end := time.Now().Local()
@@ -831,6 +841,7 @@ func dayRange(lookback int) (string, string) {
 	return start.Format("2006-01-02"), end.Format("2006-01-02")
 }
 
+
 func nextDay(day string) string {
 	start, err := time.Parse("2006-01-02", day)
 	bringyour.Raise(err)
@@ -839,7 +850,6 @@ func nextDay(day string) string {
 	end := start.Add(d)
 	return end.Format("2006-01-02")
 }
-
 
 
 func ExportStats(ctx context.Context, stats *Stats) {
@@ -857,6 +867,7 @@ func ExportStats(ctx context.Context, stats *Stats) {
 	})
 }
 
+
 func GetExportedStatsJson(ctx context.Context, lookback int) *string {
 	var statsJson *string
 	bringyour.Redis(ctx, func(client bringyour.RedisClient) {
@@ -872,6 +883,7 @@ func GetExportedStatsJson(ctx context.Context, lookback int) *string {
 	})
 	return statsJson
 }
+
 
 func GetExportedStats(ctx context.Context, lookback int) *Stats {
 	statsJson := GetExportedStatsJson(ctx, lookback)
@@ -906,6 +918,7 @@ type AuditProviderEvent struct {
 	RegionName string
 	CityName string
 }
+
 func NewAuditProviderEvent(eventType AuditEventType) *AuditProviderEvent {
 	eventId := bringyour.NewId()
 	eventTime := time.Now()
@@ -925,6 +938,7 @@ type AuditExtenderEvent struct {
 	NetworkId bringyour.Id
 	ExtenderId bringyour.Id
 }
+
 func NewAuditExtenderEvent(eventType AuditEventType) *AuditExtenderEvent {
 	eventId := bringyour.NewId()
 	eventTime := time.Now()
@@ -943,6 +957,7 @@ type AuditNetworkEvent struct {
 
 	NetworkId bringyour.Id
 }
+
 func NewAuditNetworkEvent(eventType AuditEventType) *AuditNetworkEvent {
 	eventId := bringyour.NewId()
 	eventTime := time.Now()
@@ -962,6 +977,7 @@ type AuditDeviceEvent struct {
 	NetworkId bringyour.Id
 	DeviceId bringyour.Id
 }
+
 func NewAuditDeviceEvent(eventType AuditEventType) *AuditDeviceEvent {
 	eventId := bringyour.NewId()
 	eventTime := time.Now()
@@ -988,6 +1004,7 @@ type AuditContractEvent struct {
 	TransferBytes int64
 	TransferPackets int64
 }
+
 func NewAuditContractEvent(eventType AuditEventType) *AuditContractEvent {
 	eventId := bringyour.NewId()
 	eventTime := time.Now()
@@ -1019,8 +1036,10 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 		panic(fmt.Sprintf("Event type not recognized: %T", v))
 	}
 }
+
+
 func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1049,10 +1068,12 @@ func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
 			event.CityName,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 }
+
+
 func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1075,10 +1096,12 @@ func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 }
+
+
 func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1099,10 +1122,12 @@ func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 }
+
+
 func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1125,10 +1150,12 @@ func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 }
+
+
 func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1165,5 +1192,5 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 			event.TransferPackets,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 }

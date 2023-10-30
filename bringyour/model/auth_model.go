@@ -44,7 +44,7 @@ func UserAuthAttempt(
 
 	clientIp, clientPort := session.ClientIpPort()
 
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -58,7 +58,7 @@ func UserAuthAttempt(
 			clientPort,
 			false,
 		))
-	})
+	}))
 
 	type UserAuthAttemptResult struct {
 		attemptTime time.Time
@@ -91,7 +91,7 @@ func UserAuthAttempt(
 	if userAuth != nil {
 		// lookback by user auth
 		var attempts []UserAuthAttemptResult
-		bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+		bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 			result, err := conn.Query(
 				session.Ctx,
 				`
@@ -110,14 +110,14 @@ func UserAuthAttempt(
 			bringyour.WithPgResult(result, err, func() {
 				attempts = parseAttempts(result)
 			})
-		})
+		}))
 		if !passesThreshold(attempts) {
 			return userAuthAttemptId, false
 		}
 	}
 
 	var attempts []UserAuthAttemptResult
-	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -136,7 +136,7 @@ func UserAuthAttempt(
 		bringyour.WithPgResult(result, err, func() {
 			attempts = parseAttempts(result)
 		})
-	})
+	}))
 	if !passesThreshold(attempts) {
 		return userAuthAttemptId, false
 	}
@@ -150,7 +150,7 @@ func SetUserAuthAttemptSuccess(
 	userAuthAttemptId bringyour.Id,
 	success bool,
 ) {
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -161,7 +161,7 @@ func SetUserAuthAttemptSuccess(
 			success,
 			userAuthAttemptId,
 		))
-	})
+	}))
 }
 
 
@@ -215,7 +215,7 @@ func AuthLogin(
 		}
 
 		var authType *string
-		bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+		bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 			result, err := conn.Query(
 				session.Ctx,
 				`
@@ -228,7 +228,7 @@ func AuthLogin(
 					bringyour.Raise(result.Scan(&authType))
 				}
 			})
-		})
+		}))
 		if authType == nil {
 			// new user
 			result := &AuthLoginResult{
@@ -251,7 +251,7 @@ func AuthLogin(
 			var authType string
 			var networkId bringyour.Id
 			var networkName string
-			bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+			bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 				bringyour.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 				result, err := conn.Query(
 					session.Ctx,
@@ -277,7 +277,7 @@ func AuthLogin(
 						))
 					}
 				})
-			})
+			}))
 
 			if userId == nil {
 				// new user
@@ -365,7 +365,7 @@ func AuthLoginWithPassword(
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -394,7 +394,7 @@ func AuthLoginWithPassword(
 				))
 			}
 		})
-	})
+	}))
 
 	if userId == nil {
 		return nil, errors.New("User does not exist.")
@@ -490,7 +490,7 @@ func AuthVerify(
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -522,7 +522,7 @@ func AuthVerify(
 				))
 			}
 		})
-	})
+	}))
 
 	if userAuthVerifyId == nil {
 		result := &AuthVerifyResult{
@@ -534,7 +534,7 @@ func AuthVerify(
 	}
 
 	// verified
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -554,7 +554,7 @@ func AuthVerify(
 			`,
 			userAuthVerifyId,
 		))
-	})
+	}))
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -605,7 +605,7 @@ func AuthVerifyCreateCode(
 	created := false
 	var verifyCode string
 
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		var result bringyour.PgResult
 		var err error
 
@@ -652,7 +652,7 @@ func AuthVerifyCreateCode(
 			userId,
 			verifyCode,
 		))
-	})
+	}))
 
 	if created {
 		result := &AuthVerifyCreateCodeResult{
@@ -696,7 +696,7 @@ func AuthPasswordResetCreateCode(
 	created := false
 	var resetCode string
 
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		var result bringyour.PgResult
 		var err error
 
@@ -743,7 +743,7 @@ func AuthPasswordResetCreateCode(
 			userId,
 			resetCode,
 		))
-	})
+	}))
 
 	if created {
 		result := &AuthPasswordResetCreateCodeResult{
@@ -784,7 +784,7 @@ func AuthPasswordSet(
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -814,7 +814,7 @@ func AuthPasswordSet(
 				))
 			}
 		})
-	})
+	}))
 
 	if userAuthResetId == nil {
 		return nil, errors.New("Invalid login.")
@@ -824,7 +824,7 @@ func AuthPasswordSet(
 	passwordSalt := createPasswordSalt()
 	passwordHash := computePasswordHashV1([]byte(passwordSet.Password), passwordSalt)
 
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -846,7 +846,7 @@ func AuthPasswordSet(
 			`,
 			userAuthResetId,
 		))
-	})
+	}))
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 

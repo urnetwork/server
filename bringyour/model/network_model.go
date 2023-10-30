@@ -110,7 +110,7 @@ func NetworkCreate(
 		created := false
 		var createdNetworkId bringyour.Id
 		
-		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			var result bringyour.PgResult
 			var err error
 
@@ -168,7 +168,7 @@ func NetworkCreate(
 				createdUserId,
 			)
 			bringyour.Raise(err)
-		})
+		}))
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
@@ -203,7 +203,7 @@ func NetworkCreate(
 			var createdNetworkId bringyour.Id
 			var createdUserId bringyour.Id
 
-			bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+			bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 				var userId *bringyour.Id
 
 				result, err := tx.Query(
@@ -261,7 +261,7 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
-			})
+			}))
 			if created {
 				auditNetworkCreate(networkCreate, createdNetworkId, session)
 

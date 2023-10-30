@@ -1,10 +1,7 @@
 package client
 
 
-type Sub struct {
-	unsubFn func()
+type Sub interface {
+	Close()
 }
 
-func (self *Sub) Close() {
-	self.unsubFn()
-}
