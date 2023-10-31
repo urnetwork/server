@@ -1,4 +1,4 @@
-package vc
+package client
 
 
 import (
@@ -7,12 +7,10 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
-
-	"bringyour.com/client"
 )
 
 
-var cvcLog = client.LogFn("connect_view_controller")
+var cvcLog = logFn("connect_view_controller")
 
 
 type ConnectViewController struct {
@@ -24,7 +22,7 @@ type ConnectViewController struct {
 }
 
 
-func NewConnectViewController(ctx context.Context, client *connect.Client) *ConnectViewController {
+func newConnectViewController(ctx context.Context, client *connect.Client) *ConnectViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ConnectViewController{

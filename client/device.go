@@ -10,19 +10,10 @@ import (
 
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
-
-	"bringyour.com/client/vc"
-	"bringyour.com/client"
 )
 
 
-// note: publicly exported types must be fully contained in the `client` package tree
-// the `gomobile` native interface compiler won't be able to map types otherwise
-// a number of types (struct, function, interface) are redefined in `client`,
-// somtimes in a simplified way, and then internally converted back to the native type
-
-
-const ClientDrainTimeout = 30 * time.Second
+const clientDrainTimeout = 30 * time.Second
 
 
 // receive a packet into the local raw socket
@@ -34,16 +25,16 @@ type ReceivePacket interface {
 // TODO methods to manage extenders
 
 
-// conforms to `client.Router`
+// conforms to `Router`
 type BringYourDevice struct {
 	ctx context.Context
 	cancel context.CancelFunc
 
 	byJwt string
 	platformUrl string
-	localStorage string
 
 	clientId connect.Id
+	instanceId connect.Id
 	connectClient *connect.Client
 
 	contractManager *connect.ContractManager
@@ -58,13 +49,12 @@ type BringYourDevice struct {
 
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
-	openedViewControllers map[vc.ViewController]bool
+	openedViewControllers map[ViewController]bool
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 }
 
-// `localStorage` is a path to a local storage directory
-func NewBringYourDevice(byJwt string, platformUrl string, localStorage string) (*BringYourDevice, error) {
+func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*BringYourDevice, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
 		return nil, err
@@ -82,11 +72,10 @@ func NewBringYourDevice(byJwt string, platformUrl string, localStorage string) (
 
     go connectClient.Run(routeManager, contractManager)
 
-    instanceId := initInstanceId(localStorage)
     auth := &connect.ClientAuth{
     	ByJwt: byJwt,
-    	InstanceId: instanceId,
-    	AppVersion: client.Version,
+    	InstanceId: connect.Id(instanceId),
+    	AppVersion: Version,
     }
     platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
 
@@ -99,8 +88,8 @@ func NewBringYourDevice(byJwt string, platformUrl string, localStorage string) (
 		cancel: cancel,
 		byJwt: byJwt,
 		platformUrl: platformUrl,
-		localStorage: localStorage,
 		clientId: clientId,
+		instanceId: connect.Id(instanceId),
 		connectClient: connectClient,
 		contractManager: contractManager,
 		routeManager: routeManager,
@@ -108,7 +97,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, localStorage string) (
 		localUserNat: localUserNat,
 		remoteUserNatClient: nil,
 		remoteUserNatProvider: remoteUserNatProvider,
-		openedViewControllers: map[vc.ViewController]bool{},
+		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
 	}, nil
 }
@@ -120,19 +109,19 @@ func (self *BringYourDevice) receive(source connect.Path, packet []byte) {
     }
 }
 
-func (self *BringYourDevice) SetProvideMode(provideMode client.ProvideMode) {
+func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	provideModes := map[protocol.ProvideMode]bool{}
-	if client.ProvideModePublic <= provideMode {
+	if ProvideModePublic <= provideMode {
 		provideModes[protocol.ProvideMode_Public] = true
 	}
-	if client.ProvideModeNetwork <= provideMode {
+	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
 	self.contractManager.SetProvideModes(provideModes)
 }
 
-// `client.Router` implementation
-func (self *BringYourDevice) SetDestination(destinations []client.Path, provideMode client.ProvideMode) error {
+// `Router` implementation
+func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode ProvideMode) error {
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
@@ -140,13 +129,13 @@ func (self *BringYourDevice) SetDestination(destinations []client.Path, provideM
 		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
 
-	if destinations == nil {
+	if destinations.Len() == 0 {
 		self.localUserNat.AddReceivePacketCallback(self.receive)
 		return nil
 	} else {
 		connectDestinations := []connect.Path{}
-		for _, destination := range destinations {
-			connectDestinations = append(connectDestinations, destination.ToConnectPath())
+		for i := 0; i < destinations.Len(); i += 1 {
+			connectDestinations = append(connectDestinations, destinations.Get(i).toConnectPath())
 		}
 		remoteUserNatClient_, err := connect.NewRemoteUserNatClient(
 			self.connectClient,
@@ -174,7 +163,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	}
 }
 
-func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) client.Sub {
+func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	receive := func(destination connect.Path, packet []byte) {
 		receivePacket.ReceivePacket(packet)
 	}
@@ -184,39 +173,39 @@ func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) clien
 	})
 }
 
-func (self *BringYourDevice) OpenConnectViewController() *vc.ConnectViewController {
-	cvc := vc.NewConnectViewController(self.ctx, self.connectClient)
-	self.openedViewControllers[cvc] = true
-	return cvc
+func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
+	vc := newConnectViewController(self.ctx, self.connectClient)
+	self.openedViewControllers[vc] = true
+	return vc
 }
 
-func (self *BringYourDevice) OpenProvideViewController() *vc.ProvideViewController {
-	pvc := vc.NewProvideViewController(self.ctx, self.connectClient, self)
-	self.openedViewControllers[pvc] = true
-	return pvc
+func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {
+	vc := newProvideViewController(self.ctx, self.connectClient, self)
+	self.openedViewControllers[vc] = true
+	return vc
 }
 
-func (self *BringYourDevice) OpenStatusViewController() *vc.StatusViewController {
-	svc := vc.NewStatusViewController(self.ctx, self.connectClient)
-	self.openedViewControllers[svc] = true
-	return svc
+func (self *BringYourDevice) OpenStatusViewController() *StatusViewController {
+	vc := newStatusViewController(self.ctx, self.connectClient)
+	self.openedViewControllers[vc] = true
+	return vc
 }
 
-func (self *BringYourDevice) OpenDeviceViewController() *vc.DeviceViewController {
-	dvc := vc.NewDeviceViewController(self.ctx, self.connectClient)
-	self.openedViewControllers[dvc] = true
-	return dvc
+func (self *BringYourDevice) OpenDeviceViewController() *DeviceViewController {
+	vc := newDeviceViewController(self.ctx, self.connectClient)
+	self.openedViewControllers[vc] = true
+	return vc
 }
 
-func (self *BringYourDevice) OpenAccountViewController() *vc.AccountViewController {
-	avc := vc.NewAccountViewController(self.ctx, self.connectClient)
-	self.openedViewControllers[avc] = true
-	return avc
+func (self *BringYourDevice) OpenAccountViewController() *AccountViewController {
+	vc := newAccountViewController(self.ctx, self.connectClient)
+	self.openedViewControllers[vc] = true
+	return vc
 }
 
-func (self *BringYourDevice) CloseViewController(viewController vc.ViewController) {
-	viewController.Close()
-	delete(self.openedViewControllers, viewController)
+func (self *BringYourDevice) CloseViewController(vc ViewController) {
+	vc.Close()
+	delete(self.openedViewControllers, vc)
 }
 
 func (self *BringYourDevice) Close() {
@@ -242,7 +231,7 @@ func (self *BringYourDevice) Close() {
 
 	go func() {
 		select {
-		case <- time.After(ClientDrainTimeout):
+		case <- time.After(clientDrainTimeout):
 		}
 
 		self.connectClient.Close()
@@ -265,32 +254,4 @@ func parseByJwtClientId(byJwt string) (connect.Id, error) {
     	return connect.Id{}, fmt.Errorf("byJwt hav invalid type for client_id: %T", v)
     }
 }
-
-
-func initInstanceId(localStorage string) connect.Id {
-	// FIXME store the instance id in a file
-
-	return connect.NewId()
-}
-
-
-
-
-func newSub(unsubFn func()) client.Sub {
-	return &simpleSub{
-		unsubFn: unsubFn,
-	}
-}
-
-type simpleSub struct {
-	unsubFn func()
-}
-
-func (self *simpleSub) Close() {
-	self.unsubFn()
-}
-
-// type Subscription interface {
-// 	Close()
-// }
 

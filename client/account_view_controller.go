@@ -1,15 +1,13 @@
-package vc
+package client
 
 import (
 	"context"
 
 	"bringyour.com/connect"
-
-	"bringyour.com/client"
 )
 
 
-var avcLog = client.LogFn("account_view_controller")
+var avcLog = logFn("account_view_controller")
 
 
 type AccountViewController struct {
@@ -19,7 +17,7 @@ type AccountViewController struct {
 	client *connect.Client
 }
 
-func NewAccountViewController(ctx context.Context, client *connect.Client) *AccountViewController {
+func newAccountViewController(ctx context.Context, client *connect.Client) *AccountViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	vc := &AccountViewController{
 		ctx: cancelCtx,

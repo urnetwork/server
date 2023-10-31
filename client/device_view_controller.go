@@ -1,15 +1,13 @@
-package vc
+package client
 
 import (
 	"context"
 
 	"bringyour.com/connect"
-
-	"bringyour.com/client"
 )
 
 
-var dvcLog = client.LogFn("device_view_controller")
+var dvcLog = logFn("device_view_controller")
 
 
 type DeviceViewController struct {
@@ -19,7 +17,7 @@ type DeviceViewController struct {
 	client *connect.Client
 }
 
-func NewDeviceViewController(ctx context.Context, client *connect.Client) *DeviceViewController {
+func newDeviceViewController(ctx context.Context, client *connect.Client) *DeviceViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &DeviceViewController{

@@ -1025,17 +1025,20 @@ type FindLocationsArgs struct {
     Query string `json:"query"`
     // the max search distance is `MaxDistanceFraction * len(Query)`
     // in other words `len(Query) * (1 - MaxDistanceFraction)` length the query must match
-    MaxDistanceFraction *float32 `json:"max_distance_fraction,omitempty"`
+    MaxDistanceFraction float32 `json:"max_distance_fraction,omitempty"`
+    // FIXME
+    EnableMaxDistanceFraction bool `json:"enable_max_distance_fraction,omitempty"`
 }
 
+// FIXME
 type FindLocationsResult struct {
     // this includes groups that show up in the location results
     // all `ProviderCount` are from inside the location results
     // groups are suggestions that can be used to broaden the search
-    Groups map[bringyour.Id]*LocationGroupResult `json:"groups"`
+    Groups []*LocationGroupResult `json:"groups"`
     // this includes all parent locations that show up in the location results
     // every `CityId`, `RegionId`, `CountryId` will have an entry
-    Locations map[bringyour.Id]*LocationResult `json:"locations"`
+    Locations []*LocationResult `json:"locations"`
 }
 
 // search for locations that match query

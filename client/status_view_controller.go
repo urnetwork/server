@@ -1,4 +1,4 @@
-package vc
+package client
 
 
 import (
@@ -7,12 +7,10 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
-
-	"bringyour.com/client"
 )
 
 
-var svcLog = client.LogFn("status_view_controller")
+var svcLog = logFn("status_view_controller")
 
 
 type StatusViewController struct {
@@ -26,7 +24,7 @@ type StatusViewController struct {
 	glViewController
 }
 
-func NewStatusViewController(ctx context.Context, client *connect.Client) *StatusViewController {
+func newStatusViewController(ctx context.Context, client *connect.Client) *StatusViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &StatusViewController{

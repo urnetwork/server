@@ -1,4 +1,4 @@
-package vc
+package client
 
 
 type ViewController interface {

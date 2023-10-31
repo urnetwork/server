@@ -144,9 +144,9 @@ func OptRetryDefault() DbRetryOptions {
 		rerunOnCommitError: true,
 		rerunOnConnectionError: true,
 		rerunOnTransientError: true,
-		retryTimeout: 1 * time.Second,
+		retryTimeout: 200 * time.Millisecond,
 		endRetryTimeout: 60 * time.Second,
-		debugRetryTimeout: 0 * time.Second,
+		debugRetryTimeout: 90 * time.Second,
 	}
 }
 
@@ -261,7 +261,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			return connErr
 		}
 
-		Logger().Printf("DB OPEN\n")
+		// Logger().Printf("DB OPEN\n")
 		// debug.PrintStack()
 
 		func() {
@@ -280,7 +280,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				}
 			}()
 			defer conn.Release()
-			defer Logger().Printf("DB CLOSE\n")
+			// defer Logger().Printf("DB CLOSE\n")
 			if !rwOptions.readOnly {
 				// the default is read only, escalate to rw
 				RaisePgResult(conn.Exec(ctx, "SET default_transaction_read_only=off"))

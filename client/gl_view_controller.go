@@ -1,4 +1,4 @@
-package vc
+package client
 
 
 import (
@@ -8,12 +8,10 @@ import (
 	"context"
 
 	"golang.org/x/mobile/gl"
-
-	"bringyour.com/client"
 )
 
 
-var glvcLog = client.LogFn("gl_view_controller")
+var glvcLog = logFn("gl_view_controller")
 
 
 type GLViewCallback interface {

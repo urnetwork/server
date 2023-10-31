@@ -7,16 +7,16 @@ import (
 )
 
 
-var logger = log.Default()
+var defaultLogger = log.Default()
 
-func Logger() *log.Logger {
-    return logger
+func logger() *log.Logger {
+    return defaultLogger
 }
 
-func LogFn(tag string) func(string, ...any) {
+func logFn(tag string) func(string, ...any) {
     return func(format string, a ...any) {
         m := fmt.Sprintf(format, a...)
-        Logger().Printf("%s: %s\n", tag, m)
+        logger().Printf("%s: %s\n", tag, m)
     }
 }
 

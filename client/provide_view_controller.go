@@ -1,4 +1,4 @@
-package vc
+package client
 
 
 import (
@@ -7,12 +7,10 @@ import (
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
-
-	"bringyour.com/client"
 )
 
 
-var pvcLog = client.LogFn("provide_view_controller")
+var pvcLog = logFn("provide_view_controller")
 
 
 type ProvideViewController struct {
@@ -21,12 +19,12 @@ type ProvideViewController struct {
 	
 	client *connect.Client
 
-	router client.Router
+	router Router
 
 	glViewController
 }
 
-func NewProvideViewController(ctx context.Context, client *connect.Client, router client.Router) *ProvideViewController {
+func newProvideViewController(ctx context.Context, client *connect.Client, router Router) *ProvideViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ProvideViewController{

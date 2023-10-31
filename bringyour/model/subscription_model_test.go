@@ -29,7 +29,7 @@ func TestNanoCents(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false})
 func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     ctx := context.Background()
 
-    netTransferBytes := 1024 * 1024 * 1024 * 1024
+    netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
     netRevenue := USDToNanoCents(10.00)
 
     sourceNetworkId := bringyour.NewId()
@@ -47,18 +47,18 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     })
 
     getAccountBalanceResult := GetAccountBalance(sourceSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-    balanceCode, err := CreateBalanceCode(ctx, netTransferBytes, netRevenue, "", "", "")
+    balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
     assert.Equal(t, err, nil)
     RedeemBalanceCode(&RedeemBalanceCodeArgs{
         Secret: balanceCode.Secret,
@@ -70,29 +70,29 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
     // test that escrow prevents concurrent contracts
 
-    transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferBytes)
+    transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
     assert.Equal(t, err, nil)
 
     transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
-    netBalanceBytes := 0
+    netBalanceByteCount := ByteCount(0)
     for _, transferBalance := range transferBalances {
-        netBalanceBytes += transferBalance.BalanceBytes
+        netBalanceByteCount += transferBalance.BalanceByteCount
     }
     // nothing left
-    assert.Equal(t, netBalanceBytes, 0)
+    assert.Equal(t, netBalanceByteCount, ByteCount(0))
 
-    _, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferBytes)
+    _, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
     assert.NotEqual(t, err, nil)
 
     CloseContract(ctx, transferEscrow.ContractId, sourceId, 0)
     CloseContract(ctx, transferEscrow.ContractId, destinationId, 0)
 
     transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
-    netBalanceBytes = 0
+    netBalanceByteCount = ByteCount(0)
     for _, transferBalance := range transferBalances {
-        netBalanceBytes += transferBalance.BalanceBytes
+        netBalanceByteCount += transferBalance.BalanceByteCount
     }
-    assert.Equal(t, netBalanceBytes, netTransferBytes)
+    assert.Equal(t, netBalanceByteCount, netTransferByteCount)
 
 
 
@@ -102,35 +102,35 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, contractIds, []bringyour.Id{transferEscrow.ContractId})
 
-    usedTransferBytes := 1024
-    CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
-    CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
-    paidBytes := usedTransferBytes
-    paid := USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
+    usedTransferByteCount := ByteCount(1024)
+    CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
+    CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
+    paidByteCount := usedTransferByteCount
+    paid := USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, len(contractIds), 0)
 
     // check that the payout is pending
     getAccountBalanceResult = GetAccountBalance(sourceSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, paidBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 
     transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
-    netBalanceBytes = 0
+    netBalanceByteCount = 0
     for _, transferBalance := range transferBalances {
-        netBalanceBytes += transferBalance.BalanceBytes
+        netBalanceByteCount += transferBalance.BalanceByteCount
     }
-    assert.Equal(t, netBalanceBytes, netTransferBytes - paidBytes)
+    assert.Equal(t, netBalanceByteCount, netTransferByteCount - paidByteCount)
 
 
     wallet := &AccountWallet{
@@ -150,26 +150,26 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 
-    usedTransferBytes = 1024 * 1024 * 1024
+    usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
     for paid < MinWalletPayoutThreshold {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferBytes)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
         assert.Equal(t, err, nil)
 
-        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
+        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
         assert.Equal(t, err, nil)
-        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
+        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
         assert.Equal(t, err, nil)
-        paidBytes += usedTransferBytes
-        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
+        paidByteCount += usedTransferByteCount
+        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, len(contractIds), 0)
 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, paidBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     paymentPlan = PlanPayments(ctx)
@@ -182,38 +182,38 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     
     // check that the payment is recorded
     getAccountBalanceResult = GetAccountBalance(sourceSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, paidBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, paidBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
 
 
     // repeat escrow until it fails due to no balance
-    usedTransferBytes = 1024 * 1024 * 1024
+    usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
     for {
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferBytes)
-        if err != nil && 1024 < usedTransferBytes {
-            usedTransferBytes = usedTransferBytes / 1024
-            bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferBytes)
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+        if err != nil && 1024 < usedTransferByteCount {
+            usedTransferByteCount = usedTransferByteCount / 1024
+            bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferByteCount)
             continue
         }
-        if netTransferBytes <= paidBytes {
+        if netTransferByteCount <= paidByteCount {
             assert.NotEqual(t, err, nil)
             return
         } else {
             assert.Equal(t, err, nil)
         }
 
-        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferBytes)
-        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferBytes)
-        paidBytes += usedTransferBytes
-        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferBytes) / float64(netTransferBytes))
+        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
+        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
+        paidByteCount += usedTransferByteCount
+        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }
     // at this point the balance should be fully used up
     
@@ -230,16 +230,16 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
     // check that the payment is recorded
     getAccountBalanceResult = GetAccountBalance(sourceSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, 0)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
     // the revenue from 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedBytes, netTransferBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, netTransferByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue)))
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidBytes, netTransferBytes)
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
     assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue)))
 
 
