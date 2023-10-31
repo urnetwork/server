@@ -51,6 +51,17 @@ func NewStringList() *StringList {
 }
 
 
+type IdList struct {
+	exportedList[Id]
+}
+
+func NewIdList() *IdList {
+	return &IdList{
+		exportedList: *newExportedList[Id](),
+	}
+}
+
+
 type PathList struct {
 	exportedList[*Path]
 }

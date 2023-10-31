@@ -7,6 +7,7 @@ import (
     // "errors"
     "fmt"
     "math"
+    mathrand "math/rand"
 
     "golang.org/x/exp/maps"
 
@@ -1026,7 +1027,6 @@ type FindLocationsArgs struct {
     // the max search distance is `MaxDistanceFraction * len(Query)`
     // in other words `len(Query) * (1 - MaxDistanceFraction)` length the query must match
     MaxDistanceFraction float32 `json:"max_distance_fraction,omitempty"`
-    // FIXME
     EnableMaxDistanceFraction bool `json:"enable_max_distance_fraction,omitempty"`
 }
 
@@ -1052,10 +1052,10 @@ type FindLocationsResult struct {
 func FindActiveProviderLocations(
     findLocations *FindLocationsArgs,
     session *session.ClientSession,
-) *FindLocationsResult {
+) (*FindLocationsResult, error) {
     var maxDistanceFraction float32
-    if findLocations.MaxDistanceFraction != nil {
-        maxDistanceFraction = *findLocations.MaxDistanceFraction
+    if findLocations.EnableMaxDistanceFraction {
+        maxDistanceFraction = findLocations.MaxDistanceFraction
     } else {
         maxDistanceFraction = DefaultMaxDistanceFraction
     }
@@ -1293,15 +1293,15 @@ func FindActiveProviderLocations(
     }))
 
     return &FindLocationsResult{
-        Locations: locationResults,
-        Groups: locationGroupResults,
-    }
+        Locations: maps.Values(locationResults),
+        Groups: maps.Values(locationGroupResults),
+    }, nil
 }
 
 
 func GetActiveProviderLocations(
     session *session.ClientSession,
-) *FindLocationsResult {
+) (*FindLocationsResult, error) {
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
 
@@ -1436,9 +1436,9 @@ func GetActiveProviderLocations(
     }))
 
     return &FindLocationsResult{
-        Locations: locationResults,
-        Groups: locationGroupResults,
-    }
+        Locations: maps.Values(locationResults),
+        Groups: maps.Values(locationGroupResults),
+    }, nil
 }
 
 
@@ -1449,8 +1449,8 @@ func FindLocations(
     findLocations *FindLocationsArgs,
 ) *FindLocationsResult {
     var maxDistanceFraction float32
-    if findLocations.MaxDistanceFraction != nil {
-        maxDistanceFraction = *findLocations.MaxDistanceFraction
+    if findLocations.EnableMaxDistanceFraction {
+        maxDistanceFraction = findLocations.MaxDistanceFraction
     } else {
         maxDistanceFraction = DefaultMaxDistanceFraction
     }
@@ -1609,9 +1609,75 @@ func FindLocations(
     }))
 
     return &FindLocationsResult{
-        Locations: locationResults,
-        Groups: locationGroupResults,
+        Locations: maps.Values(locationResults),
+        Groups: maps.Values(locationGroupResults),
     }
+}
+
+
+type GetActiveProvidersArgs struct {
+	LocationId *bringyour.Id `json:"location_id,omitempty"`
+	GroupLocationId *bringyour.Id `json:"group_location_id,omitempty"`
+	Count int `json:"count"`
+	ExcludeClientIds []bringyour.Id `json:"exclude_location_ids,omitempty"`
+}
+
+type GetActiveProvidersResults struct {
+	ClientIds []bringyour.Id `json:"client_ids,omitempty"`
+}
+
+func GetActiveProviders(
+	getActiveProviders *GetActiveProvidersArgs,
+	session *session.ClientSession,
+) (*GetActiveProvidersResults, error) {
+	var maxCount int
+	if getActiveProviders.Count < 1 {
+		maxCount = 1
+	} else {
+		maxCount = getActiveProviders.Count
+	}
+
+	clientIds := map[bringyour.Id]bool{}
+
+	if getActiveProviders.LocationId != nil {
+		clientIdsForLocation := GetActiveProvidersForLocation(
+			session.Ctx,
+			*getActiveProviders.LocationId,
+		)
+		for _, clientId := range clientIdsForLocation {
+			clientIds[clientId] = true
+		}
+	}
+
+	for _, clientId := range getActiveProviders.ExcludeClientIds {
+		delete(clientIds, clientId)
+	} 
+
+	if getActiveProviders.GroupLocationId != nil {
+		clientIdsForLocationGroup := GetActiveProvidersForLocationGroup(
+			session.Ctx,
+			*getActiveProviders.GroupLocationId,
+		)
+		for _, clientId := range clientIdsForLocationGroup {
+			clientIds[clientId] = true
+		}
+	}
+
+	if len(clientIds) < maxCount {
+		return &GetActiveProvidersResults{
+			ClientIds: maps.Keys(clientIds),
+		}, nil
+	} else {
+		// sample
+		shuffledClientIds := maps.Keys(clientIds)
+		mathrand.Shuffle(len(shuffledClientIds), func(i int, j int) {
+			shuffledClientIds[i], shuffledClientIds[j] = shuffledClientIds[j], shuffledClientIds[i]
+		})
+
+		return &GetActiveProvidersResults{
+			ClientIds: shuffledClientIds[:maxCount],
+		}, nil
+	}
 }
 
 

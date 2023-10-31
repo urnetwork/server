@@ -2,8 +2,12 @@ package client
 
 
 import (
+	"encoding/json"
+	"bytes"
+	"fmt"
+	"io"
 
-	// "bringyour.com/bringyour/model"
+	"bringyour.com/bringyour"
 )
 
 
@@ -62,9 +66,13 @@ type AuthLoginResultNetwork struct {
 }
 
 func (self *ApiClient) AuthLogin(authLogin *AuthLoginArgs, callback AuthLoginCallback) {
-
+	go post(
+		fmt.Sprintf("%s/auth/login", self.apiUrl),
+		authLogin,
+		&AuthLoginResult{},
+		callback,
+	)
 }
-
 
 
 type AuthLoginWithPasswordCallback apiCallback[*AuthLoginWithPasswordResult]
@@ -94,9 +102,13 @@ type AuthLoginWithPasswordResultError struct {
 }
 
 func (self *ApiClient) AuthLoginWithPassword(authLoginWithPassword *AuthLoginWithPasswordArgs, callback AuthLoginWithPasswordCallback) {
-
+	go post(
+		fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
+		authLoginWithPassword,
+		&AuthLoginWithPasswordResult{},
+		callback,
+	)
 }
-
 
 
 type AuthVerifyCallback apiCallback[*AuthVerifyResult]
@@ -120,9 +132,13 @@ type AuthVerifyResultError struct {
 }
 
 func (self *ApiClient) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVerifyCallback) {
-
+	go post(
+		fmt.Sprintf("%s/auth/verify", self.apiUrl),
+		authVerify,
+		&AuthVerifyResult{},
+		callback,
+	)
 }
-
 
 
 type NetworkCheckCallback apiCallback[*NetworkCheckResult]
@@ -136,9 +152,13 @@ type NetworkCheckResult struct {
 }
 
 func (self *ApiClient) NetworkCheck(networkCheck *NetworkCheckArgs, callback NetworkCheckCallback) {
-
+	go post(
+		fmt.Sprintf("%s/auth/network-check", self.apiUrl),
+		networkCheck,
+		&NetworkCheckResult{},
+		callback,
+	)
 }
-
 
 
 type NetworkCreateCallback apiCallback[*NetworkCreateResult]
@@ -173,9 +193,13 @@ type NetworkCreateResultError struct {
 }
 
 func (self *ApiClient) NetworkCreate(networkCreate *NetworkCreateArgs, callback NetworkCreateCallback) {
-
+	go post(
+		fmt.Sprintf("%s/auth/network-create", self.apiUrl),
+		networkCreate,
+		&NetworkCreateResult{},
+		callback,
+	)
 }
-
 
 
 type AuthNetworkClientCallback apiCallback[*AuthNetworkClientResult]
@@ -198,11 +222,14 @@ type AuthNetworkClientError struct {
 	Message string `json:"message"`
 }
 
-func (self *ApiClient) AuthNetworkClient(authNetworkClient *NetworkCreateArgs, callback AuthNetworkClientCallback) {
-
+func (self *ApiClient) AuthNetworkClient(authNetworkClient *AuthNetworkClientArgs, callback AuthNetworkClientCallback) {
+	go post(
+		fmt.Sprintf("%s/network/auth-client", self.apiUrl),
+		authNetworkClient,
+		&AuthNetworkClientResult{},
+		callback,
+	)
 }
-
-
 
 
 type FindLocationsCallback apiCallback[*FindLocationsResult]
@@ -245,24 +272,64 @@ type LocationResult struct {
     MatchDistance int `json:"match_distance,omitempty"`
 }
 
-
-
 func (self *ApiClient) FindLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
-
+	go post(
+		fmt.Sprintf("%s/network/locations", self.apiUrl),
+		findLocations,
+		&FindLocationsResult{},
+		callback,
+	)
 }
 
 
+type GetActiveProvidersCallback apiCallback[*GetActiveProvidersResults]
 
-// FIXME Need a model call for below
-// give a locationId or a locationGroupId, and the number of parallel
+type GetActiveProvidersArgs struct {
+	LocationId Id `json:"location_id,omitempty"`
+	GroupLocationId Id `json:"group_location_id,omitempty"`
+	Count int `json:"count"`
+	ExcludeClientIds *IdList `json:"exclude_location_ids,omitempty"`
+}
 
-// n parallel
-func (self *ApiClient) ChooseDestinations() {
+type GetActiveProvidersResults struct {
+	ClientIds *IdList `json:"client_ids,omitempty"`
+}
 
+func (self *ApiClient) GetActiveProviders(getActiveProviders *GetActiveProvidersArgs, callback GetActiveProvidersCallback) {
+	go post(
+		fmt.Sprintf("%s/network/active-providers", self.apiUrl),
+		getActiveProviders,
+		&GetActiveProvidersResults{},
+		callback,
+	)
 }
 
 
+func post[R any](url string, args any, result R, callback apiCallback[R]) {
+	requestBodyBytes, err := json.Marshal(args)
+	if err != nil {
+		callback.Error()
+		return
+	}
 
+	client := bringyour.DefaultClient()
+	r, err := client.Post(url, "text/json", bytes.NewReader(requestBodyBytes))
+	if err != nil {
+		callback.Error()
+		return
+	}
 
+	responseBodyBytes, err := io.ReadAll(r.Body)
+	r.Body.Close()
 
+	err = json.Unmarshal(responseBodyBytes, &result)
+	if err != nil {
+		callback.Error()
+		return
+	}
+
+	callback.Result(result)
+}
+
+// TODO post with extender
 
