@@ -6,9 +6,31 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-
-	"bringyour.com/bringyour"
+	"net"
+	"net/http"
+	"time"
 )
+
+
+const defaultHttpTimeout = 10 * time.Second
+const defaultHttpConnectTimeout = 5 * time.Second
+const defaultHttpTlsTimeout = 5 * time.Second
+
+
+func defaultClient() *http.Client {
+	// see https://medium.com/@nate510/don-t-use-go-s-default-http-client-4804cb19f779
+	dialer := &net.Dialer{
+    	Timeout: defaultHttpConnectTimeout,
+  	}
+	transport := &http.Transport{
+	  	DialContext: dialer.DialContext,
+	  	TLSHandshakeTimeout: defaultHttpTlsTimeout,
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout: defaultHttpTimeout,
+	}
+}
 
 
 type apiCallback[R any] interface {
@@ -17,7 +39,7 @@ type apiCallback[R any] interface {
 }
 
 
-type ApiClient struct {
+type BringYourApi struct {
 	apiUrl string
 
 	byJwt string
@@ -25,13 +47,13 @@ type ApiClient struct {
 
 // TODO manage extenders
 
-func NewApiClient(apiUrl string) *ApiClient {
+func NewBringYourApi(apiUrl string) *BringYourApi {
 	// FIXME
 	return nil
 }
 
 // this gets attached to api calls that need it
-func (self *ApiClient) SetByJwt(byJwt string) {
+func (self *BringYourApi) SetByJwt(byJwt string) {
 
 }
 
@@ -65,7 +87,7 @@ type AuthLoginResultNetwork struct {
 	ByJwt string `json:"by_jwt"`
 }
 
-func (self *ApiClient) AuthLogin(authLogin *AuthLoginArgs, callback AuthLoginCallback) {
+func (self *BringYourApi) AuthLogin(authLogin *AuthLoginArgs, callback AuthLoginCallback) {
 	go post(
 		fmt.Sprintf("%s/auth/login", self.apiUrl),
 		authLogin,
@@ -101,7 +123,7 @@ type AuthLoginWithPasswordResultError struct {
 	Message string `json:"message"`
 }
 
-func (self *ApiClient) AuthLoginWithPassword(authLoginWithPassword *AuthLoginWithPasswordArgs, callback AuthLoginWithPasswordCallback) {
+func (self *BringYourApi) AuthLoginWithPassword(authLoginWithPassword *AuthLoginWithPasswordArgs, callback AuthLoginWithPasswordCallback) {
 	go post(
 		fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
 		authLoginWithPassword,
@@ -131,7 +153,7 @@ type AuthVerifyResultError struct {
 	Message string `json:"message"`
 }
 
-func (self *ApiClient) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVerifyCallback) {
+func (self *BringYourApi) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVerifyCallback) {
 	go post(
 		fmt.Sprintf("%s/auth/verify", self.apiUrl),
 		authVerify,
@@ -151,7 +173,7 @@ type NetworkCheckResult struct {
 	Available bool  `json:"available"`
 }
 
-func (self *ApiClient) NetworkCheck(networkCheck *NetworkCheckArgs, callback NetworkCheckCallback) {
+func (self *BringYourApi) NetworkCheck(networkCheck *NetworkCheckArgs, callback NetworkCheckCallback) {
 	go post(
 		fmt.Sprintf("%s/auth/network-check", self.apiUrl),
 		networkCheck,
@@ -192,7 +214,7 @@ type NetworkCreateResultError struct {
 	Message string `json:"message"`
 }
 
-func (self *ApiClient) NetworkCreate(networkCreate *NetworkCreateArgs, callback NetworkCreateCallback) {
+func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callback NetworkCreateCallback) {
 	go post(
 		fmt.Sprintf("%s/auth/network-create", self.apiUrl),
 		networkCreate,
@@ -222,7 +244,7 @@ type AuthNetworkClientError struct {
 	Message string `json:"message"`
 }
 
-func (self *ApiClient) AuthNetworkClient(authNetworkClient *AuthNetworkClientArgs, callback AuthNetworkClientCallback) {
+func (self *BringYourApi) AuthNetworkClient(authNetworkClient *AuthNetworkClientArgs, callback AuthNetworkClientCallback) {
 	go post(
 		fmt.Sprintf("%s/network/auth-client", self.apiUrl),
 		authNetworkClient,
@@ -272,7 +294,7 @@ type LocationResult struct {
     MatchDistance int `json:"match_distance,omitempty"`
 }
 
-func (self *ApiClient) FindLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
+func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
 	go post(
 		fmt.Sprintf("%s/network/locations", self.apiUrl),
 		findLocations,
@@ -295,7 +317,7 @@ type GetActiveProvidersResults struct {
 	ClientIds *IdList `json:"client_ids,omitempty"`
 }
 
-func (self *ApiClient) GetActiveProviders(getActiveProviders *GetActiveProvidersArgs, callback GetActiveProvidersCallback) {
+func (self *BringYourApi) GetActiveProviders(getActiveProviders *GetActiveProvidersArgs, callback GetActiveProvidersCallback) {
 	go post(
 		fmt.Sprintf("%s/network/active-providers", self.apiUrl),
 		getActiveProviders,
@@ -312,7 +334,7 @@ func post[R any](url string, args any, result R, callback apiCallback[R]) {
 		return
 	}
 
-	client := bringyour.DefaultClient()
+	client := defaultClient()
 	r, err := client.Post(url, "text/json", bytes.NewReader(requestBodyBytes))
 	if err != nil {
 		callback.Error()
@@ -330,6 +352,7 @@ func post[R any](url string, args any, result R, callback apiCallback[R]) {
 
 	callback.Result(result)
 }
+
 
 // TODO post with extender
 

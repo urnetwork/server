@@ -4,8 +4,6 @@ package client
 import (
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
-
-	"bringyour.com/bringyour/model"
 )
 
 
@@ -19,6 +17,9 @@ import (
 // - redefined primitive types are not exportable. Use type aliases instead.
 // - arrays of structs are not exportable. See https://github.com/golang/go/issues/13445
 //   use the "ExportableList" workaround from `gomobile.go`
+//
+// additionally, the entire bringyour.com/bringyour tree cannot be used because it pulls in the
+// `warp` environment expectations, which is not compatible with the client lib
 
 
 // this value is set via the linker, e.g.
@@ -73,8 +74,4 @@ const (
 
 
 type LocationType = string
-const (
-    LocationTypeCity LocationType = LocationType(model.LocationTypeCity)
-    LocationTypeRegion LocationType = LocationType(model.LocationTypeRegion)
-    LocationTypeCountry LocationType = LocationType(model.LocationTypeCountry)
-)
+

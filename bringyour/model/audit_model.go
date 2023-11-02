@@ -74,13 +74,13 @@ type Stats struct {
     // internal data that is not exported to json
 
     // deviceId -> *ProviderState
-    ActiveProviders map[bringyour.Id]*ProviderState
+    activeProviders map[bringyour.Id]*ProviderState
     // extenderId -> *ExtenderState
-    ActiveExtenders map[bringyour.Id]*ExtenderState
+    activeExtenders map[bringyour.Id]*ExtenderState
     // networkId -> bool
-    ActiveNetworks map[bringyour.Id]bool
+    activeNetworks map[bringyour.Id]bool
     // deviceId -> bool
-    ActiveDevices map[bringyour.Id]bool
+    activeDevices map[bringyour.Id]bool
 }
 
 
@@ -299,7 +299,7 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 		stats.CitiesData = citiesData
 		stats.CitiesSummary = summary(citiesData)
 
-		stats.ActiveProviders = activeProviders
+		stats.activeProviders = activeProviders
 	})
 }
 
@@ -420,7 +420,7 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgCo
 	    stats.ExtendersSummary = summary(extendersData)
 	    stats.ExtendersSummarySuperspeed = summary(extendersSuperspeedData)
 
-	    stats.ActiveExtenders = activeExtenders
+	    stats.activeExtenders = activeExtenders
 	})
 }
 
@@ -514,7 +514,7 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgCon
 	    stats.NetworksData = networksData
 	    stats.NetworksSummary = summary(networksData)
 
-	    stats.ActiveNetworks = activeNetworks
+	    stats.activeNetworks = activeNetworks
 	})
 }
 
@@ -609,7 +609,7 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn
 	    stats.DevicesData = devicesData
 	    stats.DevicesSummary = summary(devicesData)
 
-	    stats.ActiveDevices = activeDevices
+	    stats.activeDevices = activeDevices
 	})
 }
 
@@ -621,7 +621,7 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgCo
 		`
 			SELECT
 				to_char(event_time, 'YYYY-MM-DD') AS day,
-				COALESCE(SUM(transfer_bytes), 0) AS net_transfer_bytes
+				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
 			FROM audit_contract_event
 			WHERE
 				now() - interval '1 days' * @lookback < event_time AND
@@ -632,7 +632,7 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgCo
 
 			SELECT
 				@startDay AS day,
-				COALESCE(SUM(transfer_bytes), 0) AS net_transfer_bytes
+				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
 			FROM audit_contract_event
 			WHERE
 				event_time BETWEEN now() - interval '1 days' * (@lookback + 1) AND now() - interval '1 days' * @lookback AND
@@ -755,7 +755,7 @@ func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringy
 		`
 			SELECT
 				to_char(event_time, 'YYYY-MM-DD') AS day,
-				COALESCE(SUM(transfer_bytes), 0) AS net_transfer_bytes
+				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
 			FROM audit_contract_event
 			WHERE
 				now() - interval '1 days' * @lookback < event_time AND
@@ -767,7 +767,7 @@ func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringy
 
 			SELECT
 				@startDay AS day,
-				COALESCE(SUM(transfer_bytes), 0) AS net_transfer_bytes
+				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
 			FROM audit_contract_event
 			WHERE
 				event_time BETWEEN now() - interval '1 days' * (@lookback + 1) AND now() - interval '1 days' * @lookback AND
@@ -1172,7 +1172,7 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 				extender_id,
 				event_type,
 				event_details,
-				transfer_bytes,
+				transfer_byte_count,
 				transfer_packets
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)

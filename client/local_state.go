@@ -54,7 +54,8 @@ func (self *LocalState) SetByJwt(byJwt string) error {
 	self.SetByClientJwt("")
 
 	if byJwt == "" {
-		return os.Remove(path)
+		os.Remove(path)
+		return nil
 	} else {
 		return os.WriteFile(path, []byte(byJwt), 0700)
 	}
@@ -81,7 +82,8 @@ func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 
 	if byClientJwt == "" {
 		self.setInstanceId(nil)
-		return os.Remove(path)
+		os.Remove(path)
+		return nil
 	} else {
 		instanceId := connect.NewId()
 		self.setInstanceId(Id(instanceId.Bytes()))
@@ -101,7 +103,8 @@ func (self *LocalState) GetInstanceId() (Id, error) {
 func (self *LocalState) setInstanceId(instanceId Id) error {
 	path := filepath.Join(self.localStorageDir, ".instance_id")
 	if instanceId == nil {
-		return os.Remove(path)
+		os.Remove(path)
+		return nil
 	} else {
 		instanceId_ := connect.Id(instanceId)
 		return os.WriteFile(path, instanceId_.Bytes(), 0700)

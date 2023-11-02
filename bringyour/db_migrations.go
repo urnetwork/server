@@ -201,6 +201,7 @@ var migrations = []any{
     // newSqlMigration(`CREATE TYPE audit_contract_event_type AS ENUM (
     //  'contract_closed_success'
     // )`),
+    // RENAMED `transfer_bytes` to `transfer_byte_count`
     newSqlMigration(`
         CREATE TABLE audit_contract_event (
             event_id uuid NOT NULL,
@@ -214,18 +215,18 @@ var migrations = []any{
             extender_id uuid NULL,
             event_type varchar(64) NOT NULL,
             event_details text NULL,
-            transfer_byte_count bigint NOT NULL DEFAULT 0,
+            transfer_bytes bigint NOT NULL DEFAULT 0,
             transfer_packets bigint NOT NULL DEFAULT 0,
 
             PRIMARY KEY (event_id)
         )
     `),
     newSqlMigration(`
-        CREATE INDEX audit_contract_event_stats ON audit_contract_event (event_time, transfer_byte_count, transfer_packets)
+        CREATE INDEX audit_contract_event_stats ON audit_contract_event (event_time, transfer_bytes, transfer_packets)
     `),
     newSqlMigration(`
         CREATE INDEX audit_contract_event_stats_extender_id
-        ON audit_contract_event (event_time, extender_id, transfer_byte_count, transfer_packets)
+        ON audit_contract_event (event_time, extender_id, transfer_bytes, transfer_packets)
     `),
 
     newSqlMigration(`
@@ -390,6 +391,10 @@ var migrations = []any{
             PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, alias)
         )
     `),
+    // DROPPED
+    newSqlMigration(`
+        CREATE INDEX search_projection_value_id ON search_projection (value_id, alias)
+    `),
 
     // RENAME `validate` to `verify`
     newSqlMigration(`
@@ -410,6 +415,11 @@ var migrations = []any{
             PRIMARY KEY (user_auth_verify_id),
             UNIQUE (user_id, verify_code)
         )
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE audit_contract_event
+        RENAME transfer_bytes TO transfer_byte_count
     `),
 
     newSqlMigration(`
@@ -876,6 +886,9 @@ var migrations = []any{
     `),
 
     newSqlMigration(`
+        DROP INDEX search_projection_value_id
+    `),
+    newSqlMigration(`
         DROP TABLE search_projection
     `),
 
@@ -894,5 +907,4 @@ var migrations = []any{
             PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
         )
     `),
-
 }

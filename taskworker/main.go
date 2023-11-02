@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "time"
     "fmt"
     "net/http"
@@ -17,13 +18,16 @@ import (
 
 
 type TaskWorker struct {
+    ctx context.Context
+    cancel context.CancelFunc
+
     quitEvent *bringyour.Event
 }
 
 func (self *TaskWorker) stats() {
     for !self.quitEvent.IsSet() {
-        stats := model.ComputeStats90()
-        model.ExportStats(stats)
+        stats := model.ComputeStats90(self.ctx)
+        model.ExportStats(self.ctx, stats)
 
         self.quitEvent.WaitForSet(60 * time.Second)
     }
@@ -74,12 +78,14 @@ Options:
 
     // bringyour.Logger().Printf("%s\n", opts)
 
-    quitEvent := bringyour.NewEvent()
+    cancelCtx, cancel := context.WithCancel(context.Background())
+
+    quitEvent := bringyour.NewEventWithContext(cancelCtx)
 
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    startTaskWorker(quitEvent)
+    startTaskWorker(cancelCtx, cancel, quitEvent)
     
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),
@@ -94,15 +100,17 @@ Options:
         port,
     )
 
-    routerHandler := router.NewRouter(routes)
+    routerHandler := router.NewRouter(cancelCtx, routes)
     err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
     bringyour.Logger().Fatal(err)
 }
 
 
-func startTaskWorker(quitEvent *bringyour.Event) *TaskWorker {
+func startTaskWorker(ctx context.Context, cancel context.CancelFunc, quitEvent *bringyour.Event) *TaskWorker {
 
     worker := &TaskWorker{
+        ctx: ctx,
+        cancel: cancel,
         quitEvent: quitEvent,
     }
 

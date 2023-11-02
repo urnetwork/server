@@ -202,6 +202,8 @@ func raiseHttpError(err error, w http.ResponseWriter) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 
+	// error messages that start with <number><space> 
+	// have the number peeled off and converted to the status code
 	codeRe := regexp.MustCompile("^(\\d+)\\s+(.*)$")
 	if groups := codeRe.FindStringSubmatch(message); groups != nil {
 		statusCode, _ = strconv.Atoi(groups[1])
