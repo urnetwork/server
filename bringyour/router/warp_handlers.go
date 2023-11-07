@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
 
+    "bringyour.com/bringyour/session"
     "bringyour.com/bringyour"
 )
 
@@ -13,8 +14,10 @@ import (
 func WarpStatus(w http.ResponseWriter, r *http.Request) {
     type WarpStatusResult struct {
         Version *string `json:"version,omitempty"`
-        ConfigVersion *string `json:"configVersion,omitempty"`
+        ConfigVersion *string `json:"config_version,omitempty"`
         Status string `json:"status"`
+        ClientAddress string `json:"client_address"`
+        Host string `json:"host"`
     }
 
     var warpVersion *string
@@ -31,6 +34,13 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
         warpConfigVersion = nil
     }
 
+    var clientAddress string
+    if session, err := session.NewClientSessionFromRequest(r); err == nil {
+        clientAddress = session.ClientAddress
+    } else {
+        clientAddress = fmt.Sprintf("error: %s", err.Error())
+    }
+
     status, err := collectStatus(r.Context())
     if err != nil {
         status = fmt.Sprintf("error: %s", err.Error())
@@ -40,6 +50,8 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
         Version: warpVersion,
         ConfigVersion: warpConfigVersion,
         Status: status,
+        ClientAddress: clientAddress,
+        Host: bringyour.RequireHost(),
     }
 
     responseJson, err := json.Marshal(result)

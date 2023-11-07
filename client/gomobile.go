@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"reflect"
 )
 
 
@@ -29,6 +30,15 @@ func (self *exportedList[T]) Get(i int) T {
 
 func (self *exportedList[T]) Add(value T) {
 	self.values = append(self.values, value)
+}
+
+func (self *exportedList[T]) Contains(v T) bool {
+	for _, value := range self.values {
+		if reflect.DeepEqual(value, v) {
+			return true
+		}
+	}
+	return false
 }
 
 func (self *exportedList[T]) UnmarshalJSON(b []byte) error {

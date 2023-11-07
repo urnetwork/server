@@ -2,7 +2,7 @@ package controller
 
 import (
 	"context"
-	"strings"
+	// "strings"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -15,10 +15,15 @@ func ConnectNetworkClient(
 	clientAddress string,
 ) bringyour.Id {
 	connectionId := model.ConnectNetworkClient(ctx, clientId, clientAddress)
-	parts := strings.Split(clientAddress, ":")
-	go bringyour.HandleError(
-		func() {setConnectionLocation(ctx, connectionId, parts[0])},
-	)
+	bringyour.Logger().Printf("Parse client address: %s", clientAddress)
+
+	if ipStr, _, err := bringyour.ParseClientAddress(clientAddress); err == nil {
+		// FIXME this is just temporary while the MASQ issue on the lb gets fixed
+		ipStr = "64.124.162.234"
+		go bringyour.HandleError(func() {
+			setConnectionLocation(ctx, connectionId, ipStr)
+		})
+	}
 	return connectionId
 }
 
@@ -28,9 +33,13 @@ func setConnectionLocation(
 	connectionId bringyour.Id,
 	ipStr string,
 ) {
-	if location, err := GetLocationForIp(ctx, ipStr); err == nil {
-		model.CreateLocation(ctx, location)
-		model.SetConnectionLocation(ctx, connectionId, location.LocationId)
+	location, err := GetLocationForIp(ctx, ipStr)
+	if err != nil {
+		bringyour.Logger().Printf("Get ip for location error: %s", err)
+		return
 	}
+	
+	model.CreateLocation(ctx, location)
+	model.SetConnectionLocation(ctx, connectionId, location.LocationId) 
 }
 

@@ -38,7 +38,7 @@ func UserAuthAttempt(
 	attemptLookbackCount := 100
 	// 1 hour
 	attemptLookbackSeconds := 60 * 60
-	attemptFailedCountThreshold := 10
+	attemptFailedCountThreshold := 100
 
 	userAuthAttemptId := bringyour.NewId()
 

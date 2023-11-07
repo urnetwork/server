@@ -43,8 +43,8 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 
 
 func DbVersion(ctx context.Context) int {
-    Tx(ctx, func(tx PgTx) {
-        tx.Exec(
+    Raise(Tx(ctx, func(tx PgTx) {
+        RaisePgResult(tx.Exec(
             ctx,
             `
             CREATE TABLE IF NOT EXISTS migration_audit (
@@ -54,20 +54,25 @@ func DbVersion(ctx context.Context) int {
                 status varchar(32) NOT NULL
             )
             `,
-        )
-    })
+        ))
+    }))
 
     var endVersionNumber int
-    Db(ctx, func(conn PgConn) {
-        conn.QueryRow(
+    Raise(Db(ctx, func(conn PgConn) {
+        result, err := conn.Query(
             ctx,
             `
             SELECT COALESCE(MAX(end_version_number), 0) AS max_end_version_number
             FROM migration_audit
             WHERE status = 'success'
             `,
-        ).Scan(&endVersionNumber)
-    })
+        )
+        WithPgResult(result, err, func() {
+            if result.Next() {
+                Raise(result.Scan(&endVersionNumber))
+            }
+        })
+    }))
 
     return endVersionNumber
 }
@@ -75,16 +80,16 @@ func DbVersion(ctx context.Context) int {
 
 func ApplyDbMigrations(ctx context.Context) {
     for i := DbVersion(ctx); i < len(migrations); i += 1 {
-        Tx(ctx, func(tx PgTx) {
+        Raise(Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
                 i,
             ))
-        })
+        }))
         switch v := migrations[i].(type) {
             case *SqlMigration:
-                Tx(ctx, func(tx PgTx) {
+                Raise(Tx(ctx, func(tx PgTx) {
                 	defer func() {
 	            		if err := recover(); err != nil {
 	            			// print the sql for debugging
@@ -93,20 +98,20 @@ func ApplyDbMigrations(ctx context.Context) {
 	            		}
 	            	}()
                     RaisePgResult(tx.Exec(ctx, v.sql))
-                })
+                }))
             case *CodeMigration:
                 v.callback(ctx)
             default:
                 panic(fmt.Errorf("Unknown migration type %T", v))
         }
-        Tx(ctx, func(tx PgTx) {
+        Raise(Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
                 i,
                 i + 1,
             ))
-        })
+        }))
     }
 }
 
@@ -906,5 +911,13 @@ var migrations = []any{
 
             PRIMARY KEY (realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
         )
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE network_user ALTER COLUMN auth_type TYPE varchar(32)
+    `),
+
+    newSqlMigration(`
+        DROP TYPE auth_type
     `),
 }

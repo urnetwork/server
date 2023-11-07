@@ -79,11 +79,13 @@ func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*Bring
     }
     platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
 
+    go platformTransport.Run(routeManager)
+
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
     remoteUserNatProvider := connect.NewRemoteUserNatProvider(connectClient, localUserNat)
 
-	return &BringYourDevice{
+	byDevice := &BringYourDevice{
 		ctx: cancelCtx,
 		cancel: cancel,
 		byJwt: byJwt,
@@ -99,7 +101,14 @@ func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*Bring
 		remoteUserNatProvider: remoteUserNatProvider,
 		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
-	}, nil
+	}
+
+
+	// set up with nil destination
+	localUserNat.AddReceivePacketCallback(byDevice.receive)
+
+
+	return byDevice, nil
 }
 
 // `ReceivePacketFunction`

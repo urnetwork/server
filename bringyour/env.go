@@ -11,6 +11,7 @@ import (
     "sync"
 
     "golang.org/x/exp/maps"
+    "golang.org/x/exp/slices"
 
     "gopkg.in/yaml.v3"
     "github.com/coreos/go-semver/semver"
@@ -258,10 +259,17 @@ func RequireHostPorts() map[int]int {
 
 // these are the most efficient dest for this host to reach the target host
 func Routes() map[string]string {
+    routeStrs := map[string]string{}
     if routes, ok := GetSettings()["routes"]; ok {
-        return routes.(map[string]string)
+        switch v := routes.(type) {
+        case map[string]any:
+            for host, route := range v {
+                routeStr := route.(string)
+                routeStrs[host] = routeStr
+            }
+        }
     }
-    return map[string]string{}
+    return routeStrs
 }
 
 
@@ -575,34 +583,37 @@ func versionLookup(root string, path []string) (string, error) {
         versionedPath := filepath.Join(root, path[0])
         if info, err := os.Stat(versionedPath); err == nil && info.Mode().IsRegular() {
             return versionedPath, nil
-        } else {
-            return "", errors.New("Not found.")
+        }
+        //  else {
+        //     return "", errors.New("Not found.")
+        // }
+    }
+
+    if 1 < len(path) {
+        // the versioned version takes precedence
+        if path, err := versionLookup(filepath.Join(root, path[0]), path[1:]); err == nil {
+            return filepath.Join(path), nil
         }
     }
 
-    // the versioned version takes precedence
-    if path, err := versionLookup(filepath.Join(root, path[0]), path[1:]); err == nil {
-        return filepath.Join(path), nil
-    }
 
-
-    versionNames := map[*semver.Version]string{}
+    versionNames := map[semver.Version]string{}
     if entries, err := os.ReadDir(root); err == nil {
         for _, entry := range entries {
             if entry.IsDir() {
                 if version, err := semver.NewVersion(entry.Name()); err == nil {
-                    versionNames[version] = entry.Name()
+                    versionNames[*version] = entry.Name()
                 }
             }
         }
     }
     versions := maps.Keys(versionNames)
-    semver.Sort(versions)
+    semverSortWithBuild(versions)
     for i := len(versions) - 1; 0 <= i; i -= 1 {
-        versionedRoot := filepath.Join(root, versionNames[versions[i]], path[0])
-        Logger().Printf("Test %s, %s\n", versionedRoot, path[1:])
+        versionedRoot := filepath.Join(root, versionNames[versions[i]])
+        Logger().Printf("Test %s, %s\n", versionedRoot, path)
         if info, err := os.Stat(versionedRoot); err == nil && info.Mode().IsDir() {
-            path, err := versionLookup(versionedRoot, path[1:])
+            path, err := versionLookup(versionedRoot, path)
             if err == nil {
                 return path, nil
             }
@@ -611,4 +622,20 @@ func versionLookup(root string, path []string) (string, error) {
 
     return "", errors.New("Not found.")
 }
+
+
+func semverSortWithBuild(versions []semver.Version) {
+    slices.SortStableFunc(versions, func(a semver.Version, b semver.Version)(bool) {
+        if a.LessThan(b) {
+            return true
+        }
+        if a.Equal(b) {
+            if a.Metadata < b.Metadata {
+                return true
+            }
+        }
+        return false
+    })
+}
+
 

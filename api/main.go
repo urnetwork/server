@@ -50,6 +50,7 @@ Options:
         router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
         router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
         router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+        router.NewRoute("GET", "/network/locations", handlers.GetNetworkLocations),
         router.NewRoute("POST", "/network/locations", handlers.NetworkLocations),
         router.NewRoute("POST", "/network/active-providers", handlers.NetworkActiveProviders),
         router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),

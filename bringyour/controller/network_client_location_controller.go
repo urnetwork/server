@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"encoding/json"
+	// "encoding/base64"
 	"time"
 	"sync"
 	"fmt"
@@ -15,10 +16,12 @@ import (
 
 
 var ipInfoConfig = sync.OnceValue(func() map[string]any {
-	return bringyour.Vault.RequireSimpleResource("ipinfo.yml").Parse()
+	c := bringyour.Vault.RequireSimpleResource("ipinfo.yml").Parse()
+	return c["ipinfo"].(map[string]any)
 })
 
-const LocationLookupResultExpiration = 30 * 24 * time.Hour
+
+const LocationLookupResultExpiration = 1 * time.Hour
 
 
 func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error) {
@@ -36,9 +39,16 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 		if err != nil {
 			return nil, err
 		}
+
+		token := ipInfoConfig()["access_token"].(string)
+		bringyour.Logger().Printf("Ipinfo token: %s", token)
+
+		// tokenBase64 := base64.StdEncoding.EncodeToString([]byte(token))
+
+
 		req.Header.Add(
 			"Authorization",
-			fmt.Sprintf("Bearer %s", ipInfoConfig()["access_token"]),
+			fmt.Sprintf("Bearer %s", token),
 		)
 
 		client := bringyour.DefaultClient()
@@ -56,6 +66,8 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 
 		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
 	}
+
+	bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
 
 	/*
 	example result:

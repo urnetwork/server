@@ -3,6 +3,7 @@ package client
 
 import (
 	"encoding/json"
+	"encoding/base64"
 	"bytes"
 	"fmt"
 	"io"
@@ -35,7 +36,6 @@ func defaultClient() *http.Client {
 
 type apiCallback[R any] interface {
 	Result(result R)
-	Error()
 }
 
 
@@ -48,13 +48,14 @@ type BringYourApi struct {
 // TODO manage extenders
 
 func NewBringYourApi(apiUrl string) *BringYourApi {
-	// FIXME
-	return nil
+	return &BringYourApi{
+		apiUrl: apiUrl,
+	}
 }
 
 // this gets attached to api calls that need it
 func (self *BringYourApi) SetByJwt(byJwt string) {
-
+	self.byJwt = byJwt
 }
 
 
@@ -91,6 +92,7 @@ func (self *BringYourApi) AuthLogin(authLogin *AuthLoginArgs, callback AuthLogin
 	go post(
 		fmt.Sprintf("%s/auth/login", self.apiUrl),
 		authLogin,
+		self.byJwt,
 		&AuthLoginResult{},
 		callback,
 	)
@@ -127,6 +129,7 @@ func (self *BringYourApi) AuthLoginWithPassword(authLoginWithPassword *AuthLogin
 	go post(
 		fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
 		authLoginWithPassword,
+		self.byJwt,
 		&AuthLoginWithPasswordResult{},
 		callback,
 	)
@@ -157,6 +160,7 @@ func (self *BringYourApi) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVe
 	go post(
 		fmt.Sprintf("%s/auth/verify", self.apiUrl),
 		authVerify,
+		self.byJwt,
 		&AuthVerifyResult{},
 		callback,
 	)
@@ -177,6 +181,7 @@ func (self *BringYourApi) NetworkCheck(networkCheck *NetworkCheckArgs, callback 
 	go post(
 		fmt.Sprintf("%s/auth/network-check", self.apiUrl),
 		networkCheck,
+		self.byJwt,
 		&NetworkCheckResult{},
 		callback,
 	)
@@ -218,6 +223,7 @@ func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callba
 	go post(
 		fmt.Sprintf("%s/auth/network-create", self.apiUrl),
 		networkCreate,
+		self.byJwt,
 		&NetworkCreateResult{},
 		callback,
 	)
@@ -227,8 +233,9 @@ func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callba
 type AuthNetworkClientCallback apiCallback[*AuthNetworkClientResult]
 
 type AuthNetworkClientArgs struct {
+	// FIXME how to bring this back as optional with gomobile. Use a new type *OptionalId?
 	// if omitted, a new client_id is created
-	ClientId Id `json:"client_id",omitempty`
+	// ClientId string `json:"client_id",omitempty`
 	Description string `json:"description"`
 	DeviceSpec string `json:"device_spec"`
 }
@@ -248,6 +255,7 @@ func (self *BringYourApi) AuthNetworkClient(authNetworkClient *AuthNetworkClient
 	go post(
 		fmt.Sprintf("%s/network/auth-client", self.apiUrl),
 		authNetworkClient,
+		self.byJwt,
 		&AuthNetworkClientResult{},
 		callback,
 	)
@@ -298,6 +306,7 @@ func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callba
 	go post(
 		fmt.Sprintf("%s/network/locations", self.apiUrl),
 		findLocations,
+		self.byJwt,
 		&FindLocationsResult{},
 		callback,
 	)
@@ -321,23 +330,43 @@ func (self *BringYourApi) GetActiveProviders(getActiveProviders *GetActiveProvid
 	go post(
 		fmt.Sprintf("%s/network/active-providers", self.apiUrl),
 		getActiveProviders,
+		self.byJwt,
 		&GetActiveProvidersResults{},
 		callback,
 	)
 }
 
 
-func post[R any](url string, args any, result R, callback apiCallback[R]) {
+func post[R any](url string, args any, byJwt string, result R, callback apiCallback[R]) {
 	requestBodyBytes, err := json.Marshal(args)
 	if err != nil {
-		callback.Error()
+		var empty R
+		callback.Result(empty)
 		return
 	}
 
-	client := defaultClient()
-	r, err := client.Post(url, "text/json", bytes.NewReader(requestBodyBytes))
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(requestBodyBytes))
 	if err != nil {
-		callback.Error()
+		var empty R
+		callback.Result(empty)
+		return
+	}
+
+	req.Header.Add("Content-Type", "text/json")
+
+
+	if byJwt != "" {
+		byJwtBase64 := base64.StdEncoding.EncodeToString([]byte(byJwt))
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwtBase64))
+	}
+
+
+	client := defaultClient()
+	r, err := client.Do(req)
+	if err != nil {
+		var empty R
+		callback.Result(empty)
 		return
 	}
 
@@ -346,7 +375,8 @@ func post[R any](url string, args any, result R, callback apiCallback[R]) {
 
 	err = json.Unmarshal(responseBodyBytes, &result)
 	if err != nil {
-		callback.Error()
+		var empty R
+		callback.Result(empty)
 		return
 	}
 

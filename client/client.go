@@ -29,6 +29,8 @@ var Version string
 
 type Id = []byte
 
+// TODO id to string conversion
+
 
 type Path struct {
 	ClientId Id

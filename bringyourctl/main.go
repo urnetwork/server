@@ -36,6 +36,7 @@ Usage:
     bringyourctl stats export
     bringyourctl stats import
     bringyourctl stats add
+    bringyourctl locations add-default
 
 Options:
     -h --help     Show this screen.
@@ -77,6 +78,10 @@ Options:
             statsImport(opts, args)
         } else if add, _ := opts.Bool("add"); add {
             statsAdd(opts, args)
+        }
+    } else if locations, _ := opts.Bool("locations"); locations {
+        if addDefault, _ := opts.Bool("add-default"); addDefault {
+            locationsAddDefault(opts, args)
         }
     }
 }
@@ -151,5 +156,11 @@ func statsImport(opts docopt.Opts, args CtlArgs) {
 
 func statsAdd(opts docopt.Opts, args CtlArgs) {
     controller.AddSampleEvents(context.Background(), 4 * 60)
+}
+
+
+func locationsAddDefault(opts docopt.Opts, args CtlArgs) {
+    ctx := context.Background()
+    model.AddDefaultLocations(ctx, 0)
 }
 

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"fmt"
+	"runtime/debug"
 
 	"bringyour.com/bringyour"
 )
@@ -63,7 +64,9 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				defer func() {
 					if err := recover(); err != nil {
 						// suppress the error
+						debug.PrintStack()
 						bringyour.Logger().Printf("Unhandled error from route %s (%s)\n", route.String(), err)
+						http.Error(w, "Error. Please visit support.bringyour.com for help.", http.StatusInternalServerError)
 					}
 				}()
 				route.handler(w, r.WithContext(ctx))

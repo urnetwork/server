@@ -13,7 +13,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 
-	// "golang.org/x/exp/maps"
+	"golang.org/x/exp/maps"
 
 	"google.golang.org/protobuf/proto"
 
@@ -52,7 +52,6 @@ const ContractSyncTimeout = 30 * time.Second
 const AbuseMinTimeout = 5 * time.Second
 const ControlMinTimeout = 200 * time.Millisecond
 
-const ExchangeConnectTimeout = 1 * time.Second
 
 // const NominateLocalResidentTimeout = 1 * time.Second
 
@@ -60,8 +59,10 @@ const ClientDrainTimeout = 30 * time.Second
 const TransportDrainTimeout = 30 * time.Second
 const ForwardTimeout = 200 * time.Millisecond
 
+const ExchangeConnectTimeout = 5 * time.Second
 const ExchangePingTimeout = 15 * time.Second
 const ExchangeReadWriteTimeout = 30 * time.Second
+const ExchangeReconnectAfterErrorTimeout = 5 * time.Second
 
 
 var ControlId = bringyour.Id(connect.ControlId)
@@ -215,10 +216,22 @@ func NewExchangeConnection(
 	port int,
 	op ExchangeOp,
 ) (*ExchangeConnection, error) {
+	// look up the host in the env routes
+	hostRoute, ok := bringyour.Routes()[host]
+	if !ok {
+		// use the hostname as the route
+		// this requires the DNS to be configured correctly at the site
+		hostRoute = host
+	}
+
+	authority := fmt.Sprintf("%s:%d", hostRoute, port)
+
+	bringyour.Logger().Printf("EXCHANGE CONNECTION DIAL %s\n", authority)
+
 	dialer := net.Dialer{
 		Timeout: ExchangeConnectTimeout,
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	conn, err := dialer.DialContext(ctx, "tcp", authority)
 	if err != nil {
 		bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR CONNECT %s\n", err)
 		return nil, err
@@ -475,6 +488,12 @@ func (self *ResidentTransport) Run() {
 				bringyour.Logger().Printf("EXCHANGE CONNECTION EXIT\n")
 			} else {
 				bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR: %s\n", err)
+
+				select {
+				case <- self.ctx.Done():
+					return
+				case <- time.After(ExchangeReconnectAfterErrorTimeout):
+				}
 			}
 		}
 		select {
@@ -648,21 +667,21 @@ type Exchange struct {
 	// any of the ports may be used
 	// a range of ports are used to scale one socket per transport or forward,
 	// since each port allows at most 65k connections from another connect instance
-	ports []int
+	hostToServicePorts map[int]int
 
 	residentsLock sync.RWMutex
 	// clientId -> Resident
 	residents map[bringyour.Id]*Resident
 }
 
-func NewExchange(ctx context.Context, host string, ports []int) *Exchange {
+func NewExchange(ctx context.Context, host string, hostToServicePorts map[int]int) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	exchange := &Exchange{
 		ctx: cancelCtx,
 		cancel: cancel,
 		host: host,
-		ports: ports,
+		hostToServicePorts: hostToServicePorts,
 		residents: map[bringyour.Id]*Resident{},
 	}
 
@@ -683,23 +702,24 @@ func NewExchangeFromEnv(ctx context.Context) *Exchange {
 	// the expected port usage is `number_of_residents * expected(number_of_destinations_per_resident)`,
 	// and at most `number_of_residents * MaxConcurrentForwardsPerResident`
 
-	ports := []int{}
+	// host port -> service port
+	hostToServicePorts := map[int]int{}
 	servicePort := StartInternalPort
 	for {
 		hostPort, ok := hostPorts[servicePort]
 		if !ok {
 			break
 		}
-		ports = append(ports, hostPort)
+		hostToServicePorts[hostPort] = servicePort
 		servicePort += 1
 	}
-	if len(ports) == 0 {
+	if len(hostToServicePorts) == 0 {
 		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", StartInternalPort))
 	}
 
-	bringyour.Logger().Printf("FOUND EXCHANGE PORTS %s\n", ports)
+	bringyour.Logger().Printf("FOUND EXCHANGE PORTS %s\n", hostToServicePorts)
 
-	return NewExchange(ctx, host, ports)
+	return NewExchange(ctx, host, hostToServicePorts)
 }
 
 func (self *Exchange) NominateLocalResident(
@@ -751,7 +771,7 @@ func (self *Exchange) NominateLocalResident(
 		ResidentHost: self.host,
 		ResidentService: bringyour.RequireService(),
 		ResidentBlock: bringyour.RequireBlock(),
-		ResidentInternalPorts: self.ports,
+		ResidentInternalPorts: maps.Keys(self.hostToServicePorts),
 	})
 	bringyour.Logger().Printf("NOMINATED RESIDENT %s <> %s\n", nominated.ResidentId.String(), resident.residentId.String())
 	if nominated.ResidentId == resident.residentId {
@@ -794,7 +814,7 @@ func (self *Exchange) syncResidents() {
 
 		residentsToClose := []*Resident{}
 
-		residentsForHostPort := model.GetResidentsForHostPorts(self.ctx, self.host, self.ports)
+		residentsForHostPort := model.GetResidentsForHostPorts(self.ctx, self.host, maps.Keys(self.hostToServicePorts))
 		residentIdsForHostPort := map[bringyour.Id]bool{}
 		for _, residentsForHostPort := range residentsForHostPort {
 			residentIdsForHostPort[residentsForHostPort.ResidentId] = true
@@ -864,8 +884,10 @@ func (self *Exchange) Run() {
 	// 	}
 	// }()
 
-	for _, port_ := range self.ports {
-		port := port_
+	bringyour.Logger().Printf("START EXCHANGE LISTEN ON HOST %s PORTS %s", bringyour.RequireHost(), self.hostToServicePorts)
+
+	for _, servicePort := range self.hostToServicePorts {
+		port := servicePort
 		go bringyour.HandleError(func() {
 			defer self.cancel()
 
@@ -891,6 +913,7 @@ func (self *Exchange) Run() {
 						bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ACCEPT ERROR %s", port, err)
 						return
 					}
+					bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ACCEPT %s", port, bringyour.RequireHost())
 					go bringyour.HandleError(
 						func() {self.handleExchangeConnection(conn)},
 						self.Close,

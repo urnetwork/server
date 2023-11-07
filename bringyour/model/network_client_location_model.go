@@ -25,7 +25,7 @@ var locationGroupSearch = search.NewSearch("location_group", search.SearchTypeSu
 
 
 // called from db_migrations to add default locations and groups
-func AddDefaultLocations(ctx context.Context, limit int) {
+func AddDefaultLocations(ctx context.Context, cityLimit int) {
     createCountry := func(countryCode string, country string) {
         location := &Location{
             LocationType: LocationTypeCountry,
@@ -125,7 +125,7 @@ func AddDefaultLocations(ctx context.Context, limit int) {
                 country := country_.(string)
                 for _, city := range cities.([]any) {
                     cityIndex += 1
-                    if 0 < limit && limit < cityIndex {
+                    if 0 <= cityLimit && cityLimit < cityIndex {
                         return
                     }
                     bringyour.Logger().Printf("[%d/%d] %s, %s, %s\n", cityIndex, cityCount, countryCode, region, city)
@@ -212,6 +212,7 @@ func AddDefaultLocations(ctx context.Context, limit int) {
         },
     }
     for name, members := range promotedRegions {
+        bringyour.Logger().Printf("Create promoted group %s\n", name)
         createLocationGroup(true, name, members...) 
     }
     
@@ -483,6 +484,7 @@ func AddDefaultLocations(ctx context.Context, limit int) {
         },
     }
     for name, members := range unSubregions {
+        bringyour.Logger().Printf("Create group %s\n", name)
         createLocationGroup(false, name, members...)    
     }
 }
@@ -601,26 +603,28 @@ func (self *Location) CityLocation() (*Location, error) {
 
 
 func CreateLocation(ctx context.Context, location *Location) {
-    var countryLocation *Location
-    var regionLocation *Location
-    var cityLocation *Location
-
     var countryCode string
     if location.CountryCode != "" {
         countryCode = strings.ToLower(location.CountryCode)
     } else {
-        // use the first two letters of the country
-        countryCode = strings.ToLower(string([]rune(location.Country)[0:2]))
+        // use the country name
+        countryCode = strings.ToLower(string([]rune(location.Country)))
+    }
+    if 2 < len(countryCode) {
+        countryCode = countryCode[0:2]
     }
 
     // country
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        var countryLocation *Location
+        var regionLocation *Location
+        var cityLocation *Location
+
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    location_id,
-                    country_code
+                    location_id
                 FROM location
                 WHERE
                     location_type = $1 AND
@@ -629,11 +633,12 @@ func CreateLocation(ctx context.Context, location *Location) {
             LocationTypeCountry,
             countryCode,
         )
-        var locationId bringyour.Id
-        var countryCode string
+        
+        
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
-                bringyour.Raise(result.Scan(&locationId, &countryCode))
+                var locationId bringyour.Id
+                bringyour.Raise(result.Scan(&locationId))
                 countryLocation = &Location{
                     LocationType: LocationTypeCountry,
                     Country: location.Country,
@@ -644,53 +649,47 @@ func CreateLocation(ctx context.Context, location *Location) {
             }
         })
 
-        if countryLocation != nil {
+        if countryLocation == nil { 
+            locationId := bringyour.NewId()
+            _, err = tx.Exec(
+                ctx,
+                `
+                    INSERT INTO location (
+                        location_id,
+                        location_type,
+                        location_name,
+                        country_location_id,
+                        country_code
+                    )
+                    VALUES ($1, $2, $3, $1, $4)
+                `,
+                locationId,
+                LocationTypeCountry,
+                location.Country,
+                countryCode,
+            )
+            bringyour.Raise(err)
+
+            countryLocation = &Location{
+                LocationType: LocationTypeCountry,
+                Country: location.Country,
+                CountryCode: countryCode,
+                LocationId: locationId,
+                CountryLocationId: locationId,
+            }
+
+            // add to the search
+            for i, searchStr := range countryLocation.SearchStrings() {
+                locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+            }
+        }
+
+        if location.LocationType == LocationTypeCountry {
+            *location = *countryLocation
             return
         }
-        // else create a new location
-            
-        locationId = bringyour.NewId()
-        _, err = tx.Exec(
-            ctx,
-            `
-                INSERT INTO location (
-                    location_id,
-                    location_type,
-                    location_name,
-                    country_location_id,
-                    country_code
-                )
-                VALUES ($1, $2, $3, $1, $4)
-            `,
-            locationId,
-            LocationTypeCountry,
-            location.Country,
-            countryCode,
-        )
-        bringyour.Raise(err)
 
-        countryLocation = &Location{
-            LocationType: LocationTypeCountry,
-            Country: location.Country,
-            CountryCode: countryCode,
-            LocationId: locationId,
-            CountryLocationId: locationId,
-        }
-
-        // add to the search
-        for i, searchStr := range countryLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
-        }
-    }, bringyour.TxSerializable))
-
-    if location.LocationType == LocationTypeCountry {
-        *location = *countryLocation
-        return
-    }
-
-    // region
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
+        result, err = tx.Query(
             ctx,
             `
                 SELECT
@@ -707,9 +706,10 @@ func CreateLocation(ctx context.Context, location *Location) {
             location.Region,
             countryLocation.LocationId,
         )
-        var locationId bringyour.Id
+        
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
+                var locationId bringyour.Id
                 bringyour.Raise(result.Scan(&locationId))
                 regionLocation = &Location{
                     LocationType: LocationTypeRegion,
@@ -723,58 +723,55 @@ func CreateLocation(ctx context.Context, location *Location) {
             }
         })
 
-        if regionLocation != nil {
+        if regionLocation == nil {
+            // create a new location
+
+            locationId := bringyour.NewId()
+
+            _, err = tx.Exec(
+                ctx,
+                `
+                    INSERT INTO location (
+                        location_id,
+                        location_type,
+                        location_name,
+                        region_location_id,
+                        country_location_id,
+                        country_code
+                    )
+                    VALUES ($1, $2, $3, $1, $4, $5)
+                `,
+                locationId,
+                LocationTypeRegion,
+                location.Region,
+                countryLocation.LocationId,
+                countryCode,
+            )
+            bringyour.Raise(err)
+
+            regionLocation = &Location{
+                LocationType: LocationTypeRegion,
+                Region: location.Region,
+                Country: countryLocation.Country,
+                CountryCode: countryCode,
+                LocationId: locationId,
+                RegionLocationId: locationId,
+                CountryLocationId: countryLocation.LocationId,
+            }
+
+            // add to the search
+            for i, searchStr := range regionLocation.SearchStrings() {
+                locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+            }
+        }
+
+        if location.LocationType == LocationTypeRegion {
+            *location = *regionLocation
             return
         }
-        // else create a new location
-        
-        locationId = bringyour.NewId()
 
-        _, err = tx.Exec(
-            ctx,
-            `
-                INSERT INTO location (
-                    location_id,
-                    location_type,
-                    location_name,
-                    region_location_id,
-                    country_location_id,
-                    country_code
-                )
-                VALUES ($1, $2, $3, $1, $4, $5)
-            `,
-            locationId,
-            LocationTypeRegion,
-            location.Region,
-            countryLocation.LocationId,
-            countryCode,
-        )
-        bringyour.Raise(err)
 
-        regionLocation = &Location{
-            LocationType: LocationTypeRegion,
-            Region: location.Region,
-            Country: countryLocation.Country,
-            CountryCode: countryCode,
-            LocationId: locationId,
-            RegionLocationId: locationId,
-            CountryLocationId: countryLocation.LocationId,
-        }
-
-        // add to the search
-        for i, searchStr := range regionLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
-        }
-    }, bringyour.TxSerializable))
-
-    if location.LocationType == LocationTypeRegion {
-        *location = *regionLocation
-        return
-    }
-
-    // city
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
+        result, err = tx.Query(
             ctx,
             `
                 SELECT 
@@ -784,8 +781,9 @@ func CreateLocation(ctx context.Context, location *Location) {
                     location_type = $1 AND
                     country_code = $2 AND
                     location_name = $3 AND
-                    country_location_id = $4 AND
-                    region_location_id = $5
+                    region_location_id = $4 AND
+                    country_location_id = $5
+                    
             `,
             LocationTypeCity,
             countryCode,
@@ -793,9 +791,10 @@ func CreateLocation(ctx context.Context, location *Location) {
             regionLocation.LocationId,
             countryLocation.LocationId,
         )
-        var locationId bringyour.Id
+        
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
+                var locationId bringyour.Id
                 bringyour.Raise(result.Scan(&locationId))
                 cityLocation = &Location{
                     LocationType: LocationTypeCity,
@@ -811,55 +810,54 @@ func CreateLocation(ctx context.Context, location *Location) {
             }
         })
 
-        if cityLocation != nil {
-            return
-        }
-        // else create a new location
-        
-        locationId = bringyour.NewId()
+        if cityLocation == nil {
+            // create a new location
+            
+            locationId := bringyour.NewId()
 
-        _, err = tx.Exec(
-            ctx,
-            `
-                INSERT INTO location (
-                    location_id,
-                    location_type,
-                    location_name,
-                    city_location_id,
-                    region_location_id,
-                    country_location_id,
-                    country_code
-                )
-                VALUES ($1, $2, $3, $1, $4, $5, $6)
-            `,
-            locationId,
-            LocationTypeCity,
-            location.City,
-            regionLocation.LocationId,
-            countryLocation.LocationId,
-            countryCode,
-        )
-        bringyour.Raise(err)
+            _, err = tx.Exec(
+                ctx,
+                `
+                    INSERT INTO location (
+                        location_id,
+                        location_type,
+                        location_name,
+                        city_location_id,
+                        region_location_id,
+                        country_location_id,
+                        country_code
+                    )
+                    VALUES ($1, $2, $3, $1, $4, $5, $6)
+                `,
+                locationId,
+                LocationTypeCity,
+                location.City,
+                regionLocation.LocationId,
+                countryLocation.LocationId,
+                countryCode,
+            )
+            bringyour.Raise(err)
 
-        cityLocation = &Location{
-            LocationType: LocationTypeCity,
-            City: location.City,
-            Region: regionLocation.Region,
-            Country: countryLocation.Country,
-            CountryCode: countryLocation.CountryCode,
-            LocationId: locationId,
-            CityLocationId: locationId,
-            RegionLocationId: regionLocation.LocationId,
-            CountryLocationId: countryLocation.LocationId,
+            cityLocation = &Location{
+                LocationType: LocationTypeCity,
+                City: location.City,
+                Region: regionLocation.Region,
+                Country: countryLocation.Country,
+                CountryCode: countryLocation.CountryCode,
+                LocationId: locationId,
+                CityLocationId: locationId,
+                RegionLocationId: regionLocation.LocationId,
+                CountryLocationId: countryLocation.LocationId,
+            }
+
+            // add to the search
+            for i, searchStr := range cityLocation.SearchStrings() {
+                locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+            }
         }
 
-        // add to the search
-        for i, searchStr := range cityLocation.SearchStrings() {
-            locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
-        }
+        *location = *cityLocation
     }, bringyour.TxSerializable))
-
-    *location = *cityLocation
 }
 
 
@@ -972,30 +970,76 @@ func SetConnectionLocation(
     locationId bringyour.Id,
 ) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        _, err := tx.Exec(
+        result, err := tx.Query(
             ctx,
             `
-                INSERT INTO network_client_location
                 SELECT
-                    network_client_connection.connection_id
-                    network_client_connection.client_id
-                    location.city_location_id
-                    location.region_location_id
-                    location.country_location_id
-                FROM network_client_connection
+                    client_id
+                FROM network_client_connection 
                 WHERE connection_id = $1
-                INNER JOIN location ON location.location_id = $2
-                ON CONFLICT (connection_id) DO UPDATE
-                SET
-                    client_id = network_client_connection.client_id,
-                    city_location_id = location.city_location_id,
-                    region_location_id = location.region_location_id,
-                    country_location_id = location.country_location_id
             `,
             connectionId,
+        )
+        var clientId *bringyour.Id
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&clientId))
+            }
+        })
+
+        if clientId == nil {
+            return
+        }
+
+        result, err = tx.Query(
+            ctx,
+            `
+                SELECT
+                    location.city_location_id,
+                    location.region_location_id,
+                    location.country_location_id
+                FROM location 
+                WHERE location_id = $1
+            `,
             locationId,
         )
-        bringyour.Raise(err)
+        var cityLocationId *bringyour.Id
+        var regionLocationId *bringyour.Id
+        var countryLocationId *bringyour.Id
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(
+                    &cityLocationId,
+                    &regionLocationId,
+                    &countryLocationId,
+                ))
+            }
+        })
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                INSERT INTO network_client_location (
+                    connection_id,
+                    client_id,
+                    city_location_id,
+                    region_location_id,
+                    country_location_id
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (connection_id) DO UPDATE
+                SET
+                    client_id = $2,
+                    city_location_id = $3,
+                    region_location_id = $4,
+                    country_location_id = $5
+            `,
+            connectionId,
+            clientId,
+            cityLocationId,
+            regionLocationId,
+            countryLocationId,
+        ))
     }))
 }
 
@@ -1213,20 +1257,20 @@ func FindActiveProviderLocations(
         bringyour.CreateTempJoinTableInTx(
             session.Ctx,
             tx,
-            "result_location_ids(location_id uuid, client_count int)",
+            "result_location_ids(location_id uuid -> client_count int)",
             providerCount,
         )
         result, err = tx.Query(
             session.Ctx,
             `
                 SELECT
-                    location_id,
-                    location_type,
-                    location_name,
-                    city_location_id,
-                    region_location_id,
-                    country_location_id,
-                    country_code,
+                    location.location_id,
+                    location.location_type,
+                    location.location_name,
+                    location.city_location_id,
+                    location.region_location_id,
+                    location.country_location_id,
+                    location.country_code,
                     result_location_ids.client_count,
                 FROM location
                 INNER JOIN result_location_ids ON
@@ -1258,9 +1302,9 @@ func FindActiveProviderLocations(
             session.Ctx,
             `
                 SELECT
-                    location_group_id,
-                    location_group_name,
-                    promoted,
+                    location_group.location_group_id,
+                    location_group.location_group_name,
+                    location_group.promoted,
                     t.client_count,
                 FROM location_group
                 INNER JOIN (
@@ -1364,21 +1408,21 @@ func GetActiveProviderLocations(
         bringyour.CreateTempJoinTableInTx(
             session.Ctx,
             tx,
-            "result_location_ids(location_id uuid, client_count int)",
+            "result_location_ids(location_id uuid -> client_count int)",
             providerCount,
         )
         result, err = tx.Query(
             session.Ctx,
             `
                 SELECT
-                    location_id,
-                    location_type,
-                    location_name,
-                    city_location_id,
-                    region_location_id,
-                    country_location_id,
-                    country_code,
-                    result_location_ids.client_count,
+                    location.location_id,
+                    location.location_type,
+                    location.location_name,
+                    location.city_location_id,
+                    location.region_location_id,
+                    location.country_location_id,
+                    location.country_code,
+                    result_location_ids.client_count
                 FROM location
                 INNER JOIN result_location_ids ON
                     result_location_ids.location_id = location.location_id
@@ -1405,19 +1449,19 @@ func GetActiveProviderLocations(
             session.Ctx,
             `
                 SELECT
-                    location_group_id,
-                    location_group_name,
-                    promoted,
-                    t.client_count,
+                    location_group.location_group_id,
+                    location_group.location_group_name,
+                    location_group.promoted,
+                    t.client_count
                 FROM location_group
                 INNER JOIN (
                     SELECT
-                        location_group_id,
-                        SUM(result_location_ids.client_count) AS client_count,
+                        location_group_member.location_group_id,
+                        SUM(result_location_ids.client_count) AS client_count
                     FROM location_group_member
                     INNER JOIN result_location_ids ON
                         result_location_ids.location_id = location_group_member.location_id
-                    GROUP BY location_group_id
+                    GROUP BY location_group_member.location_group_id
                 ) t ON t.location_group_id = location_group.location_group_id
             `,
         )
