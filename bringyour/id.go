@@ -64,7 +64,7 @@ func (self *Id) String() string {
 }
 
 // Scan implements the database/sql Scanner interface.
-func (dst *Id) Scan(src any) error {
+func (self *Id) Scan(src any) error {
 	if src == nil {
 		return fmt.Errorf("Scan with nil source not supported by Id (use *Id)")
 	}
@@ -75,7 +75,7 @@ func (dst *Id) Scan(src any) error {
 		if err != nil {
 			return err
 		}
-		*dst = buf
+		*self = buf
 		return nil
 	}
 
@@ -83,19 +83,19 @@ func (dst *Id) Scan(src any) error {
 }
 
 // Value implements the database/sql/driver Valuer interface.
-func (src *Id) Value() (driver.Value, error) {
-	return encodeUuid(*src), nil
+func (self *Id) Value() (driver.Value, error) {
+	return encodeUuid(*self), nil
 }
 
-func (src *Id) MarshalJSON() ([]byte, error) {
+func (self *Id) MarshalJSON() ([]byte, error) {
 	var buff bytes.Buffer
 	buff.WriteByte('"')
-	buff.WriteString(encodeUuid(*src))
+	buff.WriteString(encodeUuid(*self))
 	buff.WriteByte('"')
 	return buff.Bytes(), nil
 }
 
-func (dst *Id) UnmarshalJSON(src []byte) error {
+func (self *Id) UnmarshalJSON(src []byte) error {
 	if bytes.Equal(src, []byte("null")) {
 		return fmt.Errorf("Unmarshal with nil source not supported by Id (use *Id)")
 	}
@@ -106,7 +106,7 @@ func (dst *Id) UnmarshalJSON(src []byte) error {
 	if err != nil {
 		return err
 	}
-	*dst = buf
+	*self = buf
 	return nil
 }
 

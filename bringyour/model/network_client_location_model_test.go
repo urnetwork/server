@@ -90,3 +90,33 @@ func TestCanonicalLocations(t *testing.T) { bringyour.DefaultTestEnv().Run(func(
     assert.Equal(t, d.CountryLocationId, c.CountryLocationId)
 })}
 
+
+func TestCanonicalLocationsParallel(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    n := 1000
+    out := make(chan bringyour.Id, n)
+
+    for i := 0; i < n; i += 1 {
+        go func() {
+            c := &Location{
+                LocationType: LocationTypeCity,
+                City: "Palo Alto",
+                Region: "California",
+                Country: "United States",
+                CountryCode: "us",
+            }
+            CreateLocation(ctx, c)
+            out <- c.LocationId
+        }()
+    }
+
+    locationIds := map[bringyour.Id]bool{}
+    for i := 0; i < n; i += 1 {
+        locationId := <- out
+        locationIds[locationId] = true
+    }
+
+    assert.Equal(t, 1, len(locationIds))
+})}
+

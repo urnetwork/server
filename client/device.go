@@ -13,6 +13,9 @@ import (
 )
 
 
+var deviceLog = logFn("device")
+
+
 const clientDrainTimeout = 30 * time.Second
 
 
@@ -32,6 +35,7 @@ type BringYourDevice struct {
 
 	byJwt string
 	platformUrl string
+	apiUrl string
 
 	clientId connect.Id
 	instanceId connect.Id
@@ -52,9 +56,11 @@ type BringYourDevice struct {
 	openedViewControllers map[ViewController]bool
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
+
+	api *BringYourApi
 }
 
-func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*BringYourDevice, error) {
+func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanceId *Id) (*BringYourDevice, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
 		return nil, err
@@ -74,7 +80,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*Bring
 
     auth := &connect.ClientAuth{
     	ByJwt: byJwt,
-    	InstanceId: connect.Id(instanceId),
+    	InstanceId: instanceId.toConnectId(),
     	AppVersion: Version,
     }
     platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
@@ -85,13 +91,17 @@ func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*Bring
 
     remoteUserNatProvider := connect.NewRemoteUserNatProvider(connectClient, localUserNat)
 
+    api := newBringYourApiWithContext(cancelCtx, apiUrl)
+    api.SetByJwt(byJwt)
+
 	byDevice := &BringYourDevice{
 		ctx: cancelCtx,
 		cancel: cancel,
 		byJwt: byJwt,
 		platformUrl: platformUrl,
+		apiUrl: apiUrl,
 		clientId: clientId,
-		instanceId: connect.Id(instanceId),
+		instanceId: instanceId.toConnectId(),
 		connectClient: connectClient,
 		contractManager: contractManager,
 		routeManager: routeManager,
@@ -101,20 +111,33 @@ func NewBringYourDevice(byJwt string, platformUrl string, instanceId Id) (*Bring
 		remoteUserNatProvider: remoteUserNatProvider,
 		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
+		api: api,
 	}
-
 
 	// set up with nil destination
 	localUserNat.AddReceivePacketCallback(byDevice.receive)
 
-
 	return byDevice, nil
 }
 
+func (self *BringYourDevice) ClientId() *Id {
+	clientId := self.connectClient.ClientId()
+	return newId(clientId)
+}
+
+func (self *BringYourDevice) client() *connect.Client {
+	return self.connectClient
+}
+
+func (self *BringYourDevice) Api() *BringYourApi {
+	return self.api
+}
+
 // `ReceivePacketFunction`
-func (self *BringYourDevice) receive(source connect.Path, packet []byte) {
+func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
+	deviceLog("GOT A PACKET %d", len(packet))
     for _, receiveCallback := range self.receiveCallbacks.Get() {
-        receiveCallback(source, packet)
+        receiveCallback(source, ipProtocol, packet)
     }
 }
 
@@ -129,6 +152,18 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	self.contractManager.SetProvideModes(provideModes)
 }
 
+func (self *BringYourDevice) RemoveDestination() error {
+	return self.SetDestination(nil, ProvideModeNone)
+}
+
+func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
+	exportedDestinations := NewPathList()
+	exportedDestinations.Add(&Path{
+		ClientId: clientId,
+	})
+	return self.SetDestination(exportedDestinations, ProvideModePublic)
+}
+
 // `Router` implementation
 func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode ProvideMode) error {
 	if self.remoteUserNatClient != nil {
@@ -138,7 +173,7 @@ func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode 
 		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
 
-	if destinations.Len() == 0 {
+	if destinations == nil || destinations.Len() == 0 {
 		self.localUserNat.AddReceivePacketCallback(self.receive)
 		return nil
 	} else {
@@ -173,7 +208,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 }
 
 func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
-	receive := func(destination connect.Path, packet []byte) {
+	receive := func(destination connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
 		receivePacket.ReceivePacket(packet)
 	}
 	self.receiveCallbacks.Add(receive)
@@ -183,7 +218,7 @@ func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
 }
 
 func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
-	vc := newConnectViewController(self.ctx, self.connectClient)
+	vc := newConnectViewController(self.ctx, self)
 	self.openedViewControllers[vc] = true
 	return vc
 }

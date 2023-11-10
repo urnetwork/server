@@ -515,6 +515,7 @@ var migrations = []any{
     //  )
     // `),
 
+    // DROPPED and recreated
     newSqlMigration(`
         CREATE TABLE location (
             location_id uuid NOT NULL,
@@ -528,10 +529,12 @@ var migrations = []any{
             PRIMARY KEY (location_id)
         )
     `),
+    // DROPPED and recreated
     newSqlMigration(`
         CREATE INDEX location_type_country_code_name ON location (location_type, country_code, location_name, country_location_id, region_location_id, location_id)
     `),
 
+    // DROPPED and recreated
     newSqlMigration(`
         CREATE TABLE location_group (
             location_group_id uuid NOT NULL,
@@ -920,4 +923,51 @@ var migrations = []any{
     newSqlMigration(`
         DROP TYPE auth_type
     `),
+
+    newSqlMigration(`
+        DROP INDEX location_type_country_code_name
+    `),
+
+    newSqlMigration(`
+        DROP TABLE location
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE location (
+            location_id uuid NOT NULL,
+            location_type varchar(16) NOT NULL,
+            location_name varchar(128) NOT NULL,
+            city_location_id uuid NULL,
+            region_location_id uuid NULL,
+            country_location_id uuid NULL,
+            country_code char(2) NOT NULL,
+            location_full_name VARCHAR(256) NOT NULL,
+
+            PRIMARY KEY (location_id),
+            UNIQUE(location_full_name)
+        )
+    `),
+    newSqlMigration(`
+        CREATE INDEX location_type_country_code_name ON location (location_type, country_code, location_name, country_location_id, region_location_id, location_id)
+    `),
+
+    newSqlMigration(`
+        DROP INDEX location_group_name
+    `),
+
+    newSqlMigration(`
+        DROP TABLE location_group
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE location_group (
+            location_group_id uuid NOT NULL,
+            location_group_name varchar(128) NOT NULL,
+            promoted bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY (location_group_id),
+            UNIQUE (location_group_name)
+        )
+    `),
+
 }

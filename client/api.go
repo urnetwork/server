@@ -2,8 +2,9 @@ package client
 
 
 import (
+	"context"
 	"encoding/json"
-	"encoding/base64"
+	// "encoding/base64"
 	"bytes"
 	"fmt"
 	"io"
@@ -11,6 +12,9 @@ import (
 	"net/http"
 	"time"
 )
+
+
+var apiLog = logFn("api")
 
 
 const defaultHttpTimeout = 10 * time.Second
@@ -35,11 +39,30 @@ func defaultClient() *http.Client {
 
 
 type apiCallback[R any] interface {
-	Result(result R)
+	Result(result R, err error)
+}
+
+
+// for internal use
+type simpleApiCallback[R any] struct {
+	callback func(result R, err error)
+}
+
+func newApiCallback[R any](callback func(result R, err error)) apiCallback[R] {
+	return &simpleApiCallback[R]{
+		callback: callback,
+	}
+}
+
+func (self *simpleApiCallback[R]) Result(result R, err error) {
+	self.callback(result, err)
 }
 
 
 type BringYourApi struct {
+	ctx context.Context
+	cancel context.CancelFunc
+
 	apiUrl string
 
 	byJwt string
@@ -48,7 +71,15 @@ type BringYourApi struct {
 // TODO manage extenders
 
 func NewBringYourApi(apiUrl string) *BringYourApi {
+	return newBringYourApiWithContext(context.Background(), apiUrl)
+}
+
+func newBringYourApiWithContext(ctx context.Context, apiUrl string) *BringYourApi {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
 	return &BringYourApi{
+		ctx: cancelCtx,
+		cancel: cancel,
 		apiUrl: apiUrl,
 	}
 }
@@ -90,6 +121,7 @@ type AuthLoginResultNetwork struct {
 
 func (self *BringYourApi) AuthLogin(authLogin *AuthLoginArgs, callback AuthLoginCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/auth/login", self.apiUrl),
 		authLogin,
 		self.byJwt,
@@ -127,6 +159,7 @@ type AuthLoginWithPasswordResultError struct {
 
 func (self *BringYourApi) AuthLoginWithPassword(authLoginWithPassword *AuthLoginWithPasswordArgs, callback AuthLoginWithPasswordCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
 		authLoginWithPassword,
 		self.byJwt,
@@ -158,6 +191,7 @@ type AuthVerifyResultError struct {
 
 func (self *BringYourApi) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVerifyCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/auth/verify", self.apiUrl),
 		authVerify,
 		self.byJwt,
@@ -179,6 +213,7 @@ type NetworkCheckResult struct {
 
 func (self *BringYourApi) NetworkCheck(networkCheck *NetworkCheckArgs, callback NetworkCheckCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/auth/network-check", self.apiUrl),
 		networkCheck,
 		self.byJwt,
@@ -221,6 +256,7 @@ type NetworkCreateResultError struct {
 
 func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callback NetworkCreateCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/auth/network-create", self.apiUrl),
 		networkCreate,
 		self.byJwt,
@@ -253,6 +289,7 @@ type AuthNetworkClientError struct {
 
 func (self *BringYourApi) AuthNetworkClient(authNetworkClient *AuthNetworkClientArgs, callback AuthNetworkClientCallback) {
 	go post(
+		self.ctx,
 		fmt.Sprintf("%s/network/auth-client", self.apiUrl),
 		authNetworkClient,
 		self.byJwt,
@@ -283,28 +320,56 @@ type FindLocationsResult struct {
 }
 
 type LocationGroupResult struct {
-    LocationGroupId Id
-    Name string
-    ProviderCount int
-    Promoted bool
-    MatchDistance int
+    LocationGroupId *Id `json:"location_group_id"`
+    Name string `json:"name"`
+    ProviderCount int `json:"provider_count,omitempty"`
+    Promoted bool `json:"promoted,omitempty"`
+    MatchDistance int `json:"match_distance,omitempty"`
 }
 
 type LocationResult struct {
-    LocationId Id `json:"location_id"`
+    LocationId *Id `json:"location_id"`
     LocationType LocationType `json:"location_type"`
     Name string `json:"name"`
-    CityLocationId Id `json:"city_location_id,omitempty"`
-    RegionLocationId Id `json:"region_location_id,omitempty"`
-    CountryLocationId Id `json:"country_location_id,omitempty"`
-    CountryCode string `json:"country_code"`
+    // FIXME
+    City string `json:"city,omitempty"`
+    // FIXME
+    Region string `json:"region,omitempty"`
+    // FIXME
+    Country string `json:"country,omitempty"`
+    CountryCode string `json:"country_code,omitempty"`
+    CityLocationId *Id `json:"city_location_id,omitempty"`
+    RegionLocationId *Id `json:"region_location_id,omitempty"`
+    CountryLocationId *Id `json:"country_location_id,omitempty"`
     ProviderCount int `json:"provider_count,omitempty"`
     MatchDistance int `json:"match_distance,omitempty"`
 }
 
+func (self *BringYourApi) GetProviderLocations(callback FindLocationsCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/network/provider-locations", self.apiUrl),
+		self.byJwt,
+		&FindLocationsResult{},
+		callback,
+	)
+}
+
+func (self *BringYourApi) FindProviderLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/network/find-provider-locations", self.apiUrl),
+		findLocations,
+		self.byJwt,
+		&FindLocationsResult{},
+		callback,
+	)
+}
+
 func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callback FindLocationsCallback) {
 	go post(
-		fmt.Sprintf("%s/network/locations", self.apiUrl),
+		self.ctx,
+		fmt.Sprintf("%s/network/find-locations", self.apiUrl),
 		findLocations,
 		self.byJwt,
 		&FindLocationsResult{},
@@ -313,74 +378,128 @@ func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callba
 }
 
 
-type GetActiveProvidersCallback apiCallback[*GetActiveProvidersResults]
+type FindActiveProvidersCallback apiCallback[*FindActiveProvidersResult]
 
-type GetActiveProvidersArgs struct {
-	LocationId Id `json:"location_id,omitempty"`
-	GroupLocationId Id `json:"group_location_id,omitempty"`
+type FindActiveProvidersArgs struct {
+	LocationId *Id `json:"location_id,omitempty"`
+	LocationGroupId *Id `json:"location_group_id,omitempty"`
 	Count int `json:"count"`
 	ExcludeClientIds *IdList `json:"exclude_location_ids,omitempty"`
 }
 
-type GetActiveProvidersResults struct {
+type FindActiveProvidersResult struct {
 	ClientIds *IdList `json:"client_ids,omitempty"`
 }
 
-func (self *BringYourApi) GetActiveProviders(getActiveProviders *GetActiveProvidersArgs, callback GetActiveProvidersCallback) {
+func (self *BringYourApi) FindProviders(findActiveProviders *FindActiveProvidersArgs, callback FindActiveProvidersCallback) {
 	go post(
-		fmt.Sprintf("%s/network/active-providers", self.apiUrl),
-		getActiveProviders,
+		self.ctx,
+		fmt.Sprintf("%s/network/find-providers", self.apiUrl),
+		findActiveProviders,
 		self.byJwt,
-		&GetActiveProvidersResults{},
+		&FindActiveProvidersResult{},
 		callback,
 	)
 }
 
 
-func post[R any](url string, args any, byJwt string, result R, callback apiCallback[R]) {
+func post[R any](ctx context.Context, url string, args any, byJwt string, result R, callback apiCallback[R]) {
 	requestBodyBytes, err := json.Marshal(args)
 	if err != nil {
 		var empty R
-		callback.Result(empty)
+		callback.Result(empty, err)
 		return
 	}
 
+	apiLog("REQUEST BODY BYTES: %s", string(requestBodyBytes))
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(requestBodyBytes))
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(requestBodyBytes))
 	if err != nil {
 		var empty R
-		callback.Result(empty)
+		callback.Result(empty, err)
 		return
 	}
 
 	req.Header.Add("Content-Type", "text/json")
 
+	apiLog("BY JWT IS \"%s\"", byJwt)
 
 	if byJwt != "" {
-		byJwtBase64 := base64.StdEncoding.EncodeToString([]byte(byJwt))
-		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwtBase64))
+		auth := fmt.Sprintf("Bearer %s", byJwt)
+		apiLog("AUTH: \"%s\"", auth)
+		req.Header.Add("Authorization", auth)
 	}
 
 
 	client := defaultClient()
 	r, err := client.Do(req)
 	if err != nil {
+		apiLog("REQUEST ERROR %s", err)
 		var empty R
-		callback.Result(empty)
+		callback.Result(empty, err)
 		return
 	}
 
 	responseBodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
 
+	apiLog("GOT API RESPONSE BODY: %s", string(responseBodyBytes))
+
 	err = json.Unmarshal(responseBodyBytes, &result)
 	if err != nil {
+		apiLog("UNMARSHAL ERROR %s", err)
 		var empty R
-		callback.Result(empty)
+		callback.Result(empty, err)
 		return
 	}
 
-	callback.Result(result)
+	callback.Result(result, nil)
+}
+
+
+func get[R any](ctx context.Context, url string, byJwt string, result R, callback apiCallback[R]) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		var empty R
+		callback.Result(empty, err)
+		return
+	}
+
+	req.Header.Add("Content-Type", "text/json")
+
+	apiLog("BY JWT IS \"%s\"", byJwt)
+
+	if byJwt != "" {
+		auth := fmt.Sprintf("Bearer %s", byJwt)
+		apiLog("AUTH: \"%s\"", auth)
+		req.Header.Add("Authorization", auth)
+	}
+
+
+	client := defaultClient()
+	r, err := client.Do(req)
+	if err != nil {
+		apiLog("REQUEST ERROR %s", err)
+		var empty R
+		callback.Result(empty, err)
+		return
+	}
+
+	responseBodyBytes, err := io.ReadAll(r.Body)
+	r.Body.Close()
+
+	apiLog("GOT API RESPONSE BODY: %s", string(responseBodyBytes))
+
+	err = json.Unmarshal(responseBodyBytes, &result)
+	if err != nil {
+		apiLog("UNMARSHAL ERROR %s", err)
+		var empty R
+		callback.Result(empty, err)
+		return
+	}
+
+	callback.Result(result, nil)
 }
 
 

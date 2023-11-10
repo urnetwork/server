@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"strconv"
-	"encoding/base64"
+	// "encoding/base64"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
@@ -35,14 +35,13 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	var byJwt *jwt.ByJwt
 	if auth := req.Header.Get("Authorization"); auth != "" {
     	if strings.HasPrefix(auth, authBearerPrefix) {
-    		jwtBase64 := auth[len(authBearerPrefix):]
-    		if data, err := base64.StdEncoding.DecodeString(jwtBase64); err == nil {
-    			byJwt, err = jwt.ParseByJwt(string(data))
-    			if err != nil {
-    				return nil, err
-    			}
-		    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-    		}
+    		jwtStr := auth[len(authBearerPrefix):]
+    		var err error
+			byJwt, err = jwt.ParseByJwt(jwtStr)
+			if err != nil {
+				return nil, err
+			}
+	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
     	}
     }
 

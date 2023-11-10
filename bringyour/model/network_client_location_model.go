@@ -17,7 +17,7 @@ import (
 )
 
 
-const DefaultMaxDistanceFraction = float32(0.6)
+const DefaultMaxDistanceFraction = float32(0.2)
 
 
 var locationSearch = search.NewSearch("location", search.SearchTypeSubstring)
@@ -523,17 +523,6 @@ func (self *Location) GuessLocationType() (LocationType, error) {
     return "", fmt.Errorf("Unknown location type.")
 }
 
-func (self *Location) String() string {
-    switch self.LocationType {
-    case LocationTypeCity:
-        return fmt.Sprintf("%s (%s, %s)", self.City, self.Region, self.Country)
-    case LocationTypeRegion:
-        return fmt.Sprintf("%s (%s)", self.Region, self.Country)
-    default:
-        return fmt.Sprintf("%s (%s)", self.Country, self.CountryCode)
-    }
-}
-
 func (self *Location) SearchStrings() []string {
     switch self.LocationType {
     case LocationTypeCity:
@@ -659,13 +648,15 @@ func CreateLocation(ctx context.Context, location *Location) {
                         location_type,
                         location_name,
                         country_location_id,
-                        country_code
+                        country_code,
+                        location_full_name
                     )
-                    VALUES ($1, $2, $3, $1, $4)
+                    VALUES ($1, $2, $3, $1, $4, $5)
                 `,
                 locationId,
                 LocationTypeCountry,
                 location.Country,
+                countryCode,
                 countryCode,
             )
             bringyour.Raise(err)
@@ -737,15 +728,17 @@ func CreateLocation(ctx context.Context, location *Location) {
                         location_name,
                         region_location_id,
                         country_location_id,
-                        country_code
+                        country_code,
+                        location_full_name
                     )
-                    VALUES ($1, $2, $3, $1, $4, $5)
+                    VALUES ($1, $2, $3, $1, $4, $5, $6)
                 `,
                 locationId,
                 LocationTypeRegion,
                 location.Region,
                 countryLocation.LocationId,
                 countryCode,
+                fmt.Sprintf("%s, %s", location.Region, countryCode),
             )
             bringyour.Raise(err)
 
@@ -825,9 +818,10 @@ func CreateLocation(ctx context.Context, location *Location) {
                         city_location_id,
                         region_location_id,
                         country_location_id,
-                        country_code
+                        country_code,
+                        location_full_name
                     )
-                    VALUES ($1, $2, $3, $1, $4, $5, $6)
+                    VALUES ($1, $2, $3, $1, $4, $5, $6, $7)
                 `,
                 locationId,
                 LocationTypeCity,
@@ -835,6 +829,7 @@ func CreateLocation(ctx context.Context, location *Location) {
                 regionLocation.LocationId,
                 countryLocation.LocationId,
                 countryCode,
+                fmt.Sprintf("%s, %s, %s", location.City, location.Region, countryCode),
             )
             bringyour.Raise(err)
 
@@ -857,7 +852,7 @@ func CreateLocation(ctx context.Context, location *Location) {
         }
 
         *location = *cityLocation
-    }, bringyour.TxSerializable))
+    }))
 }
 
 
@@ -871,9 +866,30 @@ type LocationGroup struct {
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+            DELETE FROM location_group_member
+            USING location_group
+            WHERE 
+                location_group.location_group_name = $1 AND 
+                location_group_member.location_group_id = location_group.location_group_id
+            `,
+            locationGroup.Name,
+        ))
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+            DELETE FROM location_group
+            WHERE location_group_name = $1
+            `,
+            locationGroup.Name,
+        ))
+
         locationGroup.LocationGroupId = bringyour.NewId()
 
-        _, err := tx.Exec(
+        bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO location_group (
@@ -886,8 +902,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
             locationGroup.LocationGroupId,
             locationGroup.Name,
             locationGroup.Promoted,
-        )
-        bringyour.Raise(err)
+        ))
 
         bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
             for _, locationId := range locationGroup.MemberLocationIds {
@@ -904,7 +919,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
                 )
             }
         })
-    }, bringyour.TxSerializable))
+    }))
 }
 
 
@@ -958,7 +973,7 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
         })
 
         success = true
-    }, bringyour.TxSerializable))
+    }))
 
     return success
 }
@@ -1045,11 +1060,11 @@ func SetConnectionLocation(
 
 
 type LocationGroupResult struct {
-    LocationGroupId bringyour.Id
-    Name string
-    ProviderCount int
-    Promoted bool
-    MatchDistance int
+    LocationGroupId bringyour.Id  `json:"location_group_id"`
+    Name string `json:"name"`
+    ProviderCount int `json:"provider_count,omitempty"`
+    Promoted bool `json:"promoted,omitempty"`
+    MatchDistance int `json:"match_distance,omitempty"`
 }
 
 
@@ -1117,12 +1132,17 @@ func FindActiveProviderLocations(
         maxSearchDistance,
     )
 
+    bringyour.Logger().Printf("Found location search results: %v\n", locationSearchResults)
+    bringyour.Logger().Printf("Found location group results: %v\n", locationGroupSearchResults)
+
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
     
     bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         searchLocationIds := []bringyour.Id{}
-        copy(searchLocationIds, maps.Keys(locationSearchResults))
+        for searchLocationId, _ := range locationSearchResults {
+            searchLocationIds = append(searchLocationIds, searchLocationId)
+        }
         // extend the locations with the search group members
         bringyour.CreateTempTableInTx(
             session.Ctx,
@@ -1134,7 +1154,7 @@ func FindActiveProviderLocations(
             session.Ctx,
             `
                 SELECT
-                    DISTINCT location_id,
+                    DISTINCT location_group_member.location_id
                 FROM location_group_member
                 INNER JOIN find_location_group_ids ON
                     find_location_group_ids.location_group_id = location_group_member.location_group_id
@@ -1147,6 +1167,11 @@ func FindActiveProviderLocations(
                 searchLocationIds = append(searchLocationIds, locationId)
             }
         })
+
+        bringyour.Logger().Printf("Search location ids: %v\n", searchLocationIds)
+        for _, searchLocationId := range searchLocationIds {
+            bringyour.Logger().Printf("  Search location id: %s\n", searchLocationId.String())
+        }
 
         bringyour.CreateTempTableInTx(
             session.Ctx,
@@ -1164,7 +1189,7 @@ func FindActiveProviderLocations(
             `
                 INSERT INTO find_location_ids
                 SELECT
-                    region_location_id
+                    DISTINCT location.region_location_id
                 FROM location
                 INNER JOIN find_location_ids ON find_location_ids.location_id = location.city_location_id
                 ON CONFLICT DO NOTHING
@@ -1177,7 +1202,7 @@ func FindActiveProviderLocations(
             `
                 INSERT INTO find_location_ids
                 SELECT
-                    country_location_id
+                    DISTINCT location.country_location_id
                 FROM location
                 INNER JOIN find_location_ids ON 
                     find_location_ids.location_id = location.city_location_id OR
@@ -1205,18 +1230,18 @@ func FindActiveProviderLocations(
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id
 
-                LEFT JOIN temp_location_ids find_location_ids_city ON
+                LEFT JOIN find_location_ids find_location_ids_city ON
                     find_location_ids_city.location_id = network_client_location.city_location_id
-                LEFT JOIN temp_location_ids find_location_ids_region ON
+                LEFT JOIN find_location_ids find_location_ids_region ON
                     find_location_ids_region.location_id = network_client_location.region_location_id
-                LEFT JOIN temp_location_ids find_location_ids_country ON
+                LEFT JOIN find_location_ids find_location_ids_country ON
                     find_location_ids_country.location_id = network_client_location.country_location_id
 
                 WHERE
                     network_client_connection.connected = true AND (
-                        find_location_ids_city.location_id IS NO NULL OR
-                        find_location_ids_region.location_id IS NO NULL OR
-                        find_location_ids_country.location_id IS NO NULL
+                        find_location_ids_city.location_id IS NOT NULL OR
+                        find_location_ids_region.location_id IS NOT NULL OR
+                        find_location_ids_country.location_id IS NOT NULL
                     )
 
                 GROUP BY
@@ -1253,6 +1278,8 @@ func FindActiveProviderLocations(
             }
         })
 
+        bringyour.Logger().Printf("Found provider counts: %v\n", providerCount)
+
 
         bringyour.CreateTempJoinTableInTx(
             session.Ctx,
@@ -1271,7 +1298,7 @@ func FindActiveProviderLocations(
                     location.region_location_id,
                     location.country_location_id,
                     location.country_code,
-                    result_location_ids.client_count,
+                    result_location_ids.client_count
                 FROM location
                 INNER JOIN result_location_ids ON
                     result_location_ids.location_id = location.location_id
@@ -1305,12 +1332,12 @@ func FindActiveProviderLocations(
                     location_group.location_group_id,
                     location_group.location_group_name,
                     location_group.promoted,
-                    t.client_count,
+                    t.client_count
                 FROM location_group
                 INNER JOIN (
                     SELECT
-                        location_group_id,
-                        SUM(result_location_ids.client_count) AS client_count,
+                        location_group_member.location_group_id,
+                        SUM(result_location_ids.client_count) AS client_count
                     FROM location_group_member
                     INNER JOIN result_location_ids ON
                         result_location_ids.location_id = location_group_member.location_id
@@ -1489,9 +1516,9 @@ func GetActiveProviderLocations(
 // this just finds locations and groups regardless of whether there are active providers there
 // these are locations where there could be providers
 func FindLocations(
-    ctx context.Context,
     findLocations *FindLocationsArgs,
-) *FindLocationsResult {
+    session *session.ClientSession,
+) (*FindLocationsResult, error) {
     var maxDistanceFraction float32
     if findLocations.EnableMaxDistanceFraction {
         maxDistanceFraction = findLocations.MaxDistanceFraction
@@ -1502,12 +1529,12 @@ func FindLocations(
         float64(maxDistanceFraction) * float64(len(findLocations.Query)),
     ))
     locationSearchResults := locationSearch.AroundIds(
-        ctx,
+        session.Ctx,
         search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
     locationGroupSearchResults := locationGroupSearch.AroundIds(
-        ctx,
+        session.Ctx,
         search.NormalizeForSearch(findLocations.Query),
         maxSearchDistance,
     )
@@ -1515,21 +1542,23 @@ func FindLocations(
     locationResults := map[bringyour.Id]*LocationResult{}
     locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
     
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         searchLocationIds := []bringyour.Id{}
-        copy(searchLocationIds, maps.Keys(locationSearchResults))
+        for searchLocationId, _ := range locationSearchResults {
+            searchLocationIds = append(searchLocationIds, searchLocationId)
+        }
         // extend the locations with the search group members
         bringyour.CreateTempTableInTx(
-            ctx,
+            session.Ctx,
             tx,
             "find_location_group_ids(location_group_id uuid)",
             maps.Keys(locationGroupSearchResults)...,
         )
         result, err := tx.Query(
-            ctx,
+            session.Ctx,
             `
                 SELECT
-                    DISTINCT location_id,
+                    DISTINCT location_group_member.location_id
                 FROM location_group_member
                 INNER JOIN find_location_group_ids ON
                     find_location_group_ids.location_group_id = location_group_member.location_group_id
@@ -1544,7 +1573,7 @@ func FindLocations(
         })
 
         bringyour.CreateTempTableInTx(
-            ctx,
+            session.Ctx,
             tx,
             "find_location_ids(location_id uuid)",
             searchLocationIds...,
@@ -1555,11 +1584,11 @@ func FindLocations(
         // but the parent locations do
 
         _, err = tx.Exec(
-            ctx,
+            session.Ctx,
             `
                 INSERT INTO find_location_ids
                 SELECT
-                    region_location_id
+                    location.region_location_id
                 FROM location
                 INNER JOIN find_location_ids ON find_location_ids.location_id = location.city_location_id
                 ON CONFLICT DO NOTHING
@@ -1568,11 +1597,11 @@ func FindLocations(
         bringyour.Raise(err)
 
         _, err = tx.Exec(
-            ctx,
+            session.Ctx,
             `
                 INSERT INTO find_location_ids
                 SELECT
-                    country_location_id
+                    location.country_location_id
                 FROM location
                 INNER JOIN find_location_ids ON 
                     find_location_ids.location_id = location.city_location_id OR
@@ -1583,18 +1612,18 @@ func FindLocations(
         bringyour.Raise(err)
 
         result, err = tx.Query(
-            ctx,
+            session.Ctx,
             `
                 SELECT
-                    location_id,
-                    location_type,
-                    location_name,
-                    city_location_id,
-                    region_location_id,
-                    country_location_id,
-                    country_code,
+                    location.location_id,
+                    location.location_type,
+                    location.location_name,
+                    location.city_location_id,
+                    location.region_location_id,
+                    location.country_location_id,
+                    location.country_code
                 FROM location
-                INNER JOIN result_location_ids ON
+                INNER JOIN find_location_ids ON
                     find_location_ids.location_id = location.location_id
             `,
         )
@@ -1619,19 +1648,19 @@ func FindLocations(
         })
 
         result, err = tx.Query(
-            ctx,
+            session.Ctx,
             `
                 SELECT
-                    location_group_id,
-                    location_group_name,
-                    promoted,
+                    location_group.location_group_id,
+                    location_group.location_group_name,
+                    location_group.promoted
                 FROM location_group
                 INNER JOIN (
                     SELECT
-                        DISTINCT location_group_id,
+                        DISTINCT location_group_member.location_group_id
                     FROM location_group_member
-                    INNER JOIN result_location_ids ON
-                        result_location_ids.location_id = location_group_member.location_id
+                    INNER JOIN find_location_ids ON
+                        find_location_ids.location_id = location_group_member.location_id
                 ) t ON t.location_group_id = location_group.location_group_id
             `,
         )
@@ -1655,52 +1684,52 @@ func FindLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
-    }
+    }, nil
 }
 
 
-type GetActiveProvidersArgs struct {
+type FindActiveProvidersArgs struct {
 	LocationId *bringyour.Id `json:"location_id,omitempty"`
-	GroupLocationId *bringyour.Id `json:"group_location_id,omitempty"`
+	LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
 	Count int `json:"count"`
 	ExcludeClientIds []bringyour.Id `json:"exclude_location_ids,omitempty"`
 }
 
-type GetActiveProvidersResults struct {
+type FindActiveProvidersResult struct {
 	ClientIds []bringyour.Id `json:"client_ids,omitempty"`
 }
 
-func GetActiveProviders(
-	getActiveProviders *GetActiveProvidersArgs,
+func FindActiveProviders(
+	findActiveProviders *FindActiveProvidersArgs,
 	session *session.ClientSession,
-) (*GetActiveProvidersResults, error) {
+) (*FindActiveProvidersResult, error) {
 	var maxCount int
-	if getActiveProviders.Count < 1 {
+	if findActiveProviders.Count < 1 {
 		maxCount = 1
 	} else {
-		maxCount = getActiveProviders.Count
+		maxCount = findActiveProviders.Count
 	}
 
 	clientIds := map[bringyour.Id]bool{}
 
-	if getActiveProviders.LocationId != nil {
+	if findActiveProviders.LocationId != nil {
 		clientIdsForLocation := GetActiveProvidersForLocation(
 			session.Ctx,
-			*getActiveProviders.LocationId,
+			*findActiveProviders.LocationId,
 		)
 		for _, clientId := range clientIdsForLocation {
 			clientIds[clientId] = true
 		}
 	}
 
-	for _, clientId := range getActiveProviders.ExcludeClientIds {
+	for _, clientId := range findActiveProviders.ExcludeClientIds {
 		delete(clientIds, clientId)
 	} 
 
-	if getActiveProviders.GroupLocationId != nil {
+	if findActiveProviders.LocationGroupId != nil {
 		clientIdsForLocationGroup := GetActiveProvidersForLocationGroup(
 			session.Ctx,
-			*getActiveProviders.GroupLocationId,
+			*findActiveProviders.LocationGroupId,
 		)
 		for _, clientId := range clientIdsForLocationGroup {
 			clientIds[clientId] = true
@@ -1708,7 +1737,7 @@ func GetActiveProviders(
 	}
 
 	if len(clientIds) < maxCount {
-		return &GetActiveProvidersResults{
+		return &FindActiveProvidersResult{
 			ClientIds: maps.Keys(clientIds),
 		}, nil
 	} else {
@@ -1718,7 +1747,7 @@ func GetActiveProviders(
 			shuffledClientIds[i], shuffledClientIds[j] = shuffledClientIds[j], shuffledClientIds[i]
 		})
 
-		return &GetActiveProvidersResults{
+		return &FindActiveProvidersResult{
 			ClientIds: shuffledClientIds[:maxCount],
 		}, nil
 	}

@@ -10,6 +10,8 @@ import (
 // (see notes in `client.go`)
 
 
+var gmLog = logFn("gomobile")
+
 
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type exportedList[T any] struct {
@@ -32,6 +34,10 @@ func (self *exportedList[T]) Add(value T) {
 	self.values = append(self.values, value)
 }
 
+func (self *exportedList[T]) addAll(values ...T) {
+	self.values = append(self.values, values...)
+}
+
 func (self *exportedList[T]) Contains(v T) bool {
 	for _, value := range self.values {
 		if reflect.DeepEqual(value, v) {
@@ -42,6 +48,7 @@ func (self *exportedList[T]) Contains(v T) bool {
 }
 
 func (self *exportedList[T]) UnmarshalJSON(b []byte) error {
+	gmLog("GOMOBILE UNMARSHAL: %s", string(b))
 	return json.Unmarshal(b, &self.values)
 }
 
@@ -62,12 +69,12 @@ func NewStringList() *StringList {
 
 
 type IdList struct {
-	exportedList[Id]
+	exportedList[*Id]
 }
 
 func NewIdList() *IdList {
 	return &IdList{
-		exportedList: *newExportedList[Id](),
+		exportedList: *newExportedList[*Id](),
 	}
 }
 
@@ -101,5 +108,16 @@ type LocationResultList struct {
 func NewLocationResultList() *LocationResultList {
 	return &LocationResultList{
 		exportedList: *newExportedList[*LocationResult](),
+	}
+}
+
+
+type ConnectLocationList struct {
+	exportedList[*ConnectLocation]
+}
+
+func NewConnectLocationList() *ConnectLocationList {
+	return &ConnectLocationList{
+		exportedList: *newExportedList[*ConnectLocation](),
 	}
 }

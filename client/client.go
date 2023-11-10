@@ -2,6 +2,11 @@ package client
 
 
 import (
+	"fmt"
+	"bytes"
+	"encoding/hex"
+	// "hash/fnv"
+
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
 )
@@ -14,6 +19,7 @@ import (
 // examples:
 // - fixed primitive arrays are not exportable. Use slices instead.
 // - raw structs are not exportable. Use pointers to structs instead.
+//   e.g. Id that is to be exported needs to be *Id
 // - redefined primitive types are not exportable. Use type aliases instead.
 // - arrays of structs are not exportable. See https://github.com/golang/go/issues/13445
 //   use the "ExportableList" workaround from `gomobile.go`
@@ -27,17 +33,97 @@ import (
 var Version string
 
 
-type Id = []byte
+type Id struct {
+	id [16]byte
+}
 
-// TODO id to string conversion
+func newId(id [16]byte) *Id {
+	return &Id{
+		id: id,
+	}
+}
+
+func (self *Id) Bytes() []byte {
+	return self.id[:]
+}
+
+func (self *Id) toConnectId() connect.Id {
+	return self.id
+}
+
+func (self *Id) MarshalJSON() ([]byte, error) {
+	var buf [16]byte
+	copy(buf[0:16], self.id[0:16])
+	var buff bytes.Buffer
+	buff.WriteByte('"')
+	buff.WriteString(encodeUuid(buf))
+	buff.WriteByte('"')
+	b := buff.Bytes()
+	gmLog("MARSHAL ID TO: %s", string(b))
+	return b, nil
+}
+
+func (self *Id) UnmarshalJSON(src []byte) error {
+	if len(src) != 38 {
+		return fmt.Errorf("invalid length for UUID: %v", len(src))
+	}
+	buf, err := parseUuid(string(src[1 : len(src)-1]))
+	if err != nil {
+		return err
+	}
+	self.id = buf
+	return nil
+}
+
+// Android support
+
+// func (self *Id) Equals(b *Id) bool {
+// 	if b == nil {
+// 		return false
+// 	}
+// 	return self.id == b.id
+// }
+
+// func (self *Id) HashCode() int32 {
+// 	h := fnv.New32()
+// 	h.Write(self.id[:])
+// 	return int32(h.Sum32())
+// }
+
+
+// parseUuid converts a string UUID in standard form to a byte array.
+func parseUuid(src string) (dst [16]byte, err error) {
+	switch len(src) {
+	case 36:
+		src = src[0:8] + src[9:13] + src[14:18] + src[19:23] + src[24:]
+	case 32:
+		// dashes already stripped, assume valid
+	default:
+		// assume invalid.
+		return dst, fmt.Errorf("cannot parse UUID %v", src)
+	}
+
+	buf, err := hex.DecodeString(src)
+	if err != nil {
+		return dst, err
+	}
+
+	copy(dst[:], buf)
+	return dst, err
+}
+
+
+func encodeUuid(src [16]byte) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
+}
 
 
 type Path struct {
-	ClientId Id
-	StreamId Id
+	ClientId *Id
+	StreamId *Id
 }
 
-func NewPath(clientId Id, streamId Id) *Path {
+func NewPath(clientId *Id, streamId *Id) *Path {
 	return &Path{
 		ClientId: clientId,
 		StreamId: streamId,
@@ -46,24 +132,20 @@ func NewPath(clientId Id, streamId Id) *Path {
 
 func fromConnectPath(path connect.Path) *Path {
 	return &Path{
-		ClientId: Id(path.ClientId.Bytes()),
-		StreamId: Id(path.StreamId.Bytes()),
+		ClientId: newId(path.ClientId),
+		StreamId: newId(path.StreamId),
 	}
 }
 
 func (self *Path) toConnectPath() connect.Path {
-	clientId, err := connect.IdFromBytes(self.ClientId)
-	if err != nil {
-		panic(err)
+	path := connect.Path{}
+	if self.ClientId != nil {
+		path.ClientId = connect.Id(self.ClientId.id)
 	}
-	streamId, err := connect.IdFromBytes(self.StreamId)
-	if err != nil {
-		panic(err)
+	if self.StreamId != nil {
+		path.StreamId = connect.Id(self.StreamId.id)
 	}
-	return connect.Path{
-		ClientId: clientId,
-		StreamId: streamId,
-	}
+	return path
 }
 
 

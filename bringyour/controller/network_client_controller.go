@@ -18,8 +18,6 @@ func ConnectNetworkClient(
 	bringyour.Logger().Printf("Parse client address: %s", clientAddress)
 
 	if ipStr, _, err := bringyour.ParseClientAddress(clientAddress); err == nil {
-		// FIXME this is just temporary while the MASQ issue on the lb gets fixed
-		ipStr = "64.124.162.234"
 		go bringyour.HandleError(func() {
 			setConnectionLocation(ctx, connectionId, ipStr)
 		})

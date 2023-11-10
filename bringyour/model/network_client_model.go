@@ -532,6 +532,15 @@ func SetProvide(
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
+				DELETE FROM client_provide
+				WHERE client_id = $1
+			`,
+			clientId,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
 				INSERT INTO client_provide (
 					client_id,
 					provide_mode

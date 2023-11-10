@@ -36,14 +36,15 @@ Usage:
     bringyourctl stats export
     bringyourctl stats import
     bringyourctl stats add
-    bringyourctl locations add-default
+    bringyourctl locations add-default [-a]
 
 Options:
     -h --help     Show this screen.
     --version     Show version.
     -r --realm=<realm>  Search realm.
     -t --type=<type>    Search type.
-    -d, --distance=<distance>  Search distance.`
+    -d, --distance=<distance>  Search distance.
+    -a            All locations.`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
@@ -161,6 +162,10 @@ func statsAdd(opts docopt.Opts, args CtlArgs) {
 
 func locationsAddDefault(opts docopt.Opts, args CtlArgs) {
     ctx := context.Background()
-    model.AddDefaultLocations(ctx, 0)
+    cityLimit := 0
+    if all, _ := opts.Bool("-a"); all {
+        cityLimit = -1
+    }
+    model.AddDefaultLocations(ctx, cityLimit)
 }
 

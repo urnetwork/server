@@ -86,28 +86,27 @@ func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 		return nil
 	} else {
 		instanceId := connect.NewId()
-		self.setInstanceId(Id(instanceId.Bytes()))
+		self.setInstanceId(newId(instanceId))
 		return os.WriteFile(path, []byte(byClientJwt), 0700)
 	}
 }
 
-func (self *LocalState) GetInstanceId() (Id, error) {
+func (self *LocalState) GetInstanceId() (*Id, error) {
 	path := filepath.Join(self.localStorageDir, ".instance_id")
 	if instanceIdBytes, err := os.ReadFile(path); err == nil {
 		instanceId, err := connect.IdFromBytes(instanceIdBytes)
-		return Id(instanceId.Bytes()), err
+		return newId(instanceId), err
 	}
 	return nil, fmt.Errorf("Not found.")
 }
 
-func (self *LocalState) setInstanceId(instanceId Id) error {
+func (self *LocalState) setInstanceId(instanceId *Id) error {
 	path := filepath.Join(self.localStorageDir, ".instance_id")
 	if instanceId == nil {
 		os.Remove(path)
 		return nil
 	} else {
-		instanceId_ := connect.Id(instanceId)
-		return os.WriteFile(path, instanceId_.Bytes(), 0700)
+		return os.WriteFile(path, instanceId.Bytes(), 0700)
 	}
 }
 
@@ -130,8 +129,7 @@ type CommitCallback interface {
 
 
 type singleResultCallback[R any] interface {
-	Present(result R)
-	NotPresent()
+	Result(result R, ok bool)
 }
 
 
@@ -149,7 +147,7 @@ type GetByClientJwtCallback interface {
 
 type GetInstanceIdCallback interface {
 	CommitCallback
-	singleResultCallback[Id]
+	singleResultCallback[*Id]
 }
 
 
@@ -246,9 +244,9 @@ func (self *AsyncLocalState) GetByJwt(callback GetByJwtCallback) {
 	self.serialAsync(func()(error) {
 		byJwt, err := self.localState.GetByJwt()
 		if err == nil {
-			callback.Present(byJwt)
+			callback.Result(byJwt, true)
 		} else {
-			callback.NotPresent()
+			callback.Result("", false)
 		}
 		return nil
 	}, callback)
@@ -265,9 +263,9 @@ func (self *AsyncLocalState) GetByClientJwt(callback GetByClientJwtCallback) {
 	self.serialAsync(func()(error) {
 		byClientJwt, err := self.localState.GetByClientJwt()
 		if err == nil {
-			callback.Present(byClientJwt)
+			callback.Result(byClientJwt, true)
 		} else {
-			callback.NotPresent()
+			callback.Result("", false)
 		}
 		return nil
 	}, callback)
@@ -283,9 +281,9 @@ func (self *AsyncLocalState) GetInstanceId(callback GetInstanceIdCallback) {
 	self.serialAsync(func()(error) {
 		instanceId, err := self.localState.GetInstanceId()
 		if err == nil {
-			callback.Present(instanceId)
+			callback.Result(instanceId, true)
 		} else {
-			callback.NotPresent()
+			callback.Result(nil, false)
 		}
 		return nil
 	}, callback)

@@ -4,6 +4,7 @@ import (
     "context"
     "time"
     "net/http"
+    "fmt"
 
     "github.com/gorilla/websocket"
 
@@ -16,8 +17,13 @@ import (
 )
 
 
-const PingTimeout = 5 * time.Second
+// FIXME clean up and unify timeouts
+
+const PingTimeout = connect.DefaultPingTimeout
 const SyncConnectionTimeout = 60 * time.Second
+
+const WriteTimeout = connect.WriteTimeout
+const ReadTimeout = connect.DefaultReadTimeout
 
 
 // each client connection is a transport for the resident client
@@ -54,8 +60,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    ws.SetReadDeadline(time.Now().Add(ReadTimeout))
     messageType, authFrameBytes, err := ws.ReadMessage()
     if err != nil {
+        fmt.Printf("TIMEOUT HA\n")
         return
     }
     if messageType != websocket.BinaryMessage {
@@ -89,12 +97,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     // this will fail for example if the client has been removed
     client := model.GetNetworkClient(handleCtx, *byJwt.ClientId)
     if client == nil || client.NetworkId != byJwt.NetworkId {
+        fmt.Printf("ERROR HB\n")
         return
     }
 
     // echo the auth message on successful auth
+    ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
     err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
     if err != nil {
+        fmt.Printf("TIMEOUT HC\n")
         return
     }
 
@@ -112,7 +123,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     
     go bringyour.HandleError(func() {
     	// disconnect the client if the model marks the connection closed
-        defer ws.Close()
+        defer func() {
+            handleCancel()
+            ws.Close()
+        }()
 
     	for  {
     		select {
@@ -141,19 +155,29 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         defer residentTransport.Close()
 
     	for {
+            ws.SetReadDeadline(time.Now().Add(ReadTimeout))
             messageType, message, err := ws.ReadMessage()
-            bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
+            // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
             if err != nil {
+                fmt.Printf("TIMEOUT HD\n")
                 return
             }
+
             switch messageType {
             case websocket.BinaryMessage:
+                if 0 == len(message) {
+                    // ping
+                    continue
+                }
+
                 select {
                 case <- handleCtx.Done():
                     return
                 case <- residentTransport.Done():
                     return
                 case residentTransport.send <- message:
+                case <- time.After(WriteTimeout):
+                    fmt.Printf("TIMEOUT HE\n")
                 }
             // else ignore
             }
@@ -169,13 +193,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             if !ok {
                 return
             }
-            bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
+            fmt.Printf("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
+            // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
+            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
             if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
                 bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
                 return
             }
         case <- time.After(PingTimeout):
-            if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
+            if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
                 bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
                 return
             }
