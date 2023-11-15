@@ -7,6 +7,8 @@ import (
 	"time"
 	"fmt"
 
+	"golang.org/x/exp/maps"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	// "bringyour.com/bringyour/ulid"
@@ -258,12 +260,29 @@ func RemoveNetworkClient(
 
 
 type NetworkClientsResult struct {
-	Clients map[string]*NetworkClientInfo `json:"clients"`
+	Clients []*NetworkClientInfo `json:"clients"`
 }
 
 type NetworkClientInfo struct {
+	// ClientId bringyour.Id `json:"client_id"`
+	// NetworkId bringyour.Id `json:"network_id"`
+	// Description string `json:"description"`
+	// DeviceSpec string `json:"device_spec"`
+
+	// CreateTime time.Time `json:"create_time"`
+	// AuthTime time.Time `json:"auth_time"`
+
+	// InstanceId bringyour.Id `json:"client_id"`
+	// ResidentId bringyour.Id `json:"resident_id"`
+	// ResidentHost string `json:"resident_host"`
+	// ResidentService string `json:"resident_service"`
+	// ResidentBlock string `json:"resident_block"`
+	// ResidentInternalPorts []int `json:"resident_internal_ports"`
+
 	NetworkClient
-	NetworkClientResident
+
+	Resident *NetworkClientResident `json:"resident,omitempty"`
+
 	ProvideMode *ProvideMode `json:"provide_mode"`
 	Connections []*NetworkClientConnection `json:"connections"`
 }
@@ -272,7 +291,7 @@ type NetworkClientConnection struct {
 	ClientId bringyour.Id `json:"client_id"`
 	ConnectionId bringyour.Id `json:"connection_id"`
 	ConnectTime time.Time `json:"connect_time"`
-	DisconnectTime time.Time `json:"disconnect_time,omitempty"`
+	DisconnectTime *time.Time `json:"disconnect_time,omitempty"`
 	ConnectionHost string `json:"connection_host"`
 	ConnectionService string `json:"connection_service"`
 	ConnectionBlock string `json:"connection_block"`
@@ -310,21 +329,40 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		)
 		clientInfos := map[bringyour.Id]*NetworkClientInfo{}
 		bringyour.WithPgResult(result, err, func() {
+
+			var residentId *bringyour.Id
+			var residentHost *string
+			var residentService *string
+			var residentBlock *string
+
 			for result.Next() {
 				clientInfo := &NetworkClientInfo{}
 				bringyour.Raise(result.Scan(
-					&clientInfo.NetworkClient.ClientId,
+					&clientInfo.ClientId,
 					&clientInfo.Description,
 					&clientInfo.DeviceSpec,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
-					&clientInfo.ResidentId,
-					&clientInfo.ResidentHost,
-					&clientInfo.ResidentService,
-					&clientInfo.ResidentBlock,
+					&residentId,
+					&residentHost,
+					&residentService,
+					&residentBlock,
+					// &clientInfo.ResidentId,
+					// &clientInfo.ResidentHost,
+					// &clientInfo.ResidentService,
+					// &clientInfo.ResidentBlock,
 					&clientInfo.ProvideMode,
 				))
-				clientInfos[clientInfo.NetworkClient.ClientId] = clientInfo
+				if residentId != nil {
+					clientInfo.Resident = &NetworkClientResident{
+						ClientId: clientInfo.ClientId,
+						ResidentId: *residentId,
+						ResidentHost: *residentHost,
+						ResidentService: *residentService,
+						ResidentBlock: *residentBlock,
+					}
+				}
+				clientInfos[clientInfo.ClientId] = clientInfo
 			}
 		})
 
@@ -343,7 +381,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 
 				INNER JOIN network_client_resident_port ON
 					network_client_resident_port.client_id = network_client_resident.client_id AND
-					network_client_resident_port.resident_id = etwork_client_resident.resident_id
+					network_client_resident_port.resident_id = network_client_resident.resident_id
 				
 				WHERE
 					network_client.network_id = $1 AND
@@ -357,7 +395,9 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				var port int
 				bringyour.Raise(result.Scan(&clientId, &port))
 				if clientInfo, ok := clientInfos[clientId]; ok {
-					clientInfo.ResidentInternalPorts = append(clientInfo.ResidentInternalPorts, port)
+					if resident := clientInfo.Resident; resident != nil {
+						resident.ResidentInternalPorts = append(resident.ResidentInternalPorts, port)
+					}
 				}
 			}
 		})
@@ -367,18 +407,18 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 			`
 				SELECT
 					network_client.client_id,
-					network_client.connection_id,
-					network_client.connect_time,
-					network_client.disconnect_time,
-					network_client.connection_host,
-					network_client.connection_service,
-					network_client.connection_block,
+					network_client_connection.connection_id,
+					network_client_connection.connect_time,
+					network_client_connection.disconnect_time,
+					network_client_connection.connection_host,
+					network_client_connection.connection_service,
+					network_client_connection.connection_block
 				FROM network_client
-				LEFT JOIN network_client_connection ON
+				INNER JOIN network_client_connection ON
 					network_client.client_id = network_client_connection.client_id AND 
 					network_client_connection.connected
 				WHERE
-					network_client.network_id = %s AND
+					network_client.network_id = $1 AND
 					network_client.active = true
 			`,
 			session.ByJwt.NetworkId,
@@ -402,9 +442,8 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 			}
 		})
 
-		clients := map[string]*NetworkClientInfo{}
 		clientsResult = &NetworkClientsResult{
-			Clients: clients,
+			Clients: maps.Values(clientInfos),
 		}
 	}))
 

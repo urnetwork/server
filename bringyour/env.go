@@ -9,9 +9,9 @@ import (
     "regexp"
     "strconv"
     "sync"
+    "slices"
 
     "golang.org/x/exp/maps"
-    "golang.org/x/exp/slices"
 
     "gopkg.in/yaml.v3"
     "github.com/coreos/go-semver/semver"
@@ -625,16 +625,20 @@ func versionLookup(root string, path []string) (string, error) {
 
 
 func semverSortWithBuild(versions []semver.Version) {
-    slices.SortStableFunc(versions, func(a semver.Version, b semver.Version)(bool) {
+    slices.SortStableFunc(versions, func(a semver.Version, b semver.Version)(int) {
         if a.LessThan(b) {
-            return true
+            return -1
         }
-        if a.Equal(b) {
-            if a.Metadata < b.Metadata {
-                return true
-            }
+        if b.LessThan(a) {
+            return 1
         }
-        return false
+        if a.Metadata < b.Metadata {
+            return -1
+        }
+        if b.Metadata < a.Metadata {
+            return 1
+        }
+        return 0
     })
 }
 

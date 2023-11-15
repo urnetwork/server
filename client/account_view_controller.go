@@ -26,6 +26,14 @@ func newAccountViewController(ctx context.Context, client *connect.Client) *Acco
 	return vc
 }
 
+func (self *AccountViewController) Start() {
+	// FIXME
+}
+
+func (self *AccountViewController) Stop() {
+	// FIXME	
+}
+
 func (self *AccountViewController) Close() {
 	avcLog("close")
 

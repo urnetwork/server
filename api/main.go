@@ -59,6 +59,14 @@ Options:
         router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
         router.NewRoute("POST", "/pay/coinbase", handlers.CoinbaseWebhook),
         router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook),
+
+        /*
+        // FIXME
+        router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
+        router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
+        router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
+        router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+        */
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

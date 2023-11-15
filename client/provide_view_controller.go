@@ -38,6 +38,14 @@ func newProvideViewController(ctx context.Context, client *connect.Client, route
 	return vc
 }
 
+func (self *ProvideViewController) Start() {
+	// FIXME
+}
+
+func (self *ProvideViewController) Stop() {
+	// FIXME	
+}
+
 func (self *ProvideViewController) draw(g gl.Context) {
 	// pvcLog("draw")
 

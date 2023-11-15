@@ -1072,6 +1072,7 @@ type LocationResult struct {
     LocationId bringyour.Id `json:"location_id"`
     LocationType LocationType `json:"location_type"`
     Name string `json:"name"`
+    // FIXME add City, Region, Country names
     CityLocationId *bringyour.Id `json:"city_location_id,omitempty"`
     RegionLocationId *bringyour.Id `json:"region_location_id,omitempty"`
     CountryLocationId *bringyour.Id `json:"country_location_id,omitempty"`

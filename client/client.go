@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"bytes"
 	"encoding/hex"
-	// "hash/fnv"
+	"hash/fnv"
 
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
@@ -47,6 +47,22 @@ func (self *Id) Bytes() []byte {
 	return self.id[:]
 }
 
+func (self *Id) String() string {
+	return encodeUuid(self.id)
+}
+
+func (self *Id) cmp(b Id) int {
+	for i, v := range self.id {
+		if v < b.id[i] {
+			return -1
+		}
+		if b.id[i] < v {
+			return 1
+		}
+	}
+	return 0
+}
+
 func (self *Id) toConnectId() connect.Id {
 	return self.id
 }
@@ -77,18 +93,18 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 
 // Android support
 
-// func (self *Id) Equals(b *Id) bool {
-// 	if b == nil {
-// 		return false
-// 	}
-// 	return self.id == b.id
-// }
+func (self *Id) IdEquals(b *Id) bool {
+	if b == nil {
+		return false
+	}
+	return self.id == b.id
+}
 
-// func (self *Id) HashCode() int32 {
-// 	h := fnv.New32()
-// 	h.Write(self.id[:])
-// 	return int32(h.Sum32())
-// }
+func (self *Id) IdHashCode() int32 {
+	h := fnv.New32()
+	h.Write(self.id[:])
+	return int32(h.Sum32())
+}
 
 
 // parseUuid converts a string UUID in standard form to a byte array.
@@ -158,4 +174,8 @@ const (
 
 
 type LocationType = string
-
+const (
+	LocationTypeCountry LocationType = "country"
+	LocationTypeRegion LocationType = "region"
+	LocationTypeCity LocationType = "city"
+)

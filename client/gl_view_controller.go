@@ -24,8 +24,8 @@ type GLViewController interface {
 	SurfaceCreated()
 	SurfaceChanged(width, height int32)
 	DrawFrame()
-	Start(callback GLViewCallback)
-	Stop()
+	StartGl(callback GLViewCallback)
+	StopGl()
 }
 
 
@@ -196,7 +196,7 @@ func (self *glViewController) drawLoop(ctx context.Context, callback GLViewCallb
 		self.drawController.drawLoopClose()
 	}
 }
-func (self *glViewController) Start(callback GLViewCallback) {
+func (self *glViewController) StartGl(callback GLViewCallback) {
 	self.drawMutex.Lock()
 	defer self.drawMutex.Unlock()
 
@@ -211,7 +211,7 @@ func (self *glViewController) Start(callback GLViewCallback) {
 		}()
 	}
 }
-func (self *glViewController) Stop() {
+func (self *glViewController) StopGl() {
 	self.drawMutex.Lock()
 	defer self.drawMutex.Unlock()
 

@@ -38,6 +38,14 @@ func newStatusViewController(ctx context.Context, client *connect.Client) *Statu
 	return vc
 }
 
+func (self *StatusViewController) Start() {
+	// FIXME
+}
+
+func (self *StatusViewController) Stop() {
+	// FIXME	
+}
+
 func (self *StatusViewController) draw(g gl.Context) {
 	// draw something
 	// if !self.glInitialized {

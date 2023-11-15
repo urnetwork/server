@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"reflect"
+	"time"
 )
 
 
@@ -48,7 +49,6 @@ func (self *exportedList[T]) Contains(v T) bool {
 }
 
 func (self *exportedList[T]) UnmarshalJSON(b []byte) error {
-	gmLog("GOMOBILE UNMARSHAL: %s", string(b))
 	return json.Unmarshal(b, &self.values)
 }
 
@@ -75,6 +75,17 @@ type IdList struct {
 func NewIdList() *IdList {
 	return &IdList{
 		exportedList: *newExportedList[*Id](),
+	}
+}
+
+
+type IntList struct {
+	exportedList[int]
+}
+
+func NewIntList() *IntList {
+	return &IntList{
+		exportedList: *newExportedList[int](),
 	}
 }
 
@@ -121,3 +132,59 @@ func NewConnectLocationList() *ConnectLocationList {
 		exportedList: *newExportedList[*ConnectLocation](),
 	}
 }
+
+
+type NetworkClientInfoList struct {
+	exportedList[*NetworkClientInfo]
+}
+
+func NewNetworkClientInfoList() *NetworkClientInfoList {
+	return &NetworkClientInfoList{
+		exportedList: *newExportedList[*NetworkClientInfo](),
+	}
+}
+
+
+type NetworkClientConnectionList struct {
+	exportedList[*NetworkClientConnection]
+}
+
+func NewNetworkClientConnectionList() *NetworkClientConnectionList {
+	return &NetworkClientConnectionList{
+		exportedList: *newExportedList[*NetworkClientConnection](),
+	}
+}
+
+
+
+
+
+// conforms to `json.Marshaler` and `json.Unmarshaler`
+type Time struct {
+	impl time.Time
+}
+
+func NewTimeUnixMilli(unixMilli int64) *Time {
+	return &Time{
+		impl: time.UnixMilli(unixMilli),
+	}
+}
+
+func newTime(impl time.Time) *Time {
+	return &Time{
+		impl: impl,
+	}
+}
+
+func (self *Time) UnixMilli() int64 {
+	return self.impl.UnixMilli()
+}
+
+func (self *Time) UnmarshalJSON(b []byte) error {
+	return json.Unmarshal(b, &self.impl)
+}
+
+func (self *Time) MarshalJSON() ([]byte, error) {
+	return json.Marshal(self.impl)
+}
+

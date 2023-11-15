@@ -24,14 +24,14 @@ import (
 )
 
 
-const BUFFER = 1
-
-
 // note -
 // we use one socket per client transport because the socket will block based on the slowest destination
 
 
 type ByteCount = model.ByteCount
+
+
+const ExchangeBufferSize = 32
 
 
 // a single exchange message size is encoded as an `int32`
@@ -165,24 +165,6 @@ func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]b
 }
 
 
-/*
-// FIXME if cancel is called before closing, this is not needed
-func safeSend[T any](ctx context.Context, channel chan T, message T) (err error) {
-	defer func() {
-		if err_ := recover(); err != nil {
-			err = err_.(error)
-		}
-	}()
-	select {
-	case <- ctx.Done():
-		return errors.New("Done.")
-	case channel <- message:
-		return nil
-	}
-}
-*/
-
-
 type ExchangeOp byte
 
 const (
@@ -283,8 +265,8 @@ func NewExchangeConnection(
 		conn: conn,
 		sendBuffer: sendBuffer,
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(),
-		send: make(chan []byte, BUFFER),
-		receive: make(chan []byte, BUFFER),
+		send: make(chan []byte, ExchangeBufferSize),
+		receive: make(chan []byte, ExchangeBufferSize),
 	}
 	go bringyour.HandleError(connection.Run, cancel)
 
@@ -406,8 +388,8 @@ func NewResidentTransport(
 		exchange: exchange,
 		clientId: clientId,
 		instanceId: instanceId,
-		send: make(chan []byte, BUFFER),
-		receive: make(chan []byte, BUFFER),
+		send: make(chan []byte, ExchangeBufferSize),
+		receive: make(chan []byte, ExchangeBufferSize),
 	}
 	go bringyour.HandleError(transport.Run, cancel)
 	return transport
@@ -565,7 +547,7 @@ func NewResidentForward(
 		cancel: cancel,
 		exchange: exchange,
 		clientId: clientId,
-		send: make(chan []byte, BUFFER),
+		send: make(chan []byte, ExchangeBufferSize),
 		lastActivityTime: time.Now(),
 	}
 	go bringyour.HandleError(transport.Run, cancel)
@@ -1490,8 +1472,8 @@ func (self *Resident) AddTransport() (
 	receive chan[] byte,
 	closeTransport func(),
 ) {
-	send = make(chan []byte, BUFFER)
-	receive = make(chan []byte, BUFFER)
+	send = make(chan []byte, ExchangeBufferSize)
+	receive = make(chan []byte, ExchangeBufferSize)
 
 	// in `connect` the transport is bidirectional
 	// in the resident, each transport is a single direction
@@ -1744,8 +1726,9 @@ func (self *contractManager) CreateContract(
 		// FIXME companion contract support
 		// FIXME
 		// FIXME the payment hole around this will be fixed with stream ids
-		// if there is an escrow contract in the opposite direction, without an existing companion contract,
+		// if there is a non-companion escrow contract in the opposite direction,
 		// create the escrow using the opposite direction as the payer
+		// can create as many as needed. Mark the contract as companion.
 
 		escrow, err := model.CreateTransferEscrow(
 			self.ctx,

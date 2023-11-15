@@ -17,19 +17,17 @@ import (
 )
 
 
-// FIXME clean up and unify timeouts
-
-const PingTimeout = connect.DefaultPingTimeout
-const SyncConnectionTimeout = 60 * time.Second
-
-const WriteTimeout = connect.WriteTimeout
-const ReadTimeout = connect.DefaultReadTimeout
-
-
 // each client connection is a transport for the resident client
 // there can be multiple simultaneous client connections from the same client instance
 // all connections from the same client will eventually terminate at the same resident,
 // where each connection will be a `connect.Transport` and traffic will be distributed across the transports
+
+
+const PingTimeout = connect.DefaultPingTimeout
+const WriteTimeout = connect.WriteTimeout
+const ReadTimeout = connect.DefaultReadTimeout
+
+const SyncConnectionTimeout = 60 * time.Second
 
 
 type ConnectHandler struct {
@@ -51,8 +49,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     bringyour.Logger().Printf("CONNECT\b")
 
     upgrader := websocket.Upgrader{
-        ReadBufferSize: 1024,
-        WriteBufferSize: 1024,
+        ReadBufferSize: 4 * 1024,
+        WriteBufferSize: 4 * 1024,
     }
 
     ws, err := upgrader.Upgrade(w, r, nil)

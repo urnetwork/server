@@ -299,6 +299,58 @@ func (self *BringYourApi) AuthNetworkClient(authNetworkClient *AuthNetworkClient
 }
 
 
+type GetNetworkClientsCallback apiCallback[*NetworkClientsResult]
+
+
+type NetworkClientResident struct {
+	ClientId *Id `json:"client_id"`
+	InstanceId *Id `json:"client_id"`
+	ResidentId *Id `json:"resident_id"`
+	ResidentHost string `json:"resident_host"`
+	ResidentService string `json:"resident_service"`
+	ResidentBlock string `json:"resident_block"`
+	ResidentInternalPorts *IntList `json:"resident_internal_ports"`
+}
+
+type NetworkClientsResult struct {
+	Clients *NetworkClientInfoList `json:"clients"`
+}
+
+type NetworkClientInfo struct {
+	ClientId *Id `json:"client_id"`
+	NetworkId *Id `json:"network_id"`
+	Description string `json:"description"`
+	DeviceSpec string `json:"device_spec"`
+
+	CreateTime *Time `json:"create_time"`
+	AuthTime *Time `json:"auth_time"`
+
+	Resident *NetworkClientResident `json:"resident,omitempty"`
+	ProvideMode ProvideMode `json:"provide_mode"`
+	Connections *NetworkClientConnectionList `json:"connections"`
+}
+
+type NetworkClientConnection struct {
+	ClientId *Id `json:"client_id"`
+	ConnectionId *Id `json:"connection_id"`
+	ConnectTime *Time `json:"connect_time"`
+	DisconnectTime *Time `json:"disconnect_time,omitempty"`
+	ConnectionHost string `json:"connection_host"`
+	ConnectionService string `json:"connection_service"`
+	ConnectionBlock string `json:"connection_block"`
+}
+
+func (self *BringYourApi) GetNetworkClients(callback GetNetworkClientsCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/network/clients", self.apiUrl),
+		self.byJwt,
+		&NetworkClientsResult{},
+		callback,
+	)
+}
+
+
 type FindLocationsCallback apiCallback[*FindLocationsResult]
 
 type FindLocationsArgs struct {

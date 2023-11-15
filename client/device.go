@@ -235,8 +235,8 @@ func (self *BringYourDevice) OpenStatusViewController() *StatusViewController {
 	return vc
 }
 
-func (self *BringYourDevice) OpenDeviceViewController() *DeviceViewController {
-	vc := newDeviceViewController(self.ctx, self.connectClient)
+func (self *BringYourDevice) OpenDevicesViewController() *DevicesViewController {
+	vc := newDevicesViewController(self.ctx, self)
 	self.openedViewControllers[vc] = true
 	return vc
 }
