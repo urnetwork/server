@@ -193,7 +193,8 @@ func NetworkCreate(
 		}
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
 		bringyour.Logger().Printf("Parsing JWT\n")
-		authJwt := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+		authJwt, err := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+		bringyour.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
 		if authJwt != nil {
 			// validate the user does not exist
 

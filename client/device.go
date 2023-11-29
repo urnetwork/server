@@ -224,7 +224,7 @@ func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController 
 }
 
 func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {
-	vc := newProvideViewController(self.ctx, self.connectClient, self)
+	vc := newProvideViewController(self.ctx, self)
 	self.openedViewControllers[vc] = true
 	return vc
 }

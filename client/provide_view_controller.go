@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/mobile/gl"
 
-	"bringyour.com/connect"
+	// "bringyour.com/connect"
 )
 
 
@@ -17,21 +17,18 @@ type ProvideViewController struct {
 	ctx context.Context
 	cancel context.CancelFunc
 	
-	client *connect.Client
-
-	router Router
+	device *BringYourDevice
 
 	glViewController
 }
 
-func newProvideViewController(ctx context.Context, client *connect.Client, router Router) *ProvideViewController {
+func newProvideViewController(ctx context.Context, device *BringYourDevice) *ProvideViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ProvideViewController{
 		ctx: cancelCtx,
 		cancel: cancel,
-		client: client,
-		router: router,
+		device: device,
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc

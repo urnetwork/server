@@ -2,6 +2,8 @@ package model
 
 
 import (
+	"fmt"
+	
 	"bringyour.com/bringyour/jwt"
 )
 
@@ -13,28 +15,28 @@ type AuthJwt struct {
 }
 
 
-func ParseAuthJwt(authJwt string, authJwtType AuthType) *AuthJwt {
+func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 	switch authJwtType {
 	case AuthTypeApple:
 		appleJwt, err := jwt.ParseAppleJwt(authJwt)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		return &AuthJwt{
 			AuthType: AuthTypeApple,
 			UserAuth: appleJwt.UserAuth,
 			UserName: appleJwt.UserName,
-		}
+		}, nil
 	case AuthTypeGoogle:
 		googleJwt, err := jwt.ParseGoogleJwt(authJwt)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		return &AuthJwt{
 			AuthType: AuthTypeGoogle,
 			UserAuth: googleJwt.UserAuth,
 			UserName: googleJwt.UserName,
-		}
+		}, nil
 	}
-	return nil
+	return nil, fmt.Errorf("Unkown auth type: %s", authJwtType)
 }

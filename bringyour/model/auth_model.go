@@ -245,7 +245,8 @@ func AuthLogin(
 		}
 	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
 		bringyour.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
-		authJwt := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
+		authJwt, err := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
+		bringyour.Logger().Printf("login JWT result: %s, %s\n", authJwt, err)
 		if authJwt != nil {
 			var userId *bringyour.Id
 			var authType string

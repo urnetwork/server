@@ -74,7 +74,7 @@ type AuthNetworkClientArgs struct {
 }
 
 type AuthNetworkClientResult struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
+	ByClientJwt *string `json:"by_client_jwt,omitempty"`
 	Error *AuthNetworkClientError `json:"error,omitempty"`
 }
 
@@ -166,7 +166,7 @@ func AuthNetworkClient(
 
 			byJwtWithClientId := session.ByJwt.WithClientId(&clientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
-				ByJwt: &byJwtWithClientId,
+				ByClientJwt: &byJwtWithClientId,
 			}
 		}, bringyour.TxSerializable))
 	} else {
@@ -203,7 +203,7 @@ func AuthNetworkClient(
 
 			byJwtWithClientId := session.ByJwt.WithClientId(authClient.ClientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
-				ByJwt: &byJwtWithClientId,
+				ByClientJwt: &byJwtWithClientId,
 			}
 		}))
 	}

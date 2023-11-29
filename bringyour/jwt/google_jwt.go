@@ -27,7 +27,7 @@ func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
 	for _, key := range googleJwkValidator.Keys() {
 		// var err error
 		// var token gojwt.Token
-		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (interface{}, error) {
+		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
 			return key, nil
 		})
 		if err == nil {

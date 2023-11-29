@@ -11,13 +11,15 @@ import (
 	"net"
 	"net/http"
 	"time"
+	"errors"
+	"strings"
 )
 
 
 var apiLog = logFn("api")
 
 
-const defaultHttpTimeout = 10 * time.Second
+const defaultHttpTimeout = 60 * time.Second
 const defaultHttpConnectTimeout = 5 * time.Second
 const defaultHttpTlsTimeout = 5 * time.Second
 
@@ -277,7 +279,7 @@ type AuthNetworkClientArgs struct {
 }
 
 type AuthNetworkClientResult struct {
-	ByJwt string `json:"by_jwt,omitempty"`
+	ByClientJwt string `json:"by_client_jwt,omitempty"`
 	Error *AuthNetworkClientError `json:"error,omitempty"`
 }
 
@@ -492,9 +494,22 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 		callback.Result(empty, err)
 		return
 	}
+	defer r.Body.Close()
 
 	responseBodyBytes, err := io.ReadAll(r.Body)
-	r.Body.Close()
+
+	if http.StatusOK != r.StatusCode {
+		// the response body is the error message
+		errorMessage := strings.TrimSpace(string(responseBodyBytes))
+		apiLog("RESPONSE ERROR %s: %s", r.Status, errorMessage)
+		callback.Result(result, errors.New(errorMessage))
+		return
+	}
+
+	if err != nil {
+		callback.Result(result, err)
+		return
+	}
 
 	apiLog("GOT API RESPONSE BODY: %s", string(responseBodyBytes))
 

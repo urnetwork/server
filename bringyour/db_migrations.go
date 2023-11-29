@@ -970,4 +970,8 @@ var migrations = []any{
         )
     `),
 
+    newSqlMigration(`
+        ALTER TABLE network_client ALTER COLUMN device_spec TYPE varchar(256)
+    `),
+
 }
