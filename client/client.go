@@ -43,6 +43,14 @@ func newId(id [16]byte) *Id {
 	}
 }
 
+func NewIdFromString(src string) (*Id, error) {
+	dst, err := parseUuid(src)
+	if err != nil {
+		return nil, err
+	}
+	return newId(dst), nil
+}
+
 func (self *Id) Bytes() []byte {
 	return self.id[:]
 }

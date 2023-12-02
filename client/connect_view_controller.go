@@ -173,7 +173,6 @@ func (self *ConnectViewController) Shuffle() {
 	for clientId, _ := range self.usedDestinationIds {
 		exportedExcludeClientIds.Add(&clientId)
 	}
-
 	connectLocationId = self.activeLocation.ConnectLocationId
 	self.stateLock.Unlock()
 
@@ -236,19 +235,18 @@ func (self *ConnectViewController) Broaden() {
 	// FIXME
 	var upLocation *ConnectLocation
 	self.stateLock.Lock()
-	if self.activeLocation == nil {
-		return
-	}
-	if !self.activeLocation.IsGroup() {
-		// a location
-		switch self.activeLocation.LocationType {
-		case LocationTypeCity:
-			upLocation = self.activeLocation.ToRegion()
-		case LocationTypeRegion:
-			upLocation = self.activeLocation.ToCountry()
-		// TODO Mark each country with an upgroup
-		// case Country:
-		// 	upLocation = self.activeLocation.UpGroup()
+	if self.activeLocation != nil {
+		if !self.activeLocation.IsGroup() {
+			// a location
+			switch self.activeLocation.LocationType {
+			case LocationTypeCity:
+				upLocation = self.activeLocation.ToRegion()
+			case LocationTypeRegion:
+				upLocation = self.activeLocation.ToCountry()
+			// TODO Mark each country with an upgroup
+			// case Country:
+			// 	upLocation = self.activeLocation.UpGroup()
+			}
 		}
 	}
 	self.stateLock.Unlock()
@@ -264,6 +262,13 @@ func (self *ConnectViewController) Reset() {
 
 func (self *ConnectViewController) Disconnect() {
 	self.device.RemoveDestination()
+
+	self.stateLock.Lock()
+	self.activeLocation = nil
+	clear(self.usedDestinationIds)
+	clear(self.activeDestinationIds)
+	self.stateLock.Unlock()
+
 	self.connectionChanged(nil, false)
 }
 
@@ -271,13 +276,15 @@ func (self *ConnectViewController) FilterLocations(filter string) {
 	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
+	cvcLog("FILTER LOCATIONS %s", filter)
+
 	var filterSequenceNumber int64
 	self.stateLock.Lock()
 	self.nextFilterSequenceNumber += 1
 	filterSequenceNumber = self.nextFilterSequenceNumber
 	self.stateLock.Unlock()
 
-	cvcLog("FILTER LOCATIONS %s", filter)
+	cvcLog("POST FILTER LOCATIONS %s", filter)
 
 	if filter == "" {
 		self.device.Api().GetProviderLocations(FindLocationsCallback(newApiCallback[*FindLocationsResult](

@@ -28,6 +28,10 @@ type ReceivePacket interface {
 // TODO methods to manage extenders
 
 
+// FIXME all client go code should be thread safe
+// FIXME state lock
+
+
 // conforms to `Router`
 type BringYourDevice struct {
 	ctx context.Context
@@ -135,7 +139,7 @@ func (self *BringYourDevice) Api() *BringYourApi {
 
 // `ReceivePacketFunction`
 func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
-	deviceLog("GOT A PACKET %d", len(packet))
+	// deviceLog("GOT A PACKET %d", len(packet))
     for _, receiveCallback := range self.receiveCallbacks.Get() {
         receiveCallback(source, ipProtocol, packet)
     }

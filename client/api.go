@@ -203,6 +203,50 @@ func (self *BringYourApi) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVe
 }
 
 
+type AuthPasswordResetCallback apiCallback[*AuthPasswordResetResult]
+
+type AuthPasswordResetArgs struct {
+    UserAuth string `json:"user_auth"`
+}
+
+type AuthPasswordResetResult struct {
+    UserAuth string `json:"user_auth"`
+}
+
+func (self *BringYourApi) AuthPasswordReset(authPasswordReset *AuthPasswordResetArgs, callback AuthPasswordResetCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/auth/password-reset", self.apiUrl),
+		authPasswordReset,
+		self.byJwt,
+		&AuthPasswordResetResult{},
+		callback,
+	)
+}
+
+
+type AuthVerifySendCallback apiCallback[*AuthVerifySendResult]
+
+type AuthVerifySendArgs struct {
+    UserAuth string `json:"user_auth"`
+}
+
+type AuthVerifySendResult struct {
+    UserAuth string `json:"user_auth"`
+}
+
+func (self *BringYourApi) AuthVerifySend(authVerifySend *AuthVerifySendArgs, callback AuthVerifySendCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/auth/verify-send", self.apiUrl),
+		authVerifySend,
+		self.byJwt,
+		&AuthVerifySendResult{},
+		callback,
+	)
+}
+
+
 type NetworkCheckCallback apiCallback[*NetworkCheckResult]
 
 type NetworkCheckArgs struct {

@@ -8,11 +8,20 @@ import (
 	"path/filepath"
 	"errors"
 
+	gojwt "github.com/golang-jwt/jwt/v5"
+
 	"bringyour.com/connect"
 )
 
 
 const AsyncQueueSize = 32
+
+
+type ByJwt struct {
+	UserId *Id
+	NetworkName string
+	NetworkId *Id
+}
 
 
 type LocalState struct {
@@ -38,6 +47,39 @@ func (self *LocalState) GetByJwt() (string, error) {
 		return string(byJwtBytes), nil
 	}
 	return "", fmt.Errorf("Not found.")
+}
+
+func (self *LocalState) ParseByJwt() (*ByJwt, error) {
+	byJwtStr, err := self.GetByJwt()
+	if err != nil {
+		return nil, err
+	}
+
+	parser := gojwt.NewParser()
+	token, _, err := parser.ParseUnverified(byJwtStr, gojwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+
+	claims := token.Claims.(gojwt.MapClaims)
+
+	byJwt := &ByJwt{}
+
+	if userIdStr, ok := claims["user_id"]; ok {
+		if userId, err := NewIdFromString(userIdStr.(string)); err == nil {
+			byJwt.UserId = userId
+		}
+	}
+	if networkName, ok := claims["network_name"]; ok {
+		byJwt.NetworkName = networkName.(string)
+	}
+	if networkIdStr, ok := claims["network_name"]; ok {
+		if networkId, err := NewIdFromString(networkIdStr.(string)); err == nil {
+			byJwt.NetworkId = networkId
+		}
+	}
+
+	return byJwt, nil
 }
 
 // clears `byClientJwt` and `instanceId`
@@ -134,19 +176,20 @@ type singleResultCallback[R any] interface {
 
 
 type GetByJwtCallback interface {
-	CommitCallback
 	singleResultCallback[string]
+}
+
+type ParseByJwtCallback interface {
+	singleResultCallback[*ByJwt]
 }
 
 
 type GetByClientJwtCallback interface {
-	CommitCallback
 	singleResultCallback[string]
 }
 
 
 type GetInstanceIdCallback interface {
-	CommitCallback
 	singleResultCallback[*Id]
 }
 
@@ -249,7 +292,19 @@ func (self *AsyncLocalState) GetByJwt(callback GetByJwtCallback) {
 			callback.Result("", false)
 		}
 		return nil
-	}, callback)
+	})
+}
+
+func (self *AsyncLocalState) ParseByJwt(callback ParseByJwtCallback) {
+	self.serialAsync(func()(error) {
+		byJwt, err := self.localState.ParseByJwt()
+		if err == nil {
+			callback.Result(byJwt, true)
+		} else {
+			callback.Result(nil, false)
+		}
+		return nil
+	})
 }
 
 // clears the clientjwt and instanceid if differnet
@@ -268,7 +323,7 @@ func (self *AsyncLocalState) GetByClientJwt(callback GetByClientJwtCallback) {
 			callback.Result("", false)
 		}
 		return nil
-	}, callback)
+	})
 }
 
 func (self *AsyncLocalState) SetByClientJwt(byClientJwt string, callback CommitCallback) {
@@ -286,7 +341,7 @@ func (self *AsyncLocalState) GetInstanceId(callback GetInstanceIdCallback) {
 			callback.Result(nil, false)
 		}
 		return nil
-	}, callback)
+	})
 }
 
 func (self *AsyncLocalState) Logout(callback CommitCallback) {
