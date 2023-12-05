@@ -51,7 +51,7 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 			fmt.Sprintf("Bearer %s", token),
 		)
 
-		client := bringyour.DefaultClient()
+		client := bringyour.DefaultHttpClient()
 
 		res, err := client.Do(req)
 		if err != nil {

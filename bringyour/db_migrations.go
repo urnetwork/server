@@ -773,6 +773,7 @@ var migrations = []any{
     `),
 
     //  `circle_uc_user_id` is the user_id for the circle user-controlled platform
+    // DROPPED and recreated
     newSqlMigration(`
 	    CREATE TABLE circle_uc (
 	    	network_id uuid NOT NULL,
@@ -972,6 +973,20 @@ var migrations = []any{
 
     newSqlMigration(`
         ALTER TABLE network_client ALTER COLUMN device_spec TYPE varchar(256)
+    `),
+
+    newSqlMigration(`
+        DROP TABLE circle_uc
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE circle_uc (
+            network_id uuid NOT NULL,
+            user_id uuid NOT NULL,
+            circle_uc_user_id uuid NOT NULL,
+
+            PRIMARY KEY (network_id, user_id)
+        )
     `),
 
 }

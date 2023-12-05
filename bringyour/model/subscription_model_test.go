@@ -17,9 +17,9 @@ import (
 
 func TestNanoCents(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
     usd := float64(1.55)
-    a := USDToNanoCents(usd)
-    usd2 := NanoCentsToUSD(a)
-    a2 := USDToNanoCents(usd2)
+    a := UsdToNanoCents(usd)
+    usd2 := NanoCentsToUsd(a)
+    a2 := UsdToNanoCents(usd2)
 
     assert.Equal(t, usd, usd2)
     assert.Equal(t, a, a2)
@@ -30,7 +30,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     ctx := context.Background()
 
     netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
-    netRevenue := USDToNanoCents(10.00)
+    netRevenue := UsdToNanoCents(10.00)
 
     sourceNetworkId := bringyour.NewId()
     sourceId := bringyour.NewId()
@@ -106,7 +106,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
     CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
     paidByteCount := usedTransferByteCount
-    paid := USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+    paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
     assert.Equal(t, len(contractIds), 0)
@@ -160,7 +160,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
         assert.Equal(t, err, nil)
         paidByteCount += usedTransferByteCount
-        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+        paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
@@ -176,7 +176,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
     for _, payment := range paymentPlan.WalletPayments {
-        SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUSD(payment.Payout), "")
+        SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
         CompletePayment(ctx, payment.PaymentId, "")
     }
     
@@ -213,7 +213,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
         CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
         paidByteCount += usedTransferByteCount
-        paid += USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+        paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }
     // at this point the balance should be fully used up
     
@@ -224,7 +224,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
     for _, payment := range paymentPlan.WalletPayments {
-        SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUSD(payment.Payout), "")
+        SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
         CompletePayment(ctx, payment.PaymentId, "")
     }
 
@@ -238,9 +238,9 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     // the revenue from 
     getAccountBalanceResult = GetAccountBalance(destinationSession)
     assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, netTransferByteCount)
-    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue)))
+    assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue)))
     assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
-    assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, USDToNanoCents(ProviderRevenueShare * NanoCentsToUSD(netRevenue)))
+    assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue)))
 
 
     // there shoud be no more payments

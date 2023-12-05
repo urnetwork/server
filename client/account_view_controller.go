@@ -39,3 +39,7 @@ func (self *AccountViewController) Close() {
 
 	self.cancel()
 }
+
+
+// FIXME validate wallet address callback and queue. similar to network name check
+// FIXME add all the wallet apis to api.go

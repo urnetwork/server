@@ -501,12 +501,129 @@ func (self *BringYourApi) FindProviders(findActiveProviders *FindActiveProviders
 }
 
 
+type WalletCircleInitCallback apiCallback[*WalletCircleInitResult]
+
+type WalletCircleInitResult struct {
+	UserToken *CircleUserToken `json:"user_token,omitempty"`
+    ChallengeId string `json:"challenge_id,omitempty"`
+    Error *WalletCircleInitError `json:"error,omitempty"`
+}
+
+type WalletCircleInitError struct {
+    Message string `json:"message"`
+}
+
+func (self *BringYourApi) WalletCircleInit(callback WalletCircleInitCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/wallet/circle-init", self.apiUrl),
+		nil,
+		self.byJwt,
+		&WalletCircleInitResult{},
+		callback,
+	)
+}
+
+
+type WalletValidateAddressCallback apiCallback[*WalletValidateAddressResult]
+
+type WalletValidateAddressArgs struct {
+    Address string `json:"address,omitempty"`
+}
+
+type WalletValidateAddressResult struct {
+    Valid bool `json:"valid,omitempty"`
+}
+
+func (self *BringYourApi) WalletValidateAddress(walletValidateAddress *WalletValidateAddressArgs, callback WalletValidateAddressCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/wallet/validate-address", self.apiUrl),
+		walletValidateAddress,
+		self.byJwt,
+		&WalletValidateAddressResult{},
+		callback,
+	)
+}
+
+
+type NanoCents = int64
+
+
+type CircleUserToken struct {
+    UserToken string `json:"user_token"`
+    EncryptionKey string `json:"encryption_key"`
+}
+
+
+type CircleWalletInfo struct {
+    WalletId string `json:"wallet_id"`
+    TokenId string `json:"token_id"`
+    Blockchain string `json:"blockchain"`
+    BlockchainSymbol string `json:"blockchain_symbol"`
+    CreateDate string `json:"create_date"`
+    BalanceUsdcNanoCents NanoCents `json:"balance_usdc_nano_cents"`
+}
+
+
+type WalletBalanceCallback apiCallback[*WalletBalanceResult]
+
+type WalletBalanceResult struct {
+    WalletInfo *CircleWalletInfo `json:"wallet_info,omitempty"`
+}
+
+func (self *BringYourApi) WalletBalance(callback WalletBalanceCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/wallet/balance", self.apiUrl),
+		self.byJwt,
+		&WalletBalanceResult{},
+		callback,
+	)
+}
+
+
+type WalletCircleTransferOutCallback apiCallback[*WalletCircleTransferOutResult]
+
+type WalletCircleTransferOutArgs struct {
+    ToAddress string `json:"to_address"`
+    AmountUsdcNanoCents NanoCents `json:"amount_usdc_nano_cents"`
+}
+
+type WalletCircleTransferOutResult struct {
+	UserToken *CircleUserToken `json:"user_token,omitempty"`
+    ChallengeId string `json:"challenge_id,omitempty"`
+    Error *WalletCircleTransferOutError `json:"error,omitempty"`
+}
+
+type WalletCircleTransferOutError struct {
+    Message string `json:"message"`
+}
+
+func (self *BringYourApi) WalletCircleTransferOut(walletCircleTransferOut *WalletCircleTransferOutArgs, callback WalletCircleTransferOutCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/wallet/circle-transfer-out", self.apiUrl),
+		walletCircleTransferOut,
+		self.byJwt,
+		&WalletCircleTransferOutResult{},
+		callback,
+	)
+}
+
+
 func post[R any](ctx context.Context, url string, args any, byJwt string, result R, callback apiCallback[R]) {
-	requestBodyBytes, err := json.Marshal(args)
-	if err != nil {
-		var empty R
-		callback.Result(empty, err)
-		return
+	var requestBodyBytes []byte
+	if args == nil {
+		requestBodyBytes = make([]byte, 0)
+	} else {
+		var err error
+		requestBodyBytes, err = json.Marshal(args)
+		if err != nil {
+			var empty R
+			callback.Result(empty, err)
+			return
+		}
 	}
 
 	apiLog("REQUEST BODY BYTES: %s", string(requestBodyBytes))

@@ -36,14 +36,22 @@ func RequireIdFromBytes(idBytes []byte) Id {
 }
 
 func ParseId(idStr string) (Id, error) {
-	return parseUuid(idStr) 
+	return parseUuid(idStr)
 }
 
-func (self *Id) Less(b Id) bool {
+func RequireParseId(idStr string) Id {
+	id, err := ParseId(idStr)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
+func (self Id) Less(b Id) bool {
 	return self.Cmp(b) < 0
 }
 
-func (self *Id) Cmp(b Id) int {
+func (self Id) Cmp(b Id) int {
 	for i, v := range self {
 		if v < b[i] {
 			return -1
@@ -55,12 +63,12 @@ func (self *Id) Cmp(b Id) int {
 	return 0
 }
 
-func (self *Id) Bytes() []byte {
+func (self Id) Bytes() []byte {
 	return self[0:16]
 }
 
-func (self *Id) String() string {
-	return encodeUuid(*self)
+func (self Id) String() string {
+	return encodeUuid(self)
 }
 
 // Scan implements the database/sql Scanner interface.
@@ -83,14 +91,14 @@ func (self *Id) Scan(src any) error {
 }
 
 // Value implements the database/sql/driver Valuer interface.
-func (self *Id) Value() (driver.Value, error) {
-	return encodeUuid(*self), nil
+func (self Id) Value() (driver.Value, error) {
+	return encodeUuid(self), nil
 }
 
-func (self *Id) MarshalJSON() ([]byte, error) {
+func (self Id) MarshalJSON() ([]byte, error) {
 	var buff bytes.Buffer
 	buff.WriteByte('"')
-	buff.WriteString(encodeUuid(*self))
+	buff.WriteString(encodeUuid(self))
 	buff.WriteByte('"')
 	return buff.Bytes(), nil
 }

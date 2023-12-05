@@ -22,11 +22,11 @@ type ByteCount = int64
 
 type NanoCents = int64
 
-func USDToNanoCents(usd float64) NanoCents {
+func UsdToNanoCents(usd float64) NanoCents {
     return NanoCents(math.Round(usd * float64(1000000000)))
 }
 
-func NanoCentsToUSD(nanoCents NanoCents) float64 {
+func NanoCentsToUsd(nanoCents NanoCents) float64 {
     return float64(nanoCents) / float64(1000000000)
 }
 
@@ -37,7 +37,7 @@ const BalanceCodeDuration = 365 * 24 * time.Hour
 // up to 32MiB
 const AcceptableTransfersByteDifference = 32 * 1024 * 1024
 
-var MinWalletPayoutThreshold = USDToNanoCents(1.00)
+var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 
 // hold onto unpaid amounts for up to this time
 const WalletPayoutTimeout = 15 * 24 * time.Hour
@@ -103,57 +103,6 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bri
             	returnErr = fmt.Errorf("Purchase event not found.")
             }
         })
-    }))
-    return
-}
-
-
-// this user id is what is used for the api:
-// - create a user token
-// - list wallets
-// - create a wallet challenge
-func GetOrCreateCircleUserId(
-    ctx context.Context,
-    networkId bringyour.Id,
-) (circleUserId bringyour.Id) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            ctx,
-            `
-                SELECT
-                    circle_uc_user_id
-                FROM circle_uc
-                WHERE
-                    network_id = $1
-            `,
-            networkId,
-        )
-        set := false
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&circleUserId))
-                set = true
-            }
-        })
-
-        if set {
-            return
-        }
-
-        circleUserId = bringyour.NewId()
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO circle_uc (
-                    network_id,
-                    circle_uc_user_id
-                )
-                VALUES ($1, $2)
-            `,
-            networkId,
-            circleUserId,
-        ))
     }))
     return
 }
