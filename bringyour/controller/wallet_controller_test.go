@@ -16,10 +16,9 @@ import (
 )
 
 
-// FIXME use a lowercase uuid
-// this was set up manually on main
-var circleUserIdWithWallet = bringyour.RequireParseId("43BCBBC9-B774-4E02-B721-612B23562152")
-
+// these were set up manually on main
+var circleUserIdWithWallet = bringyour.RequireParseId("018c3c3c-8265-1b71-e827-902beb3233c4")
+var circleUserIdWithWalletAndBalance = bringyour.RequireParseId("018c3c7f-82f3-341b-6fd9-fe8d180c366c")
 
 
 func TestWalletCircleInit(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -31,6 +30,15 @@ func TestWalletCircleInit(t *testing.T) { bringyour.DefaultTestEnv().Run(func() 
 		UserId: bringyour.NewId(),
 	})
 	result, err := WalletCircleInit(session)
+
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result.Error, nil)
+	assert.NotEqual(t, result.UserToken, nil)
+	assert.NotEqual(t, result.ChallengeId, "")
+
+
+	// a second init should not create an error
+	result, err = WalletCircleInit(session)
 
 	assert.Equal(t, err, nil)
 	assert.Equal(t, result.Error, nil)
@@ -95,17 +103,35 @@ func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		session.ByJwt.UserId,
 		circleUserIdWithWallet,
 	)
-	TEMP_ForceUpperUserId = true
 	
 	result, err := WalletBalance(session)
 
 	assert.Equal(t, err, nil)
 	assert.NotEqual(t, result.WalletInfo, nil)
 	assert.NotEqual(t, result.WalletInfo.WalletId, "")
+	// the wallet is empty so these are the defaults
+	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
+	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
+	assert.Equal(t, result.WalletInfo.TokenId, "")
+	assert.Equal(t, result.WalletInfo.CreateDate, time.Time{})
+	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
+
+
+	model.SetCircleUserId(
+		ctx,
+		session.ByJwt.NetworkId,
+		session.ByJwt.UserId,
+		circleUserIdWithWalletAndBalance,
+	)
+	
+	result, err = WalletBalance(session)
+
+	assert.Equal(t, err, nil)
+	assert.NotEqual(t, result.WalletInfo, nil)
+	assert.NotEqual(t, result.WalletInfo.WalletId, "")
+	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
+	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
 	assert.NotEqual(t, result.WalletInfo.TokenId, "")
-	// FIXME to Polygon when the test userid is updated
-	assert.Equal(t, result.WalletInfo.Blockchain, "Ethereum")
-	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "ETH")
 	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
 })}
@@ -124,13 +150,12 @@ func TestWalletCircleTransferOut(t *testing.T) { bringyour.DefaultTestEnv().Run(
 		ctx,
 		session.ByJwt.NetworkId,
 		session.ByJwt.UserId,
-		circleUserIdWithWallet,
+		circleUserIdWithWalletAndBalance,
 	)
-	TEMP_ForceUpperUserId = true
 
 	result, err := WalletCircleTransferOut(
 		&WalletCircleTransferOutArgs{
-			// BringYour USDC Eth
+			// BringYour USDC Polygon
 			ToAddress: "0xB3f448b9C395F9833BE866577254799c23BBa682",
 			AmountUsdcNanoCents: model.UsdToNanoCents(1.0),
 		},

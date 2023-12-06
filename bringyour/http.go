@@ -118,6 +118,8 @@ func HttpGet[R any](
 ) (R, error) {
 	var empty R
 
+	fmt.Printf("GET %s\n", url)
+
     request, err := http.NewRequest("GET", url, nil)
     if err != nil {
     	return empty, err

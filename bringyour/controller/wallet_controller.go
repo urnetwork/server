@@ -8,15 +8,12 @@ import (
     // "io"
     "time"
     "strconv"
-    "strings"
+    // "strings"
 
     "bringyour.com/bringyour/session"
     "bringyour.com/bringyour/model"
     "bringyour.com/bringyour"
 )
-
-
-var TEMP_ForceUpperUserId = false
 
 
 var circleConfig = sync.OnceValue(func() map[string]any {
@@ -233,7 +230,7 @@ func createCircleUser(session *session.ClientSession) (
 
     circleApiToken := circleConfig()["api_token"]
 
-    _, resultErr = bringyour.HttpPostRequireStatusOk(
+    _, resultErr = bringyour.HttpPost(
         "https://api.circle.com/v1/w3s/users",
         map[string]any{
             "userId": circleUserId,
@@ -243,7 +240,29 @@ func createCircleUser(session *session.ClientSession) (
             header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
         },
         func(response *http.Response, responseBodyBytes []byte)(any, error) {
-            return nil, nil
+            if 200 <= response.StatusCode && response.StatusCode < 300 {
+                // all ok
+                return nil, nil
+            }
+
+            // attempt to parse the response and find the `code`
+            responseBody := map[string]any{}
+            err := json.Unmarshal(responseBodyBytes, &responseBody)
+            if err != nil {
+                return nil, err
+            }
+
+            if codeAny, ok := responseBody["code"]; ok {
+                if code, ok := codeAny.(float64); ok {
+                    // "Existing user already created with the provided userId."
+                    if code == 155101 {
+                        // already have a user, all ok
+                        return nil, nil
+                    }
+                }
+            }
+
+            return nil, fmt.Errorf("Bad status: %s %s", response.Status, string(responseBodyBytes))
         },
     )
     return
@@ -262,20 +281,13 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
         session.ByJwt.NetworkId,
         session.ByJwt.UserId,
     )
-    // FIXME we no longer need this when then the test data is lower case
-    var circleUserIdStr string
-    if TEMP_ForceUpperUserId {
-        circleUserIdStr = strings.ToUpper(circleUserId.String())
-    } else {
-        circleUserIdStr = circleUserId.String()
-    }
 
     circleApiToken := circleConfig()["api_token"]
 
     return bringyour.HttpPostRequireStatusOk(
         "https://api.circle.com/v1/w3s/users/token",
         map[string]any{
-            "userId": circleUserIdStr,
+            "userId": circleUserId,
         },
         func(header http.Header) {
             header.Add("Accept", "application/json")
@@ -436,7 +448,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
     for _, walletId := range walletsIds {
         data, err := bringyour.HttpGetRequireStatusOk(
-            fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s/balances?includeAll=true&pageSize=10", walletId),
+            fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s/balances?includeAll=true", walletId),
             func(header http.Header) {
                 header.Add("Accept", "application/json")
                 header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
@@ -459,73 +471,81 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
         if tokenBalancesAny, ok := data["tokenBalances"]; ok {
             if v, ok := tokenBalancesAny.([]any); ok {
-                for _, tokenBalance := range v {
-                    if tokenBalanceAny, ok := tokenBalance.(map[string]any); ok {
-                        if tokenAny, ok := tokenBalanceAny["token"]; ok {
-                            if v, ok := tokenAny.(map[string]any); ok {
-                                var native bool
-                                if nativeAny, ok := v["isNative"]; ok {
-                                    if v, ok := nativeAny.(bool); ok {
-                                        native = v
-                                    } else {
-                                        // bad token balance
-                                        continue
-                                    }
-                                }
-
-                                if native {
-                                    parsedName := false
-                                    parsedSymbol := false
-                                    parsedCreateDate := false
-                                    
-                                    if nameAny, ok := v["name"]; ok {
-                                        if name, ok := nameAny.(string); ok {
-                                            walletInfo.Blockchain = name
-                                            parsedName = true
+                if len(v) == 0 {
+                    // there are no tokens in this wallet
+                    walletInfo.Blockchain = circleConfig()["blockchain_name"].(string)
+                    walletInfo.BlockchainSymbol = circleConfig()["blockchain"].(string)
+                    parsedNative = true
+                    parsedUsdc = true
+                } else {
+                    for _, tokenBalance := range v {
+                        if tokenBalanceAny, ok := tokenBalance.(map[string]any); ok {
+                            if tokenAny, ok := tokenBalanceAny["token"]; ok {
+                                if v, ok := tokenAny.(map[string]any); ok {
+                                    var native bool
+                                    if nativeAny, ok := v["isNative"]; ok {
+                                        if v, ok := nativeAny.(bool); ok {
+                                            native = v
+                                        } else {
+                                            // bad token balance
+                                            continue
                                         }
                                     }
 
-                                    if symbolAny, ok := v["symbol"]; ok {
-                                        if symbol, ok := symbolAny.(string); ok {
-                                            walletInfo.BlockchainSymbol = symbol
-                                            parsedSymbol = true
-                                        }
-                                    }
-
-                                    // e.g. "createDate":"2023-10-17T22:16:04Z"
-                                    if createDateAny, ok := v["createDate"]; ok {
-                                        if createDateStr, ok := createDateAny.(string); ok {
-                                            if createDate, err := time.Parse(time.RFC3339, createDateStr); err == nil {
-                                                walletInfo.CreateDate = createDate
-                                                parsedCreateDate = true
+                                    if native {
+                                        parsedName := false
+                                        parsedSymbol := false
+                                        parsedCreateDate := false
+                                        
+                                        if nameAny, ok := v["name"]; ok {
+                                            if name, ok := nameAny.(string); ok {
+                                                walletInfo.Blockchain = name
+                                                parsedName = true
                                             }
                                         }
-                                    }
 
-                                    parsedNative = parsedName && parsedSymbol && parsedCreateDate
-                                } else if v["symbol"] == "USDC" {
-                                    // usdc
-
-                                    parsedTokenId := false
-                                    parsedBalance := false
-
-                                    if tokenIdAny, ok := v["id"]; ok {
-                                        if tokenId, ok := tokenIdAny.(string); ok {
-                                            walletInfo.TokenId = tokenId
-                                            parsedTokenId = true
-                                        } 
-                                    }
-
-                                    if amountAny, ok := tokenBalanceAny["amount"]; ok {
-                                        if amountStr, ok := amountAny.(string); ok {
-                                            if amountUsdc, err := strconv.ParseFloat(amountStr, 64); err == nil {
-                                                walletInfo.BalanceUsdcNanoCents = model.UsdToNanoCents(amountUsdc)
-                                                parsedBalance = true
+                                        if symbolAny, ok := v["symbol"]; ok {
+                                            if symbol, ok := symbolAny.(string); ok {
+                                                walletInfo.BlockchainSymbol = symbol
+                                                parsedSymbol = true
                                             }
                                         }
-                                    }
 
-                                    parsedUsdc = parsedTokenId && parsedBalance
+                                        // e.g. "createDate":"2023-10-17T22:16:04Z"
+                                        if createDateAny, ok := v["createDate"]; ok {
+                                            if createDateStr, ok := createDateAny.(string); ok {
+                                                if createDate, err := time.Parse(time.RFC3339, createDateStr); err == nil {
+                                                    walletInfo.CreateDate = createDate
+                                                    parsedCreateDate = true
+                                                }
+                                            }
+                                        }
+
+                                        parsedNative = parsedName && parsedSymbol && parsedCreateDate
+                                    } else if v["symbol"] == "USDC" {
+                                        // usdc
+
+                                        parsedTokenId := false
+                                        parsedBalance := false
+
+                                        if tokenIdAny, ok := v["id"]; ok {
+                                            if tokenId, ok := tokenIdAny.(string); ok {
+                                                walletInfo.TokenId = tokenId
+                                                parsedTokenId = true
+                                            } 
+                                        }
+
+                                        if amountAny, ok := tokenBalanceAny["amount"]; ok {
+                                            if amountStr, ok := amountAny.(string); ok {
+                                                if amountUsdc, err := strconv.ParseFloat(amountStr, 64); err == nil {
+                                                    walletInfo.BalanceUsdcNanoCents = model.UsdToNanoCents(amountUsdc)
+                                                    parsedBalance = true
+                                                }
+                                            }
+                                        }
+
+                                        parsedUsdc = parsedTokenId && parsedBalance
+                                    }
                                 }
                             }
                         }
