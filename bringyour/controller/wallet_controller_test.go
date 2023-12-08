@@ -17,7 +17,8 @@ import (
 
 
 // these were set up manually on main
-var circleUserIdWithWallet = bringyour.RequireParseId("018c3c3c-8265-1b71-e827-902beb3233c4")
+// var circleUserIdWithWallet = bringyour.RequireParseId("018c3c3c-8265-1b71-e827-902beb3233c4")
+var circleUserIdWithWallet = bringyour.RequireParseId("018c4b12-1a76-aaca-acce-72ddae03f60d")
 var circleUserIdWithWalletAndBalance = bringyour.RequireParseId("018c3c7f-82f3-341b-6fd9-fe8d180c366c")
 
 
@@ -109,11 +110,11 @@ func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, err, nil)
 	assert.NotEqual(t, result.WalletInfo, nil)
 	assert.NotEqual(t, result.WalletInfo.WalletId, "")
+	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 	// the wallet is empty so these are the defaults
 	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
 	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
 	assert.Equal(t, result.WalletInfo.TokenId, "")
-	assert.Equal(t, result.WalletInfo.CreateDate, time.Time{})
 	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
 
 
@@ -129,10 +130,10 @@ func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, err, nil)
 	assert.NotEqual(t, result.WalletInfo, nil)
 	assert.NotEqual(t, result.WalletInfo.WalletId, "")
+	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
 	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
 	assert.NotEqual(t, result.WalletInfo.TokenId, "")
-	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
 })}
 
@@ -155,6 +156,7 @@ func TestWalletCircleTransferOut(t *testing.T) { bringyour.DefaultTestEnv().Run(
 
 	result, err := WalletCircleTransferOut(
 		&WalletCircleTransferOutArgs{
+			Terms: true,
 			// BringYour USDC Polygon
 			ToAddress: "0xB3f448b9C395F9833BE866577254799c23BBa682",
 			AmountUsdcNanoCents: model.UsdToNanoCents(1.0),

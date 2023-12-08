@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"hash/fnv"
+	"math"
 
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
@@ -187,3 +188,16 @@ const (
 	LocationTypeRegion LocationType = "region"
 	LocationTypeCity LocationType = "city"
 )
+
+
+type ByteCount = int64
+
+type NanoCents = int64
+
+func UsdToNanoCents(usd float64) NanoCents {
+    return NanoCents(math.Round(usd * float64(1000000000)))
+}
+
+func NanoCentsToUsd(nanoCents NanoCents) float64 {
+    return float64(nanoCents) / float64(1000000000)
+}

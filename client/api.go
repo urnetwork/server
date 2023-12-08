@@ -547,9 +547,6 @@ func (self *BringYourApi) WalletValidateAddress(walletValidateAddress *WalletVal
 }
 
 
-type NanoCents = int64
-
-
 type CircleUserToken struct {
     UserToken string `json:"user_token"`
     EncryptionKey string `json:"encryption_key"`
@@ -588,6 +585,7 @@ type WalletCircleTransferOutCallback apiCallback[*WalletCircleTransferOutResult]
 type WalletCircleTransferOutArgs struct {
     ToAddress string `json:"to_address"`
     AmountUsdcNanoCents NanoCents `json:"amount_usdc_nano_cents"`
+    Terms bool `json:"terms"`
 }
 
 type WalletCircleTransferOutResult struct {
@@ -607,6 +605,46 @@ func (self *BringYourApi) WalletCircleTransferOut(walletCircleTransferOut *Walle
 		walletCircleTransferOut,
 		self.byJwt,
 		&WalletCircleTransferOutResult{},
+		callback,
+	)
+}
+
+
+type Subscription struct {
+    SubscriptionId *Id `json:"subscription_id"`
+    Store string `json:"store"`
+    Plan string `json:"plan"`
+}
+
+type TransferBalance struct {
+    BalanceId *Id `json:"balance_id"`
+    NetworkId *Id `json:"network_id"`
+    StartTime string `json:"start_time"`
+    EndTime string `json:"end_time"`
+    StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
+    // how much money the platform made after subtracting fees
+    NetRevenue NanoCents `json:"net_revenue"`
+    BalanceByteCount ByteCount `json:"balance_byte_count"`
+}
+
+
+type SubscriptionBalanceCallback apiCallback[*SubscriptionBalanceResult]
+
+type SubscriptionBalanceResult struct {
+	BalanceByteCount ByteCount `json:"balance_byte_count"`
+	CurrentSubscription *Subscription `json:"current_subscription,omitempty"`
+	ActiveTransferBalances *TransferBalanceList `json:"active_transfer_balances,omitempty"`
+	PendingPayoutUsdNanoCents NanoCents `json:"pending_payout_usd_nano_cents"`
+	WalletInfo *CircleWalletInfo `json:"wallet_info,omitempty"`
+	UpdateTime string `json:"update_time"`
+}
+
+func (self *BringYourApi) SubscriptionBalance(callback SubscriptionBalanceCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/subscription/balance", self.apiUrl),
+		self.byJwt,
+		&SubscriptionBalanceResult{},
 		callback,
 	)
 }

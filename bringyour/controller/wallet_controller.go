@@ -152,6 +152,7 @@ func WalletBalance(session *session.ClientSession) (*WalletBalanceResult, error)
 type WalletCircleTransferOutArgs struct {
     ToAddress string `json:"to_address"`
     AmountUsdcNanoCents model.NanoCents `json:"amount_usdc_nano_cents"`
+    Terms bool `json:"terms"`
 }
 
 
@@ -171,6 +172,10 @@ func WalletCircleTransferOut(
     walletCircleTransferOut *WalletCircleTransferOutArgs,
     session *session.ClientSession,
 ) (*WalletCircleTransferOutResult, error) {
+    if !walletCircleTransferOut.Terms {
+        return nil, fmt.Errorf("You must accept the terms of transfer.")
+    }
+
     walletInfo, err := findMostRecentCircleWallet(session)
     if err != nil {
         return nil, err
@@ -184,6 +189,7 @@ func WalletCircleTransferOut(
     return bringyour.HttpPostRequireStatusOk(
         "https://api.circle.com/v1/w3s/user/transactions/transfer",
         map[string]any{
+            "userId": circleUserToken.circleUserId,
             "destinationAddress": walletCircleTransferOut.ToAddress,
             "amounts": []string{
                 fmt.Sprintf("%f", model.NanoCentsToUsd(walletCircleTransferOut.AmountUsdcNanoCents)),
@@ -270,6 +276,8 @@ func createCircleUser(session *session.ClientSession) (
 
 
 type CircleUserToken struct {
+    // this field is not exported
+    circleUserId bringyour.Id
     UserToken string `json:"user_token"`
     EncryptionKey string `json:"encryption_key"`
 }
@@ -299,7 +307,9 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
                 return nil, err
             }
 
-            circleUserToken := &CircleUserToken{}
+            circleUserToken := &CircleUserToken{
+                circleUserId: circleUserId,
+            }
             hasUserToken := false
             hasEncryptionKey := false
 
@@ -373,6 +383,7 @@ type CircleWalletInfo struct {
     BlockchainSymbol string `json:"blockchain_symbol"`
     CreateDate time.Time `json:"create_date"`
     BalanceUsdcNanoCents model.NanoCents `json:"balance_usdc_nano_cents"`
+    Address string `json:"address"`
 }
 
 
@@ -384,7 +395,7 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
     }
 
     if len(circleWallets) == 0 {
-        return nil, fmt.Errorf("No wallets.")
+        return nil, nil
     }
 
     mostRecentWalletInfo := circleWallets[0]
@@ -410,45 +421,78 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
     circleApiToken := circleConfig()["api_token"]
 
-    walletsIds, err := bringyour.HttpGetRequireStatusOk(
+    walletInfos, err := bringyour.HttpGetRequireStatusOk(
         "https://api.circle.com/v1/w3s/wallets",
         func(header http.Header) {
             header.Add("Accept", "application/json")
             header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
             header.Add("X-User-Token", circleUserToken.UserToken)
         },
-        func(response *http.Response, responseBodyBytes []byte)([]string, error) {
+        func(response *http.Response, responseBodyBytes []byte)([]*CircleWalletInfo, error) {
             _, data, err := parseCircleResponseData(responseBodyBytes)
             if err != nil {
                 return nil, err
             }
 
-            walletsIds := []string{}
+            walletInfos := []*CircleWalletInfo{}
+
             if walletsAny, ok := data["wallets"]; ok {
                 if v, ok := walletsAny.([]any); ok {
                     for _, wallet := range v {
                         if walletAny, ok := wallet.(map[string]any); ok {
+
+                            walletInfo := &CircleWalletInfo{}
+
+                            parsedId := false
+                            parsedAddress := false
+                            parsedCreateDate := false
+
                             if walletIdAny, ok := walletAny["id"]; ok {
-                                if v, ok := walletIdAny.(string); ok {
-                                    walletsIds = append(walletsIds, v)
+                                if walletId, ok := walletIdAny.(string); ok {
+                                    walletInfo.WalletId = walletId
+                                    parsedId = true
                                 }
+                            }
+
+                            if addressAny, ok := walletAny["address"]; ok {
+                                if address, ok := addressAny.(string); ok {
+                                    walletInfo.Address = address
+                                    parsedAddress = true
+                                }
+                            }
+
+
+                            // e.g. "createDate":"2023-10-17T22:16:04Z"
+                            if createDateAny, ok := walletAny["createDate"]; ok {
+                                if createDateStr, ok := createDateAny.(string); ok {
+                                    if createDate, err := time.Parse(time.RFC3339, createDateStr); err == nil {
+                                        walletInfo.CreateDate = createDate
+                                        parsedCreateDate = true
+                                    }
+                                }
+                            }
+
+                            if parsedId && parsedAddress && parsedCreateDate {
+                                walletInfos = append(walletInfos, walletInfo)
                             }
                         }
                     }
                 }
             }
-            return walletsIds, nil
+
+            return walletInfos, nil
         },
     )
     if err != nil {
         return nil, err
     }
 
-    walletInfos := []*CircleWalletInfo{}
+    // complete the wallet infos by parsing the wallet balances
+    completeWalletInfos := []*CircleWalletInfo{}
 
-    for _, walletId := range walletsIds {
+    for _, walletInfo := range walletInfos {
         data, err := bringyour.HttpGetRequireStatusOk(
-            fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s/balances?includeAll=true", walletId),
+            fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s/balances?includeAll=true", walletInfo.WalletId),
             func(header http.Header) {
                 header.Add("Accept", "application/json")
                 header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
@@ -463,9 +507,6 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
             return nil, err
         }
 
-        walletInfo := &CircleWalletInfo{
-            WalletId: walletId,
-        }
         parsedNative := false
         parsedUsdc := false
 
@@ -495,7 +536,6 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
                                     if native {
                                         parsedName := false
                                         parsedSymbol := false
-                                        parsedCreateDate := false
                                         
                                         if nameAny, ok := v["name"]; ok {
                                             if name, ok := nameAny.(string); ok {
@@ -511,17 +551,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
                                             }
                                         }
 
-                                        // e.g. "createDate":"2023-10-17T22:16:04Z"
-                                        if createDateAny, ok := v["createDate"]; ok {
-                                            if createDateStr, ok := createDateAny.(string); ok {
-                                                if createDate, err := time.Parse(time.RFC3339, createDateStr); err == nil {
-                                                    walletInfo.CreateDate = createDate
-                                                    parsedCreateDate = true
-                                                }
-                                            }
-                                        }
-
-                                        parsedNative = parsedName && parsedSymbol && parsedCreateDate
+                                        parsedNative = parsedName && parsedSymbol
                                     } else if v["symbol"] == "USDC" {
                                         // usdc
 
@@ -556,10 +586,10 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
         if parsedNative && parsedUsdc {
             // fully parsed
-            walletInfos = append(walletInfos, walletInfo)
+            completeWalletInfos = append(completeWalletInfos, walletInfo)
         }
     }
 
-    return walletInfos, nil
+    return completeWalletInfos, nil
 }
 

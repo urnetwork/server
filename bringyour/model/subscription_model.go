@@ -388,14 +388,14 @@ func CheckBalanceCode(checkBalanceCode *CheckBalanceCodeArgs, session *session.C
 
 
 type TransferBalance struct {
-    BalanceId bringyour.Id
-    NetworkId bringyour.Id
-    StartTime time.Time
-    EndTime time.Time
-    StartBalanceByteCount ByteCount
+    BalanceId bringyour.Id `json:"balance_id"`
+    NetworkId bringyour.Id `json:"network_id"`
+    StartTime time.Time `json:"start_time"`
+    EndTime time.Time `json:"end_time"`
+    StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
     // how much money the platform made after subtracting fees
-    NetRevenue NanoCents
-    BalanceByteCount ByteCount
+    NetRevenue NanoCents `json:"net_revenue"`
+    BalanceByteCount ByteCount `json:"balance_byte_count"`
 }
 
 
@@ -1989,4 +1989,28 @@ func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult 
     }))
     return getAccountBalanceResult
 }
+
+
+type Subscription struct {
+    SubscriptionId bringyour.Id `json:"subscription_id"`
+    Store string `json:"store"`
+    Plan string `json:"plan"`
+}
+
+
+func CurrentSubscription(ctx context.Context, networkId bringyour.Id) *Subscription {
+    // FIXME
+    return nil
+}
+
+
+func GetNetPendingPayout(ctx context.Context, networkId bringyour.Id) NanoCents {
+    // add up
+    // - transfer_escrow_sweep
+    // - pending payments
+
+    // FIXME
+    return 0
+}
+
 

@@ -248,6 +248,7 @@ var migrations = []any{
         CREATE INDEX network_admin_user_id ON network (admin_user_id, network_id)
     `),
 
+    // DROPPED
     newSqlMigration(`
         CREATE TYPE auth_type AS ENUM (
             'password',
@@ -255,6 +256,7 @@ var migrations = []any{
             'google'
         )
     `),
+    // ALTER auth_type changed to varchar(32)
     // password_hash: 32-byte argon2 hash digest
     // password_salt: 32-byte random
     newSqlMigration(`

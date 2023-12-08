@@ -6,16 +6,15 @@ import (
 	"encoding/json"
 	"bytes"
 
-    "bringyour.com/bringyour"
-	// "bringyour.com/bringyour/router"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour"
 )
 
 
-// FIXME
-// SubscriptionBalance
-
-
-
+func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SubscriptionBalance, w, r)
+}
 
 
 // https://stripe.com/docs/webhooks
@@ -68,6 +67,25 @@ func CircleWebhook(w http.ResponseWriter, req *http.Request) {
 	json.Compact(out, []byte(body))
 
 	bringyour.Logger().Printf("Circle webhook body: %s\n", out.Bytes())
+
+	w.Header().Set("Content-Type", "application/json")
+    w.Write([]byte("{}"))
+}
+
+
+// https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
+// https://developer.android.com/google/play/billing/rtdn-reference
+func PlayWebhook(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+	}
+
+	out := &bytes.Buffer{}
+	json.Compact(out, []byte(body))
+
+	bringyour.Logger().Printf("Play webhook body: %s\n", out.Bytes())
 
 	w.Header().Set("Content-Type", "application/json")
     w.Write([]byte("{}"))

@@ -156,7 +156,15 @@ func NewNetworkClientConnectionList() *NetworkClientConnectionList {
 }
 
 
+type TransferBalanceList struct {
+	exportedList[*TransferBalance]
+}
 
+func NewTransferBalanceList() *TransferBalanceList {
+	return &TransferBalanceList{
+		exportedList: *newExportedList[*TransferBalance](),
+	}
+}
 
 
 // conforms to `json.Marshaler` and `json.Unmarshaler`

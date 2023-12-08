@@ -246,7 +246,7 @@ func (self *BringYourDevice) OpenDevicesViewController() *DevicesViewController 
 }
 
 func (self *BringYourDevice) OpenAccountViewController() *AccountViewController {
-	vc := newAccountViewController(self.ctx, self.connectClient)
+	vc := newAccountViewController(self.ctx, self)
 	self.openedViewControllers[vc] = true
 	return vc
 }
