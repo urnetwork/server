@@ -5,6 +5,10 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"fmt"
+	"runtime/debug"
+
+	"bringyour.com/bringyour"
 )
 
 
@@ -15,6 +19,7 @@ type Route struct {
 	regex   *regexp.Regexp
 	handler http.HandlerFunc
 }
+
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 	return &Route{
 		method: method,
@@ -23,20 +28,29 @@ func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 	}
 }
 
+func (self *Route) String() string {
+	return fmt.Sprintf("%s %s", self.method, self.regex)
+}
+
+
+
 
 type ctxKey struct{}
 
 
 type Router struct {
+	ctx context.Context
 	routes []*Route
 }
-func NewRouter(routes []*Route) *Router {
+func NewRouter(ctx context.Context, routes []*Route) *Router {
 	return &Router{
+		ctx: ctx,
 		routes: routes,
 	}
 }
 
-func (self Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// `http.Handler`
+func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var allow []string
 	for _, route := range self.routes {
 		matches := route.regex.FindStringSubmatch(r.URL.Path)
@@ -45,14 +59,24 @@ func (self Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				allow = append(allow, route.method)
 				continue
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, matches[1:])
-			route.handler(w, r.WithContext(ctx))
+			ctx := context.WithValue(self.ctx, ctxKey{}, matches[1:])
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						// suppress the error
+						debug.PrintStack()
+						bringyour.Logger().Printf("Unhandled error from route %s (%s)\n", route.String(), err)
+						http.Error(w, "Error. Please visit support.bringyour.com for help.", http.StatusInternalServerError)
+					}
+				}()
+				route.handler(w, r.WithContext(ctx))
+			}()
 			return
 		}
 	}
 	if len(allow) > 0 {
 		w.Header().Set("Allow", strings.Join(allow, ", "))
-		http.Error(w, "405 method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
 		return
 	}
 	http.NotFound(w, r)

@@ -8,7 +8,7 @@ import (
 
 
 func StatsLast90(w http.ResponseWriter, r *http.Request) {
-    statsLast90Json := model.GetExportedStatsJson(90)
+    statsLast90Json := model.GetExportedStatsJson(r.Context(), 90)
     if statsLast90Json == nil {
         http.Error(w, "Could not fetch stats.", http.StatusInternalServerError)
         return

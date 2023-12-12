@@ -1,71 +1,77 @@
 package session
 
 import (
-	"fmt"
+	"context"
 	"net/http"
+	"strings"
+	"strconv"
+	// "encoding/base64"
 
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 )
 
 
-type Ipv4 [4]byte
+// https://www.rfc-editor.org/rfc/rfc6750
+const authBearerPrefix = "Bearer "
 
 
 type ClientSession struct {
-	ClientIpv4 *Ipv4
+	Ctx context.Context
+	Cancel context.CancelFunc
+	// ip:port
+	ClientAddress string
 	ByJwt *jwt.ByJwt
 }
 
-func NewClientSessionFromRequest(req *http.Request) *ClientSession {
-	session := ClientSession{}
-	
-	clientIpv4DotNotation := req.Header.Get("X-Forwarded-For")
-	if clientIpv4DotNotation != "" {
-		var ipv4 Ipv4
-		_, err := fmt.Sscanf(
-			clientIpv4DotNotation,
-			"%u.%u.%u.%u",
-			&ipv4[0],
-			&ipv4[1],
-			&ipv4[2],
-			&ipv4[3],
-		)
-		if err == nil {
-			session.ClientIpv4 = &ipv4
-		}
-	}
-	if session.ClientIpv4 == nil {
-		// either the load balancer is not correctly configured or there is no load balancer
-		var ipv4 Ipv4
-		var port int
-		_, err := fmt.Sscanf(
-			req.RemoteAddr,
-			"%u.%u.%u.%u:%u",
-			&ipv4[0],
-			&ipv4[1],
-			&ipv4[2],
-			&ipv4[3],
-			&port,
-		)
-		if err == nil {
-			session.ClientIpv4 = &ipv4
-		}
+func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
+	cancelCtx, cancel := context.WithCancel(req.Context())
+
+	clientAddress := req.Header.Get("X-Forwarded-For")
+	if clientAddress == "" {
+		clientAddress = req.RemoteAddr
 	}
 
-	return &session
+	var byJwt *jwt.ByJwt
+	if auth := req.Header.Get("Authorization"); auth != "" {
+    	if strings.HasPrefix(auth, authBearerPrefix) {
+    		jwtStr := auth[len(authBearerPrefix):]
+    		var err error
+			byJwt, err = jwt.ParseByJwt(jwtStr)
+			if err != nil {
+				return nil, err
+			}
+	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+    	}
+    }
+
+	return &ClientSession{
+		Ctx: cancelCtx,
+		Cancel: cancel,
+		ClientAddress: clientAddress,
+		ByJwt: byJwt,
+	}, nil
 }
 
-func (self ClientSession) ClientIpv4DotNotation() *string {
-	if self.ClientIpv4 == nil {
-		return nil
-	}
+func NewLocalClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
-	ipv4DotNotation := fmt.Sprintf(
-		"%u.%u.%u.%u",
-		self.ClientIpv4[0],
-		self.ClientIpv4[1],
-		self.ClientIpv4[2],
-		self.ClientIpv4[3],
-	)
-	return &ipv4DotNotation
+	clientAddress := "0.0.0.0:0"
+
+	return &ClientSession{
+		Ctx: cancelCtx,
+		Cancel: cancel,
+		ClientAddress: clientAddress,
+		ByJwt: byJwt,
+	}
+}
+
+
+func (self *ClientSession) ClientIpPort() (ip string, port int) {
+	parts := strings.Split(self.ClientAddress, ":")
+	ip = parts[0]
+	if 1 < len(parts) {
+		port, _ = strconv.Atoi(parts[1])
+	}
+	return
 }

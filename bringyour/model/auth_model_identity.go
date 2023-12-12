@@ -9,7 +9,6 @@ import (
 	"github.com/nyaruka/phonenumbers"
 
 	"bringyour.com/bringyour"
-	// "bringyour.com/bringyour/ulid"
 )
 
 
@@ -79,13 +78,17 @@ func createPasswordSalt() []byte {
 	return passwordSalt
 }
 
-func createValidateCode() string {
-	validateCode := make([]byte, 4)
-	_, err := rand.Read(validateCode)
+func createVerifyCode() string {
+	verifyCode := make([]byte, 4)
+	_, err := rand.Read(verifyCode)
 	if err != nil {
 		panic(err)
 	}
-	return hex.EncodeToString(validateCode)
+	return hex.EncodeToString(verifyCode)
+}
+
+func TestCreateVerifyCode() string {
+	return createVerifyCode()
 }
 
 func createResetCode() string {

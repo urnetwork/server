@@ -23,10 +23,10 @@ type JwkValidator struct {
 
 
 	// type https://pkg.go.dev/crypto/rsa#PrivateKey.Public
-func (self JwkValidator) Keys() []interface{} {
+func (self JwkValidator) Keys() []any {
 	// RsaPublicKeys iterate Keys in JSONWebKeySet 
 	// key.Key
-	var keys []interface{}
+	var keys []any
 	for _, key := range self.keySet.Keys {
 		keys = append(keys, key.Key)
 	}

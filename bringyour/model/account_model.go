@@ -1,36 +1,38 @@
 package model
 
 import (
-	"context"
+	// "context"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/ulid"
+	// "bringyour.com/bringyour/ulid"
 )
 
 
 type PreferencesSetArgs struct {
-	AuthArgs
-	ProductUpdates bool `json:"productUpdates"`
+	ProductUpdates bool `json:"product_updates"`
 }
 
 type PreferencesSetResult struct {
 }
 
-func PreferencesSet(preferencesSet PreferencesSetArgs, session *session.ClientSession) (*PreferencesSetResult, error) {
-	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
-		_, err := conn.Exec(
-			context,
+func PreferencesSet(
+	preferencesSet PreferencesSetArgs,
+	session *session.ClientSession,
+) (*PreferencesSetResult, error) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		_, err := tx.Exec(
+			session.Ctx,
 			`
 				INSERT INTO account_preferences (network_id, product_updates)
 				VALUES ($1, $2)
 				ON CONFLICT (network_id) DO UPDATE SET product_updates = $2
 			`,
-			ulid.ToPg(&session.ByJwt.NetworkId),
+			session.ByJwt.NetworkId,
 			preferencesSet.ProductUpdates,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 
 	result := &PreferencesSetResult{}
 	return result, nil
@@ -38,7 +40,6 @@ func PreferencesSet(preferencesSet PreferencesSetArgs, session *session.ClientSe
 
 
 type FeedbackSendArgs struct {
-	AuthArgs
 	Uses FeedbackSendUses `json:"uses"`
 	Needs FeedbackSendNeeds `json:"needs"`
 }
@@ -51,15 +52,15 @@ type FeedbackSendNeeds struct {
 	Safe bool `json:"safe"`
 	Global bool `json:"global"`
 	Collaborate bool `json:"collaborate"`
-	AppControl bool `json:"appControl"`
-	BlockDataBrokers bool `json:"blockDataBrokers"`
-	BlockAds bool `json:"blockAds"`
+	AppControl bool `json:"app_control"`
+	BlockDataBrokers bool `json:"block_data_brokers"`
+	BlockAds bool `json:"block_ads"`
 	Focus bool `json:"focus"`
-	ConnectServers bool `json:"connectServers"`
-	RunServers bool `json:"runServers"`
-	PreventCyber bool `json:"preventCyber"`
+	ConnectServers bool `json:"connect_servers"`
+	RunServers bool `json:"run_servers"`
+	PreventCyber bool `json:"prevent_cyber"`
 	Audit bool `json:"audit"`
-	ZeroTrust bool `json:"zeroTrust"`
+	ZeroTrust bool `json:"zero_trust"`
 	Visualize bool `json:"visualize"`
 	Other *string `json:"other"`
 }
@@ -68,11 +69,14 @@ type FeedbackSendResult struct {
 }
 
 
-func FeedbackSend(feedbackSend FeedbackSendArgs, session *session.ClientSession) (*FeedbackSendResult, error) {
-	bringyour.Db(func(context context.Context, conn bringyour.PgConn) {
-		feedbackId := ulid.Make()
-		_, err := conn.Exec(
-			context,
+func FeedbackSend(
+	feedbackSend FeedbackSendArgs,
+	session *session.ClientSession,
+) (*FeedbackSendResult, error) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		feedbackId := bringyour.NewId()
+		_, err := tx.Exec(
+			session.Ctx,
 			`
 				INSERT INTO account_feedback
 				(
@@ -99,9 +103,9 @@ func FeedbackSend(feedbackSend FeedbackSendArgs, session *session.ClientSession)
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 			`,
-			ulid.ToPg(&feedbackId),
-			ulid.ToPg(&session.ByJwt.NetworkId),
-			ulid.ToPg(&session.ByJwt.UserId),
+			&feedbackId,
+			&session.ByJwt.NetworkId,
+			&session.ByJwt.UserId,
 			feedbackSend.Uses.Personal,
 			feedbackSend.Uses.Business,
 			feedbackSend.Needs.Private,
@@ -121,7 +125,7 @@ func FeedbackSend(feedbackSend FeedbackSendArgs, session *session.ClientSession)
 			feedbackSend.Needs.Other,
 		)
 		bringyour.Raise(err)
-	})
+	}))
 
 	result := &FeedbackSendResult{}
 	return result, nil

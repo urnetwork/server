@@ -10,33 +10,40 @@ import (
 
 
 func AuthLogin(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthLogin, w, r)
+	router.WrapWithInputNoAuth(controller.AuthLogin, w, r)
 }
+
 
 func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthLoginWithPassword, w, r)
+	router.WrapWithInputNoAuth(controller.AuthLoginWithPassword, w, r)
 }
 
-func AuthValidate(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(model.AuthValidate, w, r)
+
+func AuthVerify(w http.ResponseWriter, r *http.Request) {
+    router.WrapWithInputNoAuth(model.AuthVerify, w, r)
 }
 
-func AuthValidateSend(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthValidateSend, w, r)
+
+func AuthVerifySend(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.AuthVerifySend, w, r)
 }
+
 
 func AuthPasswordReset(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.AuthPasswordReset, w, r)
+	router.WrapWithInputNoAuth(controller.AuthPasswordReset, w, r)
 }
+
 
 func AuthPasswordSet(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(controller.AuthPasswordSet, w, r)
+    router.WrapWithInputNoAuth(controller.AuthPasswordSet, w, r)
 }
+
 
 func AuthNetworkCheck(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJsonIgnoreSession(model.NetworkCheck, w, r)
+	router.WrapWithInputNoAuth(model.NetworkCheck, w, r)
 }
 
+
 func AuthNetworkCreate(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithJson(controller.NetworkCreate, w, r)
+	router.WrapWithInputNoAuth(controller.NetworkCreate, w, r)
 }

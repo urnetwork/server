@@ -1,39 +1,20 @@
 package search
 
 import (
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
 )
 
-
+// https://en.wikipedia.org/wiki/Levenshtein_distance
 func EditDistance(a string, b string) int {
-	/*
-	# https://en.wikipedia.org/wiki/Levenshtein_distance
-        table = {}
-        # fixme need to use the full string length
-        k = min(len(a), len(b))
+    // TODO only need to use O(MIN(n, m)) memory by using omly current and previous
 
-        table[(0, 0)] = 0
-        for i in range(1, k+1):
-            table[(i, 0)] = i
-        for j in range(1, k+1):
-            table[(0, j)] = j
-        for i in range(1, k+1):
-            for j in range(1, k+1):
-                if a[i-1] == b[j-1]:
-                    table[(i, j)] = table[(i - 1, j - 1)]
-                else:
-                    table[(i, j)] = 1 + min(
-                        table[(i - 1, j)],
-                        table[(i, j - 1)],
-                        table[(i - 1, j - 1)]
-                    )
-        return table[(k, k)] + max(len(a) - k, len(b) - k)
-    */
+    n := len(a) + 1
+    m := len(b) + 1
 
 	index := func(alen int, blen int) int {
-		return alen + len(a) * blen
+		return alen + n * blen
 	}
-	table := make([]int, (len(a) + 1) * (len(b) + 1))
+	table := make([]int, n * m)
 	table[index(0, 0)] = 0
 	for alen := 1; alen <= len(a); alen += 1 {
 		table[index(alen, 0)] = alen
@@ -46,7 +27,7 @@ func EditDistance(a string, b string) int {
 			if a[alen - 1] == b[blen - 1] {
 				table[index(alen, blen)] = table[index(alen - 1, blen - 1)]
 			} else {
-				table[index(alen, blen)] = 1 + bringyour.MinInt(
+				table[index(alen, blen)] = 1 + min(
 					table[index(alen - 1, blen)],
 					table[index(alen, blen - 1)],
 					table[index(alen - 1, blen - 1)],

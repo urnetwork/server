@@ -9,11 +9,11 @@ import (
 
 
 func PreferencesSet(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(model.PreferencesSet, w, r)	
+    router.WrapWithInputRequireAuth(model.PreferencesSet, w, r)	
 }
 
 
 func FeedbackSend(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithJson(model.FeedbackSend, w, r)   
+    router.WrapWithInputRequireAuth(model.FeedbackSend, w, r)   
 }
 

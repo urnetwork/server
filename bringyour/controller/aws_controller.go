@@ -2,7 +2,7 @@ package controller
 
 
 import (
-	"bringyour.com/bringyour/ulid"
+	"bringyour.com/bringyour"
 
 	"github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
@@ -16,7 +16,7 @@ import (
 // marketing messages are sent via a separate channel
 
 
-func SendAccountMessage(networkId ulid.ULID, bodyHtml string, bodyText string) {
+func SendAccountMessage(networkId bringyour.Id, bodyHtml string, bodyText string) {
 	// fixme
 }
 
@@ -110,7 +110,7 @@ func sendAccountSms(phoneNumber string, bodyText string) error {
     snsService := sns.New(awsSession)
 
 	input := &sns.PublishInput{
-		Message: &phoneNumber,
+		Message: &bodyText,
 		PhoneNumber: &phoneNumber,
 	}
 

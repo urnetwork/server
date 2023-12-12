@@ -14,6 +14,14 @@ type RedisClient = *redis.Client
 const RedisNil = redis.Nil
 
 
+// resets the connection pool
+// call this after changes to the env
+func RedisReset() {
+	safeClient.close()
+	safeClient = &safeRedisClient{}
+}
+
+
 type safeRedisClient struct {
 	mutex sync.Mutex
 	client *redis.Client
@@ -23,7 +31,7 @@ func (self *safeRedisClient) open() *redis.Client {
 	defer self.mutex.Unlock()
 
 	if self.client == nil {
-		redisKeys := KeysRed.RequireSimpleResource("redis.yml")
+		redisKeys := Vault.RequireSimpleResource("redis.yml")
 
 		// see https://github.com/redis/go-redis/blob/master/options.go#L31
 		options := &redis.Options{
@@ -57,7 +65,7 @@ func (self *safeRedisClient) close() {
 }
 
 
-var safeClient *safeRedisClient = &safeRedisClient{}
+var safeClient = &safeRedisClient{}
 
 func client() *redis.Client {
 	return safeClient.open()
@@ -65,11 +73,11 @@ func client() *redis.Client {
 
 
 
-func Redis(callback func(context context.Context, client RedisClient)) {
+func Redis(ctx context.Context, callback func(RedisClient)) {
 	// From the go-redis code:
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.
-	context := context.Background()
+	// context := context.Background()
 	client := client()
-    callback(context, client)
+    callback(client)
 }
