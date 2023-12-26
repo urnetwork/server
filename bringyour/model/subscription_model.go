@@ -394,7 +394,7 @@ type TransferBalance struct {
     EndTime time.Time `json:"end_time"`
     StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
     // how much money the platform made after subtracting fees
-    NetRevenue NanoCents `json:"net_revenue"`
+    NetRevenue NanoCents `json:"net_revenue_nano_cents"`
     BalanceByteCount ByteCount `json:"balance_byte_count"`
 }
 

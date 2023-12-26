@@ -729,7 +729,7 @@ func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bo
 
 type NetworkClientResident struct {
 	ClientId bringyour.Id `json:"client_id"`
-	InstanceId bringyour.Id `json:"client_id"`
+	InstanceId bringyour.Id `json:"instance_id"`
 	ResidentId bringyour.Id `json:"resident_id"`
 	ResidentHost string `json:"resident_host"`
 	ResidentService string `json:"resident_service"`
