@@ -991,4 +991,67 @@ var migrations = []any{
         )
     `),
 
+    newSqlMigration(`
+        CREATE TABLE auth_code (
+            auth_code_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            user_id uuid NOT NULL,
+            auth_code VARCHAR(1024) NOT NULL,
+            create_time timestamp NOT NULL,
+            end_time timestamp NOT NULL,
+            uses int NOT NULL,
+            remaining_uses int NOT NULL,
+            active bool GENERATED ALWAYS AS (0 < remaining_uses) STORED,
+
+            PRIMARY KEY (auth_code_id),
+            UNIQUE (auth_code)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX auth_code_active_network_id ON auth_code (active, network_id, auth_code_id)
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX auth_code_active_user_id ON auth_code (active, user_id, auth_code_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE auth_code_session (
+            auth_code_id uuid NOT NULL,
+            auth_session_id uuid NOT NULL,
+
+            PRIMARY KEY (auth_code_id, auth_session_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE auth_session (
+            auth_session_id uuid NOT NULL,
+            active bool NOT NULL DEFAULT true,
+
+            network_id uuid NOT NULL,
+            user_id uuid NOT NULL,
+            
+            PRIMARY KEY (auth_session_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX auth_session_active_network_id ON auth_session (active, network_id, auth_session_id)
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX auth_session_active_user_id ON auth_session (active, user_id, auth_session_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE auth_session_expiration (
+            network_id uuid NOT NULL,
+            expire_time timestamp NOT NULL,
+
+            PRIMARY KEY (network_id)
+        )
+    `),
+
 }
