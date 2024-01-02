@@ -1,11 +1,16 @@
 package jwt
 
 import (
+	"context"
 	"errors"
 	"crypto/rsa"
 	"crypto/x509"
     "encoding/pem"
+    "encoding/json"
     "os"
+    "time"
+    "fmt"
+    "strings"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -51,27 +56,33 @@ func bySigningKey() *rsa.PrivateKey {
 // Trust verification happens at the user level.
 // A client is always tied to a user.
 type ByJwt struct {
-	NetworkId bringyour.Id
-	NetworkName string
-	UserId bringyour.Id
-	ClientId *bringyour.Id
+	NetworkId bringyour.Id `json:"network_id,omitempty"`
+	NetworkName string `json:"network_name,omitempty"`
+	UserId bringyour.Id `json:"user_id,omitempty"`
+	CreateTime time.Time `json:"create_time,omitempty"`
+	AuthSessionIds []bringyour.Id `json:"auth_session_ids,omitempty"`
+	ClientId *bringyour.Id `json:"client_id,omitempty"`
 }
 
 func (self *ByJwt) Sign() string {
-	claims := gojwt.MapClaims{
-		"network_id": self.NetworkId.String(),
-		"user_id": self.UserId.String(),
-		"network_name": self.NetworkName,
+	claimsJson, err := json.Marshal(self)
+	if err != nil {
+		panic(err)
 	}
-	if self.ClientId != nil {
-		claims["client_id"] = self.ClientId.String()
+
+	claims := &gojwt.MapClaims{}
+	err = json.Unmarshal(claimsJson, claims)
+	if err != nil {
+		panic(err)
 	}
+
 	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
 
 	jwtSigned, err := token.SignedString(bySigningKey())
 	if err != nil {
 		panic(err)
 	}
+
 	return jwtSigned
 }
 
@@ -80,16 +91,41 @@ func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
 		NetworkId: self.NetworkId,
 		UserId: self.UserId,
 		NetworkName: self.NetworkName,
+		CreateTime: self.CreateTime,
+		AuthSessionIds: self.AuthSessionIds,
 		ClientId: clientId,
 	}
 }
 
+func NewByJwt(
+	networkId bringyour.Id,
+	userId bringyour.Id,
+	networkName string,
+	authSessionIds ...bringyour.Id,
+) *ByJwt {
+	return NewByJwtWithCreateTime(
+		networkId,
+		userId,
+		networkName,
+		time.Now(),
+		authSessionIds...,
+	)
+}
 
-func NewByJwt(networkId bringyour.Id, userId bringyour.Id, networkName string) *ByJwt {
+func NewByJwtWithCreateTime(
+	networkId bringyour.Id,
+	userId bringyour.Id,
+	networkName string,
+	createTime time.Time,
+	authSessionIds ...bringyour.Id,
+) *ByJwt {
 	return &ByJwt{
 		NetworkId: networkId,
 		UserId: userId,
 		NetworkName: networkName,
+		// round here so that the string representation in the jwt does not lose information
+		CreateTime: createTime.Round(time.Nanosecond),
+		AuthSessionIds: authSessionIds,
 	}
 }
 
@@ -110,47 +146,85 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	}
 
 	claims := token.Claims.(gojwt.MapClaims)
-	
-	var networkId bringyour.Id
-	var userId bringyour.Id
-	var networkName string
-	var clientId *bringyour.Id
-	
-	networkIdStr, ok := claims["network_id"].(string)
-	if !ok {
-		return nil, errors.New("Malformed jwt.")
-	}
-	networkId, err = bringyour.ParseId(networkIdStr)
+
+	claimsJson, err := json.Marshal(claims)
 	if err != nil {
 		return nil, err
-	}
-	userIdStr, ok := claims["user_id"].(string)
-	if !ok {
-		return nil, errors.New("Malformed jwt.")
-	}
-	userId, err = bringyour.ParseId(userIdStr)
-	if err != nil {
-		return nil, err
-	}
-	networkName, ok = claims["network_name"].(string)
-	if !ok {
-		return nil, errors.New("Malformed jwt.")
-	}
-	clientIdStr, ok := claims["client_id"].(string)
-	// client_id is optional
-	if ok {
-		clientId_, err := bringyour.ParseId(clientIdStr)
-		if err != nil {
-			return nil, err
-		}
-		clientId = &clientId_
 	}
 
-	return &ByJwt{
-		NetworkId: networkId,
-		NetworkName: networkName,
-		UserId: userId,
-		ClientId: clientId,
-	}, nil
+	byJwt := &ByJwt{}
+	err = json.Unmarshal(claimsJson, byJwt)
+	if err != nil {
+		return nil, err
+	}
+	
+	return byJwt, nil
+}
+
+
+func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
+	// test the create time and sessions
+	// - all sessions created before a certain time may be expired (`auth_session_expiration`)
+	// - individual sessions may be expired (`auth_session`)
+
+	var hasInactiveSession bool
+
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		if len(byJwt.AuthSessionIds) == 0 {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT false AS active
+					FROM auth_session_expiration
+					WHERE
+						network_id = $1 AND
+						$2 <= expire_time
+				`,
+				byJwt.NetworkId,
+				byJwt.CreateTime,
+			)
+			bringyour.WithPgResult(result, err, func() {
+				hasInactiveSession = result.Next()
+			})
+		} else {
+			authSessionIdPlaceholders := []string{}
+			for i := 0; i < len(byJwt.AuthSessionIds); i += 1 {
+				// start at $3
+				authSessionIdPlaceholders = append(authSessionIdPlaceholders, fmt.Sprintf("$%d", 3 + i))
+			}
+			args := []any{
+				byJwt.NetworkId,
+				byJwt.CreateTime,
+			}
+			for _, authSessionId := range byJwt.AuthSessionIds {
+				args = append(args, authSessionId)
+			}
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT false AS active
+					FROM auth_session_expiration
+					WHERE
+						network_id = $1 AND
+						$2 <= expire_time
+
+					UNION ALL
+
+					SELECT active
+					FROM auth_session
+					WHERE
+						auth_session_id IN (` + strings.Join(authSessionIdPlaceholders, ",") + `) AND
+						active = false
+					LIMIT 1
+				`,
+				args...
+			)
+			bringyour.WithPgResult(result, err, func() {
+				hasInactiveSession = result.Next()
+			})
+		}
+	}))
+
+	return !hasInactiveSession
 }
 
