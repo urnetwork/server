@@ -52,7 +52,7 @@ func WrapRequireAuth[R any](
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
-			if session.ByJwt == nil {
+			if err := session.Auth(req); err != nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
@@ -72,7 +72,7 @@ func WrapRequireClient[R any](
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
-			if session.ByJwt == nil || session.ByJwt.ClientId == nil {
+			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
@@ -149,7 +149,7 @@ func WrapWithInputRequireAuth[T any, R any](
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
-			if session.ByJwt == nil {
+			if err := session.Auth(req); err != nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
@@ -169,7 +169,7 @@ func WrapWithInputRequireClient[T any, R any](
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
-			if session.ByJwt == nil || session.ByJwt.ClientId == nil {
+			if err := session.Auth(req); err != null || session.ByJwt.ClientId == nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}

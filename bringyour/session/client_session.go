@@ -6,6 +6,7 @@ import (
 	"strings"
 	"strconv"
 	// "encoding/base64"
+	"errors"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
@@ -32,24 +33,10 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		clientAddress = req.RemoteAddr
 	}
 
-	var byJwt *jwt.ByJwt
-	if auth := req.Header.Get("Authorization"); auth != "" {
-    	if strings.HasPrefix(auth, authBearerPrefix) {
-    		jwtStr := auth[len(authBearerPrefix):]
-    		var err error
-			byJwt, err = jwt.ParseByJwt(jwtStr)
-			if err != nil {
-				return nil, err
-			}
-	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-    	}
-    }
-
 	return &ClientSession{
 		Ctx: cancelCtx,
 		Cancel: cancel,
 		ClientAddress: clientAddress,
-		ByJwt: byJwt,
 	}, nil
 }
 
@@ -66,6 +53,31 @@ func NewLocalClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession
 	}
 }
 
+func (self *ClientSession) Auth(req *http.Request) error {
+	if auth := req.Header.Get("Authorization"); auth != "" {
+    	if strings.HasPrefix(auth, authBearerPrefix) {
+    		jwtStr := auth[len(authBearerPrefix):]
+
+    		// to validate the jwt:
+    		// 1. parse it which tests the signing key.
+    		//    this will fail if the signature is invalid.
+    		// 2. test the create time and sessions against
+    		//    inactive sessions. For various security reasons sessions may be expired.
+
+			byJwt, err := jwt.ParseByJwt(jwtStr)
+			if err != nil {
+				return err
+			}
+			if !jwt.IsByJwtActive(cancelCtx, byJwt) {
+				return errors.New("JWT expired.")
+			}
+	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+	    	self.ByJwt = byJwt
+	    	return nil
+    	}
+    }
+    return errors.New("Invalid auth.")
+}
 
 func (self *ClientSession) ClientIpPort() (ip string, port int) {
 	parts := strings.Split(self.ClientAddress, ":")
