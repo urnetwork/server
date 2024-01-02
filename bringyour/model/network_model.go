@@ -2,8 +2,8 @@ package model
 
 
 import (
+	"context"
 	"errors"
-	// "context"
 	"encoding/json"
 
 	"bringyour.com/bringyour"
@@ -323,4 +323,25 @@ func auditNetworkCreate(
 	auditNetworkEvent.NetworkId = networkId
 	auditNetworkEvent.EventDetails = &detailsJsonString
 	AddAuditEvent(session.Ctx, auditNetworkEvent)
+}
+
+
+func testCreateNetwork(
+	ctx context.Context,
+	networkId bringyour.Id,
+	networkName string,
+	adminUserId bringyour.Id,
+) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network (network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			networkId,
+			networkName,
+			adminUserId,
+		))
+	}))
 }

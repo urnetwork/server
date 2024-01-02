@@ -8,6 +8,8 @@ import (
 	// "strings"
 	// "strconv"
 	"time"
+	"crypto/rand"
+	"encoding/base64"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -857,3 +859,307 @@ func AuthPasswordSet(
 	return result, nil
 }
 
+
+const ActiveAuthCodeLimitPerNetwork = 10
+const DefaultAuthCodeDuration = 1 * time.Minute
+const AuthCodeMaxDuration = 24 * time.Hour
+const DefaultAuthCodeUses = 1
+const AuthCodeMaxUses = 4
+
+
+type AuthCodeCreateArgs struct {
+	DurationMinutes float64 `json:"duration_minutes,omitempty"`
+	Uses int `json:"uses,omitempty"`
+}
+
+type AuthCodeCreateResult struct {
+	AuthCode string `json:"auth_code,omitempty"`
+	DurationMinutes float64 `json:"duration_minutes,omitempty"`
+	Uses int `json:"uses,omitempty"`
+	Error *AuthCodeCreateError `json:"error,omitempty"`
+}
+
+type AuthCodeCreateError struct {
+	AuthCodeLimitExceeded bool `json:"auth_code_limit_exceeded,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+func AuthCodeCreate(
+	codeCreate *AuthCodeCreateArgs,
+	session *session.ClientSession,
+) (codeCreateResult *AuthCodeCreateResult, returnErr error) {
+	if session.ByJwt.ClientId != nil {
+		// the clientId is not threaded currently
+		// no need to implement this now
+		codeCreateResult = &AuthCodeCreateResult{
+			Error: &AuthCodeCreateError{
+				AuthCodeLimitExceeded: true,
+				Message: "A client JWT cannot create an auth code.",
+			},
+		}
+		return
+	}
+
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			session.Ctx,
+			`
+			SELECT COUNT(*) AS auth_code_count
+			FROM auth_code
+			WHERE
+				network_id = $1 AND
+				active = true
+			`,
+			session.ByJwt.NetworkId,
+		)
+
+		authCodeCount := 0
+		
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&authCodeCount))
+			}
+		})
+		if ActiveAuthCodeLimitPerNetwork <= authCodeCount {
+			codeCreateResult = &AuthCodeCreateResult{
+				Error: &AuthCodeCreateError{
+					AuthCodeLimitExceeded: true,
+					Message: "Auth code limit exceeded.",
+				},
+			}
+			return
+		}
+
+
+		authCodeId := bringyour.NewId()
+
+		authCodeBytes := make([]byte, 512)
+		if _, err := rand.Read(authCodeBytes); err != nil {
+			returnErr = err
+			return
+		}
+		authCode := base64.URLEncoding.EncodeToString(authCodeBytes)
+
+		duration := DefaultAuthCodeDuration
+		uses := DefaultAuthCodeUses
+
+		// the auth code assumes the create time of the root jwt
+		// this is to enable all derivative auth to be expired by expiring the root
+		createTime := session.ByJwt.CreateTime
+		endTime := time.Now().Add(duration)
+
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+			INSERT INTO auth_code (
+				auth_code_id,
+	            network_id,
+	            user_id,
+	            auth_code,
+	            create_time,
+	            end_time,
+	            uses,
+	            remaining_uses
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+			`,
+			authCodeId,
+			session.ByJwt.NetworkId,
+			session.ByJwt.UserId,
+			authCode,
+			createTime,
+			endTime,
+			uses,
+		))
+
+		// propagate the auth sessions
+		if 0 < len(session.ByJwt.AuthSessionIds) {
+			bringyour.Raise(bringyour.BatchInTx(session.Ctx, tx, func(batch bringyour.PgBatch) {
+				for _, authSessionId := range session.ByJwt.AuthSessionIds {
+					batch.Queue(
+						`
+						INSERT INTO auth_code_session (
+							auth_code_id,
+							auth_session_id
+						) VALUES ($1, $2)
+						`,
+						authCodeId,
+						authSessionId,
+					)
+				}
+			}))
+		}
+
+		codeCreateResult = &AuthCodeCreateResult{
+			AuthCode: authCode,
+			DurationMinutes: float64(duration) / float64(time.Minute),
+			Uses: uses,
+		}
+	}))
+
+	return
+}
+
+
+type AuthCodeLoginArgs struct {
+	AuthCode string `json:"auth_code,omitempty"`
+}
+
+type AuthCodeLoginResult struct {
+	ByJwt string `json:"by_jwt,omitempty"`
+	Error *AuthCodeLoginError `json:"error,omitempty"`
+}
+
+type AuthCodeLoginError struct {
+	Message string `json:"message,omitempty"`
+}
+
+func AuthCodeLogin(
+	codeLogin *AuthCodeLoginArgs,
+	session *session.ClientSession,
+) (codeLoginResult *AuthCodeLoginResult, returnErr error) {
+	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			session.Ctx,
+			`
+				SELECT
+					auth_code.auth_code_id,
+					auth_code.network_id,
+					auth_code.user_id,
+					auth_code.create_time,
+					auth_code.remaining_uses,
+					network.network_name
+
+				FROM auth_code
+
+				INNER JOIN network ON network.network_id = auth_code.network_id
+
+				WHERE
+					auth_code.auth_code = $1 AND
+					auth_code.active = true AND
+					$2 < auth_code.end_time
+			`,
+			codeLogin.AuthCode,
+			time.Now(),
+		)
+
+		exists := false
+		var authCodeId bringyour.Id
+		var networkId bringyour.Id
+		var userId bringyour.Id
+		var createTime time.Time
+		var remainingUses int
+		var networkName string
+		
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				exists = true
+				result.Scan(
+					&authCodeId,
+					&networkId,
+					&userId,
+					&createTime,
+					&remainingUses,
+					&networkName,
+				)
+			}
+		})
+		if !exists {
+			codeLoginResult = &AuthCodeLoginResult{
+				Error: &AuthCodeLoginError{
+					Message: "Invalid auth code.",
+				},
+			}
+			return
+		}
+
+		result, err = tx.Query(
+			session.Ctx,
+			`
+				SELECT auth_session_id
+				FROM auth_code_session
+				WHERE auth_code_id = $1
+			`,
+			authCodeId,
+		)
+
+		authSessionIds := []bringyour.Id{}
+
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var authSessionId bringyour.Id
+				result.Scan(&authSessionId)
+				authSessionIds = append(authSessionIds, authSessionId)
+			}
+		})
+
+
+		if 1 < remainingUses {
+			bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					UPDATE auth_code
+					SET remaining_uses = remaining_uses - 1
+					WHERE auth_code_id = $1
+				`,
+				authCodeId,
+			))
+		} else {
+			// this was the last use
+			// the safest approach is to just delete the auth code
+
+			bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					DELETE FROM auth_code
+					WHERE auth_code_id = $1
+				`,
+				authCodeId,
+			))
+
+			bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					DELETE FROM auth_code_session
+					WHERE auth_code_id = $1
+				`,
+				authCodeId,
+			))
+		}
+
+		byJwt := jwt.NewByJwtWithCreateTime(
+			networkId,
+			userId,
+			networkName,
+			createTime,
+			authSessionIds...
+		)
+
+		codeLoginResult = &AuthCodeLoginResult{
+			ByJwt: byJwt.Sign(),
+		}
+	}, bringyour.TxSerializable))
+
+	return
+}
+
+
+func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
+	// sessions and auth codes
+
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO auth_session_expiration (
+					network_id,
+					expire_time
+				) VALUES ($1, $2)
+				ON CONFLICT (network_id) DO UPDATE
+				SET
+					expire_time = $2
+			`,
+			networkId,
+			time.Now(),
+		))
+	}))
+}

@@ -47,3 +47,13 @@ func AuthNetworkCheck(w http.ResponseWriter, r *http.Request) {
 func AuthNetworkCreate(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.NetworkCreate, w, r)
 }
+
+
+func AuthCodeCreate(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.AuthCodeCreate, w, r)
+}
+
+
+func AuthCodeLogin(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(model.AuthCodeLogin, w, r)
+}
