@@ -51,6 +51,14 @@ func HttpPostRequireStatusOk[R any](
 }
 
 
+func HttpPostBasic[R any](
+	url string,
+	requestBody any,
+) (map[string]any, error) {
+	return HttpPost(url, requestBody, NoCustomHeaders, ResponseJsonObject)
+}
+
+
 func HttpPost[R any](
 	url string,
 	requestBody any,
@@ -111,6 +119,13 @@ func HttpGetRequireStatusOk[R any](
 }
 
 
+func HttpGetBasic[R any](
+	url string,
+) (map[string]any, error) {
+	return HttpGet(url, NoCustomHeaders, ResponseJsonObject)
+}
+
+
 func HttpGet[R any](
 	url string,
 	headerCallback HeaderCallback,
@@ -144,6 +159,22 @@ func HttpGet[R any](
     fmt.Printf("GET RESPONSE BODY %s\n", string(responseBodyBytes))
 
     return responseCallback(response, responseBodyBytes)
+}
+
+
+
+func NoCustomHeaders(header http.Header) {
+	// no nothing
+}
+
+
+func ResponseJsonObject(response *http.Response, responseBodyBytes []byte) (map[string]any, error) {
+	obj := map[string]any{}
+	err := json.Unmarshal(responseBodyBytes, &obj)
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 

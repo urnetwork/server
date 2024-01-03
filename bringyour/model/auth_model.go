@@ -933,6 +933,7 @@ func AuthCodeCreate(
 
 		authCodeId := bringyour.NewId()
 
+		// 4096 bits
 		authCodeBytes := make([]byte, 512)
 		if _, err := rand.Read(authCodeBytes); err != nil {
 			returnErr = err

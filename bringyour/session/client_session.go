@@ -53,6 +53,7 @@ func NewLocalClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession
 	}
 }
 
+// either sets `ByJwt` or returns and error
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
     	if strings.HasPrefix(auth, authBearerPrefix) {
@@ -68,7 +69,7 @@ func (self *ClientSession) Auth(req *http.Request) error {
 			if err != nil {
 				return err
 			}
-			if !jwt.IsByJwtActive(cancelCtx, byJwt) {
+			if !jwt.IsByJwtActive(self.Ctx, byJwt) {
 				return errors.New("JWT expired.")
 			}
 	    	bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)

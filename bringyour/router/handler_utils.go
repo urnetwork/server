@@ -26,7 +26,7 @@ func wrap[R any](
         return
 	}
 
-	bringyour.Logger().Printf("Handling %s\n", impl)
+	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(session)
 	if err != nil {
 		raiseHttpError(err, w)
@@ -91,8 +91,6 @@ func WrapNoAuth[R any](
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
-			// even if there was an auth value, remove it
-			session.ByJwt = nil
 			return impl(session)
 		},
 		w,
@@ -123,7 +121,7 @@ func wrapWithInput[T any, R any](
         return
 	}
 
-	bringyour.Logger().Printf("Handling %s\n", impl)
+	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
 		raiseHttpError(err, w)
@@ -169,7 +167,7 @@ func WrapWithInputRequireClient[T any, R any](
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
-			if err := session.Auth(req); err != null || session.ByJwt.ClientId == nil {
+			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
@@ -188,8 +186,6 @@ func WrapWithInputNoAuth[T any, R any](
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
-			// even if there was an auth value, remove it
-			session.ByJwt = nil
 			return impl(arg, session)
 		},
 		w,
