@@ -4,6 +4,7 @@ import (
     // "context"
     "fmt"
     // "errors"
+    "time"
 
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/session"
@@ -103,7 +104,10 @@ func createVerifyBodyHtml(verifyCode string) string {
 <br><br><b>Why you received this email.</b>
 <br><a href="https://bringyour.com">BringYour</a> requires verification that a user of the service is in control of the identity they assign to their network. The network cannot be used until the identity is verified.
 <br><br>If you did not make this change or you believe and unauthorized person has accessed your account, please contact <a href="mailto:security@bringyour.com">security@bringyour.com</a>.
-<br><br>Copyright 2023 BringYour, Inc., 2261 Market Street #5245, San Francisco, CA 94114, United States`, verifyCode)
+<br><br>Copyright %d BringYour, Inc., 2261 Market Street #5245, San Francisco, CA 94114, United States`,
+        verifyCode,
+        time.Now().Year(),
+    )
 }
 
 func createVerifyBodyText(verifyCode string) string {
