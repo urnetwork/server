@@ -1054,4 +1054,8 @@ var migrations = []any{
         )
     `),
 
+    newSqlMigration(`
+        CREATE INDEX search_projection_value ON search_projection (realm, value_id, value_variant, alias)
+    `),
+
 }
