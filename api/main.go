@@ -86,6 +86,8 @@ Options:
         router.NewRoute("POST", "/device/confirm-adopt", handlers.DeviceConfirmAdopt),
         router.NewRoute("GET", "/device/associations", handlers.DeviceAssociations),
         router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
+        router.NewRoute("POST", "/gpt/privacypolicy", handlers.GptPrivacyPolicy),
+        router.NewRoute("POST", "/gpt/bemyprivacyagent", handlers.GptBeMyPrivacyAgent),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)
