@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"bringyour.com/bringyour/session"
+	"bringyour.com/bringyour/model"
 )
 
 
@@ -263,36 +264,12 @@ practices, contact us at notice@bringyour.com.
 }
 
 
-type GptBeMyPrivacyAgentArgs struct {
-	CountryOfResidence string `json:"country_of_residence"`
-	RegionOfResidence string `json:"region_of_residence"`
-	CorrespondenceEmail string `json:"correspondence_email"`
-	Consent bool `json:"consent"`
-	EmailText *GptBeMyPrivacyAgentEmail `json:"email_text"`
-	ServiceName string `json:"service_name"`
-	ServiceUser string `json:"service_user"`
-}
-
-type GptBeMyPrivacyAgentEmail struct {
-	To string `json:"to"`
-	Subject string `json:"subject"`
-	Body string `json:"body"`
-}
-
-type GptBeMyPrivacyAgentResult struct {
-	Accepted bool `json:"accepted"`
-}
-
 func GptBeMyPrivacyAgent(
-	beMyPrivacyAgent *GptBeMyPrivacyAgentArgs,
+	beMyPrivacyAgent *model.GptBeMyPrivacyAgentArgs,
 	clientSession *session.ClientSession,
-) (*GptBeMyPrivacyAgentResult, error) {
+) (*model.GptBeMyPrivacyAgentResult, error) {
 	fmt.Printf("GptBeMyPrivacyAgent %v\n", beMyPrivacyAgent)
 	
-	// FIXME save to a db for review before sending each
-
-	return &GptBeMyPrivacyAgentResult{
-		Accepted: true,
-	}, nil
+	return model.GptBeMyPrivacyAgent(beMyPrivacyAgent, clientSession)
 }
 

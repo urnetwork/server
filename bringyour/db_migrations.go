@@ -944,7 +944,7 @@ var migrations = []any{
             region_location_id uuid NULL,
             country_location_id uuid NULL,
             country_code char(2) NOT NULL,
-            location_full_name VARCHAR(256) NOT NULL,
+            location_full_name varchar(256) NOT NULL,
 
             PRIMARY KEY (location_id),
             UNIQUE(location_full_name)
@@ -996,7 +996,7 @@ var migrations = []any{
             auth_code_id uuid NOT NULL,
             network_id uuid NOT NULL,
             user_id uuid NOT NULL,
-            auth_code VARCHAR(1024) NOT NULL,
+            auth_code varchar(1024) NOT NULL,
             create_time timestamp NOT NULL,
             end_time timestamp NOT NULL,
             uses int NOT NULL,
@@ -1056,6 +1056,24 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE INDEX search_projection_value ON search_projection (realm, value_id, value_variant, alias)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE privacy_agent_request (
+            privacy_agent_request_id uuid NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            country_of_residence varchar(256) NOT NULL,
+            region_of_residence varchar(256) NOT NULL,
+            correspondence_email varchar(256) NOT NULL,
+            consent bool NOT NULL,
+            email_text_to varchar(256) NOT NULL,
+            email_text_subject text NOT NULL,
+            email_text_body text NOT NULL,
+            service_name varchar(256) NOT NULL,
+            service_user varchar(256) NOT NULL,
+
+            PRIMARY KEY (privacy_agent_request_id)
+        ) 
     `),
 
 }
