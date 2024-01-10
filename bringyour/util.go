@@ -44,6 +44,15 @@ import (
 
 
 
+func CodecTime(t time.Time) time.Time {
+    // nanosecond resolution can be serialized and unserialized in most codecs:
+    // - json
+    // - postgres
+    return t.Round(time.Nanosecond)
+}
+
+
+
 func MinTime(a time.Time, b time.Time) time.Time {
     if a.Before(b) {
         return a

@@ -1,7 +1,8 @@
 package model
 
 import (
-	// "fmt"
+	"context"
+	"fmt"
 	// "strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 
 type CompletePrivacyPolicy struct {
+	PrivacyPolicyId bringyour.Id
 	ServiceName string
 	ServiceUrls []string
 	CreateTime time.Time
@@ -27,7 +29,7 @@ func NewCompletePrivacyPolicyPending(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: time.Now(),
+		CreateTime: bringyour.CodecTime(time.Now()),
 		Pending: true,
 	}
 }
@@ -41,7 +43,7 @@ func NewCompletePrivacyPolicy(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: time.Now(),
+		CreateTime: bringyour.CodecTime(time.Now()),
 		Pending: false,
 		PrivacyPolicyText: privacyPolicyText,
 		ExtractedUrls: extractedUrls,
@@ -49,14 +51,173 @@ func NewCompletePrivacyPolicy(
 }
 
 
-func GetCompletePrivacyPolicy(serviceName string) (*CompletePrivacyPolicy, error) {
-	// FIXME load from schema
-	return nil, nil
+func GetCompletePrivacyPolicy(
+	ctx context.Context,
+	serviceName string,
+) (completePrivacyPolicy *CompletePrivacyPolicy, returnErr error) {
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT privacy_policy_id
+				FROM latest_complete_privacy_policy
+				WHERE service_name = $1
+			`,
+			serviceName,
+		)
+
+		exists := false
+		var privacyPolicyId bringyour.Id
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				exists = true
+				bringyour.Raise(result.Scan(&privacyPolicyId))
+			}
+		})
+
+		if !exists {
+			returnErr = fmt.Errorf("Privacy policy does not exist for %s", serviceName)
+			return
+		}
+
+		completePrivacyPolicy = &CompletePrivacyPolicy{
+			PrivacyPolicyId: privacyPolicyId,
+			ServiceName: serviceName,
+		}
+
+
+		result, err = conn.Query(
+			ctx,
+			`
+				SELECT
+					create_time,
+					privacy_policy_text,
+					pending
+				FROM complete_privacy_policy
+				WHERE privacy_policy_id = $1
+			`,
+			privacyPolicyId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(
+					&completePrivacyPolicy.CreateTime,
+					&completePrivacyPolicy.PrivacyPolicyText,
+					&completePrivacyPolicy.Pending,
+				))
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			`
+				SELECT service_url
+				FROM complete_privacy_policy_service_url
+				WHERE privacy_policy_id = $1
+			`,
+			privacyPolicyId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var serviceUrl string
+				bringyour.Raise(result.Scan(&serviceUrl))
+				completePrivacyPolicy.ServiceUrls = append(
+					completePrivacyPolicy.ServiceUrls,
+					serviceUrl,
+				)
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			`
+				SELECT extracted_url
+				FROM complete_privacy_policy_extracted_url
+				WHERE privacy_policy_id = $1
+			`,
+			privacyPolicyId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var extractedUrl string
+				bringyour.Raise(result.Scan(&extractedUrl))
+				completePrivacyPolicy.ExtractedUrls = append(
+					completePrivacyPolicy.ExtractedUrls,
+					extractedUrl,
+				)
+			}
+		})
+	}))
+
+	return
 }
 
 
-func SetCompletePrivacyPolicy(completePrivacyPolicy *CompletePrivacyPolicy) {
-	// FIXME save to schema
+func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *CompletePrivacyPolicy) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		completePrivacyPolicy.PrivacyPolicyId = bringyour.NewId()
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO complete_privacy_policy (
+					privacy_policy_id,
+					create_time,
+					service_name,
+					pending,
+					privacy_policy_text
+				) VALUES ($1, $2, $3, $4, $5)
+			`,
+			completePrivacyPolicy.PrivacyPolicyId,
+			completePrivacyPolicy.CreateTime,
+			completePrivacyPolicy.ServiceName,
+			completePrivacyPolicy.Pending,
+			completePrivacyPolicy.PrivacyPolicyText,
+		))
+
+		for _, serviceUrl := range completePrivacyPolicy.ServiceUrls {
+			bringyour.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO complete_privacy_policy_service_url (
+						privacy_policy_id,
+						service_url
+					) VALUES ($1, $2)
+				`,
+				completePrivacyPolicy.PrivacyPolicyId,
+				serviceUrl,
+			))
+			
+		}
+
+		for _, extractedUrl := range completePrivacyPolicy.ExtractedUrls {
+			bringyour.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO complete_privacy_policy_extracted_url (
+						privacy_policy_id,
+						extracted_url
+					) VALUES ($1, $2)
+				`,
+				completePrivacyPolicy.PrivacyPolicyId,
+				extractedUrl,
+			))
+		}
+		
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO latest_complete_privacy_policy (
+					service_name,
+					privacy_policy_id
+				) VALUES ($2, $1)
+				ON CONFLICT (service_name) DO UPDATE
+				SET privacy_policy_id = $1
+			`,
+			completePrivacyPolicy.PrivacyPolicyId,
+			completePrivacyPolicy.ServiceName,
+		))
+	}))
 }
 
 

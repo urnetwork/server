@@ -15,6 +15,7 @@ import (
     mathrand "math/rand"
     "slices"
     "net/url"
+    "net/mail"
 
     "golang.org/x/net/html"
     "golang.org/x/exp/maps"
@@ -61,7 +62,10 @@ func GptPrivacyPolicy(
 ) (*GptPrivacyPolicyResult, error) {
 	fmt.Printf("GptPrivacyPolicy %v\n", privacyPolicy)
 
-    completePrivacyPolicy, err := model.GetCompletePrivacyPolicy(privacyPolicy.ServiceName)
+    completePrivacyPolicy, err := model.GetCompletePrivacyPolicy(
+        clientSession.Ctx,
+        privacyPolicy.ServiceName,
+    )
     var privacyPolicyText string
     if err == nil {
         privacyPolicyText = completePrivacyPolicy.PrivacyPolicyText
@@ -89,12 +93,15 @@ func GptPrivacyPolicy(
                 )
                 privacyPolicyText, extractedUrls, err := collector.Run()
                 if err == nil {
-                    model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicy(
-                        privacyPolicy.ServiceName,
-                        privacyPolicy.ServiceUrls,
-                        privacyPolicyText,
-                        extractedUrls,
-                    ))
+                    model.SetCompletePrivacyPolicy(
+                        clientSession.Ctx,
+                        model.NewCompletePrivacyPolicy(
+                            privacyPolicy.ServiceName,
+                            privacyPolicy.ServiceUrls,
+                            privacyPolicyText,
+                            extractedUrls,
+                        ),
+                    )
                 }
             }()
         }
@@ -109,21 +116,44 @@ func GptPrivacyPolicy(
         privacyPolicyText, extractedUrls, err := collector.Run()
 
         if err == nil {
-            model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicy(
-                privacyPolicy.ServiceName,
-                privacyPolicy.ServiceUrls,
-                privacyPolicyText,
-                extractedUrls,
-            ))
+            model.SetCompletePrivacyPolicy(
+                clientSession.Ctx,
+                model.NewCompletePrivacyPolicy(
+                    privacyPolicy.ServiceName,
+                    privacyPolicy.ServiceUrls,
+                    privacyPolicyText,
+                    extractedUrls,
+                ),
+            )
         } else {
-            model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicyPending(
-                privacyPolicy.ServiceName,
-                privacyPolicy.ServiceUrls,
-            ))
+            model.SetCompletePrivacyPolicy(
+                clientSession.Ctx,
+                model.NewCompletePrivacyPolicyPending(
+                    privacyPolicy.ServiceName,
+                    privacyPolicy.ServiceUrls,
+                ),
+            )
             // use a stand in policy to advance the gpt
             // this will be cleaned up async in the future after manual inspection
             privacyPolicyText = genericPrivacyPolicyText(privacyPolicy.ServiceName)
         }
+    }
+
+    // add a best effort contact email address
+    // use `byNoticeEmail` to advance the gpt conversation and flag the request for later review
+    if !hasEmailAddress(privacyPolicyText) {
+        privacyPolicyText = fmt.Sprintf(`
+
+BringYour Privacy Agent believes the best email address to reach %s is "%s". Please use this email address in correspondence.
+
+
+%s`,
+            privacyPolicy.ServiceName,
+            // TODO have a model to support custom overrides per service
+            // TODO use the by notice for now
+            byNoticeEmail,
+            privacyPolicyText,
+        )
     }
 
 	return &GptPrivacyPolicyResult{
@@ -131,6 +161,21 @@ func GptPrivacyPolicy(
 		PrivacyPolicy: privacyPolicyText,
 	}, nil
 }
+
+
+func hasEmailAddress(privacyPolicyText string) bool {
+    maybeEmailPattern := regexp.MustCompile("[\\w-\\.+]+@([\\w-]+\\.)+[\\w-]{2,64}")
+    allGroups := maybeEmailPattern.FindAllStringSubmatch(privacyPolicyText, -1)
+    for _, groups := range allGroups {
+        maybeEmail := groups[0]
+        if _, err := mail.ParseAddress(maybeEmail); err == nil {
+            fmt.Printf("FOUND EMAIL ADDRESS: %s\n", maybeEmail)
+            return true
+        }
+    }
+    return false
+}
+
 
 func GptBeMyPrivacyAgent(
 	beMyPrivacyAgent *model.GptBeMyPrivacyAgentArgs,
@@ -194,9 +239,11 @@ func (self *PrivacyPolicyCollector) Run() (string, []string, error) {
                 for _, link := range links {
                     extractor.Add(link, 1)
                 }
+                extractor.SetEndOnQuiet()
 
                 select {
                 case <- self.ctx.Done():
+                case <- extractor.End:
                 case <- time.After(self.collectTimeout):
                 }
 
@@ -226,6 +273,11 @@ type TextExtractor struct {
     extractedStateLock sync.Mutex
     addedLinkUrls map[string]int
     extractedText map[*Link]string
+
+    inFlightCount int
+    endOnQuiet bool
+
+    End chan struct{}
 }
 
 func NewTextExtractor(ctx context.Context, linkTimeout time.Duration) *TextExtractor {
@@ -239,6 +291,9 @@ func NewTextExtractor(ctx context.Context, linkTimeout time.Duration) *TextExtra
         linkTimeout: linkTimeout,
         addedLinkUrls: map[string]int{},
         extractedText: map[*Link]string{},
+        inFlightCount: 0,
+        endOnQuiet: false,
+        End: make(chan struct{}),
     }
 }
 
@@ -255,6 +310,7 @@ func (self *TextExtractor) Add(link *Link, depthToLive int) {
     _, alreadyAdded := self.addedLinkUrls[link.Url]
     if !alreadyAdded {
         self.addedLinkUrls[link.Url] = depthToLive
+        self.inFlightCount += 1
     }
     self.extractedStateLock.Unlock()
 
@@ -286,9 +342,25 @@ func (self *TextExtractor) Add(link *Link, depthToLive int) {
                         }
                     }
                 }
+
+
+                self.extractedStateLock.Lock()
+                self.inFlightCount -= 1
+                end := (self.inFlightCount == 0) && self.endOnQuiet
+                self.extractedStateLock.Unlock()
+
+                if end {
+                    close(self.End)
+                }
             }
         }
     }()
+}
+
+func (self *TextExtractor) SetEndOnQuiet() {
+    self.extractedStateLock.Lock()
+    defer self.extractedStateLock.Unlock()
+    self.endOnQuiet = true
 }
 
 func (self *TextExtractor) Finish() (string, []*Link) {

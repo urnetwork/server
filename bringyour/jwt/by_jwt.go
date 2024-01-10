@@ -124,7 +124,7 @@ func NewByJwtWithCreateTime(
 		UserId: userId,
 		NetworkName: networkName,
 		// round here so that the string representation in the jwt does not lose information
-		CreateTime: createTime.Round(time.Nanosecond),
+		CreateTime: bringyour.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
 	}
 }

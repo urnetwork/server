@@ -1076,4 +1076,47 @@ var migrations = []any{
         ) 
     `),
 
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy (
+            privacy_policy_id uuid NOT NULL,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            service_name varchar(256) NOT NULL,
+            pending bool NOT NULL,
+            privacy_policy_text text NULL,
+
+            PRIMARY KEY (privacy_policy_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy_service_url (
+            privacy_policy_id uuid NOT NULL,
+            service_url text NOT NULL
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX complete_privacy_policy_service_url_privacy_policy_id ON complete_privacy_policy_service_url (privacy_policy_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy_extracted_url (
+            privacy_policy_id uuid NOT NULL,
+            extracted_url text NOT NULL
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX complete_privacy_policy_extracted_url_privacy_policy_id ON complete_privacy_policy_extracted_url (privacy_policy_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE latest_complete_privacy_policy (
+            service_name varchar(256) NOT NULL,
+            privacy_policy_id uuid NOT NULL,
+            
+            PRIMARY KEY (service_name)
+        )
+    `),
+
 }

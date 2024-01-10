@@ -31,7 +31,7 @@ RUN npm --version
 
 # install pupeteer
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-RUN cd /usr/local/sbin && PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm i puppeteer
+RUN cd /usr/local/sbin && PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm i puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
 COPY build/$TARGETPLATFORM/gpt /usr/local/sbin/bringyour-gpt
 ADD innerhtml /usr/local/sbin/innerhtml

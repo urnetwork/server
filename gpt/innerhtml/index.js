@@ -1,10 +1,13 @@
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import {TimeoutError} from 'puppeteer';
 
 (async () => {
 
-  const url = process.argv[2]
-  const timeoutMillis = parseInt(process.argv[3])
+  const url = process.argv[2];
+  const timeoutMillis = parseInt(process.argv[3]);
+
+  puppeteer.use(StealthPlugin());
   
 
   // Launch the browser and open a new blank page
@@ -21,10 +24,10 @@ import {TimeoutError} from 'puppeteer';
   const page = await browser.newPage();
 
   // Chrome on macOS
-  const customUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  // const customUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
  
   // Set custom user agent
-  await page.setUserAgent(customUA);
+  // await page.setUserAgent(customUA);
 
   await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US'
