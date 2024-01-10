@@ -1,3 +1,8 @@
+# this docker is based on debian because
+# - it needs to use headless chrome for scraping (puppeteer) 
+# - ubuntu will not install chromium or firefox via apt anymore
+# - snap which is now required to install chromium or firefox does not work without systemd
+# - systemd is difficult to run inside a container
 FROM debian:12.4
 # https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
 
@@ -10,13 +15,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     chromium \
-    #unzip \
-    #libnss3 \
-    #libatk1.0-0 \
-    #libatk-bridge2.0-0 \
-    #libcups2 \
-    #libxcomposite1 \
-    #libxdamage1 \
  && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
@@ -31,24 +29,8 @@ ENV PATH="/root/.nvm/versions/node/${NODE_VERSION}/bin/:${PATH}"
 RUN node --version
 RUN npm --version
 
-# RUN ln -s /root/.nvm/versions/node/${NODE_VERSION}/bin/node /usr/local/sbin/node
-
-# install innerhtml dependencies
-#RUN echo https://playwright.azureedge.net/builds/chromium/1088/chromium-$(echo $TARGETPLATFORM | tr / -).zip
-#RUN curl https://playwright.azureedge.net/builds/chromium/1088/chromium-$(echo $TARGETPLATFORM | tr / -).zip -o /usr/local/sbin/chromium.zip
-# this creates /usr/local/sbin/chrome-linux
-#RUN unzip /usr/local/sbin/chromium.zip
-#RUN rm /usr/local/sbin/chromium.zip
-
-# use the debian apt sources to install chromium-browser via apt instead of snap
-# see https://www.nom.one/blog/debian-repo-on-ubuntu
-#COPY debian/debian-stable.list /etc/apt/sources.list.d/debian-stable.list 
-#COPY debian/debian-chromium /etc/apt/preferences.d/debian-chromium
-#RUN apt-get update && apt-get install -y \
-#    chromium \
-# && rm -rf /var/lib/apt/lists/*
-
-ENV PUPPETEER_EXECUTABLE_PATH /usr/bin/chromium
+# install pupeteer
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN cd /usr/local/sbin && PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm i puppeteer
 
 COPY build/$TARGETPLATFORM/gpt /usr/local/sbin/bringyour-gpt

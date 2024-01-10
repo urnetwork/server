@@ -1,12 +1,48 @@
 package controller
 
 import (
+    _ "embed"
+    "context"
 	"fmt"
 	"strings"
+    "time"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "sync"
+    "errors"
+    "regexp"
+    mathrand "math/rand"
+    "slices"
+    "net/url"
+
+    "golang.org/x/net/html"
+    "golang.org/x/exp/maps"
+
+    "github.com/microcosm-cc/bluemonday"
 
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
+
+
+//go:embed by-privacy.txt
+var byPrivacyPolicyText string
+const byNoticeEmail = "notice@bringyour.com"
+
+const maxPrivacyPolicyAge = 24 * time.Hour
+
+const collectTimeout = 30 * time.Second
+const linkTimeout = 10 * time.Second
+
+
+func genericPrivacyPolicyText(serviceName string) string {
+    privacyPolicyText := byPrivacyPolicyText
+    privacyPolicyText = strings.ReplaceAll(privacyPolicyText, "Bring Your, LLC", privacyPolicyText)
+    privacyPolicyText = strings.ReplaceAll(privacyPolicyText, "BringYour", privacyPolicyText)
+
+    return privacyPolicyText
+}
 
 
 type GptPrivacyPolicyArgs struct {
@@ -25,251 +61,514 @@ func GptPrivacyPolicy(
 ) (*GptPrivacyPolicyResult, error) {
 	fmt.Printf("GptPrivacyPolicy %v\n", privacyPolicy)
 
-	// FIXME browse and download the policy
+    completePrivacyPolicy, err := model.GetCompletePrivacyPolicy(privacyPolicy.ServiceName)
+    var privacyPolicyText string
+    if err == nil {
+        privacyPolicyText = completePrivacyPolicy.PrivacyPolicyText
+
+        // check soft refresh
+        age := time.Now().Sub(completePrivacyPolicy.CreateTime)
+        
+        var refresh bool
+        if maxPrivacyPolicyAge <= age {
+            refresh = true
+        } else {
+            // refresh probability 1/(remaining minutes)
+            refresh = (mathrand.Int63n(int64((maxPrivacyPolicyAge - age) / time.Minute)) == 0)
+        }
+
+        if refresh {
+            // attempt to refresh in the background
+            go func() {
+                collector := NewPrivacyPolicyCollector(
+                    clientSession.Ctx,
+                    privacyPolicy.ServiceName,
+                    privacyPolicy.ServiceUrls,
+                    collectTimeout,
+                    linkTimeout,
+                )
+                privacyPolicyText, extractedUrls, err := collector.Run()
+                if err == nil {
+                    model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicy(
+                        privacyPolicy.ServiceName,
+                        privacyPolicy.ServiceUrls,
+                        privacyPolicyText,
+                        extractedUrls,
+                    ))
+                }
+            }()
+        }
+    } else {
+        collector := NewPrivacyPolicyCollector(
+            clientSession.Ctx,
+            privacyPolicy.ServiceName,
+            privacyPolicy.ServiceUrls,
+            collectTimeout,
+            linkTimeout,
+        )
+        privacyPolicyText, extractedUrls, err := collector.Run()
+
+        if err == nil {
+            model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicy(
+                privacyPolicy.ServiceName,
+                privacyPolicy.ServiceUrls,
+                privacyPolicyText,
+                extractedUrls,
+            ))
+        } else {
+            model.SetCompletePrivacyPolicy(model.NewCompletePrivacyPolicyPending(
+                privacyPolicy.ServiceName,
+                privacyPolicy.ServiceUrls,
+            ))
+            // use a stand in policy to advance the gpt
+            // this will be cleaned up async in the future after manual inspection
+            privacyPolicyText = genericPrivacyPolicyText(privacyPolicy.ServiceName)
+        }
+    }
 
-	policyText := `
-Products Privacy Policy
-
-Last modified: April 3, 2023
-
-Introduction
-
-Bring Your, LLC ("Company" or "We") respect your privacy and are
-committed to protecting it through our compliance with this policy.
-
-This policy describes the types of information we may collect from you
-or that you may provide when you visit the BringYour website or use the
-BringYour app (our "Products") and our practices for collecting, using,
-maintaining, protecting, and disclosing that information.
-
-This policy applies to information we collect:
-
--   On these Products.
-
--   In email, text, and other electronic messages between you and our
-    Products.
-
--   Through mobile and desktop applications you download from this
-    Product, which provide dedicated non-browser-based interaction
-    between you and this Product.
-
-It does not apply to information collected by:
-
--   Us offline or through any other means, including on any other
-    website or app operated by Company or any third party; or
-
--   Any third party, including through any application or content
-    (including advertising) that may link to or be accessible from or on
-    the Products.
-
-Please read this policy carefully to understand our policies and
-practices regarding your information and how we will treat it. If you do
-not agree with our policies and practices, your choice is not to use our
-Products. By accessing or using this Product, you agree to this privacy
-policy. This policy may change from time to time (see Changes to Our
-Privacy Policy). Your continued use of this Product after we make
-changes is deemed to be acceptance of those changes, so please check the
-policy periodically for updates.
-
-Children Under the Age of 16
-
-Our Products are not intended for children under 16 years of age. No one
-under age 16 may provide any information to or on the Products. We do
-not knowingly collect personal information from children under 16. If
-you are under 16, do not use or provide any information on ourProducts
-or on or through any of its features. If we learn we have collected or
-received personal information from a child under 16 without verification
-of parental consent, we will delete that information. If you believe we
-might have any information from or about a child under 16, please
-contact us at: notice@bringyour.com.
-
-California residents under 16 years of age may have additional rights
-regarding the collection and sale of their personal information. Please
-see Your California Privacy Rights for more information.
-
-Information We Collect About You and How We Collect It
-
-We collect several types of information from and about users of our
-Products, including information:
-
--   By which you may be personally identified, such as name, postal
-    address, e-mail address, telephone number, or any other identifier
-    by which you may be contacted online or offline ("personal
-    information");
-
--   That is about you but individually does not identify you; and/or
-
--   About your internet connection, the equipment you use to access our
-    Products, and usage details.
-
-We collect this information:
-
--   Directly from you when you provide it to us.
-
--   Automatically as you navigate through the site. Information
-    collected automatically may include usage details, IP addresses, and
-    information collected through cookies.
-
-Information You Provide to Us
-
-The information we collect on or through our Products may include:
-
--   Information that you provide by filling in forms on our Products.
-    This includes information provided at the time of subscribing to our
-    service. We may also ask you for information when you report a
-    problem with our Products.
-
--   Records and copies of your correspondence (including email
-    addresses), if you contact us.
-
-You also may provide information to be published or displayed
-(hereinafter, "posted") on public areas of the Product, or transmitted
-to other users of the Products or third parties (collectively, "User
-Contributions"). Your User Contributions are posted on and transmitted
-to others at your own risk. Although we limit access to certain pages,
-please be aware that no security measures are perfect or impenetrable.
-Additionally, we cannot control the actions of other users of the
-Products with whom you may choose to share your User Contributions.
-Therefore, we cannot and do not guarantee that your User Contributions
-will not be viewed by unauthorized persons.
-
-Information We Collect Through Automatic Data Collection Technologies
-
-As you navigate through and interact with our Products, we may use
-automatic data collection technologies to collect certain information
-about your equipment, browsing actions, and patterns, including:
-
--   Details of your visits to our Product, including communication data
-    and the resources that you access and use on the Products.
-
--   Information about your computer and internet connection, including
-    your IP address, operating system, and browser type.
-
-The information we collect automatically is only statistical data and
-does not include personal information. It helps us to improve our
-Products and to deliver a better and more personalized service,
-including by enabling us to:
-
--   Estimate our audience size and usage patterns.
-
--   Store information about your preferences, allowing us to customize
-    our Products according to your individual interests.
-
--   Speed up your searches.
-
--   Recognize you when you return to our Products.
-
-The technologies we use for this automatic data collection may include:
-
--   Cookies (or browser cookies). A cookie is a small file placed on the
-    hard drive of your computer. You may refuse to accept browser
-    cookies by activating the appropriate setting on your browser.
-    However, if you select this setting you may be unable to access
-    certain parts of our Products. Unless you have adjusted your browser
-    setting so that it will refuse cookies, our system will issue
-    cookies when you direct your browser to our Product.
-
-We do not collect personal information automatically, but we may tie
-this information to personal information about you that we collect from
-other sources or you provide to us.
-
-How We Use Your Information
-
-We use information that we collect about you or that you provide to us,
-including any personal information:
-
--   To present our Products and its contents to you.
-
--   To provide you with information, products, or services that you
-    request from us.
-
--   To fulfill any other purpose for which you provide it.
-
--   To provide you with notices about your account, including expiration
-    and renewal notices.
-
--   To carry out our obligations and enforce our rights arising from any
-    contracts entered into between you and us, including for billing and
-    collection.
-
--   To notify you about changes to our Products or any products or
-    services we offer or provide though it.
-
--   In any other way we may describe when you provide the information.
-
--   For any other purpose with your consent.
-
-Disclosure of Your Information
-
-We may disclose aggregated information about our users without
-restriction.
-
-We may disclose personal information that we collect or you provide as
-described in this privacy policy:
-
--   To our subsidiaries and affiliates.
-
--   To contractors, service providers, and other third parties we use to
-    support our business.
-
--   To a buyer or other successor in the event of a merger, divestiture,
-    restructuring, reorganization, dissolution, or other sale or
-    transfer of some or all of BringYour's assets, whether as a going
-    concern or as part of bankruptcy, liquidation, or similar
-    proceeding, in which personal information held by BringYour about
-    our Product users is among the assets transferred.
-
--   To fulfill the purpose for which you provide it.
-
--   For any other purpose disclosed by us when you provide the
-    information.
-
--   With your consent.
-
-We may also disclose your personal information:
-
--   To comply with any court order, law, or legal process, including to
-    respond to any government or regulatory request.
-
--   and other agreements, including for billing and collection purposes.
-
--   If we believe disclosure is necessary or appropriate to protect the
-    rights, property, or safety of BringYour, our customers, or others.
-
-Changes to Our Privacy Policy
-
-It is our policy to post any changes we make to our privacy policy on
-this page with a notice that the privacy policy has been updated on the
-Product home page. If we make material changes to how we treat our
-users' personal information, we will notify you. The date the privacy
-policy was last revised is identified at the top of the page. You are
-responsible for ensuring we have an up-to-date active and deliverable
-email address for you, and for periodically visiting our Website and
-this privacy policy to check for any changes.
-
-Contact Information
-
-To ask questions or comment about this privacy policy and our privacy
-practices, contact us at notice@bringyour.com.
-
-		`
-
-	policyText = strings.ReplaceAll(policyText, "Bring Your, LLC", privacyPolicy.ServiceName)
-	policyText = strings.ReplaceAll(policyText, "BringYour", privacyPolicy.ServiceName)
-	
 	return &GptPrivacyPolicyResult{
 		Found: true,
-		PrivacyPolicy: policyText,
+		PrivacyPolicy: privacyPolicyText,
 	}, nil
 }
-
 
 func GptBeMyPrivacyAgent(
 	beMyPrivacyAgent *model.GptBeMyPrivacyAgentArgs,
 	clientSession *session.ClientSession,
 ) (*model.GptBeMyPrivacyAgentResult, error) {
 	fmt.Printf("GptBeMyPrivacyAgent %v\n", beMyPrivacyAgent)
+
+    // FIXME if to is genericPolicyEmail, then just save the request. We need to find the policy and try again.
 	
-	return model.GptBeMyPrivacyAgent(beMyPrivacyAgent, clientSession)
+	return model.SetGptBeMyPrivacyAgentPending(beMyPrivacyAgent, clientSession)
+}
+
+
+
+type PrivacyPolicyCollector struct {
+    ctx context.Context
+    serviceName string
+    serviceUrls []string
+    collectTimeout time.Duration
+    linkTimeout time.Duration
+}
+
+func NewPrivacyPolicyCollector(
+    ctx context.Context,
+    serviceName string,
+    serviceUrls []string,
+    collectTimeout time.Duration,
+    linkTimeout time.Duration,
+) *PrivacyPolicyCollector {
+    return &PrivacyPolicyCollector{
+        ctx: ctx,
+        serviceName: serviceName,
+        serviceUrls: serviceUrls,
+        collectTimeout: collectTimeout,
+        linkTimeout: linkTimeout,
+    }
+}
+
+
+// load the first page
+// find all links with the word "privacy"
+// if more than one, use all of them
+// scrape all text from the privacy pages
+// explore one link deep
+// keep a list of text nodes per page where that text has not appeared in another sequence
+// keep a map of text to count for all pages
+// only process pages where <html lang="en">
+func (self *PrivacyPolicyCollector) Run() (string, []string, error) {
+    privacyLinkTextPattern := regexp.MustCompile("(?i)\\bprivacy\\b")
+    for _, serviceUrl := range self.serviceUrls {
+        // TODO check privacy.txt for the domain
+
+        if bodyHtml, err := GetBodyHtml(self.ctx, serviceUrl, self.linkTimeout); err == nil {
+            links, err := findLinks(serviceUrl, bodyHtml, func(a *html.Node, linkText string, linkUrl string)(bool) {
+                return privacyLinkTextPattern.MatchString(linkText)
+            })
+
+            if err == nil && 0 < len(links) {
+                extractor := NewTextExtractor(self.ctx, self.linkTimeout)
+
+                for _, link := range links {
+                    extractor.Add(link, 1)
+                }
+
+                select {
+                case <- self.ctx.Done():
+                case <- time.After(self.collectTimeout):
+                }
+
+                extractedText, extractedLinks := extractor.Finish()
+                extractedUrls := []string{}
+                for _, extractedLink := range extractedLinks {
+                    extractedUrls = append(extractedUrls, extractedLink.Url)
+                }
+
+                if 0 < len(extractedUrls) {
+                    return extractedText, extractedUrls, nil
+                }
+            }
+        }
+
+    }
+    return "", nil, errors.New("Could not extract any text.")
+}
+
+
+type TextExtractor struct {
+    ctx context.Context
+    cancel context.CancelFunc
+
+    linkTimeout time.Duration
+
+    extractedStateLock sync.Mutex
+    addedLinkUrls map[string]int
+    extractedText map[*Link]string
+}
+
+func NewTextExtractor(ctx context.Context, linkTimeout time.Duration) *TextExtractor {
+
+    cancelCtx, cancel := context.WithCancel(ctx)
+
+
+    return &TextExtractor{
+        ctx: cancelCtx,
+        cancel: cancel,
+        linkTimeout: linkTimeout,
+        addedLinkUrls: map[string]int{},
+        extractedText: map[*Link]string{},
+    }
+}
+
+func (self *TextExtractor) Add(link *Link, depthToLive int) {
+    fmt.Printf("EXTRACTOR ADD LINK: (%s) %s\n", link.Text, link.Url)
+
+    select {
+    case <- self.ctx.Done():
+        return
+    default:
+    }
+
+    self.extractedStateLock.Lock()
+    _, alreadyAdded := self.addedLinkUrls[link.Url]
+    if !alreadyAdded {
+        self.addedLinkUrls[link.Url] = depthToLive
+    }
+    self.extractedStateLock.Unlock()
+
+    if alreadyAdded {
+        return
+    }
+
+    go func() {
+        if bodyHtml, err := GetBodyHtml(self.ctx, link.Url, self.linkTimeout); err == nil {
+            if bodyText, err := findText(bodyHtml, basicTextCallback); err == nil {
+                self.extractedStateLock.Lock()
+                select {
+                case <- self.ctx.Done():
+                default:
+                    self.extractedText[link] = bodyText
+                }
+                self.extractedStateLock.Unlock()
+
+                if 0 < depthToLive {
+                    privacyLinkTextPattern := regexp.MustCompile("(?i)\\bprivacy\\b")
+
+                    links, err := findLinks(link.Url, bodyHtml, func(a *html.Node, linkText string, linkUrl string)(bool) {
+                        return privacyLinkTextPattern.MatchString(linkText) || privacyLinkTextPattern.MatchString(linkUrl)
+                    })
+
+                    if err == nil {
+                        for _, link := range links {
+                            self.Add(link, depthToLive - 1)
+                        }
+                    }
+                }
+            }
+        }
+    }()
+}
+
+func (self *TextExtractor) Finish() (string, []*Link) {
+    self.cancel()
+
+    self.extractedStateLock.Lock()
+    defer self.extractedStateLock.Unlock()
+
+    links := maps.Keys(self.extractedText)
+
+    privacyLinkTextPattern := regexp.MustCompile("(?i)\\bprivacy\\b")
+    slices.SortFunc(links, func(a *Link, b *Link)(int) {
+        aPrivacy := privacyLinkTextPattern.MatchString(a.Text)
+        bPrivacy := privacyLinkTextPattern.MatchString(b.Text)
+        if aPrivacy != bPrivacy {
+            // privacy first
+            if aPrivacy {
+                return -1
+            } else {
+                return 1
+            }
+        }
+
+        aDepth := self.addedLinkUrls[a.Url]
+        bDepth := self.addedLinkUrls[b.Url]
+        if aDepth != bDepth {
+            // higher depth first
+            if bDepth < aDepth {
+                return -1
+            } else {
+                return 1
+            }
+        }
+
+        return strings.Compare(a.Text, b.Text)
+    })
+
+
+    outDoubleLines := [][]string{}
+
+    usedLines := map[string]bool{}
+    for _, link := range links {
+        doubleLines := strings.Split(self.extractedText[link], "\n\n")
+        for _, doubleLine := range doubleLines {
+            lines := strings.Split(doubleLine, "\n")
+
+            outLines := []string{}
+
+            for _, line := range lines {
+                if !usedLines[line] {
+                    usedLines[line] = true
+                    outLines = append(outLines, line)
+                }
+            }
+
+            if 0 < len(outLines) {
+                outDoubleLines = append(outDoubleLines, outLines)
+            }
+        }
+    }
+
+    outDouble := []string{}
+    for _, outLines := range outDoubleLines {
+        outDouble = append(outDouble, strings.Join(outLines, "\n"))
+    }
+
+    out := strings.Join(outDouble, "\n\n")
+
+    return out, links 
+}
+
+
+type Link struct {
+    Url string
+    Text string
+}
+
+
+type linkCallback func(a *html.Node, linkText string, linkUrl string)(bool)
+
+
+func allLinksCallback(a *html.Node, linkText string, linkUrl string) bool {
+    return true
+}
+
+
+func findLinks(bodyUrl string, bodyHtml string, callback linkCallback) ([]*Link, error) {
+    doc, err := html.Parse(strings.NewReader(bodyHtml))
+    if err != nil {
+        return nil, err
+    }
+
+    links := []*Link{}
+
+    var dfs func(*html.Node)
+    dfs = func(n *html.Node) {
+        if n.Type == html.ElementNode && n.Data == "a" {
+            if linkText, err := findTextInElement(n, basicTextCallback); err == nil {
+                var url string
+                for _, a := range n.Attr {
+                    if a.Key == "href" {
+                        url = a.Val
+                        break
+                    }
+                }
+
+                if url != "" {
+                    if absUrl := absUrl(bodyUrl, url); absUrl != "" {
+                        if callback(n, linkText, absUrl) {
+                            link := &Link{
+                                Url: absUrl,
+                                Text: linkText,
+                            }
+                            links = append(links, link)
+                        }
+                    }
+                }
+            }
+        } else {
+            for c := n.FirstChild; c != nil; c = c.NextSibling {
+                dfs(c)
+            }
+        }
+    }
+    dfs(doc)
+
+    return links, nil
+}
+
+
+func absUrl(absSourceUrl string, hrefUrl string) string {
+    fixAbsUrl := func(u *url.URL) string {
+        if u.Scheme == "http" {
+            u.Scheme = "https"
+        }
+        // for our use case the fragment is useless
+        u.Fragment = ""
+        u.RawFragment = ""
+        return u.String()
+    }
+
+    href, err := url.Parse(hrefUrl)
+    if err != nil {
+        return ""
+    }
+
+    if href.IsAbs() {
+        return fixAbsUrl(href)
+    }
+
+    source, err := url.Parse(absSourceUrl)
+    if err != nil {
+        return ""
+    }
+
+    absHref := source.ResolveReference(href)
+    return fixAbsUrl(absHref)
+}
+
+
+type textCallback func(n *html.Node)(before string, after string, descend bool)
+
+
+func basicTextCallback(n *html.Node) (before string, after string, descend bool) {
+    if n.Type == html.TextNode {
+        before = strings.TrimSpace(n.Data)
+    } else if n.Type == html.ElementNode {
+        descend = true
+        switch n.Data {
+        case "h", "h1", "h2", "h3", "h4", "p", "br", "hr", "li":
+            before = "\n\n"
+            after = "\n\n"
+        case "script", "style":
+            descend = false
+        default:
+            before = " "
+            after = " "
+        }
+    } else if n.Type == html.DocumentNode {
+        descend = true
+    }
+
+    return
+}
+
+
+func findText(bodyHtml string, callback textCallback) (string, error) {
+    doc, err := html.Parse(strings.NewReader(bodyHtml))
+    if err != nil {
+        return "", err
+    }
+
+    if bodyText, err := findTextInElement(doc, callback); err == nil {
+        return bodyText, nil
+    }
+
+    // the html is malformed
+    // fall back to try blue monday heuristic sanitizer
+    bodyText := bluemonday.UGCPolicy().Sanitize(bodyHtml)
+    return bodyText, nil
+}
+
+
+func findTextInElement(top *html.Node, callback textCallback) (string, error) {
+    parts := []string{}
+
+    var dfs func(*html.Node)
+    dfs = func(n *html.Node) {
+        before, after, descend := callback(n)
+
+        if before != "" {
+            parts = append(parts, before)
+        }
+        if descend {
+            for c := n.FirstChild; c != nil; c = c.NextSibling {
+                dfs(c)
+            }
+        }
+        if after != "" {
+            parts = append(parts, after)
+        }
+    }
+    dfs(top)
+
+    text := strings.Join(parts, "")
+    // text = strings.TrimSpace(text)
+
+    // combine multiple whitespace into a single whitespace
+    // - if spaces contain a newline, keep the newline
+    // - else use a space
+    parts = []string{}
+    spacePattern := regexp.MustCompile("\\s+")
+    allIndexes := spacePattern.FindAllStringSubmatchIndex(text, -1)
+    i := 0
+    for _, indexes := range allIndexes {
+        parts = append(parts, text[i:indexes[0]])
+        newlineCount := strings.Count(text[indexes[0]:indexes[1]], "\n")
+        if 2 <= newlineCount {
+            parts = append(parts, "\n\n")
+        } else if newlineCount == 1 {
+            parts = append(parts, "\n")
+        } else {
+            parts = append(parts, " ")
+        }
+        i = indexes[1]
+    }
+    parts = append(parts, text[i:len(text)])
+
+    text = strings.Join(parts, "")
+    text = strings.TrimSpace(text)
+
+    return text, nil
+}
+
+
+
+
+
+// scrapes a url for the rendered body html
+// this uses a headless browser scaper called `innerhtml`
+func GetBodyHtml(ctx context.Context, url string, timeout time.Duration) (string, error) {
+    binPath, err := os.Executable()
+    if err != nil {
+        return "", err
+    }
+    // the `innerhtml` scraping module should be in the same dir as the binary
+    // it is versioned at `gpt/innerhtml`
+    innerHtmlPath := fmt.Sprintf("%s/innerhtml/index.js", filepath.Dir(binPath))
+
+    c := exec.CommandContext(
+        ctx,
+        "node",
+        innerHtmlPath,
+        url,
+        fmt.Sprintf("%d", timeout / time.Millisecond),
+    )
+    bodyHtmlBytes, err := c.Output()
+    if err != nil {
+        return "", err
+    }
+    return string(bodyHtmlBytes), nil
 }
 

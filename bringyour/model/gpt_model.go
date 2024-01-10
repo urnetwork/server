@@ -3,10 +3,61 @@ package model
 import (
 	// "fmt"
 	// "strings"
+	"time"
 
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour"
 )
+
+
+
+type CompletePrivacyPolicy struct {
+	ServiceName string
+	ServiceUrls []string
+	CreateTime time.Time
+	Pending bool
+	PrivacyPolicyText string
+	ExtractedUrls []string
+}
+
+func NewCompletePrivacyPolicyPending(
+	serviceName string,
+	serviceUrls []string,
+) *CompletePrivacyPolicy {
+	return &CompletePrivacyPolicy{
+		ServiceName: serviceName,
+		ServiceUrls: serviceUrls,
+		CreateTime: time.Now(),
+		Pending: true,
+	}
+}
+
+func NewCompletePrivacyPolicy(
+	serviceName string,
+	serviceUrls []string,
+	privacyPolicyText string,
+	extractedUrls []string,
+) *CompletePrivacyPolicy {
+	return &CompletePrivacyPolicy{
+		ServiceName: serviceName,
+		ServiceUrls: serviceUrls,
+		CreateTime: time.Now(),
+		Pending: false,
+		PrivacyPolicyText: privacyPolicyText,
+		ExtractedUrls: extractedUrls,
+	}
+}
+
+
+func GetCompletePrivacyPolicy(serviceName string) (*CompletePrivacyPolicy, error) {
+	// FIXME load from schema
+	return nil, nil
+}
+
+
+func SetCompletePrivacyPolicy(completePrivacyPolicy *CompletePrivacyPolicy) {
+	// FIXME save to schema
+}
 
 
 type GptBeMyPrivacyAgentArgs struct {
@@ -29,7 +80,7 @@ type GptBeMyPrivacyAgentResult struct {
 	Accepted bool `json:"accepted"`
 }
 
-func GptBeMyPrivacyAgent(
+func SetGptBeMyPrivacyAgentPending(
 	beMyPrivacyAgent *GptBeMyPrivacyAgentArgs,
 	clientSession *session.ClientSession,
 ) (*GptBeMyPrivacyAgentResult, error) {

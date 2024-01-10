@@ -10,7 +10,13 @@ import {TimeoutError} from 'puppeteer';
   // Launch the browser and open a new blank page
   const browser = await puppeteer.launch({
     headless: "new",
-    args: ['--lang=en-US', '--no-sandbox', '--disable-gpu']
+    args: [
+      '--lang=en-US',
+      // required to run as root
+      '--no-sandbox',
+      // required to run in container
+      '--disable-gpu'
+    ]
   });
   const page = await browser.newPage();
 
@@ -21,14 +27,14 @@ import {TimeoutError} from 'puppeteer';
   await page.setUserAgent(customUA);
 
   await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en'
+      'Accept-Language': 'en-US'
   });
 
   // Navigate the page to a URL
-  await page.goto(url);
+  await page.goto(url, { waitUntil: 'networkidle2' });
 
   // Set screen size
-  await page.setViewport({width: 1920, height: 1080});
+  await page.setViewport({width: 1440, height: 1159});
 
 try {
   const bodyEnSelector = await page.waitForSelector(

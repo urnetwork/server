@@ -1,9 +1,0 @@
-Explanation: Accept chromium from the debian repo.
-Package: chromium*
-Pin: origin "*.debian.org"
-Pin-Priority: 100
-
-Explanation: Avoid other packages from the debian repo.
-Package: *
-Pin: origin "*.debian.org"
-Pin-Priority: 1
