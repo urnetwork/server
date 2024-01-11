@@ -38,6 +38,8 @@ ADD innerhtml /usr/local/sbin/innerhtml
 
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
+# this seems to help scraping speed
+ENV GOMAXPROCS=4096
 EXPOSE 80
 STOPSIGNAL SIGTERM
 CMD ["/usr/local/sbin/bringyour-gpt", "-p", "80"]

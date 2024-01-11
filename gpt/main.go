@@ -68,6 +68,10 @@ Options:
         fmt.Printf("%s\n", privacyPolicyText)
     } else {
         routes := []*router.Route{
+            router.NewRoute("GET", "/privacy.txt", router.Txt),
+            router.NewRoute("GET", "/terms.txt", router.Txt),
+            router.NewRoute("GET", "/vdp.txt", router.Txt),
+            router.NewRoute("GET", "/status", router.WarpStatus),
             router.NewRoute("POST", "/gpt/privacypolicy", handlers.GptPrivacyPolicy),
             router.NewRoute("POST", "/gpt/bemyprivacyagent", handlers.GptBeMyPrivacyAgent),
         }

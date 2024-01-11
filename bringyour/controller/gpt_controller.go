@@ -20,28 +20,37 @@ import (
     "golang.org/x/net/html"
     "golang.org/x/exp/maps"
 
-    "github.com/microcosm-cc/bluemonday"
-
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
 
 
+// maximum tokens in the response policy
+// seems to be around 100k
+// https://community.openai.com/t/gpt-actions-new-responsetoolargeerror-failure-when-handling-api-response/504153
+const privacyPolicyMaxLen = 90000
+
 //go:embed by-privacy.txt
 var byPrivacyPolicyText string
+// as mentioned in `byPrivacyPolicyText`
+var byServiceNames = []string{
+    "Bring Your, LLC",
+    "BringYour",
+}
+// as mentioned in `byPrivacyPolicyText`
 const byNoticeEmail = "notice@bringyour.com"
 
 const maxPrivacyPolicyAge = 24 * time.Hour
 
-const collectTimeout = 30 * time.Second
-const linkTimeout = 10 * time.Second
+const collectTimeout = 15 * time.Second
+const linkTimeout = 7 * time.Second
 
 
 func genericPrivacyPolicyText(serviceName string) string {
     privacyPolicyText := byPrivacyPolicyText
-    privacyPolicyText = strings.ReplaceAll(privacyPolicyText, "Bring Your, LLC", privacyPolicyText)
-    privacyPolicyText = strings.ReplaceAll(privacyPolicyText, "BringYour", privacyPolicyText)
-
+    for _, byServiceName := range byServiceNames {
+        privacyPolicyText = strings.ReplaceAll(privacyPolicyText, byServiceName, serviceName)
+    }
     return privacyPolicyText
 }
 
@@ -66,9 +75,9 @@ func GptPrivacyPolicy(
         clientSession.Ctx,
         privacyPolicy.ServiceName,
     )
-    var privacyPolicyText string
+    var returnPrivacyPolicyText string
     if err == nil {
-        privacyPolicyText = completePrivacyPolicy.PrivacyPolicyText
+        returnPrivacyPolicyText = completePrivacyPolicy.PrivacyPolicyText
 
         // check soft refresh
         age := time.Now().Sub(completePrivacyPolicy.CreateTime)
@@ -125,6 +134,8 @@ func GptPrivacyPolicy(
                     extractedUrls,
                 ),
             )
+
+            returnPrivacyPolicyText = privacyPolicyText
         } else {
             model.SetCompletePrivacyPolicy(
                 clientSession.Ctx,
@@ -133,16 +144,17 @@ func GptPrivacyPolicy(
                     privacyPolicy.ServiceUrls,
                 ),
             )
+
             // use a stand in policy to advance the gpt
             // this will be cleaned up async in the future after manual inspection
-            privacyPolicyText = genericPrivacyPolicyText(privacyPolicy.ServiceName)
+            returnPrivacyPolicyText = genericPrivacyPolicyText(privacyPolicy.ServiceName)
         }
     }
 
     // add a best effort contact email address
     // use `byNoticeEmail` to advance the gpt conversation and flag the request for later review
-    if !hasEmailAddress(privacyPolicyText) {
-        privacyPolicyText = fmt.Sprintf(`
+    if emailAddresses := getEmailAddresses(returnPrivacyPolicyText); len(emailAddresses) == 0 {
+        returnPrivacyPolicyText = fmt.Sprintf(`
 
 BringYour Privacy Agent believes the best email address to reach %s is "%s". Please use this email address in correspondence.
 
@@ -152,28 +164,35 @@ BringYour Privacy Agent believes the best email address to reach %s is "%s". Ple
             // TODO have a model to support custom overrides per service
             // TODO use the by notice for now
             byNoticeEmail,
-            privacyPolicyText,
+            returnPrivacyPolicyText,
         )
+    }
+
+    // edit the response to make it less than `privacyPolicyMaxLen` tokens
+    if privacyPolicyMaxLen < len(returnPrivacyPolicyText) {
+    	returnPrivacyPolicyText = returnPrivacyPolicyText[0:privacyPolicyMaxLen]
     }
 
 	return &GptPrivacyPolicyResult{
 		Found: true,
-		PrivacyPolicy: privacyPolicyText,
+		PrivacyPolicy: returnPrivacyPolicyText,
 	}, nil
 }
 
 
-func hasEmailAddress(privacyPolicyText string) bool {
+func getEmailAddresses(privacyPolicyText string) []string {
+    emails := []string{}
+
     maybeEmailPattern := regexp.MustCompile("[\\w-\\.+]+@([\\w-]+\\.)+[\\w-]{2,64}")
     allGroups := maybeEmailPattern.FindAllStringSubmatch(privacyPolicyText, -1)
     for _, groups := range allGroups {
         maybeEmail := groups[0]
         if _, err := mail.ParseAddress(maybeEmail); err == nil {
             fmt.Printf("FOUND EMAIL ADDRESS: %s\n", maybeEmail)
-            return true
+            emails = append(emails, maybeEmail)
         }
     }
-    return false
+    return emails
 }
 
 
@@ -559,8 +578,7 @@ func findText(bodyHtml string, callback textCallback) (string, error) {
 
     // the html is malformed
     // fall back to try blue monday heuristic sanitizer
-    bodyText := bluemonday.UGCPolicy().Sanitize(bodyHtml)
-    return bodyText, nil
+    return "", errors.New("Malformed html.")
 }
 
 
