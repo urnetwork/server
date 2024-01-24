@@ -77,15 +77,18 @@ Options:
         router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
         router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
         router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
-        router.NewRoute("GET", "/device/share-code/{code}/qr.png", handlers.DeviceShareCodeQR),
+        router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),
         router.NewRoute("POST", "/device/share-status", handlers.DeviceShareStatus),
         router.NewRoute("POST", "/device/confirm-share", handlers.DeviceConfirmShare),
         router.NewRoute("POST", "/device/create-adopt-code", handlers.DeviceCreateAdoptCode),
-        router.NewRoute("GET", "/device/adopt-code/{code}/qr.png", handlers.DeviceAdoptCodeQR),
+        router.NewRoute("GET", "/device/adopt-code/([^/]+)/qr.png", handlers.DeviceAdoptCodeQR),
         router.NewRoute("POST", "/device/adopt-status", handlers.DeviceAdoptStatus),
         router.NewRoute("POST", "/device/confirm-adopt", handlers.DeviceConfirmAdopt),
+        router.NewRoute("POST", "/device/remove-adopt-code", handlers.DeviceRemoveAdoptCode),
         router.NewRoute("GET", "/device/associations", handlers.DeviceAssociations),
         router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
+        router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
+        router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

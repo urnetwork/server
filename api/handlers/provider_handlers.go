@@ -2,18 +2,22 @@ package handlers
 
 import (
 	"net/http"
+
+    "bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/router"
 )
 
 
-// FIXME stats_provider_model
-
-func StatsProvidersOverviewLast90(w http.ResponseWriter, req *http.Request) {
+func StatsProvidersOverviewLast90(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(model.StatsProvidersOverviewLast90, w, r)
 }
 
 
-func StatsProviders(w http.ResponseWriter, req *http.Request) {
+func StatsProviders(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(model.StatsProviders, w, r)
 }
 
 
-func StatsProviderLast90(w http.ResponseWriter, req *http.Request) {
+func StatsProviderLast90(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.StatsProviderLast90, w, r)
 }

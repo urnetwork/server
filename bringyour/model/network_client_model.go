@@ -23,6 +23,7 @@ const LimitClientIdsPerNetwork = 128
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
 const (
+	ProvideModeDefault ProvideMode = -1
 	ProvideModeNone ProvideMode = 0
 	ProvideModeNetwork ProvideMode = 1
 	ProvideModeFriendsAndFamily ProvideMode = 2
@@ -1015,4 +1016,19 @@ func RemoveResident(
 		bringyour.Raise(err)
 	}))
 }
+
+
+type DeviceSetProvideArgs struct {
+
+}
+
+type DeviceSetProvideResult struct {
+
+}
+
+func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.ClientSession) (*DeviceSetProvideResult, error) {
+	// FIXME
+	return nil, nil
+}
+
 
