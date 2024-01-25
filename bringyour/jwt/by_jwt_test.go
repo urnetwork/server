@@ -75,8 +75,9 @@ func TestFullByJwtWithClientId(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
 	}
 	byJwt := NewByJwt(networkId, userId, networkName, sessionIds...)
 
+	deviceId := bringyour.NewId()
 	clientId := bringyour.NewId()
-	byClientJwt := byJwt.WithClientId(&clientId)
+	byClientJwt := byJwt.Client(deviceId, clientId)
 
 	clientJwtSigned := byClientJwt.Sign()
 
@@ -89,6 +90,7 @@ func TestFullByJwtWithClientId(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
 	assert.Equal(t, byJwt.NetworkName, parsedByClientJwt.NetworkName)
 	assert.Equal(t, byJwt.CreateTime, parsedByClientJwt.CreateTime)
 	assert.Equal(t, byJwt.AuthSessionIds, parsedByClientJwt.AuthSessionIds)
+	assert.Equal(t, byClientJwt.DeviceId, parsedByClientJwt.DeviceId)
 	assert.Equal(t, byClientJwt.ClientId, parsedByClientJwt.ClientId)
 
 	assert.Equal(t, true, IsByJwtActive(ctx, byClientJwt))

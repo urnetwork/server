@@ -3,6 +3,7 @@ package bringyour
 import (
     "fmt"
     "context"
+    "time"
 )
 
 
@@ -429,6 +430,8 @@ var migrations = []any{
         RENAME transfer_bytes TO transfer_byte_count
     `),
 
+    // ADDED device_id
+    // NO LONGER USED device_spec
     newSqlMigration(`
         CREATE TABLE network_client (
             client_id uuid NOT NULL,
@@ -1119,4 +1122,171 @@ var migrations = []any{
         )
     `),
 
+    newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN device_id uuid NULL
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX network_client_device_id ON network_client (device_id, client_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device (
+            device_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            device_name VARCHAR(256) NOT NULL,
+            device_spec VARCHAR(64) NOT NULL,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            
+            PRIMARY KEY(device_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_association_name (
+            network_id uuid NOT NULL,
+            device_association_id uuid NOT NULL,
+            device_name VARCHAR(256) NOT NULL,
+
+            PRIMARY KEY(device_association_id, network_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_add_history (
+            network_id uuid NOT NULL,
+            add_time timestamp with time zone NOT NULL DEFAULT now(),
+            device_add_id uuid NOT NULL,
+            code VARCHAR(1024),
+            device_association_id uuid NULL,
+
+            PRIMARY KEY(network_id, add_time, device_add_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_association_code(
+            device_association_id uuid NOT NULL,
+            code VARCHAR(1024),
+            code_type VARCHAR(16),
+
+            PRIMARY KEY(device_association_id),
+            UNIQUE(code)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_association_code_type ON device_association_code (code_type)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_adopt (
+            device_association_id uuid NOT NULL,
+            adopt_secret VARCHAR(1024) NOT NULL,
+            device_name VARCHAR(256) NOT NULL,
+            owner_network_id uuid NULL,
+            device_id uuid NULL,
+            client_id uuid NULL,
+            confirmed bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY(device_association_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_share (
+            device_association_id uuid NOT NULL,
+            device_name VARCHAR(256) NOT NULL,
+            source_network_id uuid NULL,
+            guest_network_id uuid NULL,
+            client_id uuid NULL,
+            confirmed bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY(device_association_id)
+        )
+    `),
+
+    newCodeMigration(migration_20240124_PopulateDevice),
+
+    // after services are deployed
+    newSqlMigration(`
+        ALTER TABLE network_client DROP COLUMN device_spec
+    `),
+}
+
+
+// create entries for `network_client.device_id`
+func migration_20240124_PopulateDevice(ctx context.Context) {
+    Raise(Tx(ctx, func(tx PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    client_id,
+                    network_id,
+                    description,
+                    device_spec
+                FROM network_client
+                WHERE
+                    device_id IS NULL
+            `,
+        )
+        type Device struct {
+            deviceId Id
+            networkId Id
+            deviceName string
+            deviceSpec string
+        }
+        devices := map[Id]*Device{}
+        WithPgResult(result, err, func() {
+            for result.Next() {
+                var clientId Id
+                device := &Device{
+                    deviceId: NewId(),
+                }
+                Raise(result.Scan(
+                    &clientId,
+                    &device.networkId,
+                    &device.deviceName,
+                    &device.deviceSpec,
+                ))
+                devices[clientId] = device
+            }
+        })
+
+        createTime := time.Now()
+
+        for clientId, device := range devices {
+            RaisePgResult(tx.Exec(
+                ctx,
+                `
+                INSERT INTO device (
+                    device_id,
+                    network_id,
+                    device_name,
+                    device_spec,
+                    create_time
+                ) VALUES ($1, $2, $3, $4, $5)
+                `,
+                device.deviceId,
+                device.networkId,
+                device.deviceName,
+                device.deviceSpec,
+                createTime,
+            ))
+
+            RaisePgResult(tx.Exec(
+                ctx,
+                `
+                UPDATE network_client
+                SET
+                    device_id = $2
+                WHERE
+                    client_id = $1
+                `,
+                clientId,
+                device.deviceId,
+            ))
+        }
+    }))
 }

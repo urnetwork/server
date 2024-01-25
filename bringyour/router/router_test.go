@@ -116,8 +116,9 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
     }
 
+    deviceId := bringyour.NewId()
     clientId := bringyour.NewId()
-    byClientJwt := byJwt.WithClientId(&clientId)
+    byClientJwt := byJwt.Client(deviceId, clientId)
     authClient := func(header http.Header) {
         header.Add("Authorization", fmt.Sprintf("Bearer %s", byClientJwt.Sign()))
     }

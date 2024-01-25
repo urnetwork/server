@@ -61,6 +61,7 @@ type ByJwt struct {
 	UserId bringyour.Id `json:"user_id,omitempty"`
 	CreateTime time.Time `json:"create_time,omitempty"`
 	AuthSessionIds []bringyour.Id `json:"auth_session_ids,omitempty"`
+	DeviceId *bringyour.Id `json:"device_id,omitempty"`
 	ClientId *bringyour.Id `json:"client_id,omitempty"`
 }
 
@@ -86,14 +87,25 @@ func (self *ByJwt) Sign() string {
 	return jwtSigned
 }
 
-func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
+func (self *ByJwt) Client(deviceId bringyour.Id, clientId bringyour.Id) *ByJwt {
 	return &ByJwt{
 		NetworkId: self.NetworkId,
 		UserId: self.UserId,
 		NetworkName: self.NetworkName,
 		CreateTime: self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
-		ClientId: clientId,
+		DeviceId: &deviceId,
+		ClientId: &clientId,
+	}
+}
+
+func (self *ByJwt) User() *ByJwt {
+	return &ByJwt{
+		NetworkId: self.NetworkId,
+		UserId: self.UserId,
+		NetworkName: self.NetworkName,
+		CreateTime: self.CreateTime,
+		AuthSessionIds: self.AuthSessionIds,
 	}
 }
 

@@ -142,16 +142,38 @@ func AuthNetworkClient(
 				return
 			}
 
-			clientId := bringyour.NewId()
+			createTime := time.Now()
 
-			_, err = tx.Exec(
+			clientId := bringyour.NewId()
+			deviceId := bringyour.NewId()
+
+			bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO device (
+						device_id,
+						network_id,
+						device_name,
+						device_spec,
+						create_time
+					)
+					VALUES ($1, $2, $3, $4, $5)
+				`,
+				deviceId,
+				session.ByJwt.NetworkId,
+				authClient.Description,
+				authClient.DeviceSpec,
+				createTime,
+			))
+
+			bringyour.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					INSERT INTO network_client (
 						client_id,
 						network_id,
+						device_id,
 						description,
-						device_spec,
 						create_time,
 						auth_time
 					)
@@ -159,13 +181,12 @@ func AuthNetworkClient(
 				`,
 				clientId,
 				session.ByJwt.NetworkId,
+				deviceId,
 				authClient.Description,
-				authClient.DeviceSpec,
-				time.Now(),
-			)
-			bringyour.Raise(err)
+				createTime,
+			))
 
-			byJwtWithClientId := session.ByJwt.WithClientId(&clientId).Sign()
+			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
@@ -202,7 +223,31 @@ func AuthNetworkClient(
 				return
 			}
 
-			byJwtWithClientId := session.ByJwt.WithClientId(authClient.ClientId).Sign()
+			result, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT device_id FROM network_client
+					WHERE client_id = $1
+				`,
+				authClient.ClientId,
+			)
+			var deviceId *bringyour.Id
+			bringyour.WithPgResult(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(result.Scan(deviceId))
+				}
+			})
+
+			if deviceId == nil {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Client needs to be migrated (support@bringyour.com).",
+					},
+				}
+				return
+			}
+
+			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
@@ -309,7 +354,9 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				SELECT
 					network_client.client_id,
 					network_client.description,
-					network_client.device_spec,
+					network_client.device_id,
+					device.device_name,
+					device.device_spec,
 					network_client.create_time,
 					network_client.auth_time,
 					network_client_resident.resident_id,
@@ -322,6 +369,8 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client.client_id = network_client_resident.client_id
 				LEFT JOIN client_provide ON
 					network_client.client_id = client_provide.client_id
+				LEFT JOIN device ON
+					network_client.device_id = device.device_id
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true
@@ -341,6 +390,8 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				bringyour.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.Description,
+					&clientInfo.DeviceId,
+					&clientInfo.DeviceName,
 					&clientInfo.DeviceSpec,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
@@ -1018,6 +1069,14 @@ func RemoveResident(
 }
 
 
+
+// FIXME DeviceSetName
+
+func DeviceSetName(setName *DeviceSetNameArgs, clientSession *session.ClientSession) (*DeviceSetNameResult, error) {
+
+}
+
+
 type DeviceSetProvideArgs struct {
 
 }
@@ -1030,5 +1089,7 @@ func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.C
 	// FIXME
 	return nil, nil
 }
+
+
 
 
