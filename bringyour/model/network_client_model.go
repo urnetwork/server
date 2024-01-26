@@ -69,7 +69,7 @@ func FindClientNetwork(
 
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
-	ClientId *bringyour.Id `json:"client_id",omitempty`
+	ClientId *bringyour.Id `json:"client_id,omitempty"`
 	Description string `json:"description"`
 	DeviceSpec string `json:"device_spec"`
 }
@@ -506,8 +506,10 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 
 type NetworkClient struct {
 	ClientId bringyour.Id `json:"client_id"`
+	DeviceId bringyour.Id `json:"device_id"`
 	NetworkId bringyour.Id `json:"network_id"`
 	Description string `json:"description"`
+	DeviceName string `json:"device_name"`
 	DeviceSpec string `json:"device_spec"`
 
 	CreateTime time.Time `json:"create_time"`
@@ -1069,20 +1071,61 @@ func RemoveResident(
 }
 
 
+type DeviceSetNameArgs struct {
+	DeviceId bringyour.Id `json:"client_id"`
+	DeviceName string `json:"device_name"`
+}
 
-// FIXME DeviceSetName
+type DeviceSetNameResult struct {
+	Error *DeviceSetNameError `json:"error,omitempty"`
+}
 
-func DeviceSetName(setName *DeviceSetNameArgs, clientSession *session.ClientSession) (*DeviceSetNameResult, error) {
+type DeviceSetNameError struct {
+	Message string `json:"message"`
+}
 
+func DeviceSetName(
+	setName *DeviceSetNameArgs,
+	clientSession *session.ClientSession,
+) (setNameResult *DeviceSetNameResult, returnErr error) {
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		tag := bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
+				UPDATE device SET
+					device_name = $2
+				WHERE
+					device_id = $1
+			`,
+			setName.DeviceId,
+			setName.DeviceName,
+		))
+		if tag.RowsAffected() != 1 {
+			setNameResult = &DeviceSetNameResult{
+				Error: &DeviceSetNameError{
+					Message: "Device does not exist.",
+				},
+			}
+			return
+		}
+		setNameResult = &DeviceSetNameResult{}
+	})
+	return
 }
 
 
 type DeviceSetProvideArgs struct {
-
+	ClientId bringyour.Id `json:"client_id"`
+	ProvideMode ProvideMode `json:"provide_mode"`
 }
 
 type DeviceSetProvideResult struct {
+	ProvideMode ProvideMode `json:"provide_mode"`
+	Error *DeviceSetProvideError `json:"error,omitempty"`
+}
 
+type DeviceSetProvideError struct {
+	Message string `json:"message"`
 }
 
 func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.ClientSession) (*DeviceSetProvideResult, error) {
@@ -1091,5 +1134,55 @@ func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.C
 }
 
 
+func Testing_CreateDevice(
+	ctx context.Context,
+	networkId bringyour.Id,
+	deviceId bringyour.Id,
+	clientId bringyour.Id,
+	deviceName string,
+	deviceSpec string,
+) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		createTime := time.Now()
 
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO device (
+					device_id,
+					network_id,
+					device_name,
+					device_spec,
+					create_time
+				)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			deviceId,
+			networkId,
+			deviceName,
+			deviceSpec,
+			createTime,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client (
+					client_id,
+					network_id,
+					device_id,
+					description,
+					create_time,
+					auth_time
+				)
+				VALUES ($1, $2, $3, $4, $5, $5)
+			`,
+			clientId,
+			networkId,
+			deviceId,
+			deviceName,
+			createTime,
+		))
+	}))
+}
 

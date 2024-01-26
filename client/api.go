@@ -312,12 +312,13 @@ func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callba
 }
 
 
+
 type AuthNetworkClientCallback apiCallback[*AuthNetworkClientResult]
 
 type AuthNetworkClientArgs struct {
 	// FIXME how to bring this back as optional with gomobile. Use a new type *OptionalId?
 	// if omitted, a new client_id is created
-	// ClientId string `json:"client_id",omitempty`
+	// ClientId string `json:"client_id,omitempty"`
 	Description string `json:"description"`
 	DeviceSpec string `json:"device_spec"`
 }

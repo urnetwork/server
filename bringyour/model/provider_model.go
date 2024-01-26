@@ -273,7 +273,6 @@ func StatsProvider(
 }
 
 
-
 // yyyy-mm-dd
 func lookbackDays(lookback int) []string {
 	days := []string{}
@@ -284,5 +283,4 @@ func lookbackDays(lookback int) []string {
 	}
 	return days
 }
-
 

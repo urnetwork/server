@@ -52,7 +52,7 @@ func DeviceConfirmShare(w http.ResponseWriter, r *http.Request) {
 
 
 func DeviceCreateAdoptCode(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(model.DeviceCreateAdoptCode, w, r)
+	router.WrapWithInputNoAuth(model.DeviceCreateAdoptCode, w, r)
 }
 
 

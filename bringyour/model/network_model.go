@@ -326,7 +326,7 @@ func auditNetworkCreate(
 }
 
 
-func testCreateNetwork(
+func Testing_CreateNetwork(
 	ctx context.Context,
 	networkId bringyour.Id,
 	networkName string,

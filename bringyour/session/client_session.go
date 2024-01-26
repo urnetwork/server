@@ -40,19 +40,6 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	}, nil
 }
 
-func NewLocalClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
-	cancelCtx, cancel := context.WithCancel(ctx)
-
-	clientAddress := "0.0.0.0:0"
-
-	return &ClientSession{
-		Ctx: cancelCtx,
-		Cancel: cancel,
-		ClientAddress: clientAddress,
-		ByJwt: byJwt,
-	}
-}
-
 // either sets `ByJwt` or returns and error
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
@@ -87,4 +74,18 @@ func (self *ClientSession) ClientIpPort() (ip string, port int) {
 		port, _ = strconv.Atoi(parts[1])
 	}
 	return
+}
+
+
+func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	clientAddress := "0.0.0.0:0"
+
+	return &ClientSession{
+		Ctx: cancelCtx,
+		Cancel: cancel,
+		ClientAddress: clientAddress,
+		ByJwt: byJwt,
+	}
 }

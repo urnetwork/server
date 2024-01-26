@@ -62,7 +62,7 @@ type GptPrivacyPolicyArgs struct {
 
 type GptPrivacyPolicyResult struct {
 	Found bool `json:"found"`
-	PrivacyPolicy string `json:"privacy_policy",omitempty`
+	PrivacyPolicy string `json:"privacy_policy,omitempty"`
 }
 
 func GptPrivacyPolicy(

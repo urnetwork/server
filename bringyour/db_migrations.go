@@ -1144,8 +1144,8 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE TABLE device_association_name (
-            network_id uuid NOT NULL,
             device_association_id uuid NOT NULL,
+            network_id uuid NOT NULL,
             device_name VARCHAR(256) NOT NULL,
 
             PRIMARY KEY(device_association_id, network_id)
@@ -1165,7 +1165,7 @@ var migrations = []any{
     `),
 
     newSqlMigration(`
-        CREATE TABLE device_association_code(
+        CREATE TABLE device_association_code (
             device_association_id uuid NOT NULL,
             code VARCHAR(1024),
             code_type VARCHAR(16),
@@ -1184,34 +1184,51 @@ var migrations = []any{
             device_association_id uuid NOT NULL,
             adopt_secret VARCHAR(1024) NOT NULL,
             device_name VARCHAR(256) NOT NULL,
+            device_spec VARCHAR(64) NOT NULL,
             owner_network_id uuid NULL,
             device_id uuid NULL,
             client_id uuid NULL,
             confirmed bool NOT NULL DEFAULT false,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            expire_time timestamp with time zone NULL,
 
             PRIMARY KEY(device_association_id)
         )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_adopt_owner_network_id ON device_adopt (owner_network_id, confirmed)
     `),
 
     newSqlMigration(`
         CREATE TABLE device_share (
             device_association_id uuid NOT NULL,
             device_name VARCHAR(256) NOT NULL,
-            source_network_id uuid NULL,
+            source_network_id uuid NOT NULL,
             guest_network_id uuid NULL,
             client_id uuid NULL,
             confirmed bool NOT NULL DEFAULT false,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
 
             PRIMARY KEY(device_association_id)
         )
     `),
 
+    newSqlMigration(`
+        CREATE INDEX device_share_source_network_id ON device_share (source_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_share_guest_network_id ON device_share (guest_network_id, confirmed)
+    `),
+
     newCodeMigration(migration_20240124_PopulateDevice),
 
+
     // after services are deployed
-    newSqlMigration(`
-        ALTER TABLE network_client DROP COLUMN device_spec
-    `),
+    // newSqlMigration(`
+    //     ALTER TABLE network_client DROP COLUMN device_spec
+    // `),
 }
 
 

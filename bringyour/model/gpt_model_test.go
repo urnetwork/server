@@ -50,7 +50,7 @@ func TestGptBeMyPrivacyAgent(t *testing.T) { bringyour.DefaultTestEnv().Run(func
         networkName,
     )
 
-    clientSession := session.NewLocalClientSession(
+    clientSession := session.Testing_CreateClientSession(
         ctx,
         byJwt,
     )

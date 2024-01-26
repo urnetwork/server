@@ -25,7 +25,7 @@ var circleUserIdWithWalletAndBalance = bringyour.RequireParseId("018c3c7f-82f3-3
 func TestWalletCircleInit(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 
-	session := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: bringyour.NewId(),
 		NetworkName: "test",
 		UserId: bringyour.NewId(),
@@ -51,7 +51,7 @@ func TestWalletCircleInit(t *testing.T) { bringyour.DefaultTestEnv().Run(func() 
 func TestWalletValidateAddress(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 
-	session := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: bringyour.NewId(),
 		NetworkName: "test",
 		UserId: bringyour.NewId(),
@@ -92,7 +92,7 @@ func TestWalletValidateAddress(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
 func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 
-	session := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: bringyour.NewId(),
 		NetworkName: "test",
 		UserId: bringyour.NewId(),
@@ -141,7 +141,7 @@ func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 func TestWalletCircleTransferOut(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 
-	session := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: bringyour.NewId(),
 		NetworkName: "test",
 		UserId: bringyour.NewId(),

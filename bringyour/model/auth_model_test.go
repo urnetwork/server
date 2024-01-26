@@ -20,10 +20,10 @@ func TestAuthCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	userId := bringyour.NewId()
 	networkName := "test"
 
-	testCreateNetwork(ctx, networkId, networkName, userId)
+	Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 	byJwt := jwt.NewByJwt(networkId, userId, networkName)
-	clientSession := session.NewLocalClientSession(ctx, byJwt)
+	clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 	authCodeCreate := &AuthCodeCreateArgs{}
 
