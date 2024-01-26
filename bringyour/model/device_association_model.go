@@ -17,6 +17,7 @@ import (
 
 
     "bringyour.com/bringyour/session"
+    "bringyour.com/bringyour/jwt"
     "bringyour.com/bringyour"
 )
 
@@ -137,14 +138,16 @@ func DeviceAdd(
                 `
                     UPDATE device_adopt
                     SET
-                        owner_network_id = $2
+                        owner_network_id = $2,
+                        owner_user_id = $3
                     WHERE
                         device_association_id = $1 AND
                         owner_network_id IS NULL AND
-                        $3 < expire_time
+                        $4 < expire_time
                 `,
                 deviceAssociationId,
                 clientSession.ByJwt.NetworkId,
+                clientSession.ByJwt.UserId,
                 addTime,
             ))
             if tag.RowsAffected() == 0 {
@@ -463,7 +466,6 @@ type DeviceConfirmShareArgs struct {
 }
 
 type DeviceConfirmShareResult struct {
-    Complete bool `json:"complete,omitempty"`
     AssociatedNetworkName string `json:"associated_network_name,omitempty"`
     Error *DeviceConfirmShareError `json:"error,omitempty"`
 }
@@ -525,7 +527,6 @@ func DeviceConfirmShare(
         }
 
         confirmShareResult = &DeviceConfirmShareResult{
-            Complete: true,
             AssociatedNetworkName: confirmShare.AssociatedNetworkName,
         }
         return
@@ -726,7 +727,6 @@ type DeviceConfirmAdoptArgs struct {
 }
 
 type DeviceConfirmAdoptResult struct {
-    Complete bool `json:"complete,omitempty"`
     AssociatedNetworkName string `json:"associated_network_name,omitempty"`
     ByClientJwt string `json:"by_client_id,omitempty"`
     Error *DeviceConfirmAdoptError `json:"error,omitempty"`
@@ -797,25 +797,75 @@ func DeviceConfirmAdopt(
             clientSession.Ctx,
             `
                 SELECT
-                    device_name,
-                    device_spec
+                    device_adopt.device_name,
+                    device_adopt.device_spec,
+                    network.network_id,
+                    network.network_name,
+                    device_adopt.owner_user_id
                 FROM device_adopt
+                INNER JOIN network ON
+                    network.network_id = device_adopt.owner_network_id
                 WHERE
-                    device_association_id = $1
+                    device_adopt.device_association_id = $1
             `,
             deviceAssociationId,
         )
 
         var deviceName string
         var deviceSpec string
+        var networkId bringyour.Id
+        var networkName string
+        var userId bringyour.Id
 
         bringyour.WithPgResult(result, err, func() {
             result.Next()
             bringyour.Raise(result.Scan(
                 &deviceName,
                 &deviceSpec,
+                &networkId,
+                &networkName,
+                &userId,
             ))
         })
+
+
+        result, err = tx.Query(
+            clientSession.Ctx,
+            `
+                SELECT
+                    auth_session_id
+                FROM device_adopt_auth_session
+                WHERE
+                    device_association_id = $1
+            `,
+            deviceAssociationId,
+        )
+
+        authSessionIds := []bringyour.Id{}
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var authSessionId bringyour.Id
+                bringyour.Raise(result.Scan(&authSessionId))
+                authSessionIds = append(authSessionIds, authSessionId)
+            }
+        })
+
+        authSessionId := bringyour.NewId()
+        authSessionIds = append(authSessionIds, authSessionId)
+
+        bringyour.RaisePgResult(tx.Exec(
+            clientSession.Ctx,
+            `
+                INSERT INTO auth_session (
+                    auth_session_id,
+                    network_id,
+                    user_id
+                ) VALUES ($1, $2, $3)
+            `,
+            authSessionId,
+            networkId,
+            userId,
+        ))
 
 
         deviceId := bringyour.NewId()
@@ -834,7 +884,7 @@ func DeviceConfirmAdopt(
                 VALUES ($1, $2, $3, $4, $5)
             `,
             deviceId,
-            clientSession.ByJwt.NetworkId,
+            networkId,
             deviceName,
             deviceSpec,
             adoptTime,
@@ -854,16 +904,21 @@ func DeviceConfirmAdopt(
                 VALUES ($1, $2, $3, $4, $5, $5)
             `,
             clientId,
-            clientSession.ByJwt.NetworkId,
+            networkId,
             deviceId,
             deviceName,
             adoptTime,
         ))
 
-        byJwtWithClientId := clientSession.ByJwt.Client(deviceId, clientId).Sign()
+        
+        byJwtWithClientId := jwt.NewByJwt(
+            networkId,
+            userId,
+            networkName,
+            authSessionIds...,
+        ).Client(deviceId, clientId).Sign()
 
         confirmAdoptResult = &DeviceConfirmAdoptResult{
-            Complete: true,
             AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
             ByClientJwt: byJwtWithClientId,
         }
@@ -931,7 +986,8 @@ func DeviceRemoveAdoptCode(
                 DELETE FROM device_adopt
                 WHERE
                     device_association_id = $1 AND
-                    adopt_secret = $2
+                    adopt_secret = $2 AND
+                    confirmed = false
             `,
             deviceAssociationId,
             removeAdoptCode.AdoptSecret,
@@ -996,7 +1052,7 @@ func DeviceAssociations(
                     device_association_code.device_association_id = device_adopt.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_adopt.device_association_id AND
-                    device_association_name.network_id = $1
+                    device_association_name.network_id = device_adopt.owner_network_id
                 WHERE
                     device_adopt.owner_network_id = $1 AND
                     confirmed = false AND
@@ -1027,37 +1083,37 @@ func DeviceAssociations(
             `
                 SELECT
 
-                    device_share.complete,
+                    device_share.confirmed,
                     device_association_code.code,
                     COALESCE(device_association_name.device_name, device_share.device_name) AS device_name,
                     device_share.client_id,
-                    network.network_name,
+                    network.network_name
 
                 FROM device_share
                 LEFT JOIN device_association_code ON
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
-                    device_association_name.network_id = $1
+                    device_association_name.network_id = device_share.source_network_id
                 LEFT JOIN network ON
                     network.network_id = device_share.source_network_id
                 WHERE
-                    device_share.network_id = $1
+                    device_share.source_network_id = $1
             `,
             clientSession.ByJwt.NetworkId,
         )
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
-                var complete bool
+                var confirmed bool
                 association := &DeviceAssociation{}
                 bringyour.Raise(result.Scan(
-                    &complete,
+                    &confirmed,
                     &association.Code,
                     &association.DeviceName,
                     &association.ClientId,
                     &association.NetworkName,
                 ))
-                association.Pending = !complete
+                association.Pending = !confirmed
                 incomingSharedDevices = append(incomingSharedDevices, association)
             }
         })
@@ -1068,37 +1124,37 @@ func DeviceAssociations(
             `
                 SELECT
 
-                    device_share.complete,
+                    device_share.confirmed,
                     device_association_code.code,
                     COALESCE(device_association_name.device_name, device_share.device_name) AS device_name,
                     device_share.client_id,
-                    network.network_name,
+                    network.network_name
 
                 FROM device_share
                 LEFT JOIN device_association_code ON
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
-                    device_association_name.network_id = $1
+                    device_association_name.network_id = device_share.guest_network_id
                 LEFT JOIN network ON
                     network.network_id = device_share.guest_network_id
                 WHERE
-                    device_share.network_id = $1
+                    device_share.guest_network_id = $1
             `,
             clientSession.ByJwt.NetworkId,
         )
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
-                var complete bool
+                var confirmed bool
                 association := &DeviceAssociation{}
                 bringyour.Raise(result.Scan(
-                    &complete,
+                    &confirmed,
                     &association.Code,
                     &association.DeviceName,
                     &association.ClientId,
                     &association.NetworkName,
                 ))
-                association.Pending = !complete
+                association.Pending = !confirmed
                 outgoingSharedDevices = append(outgoingSharedDevices, association)
             }
         })

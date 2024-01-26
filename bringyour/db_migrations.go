@@ -1186,6 +1186,7 @@ var migrations = []any{
             device_name VARCHAR(256) NOT NULL,
             device_spec VARCHAR(64) NOT NULL,
             owner_network_id uuid NULL,
+            owner_user_id uuid NULL,
             device_id uuid NULL,
             client_id uuid NULL,
             confirmed bool NOT NULL DEFAULT false,
@@ -1198,6 +1199,15 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE INDEX device_adopt_owner_network_id ON device_adopt (owner_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_adopt_auth_session (
+            device_association_id uuid NOT NULL,
+            auth_session_id uuid NOT NULL,
+
+            PRIMARY KEY(device_association_id, auth_session_id)
+        )
     `),
 
     newSqlMigration(`
