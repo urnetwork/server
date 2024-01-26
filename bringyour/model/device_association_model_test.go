@@ -34,10 +34,10 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		jwt.NewByJwt(networkIdA, userIdA, "a"),
 	)
 
-	// clientSessionB := session.Testing_CreateClientSession(
-	// 	ctx,
-	// 	jwt.NewByJwt(networkIdB, userIdB, "b"),
-	// )
+	clientSessionB := session.Testing_CreateClientSession(
+		ctx,
+		jwt.NewByJwt(networkIdB, userIdB, "b"),
+	)
 
 	
 
@@ -46,6 +46,9 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 	Testing_CreateDevice(ctx, networkIdB, deviceIdB, clientIdB, "deviceb", "specb")
+
+	GetNetworkClients(clientSessionA)
+	GetNetworkClients(clientSessionB)
 
 
 	result1, err := DeviceCreateAdoptCode(
@@ -91,6 +94,10 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, result4.AssociatedNetworkName, "a")
 	assert.NotEqual(t, result4.ByClientJwt, "")
 	assert.Equal(t, result4.Complete, true)
+
+
+	GetNetworkClients(clientSessionA)
+	GetNetworkClients(clientSessionB)
 })}
 
 
@@ -126,6 +133,9 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 	Testing_CreateDevice(ctx, networkIdB, deviceIdB, clientIdB, "deviceb", "specb")
+
+	GetNetworkClients(clientSessionA)
+	GetNetworkClients(clientSessionB)
 
 
 	result1, err := DeviceCreateShareCode(

@@ -366,11 +366,11 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					client_provide.provide_mode
 				FROM network_client
 				LEFT JOIN network_client_resident ON
-					network_client.client_id = network_client_resident.client_id
+					network_client_resident.client_id = network_client.client_id
 				LEFT JOIN client_provide ON
-					network_client.client_id = client_provide.client_id
+					client_provide.client_id = network_client.client_id
 				LEFT JOIN device ON
-					network_client.device_id = device.device_id
+					device.device_id = network_client.device_id
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true
