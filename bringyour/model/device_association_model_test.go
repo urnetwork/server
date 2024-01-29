@@ -86,6 +86,8 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	associationResult0, err := DeviceAssociations(clientSessionA)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
+	assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
 
 	result4, err := DeviceConfirmAdopt(
 		&DeviceConfirmAdoptArgs{
@@ -97,7 +99,7 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, result4.Error, nil)
-	assert.Equal(t, result4.AssociatedNetworkName, "a")
+	// assert.Equal(t, result4.AssociatedNetworkName, "a")
 	assert.NotEqual(t, result4.ByClientJwt, "")
 	byJwt, err := jwt.ParseByJwt(result4.ByClientJwt)
 	assert.Equal(t, err, nil)
@@ -110,6 +112,8 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	associationResult1, err := DeviceAssociations(clientSessionA)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
 
 
 	clientResult1, err := GetNetworkClients(clientSessionA)
@@ -118,12 +122,184 @@ func TestDeviceAdopt(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 })}
 
 
-// FIXME TestDeviceAdoptPartial
-// first, remove the adopt code before confirm
-// remove adopt code after confirm should have no impact
-// second, add adopt new code
-// remove association from the added account should remove the adopt code
 
+func TestDeviceAdoptPartialOfferRemove(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	// add adopt new code
+	// remove association from the added account should remove the adopt code
+
+	ctx := context.Background()
+
+	networkIdA := bringyour.NewId()
+
+	userIdA := bringyour.NewId()
+
+	deviceIdA := bringyour.NewId()
+	clientIdA := bringyour.NewId()
+
+	clientSessionA := session.Testing_CreateClientSession(
+		ctx,
+		jwt.NewByJwt(networkIdA, userIdA, "a"),
+	)
+
+	clientSessionNoAuth := session.Testing_CreateClientSession(
+		ctx,
+		nil,
+	)
+
+	
+
+	Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+	Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "devicea", "speca")
+
+	clientsResult0, err := GetNetworkClients(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(clientsResult0.Clients), 1)
+
+	result1, err := DeviceCreateAdoptCode(
+		&DeviceCreateAdoptCodeArgs{
+			DeviceName: "devicec",
+			DeviceSpec: "specc",
+		},
+		clientSessionNoAuth,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result1.Error, nil)
+	assert.NotEqual(t, result1.AdoptCode, "")
+	assert.NotEqual(t, result1.AdoptSecret, "")
+
+	result2, err := DeviceAdd(
+		&DeviceAddArgs{
+			Code: result1.AdoptCode,
+		},
+		clientSessionA,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result2.Error, nil)
+
+	result3, err := DeviceAdoptStatus(
+		&DeviceAdoptStatusArgs{
+			AdoptCode: result1.AdoptCode,
+		},
+		clientSessionNoAuth,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result3.Error, nil)
+
+	// at this point there should be adopt association
+	associationResult0, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
+	assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
+
+
+	removeResult0, err := DeviceRemoveAdoptCode(
+		&DeviceRemoveAdoptCodeArgs{
+			AdoptCode: result1.AdoptCode,
+			AdoptSecret: result1.AdoptSecret,
+		},
+		clientSessionNoAuth,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, removeResult0.Error, nil)
+
+
+	associationResult1, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
+
+})}
+
+
+func TestDeviceAdoptPartialOwnerRemove(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	// remove the adopt code before confirm
+	// TODO test remove adopt code after confirm should have no impact
+
+	ctx := context.Background()
+
+	networkIdA := bringyour.NewId()
+
+	userIdA := bringyour.NewId()
+
+	deviceIdA := bringyour.NewId()
+	clientIdA := bringyour.NewId()
+
+	clientSessionA := session.Testing_CreateClientSession(
+		ctx,
+		jwt.NewByJwt(networkIdA, userIdA, "a"),
+	)
+
+	clientSessionNoAuth := session.Testing_CreateClientSession(
+		ctx,
+		nil,
+	)
+
+	
+
+	Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+	Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "devicea", "speca")
+
+	clientsResult0, err := GetNetworkClients(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(clientsResult0.Clients), 1)
+
+	result1, err := DeviceCreateAdoptCode(
+		&DeviceCreateAdoptCodeArgs{
+			DeviceName: "devicec",
+			DeviceSpec: "specc",
+		},
+		clientSessionNoAuth,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result1.Error, nil)
+	assert.NotEqual(t, result1.AdoptCode, "")
+	assert.NotEqual(t, result1.AdoptSecret, "")
+
+	result2, err := DeviceAdd(
+		&DeviceAddArgs{
+			Code: result1.AdoptCode,
+		},
+		clientSessionA,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result2.Error, nil)
+
+	result3, err := DeviceAdoptStatus(
+		&DeviceAdoptStatusArgs{
+			AdoptCode: result1.AdoptCode,
+		},
+		clientSessionNoAuth,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, result3.Error, nil)
+
+	// at this point there should be adopt association
+	associationResult0, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
+	assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
+
+
+	removeResult0, err := DeviceRemoveAssociation(
+		&DeviceRemoveAssociationArgs{
+			Code: result1.AdoptCode,
+		},
+		clientSessionA,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, removeResult0.Error, nil)
+
+
+	associationResult1, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
+
+})}
 
 
 func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -181,7 +357,7 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	qrResult0, err := DeviceShareCodeQR(
-		&DeviceAdoptCodeQRArgs{
+		&DeviceShareCodeQRArgs{
 			ShareCode: result1.ShareCode,
 		},
 		clientSessionA,
@@ -209,7 +385,27 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, err, nil)
 	assert.Equal(t, result3.Error, nil)
 
-	// FIXME at this point there should be a share association pending
+	// at this point there should be share association pending
+
+	associationResult1, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 1)
+	assert.Equal(t, associationResult1.OutgoingSharedDevices[0].Pending, true)
+	assert.Equal(t, associationResult1.OutgoingSharedDevices[0].NetworkName, "b")
+	assert.Equal(t, associationResult1.OutgoingSharedDevices[0].DeviceName, "devicea")
+
+	associationResult2, err := DeviceAssociations(clientSessionB)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult2.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult2.IncomingSharedDevices), 1)
+	assert.Equal(t, len(associationResult2.OutgoingSharedDevices), 0)
+	assert.Equal(t, associationResult2.IncomingSharedDevices[0].Pending, true)
+	assert.Equal(t, associationResult2.IncomingSharedDevices[0].NetworkName, "a")
+	assert.Equal(t, associationResult2.IncomingSharedDevices[0].DeviceName, "devicea")
+
+
 
 	result4, err := DeviceConfirmShare(
 		&DeviceConfirmShareArgs{
@@ -222,13 +418,63 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, result4.Error, nil)
 	assert.Equal(t, result4.AssociatedNetworkName, "b")
 
-	// FIXME at this point there should be a share association not pending, as outgoing for A, incoming for B
+	// at this point there should be a share association not pending, as outgoing for A, incoming for B
+	associationResult3, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult3.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult3.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult3.OutgoingSharedDevices), 1)
+	assert.Equal(t, associationResult3.OutgoingSharedDevices[0].Pending, false)
+	assert.Equal(t, associationResult3.OutgoingSharedDevices[0].NetworkName, "b")
+	assert.Equal(t, associationResult3.OutgoingSharedDevices[0].DeviceName, "devicea")
 
-	// FIXME set association name
+	associationResult4, err := DeviceAssociations(clientSessionB)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult4.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult4.IncomingSharedDevices), 1)
+	assert.Equal(t, len(associationResult4.OutgoingSharedDevices), 0)
+	assert.Equal(t, associationResult4.IncomingSharedDevices[0].Pending, false)
+	assert.Equal(t, associationResult4.IncomingSharedDevices[0].NetworkName, "a")
+	assert.Equal(t, associationResult4.IncomingSharedDevices[0].DeviceName, "devicea")
 
-	// FIXME remove association
 
+	setNameResult1, err := DeviceSetAssociationName(
+		&DeviceSetAssociationNameArgs{
+			Code: result1.ShareCode,
+			DeviceName: "That device I shared",
+		},
+		clientSessionA,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, setNameResult1.Error, nil)
 
+	setNameResult2, err := DeviceSetAssociationName(
+		&DeviceSetAssociationNameArgs{
+			Code: result1.ShareCode,
+			DeviceName: "My new device from friend",
+		},
+		clientSessionB,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, setNameResult2.Error, nil)
+
+	associationResult5, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult5.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult5.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult5.OutgoingSharedDevices), 1)
+	assert.Equal(t, associationResult5.OutgoingSharedDevices[0].Pending, false)
+	assert.Equal(t, associationResult5.OutgoingSharedDevices[0].NetworkName, "b")
+	assert.Equal(t, associationResult5.OutgoingSharedDevices[0].DeviceName, "That device I shared")
+
+	associationResult6, err := DeviceAssociations(clientSessionB)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult6.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult6.IncomingSharedDevices), 1)
+	assert.Equal(t, len(associationResult6.OutgoingSharedDevices), 0)
+	assert.Equal(t, associationResult6.IncomingSharedDevices[0].Pending, false)
+	assert.Equal(t, associationResult6.IncomingSharedDevices[0].NetworkName, "a")
+	assert.Equal(t, associationResult6.IncomingSharedDevices[0].DeviceName, "My new device from friend")
 
 
 	clientsResult2, err := GetNetworkClients(clientSessionA)
@@ -240,23 +486,3 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, len(clientsResult3.Clients), 1)
 })}
 
-
-/*
-
-func TestDeviceRemoveAdoptCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-
-
-})}
-
-
-func TestDeviceRemoveAssociation(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-
-
-})}
-
-
-func TestDeviceSetAssociationName(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-
-
-})}
-*/

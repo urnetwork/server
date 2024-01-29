@@ -727,8 +727,7 @@ type DeviceConfirmAdoptArgs struct {
 }
 
 type DeviceConfirmAdoptResult struct {
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
-    ByClientJwt string `json:"by_client_id,omitempty"`
+    ByClientJwt string `json:"by_client_jwt,omitempty"`
     Error *DeviceConfirmAdoptError `json:"error,omitempty"`
 }
 
@@ -919,7 +918,7 @@ func DeviceConfirmAdopt(
         ).Client(deviceId, clientId).Sign()
 
         confirmAdoptResult = &DeviceConfirmAdoptResult{
-            AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
+            // AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
             ByClientJwt: byJwtWithClientId,
         }
     }))
@@ -1038,6 +1037,7 @@ func DeviceAssociations(
 
         checkTime := time.Now()
 
+        // pending adoption
         result, err := conn.Query(
             clientSession.Ctx,
             `
@@ -1077,7 +1077,7 @@ func DeviceAssociations(
             }
         })
 
-
+        // incoming shared
         result, err = conn.Query(
             clientSession.Ctx,
             `
@@ -1094,11 +1094,11 @@ func DeviceAssociations(
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
-                    device_association_name.network_id = device_share.source_network_id
+                    device_association_name.network_id = device_share.guest_network_id
                 LEFT JOIN network ON
                     network.network_id = device_share.source_network_id
                 WHERE
-                    device_share.source_network_id = $1
+                    device_share.guest_network_id = $1
             `,
             clientSession.ByJwt.NetworkId,
         )
@@ -1118,7 +1118,7 @@ func DeviceAssociations(
             }
         })
 
-
+        // outgoing shared
         result, err = conn.Query(
             clientSession.Ctx,
             `
@@ -1135,11 +1135,11 @@ func DeviceAssociations(
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
-                    device_association_name.network_id = device_share.guest_network_id
+                    device_association_name.network_id = device_share.source_network_id
                 LEFT JOIN network ON
                     network.network_id = device_share.guest_network_id
                 WHERE
-                    device_share.guest_network_id = $1
+                    device_share.source_network_id = $1
             `,
             clientSession.ByJwt.NetworkId,
         )
@@ -1158,6 +1158,8 @@ func DeviceAssociations(
                 outgoingSharedDevices = append(outgoingSharedDevices, association)
             }
         })
+
+
 
 
         associationResult = &DeviceAssociationsResult{
