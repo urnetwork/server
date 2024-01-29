@@ -126,7 +126,7 @@ var migrations = []any{
     //  'provider_online_superspeed',
     //  'provider_online_not_superspeed'
     // )`),
-    // newSqlMigration(`CREATE TYPE audit_event_type AS VARCHAR(64)`),
+    // newSqlMigration(`CREATE TYPE audit_event_type AS varchar(64)`),
     // newSqlMigration(`CREATE TYPE audit_event_details_type AS TEXT`),
     newSqlMigration(`
         CREATE TABLE audit_provider_event (
@@ -432,6 +432,7 @@ var migrations = []any{
 
     // ADDED device_id
     // NO LONGER USED device_spec
+    // RESIZED device_spec to varchar(256)
     newSqlMigration(`
         CREATE TABLE network_client (
             client_id uuid NOT NULL,
@@ -1130,12 +1131,13 @@ var migrations = []any{
         CREATE INDEX network_client_device_id ON network_client (device_id, client_id)
     `),
 
+    // RESIZED device_spec to varchar(256)
     newSqlMigration(`
         CREATE TABLE device (
             device_id uuid NOT NULL,
             network_id uuid NOT NULL,
-            device_name VARCHAR(256) NOT NULL,
-            device_spec VARCHAR(64) NOT NULL,
+            device_name varchar(256) NOT NULL,
+            device_spec varchar(64) NOT NULL,
             create_time timestamp with time zone NOT NULL DEFAULT now(),
             
             PRIMARY KEY(device_id)
@@ -1146,7 +1148,7 @@ var migrations = []any{
         CREATE TABLE device_association_name (
             device_association_id uuid NOT NULL,
             network_id uuid NOT NULL,
-            device_name VARCHAR(256) NOT NULL,
+            device_name varchar(256) NOT NULL,
 
             PRIMARY KEY(device_association_id, network_id)
         )
@@ -1157,7 +1159,7 @@ var migrations = []any{
             network_id uuid NOT NULL,
             add_time timestamp with time zone NOT NULL DEFAULT now(),
             device_add_id uuid NOT NULL,
-            code VARCHAR(1024),
+            code varchar(1024),
             device_association_id uuid NULL,
 
             PRIMARY KEY(network_id, add_time, device_add_id)
@@ -1167,8 +1169,8 @@ var migrations = []any{
     newSqlMigration(`
         CREATE TABLE device_association_code (
             device_association_id uuid NOT NULL,
-            code VARCHAR(1024),
-            code_type VARCHAR(16),
+            code varchar(1024),
+            code_type varchar(16),
 
             PRIMARY KEY(device_association_id),
             UNIQUE(code)
@@ -1179,12 +1181,13 @@ var migrations = []any{
         CREATE INDEX device_association_code_type ON device_association_code (code_type)
     `),
 
+    // RESIZED device_spec to varchar(256)
     newSqlMigration(`
         CREATE TABLE device_adopt (
             device_association_id uuid NOT NULL,
-            adopt_secret VARCHAR(1024) NOT NULL,
-            device_name VARCHAR(256) NOT NULL,
-            device_spec VARCHAR(64) NOT NULL,
+            adopt_secret varchar(1024) NOT NULL,
+            device_name varchar(256) NOT NULL,
+            device_spec varchar(64) NOT NULL,
             owner_network_id uuid NULL,
             owner_user_id uuid NULL,
             device_id uuid NULL,
@@ -1213,7 +1216,7 @@ var migrations = []any{
     newSqlMigration(`
         CREATE TABLE device_share (
             device_association_id uuid NOT NULL,
-            device_name VARCHAR(256) NOT NULL,
+            device_name varchar(256) NOT NULL,
             source_network_id uuid NOT NULL,
             guest_network_id uuid NULL,
             client_id uuid NULL,
@@ -1230,6 +1233,14 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE INDEX device_share_guest_network_id ON device_share (guest_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN device_spec TYPE varchar(256)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device ALTER COLUMN device_spec TYPE varchar(256)
     `),
 
     newCodeMigration(migration_20240124_PopulateDevice),
