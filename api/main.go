@@ -37,8 +37,14 @@ Options:
     defer cancel()
 
     routes := []*router.Route{
+        router.NewRoute("GET", "/privacy.txt", router.Txt),
+        router.NewRoute("GET", "/terms.txt", router.Txt),
+        router.NewRoute("GET", "/vdp.txt", router.Txt),
         router.NewRoute("GET", "/status", router.WarpStatus),
         router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
+        router.NewRoute("GET", "/stats/providers-overview-last-90", handlers.StatsProvidersOverviewLast90),
+        router.NewRoute("GET", "/stats/providers", handlers.StatsProviders),
+        router.NewRoute("POST", "/stats/provider-last-90", handlers.StatsProviderLast90),
         router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
         router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
         router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
@@ -67,6 +73,22 @@ Options:
         router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
         router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
         router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+        router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
+        router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
+        router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
+        router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
+        router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),
+        router.NewRoute("POST", "/device/share-status", handlers.DeviceShareStatus),
+        router.NewRoute("POST", "/device/confirm-share", handlers.DeviceConfirmShare),
+        router.NewRoute("POST", "/device/create-adopt-code", handlers.DeviceCreateAdoptCode),
+        router.NewRoute("GET", "/device/adopt-code/([^/]+)/qr.png", handlers.DeviceAdoptCodeQR),
+        router.NewRoute("POST", "/device/adopt-status", handlers.DeviceAdoptStatus),
+        router.NewRoute("POST", "/device/confirm-adopt", handlers.DeviceConfirmAdopt),
+        router.NewRoute("POST", "/device/remove-adopt-code", handlers.DeviceRemoveAdoptCode),
+        router.NewRoute("GET", "/device/associations", handlers.DeviceAssociations),
+        router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
+        router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
+        router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

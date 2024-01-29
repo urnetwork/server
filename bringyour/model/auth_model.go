@@ -1093,6 +1093,23 @@ func AuthCodeLogin(
 			}
 		})
 
+        authSessionId := bringyour.NewId()
+        authSessionIds = append(authSessionIds, authSessionId)
+
+        bringyour.RaisePgResult(tx.Exec(
+            session.Ctx,
+            `
+                INSERT INTO auth_session (
+                    auth_session_id,
+                    network_id,
+                    user_id
+                ) VALUES ($1, $2, $3)
+            `,
+            authSessionId,
+            networkId,
+            userId,
+        ))
+
 
 		if 1 < remainingUses {
 			bringyour.RaisePgResult(tx.Exec(

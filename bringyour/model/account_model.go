@@ -1,7 +1,9 @@
 package model
 
 import (
-	// "context"
+	"context"
+	"fmt"
+	"strings"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -129,5 +131,126 @@ func FeedbackSend(
 
 	result := &FeedbackSendResult{}
 	return result, nil
+}
+
+
+type FindNetworkResult struct {
+	NetworkId bringyour.Id
+	NetworkName string
+	UserAuths []string
+}
+
+
+func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetworkResult, error) {
+	findNetworkResults := []*FindNetworkResult{}
+
+	searchResults := networkNameSearch.Around(ctx, networkName, 3)
+
+	if len(searchResults) == 0 {
+		return []*FindNetworkResult{}, nil
+	}
+
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		args := []any{}
+		networkIdPlaceholders := []string{}
+		for i, searchResult := range searchResults {
+			args = append(args, searchResult.ValueId)
+			networkIdPlaceholders = append(networkIdPlaceholders, fmt.Sprintf("$%d", i + 1))
+		}
+
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network.network_id,
+					network.network_name,
+					network_user.user_auth
+				FROM network
+				INNER JOIN network_user ON network_user.user_id = network.admin_user_id
+				WHERE network.network_id IN (` + strings.Join(networkIdPlaceholders, ",") + `)
+			`,
+			args...,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				findNetworkResult := &FindNetworkResult{}
+				var adminUserAuth string
+				bringyour.Raise(result.Scan(
+					&findNetworkResult.NetworkId,
+					&findNetworkResult.NetworkName,
+					&adminUserAuth,
+				))
+				findNetworkResult.UserAuths = append(findNetworkResult.UserAuths, adminUserAuth)
+				findNetworkResults = append(findNetworkResults, findNetworkResult)
+			}
+		})
+	}))
+
+	return findNetworkResults, nil
+}
+
+
+func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetworkResult, error) {
+	findNetworkResults := []*FindNetworkResult{}
+
+	normalUserAuth, _ := NormalUserAuthV1(&userAuth)
+
+	if normalUserAuth == nil {
+		return nil, fmt.Errorf("Bad user auth: %s", userAuth)
+	}
+
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network.network_id,
+					network.network_name
+				FROM network_user
+				INNER JOIN network ON network.admin_user_id = network_user.user_id
+				WHERE network_user.user_auth = $1
+			`,
+			*normalUserAuth,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				findNetworkResult := &FindNetworkResult{}
+				bringyour.Raise(result.Scan(
+					&findNetworkResult.NetworkId,
+					&findNetworkResult.NetworkName,
+				))
+				findNetworkResult.UserAuths = append(findNetworkResult.UserAuths, *normalUserAuth)
+				findNetworkResults = append(findNetworkResults, findNetworkResult)
+			}
+		})
+	}))
+
+	return findNetworkResults, nil
+}
+
+
+func RemoveNetwork(ctx context.Context, networkId bringyour.Id) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user
+				USING network
+				WHERE network.network_id = $1 AND network_user.user_id = network.admin_user_id
+			`,
+			networkId,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network
+				WHERE network_id = $1
+			`,
+			networkId,
+		))
+
+		networkNameSearch.RemoveInTx(ctx, networkId, tx)
+    }))
 }
 

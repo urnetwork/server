@@ -37,11 +37,11 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     destinationNetworkId := bringyour.NewId()
     destinationId := bringyour.NewId()
 
-    sourceSession := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+    sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
         NetworkId: sourceNetworkId,
         ClientId: &sourceId,
     })
-    destinationSession := session.NewLocalClientSession(ctx, &jwt.ByJwt{
+    destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
         NetworkId: destinationNetworkId,
         ClientId: &destinationId,
     })

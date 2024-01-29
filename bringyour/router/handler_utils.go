@@ -15,10 +15,30 @@ import (
 )
 
 
+type FormatFunction[R any] func(result R)(complete bool)
+
+
+func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
+	formatter := func(result R)(bool) {
+		responseJson, err := json.Marshal(result)
+	    if err != nil {
+	        http.Error(w, err.Error(), http.StatusInternalServerError)
+	        return true
+	    }
+	    bringyour.Logger().Printf("Response %s\n", responseJson)
+	    w.Header().Set("Content-Type", "application/json")
+	    w.Write(responseJson)
+	    return true
+	}
+	return formatter
+}
+
+
 func wrap[R any](
 	impl func(*session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
     session, err := session.NewClientSessionFromRequest(req)
     if err != nil {
@@ -29,18 +49,17 @@ func wrap[R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(session)
 	if err != nil {
-		raiseHttpError(err, w)
+		RaiseHttpError(err, w)
         return
 	}
 
-	responseJson, err := json.Marshal(result)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    bringyour.Logger().Printf("Response %s\n", responseJson)
-    w.Header().Set("Content-Type", "application/json")
-    w.Write(responseJson)
+	for _, formatter := range formatters {
+		if complete := formatter(result); complete {
+			return
+		}
+	}
+
+	JsonFormatter[R](w)(result)
 }
 
 
@@ -49,6 +68,7 @@ func WrapRequireAuth[R any](
 	impl func(*session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
@@ -60,6 +80,7 @@ func WrapRequireAuth[R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
@@ -69,6 +90,7 @@ func WrapRequireClient[R any](
 	impl func(*session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
@@ -80,6 +102,7 @@ func WrapRequireClient[R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
@@ -88,6 +111,7 @@ func WrapNoAuth[R any](
 	impl func(*session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrap(
 		func (session *session.ClientSession)(R, error) {
@@ -95,6 +119,7 @@ func WrapNoAuth[R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
@@ -104,6 +129,7 @@ func wrapWithInput[T any, R any](
 	impl func(T, *session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	var input T
 
@@ -124,18 +150,17 @@ func wrapWithInput[T any, R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
-		raiseHttpError(err, w)
+		RaiseHttpError(err, w)
         return
 	}
 
-	responseJson, err := json.Marshal(result)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    bringyour.Logger().Printf("Response %s\n", responseJson)
-    w.Header().Set("Content-Type", "application/json")
-    w.Write(responseJson)
+	for _, formatter := range formatters {
+		if complete := formatter(result); complete {
+			return
+		}
+	}
+
+	JsonFormatter[R](w)(result)
 }
 
 
@@ -144,6 +169,7 @@ func WrapWithInputRequireAuth[T any, R any](
 	impl func(T, *session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
@@ -155,6 +181,7 @@ func WrapWithInputRequireAuth[T any, R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
@@ -164,6 +191,7 @@ func WrapWithInputRequireClient[T any, R any](
 	impl func(T, *session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
@@ -175,6 +203,7 @@ func WrapWithInputRequireClient[T any, R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
@@ -183,6 +212,7 @@ func WrapWithInputNoAuth[T any, R any](
 	impl func(T, *session.ClientSession)(R, error),
 	w http.ResponseWriter,
 	req *http.Request,
+	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
 		func (arg T, session *session.ClientSession)(R, error) {
@@ -190,11 +220,12 @@ func WrapWithInputNoAuth[T any, R any](
 		},
 		w,
 		req,
+		formatters...,
 	)
 }
 
 
-func raiseHttpError(err error, w http.ResponseWriter) {
+func RaiseHttpError(err error, w http.ResponseWriter) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 

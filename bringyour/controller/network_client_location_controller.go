@@ -84,9 +84,9 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 	}
 	*/
 	type IpInfoResult struct {
-		City string `json:"city",omitempty`
-		Region string `json:"region",omitempty`
-		CountryCode string `json:"country",omitempty`
+		City string `json:"city,omitempty"`
+		Region string `json:"region,omitempty"`
+		CountryCode string `json:"country,omitempty"`
 	}
 	var ipInfoResult IpInfoResult
 	err := json.Unmarshal(resultJson, &ipInfoResult)

@@ -15,13 +15,6 @@ import (
 )
 
 
-type CtlArgs struct {
-    SearchRealm string `docopt:"--realm"`
-    SearchType string `docopt:"--type"`
-    SearchDistance int `docopt:"--distance"`
-}
-
-
 func main() {
     usage := `BringYour control.
 
@@ -37,6 +30,8 @@ Usage:
     bringyourctl stats import
     bringyourctl stats add
     bringyourctl locations add-default [-a]
+    bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
+    bringyourctl network remove --network_id=<network_id>
 
 Options:
     -h --help     Show this screen.
@@ -44,66 +39,75 @@ Options:
     -r --realm=<realm>  Search realm.
     -t --type=<type>    Search type.
     -d, --distance=<distance>  Search distance.
-    -a            All locations.`
+    -a            All locations.
+    --user_auth=<user_auth>
+    --network_name=<network_name>
+    --network_id=<network_id>`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
         panic(err)
     }
 
-    args := CtlArgs{}
-    opts.Bind(&args)
-
     if db, _ := opts.Bool("db"); db {
         if version, _ := opts.Bool("version"); version {
-            dbVersion(opts, args)
+            dbVersion(opts)
         } else if migrate, _ := opts.Bool("migrate"); migrate {
-            dbMigrate(opts, args)
+            dbMigrate(opts)
         }
     } else if search, _ := opts.Bool("search"); search {
         if add, _ := opts.Bool("add"); add {
-            searchAdd(opts, args)
+            searchAdd(opts)
         } else if around, _ := opts.Bool("around"); around {
-            searchAround(opts, args)
+            searchAround(opts)
         } else if remove, _ := opts.Bool("remove"); remove {
-            searchRemove(opts, args)
+            searchRemove(opts)
         } else if clear, _ := opts.Bool("clear"); clear {
-            searchClear(opts, args)
+            searchClear(opts)
         }
     } else if stats, _ := opts.Bool("stats"); stats {
         if compute, _ := opts.Bool("compute"); compute {
-            statsCompute(opts, args)
+            statsCompute(opts)
         } else if export, _ := opts.Bool("export"); export {
-            statsExport(opts, args)
+            statsExport(opts)
         } else if import_, _ := opts.Bool("import"); import_ {
-            statsImport(opts, args)
+            statsImport(opts)
         } else if add, _ := opts.Bool("add"); add {
-            statsAdd(opts, args)
+            statsAdd(opts)
         }
     } else if locations, _ := opts.Bool("locations"); locations {
         if addDefault, _ := opts.Bool("add-default"); addDefault {
-            locationsAddDefault(opts, args)
+            locationsAddDefault(opts)
+        }
+    } else if network, _ := opts.Bool("network"); network {
+        if find, _ := opts.Bool("find"); find {
+            networkFind(opts)
+        } else if remove, _ := opts.Bool("remove"); remove {
+            networkRemove(opts)
         }
     }
 }
 
 
-func dbVersion(opts docopt.Opts, args CtlArgs) {
+func dbVersion(opts docopt.Opts) {
     version := bringyour.DbVersion(context.Background())
     bringyour.Logger().Printf("Current DB version: %d\n", version)
 }
 
 
-func dbMigrate(opts docopt.Opts, args CtlArgs) {
+func dbMigrate(opts docopt.Opts) {
     bringyour.Logger().Printf("Applying DB migrations ...\n")
     bringyour.ApplyDbMigrations(context.Background())
 }
 
 
-func searchAdd(opts docopt.Opts, args CtlArgs) {
+func searchAdd(opts docopt.Opts) {
+    realm, _ := opts.String("--realm")
+    searchType, _ := opts.String("--type")
+
     searchService := search.NewSearch(
-        args.SearchRealm,
-        search.SearchType(args.SearchType),
+        realm,
+        search.SearchType(searchType),
     )
 
     value, _ := opts.String("<value>")
@@ -111,42 +115,46 @@ func searchAdd(opts docopt.Opts, args CtlArgs) {
     searchService.Add(context.Background(), value, valueId, 0)
 }
 
-func searchAround(opts docopt.Opts, args CtlArgs) {
+func searchAround(opts docopt.Opts) {
+    realm, _ := opts.String("--realm")
+    searchType, _ := opts.String("--type")
+    distance, _ := opts.Int("--distance")
+
     searchService := search.NewSearch(
-        args.SearchRealm,
-        search.SearchType(args.SearchType),
+        realm,
+        search.SearchType(searchType),
     )
 
     value, _ := opts.String("<value>")
-    searchResults := searchService.Around(context.Background(), value, args.SearchDistance)
+    searchResults := searchService.Around(context.Background(), value, distance)
     for _, searchResult := range searchResults {
         fmt.Printf("%d %s %s\n", searchResult.ValueDistance, searchResult.Value, searchResult.ValueId)
     }
 }
 
-func searchRemove(opts docopt.Opts, args CtlArgs) {
+func searchRemove(opts docopt.Opts) {
     // fixme
 }
 
-func searchClear(opts docopt.Opts, args CtlArgs) {
+func searchClear(opts docopt.Opts) {
     // fixme
 }
 
 
-func statsCompute(opts docopt.Opts, args CtlArgs) {
+func statsCompute(opts docopt.Opts) {
     stats := model.ComputeStats90(context.Background())
     statsJson, err := json.MarshalIndent(stats, "", "  ")
     bringyour.Raise(err)
     bringyour.Logger().Printf("%s\n", statsJson)
 }
 
-func statsExport(opts docopt.Opts, args CtlArgs) {
+func statsExport(opts docopt.Opts) {
     ctx := context.Background()
     stats := model.ComputeStats(ctx, 90)
     model.ExportStats(ctx, stats)
 }
 
-func statsImport(opts docopt.Opts, args CtlArgs) {
+func statsImport(opts docopt.Opts) {
     stats := model.GetExportedStats(context.Background(), 90)
     if stats != nil {
         statsJson, err := json.MarshalIndent(stats, "", "  ")
@@ -155,17 +163,62 @@ func statsImport(opts docopt.Opts, args CtlArgs) {
     }
 }
 
-func statsAdd(opts docopt.Opts, args CtlArgs) {
+func statsAdd(opts docopt.Opts) {
     controller.AddSampleEvents(context.Background(), 4 * 60)
 }
 
 
-func locationsAddDefault(opts docopt.Opts, args CtlArgs) {
+func locationsAddDefault(opts docopt.Opts) {
     ctx := context.Background()
     cityLimit := 0
     if all, _ := opts.Bool("-a"); all {
         cityLimit = -1
     }
     model.AddDefaultLocations(ctx, cityLimit)
+}
+
+
+func networkFind(opts docopt.Opts) {
+    ctx := context.Background()
+
+    userAuth, _ := opts.String("--user_auth")
+    networkName, _ := opts.String("--network_name")
+
+    list := func(results []*model.FindNetworkResult) {
+        for _, result := range results {
+            fmt.Printf("%s %s\n", result.NetworkId, result.NetworkName)
+            for i, a := range result.UserAuths {
+                fmt.Printf("    user[%2d] %s\n", i, a)
+            }
+        }
+    }
+
+    if userAuth != "" {
+        results, err := model.FindNetworksByUserAuth(ctx, userAuth)
+        if err != nil {
+            panic(err)
+        }
+        list(results)
+    }
+    if networkName != "" {
+        results, err := model.FindNetworksByName(ctx, networkName)
+        if err != nil {
+            panic(err)
+        }
+        list(results)
+    }
+}
+
+
+func networkRemove(opts docopt.Opts) {
+    ctx := context.Background()
+
+    networkIdStr, _ := opts.String("--network_id")
+
+    networkId, err := bringyour.ParseId(networkIdStr)
+    if err != nil {
+        panic(err)
+    }
+    model.RemoveNetwork(ctx, networkId)
 }
 

@@ -7,3 +7,4 @@ client/build
 bringyourctl/bringyourctl
 api/api
 taskworker/taskworker
+gpt/gpt

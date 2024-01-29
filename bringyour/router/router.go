@@ -33,9 +33,7 @@ func (self *Route) String() string {
 }
 
 
-
-
-type ctxKey struct{}
+type pathValuesKey struct{}
 
 
 type Router struct {
@@ -59,7 +57,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				allow = append(allow, route.method)
 				continue
 			}
-			ctx := context.WithValue(self.ctx, ctxKey{}, matches[1:])
+			ctx := context.WithValue(self.ctx, pathValuesKey{}, matches[1:])
 			func() {
 				defer func() {
 					if err := recover(); err != nil {
@@ -84,7 +82,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 
 func GetPathValues(r *http.Request) []string {
-	return r.Context().Value(ctxKey{}).([]string)
+	return r.Context().Value(pathValuesKey{}).([]string)
 }
 
 

@@ -61,40 +61,8 @@ type ByJwt struct {
 	UserId bringyour.Id `json:"user_id,omitempty"`
 	CreateTime time.Time `json:"create_time,omitempty"`
 	AuthSessionIds []bringyour.Id `json:"auth_session_ids,omitempty"`
+	DeviceId *bringyour.Id `json:"device_id,omitempty"`
 	ClientId *bringyour.Id `json:"client_id,omitempty"`
-}
-
-func (self *ByJwt) Sign() string {
-	claimsJson, err := json.Marshal(self)
-	if err != nil {
-		panic(err)
-	}
-
-	claims := &gojwt.MapClaims{}
-	err = json.Unmarshal(claimsJson, claims)
-	if err != nil {
-		panic(err)
-	}
-
-	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
-
-	jwtSigned, err := token.SignedString(bySigningKey())
-	if err != nil {
-		panic(err)
-	}
-
-	return jwtSigned
-}
-
-func (self *ByJwt) WithClientId(clientId *bringyour.Id) *ByJwt {
-	return &ByJwt{
-		NetworkId: self.NetworkId,
-		UserId: self.UserId,
-		NetworkName: self.NetworkName,
-		CreateTime: self.CreateTime,
-		AuthSessionIds: self.AuthSessionIds,
-		ClientId: clientId,
-	}
 }
 
 func NewByJwt(
@@ -124,7 +92,7 @@ func NewByJwtWithCreateTime(
 		UserId: userId,
 		NetworkName: networkName,
 		// round here so that the string representation in the jwt does not lose information
-		CreateTime: createTime.Round(time.Nanosecond),
+		CreateTime: bringyour.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
 	}
 }
@@ -159,6 +127,50 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	}
 	
 	return byJwt, nil
+}
+
+func (self *ByJwt) Sign() string {
+	claimsJson, err := json.Marshal(self)
+	if err != nil {
+		panic(err)
+	}
+
+	claims := &gojwt.MapClaims{}
+	err = json.Unmarshal(claimsJson, claims)
+	if err != nil {
+		panic(err)
+	}
+
+	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
+
+	jwtSigned, err := token.SignedString(bySigningKey())
+	if err != nil {
+		panic(err)
+	}
+
+	return jwtSigned
+}
+
+func (self *ByJwt) Client(deviceId bringyour.Id, clientId bringyour.Id) *ByJwt {
+	return &ByJwt{
+		NetworkId: self.NetworkId,
+		UserId: self.UserId,
+		NetworkName: self.NetworkName,
+		CreateTime: self.CreateTime,
+		AuthSessionIds: self.AuthSessionIds,
+		DeviceId: &deviceId,
+		ClientId: &clientId,
+	}
+}
+
+func (self *ByJwt) User() *ByJwt {
+	return &ByJwt{
+		NetworkId: self.NetworkId,
+		UserId: self.UserId,
+		NetworkName: self.NetworkName,
+		CreateTime: self.CreateTime,
+		AuthSessionIds: self.AuthSessionIds,
+	}
 }
 
 

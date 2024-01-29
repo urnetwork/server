@@ -3,6 +3,7 @@ package bringyour
 import (
     "fmt"
     "context"
+    "time"
 )
 
 
@@ -125,7 +126,7 @@ var migrations = []any{
     //  'provider_online_superspeed',
     //  'provider_online_not_superspeed'
     // )`),
-    // newSqlMigration(`CREATE TYPE audit_event_type AS VARCHAR(64)`),
+    // newSqlMigration(`CREATE TYPE audit_event_type AS varchar(64)`),
     // newSqlMigration(`CREATE TYPE audit_event_details_type AS TEXT`),
     newSqlMigration(`
         CREATE TABLE audit_provider_event (
@@ -429,6 +430,9 @@ var migrations = []any{
         RENAME transfer_bytes TO transfer_byte_count
     `),
 
+    // ADDED device_id
+    // NO LONGER USED device_spec
+    // RESIZED device_spec to varchar(256)
     newSqlMigration(`
         CREATE TABLE network_client (
             client_id uuid NOT NULL,
@@ -944,7 +948,7 @@ var migrations = []any{
             region_location_id uuid NULL,
             country_location_id uuid NULL,
             country_code char(2) NOT NULL,
-            location_full_name VARCHAR(256) NOT NULL,
+            location_full_name varchar(256) NOT NULL,
 
             PRIMARY KEY (location_id),
             UNIQUE(location_full_name)
@@ -996,7 +1000,7 @@ var migrations = []any{
             auth_code_id uuid NOT NULL,
             network_id uuid NOT NULL,
             user_id uuid NOT NULL,
-            auth_code VARCHAR(1024) NOT NULL,
+            auth_code varchar(1024) NOT NULL,
             create_time timestamp NOT NULL,
             end_time timestamp NOT NULL,
             uses int NOT NULL,
@@ -1054,4 +1058,273 @@ var migrations = []any{
         )
     `),
 
+    newSqlMigration(`
+        CREATE INDEX search_projection_value ON search_projection (realm, value_id, value_variant, alias)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE privacy_agent_request (
+            privacy_agent_request_id uuid NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            country_of_residence varchar(256) NOT NULL,
+            region_of_residence varchar(256) NOT NULL,
+            correspondence_email varchar(256) NOT NULL,
+            consent bool NOT NULL,
+            email_text_to varchar(256) NOT NULL,
+            email_text_subject text NOT NULL,
+            email_text_body text NOT NULL,
+            service_name varchar(256) NOT NULL,
+            service_user varchar(256) NOT NULL,
+
+            PRIMARY KEY (privacy_agent_request_id)
+        ) 
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy (
+            privacy_policy_id uuid NOT NULL,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            service_name varchar(256) NOT NULL,
+            pending bool NOT NULL,
+            privacy_policy_text text NULL,
+
+            PRIMARY KEY (privacy_policy_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy_service_url (
+            privacy_policy_id uuid NOT NULL,
+            service_url text NOT NULL
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX complete_privacy_policy_service_url_privacy_policy_id ON complete_privacy_policy_service_url (privacy_policy_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE complete_privacy_policy_extracted_url (
+            privacy_policy_id uuid NOT NULL,
+            extracted_url text NOT NULL
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX complete_privacy_policy_extracted_url_privacy_policy_id ON complete_privacy_policy_extracted_url (privacy_policy_id)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE latest_complete_privacy_policy (
+            service_name varchar(256) NOT NULL,
+            privacy_policy_id uuid NOT NULL,
+            
+            PRIMARY KEY (service_name)
+        )
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN device_id uuid NULL
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX network_client_device_id ON network_client (device_id, client_id)
+    `),
+
+    // RESIZED device_spec to varchar(256)
+    newSqlMigration(`
+        CREATE TABLE device (
+            device_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            device_name varchar(256) NOT NULL,
+            device_spec varchar(64) NOT NULL,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            
+            PRIMARY KEY(device_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_association_name (
+            device_association_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            device_name varchar(256) NOT NULL,
+
+            PRIMARY KEY(device_association_id, network_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_add_history (
+            network_id uuid NOT NULL,
+            add_time timestamp with time zone NOT NULL DEFAULT now(),
+            device_add_id uuid NOT NULL,
+            code varchar(1024),
+            device_association_id uuid NULL,
+
+            PRIMARY KEY(network_id, add_time, device_add_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_association_code (
+            device_association_id uuid NOT NULL,
+            code varchar(1024),
+            code_type varchar(16),
+
+            PRIMARY KEY(device_association_id),
+            UNIQUE(code)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_association_code_type ON device_association_code (code_type)
+    `),
+
+    // RESIZED device_spec to varchar(256)
+    newSqlMigration(`
+        CREATE TABLE device_adopt (
+            device_association_id uuid NOT NULL,
+            adopt_secret varchar(1024) NOT NULL,
+            device_name varchar(256) NOT NULL,
+            device_spec varchar(64) NOT NULL,
+            owner_network_id uuid NULL,
+            owner_user_id uuid NULL,
+            device_id uuid NULL,
+            client_id uuid NULL,
+            confirmed bool NOT NULL DEFAULT false,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+            expire_time timestamp with time zone NULL,
+
+            PRIMARY KEY(device_association_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_adopt_owner_network_id ON device_adopt (owner_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_adopt_auth_session (
+            device_association_id uuid NOT NULL,
+            auth_session_id uuid NOT NULL,
+
+            PRIMARY KEY(device_association_id, auth_session_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE TABLE device_share (
+            device_association_id uuid NOT NULL,
+            device_name varchar(256) NOT NULL,
+            source_network_id uuid NOT NULL,
+            guest_network_id uuid NULL,
+            client_id uuid NULL,
+            confirmed bool NOT NULL DEFAULT false,
+            create_time timestamp with time zone NOT NULL DEFAULT now(),
+
+            PRIMARY KEY(device_association_id)
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_share_source_network_id ON device_share (source_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX device_share_guest_network_id ON device_share (guest_network_id, confirmed)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN device_spec TYPE varchar(256)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device ALTER COLUMN device_spec TYPE varchar(256)
+    `),
+
+    newCodeMigration(migration_20240124_PopulateDevice),
+
+
+    // after services are deployed
+    // newSqlMigration(`
+    //     ALTER TABLE network_client DROP COLUMN device_spec
+    // `),
+}
+
+
+// create entries for `network_client.device_id`
+func migration_20240124_PopulateDevice(ctx context.Context) {
+    Raise(Tx(ctx, func(tx PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    client_id,
+                    network_id,
+                    description,
+                    device_spec
+                FROM network_client
+                WHERE
+                    device_id IS NULL
+            `,
+        )
+        type Device struct {
+            deviceId Id
+            networkId Id
+            deviceName string
+            deviceSpec string
+        }
+        devices := map[Id]*Device{}
+        WithPgResult(result, err, func() {
+            for result.Next() {
+                var clientId Id
+                device := &Device{
+                    deviceId: NewId(),
+                }
+                Raise(result.Scan(
+                    &clientId,
+                    &device.networkId,
+                    &device.deviceName,
+                    &device.deviceSpec,
+                ))
+                devices[clientId] = device
+            }
+        })
+
+        createTime := time.Now()
+
+        for clientId, device := range devices {
+            RaisePgResult(tx.Exec(
+                ctx,
+                `
+                INSERT INTO device (
+                    device_id,
+                    network_id,
+                    device_name,
+                    device_spec,
+                    create_time
+                ) VALUES ($1, $2, $3, $4, $5)
+                `,
+                device.deviceId,
+                device.networkId,
+                device.deviceName,
+                device.deviceSpec,
+                createTime,
+            ))
+
+            RaisePgResult(tx.Exec(
+                ctx,
+                `
+                UPDATE network_client
+                SET
+                    device_id = $2
+                WHERE
+                    client_id = $1
+                `,
+                clientId,
+                device.deviceId,
+            ))
+        }
+    }))
 }

@@ -23,6 +23,7 @@ const LimitClientIdsPerNetwork = 128
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
 const (
+	ProvideModeDefault ProvideMode = -1
 	ProvideModeNone ProvideMode = 0
 	ProvideModeNetwork ProvideMode = 1
 	ProvideModeFriendsAndFamily ProvideMode = 2
@@ -68,7 +69,7 @@ func FindClientNetwork(
 
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
-	ClientId *bringyour.Id `json:"client_id",omitempty`
+	ClientId *bringyour.Id `json:"client_id,omitempty"`
 	Description string `json:"description"`
 	DeviceSpec string `json:"device_spec"`
 }
@@ -141,16 +142,38 @@ func AuthNetworkClient(
 				return
 			}
 
-			clientId := bringyour.NewId()
+			createTime := time.Now()
 
-			_, err = tx.Exec(
+			clientId := bringyour.NewId()
+			deviceId := bringyour.NewId()
+
+			bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO device (
+						device_id,
+						network_id,
+						device_name,
+						device_spec,
+						create_time
+					)
+					VALUES ($1, $2, $3, $4, $5)
+				`,
+				deviceId,
+				session.ByJwt.NetworkId,
+				authClient.Description,
+				authClient.DeviceSpec,
+				createTime,
+			))
+
+			bringyour.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					INSERT INTO network_client (
 						client_id,
 						network_id,
+						device_id,
 						description,
-						device_spec,
 						create_time,
 						auth_time
 					)
@@ -158,13 +181,12 @@ func AuthNetworkClient(
 				`,
 				clientId,
 				session.ByJwt.NetworkId,
+				deviceId,
 				authClient.Description,
-				authClient.DeviceSpec,
-				time.Now(),
-			)
-			bringyour.Raise(err)
+				createTime,
+			))
 
-			byJwtWithClientId := session.ByJwt.WithClientId(&clientId).Sign()
+			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
@@ -201,7 +223,31 @@ func AuthNetworkClient(
 				return
 			}
 
-			byJwtWithClientId := session.ByJwt.WithClientId(authClient.ClientId).Sign()
+			result, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT device_id FROM network_client
+					WHERE client_id = $1
+				`,
+				authClient.ClientId,
+			)
+			var deviceId *bringyour.Id
+			bringyour.WithPgResult(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(result.Scan(deviceId))
+				}
+			})
+
+			if deviceId == nil {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Client needs to be migrated (support@bringyour.com).",
+					},
+				}
+				return
+			}
+
+			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
@@ -308,7 +354,9 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				SELECT
 					network_client.client_id,
 					network_client.description,
-					network_client.device_spec,
+					network_client.device_id,
+					device.device_name,
+					device.device_spec,
 					network_client.create_time,
 					network_client.auth_time,
 					network_client_resident.resident_id,
@@ -318,9 +366,11 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					client_provide.provide_mode
 				FROM network_client
 				LEFT JOIN network_client_resident ON
-					network_client.client_id = network_client_resident.client_id
+					network_client_resident.client_id = network_client.client_id
 				LEFT JOIN client_provide ON
-					network_client.client_id = client_provide.client_id
+					client_provide.client_id = network_client.client_id
+				LEFT JOIN device ON
+					device.device_id = network_client.device_id
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true
@@ -340,6 +390,8 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				bringyour.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.Description,
+					&clientInfo.DeviceId,
+					&clientInfo.DeviceName,
 					&clientInfo.DeviceSpec,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
@@ -454,8 +506,10 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 
 type NetworkClient struct {
 	ClientId bringyour.Id `json:"client_id"`
+	DeviceId bringyour.Id `json:"device_id"`
 	NetworkId bringyour.Id `json:"network_id"`
 	Description string `json:"description"`
+	DeviceName string `json:"device_name"`
 	DeviceSpec string `json:"device_spec"`
 
 	CreateTime time.Time `json:"create_time"`
@@ -1013,6 +1067,122 @@ func RemoveResident(
 			residentId,
 		)
 		bringyour.Raise(err)
+	}))
+}
+
+
+type DeviceSetNameArgs struct {
+	DeviceId bringyour.Id `json:"client_id"`
+	DeviceName string `json:"device_name"`
+}
+
+type DeviceSetNameResult struct {
+	Error *DeviceSetNameError `json:"error,omitempty"`
+}
+
+type DeviceSetNameError struct {
+	Message string `json:"message"`
+}
+
+func DeviceSetName(
+	setName *DeviceSetNameArgs,
+	clientSession *session.ClientSession,
+) (setNameResult *DeviceSetNameResult, returnErr error) {
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		tag := bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
+				UPDATE device SET
+					device_name = $2
+				WHERE
+					device_id = $1
+			`,
+			setName.DeviceId,
+			setName.DeviceName,
+		))
+		if tag.RowsAffected() != 1 {
+			setNameResult = &DeviceSetNameResult{
+				Error: &DeviceSetNameError{
+					Message: "Device does not exist.",
+				},
+			}
+			return
+		}
+		setNameResult = &DeviceSetNameResult{}
+	})
+	return
+}
+
+
+type DeviceSetProvideArgs struct {
+	ClientId bringyour.Id `json:"client_id"`
+	ProvideMode ProvideMode `json:"provide_mode"`
+}
+
+type DeviceSetProvideResult struct {
+	ProvideMode ProvideMode `json:"provide_mode"`
+	Error *DeviceSetProvideError `json:"error,omitempty"`
+}
+
+type DeviceSetProvideError struct {
+	Message string `json:"message"`
+}
+
+func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.ClientSession) (*DeviceSetProvideResult, error) {
+	// FIXME
+	return nil, nil
+}
+
+
+func Testing_CreateDevice(
+	ctx context.Context,
+	networkId bringyour.Id,
+	deviceId bringyour.Id,
+	clientId bringyour.Id,
+	deviceName string,
+	deviceSpec string,
+) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		createTime := time.Now()
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO device (
+					device_id,
+					network_id,
+					device_name,
+					device_spec,
+					create_time
+				)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			deviceId,
+			networkId,
+			deviceName,
+			deviceSpec,
+			createTime,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client (
+					client_id,
+					network_id,
+					device_id,
+					description,
+					create_time,
+					auth_time
+				)
+				VALUES ($1, $2, $3, $4, $5, $5)
+			`,
+			clientId,
+			networkId,
+			deviceId,
+			deviceName,
+			createTime,
+		))
 	}))
 }
 

@@ -25,6 +25,10 @@ const (
 var passwordPepper = []byte("t1me4atoporita")
 
 
+// FIXME change this to not use *string
+// func NormalUserAuthV1(userAuth string) (string, UserAuthType, error) {
+// }
+
 // BE CAREFUL do not change without a backwards-compatible migration
 func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	if userAuth == nil {

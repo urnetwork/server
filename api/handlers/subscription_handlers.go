@@ -90,3 +90,12 @@ func PlayWebhook(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
     w.Write([]byte("{}"))
 }
+
+
+func SubscriptionCheckBalanceCode(w http.ResponseWriter, req *http.Request) {
+}
+
+
+func SubscriptionRedeemBalanceCode(w http.ResponseWriter, req *http.Request) {
+}
+

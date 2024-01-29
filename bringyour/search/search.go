@@ -410,3 +410,35 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	}))
 }
 
+func (self *Search) Remove(ctx context.Context, valueId bringyour.Id) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    	self.RemoveInTx(ctx, valueId, tx)
+    }))
+}
+
+func (self *Search) RemoveInTx(ctx context.Context, valueId bringyour.Id, tx bringyour.PgTx) {
+	bringyour.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			DELETE FROM search_projection
+			WHERE
+				realm = $1 AND
+				value_id = $2
+		`,
+		self.realm,
+		valueId,
+	))
+
+	bringyour.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			DELETE FROM search_value
+			WHERE
+				realm = $1 AND
+				value_id = $2
+		`,
+		self.realm,
+		valueId,
+	))
+}
+
