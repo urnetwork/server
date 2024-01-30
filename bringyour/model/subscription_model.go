@@ -31,8 +31,8 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 }
 
 
-// 1 year
-const BalanceCodeDuration = 365 * 24 * time.Hour
+// 31 days
+const BalanceCodeDuration = 31 * 24 * time.Hour
 
 // up to 32MiB
 const AcceptableTransfersByteDifference = 32 * 1024 * 1024
@@ -225,9 +225,10 @@ type RedeemBalanceCodeError struct {
     Message string `json:"message"`
 }
 
-func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *session.ClientSession) *RedeemBalanceCodeResult {
-    redeemBalanceCodeResult := &RedeemBalanceCodeResult{}
-
+func RedeemBalanceCode(
+    redeemBalanceCode *RedeemBalanceCodeArgs,
+    session *session.ClientSession,
+) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
     bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {        
         result, err := tx.Query(
             session.Ctx,
@@ -259,8 +260,10 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
             }   
         })
         if balanceCode == nil {
-            redeemBalanceCodeResult.Error = &RedeemBalanceCodeError{
-                Message: "Unknown balance code.",
+            redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+                Error: &RedeemBalanceCodeError{
+                    Message: "Unknown balance code.",
+                },
             }
             return
         }
@@ -304,15 +307,17 @@ func RedeemBalanceCode(redeemBalanceCode *RedeemBalanceCodeArgs, session *sessio
             balanceCode.NetRevenue,
         ))
 
-        redeemBalanceCodeResult.TransferBalance = &RedeemBalanceCodeTransferBalance{
-            TransferBalanceId: balanceId,
-            StartTime: balanceCode.StartTime,
-            EndTime: balanceCode.EndTime,
-            BalanceByteCount: balanceCode.BalanceByteCount,
+        redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+            TransferBalance: &RedeemBalanceCodeTransferBalance{
+                TransferBalanceId: balanceId,
+                StartTime: balanceCode.StartTime,
+                EndTime: balanceCode.EndTime,
+                BalanceByteCount: balanceCode.BalanceByteCount,
+            },
         }
     }, bringyour.TxSerializable))
 
-    return redeemBalanceCodeResult
+    return
 }
 
 
@@ -335,9 +340,10 @@ type CheckBalanceCodeError struct {
     Message string `json:"message"`
 }
 
-func CheckBalanceCode(checkBalanceCode *CheckBalanceCodeArgs, session *session.ClientSession) *CheckBalanceCodeResult {
-    checkBalanceCodeResult := &CheckBalanceCodeResult{}
-
+func CheckBalanceCode(
+    checkBalanceCode *CheckBalanceCodeArgs,
+    session *session.ClientSession,
+) (checkBalanceCodeResult *CheckBalanceCodeResult, returnErr error) {
     bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         var balanceCode *BalanceCode
 
@@ -350,6 +356,7 @@ func CheckBalanceCode(checkBalanceCode *CheckBalanceCodeArgs, session *session.C
                     end_time,
                     balance_byte_count,
                     net_revenue_nano_cents
+                FROM transfer_balance_code
                 WHERE
                     balance_code_secret = $1 AND
                     redeem_balance_id IS NULL
@@ -370,20 +377,24 @@ func CheckBalanceCode(checkBalanceCode *CheckBalanceCodeArgs, session *session.C
         })
 
         if balanceCode == nil {
-            checkBalanceCodeResult.Error = &CheckBalanceCodeError{
-                Message: "Unknown balance code.",
+            checkBalanceCodeResult = &CheckBalanceCodeResult{
+                Error: &CheckBalanceCodeError{
+                    Message: "Unknown balance code.",
+                },
             }
             return
         }
 
-        checkBalanceCodeResult.Balance = &CheckBalanceCodeBalance{
-            StartTime: balanceCode.StartTime,
-            EndTime: balanceCode.EndTime,
-            BalanceByteCount: balanceCode.BalanceByteCount,
+        checkBalanceCodeResult = &CheckBalanceCodeResult{
+            Balance: &CheckBalanceCodeBalance{
+                StartTime: balanceCode.StartTime,
+                EndTime: balanceCode.EndTime,
+                BalanceByteCount: balanceCode.BalanceByteCount,
+            },
         }
     }, bringyour.TxSerializable))
 
-    return checkBalanceCodeResult
+    return
 }
 
 

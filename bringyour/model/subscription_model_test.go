@@ -250,3 +250,60 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 // TODO escrow benchmark to see how many contracts can be opened and closed in some time period (e.g. 15s)
+
+
+func TestBalanceCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+
+    userIdA := bringyour.NewId()
+
+    clientSessionA := session.Testing_CreateClientSession(
+        ctx,
+        jwt.NewByJwt(networkIdA, userIdA, "a"),
+    )
+
+
+    checkResult0, err := CheckBalanceCode(
+        &CheckBalanceCodeArgs{
+            Secret: "foobar",
+        },
+        clientSessionA,
+    )
+    assert.Equal(t, err, nil)
+    assert.NotEqual(t, checkResult0.Error, nil)
+
+
+    balanceCode, err := CreateBalanceCode(
+        ctx,
+        1024,
+        100,
+        "test-purchase-1",
+        "rest-purchase-1-receipt",
+        "test@bringyour.com",
+    )
+    assert.Equal(t, err, nil)
+
+
+    checkResult1, err := CheckBalanceCode(
+        &CheckBalanceCodeArgs{
+            Secret: balanceCode.Secret,
+        },
+        clientSessionA,
+    )
+    assert.Equal(t, err, nil)
+    assert.Equal(t, checkResult1.Error, nil)
+    assert.Equal(t, checkResult1.Balance.BalanceByteCount, ByteCount(1024))
+
+
+    redeemResult0, err := RedeemBalanceCode(
+        &RedeemBalanceCodeArgs{
+            Secret: balanceCode.Secret,
+        },
+        clientSessionA,
+    )
+    assert.Equal(t, err, nil)
+    assert.Equal(t, redeemResult0.Error, nil)
+    assert.Equal(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
+})}

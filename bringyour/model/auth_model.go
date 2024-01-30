@@ -860,7 +860,7 @@ func AuthPasswordSet(
 }
 
 
-const ActiveAuthCodeLimitPerNetwork = 10
+const ActiveAuthCodeLimitPerNetwork = 100
 const DefaultAuthCodeDuration = 1 * time.Minute
 const AuthCodeMaxDuration = 24 * time.Hour
 const DefaultAuthCodeUses = 1
