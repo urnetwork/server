@@ -3,7 +3,7 @@ package model
 import (
     "fmt"
     "net/url"
-    "strings"
+    // "strings"
     "crypto/rand"
     "encoding/hex"
     "image/color"
@@ -11,10 +11,6 @@ import (
     // "errors"
 
     qrcode "github.com/skip2/go-qrcode"
-
-    // TODO replace this with fewer works from a larger dictionary
-    bip39 "github.com/tyler-smith/go-bip39"
-
 
     "bringyour.com/bringyour/session"
     "bringyour.com/bringyour/jwt"
@@ -223,12 +219,12 @@ func DeviceAdd(
                         network.network_name
 
                     FROM device_share
-                    LEFT JOIN device_association_code ON
+                    INNER JOIN device_association_code ON
                         device_association_code.device_association_id = device_share.device_association_id
                     LEFT JOIN device_association_name ON
                         device_association_name.device_association_id = device_share.device_association_id AND
                         device_association_name.network_id = $2
-                    LEFT JOIN network ON
+                    INNER JOIN network ON
                         network.network_id = device_share.source_network_id
                     WHERE
                         device_share.device_association_id = $1
@@ -441,11 +437,15 @@ func DeviceShareStatus(
             if result.Next() {
                 shareStatusResult = &DeviceShareStatusResult{}
                 var confirmed bool
+                var networkName *string
                 bringyour.Raise(result.Scan(
                     &confirmed,
-                    &shareStatusResult.AssociatedNetworkName,
+                    &networkName,
                 ))
                 shareStatusResult.Pending = !confirmed
+                if networkName != nil {
+                    shareStatusResult.AssociatedNetworkName = *networkName
+                }
             } else {
                 shareStatusResult = &DeviceShareStatusResult{
                     Error: &DeviceShareStatusError{
@@ -700,12 +700,16 @@ func DeviceAdoptStatus(
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
                 var confirmed bool
+                var networkName *string
                 adoptStatusResult = &DeviceAdoptStatusResult{}
                 bringyour.Raise(result.Scan(
                     &confirmed,
-                    &adoptStatusResult.AssociatedNetworkName,
+                    &networkName,
                 ))
                 adoptStatusResult.Pending = !confirmed
+                if networkName != nil {
+                    adoptStatusResult.AssociatedNetworkName = *networkName
+                }
             } else {
                 adoptStatusResult = &DeviceAdoptStatusResult{
                     Error: &DeviceAdoptStatusError{
@@ -1048,7 +1052,7 @@ func DeviceAssociations(
                     device_adopt.expire_time
 
                 FROM device_adopt
-                LEFT JOIN device_association_code ON
+                INNER JOIN device_association_code ON
                     device_association_code.device_association_id = device_adopt.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_adopt.device_association_id AND
@@ -1090,7 +1094,7 @@ func DeviceAssociations(
                     network.network_name
 
                 FROM device_share
-                LEFT JOIN device_association_code ON
+                INNER JOIN device_association_code ON
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
@@ -1105,15 +1109,19 @@ func DeviceAssociations(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var confirmed bool
+                var networkName *string
                 association := &DeviceAssociation{}
                 bringyour.Raise(result.Scan(
                     &confirmed,
                     &association.Code,
                     &association.DeviceName,
                     &association.ClientId,
-                    &association.NetworkName,
+                    &networkName,
                 ))
                 association.Pending = !confirmed
+                if networkName != nil {
+                    association.NetworkName = *networkName
+                }
                 incomingSharedDevices = append(incomingSharedDevices, association)
             }
         })
@@ -1131,7 +1139,7 @@ func DeviceAssociations(
                     network.network_name
 
                 FROM device_share
-                LEFT JOIN device_association_code ON
+                INNER JOIN device_association_code ON
                     device_association_code.device_association_id = device_share.device_association_id
                 LEFT JOIN device_association_name ON
                     device_association_name.device_association_id = device_share.device_association_id AND
@@ -1146,21 +1154,22 @@ func DeviceAssociations(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var confirmed bool
+                var networkName *string
                 association := &DeviceAssociation{}
                 bringyour.Raise(result.Scan(
                     &confirmed,
                     &association.Code,
                     &association.DeviceName,
                     &association.ClientId,
-                    &association.NetworkName,
+                    &networkName,
                 ))
                 association.Pending = !confirmed
+                if networkName != nil {
+                    association.NetworkName = *networkName
+                }
                 outgoingSharedDevices = append(outgoingSharedDevices, association)
             }
         })
-
-
-
 
         associationResult = &DeviceAssociationsResult{
             PendingAdoptionDevices: pendingAdoptionDevices,
@@ -1436,22 +1445,6 @@ func DeviceSetAssociationName(
     }
 
     return
-}
-
-
-func newCode() (string, error) {
-    entropy, err := bip39.NewEntropy(256)
-    if err != nil {
-        return "", err
-    }
-    mnemonic, err := bip39.NewMnemonic(entropy)
-    if err != nil {
-        return "", err
-    }
-
-    words := strings.Split(mnemonic, " ")
-    code := strings.Join(words[0:6], " ")
-    return code, nil
 }
 
 

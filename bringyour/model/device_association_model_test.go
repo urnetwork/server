@@ -355,6 +355,24 @@ func TestDeviceShare(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, result1.Error, nil)
 	assert.NotEqual(t, result1.ShareCode, "")
 
+	associationResult0, err := DeviceAssociations(clientSessionA)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 0)
+	assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
+	assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 1)
+	assert.Equal(t, associationResult0.OutgoingSharedDevices[0].Pending, true)
+	assert.Equal(t, associationResult0.OutgoingSharedDevices[0].NetworkName, "")
+	assert.Equal(t, associationResult0.OutgoingSharedDevices[0].DeviceName, "devicea")
+
+	shareStatus1, err := DeviceShareStatus(
+		&DeviceShareStatusArgs{
+			ShareCode: result1.ShareCode,
+		},
+		clientSessionA,
+	)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, shareStatus1.Error, nil)
+
 
 	qrResult0, err := DeviceShareCodeQR(
 		&DeviceShareCodeQRArgs{

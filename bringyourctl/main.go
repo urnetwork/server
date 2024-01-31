@@ -32,6 +32,7 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id>
+    bringyourctl balance-code create
 
 Options:
     -h --help     Show this screen.
@@ -84,6 +85,10 @@ Options:
             networkFind(opts)
         } else if remove, _ := opts.Bool("remove"); remove {
             networkRemove(opts)
+        }
+    } else if network, _ := opts.Bool("balance-code"); network {
+        if create, _ := opts.Bool("create"); create {
+            balanceCodeCreate(opts)
         }
     }
 }
@@ -220,5 +225,24 @@ func networkRemove(opts docopt.Opts) {
         panic(err)
     }
     model.RemoveNetwork(ctx, networkId)
+}
+
+
+
+func balanceCodeCreate(opts docopt.Opts) {
+    ctx := context.Background()
+
+    balanceCode, err := model.CreateBalanceCode(
+        ctx,
+        1024,
+        0,
+        bringyour.NewId().String(),
+        bringyour.NewId().String(),
+        "brien@bringyour.com",
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("%s\n", balanceCode.Secret)
 }
 

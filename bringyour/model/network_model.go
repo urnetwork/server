@@ -133,6 +133,27 @@ func NetworkCreate(
 				return
 			}
 
+
+			var existingNetworkId *bringyour.Id
+
+			result, err = tx.Query(
+				session.Ctx,
+				`
+					SELECT network_id FROM network WHERE network_name = $1
+				`,
+				networkCreate.NetworkName,
+			)
+			bringyour.WithPgResult(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(result.Scan(&existingNetworkId))
+				}
+			})
+
+			if existingNetworkId != nil {
+				return
+			}
+
+
 			created = true
 			createdUserId := bringyour.NewId()
 			createdNetworkId = bringyour.NewId()

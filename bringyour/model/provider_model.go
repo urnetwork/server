@@ -239,7 +239,7 @@ func StatsProvider(
 
 	clients := map[string]int{}
 	for _, day := range days {
-		contracts[day] = mathrand.Intn(100)
+		clients[day] = mathrand.Intn(100)
 	}
 
 	clientDetails := []*ClientDetail{}

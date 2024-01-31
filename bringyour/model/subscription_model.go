@@ -6,8 +6,8 @@ import (
     "time"
     "fmt"
     "math"
-    "crypto/rand"
-    "encoding/hex"
+    // "crypto/rand"
+    // "encoding/hex"
     // "slices"
 
     // "golang.org/x/exp/maps"
@@ -142,11 +142,11 @@ func CreateBalanceCode(
 
         balanceCodeId := bringyour.NewId()
 
-        b := make([]byte, 48)
-        if _, err := rand.Read(b); err != nil {
-            panic(err)
+        secret, err := newCode()
+        if err != nil {
+            returnErr = err
+            return
         }
-        secret := hex.EncodeToString(b)
 
         createTime := time.Now()
         // round down to 00:00 the day of create time
