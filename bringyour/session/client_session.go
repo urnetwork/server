@@ -40,6 +40,17 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	}, nil
 }
 
+func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	return &ClientSession{
+		Ctx: cancelCtx,
+		Cancel: cancel,
+		ClientAddress: clientAddress,
+		ByJwt: byJwt,
+	}
+}
+
 // either sets `ByJwt` or returns and error
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {

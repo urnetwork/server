@@ -35,6 +35,7 @@ type PgBatchResults = pgx.BatchResults
 
 
 const TxSerializable = pgx.Serializable
+const TxReadCommitted = pgx.ReadCommitted
 
 
 // resets the connection pool

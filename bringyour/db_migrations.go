@@ -3,7 +3,6 @@ package bringyour
 import (
     "fmt"
     "context"
-    "time"
 )
 
 
@@ -1246,85 +1245,73 @@ var migrations = []any{
     newCodeMigration(migration_20240124_PopulateDevice),
 
 
-    // after services are deployed
-    // newSqlMigration(`
-    //     ALTER TABLE network_client DROP COLUMN device_spec
-    // `),
-}
+    // FIXME after services are deployed. deploy the connect service
+    newSqlMigration(`
+        ALTER TABLE network_client DROP COLUMN device_spec
+    `),
 
+    // the run_at_block size is 5 minutes = 300 seconds
+    // extract(epoch ...) is epoch in seconds
+    // https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
+    newSqlMigration(`
+        CREATE TABLE pending_task (
+            task_id uuid NOT NULL,
+            function_name VARCHAR(1024) NOT NULL,
+            args_json TEXT NOT NULL,
+            client_address VARCHAR(128) NOT NULL,
+            client_by_jwt_json TEXT NULL,
+            run_at timestamp NOT NULL,
+            run_at_block bigint GENERATED ALWAYS AS (extract(epoch from run_at) / 300) STORED,
+            run_once_key VARCHAR(1024) NULL,
+            run_priority integer NOT NULL,
+            run_max_time_seconds integer NOT NULL,
 
-// create entries for `network_client.device_id`
-func migration_20240124_PopulateDevice(ctx context.Context) {
-    Raise(Tx(ctx, func(tx PgTx) {
-        result, err := tx.Query(
-            ctx,
-            `
-                SELECT
-                    client_id,
-                    network_id,
-                    description,
-                    device_spec
-                FROM network_client
-                WHERE
-                    device_id IS NULL
-            `,
+            claim_time timestamp NOT NULL,
+            release_time timestamp NOT NULL,
+
+            reschedule_error TEXT NULL,
+            has_reschedule_error bool GENERATED ALWAYS AS (reschedule_error IS NOT NULL) STORED,
+
+            PRIMARY KEY (task_id),
+            UNIQUE (run_once_key)
         )
-        type Device struct {
-            deviceId Id
-            networkId Id
-            deviceName string
-            deviceSpec string
-        }
-        devices := map[Id]*Device{}
-        WithPgResult(result, err, func() {
-            for result.Next() {
-                var clientId Id
-                device := &Device{
-                    deviceId: NewId(),
-                }
-                Raise(result.Scan(
-                    &clientId,
-                    &device.networkId,
-                    &device.deviceName,
-                    &device.deviceSpec,
-                ))
-                devices[clientId] = device
-            }
-        })
+    `),
+    newSqlMigration(`
+        CREATE INDEX pending_task_run_at_block ON pending_task (run_at_block, run_priority, run_at)
+    `),
+    newSqlMigration(`
+        CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)
+    `),
+    newSqlMigration(`
+        CREATE INDEX pending_task_release_time ON pending_task (release_time, task_id)
+    `),
 
-        createTime := time.Now()
+    newSqlMigration(`
+        CREATE TABLE finished_task (
+            task_id uuid NOT NULL,
+            function_name VARCHAR(1024) NOT NULL,
+            args_json TEXT NOT NULL,
+            client_address VARCHAR(128) NOT NULL,
+            client_by_jwt_json TEXT NULL,
+            run_at timestamp NOT NULL,
+            run_once_key VARCHAR(1024) NULL,
+            run_priority integer NOT NULL,
+            run_max_time_seconds integer NOT NULL,
 
-        for clientId, device := range devices {
-            RaisePgResult(tx.Exec(
-                ctx,
-                `
-                INSERT INTO device (
-                    device_id,
-                    network_id,
-                    device_name,
-                    device_spec,
-                    create_time
-                ) VALUES ($1, $2, $3, $4, $5)
-                `,
-                device.deviceId,
-                device.networkId,
-                device.deviceName,
-                device.deviceSpec,
-                createTime,
-            ))
+            run_start_time timestamp NOT NULL,
+            run_end_time timestamp NOT NULL,
 
-            RaisePgResult(tx.Exec(
-                ctx,
-                `
-                UPDATE network_client
-                SET
-                    device_id = $2
-                WHERE
-                    client_id = $1
-                `,
-                clientId,
-                device.deviceId,
-            ))
-        }
-    }))
+            reschedule_error TEXT NULL,
+            result_json TEXT NOT NULL,
+
+            post_error TEXT NULL,
+            post_completed bool NOT NULL DEFAULT true,
+
+            PRIMARY KEY (task_id)
+        )
+    `),
+    newSqlMigration(`
+        CREATE INDEX finished_task_run_end_time ON finished_task (run_end_time, task_id)
+    `),
 }
+
