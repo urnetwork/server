@@ -106,15 +106,6 @@ type RunMaxTimeOption struct {
 	MaxTime time.Duration
 }
 
-// helps avoid a race condition where an older version of a task that does not repeat
-// gets replaced by a newer version that does repeat
-// checks the RunOnce key
-// this can only be used in combination with RunOnce
-type EnsureScheduledOption struct {
-	CheckTimeout time.Duration
-}
-
-
 
 func ScheduleTask[T any, R any](
 	taskFunction TaskFunction[T, R],
@@ -162,7 +153,6 @@ func ScheduleTaskInTx[T any, R any](
 	runMaxTime := &RunMaxTimeOption{
 		MaxTime: DefaultMaxTime,
 	}
-	var ensureScheduled *EnsureScheduledOption
 
 	for _, opt := range opts {
 		switch v := opt.(type) {
@@ -182,10 +172,6 @@ func ScheduleTaskInTx[T any, R any](
 			runMaxTime = &v
 		case *RunMaxTimeOption:
 			runMaxTime = v
-		case EnsureScheduledOption:
-			ensureScheduled = &v
-		case *EnsureScheduledOption:
-			ensureScheduled = v
 		}
 	}
 
@@ -200,85 +186,35 @@ func ScheduleTaskInTx[T any, R any](
 
 	taskId := bringyour.NewId()
 
-	bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-		bringyour.RaisePgResult(tx.Exec(
-			clientSession.Ctx,
-			`
-				INSERT INTO pending_task (
-					task_id,
-			        function_name,
-			        args_json,
-			        client_address,
-			        client_by_jwt_json,
-			        run_at,
-			        run_once_key,
-			        run_priority,
-			        run_max_time_seconds,
-			        claim_time,
-			        release_time
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-				ON CONFLICT (run_once_key) DO NOTHING
-			`,
-			taskId,
-			taskTarget.TargetFunctionName(),
-			argsJson,
-			clientSession.ClientAddress,
-			byJwtJson,
-			runAt.At,
-			runOnceKey,
-			runPriority.Priority,
-			maxTimeSeconds,
-			claimTime,
-		))
-	}))
-
-	if ensureScheduled != nil && runOnceKey != nil {
-		go func() {
-			select {
-			case <- clientSession.Ctx.Done():
-				return
-			case <- time.After(ensureScheduled.CheckTimeout):
-			}
-
-			scheduleIfNotScheduled(*runOnceKey, taskFunction, args, clientSession, opts...)
-		}()
-	}
-}
-
-func scheduleIfNotScheduled[T any, R any](
-	runOnceKey string,
-	taskFunction TaskFunction[T, R],
-	args T,
-	clientSession *session.ClientSession,
-	opts ...any,
-) {
-	bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-		result, err := tx.Query(
-			clientSession.Ctx,
-			`
-				SELECT task_id FROM pending_task
-				WHERE run_once_key = $1
-			`,
-			runOnceKey,
-		)
-		found := false
-		bringyour.WithPgResult(result, err, func() {
-			if result.Next() {
-				found = true
-			}
-		})
-
-		if !found {
-			// schedule again
-			ScheduleTaskInTx[T, R](
-				tx,
-				taskFunction,
-				args,
-				clientSession,
-				opts...,
-			)
-		}
-	}))
+	bringyour.RaisePgResult(tx.Exec(
+		clientSession.Ctx,
+		`
+			INSERT INTO pending_task (
+				task_id,
+		        function_name,
+		        args_json,
+		        client_address,
+		        client_by_jwt_json,
+		        run_at,
+		        run_once_key,
+		        run_priority,
+		        run_max_time_seconds,
+		        claim_time,
+		        release_time
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+			ON CONFLICT (run_once_key) DO NOTHING
+		`,
+		taskId,
+		taskTarget.TargetFunctionName(),
+		argsJson,
+		clientSession.ClientAddress,
+		byJwtJson,
+		runAt.At,
+		runOnceKey,
+		runPriority.Priority,
+		maxTimeSeconds,
+		claimTime,
+	))
 }
 
 
