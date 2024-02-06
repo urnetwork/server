@@ -28,6 +28,7 @@ func main() {
 
 Usage:
   taskworker [--port=<port>] [--count=<count>] [--batch_size=<batch_size>]
+  taskworker init-tasks
   taskworker -h | --help
   taskworker --version
 
@@ -47,30 +48,56 @@ Options:
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    count, _ := opts.Int("--count")
-    batchSize, _ := opts.Int("--batch_size")
-    port, _ := opts.Int("--port")
+    if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
+        initTasks(quitEvent.Ctx)
+    } else {
+        count, _ := opts.Int("--count")
+        batchSize, _ := opts.Int("--batch_size")
+        port, _ := opts.Int("--port")
 
-    taskWorker := initTaskWorker(quitEvent.Ctx)
-    for i := 0; i < count; i += 1 {
-        go runTaskWorker(quitEvent.Ctx, taskWorker, batchSize)
+        bringyour.Logger().Printf(
+            "Starting %s %s %d task workers with batch size %d\n",
+            bringyour.RequireEnv(),
+            bringyour.RequireVersion(),
+            count,
+            batchSize,
+        )
+
+        initTasks(quitEvent.Ctx)
+
+        // one TaskWorker can be shared with many go routines calling EvalTasks
+        taskWorker := initTaskWorker(quitEvent.Ctx)
+        for i := 0; i < count; i += 1 {
+            go evalTasks(quitEvent.Ctx, taskWorker, batchSize)
+        }
+        
+        routes := []*router.Route{
+            router.NewRoute("GET", "/status", router.WarpStatus),
+        }
+
+        bringyour.Logger().Printf(
+            "Serving %s %s on *:%d\n",
+            bringyour.RequireEnv(),
+            bringyour.RequireVersion(),
+            port,
+        )
+
+        routerHandler := router.NewRouter(quitEvent.Ctx, routes)
+        err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
+        bringyour.Logger().Fatal(err)
     }
-    
-    routes := []*router.Route{
-        router.NewRoute("GET", "/status", router.WarpStatus),
-    }
+}
 
 
-    bringyour.Logger().Printf(
-        "Serving %s %s on *:%d\n",
-        bringyour.RequireEnv(),
-        bringyour.RequireVersion(),
-        port,
-    )
+func initTasks(ctx context.Context) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+        defer clientSession.Cancel()
 
-    routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-    err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-    bringyour.Logger().Fatal(err)
+        work.ScheduleWarmEmail(clientSession, tx)
+        work.ScheduleExportStats(clientSession, tx)
+        ScheduleTaskCleanup(clientSession, tx)
+    }))
 }
 
 
@@ -83,19 +110,11 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
         task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
     )
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-
-        work.ScheduleWarmEmail(clientSession, tx)
-        work.ScheduleExportStats(clientSession, tx)
-        ScheduleTaskCleanup(clientSession, tx)
-    }))
-
     return taskWorker
 }
 
 
-func runTaskWorker(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) {
+func evalTasks(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) {
     for {
         select {
         case <- ctx.Done():
