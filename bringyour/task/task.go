@@ -69,28 +69,28 @@ type TaskPostFunction[T any, R any] func(T, R, *session.ClientSession, bringyour
 
 // type ScheduleTaskFunction[T any, R any] func(TaskFunction[T, R], T, *session.ClientSession, ...any)  
 
-type RunAt struct {
+type RunAtOption struct {
 	At time.Time
 }
 
-func NewRunAt(at time.Time) *RunAt {
-	return &RunAt{
+func RunAt(at time.Time) *RunAtOption {
+	return &RunAtOption{
 		At: at,
 	}
 }
 
 // if the key is already scheduled, a new schedule will not be created
-type RunOnce struct {
+type RunOnceOption struct {
 	Key []any
 }
 
-func NewRunOnce(key ...any) *RunOnce {
-	return &RunOnce{
+func RunOnce(key ...any) *RunOnceOption {
+	return &RunOnceOption{
 		Key: key,
 	}
 }
 
-func (self *RunOnce) String() string {
+func (self *RunOnceOption) String() string {
 	keyJson, err := json.Marshal(self.Key)
 	if err != nil {
 		panic(err)
@@ -98,11 +98,11 @@ func (self *RunOnce) String() string {
 	return string(keyJson)
 }
 
-type RunPriority struct {
+type RunPriorityOption struct {
 	Priority TaskPriority
 }
 
-type RunMaxTime struct {
+type RunMaxTimeOption struct {
 	MaxTime time.Duration
 }
 
@@ -110,7 +110,7 @@ type RunMaxTime struct {
 // gets replaced by a newer version that does repeat
 // checks the RunOnce key
 // this can only be used in combination with RunOnce
-type EnsureScheduled struct {
+type EnsureScheduledOption struct {
 	CheckTimeout time.Duration
 }
 
@@ -152,39 +152,39 @@ func ScheduleTaskInTx[T any, R any](
 		byJwtJson = &byJwtJson_
 	}
 
-	runAt := &RunAt{
+	runAt := &RunAtOption{
 		At: time.Time{},
 	}
-	var runOnce *RunOnce
-	runPriority := &RunPriority{
+	var runOnce *RunOnceOption
+	runPriority := &RunPriorityOption{
 		Priority: (TaskPriorityFastest + TaskPrioritySlowest) / 2,
 	}
-	runMaxTime := &RunMaxTime{
+	runMaxTime := &RunMaxTimeOption{
 		MaxTime: DefaultMaxTime,
 	}
-	var ensureScheduled *EnsureScheduled
+	var ensureScheduled *EnsureScheduledOption
 
 	for _, opt := range opts {
 		switch v := opt.(type) {
-		case RunAt:
+		case RunAtOption:
 			runAt = &v
-		case *RunAt:
+		case *RunAtOption:
 			runAt = v
-		case RunOnce:
+		case RunOnceOption:
 			runOnce = &v
-		case *RunOnce:
+		case *RunOnceOption:
 			runOnce = v
-		case RunPriority:
+		case RunPriorityOption:
 			runPriority = &v
-		case *RunPriority:
+		case *RunPriorityOption:
 			runPriority = v
-		case RunMaxTime:
+		case RunMaxTimeOption:
 			runMaxTime = &v
-		case *RunMaxTime:
+		case *RunMaxTimeOption:
 			runMaxTime = v
-		case EnsureScheduled:
+		case EnsureScheduledOption:
 			ensureScheduled = &v
-		case *EnsureScheduled:
+		case *EnsureScheduledOption:
 			ensureScheduled = v
 		}
 	}
@@ -1225,7 +1225,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 						self.RunPost,
 						&RunPostArgs{TaskId: taskId},
 						clientSession,
-						NewRunAt(now.Add(RescheduleTimeout)),
+						RunAt(now.Add(RescheduleTimeout)),
 					)
 				}()
 			}

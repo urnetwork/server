@@ -11,8 +11,8 @@ import (
 
 
 type Event struct {
-    ctx context.Context
-    cancel context.CancelFunc
+    Ctx context.Context
+    Cancel context.CancelFunc
 }
 
 func NewEvent() *Event {
@@ -22,18 +22,18 @@ func NewEvent() *Event {
 func NewEventWithContext(ctx context.Context) *Event {
     cancelCtx, cancel := context.WithCancel(ctx)
     return &Event{
-        ctx: cancelCtx,
-        cancel: cancel,
+        Ctx: cancelCtx,
+        Cancel: cancel,
     }
 }
 
 func (self *Event) Set() {
-    self.cancel()
+    self.Cancel()
 }
 
 func (self *Event) IsSet() bool {
     select {
-    case <- self.ctx.Done():
+    case <- self.Ctx.Done():
         return true
     default:
         return false
@@ -42,7 +42,7 @@ func (self *Event) IsSet() bool {
 
 func (self *Event) WaitForSet(timeout time.Duration) bool {
     select {
-    case <- self.ctx.Done():
+    case <- self.Ctx.Done():
         return true
     case <- time.After(timeout):
         return false

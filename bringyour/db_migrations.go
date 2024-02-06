@@ -1244,12 +1244,6 @@ var migrations = []any{
 
     newCodeMigration(migration_20240124_PopulateDevice),
 
-
-    // FIXME after services are deployed. deploy the connect service
-    newSqlMigration(`
-        ALTER TABLE network_client DROP COLUMN device_spec
-    `),
-
     // the run_at_block size is 5 minutes = 300 seconds
     // extract(epoch ...) is epoch in seconds
     // https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
@@ -1313,5 +1307,12 @@ var migrations = []any{
     newSqlMigration(`
         CREATE INDEX finished_task_run_end_time ON finished_task (run_end_time, task_id)
     `),
+    
+
+
+    // FIXME after services are deployed. deploy the connect service
+    // newSqlMigration(`
+    //     ALTER TABLE network_client DROP COLUMN device_spec
+    // `),
 }
 

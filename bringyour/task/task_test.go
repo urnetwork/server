@@ -73,7 +73,7 @@ func TestTask(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 			Work1,
 			&Work1Args{},
 			clientSession,
-			NewRunOnce("unique", i % k),
+			RunOnce("unique", i % k),
 		)
 	}
 
@@ -137,7 +137,7 @@ func TestTask(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 			Work1,
 			&Work1Args{},
 			clientSession,
-			NewRunOnce("task", i),
+			RunOnce("task", i),
 		)
 	}
 
