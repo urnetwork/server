@@ -21,7 +21,7 @@ var ipInfoConfig = sync.OnceValue(func() map[string]any {
 })
 
 
-const LocationLookupResultExpiration = 1 * time.Hour
+const LocationLookupResultExpiration = 24 * time.Hour
 
 
 func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error) {

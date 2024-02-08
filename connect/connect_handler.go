@@ -24,7 +24,7 @@ import (
 
 
 const PingTimeout = connect.DefaultPingTimeout
-const WriteTimeout = connect.WriteTimeout
+const WriteTimeout = connect.DefaultWriteTimeout
 const ReadTimeout = connect.DefaultReadTimeout
 
 const SyncConnectionTimeout = 60 * time.Second

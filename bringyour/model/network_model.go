@@ -47,6 +47,7 @@ type NetworkCreateArgs struct {
 
 type NetworkCreateResult struct {
 	Network *NetworkCreateResultNetwork `json:"network,omitempty"`
+	UserAuth *string `json:"user_auth,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error *NetworkCreateResultError `json:"error,omitempty"`
 }
@@ -302,6 +303,7 @@ func NetworkCreate(
 					Network: &NetworkCreateResultNetwork{
 						ByJwt: &byJwtSigned,
 					},
+					UserAuth: &authJwt.UserAuth,
 				}
 				return result, nil
 			} else {

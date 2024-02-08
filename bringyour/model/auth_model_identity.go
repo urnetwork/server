@@ -60,6 +60,15 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	return nil, UserAuthTypeNone
 }
 
+func NormalUserAuth(userAuth string) (string, UserAuthType) {
+	normalUserAuth_, userAuthType := NormalUserAuthV1(&userAuth)
+	var normalUserAuth string
+	if normalUserAuth_ != nil {
+		normalUserAuth = *normalUserAuth_
+	}
+	return normalUserAuth, userAuthType
+}
+
 // BE CAREFUL do not change without a backwards-compatible migration
 func computePasswordHashV1(password []byte, passwordSalt []byte) []byte {
 	pepperedPassword := []byte{}
@@ -103,7 +112,5 @@ func createResetCode() string {
 	}
 	return hex.EncodeToString(resetCode)
 }
-
-
 
 

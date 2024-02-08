@@ -2,13 +2,22 @@ package controller
 
 
 import (
-	"bringyour.com/bringyour"
+    texttemplate "text/template"
+    htmltemplate "html/template"
+    "net/url"
+    "fmt"
+    "embed"
+    "strings"
+    "time"
 
-	"github.com/aws/aws-sdk-go/aws"
+    "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
     "github.com/aws/aws-sdk-go/service/ses"
     "github.com/aws/aws-sdk-go/service/sns"
     // "github.com/aws/aws-sdk-go/aws/awserr"
+
+	// "bringyour.com/bringyour"
+    "bringyour.com/bringyour/model"
 )
 
 
@@ -16,8 +25,214 @@ import (
 // marketing messages are sent via a separate channel
 
 
-func SendAccountMessage(networkId bringyour.Id, bodyHtml string, bodyText string) {
-	// fixme
+//go:embed email_templates/*
+var emailTemplates embed.FS
+
+
+type Template interface {
+    Name() string
+    Funcs() texttemplate.FuncMap
+}
+
+
+type AuthPasswordResetTemplate struct {
+    ResetCode string
+}
+
+func (self *AuthPasswordResetTemplate) Name() string {
+    return "auth_password_reset"
+}
+
+func (self *AuthPasswordResetTemplate) Funcs() texttemplate.FuncMap {
+    return texttemplate.FuncMap{}
+}
+
+func (self *AuthPasswordResetTemplate) ResetCodeUrlEncoded() string {
+    return url.QueryEscape(self.ResetCode)
+}
+
+
+type AuthPasswordSetTemplate struct {
+}
+
+func (self *AuthPasswordSetTemplate) Name() string {
+    return "auth_password_set"
+}
+
+func (self *AuthPasswordSetTemplate) Funcs() texttemplate.FuncMap {
+    return texttemplate.FuncMap{}
+}
+
+
+type AuthVerifyTemplate struct {
+    VerifyCode string
+}
+
+func (self *AuthVerifyTemplate) Name() string {
+    return "auth_verify"
+}
+
+func (self *AuthVerifyTemplate) Funcs() texttemplate.FuncMap {
+    return texttemplate.FuncMap{
+        "CopyrightYear": self.CopyrightYear,
+    }
+}
+
+func (self *AuthVerifyTemplate) CopyrightYear() string {
+    year, _, _ := time.Now().Date()
+    return fmt.Sprintf("%d", year)
+}
+
+
+type NetworkWelcomeTemplate struct {
+}
+
+func (self *NetworkWelcomeTemplate) Name() string {
+    return "network_welcome"
+}
+
+func (self *NetworkWelcomeTemplate) Funcs() texttemplate.FuncMap {
+    return texttemplate.FuncMap{
+        "CopyrightYear": self.CopyrightYear,
+    }
+}
+
+func (self *NetworkWelcomeTemplate) CopyrightYear() string {
+    year, _, _ := time.Now().Date()
+    return fmt.Sprintf("%d", year)
+}
+
+
+type SubscriptionBalanceTransferCodeTemplate struct {
+    Code string
+}
+
+func (self *SubscriptionBalanceTransferCodeTemplate) Name() string {
+    return "network_welcome"
+}
+
+func (self *SubscriptionBalanceTransferCodeTemplate) Funcs() texttemplate.FuncMap {
+    return texttemplate.FuncMap{
+        "CodeUrlEncoded": self.CodeUrlEncoded,
+    }
+}
+
+func (self *SubscriptionBalanceTransferCodeTemplate) CodeUrlEncoded() string {
+    return url.QueryEscape(self.Code)
+}
+
+
+func SendAccountMessageTemplate(userAuth string, template Template) error {
+    normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
+
+    switch userAuthType {
+    case model.UserAuthTypeEmail:
+        return SendAccountEmailTemplate(normalUserAuth, template)
+    case model.UserAuthTypePhone:
+        return SendAccountSms(normalUserAuth, template)
+    default:
+        return fmt.Errorf("Unknown user auth: %s", userAuthType)
+    }
+}
+
+
+func SendAccountEmailTemplate(emailAddress string, template Template) error {
+    subject, bodyHtml, bodyText, err := RenderEmailTemplate(template)
+    if err != nil {
+        return err
+    }
+    return sendAccountEmail(emailAddress, subject, bodyHtml, bodyText)
+}
+
+
+func RenderEmailTemplate(template Template) (subject string, bodyHtml string, bodyText string, returnErr error) {
+    if subjectBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.subject.txt", template.Name())); err == nil {
+        if subjectTemplate, err := texttemplate.New("subject").Parse(string(subjectBytes)); err == nil {
+            subjectOut := &strings.Builder{}
+            if err := subjectTemplate.Funcs(template.Funcs()).Execute(subjectOut, template); err == nil {
+                subject = subjectOut.String()
+            } else {
+                returnErr = err
+                return
+            }
+        } else {
+            returnErr = err
+            return
+        }
+    } else {
+        returnErr = err
+        return
+    }
+
+    if bodyHtmlBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.html", template.Name())); err == nil {
+        if bodyHtmlTemplate, err := htmltemplate.New("body").Parse(string(bodyHtmlBytes)); err == nil {
+            bodyHtmlOut := &strings.Builder{}
+            if err := bodyHtmlTemplate.Funcs(template.Funcs()).Execute(bodyHtmlOut, template); err == nil {
+                bodyHtml = bodyHtmlOut.String()
+            } else {
+                returnErr = err
+                return
+            }     
+        } else {
+            returnErr = err
+            return
+        }
+    } else {
+        returnErr = err
+        return
+    }
+
+    if bodyTextBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.txt", template.Name())); err == nil {
+        if bodyTextTemplate, err := texttemplate.New("body").Parse(string(bodyTextBytes)); err == nil {
+            bodyTextOut := &strings.Builder{}
+            if err := bodyTextTemplate.Funcs(template.Funcs()).Execute(bodyTextOut, template); err == nil {
+                bodyText = bodyTextOut.String()
+            } else {
+                returnErr = err
+                return
+            }
+        } else {
+            returnErr = err
+            return
+        }
+    } else {
+        returnErr = err
+        return
+    }
+
+    return
+}
+
+
+func SendAccountSms(phoneNumber string, template Template) error {
+    bodyText, err := RenderSmsTemplate(template)
+    if err != nil {
+        return err
+    }
+    return sendAccountSms(phoneNumber, bodyText)
+}
+
+
+func RenderSmsTemplate(template Template) (bodyText string, returnErr error) {
+    if bodyTextBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.txt", template.Name())); err == nil {
+        if bodyTextTemplate, err := texttemplate.New("body").Parse(string(bodyTextBytes)); err == nil {
+            bodyTextOut := &strings.Builder{}
+            if err := bodyTextTemplate.Funcs(template.Funcs()).Execute(bodyTextOut, template); err == nil {
+                bodyText = bodyTextOut.String()
+            } else {
+                returnErr = err
+                return
+            }
+        } else {
+            returnErr = err
+            return
+        }
+    } else {
+        returnErr = err
+        return
+    }
+
+    return
 }
 
 

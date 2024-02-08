@@ -1,0 +1,26 @@
+
+Welcome to BringYour!
+
+Thanks for joining this project. Our mission to build the highest quality VPN that puts you in the driver's seat of your privacy supply chain. That means hard privacy by keeping your identifiable data away from our servers and egress sites, the most regions where everything just works, and tools to remove your data from the cloud, cutting it off before it gets sold, leaked, or marketed. We believe that a correctly designed and operated VPN gives everyone a better internet.
+
+To get started, we gave you an initial balance of 30GiB of transfer data valid for 30 days. You can subscribe in app to get more transfer data and enable advanced privacy management.
+
+Some links you may find useful:
+
+Manage your network: https://app.bringyour.com
+
+Support: https://support.bringyour.com <support@bringyour.com>
+
+Install apps: https://bringyour.com/install
+
+Help grow the network and earn USDC: https://bringyour.com/participate
+
+I'm giving my all the build a product worthy of your recommendation. If you think it's lived up to your needs, please spread the word. If not, please contact me personally and I want to make sure I have your feedback captured so that I can eventually make it right.
+
+
+Brien Colwell <brien@bringyour.com>
+Founder, BringYour
+
+Copyright {{.CopyrightYear}} BringYour, Inc.
+2261 Market Street #5245, San Francisco, CA 94114, United States
+https://bringyour.com

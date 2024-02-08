@@ -253,8 +253,6 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 				activeDay = day
 			}
 
-			bringyour.Logger().Printf("NEXT\n")
-
 			// update the active providers
 			switch AuditEventType(eventType) {
 			case AuditEventTypeProviderOffline:
@@ -278,8 +276,6 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 				}
 				activeProviders[deviceId] = providerState
 			}
-
-			bringyour.Logger().Printf("NEXT 2\n")
 		}
 		exportActive()
 		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {

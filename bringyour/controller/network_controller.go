@@ -19,6 +19,11 @@ func NetworkCreate(
 			UserAuth: result.VerificationRequired.UserAuth,
 		}
 		AuthVerifySend(verifySend, session)
+	} else if result.Network != nil && result.UserAuth != nil {
+        SendAccountMessageTemplate(
+            *result.UserAuth,
+            &NetworkWelcomeTemplate{},
+        )
 	}
 	return result, err
 }

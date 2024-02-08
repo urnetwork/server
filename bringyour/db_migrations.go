@@ -1308,11 +1308,12 @@ var migrations = []any{
         CREATE INDEX finished_task_run_end_time ON finished_task (run_end_time, task_id)
     `),
     
+    newSqlMigration(`
+        CREATE INDEX auth_code_end_time ON auth_code (end_time, auth_code_id)
+    `),
 
-
-    // FIXME after services are deployed. deploy the connect service
-    // newSqlMigration(`
-    //     ALTER TABLE network_client DROP COLUMN device_spec
-    // `),
+    newSqlMigration(`
+        ALTER TABLE network_client DROP COLUMN device_spec
+    `),
 }
 

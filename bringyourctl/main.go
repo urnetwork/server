@@ -9,6 +9,7 @@ import (
     "github.com/docopt/docopt-go"
 
     "bringyour.com/bringyour"
+    "bringyour.com/bringyour/session"
     "bringyour.com/bringyour/model"
     "bringyour.com/bringyour/controller"
     "bringyour.com/bringyour/search"
@@ -33,6 +34,9 @@ Usage:
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id>
     bringyourctl balance-code create
+    bringyourctl balance-code check --secret=<secret>
+    bringyourctl send network-welcome --user_auth=<user_auth>
+    bringyourctl send auth-verify --user_auth=<user_auth>
 
 Options:
     -h --help     Show this screen.
@@ -43,7 +47,8 @@ Options:
     -a            All locations.
     --user_auth=<user_auth>
     --network_name=<network_name>
-    --network_id=<network_id>`
+    --network_id=<network_id>
+    --secret=<secret>`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
@@ -89,6 +94,14 @@ Options:
     } else if network, _ := opts.Bool("balance-code"); network {
         if create, _ := opts.Bool("create"); create {
             balanceCodeCreate(opts)
+        } else if check, _ := opts.Bool("check"); check {
+            balanceCodeCheck(opts)
+        }
+    } else if send, _ := opts.Bool("send"); send {
+        if networkWelcome, _ := opts.Bool("network-welcome"); networkWelcome {
+            sendNetworkWelcome(opts)
+        } else if authVerify, _ := opts.Bool("auth-verify"); authVerify {
+            sendAuthVerify(opts)
         }
     }
 }
@@ -244,5 +257,55 @@ func balanceCodeCreate(opts docopt.Opts) {
         panic(err)
     }
     fmt.Printf("%s\n", balanceCode.Secret)
+}
+
+
+func balanceCodeCheck(opts docopt.Opts) {
+    secret, _ := opts.String("--secret")
+
+    ctx := context.Background()
+
+    clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+    result, err := model.CheckBalanceCode(
+        &model.CheckBalanceCodeArgs{
+            Secret: secret,
+        },
+        clientSession,
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("%s\n", result)
+}
+
+
+func sendNetworkWelcome(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.NetworkWelcomeTemplate{},
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
+func sendAuthVerify(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.AuthVerifyTemplate{
+            VerifyCode: "abcdefghij",
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
 }
 
