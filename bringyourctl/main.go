@@ -37,6 +37,9 @@ Usage:
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
     bringyourctl send auth-verify --user_auth=<user_auth>
+    bringyourctl send auth-password-reset --user_auth=<user_auth>
+    bringyourctl send auth-password-set --user_auth=<user_auth>
+    bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
 
 Options:
     -h --help     Show this screen.
@@ -102,6 +105,12 @@ Options:
             sendNetworkWelcome(opts)
         } else if authVerify, _ := opts.Bool("auth-verify"); authVerify {
             sendAuthVerify(opts)
+        } else if authPasswordReset, _ := opts.Bool("auth-password-reset"); authPasswordReset {
+            sendAuthPasswordReset(opts)
+        } else if authPasswordSet, _ := opts.Bool("auth-password-set"); authPasswordSet {
+            sendAuthPasswordSet(opts)
+        } else if subscriptionTransferBalanceCode, _ := opts.Bool("subscription-transfer-balance-code"); subscriptionTransferBalanceCode {
+            sendSubscriptionTransferBalanceCode(opts)
         }
     }
 }
@@ -301,6 +310,52 @@ func sendAuthVerify(opts docopt.Opts) {
         userAuth,
         &controller.AuthVerifyTemplate{
             VerifyCode: "abcdefghij",
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
+func sendAuthPasswordReset(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.AuthPasswordResetTemplate{
+            ResetCode: "abcdefghij",
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
+func sendAuthPasswordSet(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.AuthPasswordSetTemplate{},
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
+func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.SubscriptionTransferBalanceCodeTemplate{
+            Code: "hi there bar now",
         },
     )
     if err != nil {

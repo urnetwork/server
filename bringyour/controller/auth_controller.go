@@ -143,7 +143,7 @@ func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.Cli
     if err != nil {
         return nil, err
     }
-    userAuth, _, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
+    userAuth, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
     if err != nil {
         return nil, err
     }

@@ -14,6 +14,21 @@ import (
 )
 
 
+func TestGetUserAuth(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	ctx := context.Background()
+
+	networkId := bringyour.NewId()
+	userId := bringyour.NewId()
+	networkName := "test"
+
+	testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+	userAuth, err := GetUserAuth(ctx, networkId)
+	assert.Equal(t, err, nil)
+	assert.Equal(t, userAuth, testingUserAuth)
+})}
+
+
 func TestAuthCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 

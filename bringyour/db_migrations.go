@@ -257,6 +257,7 @@ var migrations = []any{
         )
     `),
     // ALTER auth_type changed to varchar(32)
+    // RENAME validate to verified
     // password_hash: 32-byte argon2 hash digest
     // password_salt: 32-byte random
     newSqlMigration(`
@@ -403,7 +404,6 @@ var migrations = []any{
         CREATE INDEX search_projection_value_id ON search_projection (value_id, alias)
     `),
 
-    // RENAME `validate` to `verify`
     newSqlMigration(`
         ALTER TABLE network_user RENAME COLUMN validated TO verified
     `),
@@ -1314,6 +1314,16 @@ var migrations = []any{
 
     newSqlMigration(`
         ALTER TABLE network_client DROP COLUMN device_spec
+    `),
+
+    // user_auth is stored trimmed in lower case
+    // prior to this migration there were some cases where the value was not normalized
+    newSqlMigration(`
+        UPDATE network_user
+        SET
+            user_auth = lower(trim(user_auth))
+        WHERE
+            user_auth IS NOT NULL
     `),
 }
 

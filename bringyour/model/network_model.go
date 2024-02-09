@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"encoding/json"
+	"fmt"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -220,6 +221,8 @@ func NetworkCreate(
 		if authJwt != nil {
 			// validate the user does not exist
 
+			normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+
 			bringyour.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
 
 			created := false
@@ -234,7 +237,7 @@ func NetworkCreate(
 					`
 						SELECT user_id FROM network_user WHERE user_auth = $1
 					`,
-					authJwt.UserAuth,
+					normalJwtUserAuth,
 				)
 				bringyour.WithPgResult(result, err, func() {
 					if result.Next() {
@@ -263,7 +266,7 @@ func NetworkCreate(
 					createdUserId,
 					networkCreate.UserName,
 					authJwt.AuthType,
-					authJwt.UserAuth,
+					normalJwtUserAuth,
 					networkCreate.AuthJwt,
 				)
 				if err != nil {
@@ -354,7 +357,9 @@ func Testing_CreateNetwork(
 	networkId bringyour.Id,
 	networkName string,
 	adminUserId bringyour.Id,
-) {
+) (userAuth string) {
+	userAuth = fmt.Sprintf("%s@bringyour.com", networkId)
+
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
@@ -366,5 +371,20 @@ func Testing_CreateNetwork(
 			networkName,
 			adminUserId,
 		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			adminUserId,
+			"test",
+			AuthTypePassword,
+			userAuth,
+			true,
+		))
 	}))
+
+	return
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"crypto/rand"
 	"encoding/hex"
 	"net/mail"
@@ -37,11 +38,14 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 
 	bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
 
+	normalUserAuth := strings.TrimSpace(*userAuth)
+	normalUserAuth = strings.ToLower(normalUserAuth)
+
 	var emailAddress *mail.Address
 	var phoneNumber *phonenumbers.PhoneNumber
 	var err error
 
-	emailAddress, err = mail.ParseAddress(*userAuth)
+	emailAddress, err = mail.ParseAddress(normalUserAuth)
 	if err == nil {
 		// fixme trim out common alias like gmail + and domains
 		normalEmailAddress := emailAddress.Address
@@ -49,7 +53,7 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 		return &normalEmailAddress, UserAuthTypeEmail
 	}
 
-	phoneNumber, err = phonenumbers.Parse(*userAuth, "US")
+	phoneNumber, err = phonenumbers.Parse(normalUserAuth, "US")
 	if err == nil && phonenumbers.IsPossibleNumber(phoneNumber) {
 		normalPhoneNumber := phonenumbers.Format(phoneNumber, phonenumbers.INTERNATIONAL)
 		bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)

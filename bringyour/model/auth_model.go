@@ -1235,14 +1235,13 @@ func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 }
 
 
-func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, authType AuthType, returnErr error) {
+func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, returnErr error) {
 	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT
-					network_user.user_auth,
-					network_user.auth_type
+					network_user.user_auth
 				FROM network
 				INNER JOIN network_user ON network_user.user_id = network.admin_user_id
 				WHERE network.network_id = $1
@@ -1252,11 +1251,9 @@ func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, 
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
 				var userAuth_ *string
-				var authType_ *string
-				bringyour.Raise(result.Scan(&userAuth, &authType))
-				if userAuth_ != nil && authType_ != nil {
+				bringyour.Raise(result.Scan(&userAuth_))
+				if userAuth_ != nil {
 					userAuth = *userAuth_
-					authType = *authType_
 				} else {
 					// jwt auth
 					returnErr = errors.New("Missing user auth.")
