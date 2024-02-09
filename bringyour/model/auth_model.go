@@ -1001,6 +1001,58 @@ func AuthCodeCreate(
 }
 
 
+func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCount int) {
+	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					auth_code_id
+				FROM auth_code
+				WHERE
+					NOT active OR
+					end_time < $1
+			`,
+			minTime,
+		)
+		authCodeIds := []bringyour.Id{}
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var authCodeId bringyour.Id
+				bringyour.Raise(result.Scan(&authCodeId))
+			}
+		})
+
+		authCodeCount = len(authCodeIds)
+		if len(authCodeIds) == 0 {
+			return
+		}
+
+		bringyour.CreateTempTableInTx(ctx, tx, "temp_auth_code_id(auth_code_id uuid)", authCodeIds...)
+
+		tx.Exec(
+			ctx,
+			`
+			DELETE FROM auth_code
+			USING temp_auth_code_id
+			WHERE auth_code.auth_code_id = temp_auth_code_id.auth_code_id
+			`,
+		)
+
+		tx.Exec(
+			ctx,
+			`
+			DELETE FROM auth_code_session
+			USING temp_auth_code_id
+			WHERE auth_code_session.auth_code_id = temp_auth_code_id.auth_code_id
+			`,
+		)
+	}))
+
+	return
+}
+
+
 type AuthCodeLoginArgs struct {
 	AuthCode string `json:"auth_code,omitempty"`
 }

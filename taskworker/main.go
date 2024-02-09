@@ -96,6 +96,7 @@ func initTasks(ctx context.Context) {
 
         work.ScheduleWarmEmail(clientSession, tx)
         work.ScheduleExportStats(clientSession, tx)
+        work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
         ScheduleTaskCleanup(clientSession, tx)
     }))
 }
@@ -107,6 +108,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
     taskWorker.AddTargets(
         task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
         task.NewTaskTargetWithPost(work.ExportStats, work.ExportStatsPost),
+        task.NewTaskTargetWithPost(work.RemoveExpiredAuthCodes, work.RemoveExpiredAuthCodesPost),
         task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
     )
 

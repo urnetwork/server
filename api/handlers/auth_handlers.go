@@ -20,7 +20,7 @@ func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
 
 
 func AuthVerify(w http.ResponseWriter, r *http.Request) {
-    router.WrapWithInputNoAuth(model.AuthVerify, w, r)
+    router.WrapWithInputNoAuth(controller.AuthVerify, w, r)
 }
 
 
