@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"regexp"
+	"io"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -15,6 +16,9 @@ import (
 )
 
 
+type ImplFunction[R any] func(*session.ClientSession)(R, error)
+type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession)(R, error)
+type BodyFormatFunction func(*http.Request)(io.Reader, error)
 type FormatFunction[R any] func(result R)(complete bool)
 
 
@@ -35,7 +39,7 @@ func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
 
 
 func wrap[R any](
-	impl func(*session.ClientSession)(R, error),
+	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
@@ -49,6 +53,7 @@ func wrap[R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(session)
 	if err != nil {
+		bringyour.Logger().Printf("Impl error: %s\n", err)
 		RaiseHttpError(err, w)
         return
 	}
@@ -65,7 +70,7 @@ func wrap[R any](
 
 // guarantees NetworkId+UserId
 func WrapRequireAuth[R any](
-	impl func(*session.ClientSession)(R, error),
+	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
@@ -87,7 +92,7 @@ func WrapRequireAuth[R any](
 
 // guarantees NetworkId+UserId+ClientId
 func WrapRequireClient[R any](
-	impl func(*session.ClientSession)(R, error),
+	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
@@ -108,7 +113,7 @@ func WrapRequireClient[R any](
 
 
 func WrapNoAuth[R any](
-	impl func(*session.ClientSession)(R, error),
+	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
@@ -126,15 +131,23 @@ func WrapNoAuth[R any](
 
 // wraps an implementation function using json in/out
 func wrapWithInput[T any, R any](
-	impl func(T, *session.ClientSession)(R, error),
+	bodyFormatter BodyFormatFunction,
+	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
+	body, err := bodyFormatter(req)
+	if err != nil {
+    	bringyour.Logger().Printf("Body formatter error %s\n", err)
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
 	var input T
 
 	bringyour.Logger().Printf("Decoding request\n")
-	err := json.NewDecoder(req.Body).Decode(&input)
+	err = json.NewDecoder(body).Decode(&input)
     if err != nil {
     	bringyour.Logger().Printf("Decoding error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
@@ -150,6 +163,7 @@ func wrapWithInput[T any, R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
+		bringyour.Logger().Printf("Impl error: %s\n", err)
 		RaiseHttpError(err, w)
         return
 	}
@@ -166,12 +180,30 @@ func wrapWithInput[T any, R any](
 
 // guarantees NetworkId+UserId
 func WrapWithInputRequireAuth[T any, R any](
-	impl func(T, *session.ClientSession)(R, error),
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	WrapWithInputBodyFormatterRequireAuth(
+		RequestBodyFormatter,
+		impl,
+		w,
+		req,
+		formatters...,
+	)
+}
+
+
+func WrapWithInputBodyFormatterRequireAuth[T any, R any](
+	bodyFormatter BodyFormatFunction,
+	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
+		bodyFormatter,
 		func (arg T, session *session.ClientSession)(R, error) {
 			if err := session.Auth(req); err != nil {
 				var empty R
@@ -186,14 +218,32 @@ func WrapWithInputRequireAuth[T any, R any](
 }
 
 
-// guarantees NetworkId+UserId+ClientId
 func WrapWithInputRequireClient[T any, R any](
-	impl func(T, *session.ClientSession)(R, error),
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	WrapWithInputBodyFormatterRequireClient(
+		RequestBodyFormatter,
+		impl,
+		w,
+		req,
+		formatters...,
+	)
+}
+
+
+// guarantees NetworkId+UserId+ClientId
+func WrapWithInputBodyFormatterRequireClient[T any, R any](
+	bodyFormatter BodyFormatFunction,
+	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
+		bodyFormatter,
 		func (arg T, session *session.ClientSession)(R, error) {
 			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
@@ -209,12 +259,30 @@ func WrapWithInputRequireClient[T any, R any](
 
 
 func WrapWithInputNoAuth[T any, R any](
-	impl func(T, *session.ClientSession)(R, error),
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	WrapWithInputBodyFormatterNoAuth(
+		RequestBodyFormatter,
+		impl,
+		w,
+		req,
+		formatters...,
+	)
+}
+
+
+func WrapWithInputBodyFormatterNoAuth[T any, R any](
+	bodyFormatter BodyFormatFunction,
+	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
 	wrapWithInput(
+		bodyFormatter,
 		func (arg T, session *session.ClientSession)(R, error) {
 			return impl(arg, session)
 		},
@@ -238,5 +306,10 @@ func RaiseHttpError(err error, w http.ResponseWriter) {
 	}
 
 	http.Error(w, message, statusCode)
+}
+
+
+func RequestBodyFormatter(req *http.Request) (io.Reader, error) {
+	return req.Body, nil
 }
 

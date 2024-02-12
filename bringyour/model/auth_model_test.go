@@ -29,6 +29,38 @@ func TestGetUserAuth(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 })}
 
 
+func TestResetPassword(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	ctx := context.Background()
+
+	networkId := bringyour.NewId()
+	userId := bringyour.NewId()
+	networkName := "test"
+
+	testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+	byJwt := jwt.NewByJwt(networkId, userId, networkName)
+	clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+	passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
+		AuthPasswordResetCreateCodeArgs{
+			UserAuth: testingUserAuth,
+		},
+		clientSession,
+	)
+	assert.Equal(t, err, nil)
+
+	_, err = AuthPasswordSet(
+		AuthPasswordSetArgs{
+			ResetCode: *passwordResetCreateCodeResult.ResetCode,
+			Password: "testagain",
+		},
+		clientSession,
+	)
+	assert.Equal(t, err, nil)
+	
+})}
+
+
 func TestAuthCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx := context.Background()
 

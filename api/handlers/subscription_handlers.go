@@ -86,6 +86,7 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	out := &bytes.Buffer{}
 	json.Compact(out, []byte(body))
 
+	bringyour.Logger().Printf("Play webhook headers: %s\n", r.Header)
 	bringyour.Logger().Printf("Play webhook body: %s\n", out.Bytes())
 
 	w.Header().Set("Content-Type", "application/json")

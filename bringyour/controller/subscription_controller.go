@@ -101,3 +101,20 @@ func notifyBalanceCode(balanceCodeId bringyour.Id) {
 
 }
 
+
+/*
+func VerifyStripeBody(req *http.Request)(io.Reader, error) {
+
+}
+
+
+func VerifyCoinbaseBody(req *http.Request)(io.Reader, error) {
+	
+}
+
+
+func VerifyPlayBody(req *http.Request)(io.Reader, error) {
+	
+}
+*/
+

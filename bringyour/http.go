@@ -119,6 +119,20 @@ func HttpGetRequireStatusOk[R any](
 }
 
 
+func HttpGetRawRequireStatusOk(
+	url string,
+	headerCallback HeaderCallback,
+) ([]byte, error) {
+	return HttpGet[[]byte](
+		url,
+		headerCallback,
+		HttpResponseRequireStatusOk[[]byte](func(response *http.Response, responseBodyBytes []byte) ([]byte, error) {
+			return responseBodyBytes, nil
+		}),
+	)
+}
+
+
 func HttpGetBasic[R any](
 	url string,
 ) (map[string]any, error) {
@@ -160,7 +174,6 @@ func HttpGet[R any](
 
     return responseCallback(response, responseBodyBytes)
 }
-
 
 
 func NoCustomHeaders(header http.Header) {
