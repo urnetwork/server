@@ -24,6 +24,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.0 // indirect
 	github.com/redis/go-redis/v9 v9.0.3 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
+	github.com/stripe/stripe-go/v76 v76.16.0 // indirect
 	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	golang.org/x/crypto v0.14.0 // indirect
 	golang.org/x/exp v0.0.0-20230419192730-864b3d6c5c2c // indirect

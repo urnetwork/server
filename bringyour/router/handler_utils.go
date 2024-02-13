@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"regexp"
 	"io"
+	"bytes"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -146,8 +147,15 @@ func wrapWithInput[T any, R any](
 
 	var input T
 
-	bringyour.Logger().Printf("Decoding request\n")
-	err = json.NewDecoder(body).Decode(&input)
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		bringyour.Logger().Printf("Read error %s\n", err)
+        http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+
+	bringyour.Logger().Printf("Decoding request (%T): %s\n", input, string(bodyBytes))
+
+	err = json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&input)
     if err != nil {
     	bringyour.Logger().Printf("Decoding error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)

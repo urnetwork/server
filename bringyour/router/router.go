@@ -62,8 +62,12 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				defer func() {
 					if err := recover(); err != nil {
 						// suppress the error
-						debug.PrintStack()
-						bringyour.Logger().Printf("Unhandled error from route %s (%s)\n", route.String(), err)
+						bringyour.Logger().Printf(
+							"Unhandled error from route %s (%s): %s\n",
+							route.String(),
+							err,
+							string(debug.Stack()),
+						)
 						http.Error(w, "Error. Please visit support.bringyour.com for help.", http.StatusInternalServerError)
 					}
 				}()

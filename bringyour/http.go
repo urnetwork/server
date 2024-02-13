@@ -50,12 +50,28 @@ func HttpPostRequireStatusOk[R any](
 	)
 }
 
+func HttpPostRawRequireStatusOk(
+	url string,
+	requestBody []byte,
+	headerCallback HeaderCallback,
+) ([]byte, error) {
+	return HttpPost[[]byte](
+		url,
+		requestBody,
+		headerCallback,
+		HttpResponseRequireStatusOk[[]byte](func(response *http.Response, responseBodyBytes []byte) ([]byte, error) {
+			return responseBodyBytes, nil
+		}),
+	)
+}
+
+
 
 func HttpPostBasic[R any](
 	url string,
 	requestBody any,
-) (map[string]any, error) {
-	return HttpPost(url, requestBody, NoCustomHeaders, ResponseJsonObject)
+) (R, error) {
+	return HttpPost(url, requestBody, NoCustomHeaders, ResponseJsonObject[R])
 }
 
 
@@ -135,8 +151,8 @@ func HttpGetRawRequireStatusOk(
 
 func HttpGetBasic[R any](
 	url string,
-) (map[string]any, error) {
-	return HttpGet(url, NoCustomHeaders, ResponseJsonObject)
+) (R, error) {
+	return HttpGet(url, NoCustomHeaders, ResponseJsonObject[R])
 }
 
 
@@ -181,13 +197,13 @@ func NoCustomHeaders(header http.Header) {
 }
 
 
-func ResponseJsonObject(response *http.Response, responseBodyBytes []byte) (map[string]any, error) {
-	obj := map[string]any{}
-	err := json.Unmarshal(responseBodyBytes, &obj)
+func ResponseJsonObject[R any](response *http.Response, responseBodyBytes []byte) (R, error) {
+	var result R
+	err := json.Unmarshal(responseBodyBytes, &result)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	return obj, nil
+	return result, nil
 }
 
 

@@ -112,6 +112,15 @@ func (self *SubscriptionTransferBalanceCodeTemplate) Name() string {
 }
 
 
+type SubscriptionEndedTemplate struct {
+    BaseTemplate
+}
+
+func (self *SubscriptionEndedTemplate) Name() string {
+    return "subscription_ended"
+}
+
+
 func SendAccountMessageTemplate(userAuth string, template Template) error {
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 

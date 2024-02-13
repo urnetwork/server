@@ -1325,5 +1325,29 @@ var migrations = []any{
         WHERE
             user_auth IS NOT NULL
     `),
+
+    newSqlMigration(`
+        CREATE TABLE subscription_payment (
+            subscription_payment_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            user_id uuid NOT NULL,
+            create_time timestamp NOT NULL default now(),
+
+            PRIMARY KEY(payment_id),
+        )
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX subscription_payment_network_id_create_time ON subscription_payment (network_id, create_time)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE transfer_balance ADD COLUMN purchase_token VARCHAR(1024) NULL
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX transfer_balance_purchase_token ON transfer_balance (purchase_token, end_time, start_time, balance_id)
+    `),
+
 }
 

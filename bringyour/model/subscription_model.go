@@ -9,6 +9,7 @@ import (
     // "crypto/rand"
     // "encoding/hex"
     // "slices"
+    "errors"
 
     // "golang.org/x/exp/maps"
 
@@ -43,6 +44,8 @@ var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 const WalletPayoutTimeout = 15 * 24 * time.Hour
 
 const ProviderRevenueShare = 0.5
+
+const MaxSubscriptionPaymentIdsPerHour = 5
 
 
 type TransferPair struct {
@@ -398,6 +401,7 @@ func CheckBalanceCode(
 }
 
 
+// FIXME add payment_token
 type TransferBalance struct {
     BalanceId bringyour.Id `json:"balance_id"`
     NetworkId bringyour.Id `json:"network_id"`
@@ -407,6 +411,7 @@ type TransferBalance struct {
     // how much money the platform made after subtracting fees
     NetRevenue NanoCents `json:"net_revenue_nano_cents"`
     BalanceByteCount ByteCount `json:"balance_byte_count"`
+    PurchaseToken string `json:"purchase_token,omitempty"`
 }
 
 
@@ -470,22 +475,62 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                     start_time,
                     end_time,
                     start_balance_byte_count,
+                    balance_byte_count,
                     net_revenue_nano_cents,
-                    balance_byte_count
+                    purchase_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
             balanceId,
             transferBalance.NetworkId,
             transferBalance.StartTime,
             transferBalance.EndTime,
             transferBalance.StartBalanceByteCount,
-            transferBalance.NetRevenue,
             transferBalance.BalanceByteCount,
+            transferBalance.NetRevenue,
+            transferBalance.PurchaseToken,
         ))
 
         transferBalance.BalanceId = balanceId
     }))
+}
+
+
+
+
+// TODO GetLastTransferData returns the transfer data with
+// 1. the given purhase record
+// 2. that starte before and ends after sub.ExpiryTime
+// TODO with the max end time
+// TODO if none, return err
+func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    balance_id
+                FROM transfer_balance
+                WHERE
+                    purchase_token = $1 AND
+                    $2 < end_time AND
+                    start_time <= $2
+                ORDER BY end_time DESC
+                LIMIT 1
+            `,
+            purchaseToken,
+            expiryTime,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&balanceId))
+            } else {
+                returnErr = errors.New("Overlapping transfer balance not found.")
+            }
+        })
+    }))
+
+    return
 }
 
 
@@ -2022,6 +2067,102 @@ func GetNetPendingPayout(ctx context.Context, networkId bringyour.Id) NanoCents 
 
     // FIXME
     return 0
+}
+
+
+type SubscriptionCreatePaymentIdArgs struct {
+}
+
+type SubscriptionCreatePaymentIdResult struct {
+    SubscriptionPaymentId bringyour.Id
+    Error *SubscriptionCreatePaymentIdError
+}
+
+type SubscriptionCreatePaymentIdError struct {
+    Message string
+}
+
+func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArgs, clientSession *session.ClientSession) (createPaymentIdResult *SubscriptionCreatePaymentIdResult, returnErr error) {
+    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            clientSession.Ctx,
+            `
+            SELECT
+                COUNT(subscription_payment_id) AS subscription_payment_id_count
+            FROM subscription_payment_id
+            WHERE
+                network_id = $1 AND
+                $2 <= create_time
+            `,
+            clientSession.ByJwt.NetworkId,
+            time.Now().Add(-1 * time.Hour),
+        )
+
+        limitExceeded := false
+
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                var count int
+                bringyour.Raise(result.Scan(&count))
+                if MaxSubscriptionPaymentIdsPerHour <= count {
+                    limitExceeded = true
+                }
+            }
+        })
+
+        if limitExceeded {
+            createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
+                Error: &SubscriptionCreatePaymentIdError{
+                    Message: "Too many subscription payments in the last hour. Try again later.",
+                },
+            }
+            return
+        }
+
+        subscriptionPaymentId := bringyour.NewId()
+
+        tx.Exec(
+            clientSession.Ctx,
+            `
+            INSERT INTO subscription_payment (
+                subscription_payment_id,
+                network_id,
+                user_id
+            ) VALUES ($1, $2, $3)
+            `,
+            subscriptionPaymentId,
+            clientSession.ByJwt.NetworkId,
+            clientSession.ByJwt.UserId,
+        )
+
+        createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
+            SubscriptionPaymentId: subscriptionPaymentId,
+        }
+    }))
+
+    return
+}
+
+
+func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPaymentId bringyour.Id) (networkId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+            SELECT network_id FROM subscription_payment
+            WHERE subscription_payment_id = $1
+            `,
+            subscriptionPaymentId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&networkId))
+            } else {
+                returnErr = errors.New("Invalid subscription payment.")
+            }
+        })
+    }))
+    return
 }
 
 

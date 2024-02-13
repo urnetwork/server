@@ -77,8 +77,7 @@ func Raise(err error) {
 func HandleError(do func(), handlers ...func()) {
     defer func() {
         if err := recover(); err != nil {
-            Logger().Printf("Unexpected error (%s)\n", err)
-            debug.PrintStack()
+            Logger().Printf("Unexpected error (%s): %s\n", err, string(debug.Stack()))
             for _, handler := range handlers {
                 handler()
             }
