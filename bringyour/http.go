@@ -88,8 +88,6 @@ func HttpPost[R any](
         return empty, err
     }
 
-    fmt.Printf("POST BODY %s\n", string(requestBodyBytes))
-
     request, err := http.NewRequest(
         "POST",
         url,
@@ -115,8 +113,6 @@ func HttpPost[R any](
     if err != nil {
         return empty, err
     }
-
-    fmt.Printf("POST RESPONSE BODY %s\n", string(responseBodyBytes))
 
     return responseCallback(response, responseBodyBytes)
 }
@@ -163,8 +159,6 @@ func HttpGet[R any](
 ) (R, error) {
 	var empty R
 
-	fmt.Printf("GET %s\n", url)
-
     request, err := http.NewRequest("GET", url, nil)
     if err != nil {
     	return empty, err
@@ -185,8 +179,6 @@ func HttpGet[R any](
     if err != nil {
         return empty, err
     }
-
-    fmt.Printf("GET RESPONSE BODY %s\n", string(responseBodyBytes))
 
     return responseCallback(response, responseBodyBytes)
 }

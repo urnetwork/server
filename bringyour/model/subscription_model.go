@@ -2089,7 +2089,7 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
             `
             SELECT
                 COUNT(subscription_payment_id) AS subscription_payment_id_count
-            FROM subscription_payment_id
+            FROM subscription_payment
             WHERE
                 network_id = $1 AND
                 $2 <= create_time

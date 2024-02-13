@@ -30,7 +30,8 @@ func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
 	        http.Error(w, err.Error(), http.StatusInternalServerError)
 	        return true
 	    }
-	    bringyour.Logger().Printf("Response %s\n", responseJson)
+
+	    bringyour.Logger().Printf("Response (%T): %s\n", result, responseJson)
 	    w.Header().Set("Content-Type", "application/json")
 	    w.Write(responseJson)
 	    return true

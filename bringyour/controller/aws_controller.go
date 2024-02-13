@@ -103,7 +103,7 @@ func (self *NetworkWelcomeTemplate) Name() string {
 
 
 type SubscriptionTransferBalanceCodeTemplate struct {
-    Code string
+    Secret string
     BaseTemplate
 }
 

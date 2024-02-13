@@ -307,3 +307,28 @@ func TestBalanceCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, redeemResult0.Error, nil)
     assert.Equal(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
 })}
+
+
+func TestSubscriptionPaymentId(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+
+    userIdA := bringyour.NewId()
+
+    clientSessionA := session.Testing_CreateClientSession(
+        ctx,
+        jwt.NewByJwt(networkIdA, userIdA, "a"),
+    )
+
+    Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+
+
+    result, err := SubscriptionCreatePaymentId(&SubscriptionCreatePaymentIdArgs{}, clientSessionA)
+    assert.Equal(t, err, nil)
+    assert.NotEqual(t, result, nil)
+
+    resultNetworkId, err := SubscriptionGetNetworkIdForPaymentId(ctx, result.SubscriptionPaymentId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, networkIdA, resultNetworkId)
+})}

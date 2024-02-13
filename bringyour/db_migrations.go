@@ -1333,7 +1333,7 @@ var migrations = []any{
             user_id uuid NOT NULL,
             create_time timestamp NOT NULL default now(),
 
-            PRIMARY KEY(payment_id),
+            PRIMARY KEY(subscription_payment_id)
         )
     `),
 

@@ -75,6 +75,7 @@ Options:
         router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
         router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
         router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
+        router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
         router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
         router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
         router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),

@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"strings"
 	"errors"
+	"sync"
 
 	stripewebhook "github.com/stripe/stripe-go/v76/webhook"
 
@@ -29,17 +30,67 @@ import (
 const SubscriptionGracePeriod = 24 * time.Hour
 
 
-func stripeSecret() string {
-	return ""
+
+var stripeWebhookSigningSecret = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
+	return c["webhook"].(map[string]any)["signing_secret"].(string)
+})
+
+var stripeApiToken = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
+	return c["api"].(map[string]any)["token"].(string)
+})
+
+func stripeSkus() map[string]*Sku {
+	playSubscriptionFeeFraction := 0.3
+	// FIXME read from json
+	return map[string]*Sku{
+		// 300GiB
+		"prod_OlUgT5brBfOBiT": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(300) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+		// 1TiB
+		"prod_Om2V4ElmxY5Civ": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+		// 2Tib
+		"prod_Om2XiaUQlgzawz": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(2) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+	}
 }
 
-func coinbaseSecret() string {
-	return ""
+var coinbaseWebhookSigningSecret = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	return c["webhook"].(map[string]any)["signing_secret"].(string)
+})
+
+func coinbaseSkus() map[string]*Sku {
+	playSubscriptionFeeFraction := 0.3
+	// FIXME read from json
+	return map[string]*Sku{
+		"300GiB": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(300) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+		"1TiB": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+		"2TiB": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(2) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
+		},
+	}
 }
 
-func playPublisherEmail() string {
-	return "service-338638865390@gcp-sa-pubsub.iam.gserviceaccount.com"
-}
+var playPublisherEmail = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["webhook"].(map[string]any)["publisher_email"].(string)
+})
 
 
 type Sku struct {
@@ -147,6 +198,7 @@ func BalanceCodeNotify() {
 func notifyBalanceCode(balanceCodeId bringyour.Id) {
 
 }
+
 
 
 
@@ -281,11 +333,92 @@ func notifyBalanceCode(balanceCodeId bringyour.Id) {
 
 
 type StripeWebhookArgs struct {
+	Id string `json:"id"`
+	Type string `json:"data"`
+	Data *StripeEventData `json:"data"`
+}
 
+type StripeEventData struct {
+	Object *StripeEventDataObject `json:"object"`
+}
+
+type StripeEventDataObject struct {
+	Id string `json:"id"`
+	AmountTotal int `json:"amount_total"`
+	CustomerDetails *StripeEventDataObjectCustomerDetails `json:"customer_details"`
+	PaymentStatus string `json:"payment_status"`
+}
+
+type StripeEventDataObjectCustomerDetails struct {
+	Email string `json:"email,omitempty"`
+	Phone string `json:"phone,omitempty"`
 }
 
 type StripeWebhookResult struct {
 
+}
+
+
+/*
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "li_1Ogy3xEqqTaiwAGPfugdUKei",
+      "object": "item",
+      "amount_discount": 0,
+      "amount_subtotal": 500,
+      "amount_tax": 0,
+      "amount_total": 500,
+      "currency": "usd",
+      "description": "300Gib Global Data Pack",
+      "price": {
+        "id": "price_1NzPpJEqqTaiwAGPl0uHkOKK",
+        "object": "price",
+        "active": true,
+        "billing_scheme": "per_unit",
+        "created": 1696882397,
+        "currency": "usd",
+        "custom_unit_amount": null,
+        "livemode": true,
+        "lookup_key": null,
+        "metadata": {},
+        "nickname": null,
+        "product": "prod_OlUgT5brBfOBiT",
+        "recurring": null,
+        "tax_behavior": "unspecified",
+        "tiers_mode": null,
+        "transform_quantity": null,
+        "type": "one_time",
+        "unit_amount": 500,
+        "unit_amount_decimal": "500"
+      },
+      "quantity": 1
+    }
+  ],
+  "has_more": false,
+  "url": "/v1/checkout/sessions/cs_live_a1Cp5DxxhmxF2wmXbSfRvvMpX9st6AmNZghLPvzt2gJTFBZDHyFveJbLRT/line_items"
+}
+*/
+
+
+type StripeLineItems struct {
+	Data []*StripeLineItem `json:"data"`
+}
+
+type StripeLineItem struct {
+	Id string `json:"id"`
+	AmountTotal int `json:"amount_total"`
+	Currency string `json:"currency"`
+	Description string `json:"description"`
+	Price *StripeLineItemProduct `json:"price"`
+	Quantity int `json:"quantity"`
+}
+
+type StripeLineItemProduct struct {
+	Id string `json:"id"`
+	Product string `json:"product"`
+	UnitAmount int `json:"unit_amount"`
 }
 
 // FIXME need to make a second call to get the line items for the order
@@ -298,33 +431,65 @@ func StripeWebhook(
 	stripeWebhook *StripeWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+	if stripeWebhook.Type == "checkout.session.completed" {
+		stripeSessionId := stripeWebhook.Data.Object.Id
 
-	/*
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
+		url := fmt.Sprintf(
+			"https://api.stripe.com/v1/checkout/sessions/%s/line_items",
+			stripeSessionId,
+		)
+		lineItems, err := bringyour.HttpGetRequireStatusOk[*StripeLineItems](
+			url,
+			func (header http.Header) {
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+			},
+			bringyour.ResponseJsonObject[*StripeLineItems],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		purchaseEmail := stripeWebhook.Data.Object.CustomerDetails.Email
+		if purchaseEmail == "" {
+			return nil, errors.New("Missing purchase email to send balance code.")
+		}
+
+		skus := stripeSkus()
+		for _, lineItem := range lineItems.Data {
+			stripeSku := lineItem.Price.Product
+			if sku, ok := skus[stripeSku]; ok {
+				stripeItemJsonBytes, err := json.Marshal(lineItem)
+				if err != nil {
+					return nil, err
+				}
+
+				netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * float64(lineItem.AmountTotal) / 100.0)
+				err = CreateBalanceCode(
+					clientSession.Ctx,
+					
+					sku.BalanceByteCount,
+					netRevenue,
+					stripeSessionId,
+					string(stripeItemJsonBytes),
+					purchaseEmail,
+				)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				return nil, fmt.Errorf("Stripe sku not found: %s", stripeSku)
+			}
+		}
 	}
+	// else ignore the event
 
-	out := &bytes.Buffer{}
-	json.Compact(out, []byte(body))
-
-	bringyour.Logger().Printf("Stripe webhook body: %s\n", out.Bytes())
-
-	w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte("{}"))
-
-    _, err := stripewebhook.ConstructEvent(payload, r.Header.Get("Stripe-Signature"), secret)
-    // if err, the signature did not match
-
-    // verify purchase
-    // CreateDataPack sends an email with the details
-    controller.CreateDataPack(balanceByteCount, email)
-    */
-
-    return nil, nil
-
+	return &StripeWebhookResult{}, nil
 }
+
+
+
+
+
 
 
 
@@ -575,8 +740,49 @@ func StripeWebhook(
 
 
 type CoinbaseWebhookArgs struct {
-
+	Event *CoinbaseEvent
 }
+
+
+type CoinbaseEvent struct {
+	Id string
+	Type string
+	Data *CoinbaseEventData
+}
+
+type CoinbaseEventData struct {
+	Id string
+	Name string
+	Description string
+	Payments []*CoinbaseEventDataPayment
+	Checkout *CoinbaseEventDataCheckout
+	Metadata *CoinbaseEventDataMetadata
+}
+
+type CoinbaseEventDataCheckout struct {
+	Id string
+}
+
+type CoinbaseEventDataMetadata struct {
+	Email string
+}
+
+
+type CoinbaseEventDataPayment struct {
+	Net *CoinbaseEventDataPaymentNet
+}
+
+type CoinbaseEventDataPaymentNet struct {
+	Local *CoinbaseEventDataPaymentAmount
+	Crypto *CoinbaseEventDataPaymentAmount
+}
+
+type CoinbaseEventDataPaymentAmount struct {
+	Amount string
+	Current string
+}
+
+
 
 type CoinbaseWebhookResult struct {
 
@@ -590,31 +796,79 @@ func CoinbaseWebhook(
 	clientSession *session.ClientSession,
 ) (*CoinbaseWebhookResult, error) {
 
-/*	
-	body, err := io.ReadAll(r.Body)
+	if coinbaseWebhook.Event.Type == "charge:pending" {
+		skuName := coinbaseWebhook.Event.Data.Name
+		skus := coinbaseSkus()
+		if sku, ok := skus[skuName]; ok {
+			purchaseEmail := coinbaseWebhook.Event.Data.Metadata.Email
+			if purchaseEmail == "" {
+				return nil, errors.New("Missing purchase email to send balance code.")
+			}
+
+			coinbaseDataJsonBytes, err := json.Marshal(coinbaseWebhook.Event.Data)
+			if err != nil {
+				return nil, err
+			}
+
+			paymentUsd, err := strconv.ParseFloat(coinbaseWebhook.Event.Data.Payments[0].Net.Local.Amount, 64)
+			if err != nil {
+				return nil, err
+			}
+			netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * paymentUsd)
+
+			err = CreateBalanceCode(
+				clientSession.Ctx,
+				sku.BalanceByteCount,
+				netRevenue,
+				coinbaseWebhook.Event.Data.Id,
+				string(coinbaseDataJsonBytes),
+				purchaseEmail,
+			)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, fmt.Errorf("Coinbase sku not found: %s", skuName)
+		}
+
+	}
+	// else ignore
+
+	return &CoinbaseWebhookResult{}, nil
+}
+
+
+
+
+func CreateBalanceCode(
+	ctx context.Context,
+	balanceByteCount model.ByteCount,
+	netRevenue model.NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+) error {
+	balanceCode, err := model.CreateBalanceCode(
+		ctx,
+		balanceByteCount,
+		netRevenue,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
+		return err
 	}
 
-	out := &bytes.Buffer{}
-	json.Compact(out, []byte(body))
-
-	bringyour.Logger().Printf("Coinbase webhook body: %s\n", out.Bytes())
-
-	w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte("{}"))
-
-    err := coinbaseSignature(payload, r.Header.Get("X-CC-Webhook-Signature"), secret)
-
-    // verify purchase
-    // CreateDataPack sends an email with the details
-    secret := controller.CreateTransferBalanceCode(balanceByteCount, email)
-    controller.SendTransferBalancePurchaseEmail()*/
-
-    return nil, nil
-
+	return SendAccountMessageTemplate(
+        purchaseEmail,
+        &SubscriptionTransferBalanceCodeTemplate{
+        	Secret: balanceCode.Secret,
+        },
+    )
 }
+
+
 
 
 /*
@@ -753,7 +1007,7 @@ func PlayWebhook(
 			if sub.PaymentState == 1 && sub.AcknowledgementState == 0 {
 				// Aknowledge
 				url := fmt.Sprintf(
-					"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{packageName}/purchases/subscriptions/{subscriptionId}/tokens/{token}:acknowledge",
+					"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
 					rtdnMessage.PackageName,
 					rtdnMessage.SubscriptionNotification.SubscriptionId,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
@@ -845,7 +1099,8 @@ func PlaySubscriptionRenewal(
 
 	if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, expiryTime); err != nil {
 		skus := playSkus()
-		if sku, ok := skus[playSubscriptionRenewal.SubscriptionId]; ok {
+		skuName := playSubscriptionRenewal.SubscriptionId
+		if sku, ok := skus[skuName]; ok {
 			transferBalance := &model.TransferBalance{
 				NetworkId: playSubscriptionRenewal.NetworkId,
 				StartTime: startTime,
@@ -860,7 +1115,7 @@ func PlaySubscriptionRenewal(
 				transferBalance,
 			)
 		} else {
-			// FIXME error product id not found
+			return nil, fmt.Errorf("Play sku not found: %s", skuName)
 		}
 
 		return &PlaySubscriptionRenewalResult{
@@ -919,7 +1174,7 @@ func VerifyStripeBody(req *http.Request)(io.Reader, error) {
 		return nil, err
 	}
 
-	_, err = stripewebhook.ConstructEvent(bodyBytes, req.Header.Get("Stripe-Signature"), stripeSecret())
+	_, err = stripewebhook.ConstructEvent(bodyBytes, req.Header.Get("Stripe-Signature"), stripeWebhookSigningSecret())
 	if err != nil {
 		return nil, err
 	}
@@ -934,7 +1189,7 @@ func VerifyCoinbaseBody(req *http.Request)(io.Reader, error) {
 		return nil, err
 	}
 
-	err = coinbaseSignature(bodyBytes, req.Header.Get("X-CC-Webhook-Signature"), coinbaseSecret())
+	err = coinbaseSignature(bodyBytes, req.Header.Get("X-CC-Webhook-Signature"), coinbaseWebhookSigningSecret())
 	if err != nil {
 		return nil, err
 	}
