@@ -298,7 +298,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 				}
 				Logger().Printf("Transient error, retry (%v)\n", pgErr)
 				if retryDebugTime.Before(time.Now()) {
-					Logger().Printf("%s\n", string(debug.Stack()))
+					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
 				}
 				continue
 			}
@@ -400,7 +400,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				}
 				Logger().Printf("Transient error, retry (%v)\n", pgErr)
 				if retryDebugTime.Before(time.Now()) {
-					Logger().Printf("%s\n", string(debug.Stack()))
+					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
 				}
 				continue
 			}
@@ -417,7 +417,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				}
 				Logger().Printf("Commit error, retry (%v)\n", commitErr)
 				if retryDebugTime.Before(time.Now()) {
-					Logger().Printf("%s\n", string(debug.Stack()))
+					Logger().Printf("%s\n", ErrorJson(commitErr, debug.Stack()))
 				}
 				continue
 			}

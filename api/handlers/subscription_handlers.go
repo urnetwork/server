@@ -19,7 +19,7 @@ func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
 
 
 func StripeWebhook(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputBodyFormatterRequireAuth(
+	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyStripeBody,
 		controller.StripeWebhook,
 		w,
@@ -29,7 +29,7 @@ func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 
 
 func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputBodyFormatterRequireAuth(
+	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyCoinbaseBody,
 		controller.CoinbaseWebhook,
 		w,
@@ -39,7 +39,7 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputBodyFormatterRequireAuth(
+	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyPlayBody,
 		controller.PlayWebhook,
 		w,

@@ -1,7 +1,7 @@
 
-{{.Code}}
+{{.Secret}}
 
-You got 300Gib of data!
+You got {{.Balance}} of data!
 
 Add the data to your account at https://app.bringyour.com/account/add-balance?{{.Secret}} or visit https://app.bringyour.com/account/add-balance
 

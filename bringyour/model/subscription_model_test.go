@@ -15,6 +15,25 @@ import (
 )
 
 
+func TestByteCount(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0MiB")
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(5 * 1024 * 1024 * 1024 * 1024)), "5TiB")
+
+    count, err := ParseByteCount("5MiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(5 * 1024 * 1024))
+
+    count, err = ParseByteCount("1.7GiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(17 * 1024 * 1024 * 1024) / ByteCount(10))
+
+    count, err = ParseByteCount("13.1TiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(131 * 1024 * 1024 * 1024 * 1024) / ByteCount(10))
+    
+})}
+
+
 func TestNanoCents(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
     usd := float64(1.55)
     a := UsdToNanoCents(usd)

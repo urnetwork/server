@@ -104,11 +104,21 @@ func (self *NetworkWelcomeTemplate) Name() string {
 
 type SubscriptionTransferBalanceCodeTemplate struct {
     Secret string
+    BalanceByteCount model.ByteCount
     BaseTemplate
 }
 
 func (self *SubscriptionTransferBalanceCodeTemplate) Name() string {
     return "subscription_transfer_balance_code"
+}
+
+func (self *SubscriptionTransferBalanceCodeTemplate) Funcs(funcs texttemplate.FuncMap) {
+    self.BaseTemplate.Funcs(funcs)
+    funcs["Balance"] = self.Balance
+}
+
+func (self *SubscriptionTransferBalanceCodeTemplate) Balance() string {
+    return model.ByteCountHumanReadable(self.BalanceByteCount)
 }
 
 

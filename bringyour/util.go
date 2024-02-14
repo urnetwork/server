@@ -6,6 +6,8 @@ import (
     "fmt"
     "strconv"
     "runtime/debug"
+    "strings"
+    "encoding/json"
 )
 
 
@@ -77,7 +79,7 @@ func Raise(err error) {
 func HandleError(do func(), handlers ...func()) {
     defer func() {
         if err := recover(); err != nil {
-            Logger().Printf("Unexpected error (%s): %s\n", err, string(debug.Stack()))
+            Logger().Printf("Unexpected error: %s\n", ErrorJson(err, debug.Stack()))
             for _, handler := range handlers {
                 handler()
             }
@@ -122,6 +124,21 @@ func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
     err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
     return
 }
+
+
+func ErrorJson(err any, stack []byte) string {
+    stackLines := []string{}
+    for _, line := range strings.Split(string(stack), "\n") {
+        stackLines = append(stackLines, strings.TrimSpace(line))
+    }
+    errorJson, _ := json.Marshal(map[string]any{
+        "error": fmt.Sprintf("%s", err),
+        "stack": stackLines,
+    })
+    return string(errorJson)
+}
+
+
 
 
 

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"encoding/json"
 	// "reflect"
-	// "strings"
+	"strings"
 	"fmt"
 	"strconv"
 	"regexp"
@@ -141,7 +141,7 @@ func wrapWithInput[T any, R any](
 ) {
 	body, err := bodyFormatter(req)
 	if err != nil {
-    	bringyour.Logger().Printf("Body formatter error %s\n", err)
+    	bringyour.Logger().Printf("Request body formatter error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
@@ -150,15 +150,15 @@ func wrapWithInput[T any, R any](
 
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
-		bringyour.Logger().Printf("Read error %s\n", err)
+		bringyour.Logger().Printf("Request read error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 
-	bringyour.Logger().Printf("Decoding request (%T): %s\n", input, string(bodyBytes))
+	bringyour.Logger().Printf("Request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
 
 	err = json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&input)
     if err != nil {
-    	bringyour.Logger().Printf("Decoding error %s\n", err)
+    	bringyour.Logger().Printf("Request decoding error %s\n", err)
         http.Error(w, err.Error(), http.StatusBadRequest)
         return
     }
@@ -172,7 +172,7 @@ func wrapWithInput[T any, R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
-		bringyour.Logger().Printf("Impl error: %s\n", err)
+		bringyour.Logger().Printf("Request impl error: %s\n", err)
 		RaiseHttpError(err, w)
         return
 	}
