@@ -56,6 +56,12 @@ func newApiCallback[R any](callback func(result R, err error)) apiCallback[R] {
 	}
 }
 
+func newNoopApiCallback[R any]() apiCallback[R] {
+	return &simpleApiCallback[R]{
+		callback: func(result R, err error){},
+	}
+}
+
 func (self *simpleApiCallback[R]) Result(result R, err error) {
 	self.callback(result, err)
 }
@@ -651,7 +657,45 @@ func (self *BringYourApi) SubscriptionBalance(callback SubscriptionBalanceCallba
 }
 
 
-func post[R any](ctx context.Context, url string, args any, byJwt string, result R, callback apiCallback[R]) {
+
+type SubscriptionCreatePaymentIdCallback apiCallback[*SubscriptionCreatePaymentIdResult]
+
+type SubscriptionCreatePaymentIdArgs struct {
+}
+
+type SubscriptionCreatePaymentIdResult struct {
+	SubscriptionPaymentId *Id `json:"subscription_payment_id,omitempty"`
+	Error *SubscriptionCreatePaymentIdError `json:"error,omitempty"`
+}
+
+type SubscriptionCreatePaymentIdError struct {
+	Message string `json:"message"`
+}
+
+func (self *BringYourApi) SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArgs, callback SubscriptionCreatePaymentIdCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/subscription/create-payment-id", self.apiUrl),
+		createPaymentId,
+		self.byJwt,
+		&SubscriptionCreatePaymentIdResult{},
+		callback,
+	)
+}
+
+func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *SubscriptionCreatePaymentIdArgs) (*SubscriptionCreatePaymentIdResult, error) {
+	return post(
+		self.ctx,
+		fmt.Sprintf("%s/subscription/create-payment-id", self.apiUrl),
+		createPaymentId,
+		self.byJwt,
+		&SubscriptionCreatePaymentIdResult{},
+		newNoopApiCallback[*SubscriptionCreatePaymentIdResult](),
+	)
+}
+
+
+func post[R any](ctx context.Context, url string, args any, byJwt string, result R, callback apiCallback[R]) (R, error) {
 	var requestBodyBytes []byte
 	if args == nil {
 		requestBodyBytes = make([]byte, 0)
@@ -661,7 +705,7 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 		if err != nil {
 			var empty R
 			callback.Result(empty, err)
-			return
+			return empty, err
 		}
 	}
 
@@ -672,7 +716,7 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 	if err != nil {
 		var empty R
 		callback.Result(empty, err)
-		return
+		return empty, err
 	}
 
 	req.Header.Add("Content-Type", "text/json")
@@ -692,7 +736,7 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 		apiLog("REQUEST ERROR %s", err)
 		var empty R
 		callback.Result(empty, err)
-		return
+		return empty, err
 	}
 	defer r.Body.Close()
 
@@ -702,13 +746,14 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 		// the response body is the error message
 		errorMessage := strings.TrimSpace(string(responseBodyBytes))
 		apiLog("RESPONSE ERROR %s: %s", r.Status, errorMessage)
-		callback.Result(result, errors.New(errorMessage))
-		return
+		err := errors.New(errorMessage)
+		callback.Result(result, err)
+		return result, err
 	}
 
 	if err != nil {
 		callback.Result(result, err)
-		return
+		return result, err
 	}
 
 	apiLog("GOT API RESPONSE BODY: %s", string(responseBodyBytes))
@@ -716,21 +761,21 @@ func post[R any](ctx context.Context, url string, args any, byJwt string, result
 	err = json.Unmarshal(responseBodyBytes, &result)
 	if err != nil {
 		apiLog("UNMARSHAL ERROR %s", err)
-		var empty R
-		callback.Result(empty, err)
-		return
+		callback.Result(result, err)
+		return result, err
 	}
 
 	callback.Result(result, nil)
+	return result, nil
 }
 
 
-func get[R any](ctx context.Context, url string, byJwt string, result R, callback apiCallback[R]) {
+func get[R any](ctx context.Context, url string, byJwt string, result R, callback apiCallback[R]) (R, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		var empty R
 		callback.Result(empty, err)
-		return
+		return empty, err
 	}
 
 	req.Header.Add("Content-Type", "text/json")
@@ -750,7 +795,7 @@ func get[R any](ctx context.Context, url string, byJwt string, result R, callbac
 		apiLog("REQUEST ERROR %s", err)
 		var empty R
 		callback.Result(empty, err)
-		return
+		return empty, err
 	}
 
 	responseBodyBytes, err := io.ReadAll(r.Body)
@@ -763,10 +808,11 @@ func get[R any](ctx context.Context, url string, byJwt string, result R, callbac
 		apiLog("UNMARSHAL ERROR %s", err)
 		var empty R
 		callback.Result(empty, err)
-		return
+		return empty, err
 	}
 
 	callback.Result(result, nil)
+	return result, nil
 }
 
 

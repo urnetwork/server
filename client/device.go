@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 	"fmt"
+	"sync"
 	
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -51,6 +52,8 @@ type BringYourDevice struct {
 	platformTransport *connect.PlatformTransport
 
 	localUserNat *connect.LocalUserNat
+
+	stateLock sync.Mutex
 
 	// when nil, packets get routed to the local user nat
 	remoteUserNatClient *connect.RemoteUserNatClient
@@ -170,6 +173,9 @@ func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
 
 // `Router` implementation
 func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode ProvideMode) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
@@ -203,11 +209,17 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	packetCopy := make([]byte, n)
 	copy(packetCopy, packet[0:n])
 	source := connect.Path{ClientId: self.clientId}
-	if self.remoteUserNatClient != nil {
-		self.remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+
+	self.stateLock.Lock()
+	remoteUserNatClient := self.remoteUserNatClient
+	localUserNat := self.localUserNat
+	self.stateLock.Unlock()
+
+	if remoteUserNatClient != nil {
+		remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
 	} else {
 		// route locally
-		self.localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+		localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
 	}
 }
 
@@ -221,42 +233,57 @@ func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	})
 }
 
+func (self *BringYourDevice) openViewController(vc ViewController) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.openedViewControllers[vc] = true
+}
+
+func (self *BringYourDevice) closeViewController(vc ViewController) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	delete(self.openedViewControllers, vc)
+}
+
 func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
 	vc := newConnectViewController(self.ctx, self)
-	self.openedViewControllers[vc] = true
+	self.openViewController(vc)
 	return vc
 }
 
 func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {
 	vc := newProvideViewController(self.ctx, self)
-	self.openedViewControllers[vc] = true
+	self.openViewController(vc)
 	return vc
 }
 
 func (self *BringYourDevice) OpenStatusViewController() *StatusViewController {
 	vc := newStatusViewController(self.ctx, self.connectClient)
-	self.openedViewControllers[vc] = true
+	self.openViewController(vc)
 	return vc
 }
 
 func (self *BringYourDevice) OpenDevicesViewController() *DevicesViewController {
 	vc := newDevicesViewController(self.ctx, self)
-	self.openedViewControllers[vc] = true
+	self.openViewController(vc)
 	return vc
 }
 
 func (self *BringYourDevice) OpenAccountViewController() *AccountViewController {
 	vc := newAccountViewController(self.ctx, self)
-	self.openedViewControllers[vc] = true
+	self.openViewController(vc)
 	return vc
 }
 
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
-	delete(self.openedViewControllers, vc)
+	self.closeViewController(vc)
 }
 
 func (self *BringYourDevice) Close() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
 	self.cancel()
 
 	self.connectClient.Cancel()

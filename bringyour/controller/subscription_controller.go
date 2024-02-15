@@ -33,7 +33,10 @@ type Sku struct {
 	// the fees on the payment amount
 	FeeFraction float64
 	BalanceByteCount model.ByteCount
+	Special string
 }
+
+const SpecialCompany = "company"
 
 
 var stripeWebhookSigningSecret = sync.OnceValue(func()(string) {
@@ -64,6 +67,18 @@ func stripeSkus() map[string]*Sku {
 		"prod_Om2XiaUQlgzawz": &Sku{
 			FeeFraction: playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(2 * 1024 * 1024 * 1024 * 1024),
+		},
+		// 10TiB company
+		"prod_PYvFxhlBrr1FAN": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(10 * 1024 * 1024 * 1024 * 1024),
+			Special: SpecialCompany,
+		},
+		// 100TiB company
+		"prod_PYvNGYsoREsTVZ": &Sku{
+			FeeFraction: playSubscriptionFeeFraction,
+			BalanceByteCount: model.ByteCount(100 * 1024 * 1024 * 1024 * 1024),
+			Special: SpecialCompany,
 		},
 	}
 }
@@ -120,6 +135,10 @@ func playSkus() map[string]*Sku {
 			BalanceByteCount: model.ByteCount(10) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
 		},
 	}
+}
+
+func companySenderEmail() string {
+	return "brien@bringyour.com"
 }
 
 
@@ -280,16 +299,32 @@ func StripeWebhook(
 
 				bringyour.Logger().Printf("Create balance code: %s %s\n", purchaseEmail, string(stripeItemJsonBytes))
 
-				err = CreateBalanceCode(
-					clientSession.Ctx,
-					sku.BalanceByteCount,
-					netRevenue,
-					stripeSessionId,
-					string(stripeItemJsonBytes),
-					purchaseEmail,
-				)
-				if err != nil {
-					return nil, err
+				if sku.Special == "" {
+					err = CreateBalanceCode(
+						clientSession.Ctx,
+						sku.BalanceByteCount,
+						netRevenue,
+						stripeSessionId,
+						string(stripeItemJsonBytes),
+						purchaseEmail,
+					)
+					if err != nil {
+						return nil, err
+					}
+				} else if sku.Special == SpecialCompany {
+					// company shared data
+					err := SendAccountMessageTemplate(
+				        purchaseEmail,
+				        &SubscriptionTransferBalanceCompanyTemplate{
+				        	BalanceByteCount: sku.BalanceByteCount,
+				        },
+				        SenderEmail(companySenderEmail()),
+				    )
+				    if err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, fmt.Errorf("Stripe unknown special (%s) for sku: %s", sku.Special, stripeSku)
 				}
 			} else {
 				return nil, fmt.Errorf("Stripe sku not found: %s", stripeSku)
@@ -351,8 +386,7 @@ func CoinbaseWebhook(
 	coinbaseWebhook *CoinbaseWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*CoinbaseWebhookResult, error) {
-
-	if coinbaseWebhook.Event.Type == "charge:pending" {
+	if coinbaseWebhook.Event.Type == "charge:confirmed" {
 		skuName := coinbaseWebhook.Event.Data.Name
 		skus := coinbaseSkus()
 		if sku, ok := skus[skuName]; ok {
