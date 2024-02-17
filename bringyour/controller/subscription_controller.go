@@ -36,7 +36,11 @@ type Sku struct {
 	Special string
 }
 
+
 const SpecialCompany = "company"
+
+
+// FIXME read from yml
 
 
 var stripeWebhookSigningSecret = sync.OnceValue(func()(string) {
@@ -436,25 +440,45 @@ func CreateBalanceCode(
 	purchaseRecord string,
 	purchaseEmail string,
 ) error {
-	balanceCode, err := model.CreateBalanceCode(
-		ctx,
-		balanceByteCount,
-		netRevenue,
-		purchaseEventId,
-		purchaseRecord,
-		purchaseEmail,
-	)
-	if err != nil {
-		return err
-	}
+	if balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, purchaseEventId); err == nil {
+		// the code was already created for the purchase event
+		// send a reminder email
 
-	return SendAccountMessageTemplate(
-        purchaseEmail,
-        &SubscriptionTransferBalanceCodeTemplate{
-        	Secret: balanceCode.Secret,
-        	BalanceByteCount: balanceByteCount,
-        },
-    )
+		balanceCode, err := model.GetBalanceCode(ctx, balanceCodeId)
+		if err != nil {
+			return err
+		}
+
+		return SendAccountMessageTemplate(
+	        balanceCode.PurchaseEmail,
+	        &SubscriptionTransferBalanceCodeTemplate{
+	        	Secret: balanceCode.Secret,
+	        	BalanceByteCount: balanceCode.BalanceByteCount,
+	        },
+	    )
+	} else {
+		// new code
+		
+		balanceCode, err := model.CreateBalanceCode(
+			ctx,
+			balanceByteCount,
+			netRevenue,
+			purchaseEventId,
+			purchaseRecord,
+			purchaseEmail,
+		)
+		if err != nil {
+			return err
+		}
+
+		return SendAccountMessageTemplate(
+	        balanceCode.PurchaseEmail,
+	        &SubscriptionTransferBalanceCodeTemplate{
+	        	Secret: balanceCode.Secret,
+	        	BalanceByteCount: balanceCode.BalanceByteCount,
+	        },
+	    )
+	}
 }
 
 

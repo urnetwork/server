@@ -38,7 +38,7 @@ const ExchangeBufferSize = 32
 // because message must be serialized/deserialized from memory,
 // there is a global limit on the size per message
 // messages above this size will be ignored from clients and the exchange
-const MaximumExchangeMessageByteCount = int(2048)
+const MaximumExchangeMessageByteCount = int(4 * 1024 * 1024)
 
 // 8Gib minimum contract
 // this is set high enough to limit the number of parallel contracts and avoid contract spam
@@ -82,7 +82,7 @@ type ExchangeBuffer struct {
 
 func NewDefaultExchangeBuffer() *ExchangeBuffer {
 	return &ExchangeBuffer{
-		buffer: make([]byte, MaximumExchangeMessageByteCount + 4),
+		buffer: make([]byte, 33),
 	} 
 }
 
@@ -131,10 +131,14 @@ func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, tra
 	}
 
 	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
-	copy(self.buffer[4:4+n], transferFrameBytes)
+	// copy(self.buffer[4:4+n], transferFrameBytes)
 
 	// conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
-	_, err := conn.Write(self.buffer[0:4+n])
+	_, err := conn.Write(self.buffer[0:4])
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(transferFrameBytes)
 	// if 4+n != n_ {
 	// 	panic(fmt.Errorf("Bad write %s", err))
 	// }
@@ -200,9 +204,11 @@ func NewExchangeConnection(
 	host string,
 	port int,
 	op ExchangeOp,
+	routes map[string]string,
 ) (*ExchangeConnection, error) {
 	// look up the host in the env routes
-	hostRoute, ok := bringyour.Routes()[host]
+	bringyour.Logger().Printf("EXCHANGE CONNECTION USING ROUTES %v\n", routes)
+	hostRoute, ok := routes[host]
 	if !ok {
 		// use the hostname as the route
 		// this requires the DNS to be configured correctly at the site
@@ -221,6 +227,12 @@ func NewExchangeConnection(
 		bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR CONNECT %s\n", err)
 		return nil, err
 	}
+	tcpConn := conn.(*net.TCPConn)
+	tcpConn.SetNoDelay(false)
+	// tcpConn.SetWriteBuffer(MaximumExchangeMessageByteCount + 4)
+	// tcpConn.SetReadBuffer(MaximumExchangeMessageByteCount + 4)
+	// tcpConn.SetKeepAlive(true)
+	// tcpConn.SetKeepAlivePeriod(1 * time.Second)
 
 	success := false
 	defer func() {
@@ -250,9 +262,6 @@ func NewExchangeConnection(
 		return nil, err
 	}
 
-	// tcpConn := conn.(*net.TCPConn)
-	// tcpConn.SetKeepAlive(true)
-	// tcpConn.SetKeepAlivePeriod(1 * time.Second)
 
 	success = true
 
@@ -330,11 +339,13 @@ func (self *ExchangeConnection) Run() {
 				}
 				// FIXME set write timeout
 				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message); err != nil {
+					fmt.Printf("ERROR WRITING MESSAGE %s\n", err)
 					return
 				}
 			case <- time.After(ExchangePingTimeout):
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0)); err != nil {
+					fmt.Printf("ERROR WRITING PING MESSAGE %s\n", err)
 					return
 				}
 			}
@@ -370,6 +381,8 @@ type ResidentTransport struct {
 
 	clientId bringyour.Id
 	instanceId bringyour.Id
+
+	routes map[string]string
 
 	send chan []byte
 	receive chan []byte
@@ -411,13 +424,13 @@ func (self *ResidentTransport) Run() {
 			for {
 				select {
 				case <- self.ctx.Done():
-					// bringyour.Logger().Printf("WRITE 3\n")
+					bringyour.Logger().Printf("WRITE 3\n")
 					return
 				case <- connection.Done():
 					return
 				case message, ok := <- self.send:
 					if !ok {
-						// bringyour.Logger().Printf("WRITE 1\n")
+						bringyour.Logger().Printf("WRITE 1\n")
 						// transport closed
 						self.cancel()
 						return
@@ -439,13 +452,13 @@ func (self *ResidentTransport) Run() {
 		for {
 			select {
 			case <- self.ctx.Done():
-				// bringyour.Logger().Printf("READ 3\n")
+				bringyour.Logger().Printf("READ 3\n")
 				return
 			case <- connection.Done():
 				return
 			case message, ok := <- connection.receive:
 				if !ok {
-					// bringyour.Logger().Printf("READ 1\n")
+					bringyour.Logger().Printf("READ 1\n")
 					// need a new connection
 					return
 				}
@@ -464,7 +477,7 @@ func (self *ResidentTransport) Run() {
 
 	for {
 		resident := model.GetResidentWithInstance(self.ctx, self.clientId, self.instanceId)
-		bringyour.Logger().Printf("EXCHANGE FOUND RESIDENT %s\n", resident)
+		bringyour.Logger().Printf("EXCHANGE FOUND RESIDENT %v\n", resident)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -474,6 +487,7 @@ func (self *ResidentTransport) Run() {
 				resident.ResidentHost,
 				port,
 				ExchangeOpTransport,
+				self.exchange.routes,
 			)
 			if err == nil {
 				// FIXME poll the resident and cancel the handle ctx if different
@@ -597,6 +611,7 @@ func (self *ResidentForward) Run() {
 				resident.ResidentHost,
 				port,
 				ExchangeOpForward,
+				self.exchange.routes,
 			)
 			if err == nil {
 				// handleCtx, handleCancel := context.WithCancel(self.ctx)
@@ -657,6 +672,7 @@ func (self *ResidentForward) Done() <-chan struct{} {
 // a resident for a client id can be nominated to live in the exchange with `NominateLocalResident`
 // any time a resident is not reachable by a transport, the transport should nominate a local resident
 type Exchange struct {
+	cleanupCtx context.Context
 	ctx context.Context
 	cancel context.CancelFunc
 
@@ -665,13 +681,14 @@ type Exchange struct {
 	// a range of ports are used to scale one socket per transport or forward,
 	// since each port allows at most 65k connections from another connect instance
 	hostToServicePorts map[int]int
+	routes map[string]string
 
 	residentsLock sync.RWMutex
 	// clientId -> Resident
 	residents map[bringyour.Id]*Resident
 }
 
-func NewExchange(ctx context.Context, host string, hostToServicePorts map[int]int) *Exchange {
+func NewExchange(ctx context.Context, host string, hostToServicePorts map[int]int, routes map[string]string) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	exchange := &Exchange{
@@ -679,6 +696,7 @@ func NewExchange(ctx context.Context, host string, hostToServicePorts map[int]in
 		cancel: cancel,
 		host: host,
 		hostToServicePorts: hostToServicePorts,
+		routes: routes,
 		residents: map[bringyour.Id]*Resident{},
 	}
 
@@ -714,9 +732,9 @@ func NewExchangeFromEnv(ctx context.Context) *Exchange {
 		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", StartInternalPort))
 	}
 
-	bringyour.Logger().Printf("FOUND EXCHANGE PORTS %s\n", hostToServicePorts)
+	bringyour.Logger().Printf("FOUND EXCHANGE PORTS %v\n", hostToServicePorts)
 
-	return NewExchange(ctx, host, hostToServicePorts)
+	return NewExchange(ctx, host, hostToServicePorts, bringyour.Routes())
 }
 
 func (self *Exchange) NominateLocalResident(
@@ -732,19 +750,6 @@ func (self *Exchange) NominateLocalResident(
 		instanceId,
 		residentId,
 	)
-	success := false
-	defer func() {
-		if !success {
-			resident.Close()
-			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
-			self.residentsLock.Lock()
-			if currentResident, ok := self.residents[clientId]; ok && currentResident == resident {
-				bringyour.Logger().Printf("DELETE LOCAL RESIDENT %s\n", clientId.String())
-				delete(self.residents, clientId)
-			}
-			self.residentsLock.Unlock()
-		}
-	}()
 
 	var replacedResident *Resident
 
@@ -776,8 +781,15 @@ func (self *Exchange) NominateLocalResident(
 		// 	r := model.GetResidentWithInstance(self.ctx, clientId, instanceId)
 		// 	bringyour.Logger().Printf("NOMINATED RESIDENT VERIFIED %s <> %s\n", nominated.ResidentId.String(), r.ResidentId.String())
 		// }()
-		success = true
 		return nil
+	} else {
+		resident.Close()
+		self.residentsLock.Lock()
+		if currentResident, ok := self.residents[clientId]; ok && currentResident == resident {
+			bringyour.Logger().Printf("DELETE LOCAL RESIDENT %s\n", clientId.String())
+			delete(self.residents, clientId)
+		}
+		self.residentsLock.Unlock()
 	}
 
 	return errors.New("Another resident was nominated.")
@@ -809,63 +821,71 @@ func (self *Exchange) syncResidents() {
 
 		// check for differences between local residents and the model
 
-		residentsToClose := []*Resident{}
-
-		residentsForHostPort := model.GetResidentsForHostPorts(self.ctx, self.host, maps.Keys(self.hostToServicePorts))
-		residentIdsForHostPort := map[bringyour.Id]bool{}
-		for _, residentsForHostPort := range residentsForHostPort {
-			residentIdsForHostPort[residentsForHostPort.ResidentId] = true
-		}
-
-		residentsForHostPortToRemove := []*model.NetworkClientResident{}
 		
-		self.residentsLock.Lock()
-		residentIds := map[bringyour.Id]bool{}
-		for _, resident := range self.residents {
-			residentIds[resident.residentId] = true
-		}
-		for _, residentForHostPort := range residentsForHostPort {
-			if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
-				residentsForHostPortToRemove = append(residentsForHostPortToRemove, residentForHostPort)
+		func() {
+			self.residentsLock.Lock()
+			defer self.residentsLock.Unlock()
+
+			select {
+			case <- self.ctx.Done():
+				return
+			default:
 			}
-		}
-		for _, resident := range self.residents {
-			if _, ok := residentIdsForHostPort[resident.residentId]; !ok {
-				// this resident has been removed from the model
-				residentsToClose = append(residentsToClose, resident)
-				delete(self.residents, resident.clientId)
+
+			residentsToClose := []*Resident{}
+
+			residentsForHostPort := model.GetResidentsForHostPorts(self.ctx, self.host, maps.Keys(self.hostToServicePorts))
+			residentIdsForHostPort := map[bringyour.Id]bool{}
+			for _, residentsForHostPort := range residentsForHostPort {
+				residentIdsForHostPort[residentsForHostPort.ResidentId] = true
 			}
-		}
-		self.residentsLock.Unlock()
 
-		for _, resident := range residentsToClose {
-			fmt.Printf("CLOSE RESIDENT\n")
-			resident.Close()
-		}
+			residentsForHostPortToRemove := []*model.NetworkClientResident{}
 
-		for _, residentForHostPort := range residentsForHostPortToRemove {
-			fmt.Printf("REMOVE RESIDENT\n")
-			model.RemoveResident(self.ctx, residentForHostPort.ClientId, residentForHostPort.ResidentId)
-		}
+			// check for residents with no transports, and have no activity in some time
+			residentsToRemove := []*Resident{}
 
 
-		// check for residents with no transports, and have no activity in some time
-		residentsToRemove := []*Resident{}
-
-		self.residentsLock.Lock()
-		for _, resident := range self.residents {
-			if resident.IsIdle() {
-				residentsToRemove = append(residentsToRemove, resident)
-				delete(self.residents, resident.clientId)
+			residentIds := map[bringyour.Id]bool{}
+			for _, resident := range self.residents {
+				residentIds[resident.residentId] = true
 			}
-		}
-		self.residentsLock.Unlock()
+			for _, residentForHostPort := range residentsForHostPort {
+				if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
+					residentsForHostPortToRemove = append(residentsForHostPortToRemove, residentForHostPort)
+				}
+			}
+			for _, resident := range self.residents {
+				if _, ok := residentIdsForHostPort[resident.residentId]; !ok {
+					// this resident has been removed from the model
+					residentsToClose = append(residentsToClose, resident)
+					delete(self.residents, resident.clientId)
+				}
+			}
 
-		for _, resident := range residentsToRemove {
-			fmt.Printf("CLOSE AND REMOVE RESIDENT\n")
-			resident.Close()
-			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
-		}
+			for _, resident := range residentsToClose {
+				fmt.Printf("CLOSE RESIDENT\n")
+				resident.Close()
+			}
+
+			for _, residentForHostPort := range residentsForHostPortToRemove {
+				fmt.Printf("REMOVE RESIDENT\n")
+				model.RemoveResident(self.ctx, residentForHostPort.ClientId, residentForHostPort.ResidentId)
+			}
+
+			for _, resident := range self.residents {
+				if resident.IsIdle() {
+					residentsToRemove = append(residentsToRemove, resident)
+					delete(self.residents, resident.clientId)
+				}
+			}
+
+			for _, resident := range residentsToRemove {
+				fmt.Printf("CLOSE AND REMOVE RESIDENT\n")
+				resident.Close()
+				model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
+			}
+		}()
 	}
 }
 
@@ -884,7 +904,7 @@ func (self *Exchange) Run() {
 	// 	}
 	// }()
 
-	bringyour.Logger().Printf("START EXCHANGE LISTEN ON HOST %s PORTS %s", bringyour.RequireHost(), self.hostToServicePorts)
+	bringyour.Logger().Printf("START EXCHANGE LISTEN ON HOST %s PORTS %v", bringyour.RequireHost(), self.hostToServicePorts)
 
 	for _, servicePort := range self.hostToServicePorts {
 		port := servicePort
@@ -954,11 +974,11 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	self.residentsLock.RLock()
 	resident, ok := self.residents[header.ClientId]
-	bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %s\n", self.residents)
+	bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %v\n", self.residents)
 	self.residentsLock.RUnlock()
 
 	if !ok || resident.residentId != header.ResidentId {
-		bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT MISSING RESIDENT %s %s (%s, %s) \n", header.ClientId.String(), header.ResidentId.String(), ok, resident)
+		bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT MISSING RESIDENT %s %s (%t, %v) \n", header.ClientId.String(), header.ResidentId.String(), ok, resident)
 		return
 	}
 
@@ -1105,7 +1125,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 }
 
 func (self *Exchange) Close() {
-	self.cancel()
+	
 	
 	// close all residents
 	self.residentsLock.Lock()
@@ -1115,6 +1135,8 @@ func (self *Exchange) Close() {
 	}
 	clear(self.residents)
 	self.residentsLock.Unlock()
+
+	self.cancel()
 }
 
 
@@ -1188,9 +1210,9 @@ func NewResident(
 		client.Run(clientRouteManager, clientContractManager)
 	}, cancel)
 
-	// FIXME
-	// go bringyour.HandleError(resident.cleanupForwards, cancel)
+	go bringyour.HandleError(resident.cleanupForwards, cancel)
 
+	// FIXME clean up
 	go bringyour.HandleError(func() {
 		for {
 			select {
@@ -1230,6 +1252,7 @@ func (self *Resident) cleanupForwards() {
 			}
 		}
 		for _, forward := range forwardsToRemove {
+			bringyour.Logger().Printf("CLEAN UP FORWARD\n")
 			forward.Close()
 			delete(self.forwards, forward.clientId)
 		}
@@ -1364,9 +1387,9 @@ func (self *Resident) controlProvide(sourceId bringyour.Id, provide *protocol.Pr
 	for _, provideKey := range provide.Keys {
 		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
 	}
-	bringyour.Logger().Printf("SET PROVIDE %s %s\n", sourceId.String(), secretKeys)
+	bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
 	model.SetProvide(self.ctx, sourceId, secretKeys)
-	bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %s\n", sourceId.String(), secretKeys)
+	bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
 }
 
 func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContract *protocol.CreateContract) {

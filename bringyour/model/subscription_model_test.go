@@ -304,6 +304,16 @@ func TestBalanceCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     )
     assert.Equal(t, err, nil)
 
+    balanceCodeId2, err := GetBalanceCodeIdForPurchaseEventId(ctx, balanceCode.PurchaseEventId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, balanceCode.BalanceCodeId, balanceCodeId2)
+
+    _, err = GetBalanceCodeIdForPurchaseEventId(ctx, "test-purchase-nothing")
+    assert.NotEqual(t, err, nil)
+
+    balanceCode2, err := GetBalanceCode(ctx, balanceCode.BalanceCodeId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, *balanceCode, *balanceCode2)
 
     checkResult1, err := CheckBalanceCode(
         &CheckBalanceCodeArgs{

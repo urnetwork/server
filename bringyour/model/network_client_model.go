@@ -190,30 +190,27 @@ func AuthNetworkClient(
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
-		}, bringyour.TxSerializable))
+		}))
 	} else {
 		// important: must check `network_id = session network_id`
 		bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-			tag, err := tx.Exec(
+			tag := bringyour.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					UPDATE network_client
 					SET
-						description = $1,
-						device_spec = $2,
-						auth_time = $3
+						description = $3,
+						auth_time = $4
 					WHERE
-						client_id = $4 AND
-						network_id = $5 AND
+						client_id = $1 AND
+						network_id = $2 AND
 						active = true
 				`,
-				authClient.Description,
-				authClient.DeviceSpec,
-				time.Now(),
 				authClient.ClientId,
 				session.ByJwt.NetworkId,
-			)
-			bringyour.Raise(err)
+				authClient.Description,
+				time.Now(),
+			))
 			if tag.RowsAffected() != 1 {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
@@ -242,6 +239,27 @@ func AuthNetworkClient(
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Client needs to be migrated (support@bringyour.com).",
+					},
+				}
+				return
+			}
+
+			tag = bringyour.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					UPDATE device
+					SET
+						device_spec = $2,
+					WHERE
+						device_id = $1
+				`,
+				deviceId,
+				authClient.DeviceSpec,
+			))
+			if tag.RowsAffected() != 1 {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Device does not exist.",
 					},
 				}
 				return
@@ -387,12 +405,14 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 
 			for result.Next() {
 				clientInfo := &NetworkClientInfo{}
+				var deviceName_ *string
+				var deviceSpec_ *string
 				bringyour.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.Description,
 					&clientInfo.DeviceId,
-					&clientInfo.DeviceName,
-					&clientInfo.DeviceSpec,
+					&deviceName_,
+					&deviceSpec_,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
 					&residentId,
@@ -405,6 +425,12 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					// &clientInfo.ResidentBlock,
 					&clientInfo.ProvideMode,
 				))
+				if deviceName_ != nil {
+					clientInfo.DeviceName = *deviceName_
+				}
+				if deviceSpec_ != nil {
+					clientInfo.DeviceSpec = *deviceSpec_
+				}
 				if residentId != nil {
 					clientInfo.Resident = &NetworkClientResident{
 						ClientId: clientInfo.ClientId,
@@ -525,12 +551,14 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 			ctx,
 			`
 				SELECT
-					network_id,
-					description,
-					device_spec,
-					create_time,
-					auth_time
+					network_client.network_id,
+					network_client.description,
+					device.device_name,
+					device.device_spec,
+					network_client.create_time,
+					network_client.auth_time
 				FROM network_client
+				LEFT JOIN device ON device.device_id = network_client.device_id
 				WHERE
 					client_id = $1 AND
 					active = true
@@ -542,13 +570,22 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 				networkClient = &NetworkClient{
 					ClientId: clientId,
 				}
+				var deviceName_ *string
+				var deviceSpec_ *string
 				bringyour.Raise(result.Scan(
 					&networkClient.NetworkId,
 					&networkClient.Description,
-					&networkClient.DeviceSpec,
+					&deviceName_,
+					&deviceSpec_,
 					&networkClient.CreateTime,
 					&networkClient.AuthTime,
 				))
+				if deviceName_ != nil {
+					networkClient.DeviceName = *deviceName_
+				}
+				if deviceSpec_ != nil {
+					networkClient.DeviceSpec = *deviceSpec_
+				}
 			}
 		})
 	}))
@@ -905,21 +942,41 @@ func NominateResident(
 
 	bringyour.Logger().Printf("NOMINATE")
 
-	// important: use serializable tx
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		resident = dbGetResidentWithInstanceInTx(ctx, tx, nomination.ClientId, nomination.InstanceId)
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					resident_id,
+					instance_id
+				FROM network_client_resident
+				WHERE client_id = $1
+				FOR UPDATE
+			`,
+			nomination.ClientId,
+		)
 
-		if resident != nil {
-			if residentIdToReplace != nil && resident.ResidentId != *residentIdToReplace {
+		hasResident := false
+		var residentId bringyour.Id
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				var instanceId bringyour.Id
+				bringyour.Raise(result.Scan(&residentId, instanceId))
+				if instanceId == nomination.InstanceId {
+					hasResident = true
+				}
+			}
+		})
+
+		if hasResident {
+			if residentIdToReplace == nil || residentId != *residentIdToReplace {
 				// already replaced
-				return
-			} else if residentIdToReplace == nil {
-				// already replaced
+				resident = dbGetResidentInTx(ctx, tx, nomination.ClientId)
 				return
 			}
 		}
 
-		_, err := tx.Exec(
+		_, err = tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_resident (
@@ -980,7 +1037,7 @@ func NominateResident(
 		}
 
 		resident = nomination
-	}, bringyour.TxSerializable))
+	}, bringyour.TxReadCommitted))
 
 	return resident
 }

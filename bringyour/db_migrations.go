@@ -430,7 +430,7 @@ var migrations = []any{
     `),
 
     // ADDED device_id
-    // NO LONGER USED device_spec
+    // REMOVED device_spec
     // RESIZED device_spec to varchar(256)
     newSqlMigration(`
         CREATE TABLE network_client (

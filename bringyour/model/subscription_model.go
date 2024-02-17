@@ -158,26 +158,75 @@ type BalanceCode struct {
     BalanceByteCount ByteCount
     NetRevenue NanoCents
     Secret string
+    PurchaseEventId string
     PurchaseRecord string
     PurchaseEmail string
 }
 
 
-func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bringyour.Id) (balanceCodeId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
+func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId string) (balanceCodeId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
             ctx,
             `
                 SELECT balance_code_id FROM transfer_balance_code
                 WHERE purchase_event_id = $1
             `,
-            balanceCodeId,
+            purchaseEventId,
         )
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
                 bringyour.Raise(result.Scan(&balanceCodeId))
             } else {
             	returnErr = fmt.Errorf("Purchase event not found.")
+            }
+        })
+    }))
+    return
+}
+
+
+func GetBalanceCode(
+    ctx context.Context,
+    balanceCodeId bringyour.Id,
+) (balanceCode *BalanceCode, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    create_time,
+                    start_time,
+                    end_time,
+                    balance_byte_count,
+                    net_revenue_nano_cents,
+                    balance_code_secret,
+                    purchase_event_id,
+                    purchase_record,
+                    purchase_email
+                FROM transfer_balance_code
+                WHERE balance_code_id = $1
+            `,
+            balanceCodeId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                balanceCode = &BalanceCode{
+                    BalanceCodeId: balanceCodeId,
+                }
+                bringyour.Raise(result.Scan(
+                    &balanceCode.CreateTime,
+                    &balanceCode.StartTime,
+                    &balanceCode.EndTime,
+                    &balanceCode.BalanceByteCount,
+                    &balanceCode.NetRevenue,
+                    &balanceCode.Secret,
+                    &balanceCode.PurchaseEventId,
+                    &balanceCode.PurchaseRecord,
+                    &balanceCode.PurchaseEmail,
+                ))
+            } else {
+                returnErr = fmt.Errorf("Balance code not found.")
             }
         })
     }))
@@ -225,7 +274,7 @@ func CreateBalanceCode(
             return
         }
 
-        createTime := time.Now()
+        createTime := time.Now().UTC()
         // round down to 00:00 the day of create time
         startTime := time.Date(
             createTime.Year(),
@@ -274,6 +323,7 @@ func CreateBalanceCode(
             BalanceByteCount: balanceByteCount,
             NetRevenue: netRevenue,
             Secret: secret,
+            PurchaseEventId: purchaseEventId,
             PurchaseRecord: purchaseRecord,
             PurchaseEmail: purchaseEmail,
         }
@@ -320,6 +370,7 @@ func RedeemBalanceCode(
                 WHERE
                     balance_code_secret = $1 AND
                     redeem_balance_id IS NULL
+                FOR UPDATE
             `,
             redeemBalanceCode.Secret,
         )
@@ -392,7 +443,7 @@ func RedeemBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -437,6 +488,7 @@ func CheckBalanceCode(
                 WHERE
                     balance_code_secret = $1 AND
                     redeem_balance_id IS NULL
+                FOR UPDATE
             `,
             checkBalanceCode.Secret,
         )
@@ -469,7 +521,7 @@ func CheckBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -678,6 +730,8 @@ func CreateTransferEscrow(
                     start_time <= $2 AND $2 < end_time
 
                 ORDER BY end_time ASC
+
+                FOR UPDATE
             `,
             sourceNetworkId,
             time.Now(),
@@ -778,7 +832,7 @@ func CreateTransferEscrow(
             ContractId: contractId,
             Balances: balances,
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -939,6 +993,7 @@ func CloseContract(
                 WHERE
                     contract_id = $1 AND
                     outcome IS NULL
+                FOR UPDATE
             `,
             contractId,
         )
@@ -1084,6 +1139,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     FROM contract_close
                     WHERE
                         contract_id = $1
+                    FOR UPDATE
                 `,
                 contractId,
             )
@@ -1115,6 +1171,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     WHERE
                         contract_id = $1 AND
                         party = $2
+                    FOR UPDATE
                 `,
                 contractId,
                 party,
@@ -1152,6 +1209,8 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     transfer_contract.outcome IS NULL
 
                 ORDER BY transfer_balance.end_time ASC
+
+                FOR UPDATE
             `,
             contractId,
         )
@@ -1209,6 +1268,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 FROM transfer_contract
                 WHERE
                     contract_id = $1
+                FOR UPDATE
             `,
             contractId,
         )
@@ -1316,7 +1376,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             netPayoutByteCount,
             netPayout,
         ))
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -1812,6 +1872,29 @@ type PaymentPlan struct {
 func PlanPayments(ctx context.Context) *PaymentPlan {
     var paymentPlan *PaymentPlan
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+            CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
+
+            AS
+
+            SELECT
+                transfer_escrow_sweep.contract_id,
+                transfer_escrow_sweep.balance_id
+                
+            FROM transfer_escrow_sweep
+
+            LEFT JOIN account_payment ON
+                account_payment.payment_id = transfer_escrow_sweep.payment_id
+
+            WHERE
+                account_payment.payment_id IS NULL OR
+                NOT account_payment.completed AND account_payment.canceled
+            `,
+        ))
+
         result, err := tx.Query(
             ctx,
             `
@@ -1825,8 +1908,9 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
 
             FROM transfer_escrow_sweep
 
-            LEFT JOIN account_payment ON
-                account_payment.payment_id = transfer_escrow_sweep.payment_id
+            INNER JOIN temp_account_payment ON
+                temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
+                temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
 
             INNER JOIN payout_wallet ON
                 payout_wallet.network_id = transfer_escrow_sweep.network_id
@@ -1835,11 +1919,12 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             	account_wallet.wallet_id = payout_wallet.wallet_id AND
             	account_wallet.active = true
 
-            WHERE
-                account_payment.payment_id IS NULL OR
-                NOT account_payment.completed AND account_payment.canceled
+            FOR UPDATE
             `,
         )
+        // FIXME select the account_payment into a temp table as a first step
+        // contract_id, balance_id, payment_id, completed, canceled
+        // FIXME how to wind in FOR UPDATE
         paymentPlanId := bringyour.NewId()
         // walletId -> AccountPayment
         walletPayments := map[bringyour.Id]*AccountPayment{}
@@ -1955,7 +2040,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             WalletPayments: walletPayments,
             WithheldWalletIds: walletIdsToRemove,
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return paymentPlan
 }

@@ -8,6 +8,7 @@ import (
     "runtime/debug"
     "strings"
     "encoding/json"
+    "bytes"
 )
 
 
@@ -43,6 +44,13 @@ import (
 //  }
 //  return min
 // }
+
+
+func NowUtc() time.Time {
+    // data stores use utc time without time zone
+    // use the same time format locally to keep the local time in sync with the data store time
+    return time.Now().UTC()
+}
 
 
 
@@ -139,7 +147,15 @@ func ErrorJson(err any, stack []byte) string {
 }
 
 
-
-
-
+// returns source if cannot compact
+func AttemptCompactJson(jsonBytes []byte) []byte {
+    b := &bytes.Buffer{}
+    if err := json.Compact(b, jsonBytes); err == nil {
+        return b.Bytes()
+    } else {
+        // there was an error compacting the json
+        // return the original
+        return jsonBytes
+    }
+}
 

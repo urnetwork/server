@@ -117,7 +117,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     }
 
     connectionId := controller.ConnectNetworkClient(handleCtx, *byJwt.ClientId, clientAddress)
-    defer model.DisconnectNetworkClient(handleCtx, connectionId)
+    defer model.DisconnectNetworkClient(self.ctx, connectionId)
     
     go bringyour.HandleError(func() {
     	// disconnect the client if the model marks the connection closed

@@ -1090,6 +1090,8 @@ func AuthCodeLogin(
 					auth_code.auth_code = $1 AND
 					auth_code.active = true AND
 					$2 < auth_code.end_time
+
+				FOR UPDATE
 			`,
 			codeLogin.AuthCode,
 			time.Now(),
@@ -1207,7 +1209,7 @@ func AuthCodeLogin(
 		codeLoginResult = &AuthCodeLoginResult{
 			ByJwt: byJwt.Sign(),
 		}
-	}, bringyour.TxSerializable))
+	}))
 
 	return
 }
