@@ -31,6 +31,10 @@ import (
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
 func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	// FIXME the chaos is messed up
+	ChaosResidentShutdownPerSecond = 0.01
+
+
 	type Message struct {
 		sourceId connect.Id
 		frames []*protocol.Frame
@@ -41,7 +45,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	os.Setenv("WARP_BLOCK", "test")
 
 
-	receiveTimeout := 60 * time.Second
+	receiveTimeout := 120 * time.Second
 	// 8MiB
 	messageContentSize := 1024 * 1024
 
@@ -52,6 +56,9 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	hostA := "testConnectA"
 	hostB := "testConnectB"
+
+	service := "testConnect"
+	block := "test"
 
 
 	clientIdA := connect.NewId()
@@ -72,8 +79,8 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	}
 
 
-	exchangeA := NewExchange(ctx, hostA, hostToServicePortsA, routes)
-	exchangeB := NewExchange(ctx, hostB, hostToServicePortsB, routes)
+	exchangeA := NewExchange(ctx, hostA, service, block, hostToServicePortsA, routes)
+	exchangeB := NewExchange(ctx, hostB, service, block, hostToServicePortsB, routes)
 
 
 	clientSettingsA := connect.DefaultClientSettings()
@@ -249,6 +256,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 					// messagesToB = append(messagesToB, message)
 
 					// check in order
+					assert.Equal(t, 1, len(message.frames))
 					for _, frame := range message.frames {
 						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
 						assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
@@ -311,6 +319,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				select {
 				case message := <- receiveA:
 					// check in order
+					assert.Equal(t, 1, len(message.frames))
 					for _, frame := range message.frames {
 						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
 						assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
