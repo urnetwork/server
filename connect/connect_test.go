@@ -87,14 +87,16 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
 	routeManagerA := connect.NewRouteManager(clientA)
 	contractManagerA := connect.NewContractManagerWithDefaults(clientA)
-	go clientA.Run(routeManagerA, contractManagerA)
+	clientA.Setup(routeManagerA, contractManagerA)
+	go clientA.Run()
 
 
 	clientSettingsB := connect.DefaultClientSettings()
 	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
 	routeManagerB := connect.NewRouteManager(clientB)
 	contractManagerB := connect.NewContractManagerWithDefaults(clientB)
-	go clientB.Run(routeManagerB, contractManagerB)
+	clientB.Setup(routeManagerB, contractManagerB)
+	go clientB.Run()
 
 
 	createServer := func(exchange *Exchange, port int) *http.Server {

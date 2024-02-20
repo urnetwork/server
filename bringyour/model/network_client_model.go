@@ -398,10 +398,10 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		clientInfos := map[bringyour.Id]*NetworkClientInfo{}
 		bringyour.WithPgResult(result, err, func() {
 
-			var residentId *bringyour.Id
-			var residentHost *string
-			var residentService *string
-			var residentBlock *string
+			var residentId_ *bringyour.Id
+			var residentHost_ *string
+			var residentService_ *string
+			var residentBlock_ *string
 
 			for result.Next() {
 				clientInfo := &NetworkClientInfo{}
@@ -415,10 +415,10 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					&deviceSpec_,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
-					&residentId,
-					&residentHost,
-					&residentService,
-					&residentBlock,
+					&residentId_,
+					&residentHost_,
+					&residentService_,
+					&residentBlock_,
 					// &clientInfo.ResidentId,
 					// &clientInfo.ResidentHost,
 					// &clientInfo.ResidentService,
@@ -431,13 +431,13 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				if deviceSpec_ != nil {
 					clientInfo.DeviceSpec = *deviceSpec_
 				}
-				if residentId != nil {
+				if residentId_ != nil {
 					clientInfo.Resident = &NetworkClientResident{
 						ClientId: clientInfo.ClientId,
-						ResidentId: *residentId,
-						ResidentHost: *residentHost,
-						ResidentService: *residentService,
-						ResidentBlock: *residentBlock,
+						ResidentId: *residentId_,
+						ResidentHost: *residentHost_,
+						ResidentService: *residentService_,
+						ResidentBlock: *residentBlock_,
 					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
@@ -846,7 +846,9 @@ func dbGetResidentInTx(
 				resident_service,
 				resident_block
 			FROM network_client_resident
-			WHERE client_id = $1
+			WHERE
+				client_id = $1 AND
+				resident_id IS NOT NULL
 		`,
 		clientId,
 	)
@@ -937,9 +939,7 @@ func NominateResident(
 	ctx context.Context,
 	residentIdToReplace *bringyour.Id,
 	nomination *NetworkClientResident,
-) *NetworkClientResident {
-	var resident *NetworkClientResident
-
+) (resident *NetworkClientResident) {
 	bringyour.Logger().Printf("NOMINATE")
 
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
@@ -947,23 +947,26 @@ func NominateResident(
 			ctx,
 			`
 				SELECT
-					resident_id,
-					instance_id
+					resident_id
 				FROM network_client_resident
-				WHERE client_id = $1
+				WHERE
+					client_id = $1 AND
+					instance_id = $2
 				FOR UPDATE
 			`,
 			nomination.ClientId,
+			nomination.InstanceId,
 		)
 
 		hasResident := false
 		var residentId bringyour.Id
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
-				var instanceId bringyour.Id
-				bringyour.Raise(result.Scan(&residentId, instanceId))
-				if instanceId == nomination.InstanceId {
+				var residentId_ *bringyour.Id
+				bringyour.Raise(result.Scan(&residentId_))
+				if residentId_ != nil {
 					hasResident = true
+					residentId = *residentId_
 				}
 			}
 		})
@@ -971,12 +974,17 @@ func NominateResident(
 		if hasResident {
 			if residentIdToReplace == nil || residentId != *residentIdToReplace {
 				// already replaced
-				resident = dbGetResidentInTx(ctx, tx, nomination.ClientId)
+				resident = dbGetResidentWithInstanceInTx(
+					ctx,
+					tx,
+					nomination.ClientId,
+					nomination.InstanceId,
+				)
 				return
 			}
 		}
 
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_resident (
@@ -1002,10 +1010,9 @@ func NominateResident(
 			nomination.ResidentHost,
 			nomination.ResidentService,
 			nomination.ResidentBlock,
-		)
-		bringyour.Raise(err)
+		))
 
-		_, err = tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				DELETE FROM network_client_resident_port
@@ -1015,31 +1022,29 @@ func NominateResident(
 			`,
 			nomination.ClientId,
 			nomination.ResidentId,
-		)
-		bringyour.Raise(err)
+		))
 
-		for _, port := range nomination.ResidentInternalPorts {
-			_, err = tx.Exec(
-				ctx,
-				`
-					INSERT INTO network_client_resident_port (
-						client_id,
-						resident_id,
-						resident_internal_port
-					)
-					VALUES ($1, $2, $3)
-				`,
-				nomination.ClientId,
-				nomination.ResidentId,
-				port,
-			)
-			bringyour.Raise(err)
-		}
+		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+			for _, port := range nomination.ResidentInternalPorts {
+				batch.Queue(
+					`
+						INSERT INTO network_client_resident_port (
+							client_id,
+							resident_id,
+							resident_internal_port
+						)
+						VALUES ($1, $2, $3)
+					`,
+					nomination.ClientId,
+					nomination.ResidentId,
+					port,
+				)
+			}
+		})
 
 		resident = nomination
-	}, bringyour.TxReadCommitted))
-
-	return resident
+	}))
+	return
 }
 
 

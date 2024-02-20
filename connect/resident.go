@@ -1252,8 +1252,10 @@ func NewResident(
 	client.AddReceiveCallback(resident.handleClientReceive)
 	client.AddForwardCallback(resident.handleClientForward)
 
+	client.Setup(clientRouteManager, clientContractManager)
+
 	go bringyour.HandleError(func() {
-		client.Run(clientRouteManager, clientContractManager)
+		client.Run()
 	}, cancel)
 
 	go bringyour.HandleError(resident.cleanupForwards, cancel)

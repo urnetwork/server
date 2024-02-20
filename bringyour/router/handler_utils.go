@@ -172,7 +172,7 @@ func wrapWithInput[T any, R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
-		bringyour.Logger().Printf("Request impl error: %s\n", err)
+		bringyour.Logger().Printf("Request impl error: %s\n", bringyour.ErrorJsonNoStack(err))
 		RaiseHttpError(err, w)
         return
 	}

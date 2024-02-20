@@ -10,10 +10,11 @@ import (
 	"io"
 	"strconv"
 	"net/http"
+	"net/url"
 	"bytes"
+	"strings"
 	"crypto/hmac"
 	"crypto/sha256"
-	"strings"
 	"errors"
 	"sync"
 
@@ -144,6 +145,21 @@ func playSkus() map[string]*Sku {
 func companySenderEmail() string {
 	return "brien@bringyour.com"
 }
+
+var playClientId = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["client_id"].(string)
+})
+
+var playClientSecret = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["client_secret"].(string)
+})
+
+var playRefreshToken = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["refresh_token"].(string)
+})
 
 
 // app initially calls "get info"
@@ -482,6 +498,40 @@ func CreateBalanceCode(
 }
 
 
+// https://developers.google.com/android-publisher/authorization
+func playAuth() (string, error) {
+	form := url.Values{}
+	form.Add("grant_type", "refresh_token")
+	form.Add("client_id", playClientId())
+	form.Add("client_secret", playClientSecret())
+	form.Add("refresh_token", playRefreshToken())
+
+	result, err := bringyour.HttpPostForm(
+		"https://accounts.google.com/o/oauth2/token",
+		form,
+		bringyour.NoCustomHeaders,
+		bringyour.ResponseJsonObject[map[string]any],
+	)
+	if err != nil {
+		return "", err
+	}
+
+	tokenType := result["token_type"]
+	accessToken := result["access_token"]
+
+	if tokenType == "Bearer" {
+		return fmt.Sprintf("Bearer %s", accessToken), nil
+	}
+	return "", errors.New("Could not auth.")
+}
+
+func playAuthHeaders(header http.Header) {
+	if auth, err := playAuth(); err == nil {
+		header.Add("Authorization", auth)
+	}
+}
+
+
 type PlayRtdnMessage struct {
 	Version string `json:"version"`
 	PackageName string  `json:"packageName"`
@@ -495,9 +545,10 @@ type PlaySubscriptionNotification struct {
 	SubscriptionId string `json:"subscriptionId"`
 }
 
+// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions
 type PlaySubscription struct {
-	StartTimeMillis int64 `json:"startTimeMillis"`
-	ExpiryTimeMillis int64 `json:"expiryTimeMillis"`
+	StartTimeMillis string `json:"startTimeMillis"`
+	ExpiryTimeMillis string `json:"expiryTimeMillis"`
 	AutoRenewing bool `json:"autoRenewing"`
 	PriceCurrencyCode string `json:"priceCurrencyCode"`
 	PriceAmountMicros string `json:"priceAmountMicros"`
@@ -506,11 +557,28 @@ type PlaySubscription struct {
 	PaymentState int `json:"paymentState"`
 	OrderId string `json:"orderId"`
 	AcknowledgementState int `json:"acknowledgementState"`
-	Kind int `json:"kind"`
+	Kind string `json:"kind"`
 
 	// FIXME How is this actually passed?
 	ObfuscatedAccountId string
 }
+
+func (self *PlaySubscription) requireStartTimeMillis() int64 {
+	i, err := strconv.ParseInt(self.StartTimeMillis, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	return i
+}
+
+func (self *PlaySubscription) requireExpiryTimeMillis() int64 {
+	i, err := strconv.ParseInt(self.ExpiryTimeMillis, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	return i
+}
+
 
 type PlayWebhookArgs struct {
 	Message *PlayWebhookMessage `json:"message"`
@@ -550,16 +618,21 @@ func PlayWebhook(
 			)
 			sub, err := bringyour.HttpGetRequireStatusOk[*PlaySubscription](
 				url,
-				bringyour.NoCustomHeaders,
+				playAuthHeaders,
 				bringyour.ResponseJsonObject[*PlaySubscription],
 			)
 			if err != nil {
 				return nil, err
 			}
 
+			bringyour.Logger().Printf("Got Google Play sub: %s\n", sub)
+
 		    // FIXME ANDROID APP setObfuscatedAccountId use the network name
 			// the obfuscated account id should be a subscription payment id
 			subscriptionPaymentId, err := bringyour.ParseId(sub.ObfuscatedAccountId)
+			if err != nil {
+				return nil, err
+			}
 
 			networkId, err := model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, subscriptionPaymentId)
 			if err != nil {
@@ -577,7 +650,7 @@ func PlayWebhook(
 				bringyour.HttpPostRawRequireStatusOk(
 					url,
 					[]byte{},
-					bringyour.NoCustomHeaders,
+					playAuthHeaders,
 				)
 
 				// continually renew as long as the expiry time keeps getting pushed forward
@@ -590,7 +663,7 @@ func PlayWebhook(
 						PackageName: rtdnMessage.PackageName,
 						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
 						PurchaseToken: rtdnMessage.SubscriptionNotification.PurchaseToken,
-						CheckTime: time.UnixMilli(sub.ExpiryTimeMillis),
+						CheckTime: time.UnixMilli(sub.requireExpiryTimeMillis()),
 					},
 					clientSession,
 				)
@@ -644,15 +717,15 @@ func PlaySubscriptionRenewal(
 	)
 	sub, err := bringyour.HttpGetRequireStatusOk[*PlaySubscription](
 		url,
-		bringyour.NoCustomHeaders,
+		playAuthHeaders,
 		bringyour.ResponseJsonObject[*PlaySubscription],
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	expiryTime := time.UnixMilli(sub.ExpiryTimeMillis)
-	startTime := time.UnixMilli(sub.StartTimeMillis)
+	expiryTime := time.UnixMilli(sub.requireExpiryTimeMillis())
+	startTime := time.UnixMilli(sub.requireStartTimeMillis())
 
 	priceAmountMicros, err := strconv.ParseFloat(sub.PriceAmountMicros, 64)
 	if err != nil {
@@ -784,7 +857,7 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 
 func VerifyPlayBody(req *http.Request)(io.Reader, error) {
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err := playAuth(req.Header.Get("Authorization"))
+	err := verifyPlayAuth(req.Header.Get("Authorization"))
 	if err != nil {
 		return nil, err
 	}
@@ -792,7 +865,7 @@ func VerifyPlayBody(req *http.Request)(io.Reader, error) {
 	return req.Body, nil
 }
 
-func playAuth(auth string) error {
+func verifyPlayAuth(auth string) error {
 	bearerPrefix := "Bearer "
 	if strings.HasPrefix(auth, bearerPrefix) {
 		jwt := auth[len(bearerPrefix):len(auth)]

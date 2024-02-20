@@ -5,8 +5,10 @@ import (
 	"time"
 	"net"
 	"net/http"
+	"net/url"
 	"encoding/json"
 	"bytes"
+	"strings"
 	"io"
 )
 
@@ -66,7 +68,6 @@ func HttpPostRawRequireStatusOk(
 }
 
 
-
 func HttpPostBasic[R any](
 	url string,
 	requestBody any,
@@ -99,6 +100,44 @@ func HttpPost[R any](
 
     header := request.Header
     header.Add("Content-Type", "application/json")
+    headerCallback(header)
+
+    client := DefaultHttpClient()
+
+    response, err := client.Do(request)
+    if err != nil {
+        return empty, err
+    }
+    defer response.Body.Close()
+
+    responseBodyBytes, err := io.ReadAll(response.Body)
+    if err != nil {
+        return empty, err
+    }
+
+    return responseCallback(response, responseBodyBytes)
+}
+
+
+func HttpPostForm[R any](
+	url string,
+	form url.Values,
+	headerCallback HeaderCallback,
+	responseCallback ResponseCallback[R],
+) (R, error) {
+	var empty R
+
+    request, err := http.NewRequest(
+        "POST",
+        url,
+        strings.NewReader(form.Encode()),
+    )
+    if err != nil {
+    	return empty, err
+    }
+
+    header := request.Header
+    header.Add("Content-Type", "application/x-www-form-urlencoded")
     headerCallback(header)
 
     client := DefaultHttpClient()

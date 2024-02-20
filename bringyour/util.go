@@ -147,6 +147,14 @@ func ErrorJson(err any, stack []byte) string {
 }
 
 
+func ErrorJsonNoStack(err any) string {
+    errorJson, _ := json.Marshal(map[string]any{
+        "error": fmt.Sprintf("%s", err),
+    })
+    return string(errorJson)
+}
+
+
 // returns source if cannot compact
 func AttemptCompactJson(jsonBytes []byte) []byte {
     b := &bytes.Buffer{}
