@@ -940,8 +940,6 @@ func NominateResident(
 	residentIdToReplace *bringyour.Id,
 	nomination *NetworkClientResident,
 ) (resident *NetworkClientResident) {
-	bringyour.Logger().Printf("NOMINATE")
-
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			ctx,

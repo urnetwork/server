@@ -4,7 +4,7 @@ import (
     "context"
     "time"
     "net/http"
-    "fmt"
+    // "fmt"
 
     "github.com/gorilla/websocket"
 
@@ -46,7 +46,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     handleCtx, handleCancel := context.WithCancel(self.ctx)
     defer handleCancel()
 
-    bringyour.Logger().Printf("CONNECT\b")
+    // bringyour.Logger().Printf("CONNECT\b")
 
     upgrader := websocket.Upgrader{
         ReadBufferSize: 4 * 1024,
@@ -61,7 +61,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     ws.SetReadDeadline(time.Now().Add(ReadTimeout))
     messageType, authFrameBytes, err := ws.ReadMessage()
     if err != nil {
-        fmt.Printf("TIMEOUT HA\n")
+        // bringyour.Logger("TIMEOUT HA\n")
         return
     }
     if messageType != websocket.BinaryMessage {
@@ -95,7 +95,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     // this will fail for example if the client has been removed
     client := model.GetNetworkClient(handleCtx, *byJwt.ClientId)
     if client == nil || client.NetworkId != byJwt.NetworkId {
-        fmt.Printf("ERROR HB\n")
+        // bringyour.Logger("ERROR HB\n")
         return
     }
 
@@ -103,14 +103,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
     err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
     if err != nil {
-        fmt.Printf("TIMEOUT HC\n")
+        // bringyour.Logger("TIMEOUT HC\n")
         return
     }
 
     // find the client ip:port from the request header
     // `X-Forwarded-For` is added by the warp lb
     clientAddress := r.Header.Get("X-Forwarded-For")
-    bringyour.Logger().Printf("X-Forwarded-For header is %s (%s)", clientAddress, r.RemoteAddr)
+    // bringyour.Logger().Printf("X-Forwarded-For header is %s (%s)", clientAddress, r.RemoteAddr)
     if clientAddress == "" {
         // use the raw connection remote address
         clientAddress = r.RemoteAddr
@@ -134,7 +134,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     		}
 
     		if !model.IsNetworkClientConnected(handleCtx, connectionId) {
-                bringyour.Logger().Printf("NETWORK CLIENT DISCONNECTED\n",)
+                // bringyour.Logger().Printf("NETWORK CLIENT DISCONNECTED\n",)
     			return
     		}
     	}
@@ -155,9 +155,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     	for {
             ws.SetReadDeadline(time.Now().Add(ReadTimeout))
             messageType, message, err := ws.ReadMessage()
-            // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
+            // // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
             if err != nil {
-                fmt.Printf("TIMEOUT HD\n")
+                // bringyour.Logger("TIMEOUT HD\n")
                 return
             }
 
@@ -175,7 +175,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                     return
                 case residentTransport.send <- message:
                 case <- time.After(WriteTimeout):
-                    fmt.Printf("TIMEOUT HE\n")
+                    // bringyour.Logger("TIMEOUT HE\n")
                 }
             // else ignore
             }
@@ -191,17 +191,17 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             if !ok {
                 return
             }
-            fmt.Printf("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
-            // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
+            // bringyour.Logger("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
+            // // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
             ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
             if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
-                bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
+                // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
                 return
             }
         case <- time.After(PingTimeout):
             ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
             if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
-                bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
+                // bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
                 return
             }
         }

@@ -558,9 +558,7 @@ type PlaySubscription struct {
 	OrderId string `json:"orderId"`
 	AcknowledgementState int `json:"acknowledgementState"`
 	Kind string `json:"kind"`
-
-	// FIXME How is this actually passed?
-	ObfuscatedAccountId string
+	ObfuscatedExternalAccountId string `json:"obfuscatedExternalAccountId"`
 }
 
 func (self *PlaySubscription) requireStartTimeMillis() int64 {
@@ -627,9 +625,7 @@ func PlayWebhook(
 
 			bringyour.Logger().Printf("Got Google Play sub: %s\n", sub)
 
-		    // FIXME ANDROID APP setObfuscatedAccountId use the network name
-			// the obfuscated account id should be a subscription payment id
-			subscriptionPaymentId, err := bringyour.ParseId(sub.ObfuscatedAccountId)
+			subscriptionPaymentId, err := bringyour.ParseId(sub.ObfuscatedExternalAccountId)
 			if err != nil {
 				return nil, err
 			}
