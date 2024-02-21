@@ -13,7 +13,7 @@ import (
     "encoding/hex"
     "runtime"
 
-    // "golang.org/x/exp/maps"
+    "golang.org/x/exp/maps"
 
     "github.com/go-playground/assert/v2"
 
@@ -54,13 +54,11 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		1024 * 1024,
 	}
 
+	newInstanceM := 10
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-
-	hostA := "testConnectA"
-	hostB := "testConnectB"
 
 	service := "testConnect"
 	block := "test"
@@ -69,39 +67,11 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	clientIdA := connect.NewId()
 	clientIdB := connect.NewId()
 
-	portA := 8080
-	portB := 8081
-	hostToServicePortsA := map[int]int{
-		8090: 8090,
+	routes := map[string]string{}
+	for i := 0; i < 10; i += 1 {
+		host := fmt.Sprintf("host%d", i)
+		routes[host] = "127.0.0.1"
 	}
-	hostToServicePortsB := map[int]int{
-		8091: 8091,
-	}
-	
-	routes := map[string]string{
-		hostA: "127.0.0.1",
-		hostB: "127.0.0.1",
-	}
-
-
-	exchangeA := NewExchange(ctx, hostA, service, block, hostToServicePortsA, routes)
-	exchangeB := NewExchange(ctx, hostB, service, block, hostToServicePortsB, routes)
-
-
-	clientSettingsA := connect.DefaultClientSettings()
-	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
-	routeManagerA := connect.NewRouteManager(clientA)
-	contractManagerA := connect.NewContractManagerWithDefaults(clientA)
-	clientA.Setup(routeManagerA, contractManagerA)
-	go clientA.Run()
-
-
-	clientSettingsB := connect.DefaultClientSettings()
-	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
-	routeManagerB := connect.NewRouteManager(clientB)
-	contractManagerB := connect.NewContractManagerWithDefaults(clientB)
-	clientB.Setup(routeManagerB, contractManagerB)
-	go clientB.Run()
 
 
 	createServer := func(exchange *Exchange, port int) *http.Server {
@@ -122,19 +92,49 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		return server
 	}
 
+	hostPorts := map[string]int{}
+	exchanges := map[string]*Exchange{}
+	servers := map[string]*http.Server{}
+	for i := 0; i < 10; i += 1 {
+		host := fmt.Sprintf("host%d", i)
+		port := 8080 + 1
+		hostPorts[host] = port
 
-	serverA := createServer(exchangeA, portA)
-	defer serverA.Close()
-	go serverA.ListenAndServe()
+		hostToServicePorts := map[int]int{
+			9000 + i: 9000 + i,
+		}
+
+		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes)
+		exchanges[host] = exchange
+
+		server := createServer(exchange, port)
+		servers[host] = server
+		defer server.Close()
+		go server.ListenAndServe()
+	}
+
+	randServer := func()(string) {
+		ports := maps.Values(hostPorts)
+		port := ports[mathrand.Intn(len(ports))]
+		return fmt.Sprintf("ws://127.0.0.1:%d", port)
+	}
 
 
-	serverB := createServer(exchangeB, portB)
-	defer serverB.Close()
-	go serverB.ListenAndServe()
+	clientSettingsA := connect.DefaultClientSettings()
+	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
+	routeManagerA := connect.NewRouteManager(clientA)
+	contractManagerA := connect.NewContractManagerWithDefaults(clientA)
+	clientA.Setup(routeManagerA, contractManagerA)
+	go clientA.Run()
 
 
+	clientSettingsB := connect.DefaultClientSettings()
+	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
+	routeManagerB := connect.NewRouteManager(clientB)
+	contractManagerB := connect.NewContractManagerWithDefaults(clientB)
+	clientB.Setup(routeManagerB, contractManagerB)
+	go clientB.Run()
 
-	
 	
 	networkIdA := bringyour.NewId()
 	networkNameA := "testConnectNetworkA"
@@ -186,7 +186,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	    AppVersion: "0.0.0",
 	}
 
-	transportA := connect.NewPlatformTransportWithDefaults(ctx, fmt.Sprintf("ws://127.0.0.1:%d", portA), authA)
+	transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
 	go transportA.Run(routeManagerA)
 
 
@@ -198,7 +198,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	    AppVersion: "0.0.0",
 	}
 
-	transportB := connect.NewPlatformTransportWithDefaults(ctx, fmt.Sprintf("ws://127.0.0.1:%d", portB), authB)
+	transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
 	go transportB.Run(routeManagerB)
 
 
@@ -256,6 +256,19 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 					burstSize,
 					b,
 				)
+
+				transportA.Close()
+				if 0 == mathrand.Intn(newInstanceM) {
+					fmt.Printf("new instance\n")
+					clientA.SetInstanceId(connect.NewId())
+				}
+				authA = &connect.ClientAuth {
+				    ByJwt: byJwtA,
+				    InstanceId: clientA.InstanceId(),
+				    AppVersion: "0.0.0",
+				}
+				transportA = connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
+				go transportA.Run(routeManagerA)
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
@@ -347,6 +360,19 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				// 	}
 				// }
 
+
+				transportB.Close()
+				if 0 == mathrand.Intn(newInstanceM) {
+					fmt.Printf("new instance\n")
+					clientB.SetInstanceId(connect.NewId())
+				}
+				authB = &connect.ClientAuth {
+				    ByJwt: byJwtB,
+				    InstanceId: clientB.InstanceId(),
+				    AppVersion: "0.0.0",
+				}
+				transportB = connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
+				go transportB.Run(routeManagerB)
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
@@ -470,11 +496,12 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	close(receiveA)
 	close(receiveB)
 
-	serverA.Close()
-	serverB.Close()
-
-	exchangeA.Close()
-	exchangeB.Close()
+	for _, server := range servers {
+		server.Close()
+	}
+	for _, exchange := range exchanges {
+		exchange.Close()
+	}
 
 	select {
 	case <- time.After(1 * time.Second):

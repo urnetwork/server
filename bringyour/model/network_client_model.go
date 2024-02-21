@@ -934,6 +934,34 @@ func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanc
 }
 
 
+func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) (residentId bringyour.Id, returnErr error) {
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					resident_id
+				FROM network_client_resident
+				WHERE
+					client_id = $1 AND
+					instance_id = $2 AND
+					resident_id IS NOT NULL
+			`,
+			clientId,
+			instanceId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&residentId))
+			} else {
+				returnErr = errors.New("No resident for instance.")
+			}
+		})
+	}))
+	return
+}
+
+
 // replace an existing resident with the given, or if there was already a replacement, return it
 func NominateResident(
 	ctx context.Context,
@@ -945,29 +973,31 @@ func NominateResident(
 			ctx,
 			`
 				SELECT
+					instance_id,
 					resident_id
 				FROM network_client_resident
 				WHERE
-					client_id = $1 AND
-					instance_id = $2
+					client_id = $1
 				FOR UPDATE
 			`,
 			nomination.ClientId,
-			nomination.InstanceId,
 		)
 
 		hasResident := false
 		var residentId bringyour.Id
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
+				var instanceId bringyour.Id
 				var residentId_ *bringyour.Id
-				bringyour.Raise(result.Scan(&residentId_))
-				if residentId_ != nil {
+				bringyour.Raise(result.Scan(&instanceId, &residentId_))
+				if instanceId == nomination.InstanceId && residentId_ != nil {
 					hasResident = true
 					residentId = *residentId_
 				}
 			}
 		})
+
+		fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
 
 		if hasResident {
 			if residentIdToReplace == nil || residentId != *residentIdToReplace {
@@ -1041,7 +1071,7 @@ func NominateResident(
 		})
 
 		resident = nomination
-	}))
+	}, bringyour.TxReadCommitted))
 	return
 }
 

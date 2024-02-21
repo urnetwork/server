@@ -57,6 +57,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     if err != nil {
         return
     }
+    defer ws.Close()
 
     ws.SetReadDeadline(time.Now().Add(ReadTimeout))
     messageType, authFrameBytes, err := ws.ReadMessage()
@@ -123,7 +124,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     	// disconnect the client if the model marks the connection closed
         defer func() {
             handleCancel()
-            ws.Close()
         }()
 
     	for  {
