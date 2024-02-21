@@ -623,7 +623,7 @@ func PlayWebhook(
 				return nil, err
 			}
 
-			bringyour.Logger().Printf("Got Google Play sub: %s\n", sub)
+			bringyour.Logger().Printf("Got Google Play sub: %v\n", sub)
 
 			subscriptionPaymentId, err := bringyour.ParseId(sub.ObfuscatedExternalAccountId)
 			if err != nil {

@@ -1,8 +1,8 @@
 module bringyour.com/service/taskworker
 
-go 1.21
+go 1.22
 
-toolchain go1.21.0
+toolchain go1.22.0
 
 require (
 	bringyour.com/bringyour v0.0.0

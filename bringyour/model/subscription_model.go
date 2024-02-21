@@ -42,12 +42,20 @@ func ByteCountHumanReadable(count ByteCount) string {
             2,
             "GiB",
         )
-    } else {
+    } else if 1024 * 1024 <= count {
         return trimFloatString(
             float64(100 * count / (1024 * 1024)) / 100.0,
             2,
             "MiB",
         )
+    } else if 1024 <= count {
+        return trimFloatString(
+            float64(100 * count / (1024)) / 100.0,
+            2,
+            "KiB",
+        )
+    } else {
+        return fmt.Sprintf("%dB", count)
     }
 }
 

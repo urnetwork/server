@@ -83,13 +83,25 @@ func Raise(err error) {
 }
 
 
+func IsDoneError(r any) bool {
+    if err, ok := r.(error); ok && err.Error() == "Done" {
+        return true
+    }
+    return false
+}
+
+
 // this is meant to handle unexpected errors and do some cleanup
 func HandleError(do func(), handlers ...func()) {
     defer func() {
-        if err := recover(); err != nil {
-            Logger().Printf("Unexpected error: %s\n", ErrorJson(err, debug.Stack()))
-            for _, handler := range handlers {
-                handler()
+        if r := recover(); r != nil {
+            if IsDoneError(r) {
+                // the context was canceled and raised. this is a standard pattern, ignore
+            } else {
+                Logger().Printf("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
+                for _, handler := range handlers {
+                    handler()
+                }
             }
         }
     }()

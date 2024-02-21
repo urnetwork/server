@@ -46,8 +46,13 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	receiveTimeout := 120 * time.Second
-	// 8MiB
-	messageContentSize := 1024 * 1024
+
+	// larger values test the send queue and receive queue sizes
+	messageContentSizes := []ByteCount{
+		4 * 1024,
+		128 * 1024,
+		1024 * 1024,
+	}
 
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -200,8 +205,20 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	receiveA := make(chan *Message, 1024)
 	receiveB := make(chan *Message, 1024)
 
+	// printReceive := func(clientName string, frames []*protocol.Frame) {
+	// 	for _, frame := range frames {
+	// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+	// 		if 0 < simpleMessage.MessageCount {
+	// 			fmt.Printf("[%s] receive acked message %d\n", clientName, simpleMessage.MessageIndex)
+	// 		} else {
+	// 			fmt.Printf("[%s] receive nacked message %d\n", clientName, simpleMessage.MessageIndex)
+	// 		}
+	// 	}
+	// }
+
 
 	clientA.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+		// printReceive("a", frames)
 		receiveA <- &Message{
 			sourceId: sourceId,
 			frames: frames,
@@ -210,6 +227,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	})
 
 	clientB.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+		// printReceive("b", frames)
 		receiveB <- &Message{
 			sourceId: sourceId,
 			frames: frames,
@@ -218,162 +236,228 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	})
 
 
-	messageContentBytes := make([]byte, messageContentSize)
-	mathrand.Read(messageContentBytes)
-	messageContent := hex.EncodeToString(messageContentBytes)
+	for _, messageContentSize := range messageContentSizes {
+		messageContentBytes := make([]byte, messageContentSize)
+		mathrand.Read(messageContentBytes)
+		messageContent := hex.EncodeToString(messageContentBytes)
 
 
-	ackA := make(chan error, 1024)
-	ackB := make(chan error, 1024)
-	
+		ackA := make(chan error, 1024)
+		ackB := make(chan error, 1024)
 
-	for burstSize := 1; burstSize < 128; burstSize += 1 {
-		for b := 0; b < 2; b += 1 {
-			fmt.Printf("\n\nITER %d %d\n\n", burstSize, b)
+		nackM := 4
+		
 
-			go func() {
+		for burstSize := 1; burstSize < 64; burstSize += 1 {
+			for b := 0; b < 2; b += 1 {
+				fmt.Printf(
+					"[%s] burstSize=%d b=%d\n",
+					model.ByteCountHumanReadable(messageContentSize),
+					burstSize,
+					b,
+				)
+
+				go func() {
+					for i := 0; i < burstSize; i += 1 {
+						for j := 0; j < nackM; j += 1 {
+							success := clientA.SendWithTimeout(
+								connect.RequireToFrame(&protocol.SimpleMessage{
+									MessageIndex: uint32(i * nackM + j),
+									MessageCount: uint32(0),
+									Content: messageContent,
+								}),
+								clientIdB,
+								nil,
+								-1,
+								connect.NoAck(),
+							)
+							if !success {
+								panic(errors.New("Could not send."))
+							}
+						}
+						success := clientA.Send(
+							connect.RequireToFrame(&protocol.SimpleMessage{
+								MessageIndex: uint32(i),
+								MessageCount: uint32(burstSize),
+								Content: messageContent,
+							}),
+							clientIdB,
+							func (err error) {
+								ackA <- err
+							},
+						)
+						if !success {
+							panic(errors.New("Could not send."))
+						}
+					}
+				}()
+
+				// messagesToB := []*Message{}
+				nackBCount := 0
 				for i := 0; i < burstSize; i += 1 {
-					success := clientA.Send(
-						connect.RequireToFrame(&protocol.SimpleMessage{
-							MessageIndex: uint32(i),
-							MessageCount: uint32(burstSize),
-							Content: messageContent,
-						}),
-						clientIdB,
-						func (err error) {
-							ackA <- err
-						},
-					)
-					if !success {
-						panic(errors.New("Could not send."))
+					ReceiveAckB:
+					for {
+						select {
+						case message := <- receiveB:
+							// messagesToB = append(messagesToB, message)
+
+							// check in order
+							assert.Equal(t, 1, len(message.frames))
+							frame := message.frames[0]
+							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+							if 0 < simpleMessage.MessageCount {
+								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+								break ReceiveAckB
+							} else {
+								nackBCount += 1
+							}
+						case <- time.After(receiveTimeout):
+							printAllStacks()
+							panic(errors.New("Timeout."))
+						}
 					}
 				}
-			}()
-
-
-			// messagesToB := []*Message{}
-			for i := 0; i < burstSize; i += 1 {
-				select {
-				case message := <- receiveB:
-					// messagesToB = append(messagesToB, message)
-
-					// check in order
-					assert.Equal(t, 1, len(message.frames))
-					for _, frame := range message.frames {
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-					}
-				case <- time.After(receiveTimeout):
-					printAllStacks()
-					panic(errors.New("Timeout."))
+				if nackBCount != nackM * burstSize {
+					fmt.Printf("B dropped nacks: %d <> %d\n", nackBCount, nackM * burstSize)
 				}
-			}
-			select {
-			case <- receiveB:
-				panic(errors.New("Too many messages."))
-			default:
-			}
-			for i := 0; i < burstSize; i += 1 {
 				select {
-				case err := <- ackA:
-					assert.Equal(t, err, nil)
-				case <- time.After(receiveTimeout):
-					printAllStacks()
-					panic(errors.New("Timeout."))
+				case <- receiveB:
+					panic(errors.New("Too many messages."))
+				default:
 				}
-			}
-			select {
-			case <- ackA:
-				panic(errors.New("Too many acks."))
-			default:
-			}
-			// check in order
-			// for i, message := range messagesToB {
-			// 	for _, frame := range message.frames {
-			// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-			// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-			// 	}
-			// }
-
-
-			go func() {
 				for i := 0; i < burstSize; i += 1 {
-					success := clientB.Send(
-						connect.RequireToFrame(&protocol.SimpleMessage{
-							MessageIndex: uint32(i),
-							MessageCount: uint32(burstSize),
-							Content: messageContent,
-						}),
-						clientIdA,
-						func (err error) {
-							ackB <- err
-						},
-					)
-					if !success {
-						panic(errors.New("Could not send."))
+					select {
+					case err := <- ackA:
+						assert.Equal(t, err, nil)
+					case <- time.After(receiveTimeout):
+						printAllStacks()
+						panic(errors.New("Timeout."))
 					}
 				}
-			}()
-
-			
-			// messagesToA := []*Message{}
-			for i := 0; i < burstSize; i += 1 {
 				select {
-				case message := <- receiveA:
-					// check in order
-					assert.Equal(t, 1, len(message.frames))
-					for _, frame := range message.frames {
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+				case <- ackA:
+					panic(errors.New("Too many acks."))
+				default:
+				}
+				// check in order
+				// for i, message := range messagesToB {
+				// 	for _, frame := range message.frames {
+				// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+				// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+				// 	}
+				// }
+
+
+				go func() {
+					for i := 0; i < burstSize; i += 1 {
+						for j := 0; j < nackM; j += 1 {
+							success := clientB.SendWithTimeout(
+								connect.RequireToFrame(&protocol.SimpleMessage{
+									MessageIndex: uint32(i * nackM + j),
+									MessageCount: uint32(0),
+									Content: messageContent,
+								}),
+								clientIdA,
+								nil,
+								-1,
+								connect.NoAck(),
+							)
+							if !success {
+								panic(errors.New("Could not send."))
+							}
+						}
+						success := clientB.Send(
+							connect.RequireToFrame(&protocol.SimpleMessage{
+								MessageIndex: uint32(i),
+								MessageCount: uint32(burstSize),
+								Content: messageContent,
+							}),
+							clientIdA,
+							func (err error) {
+								ackB <- err
+							},
+						)
+						if !success {
+							panic(errors.New("Could not send."))
+						}
 					}
-				case <- time.After(receiveTimeout):
-					printAllStacks()
-					panic(errors.New("Timeout."))
+				}()
+
+
+				// 	sendToA(burstSize - 1)
+				// }()
+				// messagesToA := []*Message{}
+				nackACount := 0
+				for i := 0; i < burstSize; i += 1 {
+					ReceiveAckA:
+					for {
+						select {
+						case message := <- receiveA:
+							// messagesToB = append(messagesToB, message)
+
+							// check in order
+							assert.Equal(t, 1, len(message.frames))
+							frame := message.frames[0]
+							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+							if 0 < simpleMessage.MessageCount {
+								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+								break ReceiveAckA
+							} else {
+								nackACount += 1
+							}
+						case <- time.After(receiveTimeout):
+							printAllStacks()
+							panic(errors.New("Timeout."))
+						}
+					}
 				}
-			}
-			select {
-			case <- receiveA:
-				panic(errors.New("Too many messages."))
-			default:
-			}
-			for i := 0; i < burstSize; i += 1 {
+				if nackACount != nackM * burstSize {
+					fmt.Printf("A dropped nacks: %d <> %d\n", nackACount, nackM * burstSize)
+				}
 				select {
-				case err := <- ackB:
-					assert.Equal(t, err, nil)
-				case <- time.After(receiveTimeout):
-					printAllStacks()
-					panic(errors.New("Timeout."))
+				case <- receiveA:
+					panic(errors.New("Too many messages."))
+				default:
 				}
+				for i := 0; i < burstSize; i += 1 {
+					select {
+					case err := <- ackB:
+						assert.Equal(t, err, nil)
+					case <- time.After(receiveTimeout):
+						printAllStacks()
+						panic(errors.New("Timeout."))
+					}
+				}
+				select {
+				case <- ackB:
+					panic(errors.New("Too many acks."))
+				default:
+				}
+				// check in order
+				// for i, message := range messagesToA {
+				// 	for _, frame := range message.frames {
+				// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+				// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+				// 	}
+				// }
+
+
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
+				assert.Equal(t, resendItemCountA, 0)
+				assert.Equal(t, resendItemByteCountA, 0)
+
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
+				assert.Equal(t, resendItemCountB, 0)
+				assert.Equal(t, resentItemByteCountB, 0)
+
+				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
+				assert.Equal(t, receiveItemCountA, 0)
+				assert.Equal(t, receiveItemByteCountA, 0)
+
+				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
+				assert.Equal(t, receiveItemCountB, 0)
+				assert.Equal(t, receiveItemByteCountB, 0)
 			}
-			select {
-			case <- ackB:
-				panic(errors.New("Too many acks."))
-			default:
-			}
-			// check in order
-			// for i, message := range messagesToA {
-			// 	for _, frame := range message.frames {
-			// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-			// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-			// 	}
-			// }
-
-
-			resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
-			assert.Equal(t, resendItemCountA, 0)
-			assert.Equal(t, resendItemByteCountA, 0)
-
-			resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
-			assert.Equal(t, resendItemCountB, 0)
-			assert.Equal(t, resentItemByteCountB, 0)
-
-			receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
-			assert.Equal(t, receiveItemCountA, 0)
-			assert.Equal(t, receiveItemByteCountA, 0)
-
-			receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
-			assert.Equal(t, receiveItemCountB, 0)
-			assert.Equal(t, receiveItemByteCountB, 0)
 		}
 	}
 

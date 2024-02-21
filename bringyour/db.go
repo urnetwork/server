@@ -25,6 +25,9 @@ import (
 */
 
 
+var DbContextDoneError = errors.New("Done")
+
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
@@ -238,7 +241,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
-					return errors.New("Done")
+					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
@@ -255,7 +258,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
-					return errors.New("Done")
+					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
@@ -290,7 +293,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
-					return errors.New("Done")
+					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(time.Now()) {
@@ -392,7 +395,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
-					return errors.New("Done")
+					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(time.Now()) {
@@ -409,7 +412,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 			if retryOptions.rerunOnCommitError {
 				select {
 				case <- ctx.Done():
-					return errors.New("Done")
+					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(time.Now()) {
