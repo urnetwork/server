@@ -161,12 +161,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                 return
             }
 
+
             switch messageType {
             case websocket.BinaryMessage:
                 if 0 == len(message) {
                     // ping
                     continue
                 }
+
+
+                // fmt.Printf("resident transport read message %s->\n", byJwt.ClientId)
 
                 select {
                 case <- handleCtx.Done():
@@ -191,6 +195,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             if !ok {
                 return
             }
+            
+            // fmt.Printf("resident transport write message ->%s\n", byJwt.ClientId)
+
             // bringyour.Logger("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
             // // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
             ws.SetWriteDeadline(time.Now().Add(WriteTimeout))

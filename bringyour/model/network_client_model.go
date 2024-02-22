@@ -934,6 +934,32 @@ func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanc
 }
 
 
+func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bringyour.Id, returnErr error) {
+	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					resident_id
+				FROM network_client_resident
+				WHERE
+					client_id = $1 AND
+					resident_id IS NOT NULL
+			`,
+			clientId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&residentId))
+			} else {
+				returnErr = errors.New("No resident for client.")
+			}
+		})
+	}))
+	return
+}
+
+
 func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) (residentId bringyour.Id, returnErr error) {
 	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
@@ -954,7 +980,7 @@ func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, insta
 			if result.Next() {
 				bringyour.Raise(result.Scan(&residentId))
 			} else {
-				returnErr = errors.New("No resident for instance.")
+				returnErr = errors.New("No resident for client instance.")
 			}
 		})
 	}))
@@ -997,7 +1023,7 @@ func NominateResident(
 			}
 		})
 
-		fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
+		// fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
 
 		if hasResident {
 			if residentIdToReplace == nil || residentId != *residentIdToReplace {

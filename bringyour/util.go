@@ -84,8 +84,16 @@ func Raise(err error) {
 
 
 func IsDoneError(r any) bool {
-    if err, ok := r.(error); ok && err.Error() == "Done" {
-        return true
+    if err, ok := r.(error); ok {
+        switch err.Error() {
+        case "Done":
+            return true
+        // pgx
+        case "context canceled", "timeout: context already done: context canceled":
+            return true
+        default:
+            return false
+        }
     }
     return false
 }

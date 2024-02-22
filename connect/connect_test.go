@@ -54,7 +54,10 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		1024 * 1024,
 	}
 
-	newInstanceM := 10
+	newInstanceM := -1
+
+	transportM := 20
+	burstM := 64
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -182,24 +185,34 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	authA := &connect.ClientAuth {
 	    ByJwt: byJwtA,
+	    ClientId: clientIdA,
 	    InstanceId: clientA.InstanceId(),
 	    AppVersion: "0.0.0",
 	}
 
-	transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
-	go transportA.Run(routeManagerA)
+	transportAs := []*connect.PlatformTransport{}
+	for i := 0; i < transportM; i += 1 {
+		transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
+		transportAs = append(transportAs, transportA)
+		go transportA.Run(routeManagerA)
+	}
 
 
 	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, bringyour.Id(clientIdB)).Sign()
 
 	authB := &connect.ClientAuth {
 	    ByJwt: byJwtB,
+	    ClientId: clientIdB,
 	    InstanceId: clientB.InstanceId(),
 	    AppVersion: "0.0.0",
 	}
 
-	transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
-	go transportB.Run(routeManagerB)
+	transportBs := []*connect.PlatformTransport{}
+	for i := 0; i < transportM; i += 1 {
+		transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
+		transportBs = append(transportBs, transportB)
+		go transportB.Run(routeManagerB)
+	}
 
 
 	receiveA := make(chan *Message, 1024)
@@ -248,7 +261,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		nackM := 4
 		
 
-		for burstSize := 1; burstSize < 64; burstSize += 1 {
+		for burstSize := 1; burstSize < burstM; burstSize += 1 {
 			for b := 0; b < 2; b += 1 {
 				fmt.Printf(
 					"[%s] burstSize=%d b=%d\n",
@@ -257,18 +270,29 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 					b,
 				)
 
-				transportA.Close()
-				if 0 == mathrand.Intn(newInstanceM) {
+				for _, transportA := range transportAs {
+					transportA.Close()
+				}
+				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
 					clientA.SetInstanceId(connect.NewId())
 				}
 				authA = &connect.ClientAuth {
 				    ByJwt: byJwtA,
+				    ClientId: clientIdA,
 				    InstanceId: clientA.InstanceId(),
 				    AppVersion: "0.0.0",
 				}
-				transportA = connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
-				go transportA.Run(routeManagerA)
+				for i := 0; i < transportM; i += 1 {
+					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
+					transportAs = append(transportAs, transportA)
+					go transportA.Run(routeManagerA)
+				}
+				// let the closed transports remove, otherwise messages will be send to closing tranports
+				// (this will affect the nack delivery)
+				select {
+				case <- time.After(200 * time.Millisecond):
+				}
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
@@ -325,25 +349,42 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 								nackBCount += 1
 							}
 						case <- time.After(receiveTimeout):
-							printAllStacks()
+							// printAllStacks()
 							panic(errors.New("Timeout."))
 						}
 					}
 				}
+				endTime := time.Now().Add(1 * time.Second)
+				for nackBCount < nackM * burstSize {
+					timeout := endTime.Sub(time.Now())
+					if timeout <= 0 {
+						break
+					}
+					select {
+					case message := <- receiveB:
+						// messagesToB = append(messagesToB, message)
+
+						// check in order
+						assert.Equal(t, 1, len(message.frames))
+						frame := message.frames[0]
+						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+						if 0 < simpleMessage.MessageCount {
+							t.Fatal("Unexpected ack message.")
+						} else {
+							nackBCount += 1
+						}
+					case <- time.After(timeout):
+					}
+				}
 				if nackBCount != nackM * burstSize {
 					fmt.Printf("B dropped nacks: %d <> %d\n", nackBCount, nackM * burstSize)
-				}
-				select {
-				case <- receiveB:
-					panic(errors.New("Too many messages."))
-				default:
 				}
 				for i := 0; i < burstSize; i += 1 {
 					select {
 					case err := <- ackA:
 						assert.Equal(t, err, nil)
 					case <- time.After(receiveTimeout):
-						printAllStacks()
+						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}
 				}
@@ -361,18 +402,29 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				// }
 
 
-				transportB.Close()
-				if 0 == mathrand.Intn(newInstanceM) {
+				for _, transportB := range transportBs {
+					transportB.Close()
+				}
+				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
 					clientB.SetInstanceId(connect.NewId())
 				}
 				authB = &connect.ClientAuth {
 				    ByJwt: byJwtB,
+				    ClientId: clientIdB,
 				    InstanceId: clientB.InstanceId(),
 				    AppVersion: "0.0.0",
 				}
-				transportB = connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
-				go transportB.Run(routeManagerB)
+				for i := 0; i < transportM; i += 1 {
+					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
+					transportBs = append(transportBs, transportB)
+					go transportB.Run(routeManagerB)
+				}
+				// let the closed transports remove, otherwise messages will be send to closing tranports
+				// (this will affect the nack delivery)
+				select {
+				case <- time.After(200 * time.Millisecond):
+				}
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
@@ -432,25 +484,42 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 								nackACount += 1
 							}
 						case <- time.After(receiveTimeout):
-							printAllStacks()
+							// printAllStacks()
 							panic(errors.New("Timeout."))
 						}
 					}
 				}
+				endTime = time.Now().Add(1 * time.Second)
+				for nackACount < nackM * burstSize {
+					timeout := endTime.Sub(time.Now())
+					if timeout <= 0 {
+						break
+					}
+					select {
+					case message := <- receiveA:
+						// messagesToB = append(messagesToB, message)
+
+						// check in order
+						assert.Equal(t, 1, len(message.frames))
+						frame := message.frames[0]
+						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
+						if 0 < simpleMessage.MessageCount {
+							t.Fatal("Unexpected ack message.")
+						} else {
+							nackACount += 1
+						}
+					case <- time.After(timeout):
+					}
+				}
 				if nackACount != nackM * burstSize {
 					fmt.Printf("A dropped nacks: %d <> %d\n", nackACount, nackM * burstSize)
-				}
-				select {
-				case <- receiveA:
-					panic(errors.New("Too many messages."))
-				default:
 				}
 				for i := 0; i < burstSize; i += 1 {
 					select {
 					case err := <- ackB:
 						assert.Equal(t, err, nil)
 					case <- time.After(receiveTimeout):
-						printAllStacks()
+						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}
 				}
@@ -487,8 +556,12 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		}
 	}
 
-	transportA.Close()
-	transportB.Close()
+	for _, transportA := range transportAs {
+		transportA.Close()
+	}
+	for _, transportB := range transportBs {
+		transportB.Close()
+	}
 
 	clientA.Cancel()
 	clientB.Cancel()
