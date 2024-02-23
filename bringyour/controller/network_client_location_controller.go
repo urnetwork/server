@@ -30,6 +30,7 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 	var resultJson []byte
 	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
 		resultJson = []byte(resultJsonStr)
+		resultJson = bringyour.AttemptCompactJson(resultJson)
 	} else {
 		req, err := http.NewRequest(
 			"GET",
@@ -63,6 +64,9 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 		if err != nil {
 			return nil, err
 		}
+		resultJson = bringyour.AttemptCompactJson(resultJson)
+
+		bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
 
 		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
 	}

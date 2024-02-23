@@ -129,42 +129,42 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
         bringyour.NoCustomHeaders,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/auth", port),
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/auth", port),
         bringyour.NoCustomHeaders,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.NotEqual(t, err, nil)
 
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/client", port),
         authClient,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
     _, err = bringyour.HttpGet(
         fmt.Sprintf("http://127.0.0.1:%d/client", port),
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.NotEqual(t, err, nil)
 
@@ -173,7 +173,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
         map[string]any{},
         bringyour.NoCustomHeaders,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
@@ -181,7 +181,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
         map[string]any{},
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
@@ -189,7 +189,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
         map[string]any{},
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
@@ -197,7 +197,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
         map[string]any{},
         bringyour.NoCustomHeaders,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.NotEqual(t, err, nil)
 
@@ -205,7 +205,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
         map[string]any{},
         authClient,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.Equal(t, err, nil)
 
@@ -213,7 +213,7 @@ func TestRouterBasic(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
         map[string]any{},
         auth,
-        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject),
+        bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
     )
     assert.NotEqual(t, err, nil)
 

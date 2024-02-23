@@ -355,7 +355,7 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     err := controller.SendAccountMessageTemplate(
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
-            Code: "hi there bar now",
+            Secret: "hi there bar now",
         },
     )
     if err != nil {

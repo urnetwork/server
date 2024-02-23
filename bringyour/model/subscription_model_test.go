@@ -15,6 +15,25 @@ import (
 )
 
 
+func TestByteCount(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0MiB")
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(5 * 1024 * 1024 * 1024 * 1024)), "5TiB")
+
+    count, err := ParseByteCount("5MiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(5 * 1024 * 1024))
+
+    count, err = ParseByteCount("1.7GiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(17 * 1024 * 1024 * 1024) / ByteCount(10))
+
+    count, err = ParseByteCount("13.1TiB")
+    assert.Equal(t, err, nil)
+    assert.Equal(t, count, ByteCount(131 * 1024 * 1024 * 1024 * 1024) / ByteCount(10))
+    
+})}
+
+
 func TestNanoCents(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
     usd := float64(1.55)
     a := UsdToNanoCents(usd)
@@ -285,6 +304,16 @@ func TestBalanceCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     )
     assert.Equal(t, err, nil)
 
+    balanceCodeId2, err := GetBalanceCodeIdForPurchaseEventId(ctx, balanceCode.PurchaseEventId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, balanceCode.BalanceCodeId, balanceCodeId2)
+
+    _, err = GetBalanceCodeIdForPurchaseEventId(ctx, "test-purchase-nothing")
+    assert.NotEqual(t, err, nil)
+
+    balanceCode2, err := GetBalanceCode(ctx, balanceCode.BalanceCodeId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, *balanceCode, *balanceCode2)
 
     checkResult1, err := CheckBalanceCode(
         &CheckBalanceCodeArgs{
@@ -306,4 +335,29 @@ func TestBalanceCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, err, nil)
     assert.Equal(t, redeemResult0.Error, nil)
     assert.Equal(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
+})}
+
+
+func TestSubscriptionPaymentId(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+
+    userIdA := bringyour.NewId()
+
+    clientSessionA := session.Testing_CreateClientSession(
+        ctx,
+        jwt.NewByJwt(networkIdA, userIdA, "a"),
+    )
+
+    Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+
+
+    result, err := SubscriptionCreatePaymentId(&SubscriptionCreatePaymentIdArgs{}, clientSessionA)
+    assert.Equal(t, err, nil)
+    assert.NotEqual(t, result, nil)
+
+    resultNetworkId, err := SubscriptionGetNetworkIdForPaymentId(ctx, result.SubscriptionPaymentId)
+    assert.Equal(t, err, nil)
+    assert.Equal(t, networkIdA, resultNetworkId)
 })}

@@ -1,0 +1,52 @@
+==================
+WARNING: DATA RACE
+Write at 0x00c00077ec00 by goroutine 11396:
+  runtime.mapassign()
+      /usr/local/go/src/runtime/map.go:579 +0x4fc
+  bringyour.com/connect.(*MultiRouteSelector).updateTransport()
+      /Users/brien/bringyour/connect/connect/transfer.go:3227 +0xa68
+  bringyour.com/connect.(*MatchState).updateTransport()
+      /Users/brien/bringyour/connect/connect/transfer.go:3109 +0x700
+  bringyour.com/connect.(*RouteManager).UpdateTransport()
+      /Users/brien/bringyour/connect/connect/transfer.go:2981 +0xb8
+  bringyour.com/connect.(*RouteManager).RemoveTransport()
+      /Users/brien/bringyour/connect/connect/transfer.go:2986 +0x70
+  bringyour.com/connect.(*PlatformTransport).Run.func2.1()
+      /Users/brien/bringyour/connect/connect/transport.go:233 +0x50
+  runtime.deferreturn()
+      /usr/local/go/src/runtime/panic.go:602 +0x5c
+  bringyour.com/connect.(*PlatformTransport).Run()
+      /Users/brien/bringyour/connect/connect/transport.go:331 +0x5c4
+  bringyour.com/service/connect.TestConnect.func1.gowrap7()
+      /Users/brien/bringyour/bringyour/connect/connect_test.go:289 +0x40
+
+Previous read at 0x00c00077ec00 by goroutine 336:
+  bringyour.com/connect.(*MultiRouteSelector).Write()
+      /Users/brien/bringyour/connect/connect/transfer.go:3524 +0x5dc
+  bringyour.com/connect.(*SendSequence).Run()
+      /Users/brien/bringyour/connect/connect/transfer.go:1231 +0x7b0
+  bringyour.com/connect.(*SendBuffer).Pack.func1.1()
+      /Users/brien/bringyour/connect/connect/transfer.go:849 +0x40
+
+Goroutine 11396 (running) created at:
+  bringyour.com/service/connect.TestConnect.func1()
+      /Users/brien/bringyour/bringyour/connect/connect_test.go:289 +0x2ec4
+  bringyour.com/bringyour.(*TestEnv).Run()
+      /Users/brien/bringyour/bringyour/bringyour/test_util.go:41 +0x4c
+  bringyour.com/service/connect.TestConnect()
+      /Users/brien/bringyour/bringyour/connect/connect_test.go:33 +0x68
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1689 +0x180
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:1742 +0x40
+
+Goroutine 336 (running) created at:
+  bringyour.com/connect.(*SendBuffer).Pack.func1()
+      /Users/brien/bringyour/connect/connect/transfer.go:848 +0x330
+  bringyour.com/connect.(*SendBuffer).Pack()
+      /Users/brien/bringyour/connect/connect/transfer.go:862 +0x74
+  bringyour.com/connect.(*Client).SendWithTimeout()
+      /Users/brien/bringyour/connect/connect/transfer.go:428 +0x62c
+  bringyour.com/service/connect.TestConnect.func1.5()
+      /Users/brien/bringyour/bringyour/connect/connect_test.go:295 +0x388
+==================

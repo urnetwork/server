@@ -103,7 +103,8 @@ func (self *NetworkWelcomeTemplate) Name() string {
 
 
 type SubscriptionTransferBalanceCodeTemplate struct {
-    Code string
+    Secret string
+    BalanceByteCount model.ByteCount
     BaseTemplate
 }
 
@@ -111,13 +112,50 @@ func (self *SubscriptionTransferBalanceCodeTemplate) Name() string {
     return "subscription_transfer_balance_code"
 }
 
+func (self *SubscriptionTransferBalanceCodeTemplate) Funcs(funcs texttemplate.FuncMap) {
+    self.BaseTemplate.Funcs(funcs)
+    funcs["Balance"] = self.Balance
+}
 
-func SendAccountMessageTemplate(userAuth string, template Template) error {
+func (self *SubscriptionTransferBalanceCodeTemplate) Balance() string {
+    return model.ByteCountHumanReadable(self.BalanceByteCount)
+}
+
+
+type SubscriptionTransferBalanceCompanyTemplate struct {
+    BalanceByteCount model.ByteCount
+    BaseTemplate
+}
+
+func (self *SubscriptionTransferBalanceCompanyTemplate) Name() string {
+    return "subscription_transfer_balance_company"
+}
+
+func (self *SubscriptionTransferBalanceCompanyTemplate) Funcs(funcs texttemplate.FuncMap) {
+    self.BaseTemplate.Funcs(funcs)
+    funcs["Balance"] = self.Balance
+}
+
+func (self *SubscriptionTransferBalanceCompanyTemplate) Balance() string {
+    return model.ByteCountHumanReadable(self.BalanceByteCount)
+}
+
+
+type SubscriptionEndedTemplate struct {
+    BaseTemplate
+}
+
+func (self *SubscriptionEndedTemplate) Name() string {
+    return "subscription_ended"
+}
+
+
+func SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 
     switch userAuthType {
     case model.UserAuthTypeEmail:
-        return SendAccountEmailTemplate(normalUserAuth, template)
+        return SendAccountEmailTemplate(normalUserAuth, template, sendOpts...)
     case model.UserAuthTypePhone:
         return SendAccountSms(normalUserAuth, template)
     default:
@@ -126,12 +164,12 @@ func SendAccountMessageTemplate(userAuth string, template Template) error {
 }
 
 
-func SendAccountEmailTemplate(emailAddress string, template Template) error {
+func SendAccountEmailTemplate(emailAddress string, template Template, sendOpts ...any) error {
     subject, bodyHtml, bodyText, err := RenderEmailTemplate(template)
     if err != nil {
         return err
     }
-    return sendAccountEmail(emailAddress, subject, bodyHtml, bodyText)
+    return sendAccountEmail(emailAddress, subject, bodyHtml, bodyText, sendOpts...)
 }
 
 
@@ -226,13 +264,33 @@ func RenderSmsTemplate(template Template) (bodyText string, returnErr error) {
 }
 
 
+type SendAccountEmailSenderEmail struct {
+    SenderEmail string
+}
+
+func SenderEmail(senderEmail string) *SendAccountEmailSenderEmail {
+    return &SendAccountEmailSenderEmail{
+        SenderEmail: senderEmail,
+    }
+}
+
+
 // https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 // https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/ses-example-send-email.html
 // https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
-func sendAccountEmail(emailAddress string, subject string, bodyHtml string, bodyText string) error {
+func sendAccountEmail(emailAddress string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
-	senderEmailAddress := "no-reply@bringyour.com"
+
+    senderEmail := SenderEmail("no-reply@bringyour.com")
+    for _, sendOpt := range sendOpts {
+        switch v := sendOpt.(type) {
+        case SendAccountEmailSenderEmail:
+            senderEmail = &v
+        case *SendAccountEmailSenderEmail:
+            senderEmail = v
+        }
+    }
 
     awsSession, err := session.NewSession(&aws.Config{
         Region: aws.String(awsRegion),
@@ -267,7 +325,7 @@ func sendAccountEmail(emailAddress string, subject string, bodyHtml string, body
                 Data: aws.String(subject),
             },
         },
-        Source: aws.String(senderEmailAddress),
+        Source: aws.String(senderEmail.SenderEmail),
             // Uncomment to use a configuration set
             //ConfigurationSetName: aws.String(ConfigurationSet),
     }

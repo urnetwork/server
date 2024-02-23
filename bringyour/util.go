@@ -6,6 +6,9 @@ import (
     "fmt"
     "strconv"
     "runtime/debug"
+    "strings"
+    "encoding/json"
+    "bytes"
 )
 
 
@@ -43,6 +46,13 @@ import (
 // }
 
 
+func NowUtc() time.Time {
+    // data stores use utc time without time zone
+    // use the same time format locally to keep the local time in sync with the data store time
+    return time.Now().UTC()
+}
+
+
 
 func CodecTime(t time.Time) time.Time {
     // nanosecond resolution can be serialized and unserialized in most codecs:
@@ -73,14 +83,33 @@ func Raise(err error) {
 }
 
 
+func IsDoneError(r any) bool {
+    if err, ok := r.(error); ok {
+        switch err.Error() {
+        case "Done":
+            return true
+        // pgx
+        case "context canceled", "timeout: context already done: context canceled":
+            return true
+        default:
+            return false
+        }
+    }
+    return false
+}
+
+
 // this is meant to handle unexpected errors and do some cleanup
 func HandleError(do func(), handlers ...func()) {
     defer func() {
-        if err := recover(); err != nil {
-            Logger().Printf("Unexpected error (%s)\n", err)
-            debug.PrintStack()
-            for _, handler := range handlers {
-                handler()
+        if r := recover(); r != nil {
+            if IsDoneError(r) {
+                // the context was canceled and raised. this is a standard pattern, ignore
+            } else {
+                Logger().Printf("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
+                for _, handler := range handlers {
+                    handler()
+                }
             }
         }
     }()
@@ -125,5 +154,36 @@ func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
 }
 
 
+func ErrorJson(err any, stack []byte) string {
+    stackLines := []string{}
+    for _, line := range strings.Split(string(stack), "\n") {
+        stackLines = append(stackLines, strings.TrimSpace(line))
+    }
+    errorJson, _ := json.Marshal(map[string]any{
+        "error": fmt.Sprintf("%s", err),
+        "stack": stackLines,
+    })
+    return string(errorJson)
+}
 
+
+func ErrorJsonNoStack(err any) string {
+    errorJson, _ := json.Marshal(map[string]any{
+        "error": fmt.Sprintf("%s", err),
+    })
+    return string(errorJson)
+}
+
+
+// returns source if cannot compact
+func AttemptCompactJson(jsonBytes []byte) []byte {
+    b := &bytes.Buffer{}
+    if err := json.Compact(b, jsonBytes); err == nil {
+        return b.Bytes()
+    } else {
+        // there was an error compacting the json
+        // return the original
+        return jsonBytes
+    }
+}
 

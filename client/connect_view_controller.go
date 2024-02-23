@@ -408,7 +408,8 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 	// - groups first
 	// - promoted
 	// - provider count descending
-	// - in order: country, region, location
+	// - country
+	// - region, location
 
 	if a == b {
 		return 0
@@ -442,20 +443,20 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 
 		return a.ConnectLocationId.LocationGroupId.cmp(*b.ConnectLocationId.LocationGroupId)
 	} else {
+		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
+			if a.LocationType == LocationTypeCountry {
+				return -1
+			} else {
+				return 1
+			}
+		}
+
 		// provider count descending
 		if a.ProviderCount != b.ProviderCount {
 			if a.ProviderCount < b.ProviderCount {
 				return 1
 			} else {
 				return -1
-			}
-		}
-
-		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
-			if a.LocationType == LocationTypeCountry {
-				return -1
-			} else {
-				return 1
 			}
 		}
 

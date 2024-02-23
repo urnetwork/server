@@ -9,6 +9,9 @@ import (
     // "crypto/rand"
     // "encoding/hex"
     // "slices"
+    "errors"
+    "strings"
+    "strconv"
 
     // "golang.org/x/exp/maps"
 
@@ -18,6 +21,86 @@ import (
 
 
 type ByteCount = int64
+
+func ByteCountHumanReadable(count ByteCount) string {
+    trimFloatString := func(value float64, precision int, suffix string)(string) {
+        s := fmt.Sprintf("%." + strconv.Itoa(precision) + "f", value)
+        s = strings.TrimRight(s, "0")
+        s = strings.TrimRight(s, ".")
+        return s + suffix
+    }
+
+    if 1024 * 1024 * 1024 * 1024 <= count {
+        return trimFloatString(
+            float64(100 * count / (1024 * 1024 * 1024 * 1024)) / 100.0,
+            2,
+            "TiB",
+        )
+    } else if 1024 * 1024 * 1024 <= count {
+        return trimFloatString(
+            float64(100 * count / (1024 * 1024 * 1024)) / 100.0,
+            2,
+            "GiB",
+        )
+    } else if 1024 * 1024 <= count {
+        return trimFloatString(
+            float64(100 * count / (1024 * 1024)) / 100.0,
+            2,
+            "MiB",
+        )
+    } else if 1024 <= count {
+        return trimFloatString(
+            float64(100 * count / (1024)) / 100.0,
+            2,
+            "KiB",
+        )
+    } else {
+        return fmt.Sprintf("%dB", count)
+    }
+}
+
+func ParseByteCount(humanReadable string) (ByteCount, error) {
+    humanReadableLower := strings.ToLower(humanReadable)
+    tibLower := "tib"
+    gibLower := "gib"
+    mibLower := "mib"
+    if strings.HasSuffix(humanReadableLower, tibLower) {
+        countFloat, err := strconv.ParseFloat(
+            humanReadableLower[0:len(humanReadableLower)-len(tibLower)],
+            64,
+        )
+        if err != nil {
+            return ByteCount(0), err
+        }
+        return ByteCount(countFloat * 1024 * 1024 * 1024 * 1024), nil
+    } else if strings.HasSuffix(humanReadableLower, gibLower) {
+        countFloat, err := strconv.ParseFloat(
+            humanReadableLower[0:len(humanReadableLower)-len(gibLower)],
+            64,
+        )
+        if err != nil {
+            return ByteCount(0), err
+        }
+        return ByteCount(countFloat * 1024 * 1024 * 1024), nil
+    } else if strings.HasSuffix(humanReadableLower, mibLower) {
+        countFloat, err := strconv.ParseFloat(
+            humanReadableLower[0:len(humanReadableLower)-len(mibLower)],
+            64,
+        )
+        if err != nil {
+            return ByteCount(0), err
+        }
+        return ByteCount(countFloat * 1024 * 1024), nil
+    } else {
+        countInt, err := strconv.ParseInt(humanReadableLower, 10, 63)
+        if err != nil {
+            return ByteCount(0), err
+        }
+        return ByteCount(countInt), nil
+    }
+}
+
+
 
 
 type NanoCents = int64
@@ -43,6 +126,8 @@ var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 const WalletPayoutTimeout = 15 * 24 * time.Hour
 
 const ProviderRevenueShare = 0.5
+
+const MaxSubscriptionPaymentIdsPerHour = 5
 
 
 type TransferPair struct {
@@ -81,26 +166,75 @@ type BalanceCode struct {
     BalanceByteCount ByteCount
     NetRevenue NanoCents
     Secret string
+    PurchaseEventId string
     PurchaseRecord string
     PurchaseEmail string
 }
 
 
-func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId bringyour.Id) (balanceCodeId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
+func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId string) (balanceCodeId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
             ctx,
             `
                 SELECT balance_code_id FROM transfer_balance_code
                 WHERE purchase_event_id = $1
             `,
-            balanceCodeId,
+            purchaseEventId,
         )
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
                 bringyour.Raise(result.Scan(&balanceCodeId))
             } else {
             	returnErr = fmt.Errorf("Purchase event not found.")
+            }
+        })
+    }))
+    return
+}
+
+
+func GetBalanceCode(
+    ctx context.Context,
+    balanceCodeId bringyour.Id,
+) (balanceCode *BalanceCode, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    create_time,
+                    start_time,
+                    end_time,
+                    balance_byte_count,
+                    net_revenue_nano_cents,
+                    balance_code_secret,
+                    purchase_event_id,
+                    purchase_record,
+                    purchase_email
+                FROM transfer_balance_code
+                WHERE balance_code_id = $1
+            `,
+            balanceCodeId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                balanceCode = &BalanceCode{
+                    BalanceCodeId: balanceCodeId,
+                }
+                bringyour.Raise(result.Scan(
+                    &balanceCode.CreateTime,
+                    &balanceCode.StartTime,
+                    &balanceCode.EndTime,
+                    &balanceCode.BalanceByteCount,
+                    &balanceCode.NetRevenue,
+                    &balanceCode.Secret,
+                    &balanceCode.PurchaseEventId,
+                    &balanceCode.PurchaseRecord,
+                    &balanceCode.PurchaseEmail,
+                ))
+            } else {
+                returnErr = fmt.Errorf("Balance code not found.")
             }
         })
     }))
@@ -148,7 +282,7 @@ func CreateBalanceCode(
             return
         }
 
-        createTime := time.Now()
+        createTime := time.Now().UTC()
         // round down to 00:00 the day of create time
         startTime := time.Date(
             createTime.Year(),
@@ -197,6 +331,7 @@ func CreateBalanceCode(
             BalanceByteCount: balanceByteCount,
             NetRevenue: netRevenue,
             Secret: secret,
+            PurchaseEventId: purchaseEventId,
             PurchaseRecord: purchaseRecord,
             PurchaseEmail: purchaseEmail,
         }
@@ -243,6 +378,7 @@ func RedeemBalanceCode(
                 WHERE
                     balance_code_secret = $1 AND
                     redeem_balance_id IS NULL
+                FOR UPDATE
             `,
             redeemBalanceCode.Secret,
         )
@@ -315,7 +451,7 @@ func RedeemBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -360,6 +496,7 @@ func CheckBalanceCode(
                 WHERE
                     balance_code_secret = $1 AND
                     redeem_balance_id IS NULL
+                FOR UPDATE
             `,
             checkBalanceCode.Secret,
         )
@@ -392,12 +529,13 @@ func CheckBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
 
 
+// FIXME add payment_token
 type TransferBalance struct {
     BalanceId bringyour.Id `json:"balance_id"`
     NetworkId bringyour.Id `json:"network_id"`
@@ -407,6 +545,7 @@ type TransferBalance struct {
     // how much money the platform made after subtracting fees
     NetRevenue NanoCents `json:"net_revenue_nano_cents"`
     BalanceByteCount ByteCount `json:"balance_byte_count"`
+    PurchaseToken string `json:"purchase_token,omitempty"`
 }
 
 
@@ -470,22 +609,62 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                     start_time,
                     end_time,
                     start_balance_byte_count,
+                    balance_byte_count,
                     net_revenue_nano_cents,
-                    balance_byte_count
+                    purchase_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
             balanceId,
             transferBalance.NetworkId,
             transferBalance.StartTime,
             transferBalance.EndTime,
             transferBalance.StartBalanceByteCount,
-            transferBalance.NetRevenue,
             transferBalance.BalanceByteCount,
+            transferBalance.NetRevenue,
+            transferBalance.PurchaseToken,
         ))
 
         transferBalance.BalanceId = balanceId
     }))
+}
+
+
+
+
+// TODO GetLastTransferData returns the transfer data with
+// 1. the given purhase record
+// 2. that starte before and ends after sub.ExpiryTime
+// TODO with the max end time
+// TODO if none, return err
+func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    balance_id
+                FROM transfer_balance
+                WHERE
+                    purchase_token = $1 AND
+                    $2 < end_time AND
+                    start_time <= $2
+                ORDER BY end_time DESC
+                LIMIT 1
+            `,
+            purchaseToken,
+            expiryTime,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&balanceId))
+            } else {
+                returnErr = errors.New("Overlapping transfer balance not found.")
+            }
+        })
+    }))
+
+    return
 }
 
 
@@ -559,6 +738,8 @@ func CreateTransferEscrow(
                     start_time <= $2 AND $2 < end_time
 
                 ORDER BY end_time ASC
+
+                FOR UPDATE
             `,
             sourceNetworkId,
             time.Now(),
@@ -659,7 +840,7 @@ func CreateTransferEscrow(
             ContractId: contractId,
             Balances: balances,
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -820,6 +1001,7 @@ func CloseContract(
                 WHERE
                     contract_id = $1 AND
                     outcome IS NULL
+                FOR UPDATE
             `,
             contractId,
         )
@@ -965,6 +1147,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     FROM contract_close
                     WHERE
                         contract_id = $1
+                    FOR UPDATE
                 `,
                 contractId,
             )
@@ -996,6 +1179,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     WHERE
                         contract_id = $1 AND
                         party = $2
+                    FOR UPDATE
                 `,
                 contractId,
                 party,
@@ -1033,6 +1217,8 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     transfer_contract.outcome IS NULL
 
                 ORDER BY transfer_balance.end_time ASC
+
+                FOR UPDATE
             `,
             contractId,
         )
@@ -1090,6 +1276,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                 FROM transfer_contract
                 WHERE
                     contract_id = $1
+                FOR UPDATE
             `,
             contractId,
         )
@@ -1197,7 +1384,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
             netPayoutByteCount,
             netPayout,
         ))
-    }, bringyour.TxSerializable))
+    }))
 
     return
 }
@@ -1693,6 +1880,29 @@ type PaymentPlan struct {
 func PlanPayments(ctx context.Context) *PaymentPlan {
     var paymentPlan *PaymentPlan
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+            CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
+
+            AS
+
+            SELECT
+                transfer_escrow_sweep.contract_id,
+                transfer_escrow_sweep.balance_id
+                
+            FROM transfer_escrow_sweep
+
+            LEFT JOIN account_payment ON
+                account_payment.payment_id = transfer_escrow_sweep.payment_id
+
+            WHERE
+                account_payment.payment_id IS NULL OR
+                NOT account_payment.completed AND account_payment.canceled
+            `,
+        ))
+
         result, err := tx.Query(
             ctx,
             `
@@ -1706,8 +1916,9 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
 
             FROM transfer_escrow_sweep
 
-            LEFT JOIN account_payment ON
-                account_payment.payment_id = transfer_escrow_sweep.payment_id
+            INNER JOIN temp_account_payment ON
+                temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
+                temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
 
             INNER JOIN payout_wallet ON
                 payout_wallet.network_id = transfer_escrow_sweep.network_id
@@ -1716,11 +1927,12 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             	account_wallet.wallet_id = payout_wallet.wallet_id AND
             	account_wallet.active = true
 
-            WHERE
-                account_payment.payment_id IS NULL OR
-                NOT account_payment.completed AND account_payment.canceled
+            FOR UPDATE
             `,
         )
+        // FIXME select the account_payment into a temp table as a first step
+        // contract_id, balance_id, payment_id, completed, canceled
+        // FIXME how to wind in FOR UPDATE
         paymentPlanId := bringyour.NewId()
         // walletId -> AccountPayment
         walletPayments := map[bringyour.Id]*AccountPayment{}
@@ -1836,7 +2048,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             WalletPayments: walletPayments,
             WithheldWalletIds: walletIdsToRemove,
         }
-    }, bringyour.TxSerializable))
+    }))
 
     return paymentPlan
 }
@@ -2022,6 +2234,102 @@ func GetNetPendingPayout(ctx context.Context, networkId bringyour.Id) NanoCents 
 
     // FIXME
     return 0
+}
+
+
+type SubscriptionCreatePaymentIdArgs struct {
+}
+
+type SubscriptionCreatePaymentIdResult struct {
+    SubscriptionPaymentId bringyour.Id `json:"subscription_payment_id,omitempty"`
+    Error *SubscriptionCreatePaymentIdError `json:"error,omitempty"`
+}
+
+type SubscriptionCreatePaymentIdError struct {
+    Message string `json:"message"`
+}
+
+func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArgs, clientSession *session.ClientSession) (createPaymentIdResult *SubscriptionCreatePaymentIdResult, returnErr error) {
+    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            clientSession.Ctx,
+            `
+            SELECT
+                COUNT(subscription_payment_id) AS subscription_payment_id_count
+            FROM subscription_payment
+            WHERE
+                network_id = $1 AND
+                $2 <= create_time
+            `,
+            clientSession.ByJwt.NetworkId,
+            time.Now().Add(-1 * time.Hour),
+        )
+
+        limitExceeded := false
+
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                var count int
+                bringyour.Raise(result.Scan(&count))
+                if MaxSubscriptionPaymentIdsPerHour <= count {
+                    limitExceeded = true
+                }
+            }
+        })
+
+        if limitExceeded {
+            createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
+                Error: &SubscriptionCreatePaymentIdError{
+                    Message: "Too many subscription payments in the last hour. Try again later.",
+                },
+            }
+            return
+        }
+
+        subscriptionPaymentId := bringyour.NewId()
+
+        tx.Exec(
+            clientSession.Ctx,
+            `
+            INSERT INTO subscription_payment (
+                subscription_payment_id,
+                network_id,
+                user_id
+            ) VALUES ($1, $2, $3)
+            `,
+            subscriptionPaymentId,
+            clientSession.ByJwt.NetworkId,
+            clientSession.ByJwt.UserId,
+        )
+
+        createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
+            SubscriptionPaymentId: subscriptionPaymentId,
+        }
+    }))
+
+    return
+}
+
+
+func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPaymentId bringyour.Id) (networkId bringyour.Id, returnErr error) {
+    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+            SELECT network_id FROM subscription_payment
+            WHERE subscription_payment_id = $1
+            `,
+            subscriptionPaymentId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&networkId))
+            } else {
+                returnErr = errors.New("Invalid subscription payment.")
+            }
+        })
+    }))
+    return
 }
 
 

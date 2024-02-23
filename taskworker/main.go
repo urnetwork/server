@@ -110,6 +110,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
         task.NewTaskTargetWithPost(work.ExportStats, work.ExportStatsPost),
         task.NewTaskTargetWithPost(work.RemoveExpiredAuthCodes, work.RemoveExpiredAuthCodesPost),
         task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
+        task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
     )
 
     return taskWorker

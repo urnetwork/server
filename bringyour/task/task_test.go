@@ -79,7 +79,7 @@ func TestTask(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	for i := 0; i < n; i += 1 {
-		taskWorker := NewTaskWorker(clientSession.Ctx)
+		taskWorker := NewTaskWorker(ctx)
 		taskWorker.AddTargets(NewTaskTargetWithPost(Work1, Work1Post))
 
 		go func() {

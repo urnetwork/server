@@ -1,12 +1,13 @@
 module bringyour.com/service/connect
 
-go 1.21.0
+go 1.22.0
 
 require (
 	bringyour.com/bringyour v0.0.0
 	bringyour.com/connect v0.0.0
 	bringyour.com/protocol v0.0.0
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
+	github.com/go-playground/assert/v2 v2.2.0
 	github.com/gorilla/websocket v1.5.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
 	google.golang.org/protobuf v1.31.0
@@ -32,6 +33,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.0 // indirect
 	github.com/redis/go-redis/v9 v9.0.3 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
+	github.com/stripe/stripe-go/v76 v76.16.0 // indirect
 	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	golang.org/x/crypto v0.14.0 // indirect
 	golang.org/x/net v0.17.0 // indirect

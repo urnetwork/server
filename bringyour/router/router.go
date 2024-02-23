@@ -60,10 +60,17 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ctx := context.WithValue(self.ctx, pathValuesKey{}, matches[1:])
 			func() {
 				defer func() {
-					if err := recover(); err != nil {
+					if r := recover(); r != nil {
 						// suppress the error
-						debug.PrintStack()
-						bringyour.Logger().Printf("Unhandled error from route %s (%s)\n", route.String(), err)
+						if bringyour.IsDoneError(r) {
+							// standard pattern to raise on context done. ignore
+						} else {
+							bringyour.Logger().Printf(
+								"Unhandled error from route %s: %s\n",
+								route.String(),
+								bringyour.ErrorJson(r, debug.Stack()),
+							)
+						}
 						http.Error(w, "Error. Please visit support.bringyour.com for help.", http.StatusInternalServerError)
 					}
 				}()
