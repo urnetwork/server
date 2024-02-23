@@ -46,8 +46,8 @@ type BringYourDevice struct {
 	instanceId connect.Id
 	connectClient *connect.Client
 
-	contractManager *connect.ContractManager
-	routeManager *connect.RouteManager
+	// contractManager *connect.ContractManager
+	// routeManager *connect.RouteManager
 
 	platformTransport *connect.PlatformTransport
 
@@ -80,9 +80,9 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
         clientId,
     )
 
-    routeManager := connect.NewRouteManager(connectClient)
-    contractManager := connect.NewContractManagerWithDefaults(connectClient)
-    connectClient.Setup(routeManager, contractManager)
+    // routeManager := connect.NewRouteManager(connectClient)
+    // contractManager := connect.NewContractManagerWithDefaults(connectClient)
+    // connectClient.Setup(routeManager, contractManager)
     go connectClient.Run()
 
     auth := &connect.ClientAuth{
@@ -92,7 +92,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
     }
     platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
 
-    go platformTransport.Run(routeManager)
+    go platformTransport.Run(connectClient.RouteManager())
 
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
@@ -110,8 +110,8 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 		clientId: clientId,
 		instanceId: instanceId.toConnectId(),
 		connectClient: connectClient,
-		contractManager: contractManager,
-		routeManager: routeManager,
+		// contractManager: contractManager,
+		// routeManager: routeManager,
 		platformTransport: platformTransport,
 		localUserNat: localUserNat,
 		remoteUserNatClient: nil,
@@ -156,7 +156,7 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
-	self.contractManager.SetProvideModes(provideModes)
+	self.connectClient.ContractManager().SetProvideModes(provideModes)
 }
 
 func (self *BringYourDevice) RemoveDestination() error {

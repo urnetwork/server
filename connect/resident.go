@@ -1307,8 +1307,8 @@ type Resident struct {
 
 	// the client id in the resident is always `connect.ControlId`
 	client *connect.Client
-	clientRouteManager *connect.RouteManager
-	clientContractManager *connect.ContractManager
+	// clientRouteManager *connect.RouteManager
+	// clientContractManager *connect.ContractManager
 	contractManager *contractManager
 
 	stateLock sync.Mutex
@@ -1335,11 +1335,11 @@ func NewResident(
 
 	client := connect.NewClientWithDefaults(cancelCtx, connect.ControlId)
 
-	clientRouteManager := connect.NewRouteManager(client)
-	clientContractManager := connect.NewContractManagerWithDefaults(client)
+	// clientRouteManager := connect.NewRouteManager(client)
+	// clientContractManager := connect.NewContractManagerWithDefaults(client)
 	// no contract is required between the platform and client
 	// // bringyour.Logger().Printf("NO CONTRACT PEER %s\n", clientId.String())
-	clientContractManager.AddNoContractPeer(connect.Id(clientId))
+	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
 
 	resident := &Resident{
 		ctx: cancelCtx,
@@ -1349,8 +1349,8 @@ func NewResident(
 		instanceId: instanceId,
 		residentId: residentId,
 		client: client,
-		clientRouteManager: clientRouteManager,
-		clientContractManager: clientContractManager,
+		// clientRouteManager: clientRouteManager,
+		// clientContractManager: clientContractManager,
 		contractManager: newContractManager(cancelCtx, cancel, clientId),
 		transports: map[*clientTransport]bool{},
 		forwards: map[bringyour.Id]*ResidentForward{},
@@ -1361,7 +1361,7 @@ func NewResident(
 	client.AddReceiveCallback(resident.handleClientReceive)
 	client.AddForwardCallback(resident.handleClientForward)
 
-	client.Setup(clientRouteManager, clientContractManager)
+	// client.Setup(clientRouteManager, clientContractManager)
 
 	go bringyour.HandleError(func() {
 		client.Run()
@@ -1683,8 +1683,9 @@ func (self *Resident) AddTransport() (
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.transports[transport] = true
-		self.clientRouteManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
-		self.clientRouteManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
+		routeManager := self.client.RouteManager()
+		routeManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
+		routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
 	}()
 
 	closeTransport = func() {
@@ -1693,8 +1694,9 @@ func (self *Resident) AddTransport() (
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			self.clientRouteManager.RemoveTransport(transport.sendTransport)
-			self.clientRouteManager.RemoveTransport(transport.receiveTransport)
+			routeManager := self.client.RouteManager()
+			routeManager.RemoveTransport(transport.sendTransport)
+			routeManager.RemoveTransport(transport.receiveTransport)
 			delete(self.transports, transport)
 		}()
 

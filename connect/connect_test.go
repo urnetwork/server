@@ -54,10 +54,11 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		1024 * 1024,
 	}
 
+	
+	transportCount := 8
+	burstM := 48
 	newInstanceM := -1
 
-	transportM := 20
-	burstM := 64
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -68,7 +69,9 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	clientIdA := connect.NewId()
+	clientAInstanceId := connect.NewId()
 	clientIdB := connect.NewId()
+	clientBInstanceId := connect.NewId()
 
 	routes := map[string]string{}
 	for i := 0; i < 10; i += 1 {
@@ -125,17 +128,17 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	clientSettingsA := connect.DefaultClientSettings()
 	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
-	routeManagerA := connect.NewRouteManager(clientA)
-	contractManagerA := connect.NewContractManagerWithDefaults(clientA)
-	clientA.Setup(routeManagerA, contractManagerA)
+	// routeManagerA := connect.NewRouteManager(clientA)
+	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
+	// clientA.Setup(routeManagerA, contractManagerA)
 	go clientA.Run()
 
 
 	clientSettingsB := connect.DefaultClientSettings()
 	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
-	routeManagerB := connect.NewRouteManager(clientB)
-	contractManagerB := connect.NewContractManagerWithDefaults(clientB)
-	clientB.Setup(routeManagerB, contractManagerB)
+	// routeManagerB := connect.NewRouteManager(clientB)
+	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
+	// clientB.Setup(routeManagerB, contractManagerB)
 	go clientB.Run()
 
 	
@@ -186,15 +189,15 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	authA := &connect.ClientAuth {
 	    ByJwt: byJwtA,
 	    ClientId: clientIdA,
-	    InstanceId: clientA.InstanceId(),
+	    InstanceId: clientAInstanceId,
 	    AppVersion: "0.0.0",
 	}
 
 	transportAs := []*connect.PlatformTransport{}
-	for i := 0; i < transportM; i += 1 {
+	for i := 0; i < transportCount; i += 1 {
 		transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
 		transportAs = append(transportAs, transportA)
-		go transportA.Run(routeManagerA)
+		go transportA.Run(clientA.RouteManager())
 	}
 
 
@@ -203,15 +206,15 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	authB := &connect.ClientAuth {
 	    ByJwt: byJwtB,
 	    ClientId: clientIdB,
-	    InstanceId: clientB.InstanceId(),
+	    InstanceId: clientBInstanceId,
 	    AppVersion: "0.0.0",
 	}
 
 	transportBs := []*connect.PlatformTransport{}
-	for i := 0; i < transportM; i += 1 {
+	for i := 0; i < transportCount; i += 1 {
 		transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
 		transportBs = append(transportBs, transportB)
-		go transportB.Run(routeManagerB)
+		go transportB.Run(clientB.RouteManager())
 	}
 
 
@@ -275,18 +278,18 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientA.SetInstanceId(connect.NewId())
+					clientAInstanceId = connect.NewId()
 				}
 				authA = &connect.ClientAuth {
 				    ByJwt: byJwtA,
 				    ClientId: clientIdA,
-				    InstanceId: clientA.InstanceId(),
+				    InstanceId: clientAInstanceId,
 				    AppVersion: "0.0.0",
 				}
-				for i := 0; i < transportM; i += 1 {
+				for i := 0; i < transportCount; i += 1 {
 					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
 					transportAs = append(transportAs, transportA)
-					go transportA.Run(routeManagerA)
+					go transportA.Run(clientA.RouteManager())
 				}
 				// let the closed transports remove, otherwise messages will be send to closing tranports
 				// (this will affect the nack delivery)
@@ -407,18 +410,18 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientB.SetInstanceId(connect.NewId())
+					clientBInstanceId = connect.NewId()
 				}
 				authB = &connect.ClientAuth {
 				    ByJwt: byJwtB,
 				    ClientId: clientIdB,
-				    InstanceId: clientB.InstanceId(),
+				    InstanceId: clientBInstanceId,
 				    AppVersion: "0.0.0",
 				}
-				for i := 0; i < transportM; i += 1 {
+				for i := 0; i < transportCount; i += 1 {
 					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
 					transportBs = append(transportBs, transportB)
-					go transportB.Run(routeManagerB)
+					go transportB.Run(clientB.RouteManager())
 				}
 				// let the closed transports remove, otherwise messages will be send to closing tranports
 				// (this will affect the nack delivery)
