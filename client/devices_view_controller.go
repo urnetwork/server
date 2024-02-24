@@ -112,7 +112,7 @@ func (self *DevicesViewController) cmpNetworkClientLayout(a *NetworkClientInfo, 
 		}
 	}
 
-	return a.ClientId.cmp(*b.ClientId)
+	return a.ClientId.Cmp(b.ClientId)
 }
 
 

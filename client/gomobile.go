@@ -101,6 +101,17 @@ func NewPathList() *PathList {
 }
 
 
+type LocationResultList struct {
+	exportedList[*LocationResult]
+}
+
+func NewLocationResultList() *LocationResultList {
+	return &LocationResultList{
+		exportedList: *newExportedList[*LocationResult](),
+	}
+}
+
+
 type LocationGroupResultList struct {
 	exportedList[*LocationGroupResult]
 }
@@ -112,13 +123,13 @@ func NewLocationGroupResultList() *LocationGroupResultList {
 }
 
 
-type LocationResultList struct {
-	exportedList[*LocationResult]
+type LocationDeviceResultList struct {
+	exportedList[*LocationDeviceResult]
 }
 
-func NewLocationResultList() *LocationResultList {
-	return &LocationResultList{
-		exportedList: *newExportedList[*LocationResult](),
+func NewLocationDeviceResultList() *LocationDeviceResultList {
+	return &LocationDeviceResultList{
+		exportedList: *newExportedList[*LocationDeviceResult](),
 	}
 }
 

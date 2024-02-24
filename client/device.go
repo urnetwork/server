@@ -179,19 +179,15 @@ func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode 
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
-	} else {
-		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
 
-	if destinations == nil || destinations.Len() == 0 {
-		self.localUserNat.AddReceivePacketCallback(self.receive)
-		return nil
-	} else {
+	if destinations != nil && 0 < destinations.Len() {
 		connectDestinations := []connect.Path{}
 		for i := 0; i < destinations.Len(); i += 1 {
 			connectDestinations = append(connectDestinations, destinations.Get(i).toConnectPath())
 		}
-		remoteUserNatClient_, err := connect.NewRemoteUserNatClient(
+		var err error
+		self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
 			self.connectClient,
 			self.receive,
 			connectDestinations,
@@ -200,9 +196,8 @@ func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode 
 		if err != nil {
 			return err
 		}
-		self.remoteUserNatClient = remoteUserNatClient_
-		return nil
 	}
+	return nil
 }
 
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
@@ -291,10 +286,8 @@ func (self *BringYourDevice) Close() {
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
-	} else {
-		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
-
+	self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	self.remoteUserNatProvider.Close()
 
 	self.localUserNat.Close()

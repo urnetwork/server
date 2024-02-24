@@ -1081,6 +1081,11 @@ type LocationResult struct {
     MatchDistance int `json:"match_distance,omitempty"`
 }
 
+type LocationDeviceResult struct {
+    ClientId bringyour.Id `json:"client_id"`
+    DeviceName string `json:"device_name"`
+}
+
 
 type FindLocationsArgs struct {
     Query string `json:"query"`
@@ -1090,7 +1095,6 @@ type FindLocationsArgs struct {
     EnableMaxDistanceFraction bool `json:"enable_max_distance_fraction,omitempty"`
 }
 
-// FIXME
 type FindLocationsResult struct {
     // this includes groups that show up in the location results
     // all `ProviderCount` are from inside the location results
@@ -1099,6 +1103,8 @@ type FindLocationsResult struct {
     // this includes all parent locations that show up in the location results
     // every `CityId`, `RegionId`, `CountryId` will have an entry
     Locations []*LocationResult `json:"locations"`
+    // direct devices
+    Devices []*LocationDeviceResult `json:"devices"`
 }
 
 // search for locations that match query
@@ -1367,6 +1373,7 @@ func FindActiveProviderLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: findLocationDevices(session.Ctx, findLocations),
     }, nil
 }
 
@@ -1510,6 +1517,7 @@ func GetActiveProviderLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: getActiveLocationDevices(session.Ctx),
     }, nil
 }
 
@@ -1685,6 +1693,7 @@ func FindLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: findLocationDevices(session.Ctx, findLocations),
     }, nil
 }
 
@@ -1849,6 +1858,28 @@ func GetActiveProvidersForLocationGroup(
     }))
 
     return clientIds
+}
+
+
+func findLocationDevices(ctx context.Context, findLocations *FindLocationsArgs) []*LocationDeviceResult {
+    // if query is a udid, include a raw client id
+
+    devices := []*LocationDeviceResult{}
+
+    if clientId, err := bringyour.ParseId(findLocations.Query); err == nil {
+        device := &LocationDeviceResult{
+            ClientId: clientId,
+            DeviceName: fmt.Sprintf("%s", clientId),
+        }
+        devices = append(devices, device)
+    }
+
+    return devices
+}
+
+
+func getActiveLocationDevices(ctx context.Context) []*LocationDeviceResult {
+    return []*LocationDeviceResult{}
 }
 
 

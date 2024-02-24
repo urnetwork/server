@@ -140,26 +140,30 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	clear(self.activeDestinationIds)
 	self.stateLock.Unlock()
 
-	exportedExcludeClientIds := NewIdList()
-	// exclude self
-	exportedExcludeClientIds.Add(self.device.ClientId())
+	if location.IsDevice() {
+		self.setDestination(location, *location.ConnectLocationId.ClientId)
+	} else {
+		exportedExcludeClientIds := NewIdList()
+		// exclude self
+		exportedExcludeClientIds.Add(self.device.ClientId())
 
-	findActiveProviders := &FindActiveProvidersArgs{
-		LocationId: location.ConnectLocationId.LocationId,
-		LocationGroupId: location.ConnectLocationId.LocationGroupId,
-		Count: 1,
-		ExcludeClientIds: exportedExcludeClientIds,
-	}
-	self.device.Api().FindProviders(findActiveProviders, FindActiveProvidersCallback(newApiCallback[*FindActiveProvidersResult](
-		func(result *FindActiveProvidersResult, err error) {
-			if err == nil {
-				if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
-					clientId := result.ClientIds.Get(0)
-					self.setDestination(location, *clientId)
+		findActiveProviders := &FindActiveProvidersArgs{
+			LocationId: location.ConnectLocationId.LocationId,
+			LocationGroupId: location.ConnectLocationId.LocationGroupId,
+			Count: 1,
+			ExcludeClientIds: exportedExcludeClientIds,
+		}
+		self.device.Api().FindProviders(findActiveProviders, FindActiveProvidersCallback(newApiCallback[*FindActiveProvidersResult](
+			func(result *FindActiveProvidersResult, err error) {
+				if err == nil {
+					if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
+						clientId := result.ClientIds.Get(0)
+						self.setDestination(location, *clientId)
+					}
 				}
-			}
-		},
-	)))
+			},
+		)))
+	}
 }
 
 func (self *ConnectViewController) Shuffle() {
@@ -257,7 +261,9 @@ func (self *ConnectViewController) Broaden() {
 }
 
 func (self *ConnectViewController) Reset() {
-	self.device.client().Reset()
+	// self.device.client().Reset()
+
+	// todo how to reset?
 }
 
 func (self *ConnectViewController) Disconnect() {
@@ -372,6 +378,18 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 		locations = append(locations, location)
 	}
 
+	for i := 0; i < result.Devices.Len(); i += 1 {
+		locationDeviceResult := result.Devices.Get(i)
+
+		location := &ConnectLocation{
+			ConnectLocationId: &ConnectLocationId{
+				ClientId: locationDeviceResult.ClientId,
+			},
+		    Name: locationDeviceResult.DeviceName,
+		}
+		locations = append(locations, location)
+	}
+
 	slices.SortStableFunc(locations, cmpConnectLocationLayout)
 
 	exportedFilteredLocations := NewConnectLocationList()
@@ -405,14 +423,24 @@ func (self *ConnectViewController) Close() {
 
 func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 	// sort locations
-	// - groups first
+	// - devices
+	// - groups
 	// - promoted
 	// - provider count descending
 	// - country
 	// - region, location
+	// - name
 
 	if a == b {
 		return 0
+	}
+
+	if a.IsDevice() != b.IsDevice() {
+		if a.IsDevice() {
+			return -1
+		} else {
+			return 1
+		}
 	}
 
 	if a.IsGroup() != b.IsGroup() {
@@ -441,7 +469,7 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 			}
 		}
 
-		return a.ConnectLocationId.LocationGroupId.cmp(*b.ConnectLocationId.LocationGroupId)
+		return a.ConnectLocationId.LocationGroupId.Cmp(b.ConnectLocationId.LocationGroupId)
 	} else {
 		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
 			if a.LocationType == LocationTypeCountry {
@@ -476,7 +504,15 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 			}
 		}
 
-		return a.ConnectLocationId.LocationId.cmp(*b.ConnectLocationId.LocationId)
+		if a.Name != b.Name {
+			if a.Name < b.Name {
+				return -1
+			} else {
+				return 1
+			}
+		}
+
+		return a.ConnectLocationId.Cmp(b.ConnectLocationId)
 	}
 }
 
@@ -518,7 +554,11 @@ type ConnectLocation struct {
 }
 
 func (self *ConnectLocation) IsGroup() bool {
-	return self.ConnectLocationId.LocationGroupId != nil
+	return self.ConnectLocationId.IsGroup()
+}
+
+func (self *ConnectLocation) IsDevice() bool {
+	return self.ConnectLocationId.IsDevice()
 }
 
 func (self *ConnectLocation) ToRegion() *ConnectLocation {
@@ -534,12 +574,54 @@ func (self *ConnectLocation) ToCountry() *ConnectLocation {
 
 // merged location and location group
 type ConnectLocationId struct {
+	// if set, the location is a direct connection to another device
+	ClientId *Id
 	LocationId *Id 
 	LocationGroupId *Id 
 }
 
 func (self *ConnectLocationId) IsGroup() bool {
 	return self.LocationGroupId != nil
+}
+
+func (self *ConnectLocationId) IsDevice() bool {
+	return self.ClientId != nil
+}
+
+func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
+	// - direct
+	// - group
+	if self.ClientId != nil && b.ClientId != nil {
+		if c := self.ClientId.Cmp(b.ClientId); c != 0 {
+			return c
+		}
+	} else if self.ClientId != nil {
+		return -1
+	} else if b.ClientId != nil {
+		return 1
+	}
+
+	if self.LocationGroupId != nil && b.LocationGroupId != nil {
+		if c := self.LocationGroupId.Cmp(b.LocationGroupId); c != 0 {
+			return c
+		}
+	} else if self.LocationGroupId != nil {
+		return -1
+	} else if b.LocationGroupId != nil {
+		return 1
+	}
+
+	if self.LocationId != nil && b.LocationId != nil {
+		if c := self.LocationId.Cmp(b.LocationId); c != 0 {
+			return c
+		}
+	} else if self.LocationId != nil {
+		return -1
+	} else if b.LocationId != nil {
+		return 1
+	}
+
+	return 0
 }
 
 

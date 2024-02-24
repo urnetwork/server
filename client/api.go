@@ -422,14 +422,7 @@ type FindLocationsResult struct {
     // this includes all parent locations that show up in the location results
     // every `CityId`, `RegionId`, `CountryId` will have an entry
     Locations *LocationResultList `json:"locations"`
-}
-
-type LocationGroupResult struct {
-    LocationGroupId *Id `json:"location_group_id"`
-    Name string `json:"name"`
-    ProviderCount int `json:"provider_count,omitempty"`
-    Promoted bool `json:"promoted,omitempty"`
-    MatchDistance int `json:"match_distance,omitempty"`
+    Devices *LocationDeviceResultList `json:"devices"`
 }
 
 type LocationResult struct {
@@ -448,6 +441,19 @@ type LocationResult struct {
     CountryLocationId *Id `json:"country_location_id,omitempty"`
     ProviderCount int `json:"provider_count,omitempty"`
     MatchDistance int `json:"match_distance,omitempty"`
+}
+
+type LocationGroupResult struct {
+    LocationGroupId *Id `json:"location_group_id"`
+    Name string `json:"name"`
+    ProviderCount int `json:"provider_count,omitempty"`
+    Promoted bool `json:"promoted,omitempty"`
+    MatchDistance int `json:"match_distance,omitempty"`
+}
+
+type LocationDeviceResult struct {
+	ClientId *Id `json:"client_id"`
+	DeviceName string `json:"device_name"`
 }
 
 func (self *BringYourApi) GetProviderLocations(callback FindLocationsCallback) {
