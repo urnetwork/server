@@ -101,6 +101,28 @@ func NewPathList() *PathList {
 }
 
 
+type ProviderSpecList struct {
+	exportedList[*ProviderSpec]
+}
+
+func NewProviderSpecList() *ProviderSpecList {
+	return &ProviderSpecList{
+		exportedList: *newExportedList[*ProviderSpec](),
+	}
+}
+
+
+type FindProvidersProviderList struct {
+	exportedList[*FindProvidersProvider]
+}
+
+func NewFindProvidersProviderList() *FindProvidersProviderList {
+	return &FindProvidersProviderList{
+		exportedList: *newExportedList[*FindProvidersProvider](),
+	}
+}
+
+
 type LocationResultList struct {
 	exportedList[*LocationResult]
 }

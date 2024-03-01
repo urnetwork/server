@@ -29,10 +29,6 @@ type ReceivePacket interface {
 // TODO methods to manage extenders
 
 
-// FIXME all client go code should be thread safe
-// FIXME state lock
-
-
 // conforms to `Router`
 type BringYourDevice struct {
 	ctx context.Context
@@ -56,7 +52,7 @@ type BringYourDevice struct {
 	stateLock sync.Mutex
 
 	// when nil, packets get routed to the local user nat
-	remoteUserNatClient *connect.RemoteUserNatClient
+	remoteUserNatClient *connect.RemoteUserNatMultiClient
 
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
@@ -83,16 +79,21 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
     // routeManager := connect.NewRouteManager(connectClient)
     // contractManager := connect.NewContractManagerWithDefaults(connectClient)
     // connectClient.Setup(routeManager, contractManager)
-    go connectClient.Run()
+    // go connectClient.Run()
 
     auth := &connect.ClientAuth{
     	ByJwt: byJwt,
     	InstanceId: instanceId.toConnectId(),
     	AppVersion: Version,
     }
-    platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
+    platformTransport := connect.NewPlatformTransportWithDefaults(
+    	cancelCtx,
+    	platformUrl,
+    	auth,
+    	connectClient.RouteManager(),
+    )
 
-    go platformTransport.Run(connectClient.RouteManager())
+    // go platformTransport.Run(connectClient.RouteManager())
 
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
@@ -163,16 +164,28 @@ func (self *BringYourDevice) RemoveDestination() error {
 	return self.SetDestination(nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
-	exportedDestinations := NewPathList()
-	exportedDestinations.Add(&Path{
-		ClientId: clientId,
-	})
-	return self.SetDestination(exportedDestinations, ProvideModePublic)
+func (self *BringYourDevice) SetDestinationPublicClientIds(clientIds *IdList) error {
+	specs := NewProviderSpecList()
+	for i := 0; i < clientIds.Len(); i += 1 {
+		specs.Add(&ProviderSpec{
+			ClientId: clientIds.Get(i),
+		})
+	}
+	return self.SetDestination(specs, ProvideModePublic)
 }
 
+/*
+func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
+	specs := NewProviderSpecList()
+	specs.Add(&ProviderSpec{
+		ClientId: clientId,
+	})
+	return self.SetDestination(specs, ProvideModePublic)
+}
+*/
+
 // `Router` implementation
-func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode ProvideMode) error {
+func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -181,17 +194,19 @@ func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode 
 		self.remoteUserNatClient = nil
 	}
 
-	if destinations != nil && 0 < destinations.Len() {
-		connectDestinations := []connect.Path{}
-		for i := 0; i < destinations.Len(); i += 1 {
-			connectDestinations = append(connectDestinations, destinations.Get(i).toConnectPath())
+	if specs != nil && 0 < specs.Len() {
+		connectSpecs := []*connect.ProviderSpec{}
+		for i := 0; i < specs.Len(); i += 1 {
+			connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
 		}
 		var err error
-		self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
-			self.connectClient,
+		self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
+			self.ctx,
+			self.apiUrl,
+			self.byJwt,
+			self.platformUrl,
+			connectSpecs,
 			self.receive,
-			connectDestinations,
-			protocol.ProvideMode(provideMode),
 		)
 		if err != nil {
 			return err

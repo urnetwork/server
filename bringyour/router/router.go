@@ -33,7 +33,7 @@ func (self *Route) String() string {
 }
 
 
-type pathValuesKey struct{}
+type pathValuesKey struct {}
 
 
 type Router struct {

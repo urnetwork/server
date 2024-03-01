@@ -5,7 +5,7 @@ go 1.22.0
 require (
 	bringyour.com/connect v0.0.0
 	bringyour.com/protocol v0.0.0
-	github.com/golang-jwt/jwt/v5 v5.0.0
+	github.com/golang-jwt/jwt/v5 v5.2.0
 	golang.org/x/mobile v0.0.0-20230427221453-e8d11dd0ba41
 )
 

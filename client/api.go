@@ -13,6 +13,8 @@ import (
 	"time"
 	"errors"
 	"strings"
+
+	"bringyour.com/connect"
 )
 
 
@@ -415,6 +417,7 @@ type FindLocationsArgs struct {
 }
 
 type FindLocationsResult struct {
+	Specs *ProviderSpecList `json:"specs"`
     // this includes groups that show up in the location results
     // all `ProviderCount` are from inside the location results
     // groups are suggestions that can be used to broaden the search
@@ -489,26 +492,79 @@ func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callba
 }
 
 
-type FindActiveProvidersCallback apiCallback[*FindActiveProvidersResult]
+type FindProvidersCallback apiCallback[*FindProvidersResult]
 
-type FindActiveProvidersArgs struct {
+type FindProvidersArgs struct {
 	LocationId *Id `json:"location_id,omitempty"`
 	LocationGroupId *Id `json:"location_group_id,omitempty"`
 	Count int `json:"count"`
 	ExcludeClientIds *IdList `json:"exclude_location_ids,omitempty"`
 }
 
-type FindActiveProvidersResult struct {
+type FindProvidersResult struct {
 	ClientIds *IdList `json:"client_ids,omitempty"`
 }
 
-func (self *BringYourApi) FindProviders(findActiveProviders *FindActiveProvidersArgs, callback FindActiveProvidersCallback) {
+func (self *BringYourApi) FindProviders(findProviders *FindProvidersArgs, callback FindProvidersCallback) {
 	go post(
 		self.ctx,
 		fmt.Sprintf("%s/network/find-providers", self.apiUrl),
-		findActiveProviders,
+		findProviders,
 		self.byJwt,
-		&FindActiveProvidersResult{},
+		&FindProvidersResult{},
+		callback,
+	)
+}
+
+
+type ProviderSpec struct {
+    LocationId *Id `json:"location_id,omitempty"`
+    LocationGroupId *Id `json:"location_group_id,omitempty"`
+    ClientId *Id `json:"client_id,omitempty"`
+}
+
+func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
+	connectProviderSpec := &connect.ProviderSpec{}
+	if self.LocationId != nil {
+		connectLocationId := self.LocationId.toConnectId()
+		connectProviderSpec.LocationId = &connectLocationId
+	}
+	if self.LocationGroupId != nil {
+		connectLocationGroupId := self.LocationGroupId.toConnectId()
+		connectProviderSpec.LocationGroupId = &connectLocationGroupId
+	}
+	if self.ClientId != nil {
+		connectClientId := self.ClientId.toConnectId()
+		connectProviderSpec.ClientId = &connectClientId
+	}
+	return connectProviderSpec
+}
+
+
+type FindProviders2Callback apiCallback[*FindProviders2Result]
+
+type FindProviders2Args struct {
+	Specs *ProviderSpecList `json:"specs"`
+	Count int `json:"count"`
+	ExcludeClientIds *IdList `json:"exclude_client_ids"`
+}
+
+type FindProviders2Result struct {
+	ProviderStats *FindProvidersProviderList `json:"providers"`
+}
+
+type FindProvidersProvider struct {
+	ClientId *Id `json:"client_id"`
+	EstimatedBytesPerSecond int `json:"estimated_bytes_per_second"`
+}
+
+func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, callback FindProvidersCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/network/find-providers2", self.apiUrl),
+		findProviders2,
+		self.byJwt,
+		&FindProvidersResult{},
 		callback,
 	)
 }

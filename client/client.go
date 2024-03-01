@@ -44,7 +44,7 @@ func newId(id [16]byte) *Id {
 	}
 }
 
-func NewIdFromString(src string) (*Id, error) {
+func ParseId(src string) (*Id, error) {
 	dst, err := parseUuid(src)
 	if err != nil {
 		return nil, err

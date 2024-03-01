@@ -106,17 +106,26 @@ func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *C
 	}
 }
 
-func (self *ConnectViewController) setDestination(location *ConnectLocation, destinationId Id) {
+func (self *ConnectViewController) setDestinations(destinationIds []Id) {
 	self.stateLock.Lock()
-	self.usedDestinationIds[destinationId] = true
+	for _, destinationId := range destinationIds {
+		self.usedDestinationIds[destinationId] = true
+	}
 	clear(self.activeDestinationIds)
-	self.activeDestinationIds[destinationId] = true
+	for _, destinationId := range destinationIds {
+		self.activeDestinationIds[destinationId] = true
+	}
 	self.stateLock.Unlock()
 
-	self.device.SetDestinationPublicClientId(&destinationId)
-	self.connectionChanged(location, true)
+	clientIds := NewIdList()
+	for _, destinationId := range destinationIds {
+		clientIds.Add(&destinationId)
+	}
+
+	self.device.SetDestinationPublicClientIds(clientIds)
 }
 
+/*
 func (self *ConnectViewController) updateDestination(destinationId Id) {
 	self.stateLock.Lock()
 	self.usedDestinationIds[destinationId] = true
@@ -126,6 +135,11 @@ func (self *ConnectViewController) updateDestination(destinationId Id) {
 
 	self.device.SetDestinationPublicClientId(&destinationId)
 }
+*/
+
+
+// FIXME ConnectWithSpecs(SpecList)
+
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// api call to get client ids, device.SETLOCATION
@@ -141,25 +155,33 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	self.stateLock.Unlock()
 
 	if location.IsDevice() {
-		self.setDestination(location, *location.ConnectLocationId.ClientId)
+		clientIds := []Id{
+			*location.ConnectLocationId.ClientId,
+		}
+		self.setDestinations(clientIds)
+		self.connectionChanged(location, true)
 	} else {
 		exportedExcludeClientIds := NewIdList()
 		// exclude self
 		exportedExcludeClientIds.Add(self.device.ClientId())
 
-		findActiveProviders := &FindActiveProvidersArgs{
+		findProviders := &FindProvidersArgs{
 			LocationId: location.ConnectLocationId.LocationId,
 			LocationGroupId: location.ConnectLocationId.LocationGroupId,
-			Count: 1,
+			// FIXME 
+			Count: 1024,
 			ExcludeClientIds: exportedExcludeClientIds,
 		}
-		self.device.Api().FindProviders(findActiveProviders, FindActiveProvidersCallback(newApiCallback[*FindActiveProvidersResult](
-			func(result *FindActiveProvidersResult, err error) {
-				if err == nil {
-					if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
-						clientId := result.ClientIds.Get(0)
-						self.setDestination(location, *clientId)
+		self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
+			func(result *FindProvidersResult, err error) {
+				if err == nil && result.ClientIds != nil {
+					clientIds := []Id{}
+					for i := 0; i < result.ClientIds.Len(); i += 1 {
+						clientId := result.ClientIds.Get(i)
+						clientIds = append(clientIds, *clientId)
 					}
+					self.setDestinations(clientIds)
+					self.connectionChanged(location, true)
 				}
 			},
 		)))
@@ -167,6 +189,11 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 }
 
 func (self *ConnectViewController) Shuffle() {
+
+
+	// FIXME remoteClient.Shuffle()
+
+
 	var connectLocationId *ConnectLocationId
 	
 	exportedExcludeClientIds := NewIdList()
@@ -180,18 +207,22 @@ func (self *ConnectViewController) Shuffle() {
 	connectLocationId = self.activeLocation.ConnectLocationId
 	self.stateLock.Unlock()
 
-	findActiveProviders := &FindActiveProvidersArgs{
+	findProviders := &FindProvidersArgs{
 		LocationId: connectLocationId.LocationId,
 		LocationGroupId: connectLocationId.LocationGroupId,
 		Count: 1,
 		ExcludeClientIds: exportedExcludeClientIds,
 	}
-	self.device.Api().FindProviders(findActiveProviders, FindActiveProvidersCallback(newApiCallback[*FindActiveProvidersResult](
-		func(result *FindActiveProvidersResult, err error) {
+	self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
+		func(result *FindProvidersResult, err error) {
 			if err == nil {
 				if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
-					clientId := result.ClientIds.Get(0)
-					self.updateDestination(*clientId)
+					clientIds := []Id{}
+					for i := 0; i < result.ClientIds.Len(); i += 1 {
+						clientId := result.ClientIds.Get(i)
+						clientIds = append(clientIds, *clientId)
+					}
+					self.setDestinations(clientIds)
 				} else {
 					// no more destinations to try. Reset `usedDestinationIds` and try again once.
 
@@ -211,20 +242,22 @@ func (self *ConnectViewController) Shuffle() {
 						// exclude self
 						exportedExcludeClientIds.Add(self.device.ClientId())
 
-						findActiveProviders := &FindActiveProvidersArgs{
+						findProviders := &FindProvidersArgs{
 							LocationId: connectLocationId.LocationId,
 							LocationGroupId: connectLocationId.LocationGroupId,
 							Count: 1,
 							ExcludeClientIds: exportedExcludeClientIds,
 						}
 
-						self.device.Api().FindProviders(findActiveProviders, FindActiveProvidersCallback(newApiCallback[*FindActiveProvidersResult](
-							func(result *FindActiveProvidersResult, err error) {
-								if err == nil {
-									if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
-										clientId := result.ClientIds.Get(0)
-										self.updateDestination(*clientId)
+						self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
+							func(result *FindProvidersResult, err error) {
+								if err == nil && result.ClientIds != nil {
+									clientIds := []Id{}
+									for i := 0; i < result.ClientIds.Len(); i += 1 {
+										clientId := result.ClientIds.Get(i)
+										clientIds = append(clientIds, *clientId)
 									}
+									self.setDestinations(clientIds)
 								}
 							},
 						)))

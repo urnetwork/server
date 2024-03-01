@@ -12,6 +12,7 @@ build_android:
 		-ldflags "-X client.Version=$$WARP_VERSION" \
 		-target=android -androidapi 19 \
 		-javapkg com.bringyour \
+		-trimpath \
 		-o build/android/BringYourClient.aar \
 	bringyour.com/client
 	# validate that all types could be exported
@@ -37,6 +38,7 @@ build_ios:
 	gomobile bind \
 		-ldflags "-X client.Version=$$WARP_VERSION" \
 		-target=ios -iosversion 14.0 \
+		-trimpath \
 		-o build/ios/BringYourClient.xcframework \
 	bringyour.com/client
 
