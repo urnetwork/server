@@ -1363,9 +1363,9 @@ func NewResident(
 
 	// client.Setup(clientRouteManager, clientContractManager)
 
-	go bringyour.HandleError(func() {
-		client.Run()
-	}, cancel)
+	// go bringyour.HandleError(func() {
+	// 	client.Run()
+	// }, cancel)
 
 	go bringyour.HandleError(resident.cleanupForwards, cancel)
 

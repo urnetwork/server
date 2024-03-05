@@ -22,9 +22,10 @@ func (self *Destination) Insert(path *Path) *Destination {
 }
 */
 
-
+/*
 type Router interface {
 	// `provideMode` is the relative provide mode for the destinations
 	// e.g. if a public device, `ProvideModePublic`
 	SetDestination(destinations *PathList, provideMode ProvideMode) error
 }
+*/

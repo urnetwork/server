@@ -40,7 +40,7 @@ type BringYourDevice struct {
 
 	clientId connect.Id
 	instanceId connect.Id
-	connectClient *connect.Client
+	client *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -53,6 +53,7 @@ type BringYourDevice struct {
 
 	// when nil, packets get routed to the local user nat
 	remoteUserNatClient *connect.RemoteUserNatMultiClient
+	// remoteUserNatClient *connect.RemoteUserNatClient
 
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
@@ -71,7 +72,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
-	connectClient := connect.NewClientWithDefaults(
+	client := connect.NewClientWithDefaults(
         cancelCtx,
         clientId,
     )
@@ -90,14 +91,14 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
     	cancelCtx,
     	platformUrl,
     	auth,
-    	connectClient.RouteManager(),
+    	client.RouteManager(),
     )
 
     // go platformTransport.Run(connectClient.RouteManager())
 
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
-    remoteUserNatProvider := connect.NewRemoteUserNatProvider(connectClient, localUserNat)
+    remoteUserNatProvider := connect.NewRemoteUserNatProvider(client, localUserNat)
 
     api := newBringYourApiWithContext(cancelCtx, apiUrl)
     api.SetByJwt(byJwt)
@@ -110,7 +111,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 		apiUrl: apiUrl,
 		clientId: clientId,
 		instanceId: instanceId.toConnectId(),
-		connectClient: connectClient,
+		client: client,
 		// contractManager: contractManager,
 		// routeManager: routeManager,
 		platformTransport: platformTransport,
@@ -129,13 +130,13 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 }
 
 func (self *BringYourDevice) ClientId() *Id {
-	clientId := self.connectClient.ClientId()
-	return newId(clientId)
+	// clientId := self.client.ClientId()
+	return newId(self.clientId)
 }
 
-func (self *BringYourDevice) client() *connect.Client {
-	return self.connectClient
-}
+// func (self *BringYourDevice) client() *connect.Client {
+// 	return self.client
+// }
 
 func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
@@ -157,7 +158,7 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
-	self.connectClient.ContractManager().SetProvideModes(provideModes)
+	self.client.ContractManager().SetProvideModes(provideModes)
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
@@ -184,7 +185,6 @@ func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
 }
 */
 
-// `Router` implementation
 func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -199,7 +199,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 		for i := 0; i < specs.Len(); i += 1 {
 			connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
 		}
-		var err error
+
 		self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 			self.ctx,
 			self.apiUrl,
@@ -208,9 +208,26 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			connectSpecs,
 			self.receive,
 		)
+
+		/*
+
+		var err error
+		paths := []connect.Path{}
+		for _, connectSpec := range connectSpecs {
+			if connectSpec.ClientId != nil {
+				paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
+			}
+		}
+		self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
+			self.client,
+			self.receive,
+			paths,
+			protocol.ProvideMode_Network,
+		)
 		if err != nil {
 			return err
 		}
+		*/
 	}
 	return nil
 }
@@ -268,7 +285,7 @@ func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController 
 }
 
 func (self *BringYourDevice) OpenStatusViewController() *StatusViewController {
-	vc := newStatusViewController(self.ctx, self.connectClient)
+	vc := newStatusViewController(self.ctx, self.client)
 	self.openViewController(vc)
 	return vc
 }
@@ -296,7 +313,7 @@ func (self *BringYourDevice) Close() {
 
 	self.cancel()
 
-	self.connectClient.Cancel()
+	self.client.Cancel()
 
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
@@ -317,7 +334,7 @@ func (self *BringYourDevice) Close() {
 		case <- time.After(clientDrainTimeout):
 		}
 
-		self.connectClient.Close()
+		self.client.Close()
 	}()
 }
 
