@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"slices"
+	"fmt"
 
 	"golang.org/x/mobile/gl"
 
@@ -107,6 +108,14 @@ func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *C
 }
 
 func (self *ConnectViewController) setDestinations(destinationIds []Id) {
+
+	destinationIdStrs := []string{}
+	for _, destinationId := range destinationIds {
+		destinationIdStrs = append(destinationIdStrs, destinationId.String())
+	}
+	fmt.Printf("Found client ids:\n%s", strings.Join(destinationIdStrs, "\n"))
+
+
 	self.stateLock.Lock()
 	for _, destinationId := range destinationIds {
 		self.usedDestinationIds[destinationId] = true

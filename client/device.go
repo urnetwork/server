@@ -20,6 +20,13 @@ var deviceLog = logFn("device")
 const clientDrainTimeout = 30 * time.Second
 
 
+// FIXME
+var sendTimeout = 30 * time.Second
+
+
+var TestingUseSingleClient = false
+
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
     ReceivePacket(packet []byte)
@@ -38,6 +45,9 @@ type BringYourDevice struct {
 	platformUrl string
 	apiUrl string
 
+	deviceDescription string
+	deviceSpec string
+
 	clientId connect.Id
 	instanceId connect.Id
 	client *connect.Client
@@ -52,8 +62,7 @@ type BringYourDevice struct {
 	stateLock sync.Mutex
 
 	// when nil, packets get routed to the local user nat
-	remoteUserNatClient *connect.RemoteUserNatMultiClient
-	// remoteUserNatClient *connect.RemoteUserNatClient
+	remoteUserNatClient connect.UserNatClient
 
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
@@ -64,7 +73,15 @@ type BringYourDevice struct {
 	api *BringYourApi
 }
 
-func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanceId *Id) (*BringYourDevice, error) {
+func NewBringYourDevice(
+	byJwt string,
+	platformUrl string,
+	apiUrl string,
+	deviceDescription string,
+	deviceSpec string,
+	// FIXME appVersion
+	instanceId *Id,
+) (*BringYourDevice, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
 		return nil, err
@@ -98,7 +115,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
-    remoteUserNatProvider := connect.NewRemoteUserNatProvider(client, localUserNat)
+    remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(client, localUserNat)
 
     api := newBringYourApiWithContext(cancelCtx, apiUrl)
     api.SetByJwt(byJwt)
@@ -109,6 +126,8 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 		byJwt: byJwt,
 		platformUrl: platformUrl,
 		apiUrl: apiUrl,
+		deviceDescription: deviceDescription,
+		deviceSpec: deviceSpec,
 		clientId: clientId,
 		instanceId: instanceId.toConnectId(),
 		client: client,
@@ -200,35 +219,44 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
 		}
 
-		self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
-			self.ctx,
-			self.apiUrl,
-			self.byJwt,
-			self.platformUrl,
-			connectSpecs,
-			self.receive,
-		)
-
-		/*
-
-		var err error
 		paths := []connect.Path{}
 		for _, connectSpec := range connectSpecs {
 			if connectSpec.ClientId != nil {
 				paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
 			}
 		}
-		self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
-			self.client,
-			self.receive,
-			paths,
-			protocol.ProvideMode_Network,
-		)
-		if err != nil {
-			return err
+
+		if len(connectSpecs) == len(paths) && TestingUseSingleClient {
+			var err error
+			self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
+				self.client,
+				self.receive,
+				paths,
+				protocol.ProvideMode_Network,
+			)
+			if err != nil {
+				return err
+			}
+		} else {
+			generator := connect.NewApiMultiClientGenerator(
+				connectSpecs,
+				self.apiUrl,
+				self.byJwt,
+				self.platformUrl,
+				self.deviceDescription,
+				self.deviceSpec,
+				// FIXME get the app version
+				"0.0.0",
+			)
+			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
+				self.ctx,
+				generator,
+				self.receive,
+			)
+			return nil
 		}
-		*/
 	}
+	// no specs, not an error
 	return nil
 }
 
@@ -243,10 +271,10 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	self.stateLock.Unlock()
 
 	if remoteUserNatClient != nil {
-		remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+		remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy, sendTimeout)
 	} else {
 		// route locally
-		localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+		localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy, sendTimeout)
 	}
 }
 
