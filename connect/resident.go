@@ -1322,6 +1322,9 @@ type Resident struct {
 
 	abuseLimiter *limiter
 	controlLimiter *limiter
+
+	clientReceiveUnsub func()
+	clientForwardUnsub func()
 }
 
 func NewResident(
@@ -1358,8 +1361,11 @@ func NewResident(
 		controlLimiter: newLimiter(cancelCtx, ControlMinTimeout),
 	}
 
-	client.AddReceiveCallback(resident.handleClientReceive)
-	client.AddForwardCallback(resident.handleClientForward)
+	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
+	resident.clientReceiveUnsub = clientReceiveUnsub
+
+	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
+	resident.clientForwardUnsub = clientForwardUnsub
 
 	// client.Setup(clientRouteManager, clientContractManager)
 
@@ -1755,8 +1761,11 @@ func (self *Resident) Close() {
 
 	self.client.Cancel()
 
-	self.client.RemoveReceiveCallback(self.handleClientReceive)
-	self.client.RemoveForwardCallback(self.handleClientForward)
+	// self.client.RemoveReceiveCallback(self.handleClientReceive)
+	// self.client.RemoveForwardCallback(self.handleClientForward)
+	self.clientReceiveUnsub()
+	self.clientForwardUnsub()
+	
 
 	func() {
 		self.stateLock.Lock()

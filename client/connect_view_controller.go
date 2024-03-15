@@ -74,9 +74,9 @@ func (self *ConnectViewController) Stop() {
 }
 
 func (self *ConnectViewController) AddConnectionListener(listener ConnectionListener) Sub {
-	self.connectionListeners.Add(listener)
+	callbackId := self.connectionListeners.Add(listener)
 	return newSub(func() {
-		self.connectionListeners.Remove(listener)
+		self.connectionListeners.Remove(callbackId)
 	})
 }
 
@@ -91,9 +91,9 @@ func (self *ConnectViewController) connectionChanged(location *ConnectLocation, 
 }
 
 func (self *ConnectViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
-	self.filteredLocationListeners.Add(listener)
+	callbackId := self.filteredLocationListeners.Add(listener)
 	return newSub(func() {
-		self.filteredLocationListeners.Remove(listener)
+		self.filteredLocationListeners.Remove(callbackId)
 	})
 }
 

@@ -67,9 +67,9 @@ func (self *DevicesViewController) Stop() {
 }
 
 func (self *DevicesViewController) AddNetworkClientsListener(listener NetworkClientsListener) Sub {
-	self.networkClientsListeners.Add(listener)
+	callbackId := self.networkClientsListeners.Add(listener)
 	return newSub(func() {
-		self.networkClientsListeners.Remove(listener)
+		self.networkClientsListeners.Remove(callbackId)
 	})
 }
 

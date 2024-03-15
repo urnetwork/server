@@ -17,16 +17,6 @@ import (
 var deviceLog = logFn("device")
 
 
-const clientDrainTimeout = 30 * time.Second
-
-
-// FIXME
-var sendTimeout = 30 * time.Second
-
-
-var TestingUseSingleClient = false
-
-
 // receive a packet into the local raw socket
 type ReceivePacket interface {
     ReceivePacket(packet []byte)
@@ -34,6 +24,20 @@ type ReceivePacket interface {
 
 
 // TODO methods to manage extenders
+
+
+type deviceSettings struct {
+	// time to give up (drop) sending a packet to a destination
+	SendTimeout time.Duration
+	ClientDrainTimeout time.Duration
+}
+
+func defaultDeviceSettings() *deviceSettings {
+	return &deviceSettings{
+		SendTimeout: 5 * time.Second,
+		ClientDrainTimeout: 30 * time.Second,
+	}
+}
 
 
 // conforms to `Router`
@@ -47,9 +51,14 @@ type BringYourDevice struct {
 
 	deviceDescription string
 	deviceSpec string
+	appVersion string
+
+	settings *deviceSettings
 
 	clientId connect.Id
 	instanceId connect.Id
+
+
 	client *connect.Client
 
 	// contractManager *connect.ContractManager
@@ -71,16 +80,40 @@ type BringYourDevice struct {
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
 	api *BringYourApi
+
+	localUserNatUnsub func()
 }
 
-func NewBringYourDevice(
+func NewBringYourDeviceWithDefaults(
 	byJwt string,
 	platformUrl string,
 	apiUrl string,
 	deviceDescription string,
 	deviceSpec string,
-	// FIXME appVersion
+	appVersion string,
 	instanceId *Id,
+) (*BringYourDevice, error) {
+	return newBringYourDevice(
+		byJwt,
+		platformUrl,
+		apiUrl,
+		deviceDescription,
+		deviceSpec,
+		appVersion,
+		instanceId,
+		defaultDeviceSettings(),
+	)
+}
+
+func newBringYourDevice(
+	byJwt string,
+	platformUrl string,
+	apiUrl string,
+	deviceDescription string,
+	deviceSpec string,
+	appVersion string,
+	instanceId *Id,
+	settings *deviceSettings,
 ) (*BringYourDevice, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
@@ -128,6 +161,8 @@ func NewBringYourDevice(
 		apiUrl: apiUrl,
 		deviceDescription: deviceDescription,
 		deviceSpec: deviceSpec,
+		appVersion: appVersion,
+		settings: settings,
 		clientId: clientId,
 		instanceId: instanceId.toConnectId(),
 		client: client,
@@ -143,7 +178,8 @@ func NewBringYourDevice(
 	}
 
 	// set up with nil destination
-	localUserNat.AddReceivePacketCallback(byDevice.receive)
+	localUserNatUnsub := localUserNat.AddReceivePacketCallback(byDevice.receive)
+	byDevice.localUserNatUnsub = localUserNatUnsub
 
 	return byDevice, nil
 }
@@ -226,7 +262,9 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			}
 		}
 
-		if len(connectSpecs) == len(paths) && TestingUseSingleClient {
+		// connect to a single client
+		// no need to optimize this case, use the simplest user nat client
+		if len(connectSpecs) == len(paths) && len(paths) == 1 {
 			var err error
 			self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
 				self.client,
@@ -245,8 +283,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.platformUrl,
 				self.deviceDescription,
 				self.deviceSpec,
-				// FIXME get the app version
-				"0.0.0",
+				self.appVersion,
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
@@ -271,10 +308,20 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	self.stateLock.Unlock()
 
 	if remoteUserNatClient != nil {
-		remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy, sendTimeout)
+		remoteUserNatClient.SendPacket(
+			source,
+			protocol.ProvideMode_Network,
+			packetCopy,
+			self.settings.SendTimeout,
+		)
 	} else {
 		// route locally
-		localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy, sendTimeout)
+		localUserNat.SendPacket(
+			source,
+			protocol.ProvideMode_Network,
+			packetCopy,
+			self.settings.SendTimeout,
+		)
 	}
 }
 
@@ -282,9 +329,9 @@ func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	receive := func(destination connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
 		receivePacket.ReceivePacket(packet)
 	}
-	self.receiveCallbacks.Add(receive)
+	callbackId := self.receiveCallbacks.Add(receive)
 	return newSub(func() {
-		self.receiveCallbacks.Remove(receive)
+		self.receiveCallbacks.Remove(callbackId)
 	})
 }
 
@@ -347,7 +394,8 @@ func (self *BringYourDevice) Close() {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
 	}
-	self.localUserNat.RemoveReceivePacketCallback(self.receive)
+	// self.localUserNat.RemoveReceivePacketCallback(self.receive)
+	self.localUserNatUnsub()
 	self.remoteUserNatProvider.Close()
 
 	self.localUserNat.Close()
@@ -359,7 +407,7 @@ func (self *BringYourDevice) Close() {
 
 	go func() {
 		select {
-		case <- time.After(clientDrainTimeout):
+		case <- time.After(self.settings.ClientDrainTimeout):
 		}
 
 		self.client.Close()

@@ -542,19 +542,19 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
 				assert.Equal(t, resendItemCountA, 0)
-				assert.Equal(t, resendItemByteCountA, 0)
+				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
 				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
 				assert.Equal(t, resendItemCountB, 0)
-				assert.Equal(t, resentItemByteCountB, 0)
+				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
 				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
-				assert.Equal(t, receiveItemByteCountA, 0)
+				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
 				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
-				assert.Equal(t, receiveItemByteCountB, 0)
+				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
 		}
 	}
