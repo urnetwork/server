@@ -8,13 +8,13 @@ import (
 )
 
 
-func NetworkGetActiveProviderLocations(w http.ResponseWriter, r *http.Request) {
-	router.WrapNoAuth(model.GetActiveProviderLocations, w, r)
+func NetworkGetProviderLocations(w http.ResponseWriter, r *http.Request) {
+	router.WrapNoAuth(model.GetProviderLocations, w, r)
 }
 
 
-func NetworkFindActiveProviderLocations(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputNoAuth(model.FindActiveProviderLocations, w, r)
+func NetworkFindProviderLocations(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(model.FindProviderLocations, w, r)
 }
 
 
@@ -23,7 +23,17 @@ func NetworkFindLocations(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func NetworkFindActiveProviders(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputNoAuth(model.FindActiveProviders, w, r)
+func NetworkFindProviders(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(model.FindProviders, w, r)
+}
+
+
+func NetworkFindProviders2(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(model.FindProviders2, w, r)
+}
+
+
+func NetworkCreateProviderSpec(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(model.CreateProviderSpec, w, r)
 }
 

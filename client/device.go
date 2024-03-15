@@ -17,9 +17,6 @@ import (
 var deviceLog = logFn("device")
 
 
-const clientDrainTimeout = 30 * time.Second
-
-
 // receive a packet into the local raw socket
 type ReceivePacket interface {
     ReceivePacket(packet []byte)
@@ -29,8 +26,18 @@ type ReceivePacket interface {
 // TODO methods to manage extenders
 
 
-// FIXME all client go code should be thread safe
-// FIXME state lock
+type deviceSettings struct {
+	// time to give up (drop) sending a packet to a destination
+	SendTimeout time.Duration
+	ClientDrainTimeout time.Duration
+}
+
+func defaultDeviceSettings() *deviceSettings {
+	return &deviceSettings{
+		SendTimeout: 5 * time.Second,
+		ClientDrainTimeout: 30 * time.Second,
+	}
+}
 
 
 // conforms to `Router`
@@ -42,9 +49,17 @@ type BringYourDevice struct {
 	platformUrl string
 	apiUrl string
 
+	deviceDescription string
+	deviceSpec string
+	appVersion string
+
+	settings *deviceSettings
+
 	clientId connect.Id
 	instanceId connect.Id
-	connectClient *connect.Client
+
+
+	client *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -56,7 +71,7 @@ type BringYourDevice struct {
 	stateLock sync.Mutex
 
 	// when nil, packets get routed to the local user nat
-	remoteUserNatClient *connect.RemoteUserNatClient
+	remoteUserNatClient connect.UserNatClient
 
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
@@ -65,9 +80,41 @@ type BringYourDevice struct {
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
 	api *BringYourApi
+
+	localUserNatUnsub func()
 }
 
-func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanceId *Id) (*BringYourDevice, error) {
+func NewBringYourDeviceWithDefaults(
+	byJwt string,
+	platformUrl string,
+	apiUrl string,
+	deviceDescription string,
+	deviceSpec string,
+	appVersion string,
+	instanceId *Id,
+) (*BringYourDevice, error) {
+	return newBringYourDevice(
+		byJwt,
+		platformUrl,
+		apiUrl,
+		deviceDescription,
+		deviceSpec,
+		appVersion,
+		instanceId,
+		defaultDeviceSettings(),
+	)
+}
+
+func newBringYourDevice(
+	byJwt string,
+	platformUrl string,
+	apiUrl string,
+	deviceDescription string,
+	deviceSpec string,
+	appVersion string,
+	instanceId *Id,
+	settings *deviceSettings,
+) (*BringYourDevice, error) {
 	clientId, err := parseByJwtClientId(byJwt)
 	if err != nil {
 		return nil, err
@@ -75,7 +122,7 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
-	connectClient := connect.NewClientWithDefaults(
+	client := connect.NewClientWithDefaults(
         cancelCtx,
         clientId,
     )
@@ -83,20 +130,25 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
     // routeManager := connect.NewRouteManager(connectClient)
     // contractManager := connect.NewContractManagerWithDefaults(connectClient)
     // connectClient.Setup(routeManager, contractManager)
-    go connectClient.Run()
+    // go connectClient.Run()
 
     auth := &connect.ClientAuth{
     	ByJwt: byJwt,
     	InstanceId: instanceId.toConnectId(),
     	AppVersion: Version,
     }
-    platformTransport := connect.NewPlatformTransportWithDefaults(cancelCtx, platformUrl, auth)
+    platformTransport := connect.NewPlatformTransportWithDefaults(
+    	cancelCtx,
+    	platformUrl,
+    	auth,
+    	client.RouteManager(),
+    )
 
-    go platformTransport.Run(connectClient.RouteManager())
+    // go platformTransport.Run(connectClient.RouteManager())
 
     localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
 
-    remoteUserNatProvider := connect.NewRemoteUserNatProvider(connectClient, localUserNat)
+    remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(client, localUserNat)
 
     api := newBringYourApiWithContext(cancelCtx, apiUrl)
     api.SetByJwt(byJwt)
@@ -107,9 +159,13 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 		byJwt: byJwt,
 		platformUrl: platformUrl,
 		apiUrl: apiUrl,
+		deviceDescription: deviceDescription,
+		deviceSpec: deviceSpec,
+		appVersion: appVersion,
+		settings: settings,
 		clientId: clientId,
 		instanceId: instanceId.toConnectId(),
-		connectClient: connectClient,
+		client: client,
 		// contractManager: contractManager,
 		// routeManager: routeManager,
 		platformTransport: platformTransport,
@@ -122,19 +178,20 @@ func NewBringYourDevice(byJwt string, platformUrl string, apiUrl string, instanc
 	}
 
 	// set up with nil destination
-	localUserNat.AddReceivePacketCallback(byDevice.receive)
+	localUserNatUnsub := localUserNat.AddReceivePacketCallback(byDevice.receive)
+	byDevice.localUserNatUnsub = localUserNatUnsub
 
 	return byDevice, nil
 }
 
 func (self *BringYourDevice) ClientId() *Id {
-	clientId := self.connectClient.ClientId()
-	return newId(clientId)
+	// clientId := self.client.ClientId()
+	return newId(self.clientId)
 }
 
-func (self *BringYourDevice) client() *connect.Client {
-	return self.connectClient
-}
+// func (self *BringYourDevice) client() *connect.Client {
+// 	return self.client
+// }
 
 func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
@@ -156,53 +213,88 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
-	self.connectClient.ContractManager().SetProvideModes(provideModes)
+	self.client.ContractManager().SetProvideModes(provideModes)
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
 	return self.SetDestination(nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
-	exportedDestinations := NewPathList()
-	exportedDestinations.Add(&Path{
-		ClientId: clientId,
-	})
-	return self.SetDestination(exportedDestinations, ProvideModePublic)
+func (self *BringYourDevice) SetDestinationPublicClientIds(clientIds *IdList) error {
+	specs := NewProviderSpecList()
+	for i := 0; i < clientIds.Len(); i += 1 {
+		specs.Add(&ProviderSpec{
+			ClientId: clientIds.Get(i),
+		})
+	}
+	return self.SetDestination(specs, ProvideModePublic)
 }
 
-// `Router` implementation
-func (self *BringYourDevice) SetDestination(destinations *PathList, provideMode ProvideMode) error {
+/*
+func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
+	specs := NewProviderSpecList()
+	specs.Add(&ProviderSpec{
+		ClientId: clientId,
+	})
+	return self.SetDestination(specs, ProvideModePublic)
+}
+*/
+
+func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
-	} else {
-		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
 
-	if destinations == nil || destinations.Len() == 0 {
-		self.localUserNat.AddReceivePacketCallback(self.receive)
-		return nil
-	} else {
-		connectDestinations := []connect.Path{}
-		for i := 0; i < destinations.Len(); i += 1 {
-			connectDestinations = append(connectDestinations, destinations.Get(i).toConnectPath())
+	if specs != nil && 0 < specs.Len() {
+		connectSpecs := []*connect.ProviderSpec{}
+		for i := 0; i < specs.Len(); i += 1 {
+			connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
 		}
-		remoteUserNatClient_, err := connect.NewRemoteUserNatClient(
-			self.connectClient,
-			self.receive,
-			connectDestinations,
-			protocol.ProvideMode(provideMode),
-		)
-		if err != nil {
-			return err
+
+		paths := []connect.Path{}
+		for _, connectSpec := range connectSpecs {
+			if connectSpec.ClientId != nil {
+				paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
+			}
 		}
-		self.remoteUserNatClient = remoteUserNatClient_
-		return nil
+
+		// connect to a single client
+		// no need to optimize this case, use the simplest user nat client
+		if len(connectSpecs) == len(paths) && len(paths) == 1 {
+			var err error
+			self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
+				self.client,
+				self.receive,
+				paths,
+				protocol.ProvideMode_Network,
+			)
+			if err != nil {
+				return err
+			}
+		} else {
+			generator := connect.NewApiMultiClientGenerator(
+				connectSpecs,
+				self.apiUrl,
+				self.byJwt,
+				self.platformUrl,
+				self.deviceDescription,
+				self.deviceSpec,
+				self.appVersion,
+			)
+			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
+				self.ctx,
+				generator,
+				self.receive,
+			)
+			return nil
+		}
 	}
+	// no specs, not an error
+	return nil
 }
 
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
@@ -216,10 +308,20 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	self.stateLock.Unlock()
 
 	if remoteUserNatClient != nil {
-		remoteUserNatClient.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+		remoteUserNatClient.SendPacket(
+			source,
+			protocol.ProvideMode_Network,
+			packetCopy,
+			self.settings.SendTimeout,
+		)
 	} else {
 		// route locally
-		localUserNat.SendPacket(source, protocol.ProvideMode_Network, packetCopy)
+		localUserNat.SendPacket(
+			source,
+			protocol.ProvideMode_Network,
+			packetCopy,
+			self.settings.SendTimeout,
+		)
 	}
 }
 
@@ -227,9 +329,9 @@ func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
 	receive := func(destination connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
 		receivePacket.ReceivePacket(packet)
 	}
-	self.receiveCallbacks.Add(receive)
+	callbackId := self.receiveCallbacks.Add(receive)
 	return newSub(func() {
-		self.receiveCallbacks.Remove(receive)
+		self.receiveCallbacks.Remove(callbackId)
 	})
 }
 
@@ -258,7 +360,7 @@ func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController 
 }
 
 func (self *BringYourDevice) OpenStatusViewController() *StatusViewController {
-	vc := newStatusViewController(self.ctx, self.connectClient)
+	vc := newStatusViewController(self.ctx, self.client)
 	self.openViewController(vc)
 	return vc
 }
@@ -286,15 +388,14 @@ func (self *BringYourDevice) Close() {
 
 	self.cancel()
 
-	self.connectClient.Cancel()
+	self.client.Cancel()
 
 	if self.remoteUserNatClient != nil {
 		self.remoteUserNatClient.Close()
 		self.remoteUserNatClient = nil
-	} else {
-		self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	}
-
+	// self.localUserNat.RemoveReceivePacketCallback(self.receive)
+	self.localUserNatUnsub()
 	self.remoteUserNatProvider.Close()
 
 	self.localUserNat.Close()
@@ -306,10 +407,10 @@ func (self *BringYourDevice) Close() {
 
 	go func() {
 		select {
-		case <- time.After(clientDrainTimeout):
+		case <- time.After(self.settings.ClientDrainTimeout):
 		}
 
-		self.connectClient.Close()
+		self.client.Close()
 	}()
 }
 

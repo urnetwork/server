@@ -66,7 +66,7 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 	byJwt := &ByJwt{}
 
 	if userIdStr, ok := claims["user_id"]; ok {
-		if userId, err := NewIdFromString(userIdStr.(string)); err == nil {
+		if userId, err := ParseId(userIdStr.(string)); err == nil {
 			byJwt.UserId = userId
 		}
 	}
@@ -74,7 +74,7 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 		byJwt.NetworkName = networkName.(string)
 	}
 	if networkIdStr, ok := claims["network_name"]; ok {
-		if networkId, err := NewIdFromString(networkIdStr.(string)); err == nil {
+		if networkId, err := ParseId(networkIdStr.(string)); err == nil {
 			byJwt.NetworkId = networkId
 		}
 	}

@@ -1081,6 +1081,11 @@ type LocationResult struct {
     MatchDistance int `json:"match_distance,omitempty"`
 }
 
+type LocationDeviceResult struct {
+    ClientId bringyour.Id `json:"client_id"`
+    DeviceName string `json:"device_name"`
+}
+
 
 type FindLocationsArgs struct {
     Query string `json:"query"`
@@ -1090,7 +1095,6 @@ type FindLocationsArgs struct {
     EnableMaxDistanceFraction bool `json:"enable_max_distance_fraction,omitempty"`
 }
 
-// FIXME
 type FindLocationsResult struct {
     // this includes groups that show up in the location results
     // all `ProviderCount` are from inside the location results
@@ -1099,6 +1103,8 @@ type FindLocationsResult struct {
     // this includes all parent locations that show up in the location results
     // every `CityId`, `RegionId`, `CountryId` will have an entry
     Locations []*LocationResult `json:"locations"`
+    // direct devices
+    Devices []*LocationDeviceResult `json:"devices"`
 }
 
 // search for locations that match query
@@ -1109,7 +1115,7 @@ type FindLocationsResult struct {
 // args have query and count
 // args have location types, which would typically be all (city, region, country, group)
 // args have min search threshold
-func FindActiveProviderLocations(
+func FindProviderLocations(
     findLocations *FindLocationsArgs,
     session *session.ClientSession,
 ) (*FindLocationsResult, error) {
@@ -1367,11 +1373,12 @@ func FindActiveProviderLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: findLocationDevices(session.Ctx, findLocations),
     }, nil
 }
 
 
-func GetActiveProviderLocations(
+func GetProviderLocations(
     session *session.ClientSession,
 ) (*FindLocationsResult, error) {
     locationResults := map[bringyour.Id]*LocationResult{}
@@ -1510,6 +1517,7 @@ func GetActiveProviderLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: getLocationDevices(session.Ctx),
     }, nil
 }
 
@@ -1685,77 +1693,270 @@ func FindLocations(
     return &FindLocationsResult{
         Locations: maps.Values(locationResults),
         Groups: maps.Values(locationGroupResults),
+        Devices: findLocationDevices(session.Ctx, findLocations),
     }, nil
 }
 
 
-type FindActiveProvidersArgs struct {
+type FindProvidersArgs struct {
 	LocationId *bringyour.Id `json:"location_id,omitempty"`
 	LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
 	Count int `json:"count"`
 	ExcludeClientIds []bringyour.Id `json:"exclude_location_ids,omitempty"`
 }
 
-type FindActiveProvidersResult struct {
+type FindProvidersResult struct {
 	ClientIds []bringyour.Id `json:"client_ids,omitempty"`
 }
 
-func FindActiveProviders(
-	findActiveProviders *FindActiveProvidersArgs,
+func FindProviders(
+	findProviders *FindProvidersArgs,
 	session *session.ClientSession,
-) (*FindActiveProvidersResult, error) {
-	var maxCount int
-	if findActiveProviders.Count < 1 {
-		maxCount = 1
-	} else {
-		maxCount = findActiveProviders.Count
-	}
-
+) (*FindProvidersResult, error) {
 	clientIds := map[bringyour.Id]bool{}
 
-	if findActiveProviders.LocationId != nil {
-		clientIdsForLocation := GetActiveProvidersForLocation(
+	if findProviders.LocationId != nil {
+		clientIdsForLocation := GetProvidersForLocation(
 			session.Ctx,
-			*findActiveProviders.LocationId,
+			*findProviders.LocationId,
 		)
 		for _, clientId := range clientIdsForLocation {
 			clientIds[clientId] = true
 		}
 	}
 
-	for _, clientId := range findActiveProviders.ExcludeClientIds {
-		delete(clientIds, clientId)
-	} 
-
-	if findActiveProviders.LocationGroupId != nil {
-		clientIdsForLocationGroup := GetActiveProvidersForLocationGroup(
+	if findProviders.LocationGroupId != nil {
+		clientIdsForLocationGroup := GetProvidersForLocationGroup(
 			session.Ctx,
-			*findActiveProviders.LocationGroupId,
+			*findProviders.LocationGroupId,
 		)
 		for _, clientId := range clientIdsForLocationGroup {
 			clientIds[clientId] = true
 		}
 	}
 
-	if len(clientIds) < maxCount {
-		return &FindActiveProvidersResult{
-			ClientIds: maps.Keys(clientIds),
-		}, nil
-	} else {
-		// sample
-		shuffledClientIds := maps.Keys(clientIds)
-		mathrand.Shuffle(len(shuffledClientIds), func(i int, j int) {
-			shuffledClientIds[i], shuffledClientIds[j] = shuffledClientIds[j], shuffledClientIds[i]
-		})
 
-		return &FindActiveProvidersResult{
-			ClientIds: shuffledClientIds[:maxCount],
-		}, nil
+    for _, clientId := range findProviders.ExcludeClientIds {
+        delete(clientIds, clientId)
+    }
+
+
+    outClientIds := maps.Keys(clientIds)
+
+	if findProviders.Count < len(clientIds) {
+		// sample
+		mathrand.Shuffle(len(outClientIds), func(i int, j int) {
+			outClientIds[i], outClientIds[j] = outClientIds[j], outClientIds[i]
+		})
+        outClientIds = outClientIds[:findProviders.Count]
 	}
+
+
+    return &FindProvidersResult{
+        ClientIds: outClientIds,
+    }, nil
 }
 
 
-func GetActiveProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bringyour.Id {
+type ProviderSpec struct {
+    LocationId *bringyour.Id `json:"location_id,omitempty"`
+    LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
+    ClientId *bringyour.Id `json:"client_id,omitempty"`
+}
+
+type FindProviders2Args struct {
+    Specs []*ProviderSpec `json:"specs"`
+    Count int `json:"count"`
+    ExcludeClientIds []bringyour.Id `json:"exclude_client_ids"`
+}
+
+type FindProviders2Result struct {
+    Providers []*FindProvidersProvider `json:"providers"`
+}
+
+type FindProvidersProvider struct {
+    ClientId bringyour.Id `json:"client_id"`
+    EstimatedBytesPerSecond int `json:"estimated_bytes_per_second"`
+}
+
+func FindProviders2(
+    findProviders2 *FindProviders2Args,
+    session *session.ClientSession,
+) (*FindProviders2Result, error) {
+    clientIds := map[bringyour.Id]bool{}
+
+    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+        locationIds := map[bringyour.Id]bool{}
+        locationGroupIds := map[bringyour.Id]bool{}
+
+        for _, spec := range findProviders2.Specs {
+            if spec.LocationId != nil {
+                locationIds[*spec.LocationId] = true
+            }
+            if spec.LocationGroupId != nil {
+                locationGroupIds[*spec.LocationGroupId] = true
+            }
+            if spec.ClientId != nil {
+                clientIds[*spec.ClientId] = true
+            }
+        }
+
+
+        if 0 < len(locationIds) {
+            bringyour.CreateTempTableInTx(
+                session.Ctx,
+                tx,
+                "temp_location_ids(location_id uuid)",
+                maps.Keys(locationIds)...,
+            )
+
+            result, err := tx.Query(
+                session.Ctx,
+                `
+                SELECT
+
+                    DISTINCT network_client_location.client_id
+
+                FROM network_client_location
+
+                INNER JOIN client_provide ON
+                    client_provide.client_id = network_client_location.client_id AND
+                    client_provide.provide_mode = $1
+
+                INNER JOIN network_client_connection ON
+                    network_client_connection.connection_id = network_client_location.connection_id
+
+                INNER JOIN temp_location_ids ON 
+                    temp_location_id.location_id = network_client_location.city_location_id OR
+                    temp_location_id.location_id = network_client_location.region_location_id OR
+                    temp_location_id.location_id = network_client_location.country_location_id
+
+                WHERE
+                    network_client_connection.connected = true
+
+                `,
+                ProvideModePublic,
+            )
+            bringyour.WithPgResult(result, err, func() {
+                for result.Next() {
+                    var clientId bringyour.Id
+                    bringyour.Raise(result.Scan(&clientId))
+                    clientIds[clientId] = true
+                }
+            })
+        }
+
+
+        if 0 < len(locationGroupIds) {
+            bringyour.CreateTempTableInTx(
+                session.Ctx,
+                tx,
+                "temp_location_group_ids(location_group_id uuid)",
+                maps.Keys(locationGroupIds)...,
+            )
+
+            result, err := tx.Query(
+                session.Ctx,
+                `
+                    SELECT
+
+                        DISTINCT network_client_location.client_id
+
+                    FROM network_client_location
+
+                    INNER JOIN client_provide ON
+                        client_provide.client_id = network_client_location.client_id AND
+                        client_provide.provide_mode = $1
+
+                    INNER JOIN network_client_connection ON
+                        network_client_connection.connection_id = network_client_location.connection_id
+
+                    LEFT JOIN location_group_member location_group_member_city ON
+                        location_group_member_city.location_id = network_client_location.city_location_id
+
+                    LEFT JOIN location_group_member location_group_member_region ON
+                        location_group_member_region.location_id = network_client_location.region_location_id
+
+                    LEFT JOIN location_group_member location_group_member_country ON
+                        location_group_member_country.location_id = network_client_location.country_location_id
+
+                    INNER JOIN temp_location_group_ids ON 
+                        temp_location_group_ids.location_group_id = location_group_member_city.location_group_id OR
+                        temp_location_group_ids.location_group_id = location_group_member_region.location_group_id OR
+                        temp_location_group_ids.location_group_id = location_group_member_country.location_group_id
+
+                    WHERE
+                        network_client_connection.connected = true AND (
+                            location_group_member_city.location_id IS NOT NULL OR
+                            location_group_member_region.location_id IS NOT NULL OR
+                            location_group_member_country.location_id IS NOT NULL
+                        )
+                `,
+                ProvideModePublic,
+            )
+            bringyour.WithPgResult(result, err, func() {
+                for result.Next() {
+                    var clientId bringyour.Id
+                    bringyour.Raise(result.Scan(&clientId))
+                    clientIds[clientId] = true
+                }
+            })
+        }
+    }))
+
+
+    for _, clientId := range findProviders2.ExcludeClientIds {
+        delete(clientIds, clientId)
+    }
+
+    outClientIds := maps.Keys(clientIds)
+
+    if findProviders2.Count < len(clientIds) {
+        // sample
+        mathrand.Shuffle(len(outClientIds), func(i int, j int) {
+            outClientIds[i], outClientIds[j] = outClientIds[j], outClientIds[i]
+        })
+        outClientIds = outClientIds[:findProviders2.Count]
+    }
+
+
+    providers := []*FindProvidersProvider{}
+    for _, clientId := range outClientIds {
+        provider := &FindProvidersProvider{
+            ClientId: clientId,
+            // TODO
+            EstimatedBytesPerSecond: 0,
+        }
+        providers = append(providers, provider)
+    }
+
+    return &FindProviders2Result{
+        Providers: providers,
+    }, nil
+}
+
+
+type CreateProviderSpecArgs struct {
+    Query string `json:"query"`
+}
+
+type CreateProviderSpecResult struct {
+    Specs []*ProviderSpec `json:"specs"`
+}
+
+func CreateProviderSpec(
+    createProviderSpec *CreateProviderSpecArgs,
+    session *session.ClientSession,
+) (*CreateProviderSpecResult, error) {
+    // FIXME return empty for now
+
+    return &CreateProviderSpecResult{
+        Specs: []*ProviderSpec{},
+    }, nil
+}
+
+
+func GetProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bringyour.Id {
     clientIds := []bringyour.Id{}
 
     bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
@@ -1796,7 +1997,7 @@ func GetActiveProvidersForLocation(ctx context.Context, locationId bringyour.Id)
 }
 
 
-func GetActiveProvidersForLocationGroup(
+func GetProvidersForLocationGroup(
     ctx context.Context,
     locationGroupId bringyour.Id,
 ) []bringyour.Id {
@@ -1822,12 +2023,12 @@ func GetActiveProvidersForLocationGroup(
                     location_group_member_city.location_id = network_client_location.city_location_id
 
                 LEFT JOIN location_group_member location_group_member_region ON
-                    location_group_member_city.location_group_id = $2 AND
-                    location_group_member_city.location_id = network_client_location.region_location_id
+                    location_group_member_region.location_group_id = $2 AND
+                    location_group_member_region.location_id = network_client_location.region_location_id
 
                 LEFT JOIN location_group_member location_group_member_country ON
-                    location_group_member_city.location_group_id = $2 AND
-                    location_group_member_city.location_id = network_client_location.country_location_id
+                    location_group_member_country.location_group_id = $2 AND
+                    location_group_member_country.location_id = network_client_location.country_location_id
 
                 WHERE
                     network_client_connection.connected = true AND (
@@ -1849,6 +2050,28 @@ func GetActiveProvidersForLocationGroup(
     }))
 
     return clientIds
+}
+
+
+func findLocationDevices(ctx context.Context, findLocations *FindLocationsArgs) []*LocationDeviceResult {
+    // if query is a udid, include a raw client id
+
+    devices := []*LocationDeviceResult{}
+
+    if clientId, err := bringyour.ParseId(findLocations.Query); err == nil {
+        device := &LocationDeviceResult{
+            ClientId: clientId,
+            DeviceName: fmt.Sprintf("%s", clientId),
+        }
+        devices = append(devices, device)
+    }
+
+    return devices
+}
+
+
+func getLocationDevices(ctx context.Context) []*LocationDeviceResult {
+    return []*LocationDeviceResult{}
 }
 
 

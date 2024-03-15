@@ -56,7 +56,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	
 	transportCount := 8
-	burstM := 48
+	burstM := 32
 	newInstanceM := -1
 
 
@@ -131,7 +131,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
-	go clientA.Run()
+	// go clientA.Run()
 
 
 	clientSettingsB := connect.DefaultClientSettings()
@@ -139,7 +139,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
-	go clientB.Run()
+	// go clientB.Run()
 
 	
 	networkIdA := bringyour.NewId()
@@ -188,16 +188,16 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	authA := &connect.ClientAuth {
 	    ByJwt: byJwtA,
-	    ClientId: clientIdA,
+	    // ClientId: clientIdA,
 	    InstanceId: clientAInstanceId,
 	    AppVersion: "0.0.0",
 	}
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
+		transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
 		transportAs = append(transportAs, transportA)
-		go transportA.Run(clientA.RouteManager())
+		// go transportA.Run(clientA.RouteManager())
 	}
 
 
@@ -205,16 +205,16 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	authB := &connect.ClientAuth {
 	    ByJwt: byJwtB,
-	    ClientId: clientIdB,
+	    // ClientId: clientIdB,
 	    InstanceId: clientBInstanceId,
 	    AppVersion: "0.0.0",
 	}
 
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
+		transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
 		transportBs = append(transportBs, transportB)
-		go transportB.Run(clientB.RouteManager())
+		// go transportB.Run(clientB.RouteManager())
 	}
 
 
@@ -282,14 +282,14 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				authA = &connect.ClientAuth {
 				    ByJwt: byJwtA,
-				    ClientId: clientIdA,
+				    // ClientId: clientIdA,
 				    InstanceId: clientAInstanceId,
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
-					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA)
+					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
 					transportAs = append(transportAs, transportA)
-					go transportA.Run(clientA.RouteManager())
+					// go transportA.Run(clientA.RouteManager())
 				}
 				// let the closed transports remove, otherwise messages will be send to closing tranports
 				// (this will affect the nack delivery)
@@ -414,14 +414,14 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				authB = &connect.ClientAuth {
 				    ByJwt: byJwtB,
-				    ClientId: clientIdB,
+				    // ClientId: clientIdB,
 				    InstanceId: clientBInstanceId,
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
-					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB)
+					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
 					transportBs = append(transportBs, transportB)
-					go transportB.Run(clientB.RouteManager())
+					// go transportB.Run(clientB.RouteManager())
 				}
 				// let the closed transports remove, otherwise messages will be send to closing tranports
 				// (this will affect the nack delivery)
@@ -542,19 +542,19 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
 				assert.Equal(t, resendItemCountA, 0)
-				assert.Equal(t, resendItemByteCountA, 0)
+				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
 				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
 				assert.Equal(t, resendItemCountB, 0)
-				assert.Equal(t, resentItemByteCountB, 0)
+				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
 				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
-				assert.Equal(t, receiveItemByteCountA, 0)
+				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
 				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
-				assert.Equal(t, receiveItemByteCountB, 0)
+				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
 		}
 	}

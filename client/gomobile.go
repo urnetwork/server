@@ -101,13 +101,24 @@ func NewPathList() *PathList {
 }
 
 
-type LocationGroupResultList struct {
-	exportedList[*LocationGroupResult]
+type ProviderSpecList struct {
+	exportedList[*ProviderSpec]
 }
 
-func NewLocationGroupResultList() *LocationGroupResultList {
-	return &LocationGroupResultList{
-		exportedList: *newExportedList[*LocationGroupResult](),
+func NewProviderSpecList() *ProviderSpecList {
+	return &ProviderSpecList{
+		exportedList: *newExportedList[*ProviderSpec](),
+	}
+}
+
+
+type FindProvidersProviderList struct {
+	exportedList[*FindProvidersProvider]
+}
+
+func NewFindProvidersProviderList() *FindProvidersProviderList {
+	return &FindProvidersProviderList{
+		exportedList: *newExportedList[*FindProvidersProvider](),
 	}
 }
 
@@ -119,6 +130,28 @@ type LocationResultList struct {
 func NewLocationResultList() *LocationResultList {
 	return &LocationResultList{
 		exportedList: *newExportedList[*LocationResult](),
+	}
+}
+
+
+type LocationGroupResultList struct {
+	exportedList[*LocationGroupResult]
+}
+
+func NewLocationGroupResultList() *LocationGroupResultList {
+	return &LocationGroupResultList{
+		exportedList: *newExportedList[*LocationGroupResult](),
+	}
+}
+
+
+type LocationDeviceResultList struct {
+	exportedList[*LocationDeviceResult]
+}
+
+func NewLocationDeviceResultList() *LocationDeviceResultList {
+	return &LocationDeviceResultList{
+		exportedList: *newExportedList[*LocationDeviceResult](),
 	}
 }
 

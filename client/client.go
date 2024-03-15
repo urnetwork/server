@@ -44,7 +44,7 @@ func newId(id [16]byte) *Id {
 	}
 }
 
-func NewIdFromString(src string) (*Id, error) {
+func ParseId(src string) (*Id, error) {
 	dst, err := parseUuid(src)
 	if err != nil {
 		return nil, err
@@ -60,7 +60,7 @@ func (self *Id) String() string {
 	return encodeUuid(self.id)
 }
 
-func (self *Id) cmp(b Id) int {
+func (self *Id) Cmp(b *Id) int {
 	for i, v := range self.id {
 		if v < b.id[i] {
 			return -1
