@@ -81,7 +81,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	createServer := func(exchange *Exchange, port int) *http.Server {
-	    connectHandler := NewConnectHandler(ctx, exchange)
+	    connectHandler := NewConnectHandlerWithDefaults(ctx, exchange)
 
 	    routes := []*router.Route{
 	        router.NewRoute("GET", "/status", router.WarpStatus),
@@ -110,7 +110,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 			9000 + i: 9000 + i,
 		}
 
-		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes)
+		exchange := NewExchangeWithDefaults(ctx, host, service, block, hostToServicePorts, routes)
 		exchanges[host] = exchange
 
 		server := createServer(exchange, port)

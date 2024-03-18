@@ -23,22 +23,41 @@ import (
 // where each connection will be a `connect.Transport` and traffic will be distributed across the transports
 
 
-const PingTimeout = connect.DefaultPingTimeout
-const WriteTimeout = connect.DefaultWriteTimeout
-const ReadTimeout = connect.DefaultReadTimeout
+type ConnectHandlerSettings struct {
+    PingTimeout time.Duration
+    WriteTimeout time.Duration
+    ReadTimeout time.Duration
+    SyncConnectionTimeout time.Duration
+}
 
-const SyncConnectionTimeout = 60 * time.Second
+
+func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
+    platformTransportSettings := connect.DefaultPlatformTransportSettings()
+    return &ConnectHandlerSettings{
+        PingTimeout: platformTransportSettings.PingTimeout,
+        WriteTimeout: platformTransportSettings.WriteTimeout,
+        ReadTimeout: platformTransportSettings.ReadTimeout,
+        SyncConnectionTimeout: 60 * time.Second,
+    }
+}
 
 
 type ConnectHandler struct {
     ctx context.Context
 	exchange *Exchange
+    settings *ConnectHandlerSettings
 }
 
-func NewConnectHandler(ctx context.Context, exchange *Exchange) *ConnectHandler {
+
+func NewConnectHandlerWithDefaults(ctx context.Context, exchange *Exchange) *ConnectHandler {
+    return NewConnectHandler(ctx, exchange, DefaultConnectHandlerSettings())
+}
+
+func NewConnectHandler(ctx context.Context, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
     return &ConnectHandler{
         ctx: ctx,
         exchange: exchange,
+        settings: settings,
     }
 }
 
@@ -59,7 +78,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     }
     defer ws.Close()
 
-    ws.SetReadDeadline(time.Now().Add(ReadTimeout))
+    ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
     messageType, authFrameBytes, err := ws.ReadMessage()
     if err != nil {
         // bringyour.Logger("TIMEOUT HA\n")
@@ -101,7 +120,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     }
 
     // echo the auth message on successful auth
-    ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
+    ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
     err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
     if err != nil {
         // bringyour.Logger("TIMEOUT HC\n")
@@ -130,7 +149,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     		select {
     		case <- handleCtx.Done():
     			return
-    		case <- time.After(SyncConnectionTimeout):
+    		case <- time.After(self.settings.SyncConnectionTimeout):
     		}
 
     		if !model.IsNetworkClientConnected(handleCtx, connectionId) {
@@ -153,7 +172,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         defer residentTransport.Close()
 
     	for {
-            ws.SetReadDeadline(time.Now().Add(ReadTimeout))
+            ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
             messageType, message, err := ws.ReadMessage()
             // // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
             if err != nil {
@@ -178,7 +197,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                 case <- residentTransport.Done():
                     return
                 case residentTransport.send <- message:
-                case <- time.After(WriteTimeout):
+                case <- time.After(self.settings.WriteTimeout):
                     // bringyour.Logger("TIMEOUT HE\n")
                 }
             // else ignore
@@ -200,13 +219,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
             // bringyour.Logger("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
             // // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
-            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
+            ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
             if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
                 // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
                 return
             }
-        case <- time.After(PingTimeout):
-            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
+        case <- time.After(self.settings.PingTimeout):
+            ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
             if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
                 // bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
                 return

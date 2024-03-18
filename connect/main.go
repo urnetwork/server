@@ -44,10 +44,10 @@ Options:
     closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
     defer closeFn()
 
-    exchange := NewExchangeFromEnv(cancelCtx)
+    exchange := NewExchangeFromEnvWithDefaults(cancelCtx)
     defer exchange.Close()
 
-    connectHandler := NewConnectHandler(cancelCtx, exchange)
+    connectHandler := NewConnectHandlerWithDefaults(cancelCtx, exchange)
 
     routes := []*router.Route{
         router.NewRoute("GET", "/status", router.WarpStatus),

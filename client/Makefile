@@ -8,6 +8,7 @@ build_android:
 	mkdir -p build/android
 # 	gomobile bind -target=android -androidapi 19 -javapkg com.bringyour.network -o build/android/client.aar
 	WARP_VERSION=`warpctl ls version`; \
+	# -target=android/arm
 	gomobile bind \
 		-ldflags "-X client.Version=$$WARP_VERSION" \
 		-target=android -androidapi 19 \
