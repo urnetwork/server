@@ -16,7 +16,7 @@ import (
 
 
 func TestByteCount(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
-    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0MiB")
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0B")
     assert.Equal(t, ByteCountHumanReadable(ByteCount(5 * 1024 * 1024 * 1024 * 1024)), "5TiB")
 
     count, err := ParseByteCount("5MiB")

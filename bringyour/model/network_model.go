@@ -51,6 +51,9 @@ type NetworkCreateResult struct {
 	UserAuth *string `json:"user_auth,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error *NetworkCreateResultError `json:"error,omitempty"`
+
+	// not shared to the user outside of the jwt
+	NetworkId bringyour.Id
 }
 
 type NetworkCreateResultNetwork struct {

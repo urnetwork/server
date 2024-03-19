@@ -30,9 +30,6 @@ type ByteCount = model.ByteCount
 
 var ControlId = bringyour.Id(connect.ControlId)
 
-// testing
-var ChaosResidentShutdownPerSecond = float64(0)
-
 
 type ExchangeSettings struct {
 	ConnectHandlerSettings
@@ -69,7 +66,15 @@ type ExchangeSettings struct {
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
+
+	ExchangeChaosSettings
 }
+
+
+type ExchangeChaosSettings struct {
+	ResidentShutdownPerSecond float64
+}
+
 
 
 func DefaultExchangeSettings() *ExchangeSettings {
@@ -118,6 +123,15 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 8,
+
+		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
+	}
+}
+
+
+func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
+	return &ExchangeChaosSettings{
+		ResidentShutdownPerSecond: 0.0,
 	}
 }
 
@@ -1452,7 +1466,7 @@ func NewResident(
 	go bringyour.HandleError(resident.cleanupForwards, cancel)
 
 	// FIXME clean up
-	if 0 < ChaosResidentShutdownPerSecond {
+	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
 		go bringyour.HandleError(func() {
 			for {
 				select {
@@ -1464,7 +1478,7 @@ func NewResident(
 				// bringyour.Logger("RESIDENT ALIVE host=%s clientId=%s residentId=%s\n", exchange.host, clientId.String(), residentId.String())
 
 				
-				if mathrand.Float64() < ChaosResidentShutdownPerSecond {
+				if mathrand.Float64() < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
 					// bringyour.Logger("RESIDENT CHAOS SHUTDOWN host=%s clientId=%s residentId=%s\n", exchange.host, clientId.String(), residentId.String())
 					resident.Cancel()
 				}

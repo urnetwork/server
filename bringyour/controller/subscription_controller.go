@@ -886,3 +886,61 @@ func verifyPlayAuth(auth string) error {
 	return errors.New("Missing authorization.")
 }
 
+
+func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) {
+	model.AddBasicTransferBalance(
+		ctx,
+		networkId,
+		InitialTransferBalance,
+		InitialTransferBalanceExpiration,
+	)
+}
+
+
+// BACKFILL INITIAL TRANSFER BALANCE
+
+type BackfillInitialTransferBalanceArgs struct {
+}
+
+type BackfillInitialTransferBalanceResult struct {
+}
+
+func ScheduleBackfillInitialTransferBalance(clientSession *session.ClientSession, tx bringyour.PgTx) {
+    task.ScheduleTaskInTx(
+        tx,
+        BackfillInitialTransferBalance,
+        &BackfillInitialTransferBalanceArgs{},
+        clientSession,
+        task.RunOnce("backfill_initial_transfer_balance"),
+        task.RunAt(time.Now().Add(1 * time.Hour)),
+    )
+}
+
+func BackfillInitialTransferBalance(
+    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+    clientSession *session.ClientSession,
+) (*BackfillInitialTransferBalanceResult, error) {
+    networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
+	for _, networkId := range networkIds {
+		// add initial transfer balance
+		AddInitialTransferBalance(clientSession.Ctx, networkId)
+	}
+	return &BackfillInitialTransferBalanceResult{}, nil
+}
+
+func BackfillInitialTransferBalancePost(
+    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+    backfillInitialTransferBalanceResult *BackfillInitialTransferBalanceResult,
+    clientSession *session.ClientSession,
+    tx bringyour.PgTx,
+) error {
+    ScheduleBackfillInitialTransferBalance(clientSession, tx)
+    return nil
+}
+
+
+// FIXME
+// FIXME
+// FIXME PlanPayments and payment loop
+
+

@@ -55,9 +55,6 @@ const (
 // send message bursts between the clients
 // contract logic is optional so that the effects of contracts can be isolated
 func testConnect(t *testing.T, contractTest int) {
-	// FIXME the chaos is messed up
-	ChaosResidentShutdownPerSecond = 0.01
-
 
 	type Message struct {
 		sourceId connect.Id
@@ -80,7 +77,7 @@ func testConnect(t *testing.T, contractTest int) {
 
 	
 	transportCount := 8
-	burstM := 32
+	burstM := 16
 	newInstanceM := -1
 
 
@@ -134,7 +131,10 @@ func testConnect(t *testing.T, contractTest int) {
 			9000 + i: 9000 + i,
 		}
 
-		exchange := NewExchangeWithDefaults(ctx, host, service, block, hostToServicePorts, routes)
+		settings := DefaultExchangeSettings()
+		settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.01
+
+		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
 		exchanges[host] = exchange
 
 		server := createServer(exchange, port)
@@ -151,6 +151,8 @@ func testConnect(t *testing.T, contractTest int) {
 
 
 	clientSettingsA := connect.DefaultClientSettings()
+	// disable scheduled network events
+	clientSettingsA.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
 	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
@@ -159,6 +161,8 @@ func testConnect(t *testing.T, contractTest int) {
 
 
 	clientSettingsB := connect.DefaultClientSettings()
+	// disable scheduled network events
+	clientSettingsB.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
 	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)

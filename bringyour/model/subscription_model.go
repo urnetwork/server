@@ -668,6 +668,75 @@ func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, ex
 }
 
 
+// add balance to a network at no cost
+func AddBasicTransferBalance(
+    ctx context.Context,
+    networkId bringyour.Id,
+    transferBalance ByteCount,
+    expiration time.Duration,
+) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        balanceId := bringyour.NewId()
+
+        startTime := time.Now()
+        endTime := startTime.Add(expiration)
+
+        bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                INSERT INTO transfer_balance (
+                    balance_id,
+                    network_id,
+                    start_time,
+                    end_time,
+                    start_balance_byte_count,
+                    balance_byte_count,
+                    net_revenue_nano_cents
+                )
+                VALUES ($1, $2, $3, $4, $5, $5, $6)
+            `,
+            balanceId,
+            networkId,
+            startTime,
+            endTime,
+            transferBalance,
+            NanoCents(0),
+        ))
+    }))
+}
+
+
+// this finds networks with no entries in transfer_balance
+// this is potentially different than networks with zero transfer balance
+func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []bringyour.Id) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT 
+                    network.network_id
+                FROM network
+                
+                LEFT JOIN transfer_balance ON transfer_balance.network_id = network.network_id
+
+                GROUP BY (network.network_id)
+                HAVING COUNT(transfer_balance.balance_id) == 0
+            `,
+        )
+
+        networkIds = []bringyour.Id{}
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var networkId bringyour.Id
+                bringyour.Raise(result.Scan(&networkId))
+                networkIds = append(networkIds, networkId)
+            }
+        })
+    })
+    return
+}
+
+
 type EscrowId struct {
     ContractId bringyour.Id
     BalanceId bringyour.Id
