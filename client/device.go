@@ -40,6 +40,10 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 
+// FIXME call SetProvideModesWithReturnTraffic always
+// FIXME read the stored provide mode and restore it
+
+
 // conforms to `Router`
 type BringYourDevice struct {
 	ctx context.Context

@@ -10,13 +10,10 @@ import (
 	"io"
 	"fmt"
 	"errors"
-	"crypto/hmac"
-	"crypto/sha256"
+
 	mathrand "math/rand"
 
 	"golang.org/x/exp/maps"
-
-	"google.golang.org/protobuf/proto"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -1373,7 +1370,8 @@ type Resident struct {
 	client *connect.Client
 	// clientRouteManager *connect.RouteManager
 	// clientContractManager *connect.ContractManager
-	contractManager *contractManager
+	residentContractManager *residentContractManager
+	residentController *residentController
 
 	stateLock sync.Mutex
 
@@ -1402,11 +1400,26 @@ func NewResident(
 
 	client := connect.NewClientWithDefaults(cancelCtx, connect.ControlId)
 
-	// clientRouteManager := connect.NewRouteManager(client)
-	// clientContractManager := connect.NewContractManagerWithDefaults(client)
 	// no contract is required between the platform and client
-	// // bringyour.Logger().Printf("NO CONTRACT PEER %s\n", clientId.String())
+	// because the platform creates the contracts for the client
 	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
+
+
+	residentContractManager := newResidentContractManager(
+		cancelCtx,
+		cancel,
+		clientId,
+		exchange.settings,
+	)
+
+	residentController := newResidentController(
+		cancelCtx,
+		cancel,
+		clientId,
+		client,
+		residentContractManager,
+		exchange.settings,
+	)
 
 	resident := &Resident{
 		ctx: cancelCtx,
@@ -1416,9 +1429,8 @@ func NewResident(
 		instanceId: instanceId,
 		residentId: residentId,
 		client: client,
-		// clientRouteManager: clientRouteManager,
-		// clientContractManager: clientContractManager,
-		contractManager: newContractManager(cancelCtx, cancel, clientId, exchange.settings),
+		residentContractManager: residentContractManager,
+		residentController: residentController,
 		transports: map[*clientTransport]bool{},
 		forwards: map[bringyour.Id]*ResidentForward{},
 		abuseLimiter: newLimiter(cancelCtx, exchange.settings.AbuseMinTimeout),
@@ -1601,133 +1613,22 @@ func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protoc
 		return
 	}
 
+	if sourceId != self.clientId {
+		// only messages from the resident client are processed by the resident
+		return
+	}
+
 	self.updateActivity()
 	self.controlLimiter.delay()
 
 	for _, frame := range frames {
 		// bringyour.Logger().Printf("HANDLE CLIENT RECEIVE FRAME %s\n", frame)
 		if message, err := connect.FromFrame(frame); err == nil {
-		switch v := message.(type) {
-			case *protocol.Provide:
-				// FIXME sourceId is not clientId
-				self.controlProvide(sourceId, v)
-
-			case *protocol.CreateContract:
-				self.controlCreateContract(sourceId, v)
-
-			case *protocol.CloseContract:
-				self.controlCloseContract(sourceId, v)
-			}
+			self.residentController.HandleControlMessage(message)
 		}
 	}
 }
 
-func (self *Resident) controlProvide(sourceId bringyour.Id, provide *protocol.Provide) {
-	secretKeys := map[model.ProvideMode][]byte{}			
-	for _, provideKey := range provide.Keys {
-		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
-	}
-	// bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
-	model.SetProvide(self.ctx, sourceId, secretKeys)
-	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
-}
-
-func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContract *protocol.CreateContract) {
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT\n")
-
-	destinationId := bringyour.Id(createContract.DestinationId)
-
-	minRelationship := self.contractManager.GetProvideRelationship(sourceId, destinationId)
-
-	maxProvideMode := self.contractManager.GetProvideMode(destinationId)
-	if maxProvideMode < minRelationship {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION\n")
-		contractError := protocol.ContractError_NoPermission
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	provideSecretKey, err := model.GetProvideSecretKey(self.ctx, destinationId, minRelationship)
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
-		contractError := protocol.ContractError_NoPermission
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	// if `minRelationship < Public`, use CreateContractNoEscrow
-	// else use CreateTransferEscrow
-	contractId, contractByteCount, err := self.contractManager.CreateContract(
-		sourceId,
-		destinationId,
-		ByteCount(createContract.TransferByteCount),
-		minRelationship,
-	)
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
-
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR INSUFFICIENT BALANCE\n")
-		contractError := protocol.ContractError_InsufficientBalance
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	storedContract := &protocol.StoredContract{
-		ContractId: contractId.Bytes(),
-		TransferByteCount: uint64(contractByteCount),
-		SourceId: sourceId.Bytes(),
-		DestinationId: destinationId.Bytes(),
-	}
-	storedContractBytes, err := proto.Marshal(storedContract)
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT STORED ERROR\n")
-		contractError := protocol.ContractError_Setup
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-	mac := hmac.New(sha256.New, provideSecretKey)
-	storedContractHmac := mac.Sum(storedContractBytes)
-
-	result := &protocol.CreateContractResult{
-		Contract: &protocol.Contract{
-			StoredContractBytes: storedContractBytes,
-			StoredContractHmac: storedContractHmac,
-			ProvideMode: protocol.ProvideMode(minRelationship),
-		},
-	}
-	frame, err := connect.ToFrame(result)
-	bringyour.Raise(err)
-	self.client.Send(frame, connect.Id(sourceId), nil)
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
-}
-
-func (self *Resident) controlCloseContract(sourceId bringyour.Id, closeContract *protocol.CloseContract) {
-	self.contractManager.CloseContract(
-		bringyour.RequireIdFromBytes(closeContract.ContractId),
-		sourceId,
-		ByteCount(closeContract.AckedByteCount),
-	)
-}
 
 // caller must close `receive`
 func (self *Resident) AddTransport() (
@@ -1743,8 +1644,8 @@ func (self *Resident) AddTransport() (
 	// in `connect` the transport is bidirectional
 	// in the resident, each transport is a single direction
 	transport := &clientTransport{
-		sendTransport: newClientSendTransport(self.clientId),
-		receiveTransport: newClientReceiveTransport(),
+		sendTransport: connect.NewSendClientTransport(connect.Id(self.clientId)),
+		receiveTransport: connect.NewReceiveGatewayTransport(),
 	}
 
 	// bringyour.Logger().Printf("ADD TRANSPORT %s\n", self.clientId.String())
@@ -1877,323 +1778,10 @@ func (self *Resident) Done() <-chan struct{} {
 }
 
 
-type contractManager struct {
-	ctx context.Context
-	cancel context.CancelFunc
-
-	clientId bringyour.Id
-
-	settings *ExchangeSettings
-
-	stateLock sync.Mutex
-	// unordered transfer pair -> contract ids
-	pairContractIds map[model.TransferPair]map[bringyour.Id]bool
-}
-
-func newContractManager(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	clientId bringyour.Id,
-	settings *ExchangeSettings,
-) *contractManager {
-	contractManager := &contractManager {
-		ctx: ctx,
-		cancel: cancel,
-		clientId: clientId,
-		settings: settings,
-		pairContractIds: model.GetOpenContractIdsForSourceOrDestination(ctx, clientId),
-	}
-
-	go bringyour.HandleError(contractManager.syncContracts, cancel)
-
-	return contractManager
-}
-
-func (self *contractManager) syncContracts() {
-	for {
-		select {
-		case <- self.ctx.Done():
-			return
-		case <- time.After(self.settings.ContractSyncTimeout):
-		}
-
-		pairContractIds_ := model.GetOpenContractIdsForSourceOrDestination(self.ctx, self.clientId)
-		self.stateLock.Lock()
-		self.pairContractIds = pairContractIds_
-		// if a contract was added between the sync and set, it will be looked up from the model on miss
-		self.stateLock.Unlock()
-
-		// FIXME close expired contracts
-	}
-}
-
-// this is the "min" or most specific relationship
-func (self *contractManager) GetProvideRelationship(sourceId bringyour.Id, destinationId bringyour.Id) model.ProvideMode {
-	if sourceId == ControlId || destinationId == ControlId {
-		return model.ProvideModeNetwork
-	}
-
-	if sourceId == destinationId {
-		return model.ProvideModeNetwork
-	}
-
-	if sourceClient := model.GetNetworkClient(self.ctx, sourceId); sourceClient != nil {
-		if destinationClient := model.GetNetworkClient(self.ctx, destinationId); destinationClient != nil {
-			if sourceClient.NetworkId == destinationClient.NetworkId {
-				return model.ProvideModeNetwork
-			}
-		}
-	}
-
-	// TODO network and friends-and-family not implemented yet
-
-	return model.ProvideModePublic
-}
-
-func (self *contractManager) GetProvideMode(destinationId bringyour.Id) model.ProvideMode {
-
-	if destinationId == ControlId {
-		return model.ProvideModeNetwork
-	}
-
-	provideMode, err := model.GetProvideMode(self.ctx, destinationId)
-	if err != nil {
-		return model.ProvideModeNone
-	}
-	return provideMode
-}
-
-
-func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
-	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
-
-	self.stateLock.Lock()
-	contracts, ok := self.pairContractIds[transferPair]
-	self.stateLock.Unlock()
-
-	if !ok {
-		contractIds := model.GetOpenContractIds(self.ctx, sourceId, destinationId)
-		contracts := map[bringyour.Id]bool{}
-		for _, contractId := range contractIds {
-			contracts[contractId] = true
-		}
-		self.stateLock.Lock()
-		// if no contracts, store an empty map as a cache miss until the next `syncContracts` iteration
-		self.pairContractIds[transferPair] = contracts
-		self.stateLock.Unlock()
-	}
-
-	return 0 < len(contracts)
-}
-
-func (self *contractManager) CreateContract(
-	sourceId bringyour.Id,
-	destinationId bringyour.Id,
-	transferByteCount ByteCount,
-	provideMode model.ProvideMode,
-) (contractId bringyour.Id, contractTransferByteCount ByteCount, returnErr error) {
-	sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
-	if err != nil {
-		// the source is not a real client
-		returnErr = err
-		return
-	}
-	destinationNetworkId, err := model.FindClientNetwork(self.ctx, destinationId)
-	if err != nil {
-		// the destination is not a real client
-		returnErr = err
-		return
-	}
-	
-	contractTransferByteCount = max(self.settings.MinContractTransferByteCount, transferByteCount)
-
-	if provideMode < model.ProvideModePublic {
-		contractId, err = model.CreateContractNoEscrow(
-			self.ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-	} else {
-		// FIXME companion contract support
-		// FIXME
-		// FIXME the payment hole around this will be fixed with stream ids
-		// if there is a non-companion escrow contract in the opposite direction,
-		// create the escrow using the opposite direction as the payer
-		// can create as many as needed. Mark the contract as companion.
-
-		escrow, err := model.CreateTransferEscrow(
-			self.ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-		contractId = escrow.ContractId
-	}
-
-	// update the cache
-	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		contracts, ok := self.pairContractIds[transferPair]
-		if !ok {
-			contracts = map[bringyour.Id]bool{}
-			self.pairContractIds[transferPair] = contracts
-		}
-		contracts[contractId] = true
-	}()
-
-	return
-}
-
-func (self *contractManager) CloseContract(
-	contractId bringyour.Id,
-	clientId bringyour.Id,
-	usedTransferByteCount ByteCount,
-) error {
-	// update the cache
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		for transferPair, contracts := range self.pairContractIds {
-			if transferPair.A == clientId || transferPair.B == clientId {
-				delete(contracts, contractId)
-			}
-		}
-	}()
-
-	err := model.CloseContract(self.ctx, contractId, clientId, usedTransferByteCount)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-
-// each send on the forward updates the send time
-// the cleanup removes forwards that haven't been used in some time
-// type clientForward struct {
-// 	ResidentForward
-// 	lastActivityTime time.Time
-// }
-
-
 type clientTransport struct {
-	sendTransport *clientSendTransport
-	receiveTransport *clientReceiveTransport
+	sendTransport connect.Transport
+	receiveTransport connect.Transport
 }
-
-// func (self *clientTransport) Close() {
-// 	self.sendTransport.Close()
-// 	self.receiveTransport.Close()
-// }
-
-
-// conforms to `connect.Transport`
-type clientSendTransport struct {
-	transportId bringyour.Id
-	clientId bringyour.Id
-}
-
-func newClientSendTransport(clientId bringyour.Id) *clientSendTransport {
-	return &clientSendTransport{
-		transportId: bringyour.NewId(),
-		clientId: clientId,
-	}
-}
-
-func (self *clientSendTransport) TransportId() connect.Id {
-	return connect.Id(self.transportId)
-}
-
-func (self *clientSendTransport) Priority() int {
-	return 100
-}
-
-func (self *clientSendTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
-	return true
-}
-
-func (self *clientSendTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
-	// uniform weight
-	return 1.0 / float32(1 + len(remainingStats))
-}
-
-func (self *clientSendTransport) MatchesSend(destinationId connect.Id) bool {
-	// send to client id only
-	return bringyour.Id(destinationId) == self.clientId
-}
-
-func (self *clientSendTransport) MatchesReceive(destinationId connect.Id) bool {
-	return false
-}
-
-func (self *clientSendTransport) Downgrade(sourceId connect.Id) {
-	// nothing to downgrade
-}
-
-// func (self *clientSendTransport) Close() {
-// 	close(self.send)
-// }
-
-
-// conforms to `connect.Transport`
-type clientReceiveTransport struct {
-	transportId bringyour.Id
-}
-
-func newClientReceiveTransport() *clientReceiveTransport {
-	return &clientReceiveTransport{
-		transportId: bringyour.NewId(),
-	}
-}
-
-func (self *clientReceiveTransport) TransportId() connect.Id {
-	return connect.Id(self.transportId)
-}
-
-func (self *clientReceiveTransport) Priority() int {
-	return 100
-}
-
-func (self *clientReceiveTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
-	return true
-}
-
-func (self *clientReceiveTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
-	// uniform weight
-	return 1.0 / float32(1 + len(remainingStats))
-}
-
-func (self *clientReceiveTransport) MatchesSend(destinationId connect.Id) bool {
-	return false
-}
-
-func (self *clientReceiveTransport) MatchesReceive(destinationId connect.Id) bool {
-	return true
-}
-
-func (self *clientReceiveTransport) Downgrade(sourceId connect.Id) {
-	// nothing to downgrade
-}
-
-// func (self *clientReceiveTransport) Close() {
-// 	close(self.receive)
-// }
 
 
 type limiter struct {

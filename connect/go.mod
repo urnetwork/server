@@ -10,7 +10,7 @@ require (
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/gorilla/websocket v1.5.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
-	google.golang.org/protobuf v1.31.0
+	google.golang.org/protobuf v1.33.0
 )
 
 require (

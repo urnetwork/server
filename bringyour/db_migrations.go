@@ -645,6 +645,7 @@ var migrations = []any{
     //  )
     // `),
 
+    // ADDED companion_contract_id
     newSqlMigration(`
         CREATE TABLE transfer_contract (
             contract_id uuid NOT NULL,
@@ -1347,6 +1348,14 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE INDEX transfer_balance_purchase_token ON transfer_balance (purchase_token, end_time, start_time, balance_id)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE transfer_contract ADD COLUMN companion_contract_id uuid NULL
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, create_time, contract_id)
     `),
 
 }

@@ -711,7 +711,141 @@ type TransferEscrowBalance struct {
 }
 
 
-// FIXME support a third payerId and payerNetwork
+func createTransferEscrowInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    payeeNetworkId bringyour.Id,
+    contractTransferByteCount ByteCount,
+    companionContractId *bringyour.Id,
+) (transferEscrow *TransferEscrow, returnErr error) {
+    contractId := bringyour.NewId()
+
+    // order balances by end date, ascending
+    // take from the earlier before the later
+    result, err := tx.Query(
+        ctx,
+        `
+            SELECT
+                balance_id,
+                balance_byte_count
+            FROM transfer_balance
+            WHERE
+                network_id = $1 AND
+                active = true AND
+                start_time <= $2 AND $2 < end_time
+
+            ORDER BY end_time ASC
+
+            FOR UPDATE
+        `,
+        payeeNetworkId,
+        time.Now(),
+    )
+    // add up the balance_byte_count until >= contractTransferByteCount
+    // if not enough, error
+    escrow := map[bringyour.Id]ByteCount{}
+    netEscrowBalanceByteCount := ByteCount(0)
+    bringyour.WithPgResult(result, err, func() {
+        for result.Next() {
+            var balanceId bringyour.Id
+            var balanceByteCount ByteCount
+            bringyour.Raise(result.Scan(
+                &balanceId,
+                &balanceByteCount,
+            ))
+            escrowBalanceByteCount := min(contractTransferByteCount - netEscrowBalanceByteCount, balanceByteCount)
+            escrow[balanceId] = escrowBalanceByteCount
+            netEscrowBalanceByteCount += escrowBalanceByteCount
+            if contractTransferByteCount <= netEscrowBalanceByteCount {
+                break
+            }
+        }
+    })
+
+    if netEscrowBalanceByteCount < contractTransferByteCount {
+        returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
+        return
+    }
+
+    bringyour.CreateTempJoinTableInTx(
+        ctx,
+        tx,
+        "escrow(balance_id uuid -> balance_byte_count bigint)",
+        escrow,
+    )
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_balance
+            SET
+                balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
+            FROM escrow
+            WHERE
+                transfer_balance.balance_id = escrow.balance_id
+        `,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            INSERT INTO transfer_escrow (
+                contract_id,
+                balance_id,
+                balance_byte_count
+            )
+            SELECT
+                $1 AS contract_id,
+                balance_id,
+                balance_byte_count
+            FROM escrow
+        `,
+        contractId,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            INSERT INTO transfer_contract (
+                contract_id,
+                source_network_id,
+                source_id,
+                destination_network_id,
+                destination_id,
+                transfer_byte_count
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        contractId,
+        sourceNetworkId,
+        sourceId,
+        destinationNetworkId,
+        destinationId,
+        contractTransferByteCount,
+    ))
+
+    balances := []*TransferEscrowBalance{}
+    for balanceId, escrowBalanceByteCount := range escrow {
+        balance := &TransferEscrowBalance{
+            BalanceId: balanceId,
+            BalanceByteCount: escrowBalanceByteCount,
+        }
+        balances = append(balances, balance)
+    }
+
+    transferEscrow = &TransferEscrow{
+        ContractId: contractId,
+        Balances: balances,
+    }
+
+    return
+}
+
+
 func CreateTransferEscrow(
     ctx context.Context,
     sourceNetworkId bringyour.Id,
@@ -721,125 +855,81 @@ func CreateTransferEscrow(
     contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        contractId := bringyour.NewId()
-
-        // order balances by end date, ascending
-        // take from the earlier before the later
-        result, err := tx.Query(
-            ctx,
-            `
-                SELECT
-                    balance_id,
-                    balance_byte_count
-                FROM transfer_balance
-                WHERE
-                    network_id = $1 AND
-                    active = true AND
-                    start_time <= $2 AND $2 < end_time
-
-                ORDER BY end_time ASC
-
-                FOR UPDATE
-            `,
-            sourceNetworkId,
-            time.Now(),
-        )
-        // add up the balance_byte_count until >= contractTransferByteCount
-        // if not enough, error
-        escrow := map[bringyour.Id]ByteCount{}
-        netEscrowBalanceByteCount := ByteCount(0)
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var balanceId bringyour.Id
-                var balanceByteCount ByteCount
-                bringyour.Raise(result.Scan(
-                    &balanceId,
-                    &balanceByteCount,
-                ))
-                escrowBalanceByteCount := min(contractTransferByteCount - netEscrowBalanceByteCount, balanceByteCount)
-                escrow[balanceId] = escrowBalanceByteCount
-                netEscrowBalanceByteCount += escrowBalanceByteCount
-                if contractTransferByteCount <= netEscrowBalanceByteCount {
-                    break
-                }
-            }
-        })
-
-        if netEscrowBalanceByteCount < contractTransferByteCount {
-            returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
-            return
-        }
-
-        bringyour.CreateTempJoinTableInTx(
+        
+        transferEscrow, returnErr = createTransferEscrowInTx(
             ctx,
             tx,
-            "escrow(balance_id uuid -> balance_byte_count bigint)",
-            escrow,
-        )
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_balance
-                SET
-                    balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
-                FROM escrow
-                WHERE
-                    transfer_balance.balance_id = escrow.balance_id
-            `,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO transfer_escrow (
-                    contract_id,
-                    balance_id,
-                    balance_byte_count
-                )
-                SELECT
-                    $1 AS contract_id,
-                    balance_id,
-                    balance_byte_count
-                FROM escrow
-            `,
-            contractId,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO transfer_contract (
-                    contract_id,
-                    source_network_id,
-                    source_id,
-                    destination_network_id,
-                    destination_id,
-                    transfer_byte_count
-                )
-                VALUES ($1, $2, $3, $4, $5, $6)
-            `,
-            contractId,
             sourceNetworkId,
             sourceId,
             destinationNetworkId,
             destinationId,
+            // source is payer
+            sourceNetworkId,
             contractTransferByteCount,
-        ))
+            nil,
+        )
 
-        balances := []*TransferEscrowBalance{}
-        for balanceId, escrowBalanceByteCount := range escrow {
-            balance := &TransferEscrowBalance{
-                BalanceId: balanceId,
-                BalanceByteCount: escrowBalanceByteCount,
+    }))
+
+    return
+}
+
+
+func CreateCompanionTransferEscrow(
+    ctx context.Context,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferByteCount ByteCount,
+) (transferEscrow *TransferEscrow, returnErr error) {
+    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        // find the earliest open transfer contract in the opposite direction
+        // with null companion_contract_id
+        // there can be many companion contracts for an original contract
+
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    contract_id
+                FROM transfer_contract
+                WHERE
+                    open = true AND
+                    source_id = $1 AND
+                    destination_id = $2 AND
+                    companion_contract_id IS NULL
+                ORDER BY create_time ASC
+                LIMIT 1
+            `,
+            // note origin sourceId == destinationId
+            destinationId,
+            sourceId,
+        )
+        var companionContractId *bringyour.Id
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&companionContractId))
             }
-            balances = append(balances, balance)
+        })
+
+        if companionContractId == nil {
+            returnErr = fmt.Errorf("Missing origin contract for companion.")
+            return
         }
 
-        transferEscrow = &TransferEscrow{
-            ContractId: contractId,
-            Balances: balances,
-        }
+        transferEscrow, returnErr = createTransferEscrowInTx(
+            ctx,
+            tx,
+            sourceNetworkId,
+            sourceId,
+            destinationNetworkId,
+            destinationId,
+            // destination is payer
+            destinationNetworkId,
+            contractTransferByteCount,
+            companionContractId,
+        )
     }))
 
     return
@@ -1413,6 +1503,8 @@ func SetContractDispute(ctx context.Context, contractId bringyour.Id, dispute bo
                     contract_id = $1 AND
                     outcome IS NULL
             `,
+            contractId,
+            dispute,
         ))
     }))
 }

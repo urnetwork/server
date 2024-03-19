@@ -23,14 +23,38 @@ import (
     "bringyour.com/bringyour/model"
     "bringyour.com/bringyour/jwt"
     "bringyour.com/bringyour/router"
-    // "bringyour.com/bringyour/session"
+    "bringyour.com/bringyour/session"
+)
+
+
+func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone)
+})}
+
+
+func TestConnectWithSymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestSymmetric)
+})}
+
+
+func TestConnectWithAsymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestAsymmetric)
+})}
+
+
+const (
+	contractTestNone int = 0
+	contractTestSymmetric = 1
+	// the normal client-provider relationship
+	contractTestAsymmetric = 2
 )
 
 
 // this test that two clients can communicate via the connect server
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
-func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+// contract logic is optional so that the effects of contracts can be isolated
+func testConnect(t *testing.T, contractTest int) {
 	// FIXME the chaos is messed up
 	ChaosResidentShutdownPerSecond = 0.01
 
@@ -141,6 +165,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	// clientB.Setup(routeManagerB, contractManagerB)
 	// go clientB.Run()
 
+
 	
 	networkIdA := bringyour.NewId()
 	networkNameA := "testConnectNetworkA"
@@ -182,12 +207,13 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		"b",
 	)
 
+
 	// attach transports
 
-	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, bringyour.Id(clientIdA)).Sign()
+	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, bringyour.Id(clientIdA))
 
 	authA := &connect.ClientAuth {
-	    ByJwt: byJwtA,
+	    ByJwt: byJwtA.Sign(),
 	    // ClientId: clientIdA,
 	    InstanceId: clientAInstanceId,
 	    AppVersion: "0.0.0",
@@ -201,10 +227,10 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	}
 
 
-	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, bringyour.Id(clientIdB)).Sign()
+	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, bringyour.Id(clientIdB))
 
 	authB := &connect.ClientAuth {
-	    ByJwt: byJwtB,
+	    ByJwt: byJwtB.Sign(),
 	    // ClientId: clientIdB,
 	    InstanceId: clientBInstanceId,
 	    AppVersion: "0.0.0",
@@ -252,6 +278,94 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	})
 
 
+	// set up provide
+	switch contractTest {
+	case contractTestNone:
+		clientA.ContractManager().AddNoContractPeer(clientIdB)
+		clientB.ContractManager().AddNoContractPeer(clientIdA)
+
+	case contractTestSymmetric:
+		provideModes := map[protocol.ProvideMode]bool{
+	        protocol.ProvideMode_Network: true,
+	        protocol.ProvideMode_Public: true,
+	    }
+
+		clientA.ContractManager().SetProvideModes(provideModes)
+		clientB.ContractManager().SetProvideModes(provideModes)
+
+		balanceCodeA, err := model.CreateBalanceCode(
+		    ctx,
+		    ByteCount(1024 * 1024 * 1024 * 1024),
+		    0,
+		    "test-1",
+		    "",
+		    "",
+		)
+		assert.Equal(t, nil, err)
+
+		result, err := model.RedeemBalanceCode(
+			&model.RedeemBalanceCodeArgs{
+				Secret: balanceCodeA.Secret,
+			},
+			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, result.Error)
+
+
+		balanceCodeB, err := model.CreateBalanceCode(
+		    ctx,
+		    ByteCount(1024 * 1024 * 1024 * 1024),
+		    0,
+		    "test-2",
+		    "",
+		    "",
+		)
+		assert.Equal(t, nil, err)
+
+		result, err = model.RedeemBalanceCode(
+			&model.RedeemBalanceCodeArgs{
+				Secret: balanceCodeB.Secret,
+			},
+			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtB),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, result.Error)
+
+	case contractTestAsymmetric:
+		// a->b is provide
+		// b->a is a companion
+
+
+		clientA.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{})
+		clientB.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
+	        protocol.ProvideMode_Network: true,
+	        protocol.ProvideMode_Public: true,
+	    })
+
+		balanceCodeA, err := model.CreateBalanceCode(
+		    ctx,
+		    ByteCount(1024 * 1024 * 1024 * 1024),
+		    0,
+		    "test-1",
+		    "",
+		    "",
+		)
+		assert.Equal(t, nil, err)
+
+		result, err := model.RedeemBalanceCode(
+			&model.RedeemBalanceCodeArgs{
+				Secret: balanceCodeA.Secret,
+			},
+			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, result.Error)
+
+	}
+
+
+
 	for _, messageContentSize := range messageContentSizes {
 		messageContentBytes := make([]byte, messageContentSize)
 		mathrand.Read(messageContentBytes)
@@ -281,7 +395,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 					clientAInstanceId = connect.NewId()
 				}
 				authA = &connect.ClientAuth {
-				    ByJwt: byJwtA,
+				    ByJwt: byJwtA.Sign(),
 				    // ClientId: clientIdA,
 				    InstanceId: clientAInstanceId,
 				    AppVersion: "0.0.0",
@@ -344,12 +458,14 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 							// check in order
 							assert.Equal(t, 1, len(message.frames))
 							frame := message.frames[0]
-							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-							if 0 < simpleMessage.MessageCount {
-								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-								break ReceiveAckB
-							} else {
-								nackBCount += 1
+							switch v := connect.RequireFromFrame(frame).(type) {
+							case *protocol.SimpleMessage:
+								if 0 < v.MessageCount {
+									assert.Equal(t, uint32(i), v.MessageIndex)
+									break ReceiveAckB
+								} else {
+									nackBCount += 1
+								}
 							}
 						case <- time.After(receiveTimeout):
 							// printAllStacks()
@@ -413,7 +529,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 					clientBInstanceId = connect.NewId()
 				}
 				authB = &connect.ClientAuth {
-				    ByJwt: byJwtB,
+				    ByJwt: byJwtB.Sign(),
 				    // ClientId: clientIdB,
 				    InstanceId: clientBInstanceId,
 				    AppVersion: "0.0.0",
@@ -432,6 +548,13 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
 						for j := 0; j < nackM; j += 1 {
+							opts := []any{
+								connect.NoAck(),
+							}
+							if contractTest == contractTestAsymmetric {
+								opts = append(opts, connect.CompanionContract())
+							}
+
 							success := clientB.SendWithTimeout(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i * nackM + j),
@@ -441,13 +564,17 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 								clientIdA,
 								nil,
 								-1,
-								connect.NoAck(),
+								opts...,
 							)
 							if !success {
 								panic(errors.New("Could not send."))
 							}
 						}
-						success := clientB.Send(
+						opts := []any{}
+						if contractTest == contractTestAsymmetric {
+							opts = append(opts, connect.CompanionContract())
+						}
+						success := clientB.SendWithTimeout(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
@@ -457,6 +584,8 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 							func (err error) {
 								ackB <- err
 							},
+							-1,
+							opts...,
 						)
 						if !success {
 							panic(errors.New("Could not send."))
@@ -479,12 +608,14 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 							// check in order
 							assert.Equal(t, 1, len(message.frames))
 							frame := message.frames[0]
-							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-							if 0 < simpleMessage.MessageCount {
-								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-								break ReceiveAckA
-							} else {
-								nackACount += 1
+							switch v := connect.RequireFromFrame(frame).(type) {
+							case *protocol.SimpleMessage:
+								if 0 < v.MessageCount {
+									assert.Equal(t, uint32(i), v.MessageIndex)
+									break ReceiveAckA
+								} else {
+									nackACount += 1
+								}
 							}
 						case <- time.After(receiveTimeout):
 							// printAllStacks()
@@ -540,11 +671,11 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				// }
 
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB, false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA, false)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
@@ -585,7 +716,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	clientA.Close()
 	clientB.Close()
-})}
+}
 
 
 func printAllStacks() {
