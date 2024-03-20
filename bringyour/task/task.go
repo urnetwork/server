@@ -424,7 +424,7 @@ func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 				FROM pending_task
 				WHERE $1 < release_time
 			`,
-			time.Now(),
+			bringyour.NowUtc(),
 		)
 
 		bringyour.WithPgResult(result, err, func() {
@@ -853,7 +853,7 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 
 	bringyour.Raise(bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 
-		now := time.Now()
+		now := bringyour.NowUtc()
 		nowBlock := now.Unix() / BlockSizeSeconds
 
 
@@ -929,7 +929,7 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 	    // keep up to n
 	    taskIds = taskIds[0:min(n, len(taskIds))]
 
-	    claimTime := time.Now()
+	    claimTime := bringyour.NowUtc()
 	    releaseTime := claimTime.Add(ReleaseTimeout)
 
 	    bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
@@ -988,9 +988,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 		defer close(done)
 		for _, task := range tasks {
 			if target, ok := self.targets[task.FunctionName]; ok {
-				runStartTime := time.Now()
+				runStartTime := bringyour.NowUtc()
 				if result, runPost, err := target.Run(self.ctx, task); err == nil {
-					runEndTime := time.Now()
+					runEndTime := bringyour.NowUtc()
 					if resultJson, err := json.Marshal(result); err == nil {
 						finishedTasks[task.TaskId] = &Finished{
 							runStartTime: runStartTime,
@@ -1019,7 +1019,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		case <- time.After(ReleaseTimeout / 3):
 			bringyour.Raise(bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 				bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
-					claimTime := time.Now()
+					claimTime := bringyour.NowUtc()
 					releaseTime := claimTime.Add(ReleaseTimeout)
 
 					for _, task := range tasks {
@@ -1110,7 +1110,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 			}
 
 			for taskId, err := range rescheduledTasks {
-				now := time.Now()
+				now := bringyour.NowUtc()
 				batch.Queue(
 					`
 						UPDATE pending_task
@@ -1149,7 +1149,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 				// re-run the post
 				func() {
-					now := time.Now()
+					now := bringyour.NowUtc()
 					task := tasks[taskId]
 					clientSession, err := task.ClientSession(self.ctx)
 					if err != nil {

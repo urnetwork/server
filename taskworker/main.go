@@ -12,6 +12,7 @@ import (
     
     "bringyour.com/service/taskworker/work"    
     "bringyour.com/bringyour"
+    "bringyour.com/bringyour/controller"
     "bringyour.com/bringyour/session"
     "bringyour.com/bringyour/router"
     "bringyour.com/bringyour/task"

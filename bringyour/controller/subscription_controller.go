@@ -27,6 +27,13 @@ import (
 )
 
 
+
+const InitialTransferBalance = 30 * model.Gib
+
+// 30 days
+const InitialTransferBalanceDuration = 30 * 24 * time.Hour
+
+
 const SubscriptionGracePeriod = 24 * time.Hour
 
 
@@ -199,7 +206,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		ActiveTransferBalances: transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		WalletInfo: walletInfo,
-		UpdateTime: time.Now(),
+		UpdateTime: bringyour.NowUtc(),
 	}, nil
 }
 
@@ -776,9 +783,9 @@ func PlaySubscriptionRenewalPost(
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else if time.Now().Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+	} else if bringyour.NowUtc().Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
 		// check again in 30 minutes
-		playSubscriptionRenewal.CheckTime = time.Now().Add(30 * time.Minute)
+		playSubscriptionRenewal.CheckTime = bringyour.NowUtc().Add(30 * time.Minute)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
@@ -888,11 +895,14 @@ func verifyPlayAuth(auth string) error {
 
 
 func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) {
+	startTime := bringyour.NowUtc()
+	endTime := startTime.Add(InitialTransferBalanceDuration)
 	model.AddBasicTransferBalance(
 		ctx,
 		networkId,
 		InitialTransferBalance,
-		InitialTransferBalanceExpiration,
+		startTime,
+		endTime,
 	)
 }
 
@@ -912,7 +922,7 @@ func ScheduleBackfillInitialTransferBalance(clientSession *session.ClientSession
         &BackfillInitialTransferBalanceArgs{},
         clientSession,
         task.RunOnce("backfill_initial_transfer_balance"),
-        task.RunAt(time.Now().Add(1 * time.Hour)),
+        task.RunAt(bringyour.NowUtc().Add(1 * time.Hour)),
     )
 }
 

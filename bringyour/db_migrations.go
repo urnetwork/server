@@ -1080,6 +1080,7 @@ var migrations = []any{
         ) 
     `),
 
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE complete_privacy_policy (
             privacy_policy_id uuid NOT NULL,
@@ -1132,6 +1133,7 @@ var migrations = []any{
     `),
 
     // RESIZED device_spec to varchar(256)
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device (
             device_id uuid NOT NULL,
@@ -1154,6 +1156,7 @@ var migrations = []any{
         )
     `),
 
+    // ALTERED add_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_add_history (
             network_id uuid NOT NULL,
@@ -1182,6 +1185,8 @@ var migrations = []any{
     `),
 
     // RESIZED device_spec to varchar(256)
+    // ALTERED create_time timestamp with time zone -> timestamp
+    // ALTERED expire_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_adopt (
             device_association_id uuid NOT NULL,
@@ -1213,6 +1218,7 @@ var migrations = []any{
         )
     `),
 
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_share (
             device_association_id uuid NOT NULL,
@@ -1356,6 +1362,30 @@ var migrations = []any{
 
     newSqlMigration(`
         CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, create_time, contract_id)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE complete_privacy_policy ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_add_history ALTER COLUMN add_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN expire_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_share ALTER COLUMN create_time TYPE timestamp
     `),
 
 }

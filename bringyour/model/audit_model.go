@@ -108,7 +108,7 @@ func ComputeStats90(ctx context.Context) *Stats {
 func ComputeStats(ctx context.Context, lookback int) *Stats {
 	stats := &Stats{
 		Lookback: lookback,
-		CreatedTime: time.Now().UnixMilli(),
+		CreatedTime: bringyour.NowUtc().UnixMilli(),
 	}
 
 	bringyour.Raise(bringyour.Db(ctx, func (conn bringyour.PgConn) {
@@ -829,7 +829,7 @@ func summary(data map[string]int) int {
 
 func dayRange(lookback int) (string, string) {
 	// this should be running in the same tz as postgres
-	end := time.Now().Local()
+	end := bringyour.NowUtc().Local()
 	d, err := time.ParseDuration(fmt.Sprintf("-%dh", lookback * 24))
 	bringyour.Raise(err)
 	start := end.Add(d)
@@ -917,7 +917,7 @@ type AuditProviderEvent struct {
 
 func NewAuditProviderEvent(eventType AuditEventType) *AuditProviderEvent {
 	eventId := bringyour.NewId()
-	eventTime := time.Now()
+	eventTime := bringyour.NowUtc()
 	return &AuditProviderEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,
@@ -937,7 +937,7 @@ type AuditExtenderEvent struct {
 
 func NewAuditExtenderEvent(eventType AuditEventType) *AuditExtenderEvent {
 	eventId := bringyour.NewId()
-	eventTime := time.Now()
+	eventTime := bringyour.NowUtc()
 	return &AuditExtenderEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,
@@ -956,7 +956,7 @@ type AuditNetworkEvent struct {
 
 func NewAuditNetworkEvent(eventType AuditEventType) *AuditNetworkEvent {
 	eventId := bringyour.NewId()
-	eventTime := time.Now()
+	eventTime := bringyour.NowUtc()
 	return &AuditNetworkEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,
@@ -976,7 +976,7 @@ type AuditDeviceEvent struct {
 
 func NewAuditDeviceEvent(eventType AuditEventType) *AuditDeviceEvent {
 	eventId := bringyour.NewId()
-	eventTime := time.Now()
+	eventTime := bringyour.NowUtc()
 	return &AuditDeviceEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,
@@ -1003,7 +1003,7 @@ type AuditContractEvent struct {
 
 func NewAuditContractEvent(eventType AuditEventType) *AuditContractEvent {
 	eventId := bringyour.NewId()
-	eventTime := time.Now()
+	eventTime := bringyour.NowUtc()
 	return &AuditContractEvent{
 		AuditEvent: AuditEvent{
 			EventId: eventId,

@@ -947,7 +947,7 @@ func AuthCodeCreate(
 		// the auth code assumes the create time of the root jwt
 		// this is to enable all derivative auth to be expired by expiring the root
 		createTime := session.ByJwt.CreateTime
-		endTime := time.Now().Add(duration)
+		endTime := bringyour.NowUtc().Add(duration)
 
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -1094,7 +1094,7 @@ func AuthCodeLogin(
 				FOR UPDATE
 			`,
 			codeLogin.AuthCode,
-			time.Now(),
+			bringyour.NowUtc(),
 		)
 
 		exists := false
@@ -1231,7 +1231,7 @@ func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 					expire_time = $2
 			`,
 			networkId,
-			time.Now(),
+			bringyour.NowUtc(),
 		))
 	}))
 }

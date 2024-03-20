@@ -1,18 +1,12 @@
 package controller
 
 import (
-	"time"
+	// "time"
 
 	// "bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
-
-
-const InitialTransferBalance = model.ByteCount(30 * 1024 * 1024 * 1024)
-
-// 30 days
-const InitialTransferBalanceExpiration = 30 * 24 * time.Hour
 
 
 type NetworkCreateResult struct {

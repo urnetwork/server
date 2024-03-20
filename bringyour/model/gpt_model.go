@@ -29,7 +29,7 @@ func NewCompletePrivacyPolicyPending(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(time.Now()),
+		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
 		Pending: true,
 	}
 }
@@ -43,7 +43,7 @@ func NewCompletePrivacyPolicy(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(time.Now()),
+		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
 		Pending: false,
 		PrivacyPolicyText: privacyPolicyText,
 		ExtractedUrls: extractedUrls,

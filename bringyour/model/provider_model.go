@@ -80,7 +80,7 @@ func StatsProvidersOverview(
 
 	result := &StatsProvidersOverviewResult{
 		Lookback: providersOverview.Lookback,
-		CreatedTime: time.Now(),
+		CreatedTime: bringyour.NowUtc(),
 		Uptime: uptime,
 		TransferData: transferData,
 		Payout: payout,
@@ -130,7 +130,7 @@ func StatsProviders(
 		
 
 		connectedEvents := []*ConnectedEvent{}
-		endTime := time.Now()
+		endTime := bringyour.NowUtc()
 		t := endTime.Add(-24 * time.Hour)
 		for t.Before(endTime) {
 			connected := (len(connectedEvents) % 2 == 1)
@@ -158,7 +158,7 @@ func StatsProviders(
 	}
 
 	result := &StatsProvidersResult{
-		CreatedTime: time.Now(),
+		CreatedTime: bringyour.NowUtc(),
 		Providers: providers,
 	}
 
@@ -259,7 +259,7 @@ func StatsProvider(
 
 	result := &StatsProviderResult{
 		Lookback: provider.Lookback,
-		CreatedTime: time.Now(),
+		CreatedTime: bringyour.NowUtc(),
 		Uptime: uptime,
 		TransferData: transferData,
 		Payout: payout,
@@ -276,7 +276,7 @@ func StatsProvider(
 // yyyy-mm-dd
 func lookbackDays(lookback int) []string {
 	days := []string{}
-	t := time.Now().UTC()
+	t := bringyour.NowUtc().UTC()
 	for i := 0; i < lookback; i += 1 {
 		days = append(days, t.Format("2006-01-02"))
 		t = t.Add(-24 * time.Hour)

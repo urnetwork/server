@@ -22,6 +22,10 @@ import (
 
 type ByteCount = int64
 
+const Kib = ByteCount(1024)
+const Mib = ByteCount(1024 * 1024)
+const Gib = ByteCount(1024 * 1024 * 1024)
+
 func ByteCountHumanReadable(count ByteCount) string {
     trimFloatString := func(value float64, precision int, suffix string)(string) {
         s := fmt.Sprintf("%." + strconv.Itoa(precision) + "f", value)
@@ -282,7 +286,7 @@ func CreateBalanceCode(
             return
         }
 
-        createTime := time.Now().UTC()
+        createTime := bringyour.NowUtc()
         // round down to 00:00 the day of create time
         startTime := time.Date(
             createTime.Year(),
@@ -417,7 +421,7 @@ func RedeemBalanceCode(
                     balance_code_id = $1
             `,
             balanceCode.BalanceCodeId,
-            time.Now(),
+            bringyour.NowUtc(),
             balanceId,
         ))
 
@@ -550,7 +554,7 @@ type TransferBalance struct {
 
 
 func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*TransferBalance {
-    now := time.Now()
+    now := bringyour.NowUtc()
 
     transferBalances := []*TransferBalance{}
 
@@ -673,13 +677,11 @@ func AddBasicTransferBalance(
     ctx context.Context,
     networkId bringyour.Id,
     transferBalance ByteCount,
-    expiration time.Duration,
+    startTime time.Time,
+    endTime time.Time,
 ) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         balanceId := bringyour.NewId()
-
-        startTime := time.Now()
-        endTime := startTime.Add(expiration)
 
         bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -690,10 +692,10 @@ func AddBasicTransferBalance(
                     start_time,
                     end_time,
                     start_balance_byte_count,
-                    balance_byte_count,
-                    net_revenue_nano_cents
+                    net_revenue_nano_cents,
+                    balance_byte_count
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $5)
             `,
             balanceId,
             networkId,
@@ -720,7 +722,7 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []bring
                 LEFT JOIN transfer_balance ON transfer_balance.network_id = network.network_id
 
                 GROUP BY (network.network_id)
-                HAVING COUNT(transfer_balance.balance_id) == 0
+                HAVING COUNT(transfer_balance.balance_id) = 0
             `,
         )
 
@@ -812,7 +814,7 @@ func createTransferEscrowInTx(
             FOR UPDATE
         `,
         payeeNetworkId,
-        time.Now(),
+        bringyour.NowUtc(),
     )
     // add up the balance_byte_count until >= contractTransferByteCount
     // if not enough, error
@@ -1485,7 +1487,7 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
                     transfer_escrow.balance_id = sweep_payout.balance_id
             `,
             contractId,
-            time.Now(),
+            bringyour.NowUtc(),
         ))
 
         bringyour.RaisePgResult(tx.Exec(
@@ -1733,7 +1735,7 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         wallet.WalletId = bringyour.NewId()
         wallet.Active = true
-        wallet.CreateTime = time.Now()
+        wallet.CreateTime = bringyour.NowUtc()
 
         bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -2123,7 +2125,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                         PaymentId: paymentId,
                         PaymentPlanId: paymentPlanId,
                         WalletId: walletId,
-                        CreateTime: time.Now(),
+                        CreateTime: bringyour.NowUtc(),
                     }
                     walletPayments[walletId] = payment
                 }
@@ -2147,7 +2149,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
         // apply wallet minimum payout threshold
         // any wallet that does not meet the threshold will not be included in this plan
         walletIdsToRemove := []bringyour.Id{}
-        payoutExpirationTime := time.Now().Add(-WalletPayoutTimeout)
+        payoutExpirationTime := bringyour.NowUtc().Add(-WalletPayoutTimeout)
         for walletId, payment := range walletPayments {
             // cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
             if payment.Payout < MinWalletPayoutThreshold && payoutExpirationTime.Before(payment.MinSweepTime) {
@@ -2268,7 +2270,7 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
             `,
             paymentId,
             paymentReceipt,
-            time.Now(),
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
@@ -2309,7 +2311,7 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
                     NOT completed AND NOT canceled
             `,
             paymentId,
-            time.Now(),
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
@@ -2423,7 +2425,7 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
                 $2 <= create_time
             `,
             clientSession.ByJwt.NetworkId,
-            time.Now().Add(-1 * time.Hour),
+            bringyour.NowUtc().Add(-1 * time.Hour),
         )
 
         limitExceeded := false

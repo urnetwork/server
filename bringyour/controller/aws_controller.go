@@ -8,7 +8,7 @@ import (
     "fmt"
     "embed"
     "strings"
-    "time"
+    // "time"
 
     "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
@@ -16,7 +16,7 @@ import (
     "github.com/aws/aws-sdk-go/service/sns"
     // "github.com/aws/aws-sdk-go/aws/awserr"
 
-	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
     "bringyour.com/bringyour/model"
 )
 
@@ -50,7 +50,7 @@ func (self *BaseTemplate) Funcs(funcs texttemplate.FuncMap) {
 }
 
 func (self *BaseTemplate) CopyrightYear() string {
-    year, _, _ := time.Now().Date()
+    year, _, _ := bringyour.NowUtc().Date()
     return fmt.Sprintf("%d", year)
 }
 

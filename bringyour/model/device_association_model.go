@@ -78,7 +78,7 @@ func DeviceAdd(
             }
         })
 
-        addTime := time.Now()
+        addTime := bringyour.NowUtc()
 
         bringyour.RaisePgResult(tx.Exec(
             clientSession.Ctx,
@@ -566,7 +566,7 @@ func DeviceCreateAdoptCode(
     clientSession *session.ClientSession,
 ) (createAdoptCodeResult *DeviceCreateAdoptCodeResult, returnErr error) {
     bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        createTime := time.Now()
+        createTime := bringyour.NowUtc()
         expireTime := createTime.Add(AdoptCodeExpireTimeout)
 
         deviceAssociationId := bringyour.NewId()
@@ -770,7 +770,7 @@ func DeviceConfirmAdopt(
             return
         }
 
-        adoptTime := time.Now()
+        adoptTime := bringyour.NowUtc()
 
         tag := bringyour.RaisePgResult(tx.Exec(
             clientSession.Ctx,
@@ -1039,7 +1039,7 @@ func DeviceAssociations(
         incomingSharedDevices := []*DeviceAssociation{}
         outgoingSharedDevices := []*DeviceAssociation{}
 
-        checkTime := time.Now()
+        checkTime := bringyour.NowUtc()
 
         // pending adoption
         result, err := conn.Query(

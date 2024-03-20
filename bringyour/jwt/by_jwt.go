@@ -75,7 +75,7 @@ func NewByJwt(
 		networkId,
 		userId,
 		networkName,
-		time.Now(),
+		bringyour.NowUtc(),
 		authSessionIds...,
 	)
 }

@@ -24,6 +24,8 @@ import (
 `Tx` runs in read-write mode by default, which can be changed with `pgx.TxOptions`
 */
 
+// note all times in the db should be `timestamp` UTC. Do not use `timestamp with time zone`. See `NowUtc`
+
 
 var DbContextDoneError = errors.New("Done")
 
@@ -232,8 +234,8 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 		}
 	}
 
-	retryEndTime := time.Now().Add(retryOptions.endRetryTimeout)
-	retryDebugTime := time.Now().Add(retryOptions.debugRetryTimeout)
+	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
+	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
 		var pgErr *pgconn.PgError
 		conn, connErr := pool().Acquire(ctx)
@@ -296,11 +298,11 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
-				if retryEndTime.Before(time.Now()) {
+				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
 				}
 				Logger().Printf("Transient error, retry (%v)\n", pgErr)
-				if retryDebugTime.Before(time.Now()) {
+				if retryDebugTime.Before(NowUtc()) {
 					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
 				}
 				continue
@@ -340,8 +342,8 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 		}
 	}
 
-	retryEndTime := time.Now().Add(retryOptions.endRetryTimeout)
-	retryDebugTime := time.Now().Add(retryOptions.debugRetryTimeout)
+	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
+	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
 		var pgErr *pgconn.PgError
 		var commitErr error
@@ -398,11 +400,11 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
-				if retryEndTime.Before(time.Now()) {
+				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
 				}
 				Logger().Printf("Transient error, retry (%v)\n", pgErr)
-				if retryDebugTime.Before(time.Now()) {
+				if retryDebugTime.Before(NowUtc()) {
 					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
 				}
 				continue
@@ -415,11 +417,11 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 					return DbContextDoneError
 				case <- time.After(retryOptions.retryTimeout):
 				}
-				if retryEndTime.Before(time.Now()) {
+				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)
 				}
 				Logger().Printf("Commit error, retry (%v)\n", commitErr)
-				if retryDebugTime.Before(time.Now()) {
+				if retryDebugTime.Before(NowUtc()) {
 					Logger().Printf("%s\n", ErrorJson(commitErr, debug.Stack()))
 				}
 				continue

@@ -4,7 +4,7 @@ package model
 import (
 	"context"
     "testing"
-    "time"
+    // "time"
 
     "github.com/go-playground/assert/v2"
 
@@ -105,7 +105,7 @@ func TestAuthCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, authCodeLoginResult2.ByJwt, "")
 	assert.NotEqual(t, authCodeLoginResult2.Error, nil)
 
-	RemoveExpiredAuthCodes(ctx, time.Now())
+	RemoveExpiredAuthCodes(ctx, bringyour.NowUtc())
 })}
 
 

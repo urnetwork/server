@@ -4,6 +4,8 @@ package model
 import (
     "context"
     "testing"
+    "slices"
+    "time"
 
     "golang.org/x/exp/maps"
 
@@ -360,4 +362,45 @@ func TestSubscriptionPaymentId(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
     resultNetworkId, err := SubscriptionGetNetworkIdForPaymentId(ctx, result.SubscriptionPaymentId)
     assert.Equal(t, err, nil)
     assert.Equal(t, networkIdA, resultNetworkId)
+})}
+
+
+func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+    userIdA := bringyour.NewId()
+
+    networkIdB := bringyour.NewId()
+    userIdB := bringyour.NewId()
+
+    Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+    Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+    networkIds := FindNetworksWithoutTransferBalance(ctx)
+    assert.Equal(t, 2, len(networkIds))
+    assert.Equal(t, true, slices.Contains(networkIds, networkIdA))
+    assert.Equal(t, true, slices.Contains(networkIds, networkIdB))
+
+    for _, networkId := range networkIds {
+        initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+        initialTransferBalanceDuration := 30 * 24 * time.Hour
+
+        startTime := bringyour.NowUtc()
+        endTime := startTime.Add(initialTransferBalanceDuration)
+        AddBasicTransferBalance(
+            ctx,
+            networkId,
+            initialTransferBalance,
+            startTime,
+            endTime,
+        )
+
+        transferBalances := GetActiveTransferBalances(ctx, networkId)
+        assert.Equal(t, 1, len(transferBalances))
+        transferBalance := transferBalances[0]
+        assert.Equal(t, initialTransferBalance, transferBalance.BalanceByteCount)
+        assert.Equal(t, startTime, transferBalance.StartTime)
+        assert.Equal(t, endTime, transferBalance.EndTime)
+    }
 })}

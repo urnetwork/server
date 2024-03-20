@@ -25,7 +25,7 @@ const LocationLookupResultExpiration = 24 * time.Hour
 
 
 func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error) {
-	earliestResultTime := time.Now().Add(-LocationLookupResultExpiration)
+	earliestResultTime := bringyour.NowUtc().Add(-LocationLookupResultExpiration)
 
 	var resultJson []byte
 	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {

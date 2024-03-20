@@ -99,7 +99,7 @@ func AuthNetworkClient(
 					WHERE network_id = $1 AND $2 <= create_time
 				`,
 				session.ByJwt.NetworkId,
-				time.Now(),
+				bringyour.NowUtc(),
 			)
 			var last24HourCount int
 			bringyour.WithPgResult(result, err, func() {
@@ -142,7 +142,7 @@ func AuthNetworkClient(
 				return
 			}
 
-			createTime := time.Now()
+			createTime := bringyour.NowUtc()
 
 			clientId := bringyour.NewId()
 			deviceId := bringyour.NewId()
@@ -209,7 +209,7 @@ func AuthNetworkClient(
 				authClient.ClientId,
 				session.ByJwt.NetworkId,
 				authClient.Description,
-				time.Now(),
+				bringyour.NowUtc(),
 			))
 			if tag.RowsAffected() != 1 {
 				authClientResult = &AuthNetworkClientResult{
@@ -731,7 +731,7 @@ func ConnectNetworkClient(
 
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		connectionId = bringyour.NewId()
-		connectTime := time.Now()
+		connectTime := bringyour.NowUtc()
 
 		_, err := tx.Exec(
 			ctx,
@@ -766,7 +766,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 	var disconnectErr error
 
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		disconnectTime := time.Now()
+		disconnectTime := bringyour.NowUtc()
 		tag, err := tx.Exec(
 			ctx,
 			`
@@ -1259,7 +1259,7 @@ func Testing_CreateDevice(
 	deviceSpec string,
 ) {
 	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		createTime := time.Now()
+		createTime := bringyour.NowUtc()
 
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
