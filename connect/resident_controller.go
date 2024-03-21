@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	// "sync"
+	"errors"
 
 	"crypto/hmac"
 	"crypto/sha256"
@@ -119,28 +120,50 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 		return
 	}
 
-	// if `relationship < Public`, use CreateContractNoEscrow
-	// else use CreateTransferEscrow or CreateCompanionTransferEscrow
-	contractId, contractByteCount, err := self.residentContractManager.CreateContract(
-		self.clientId,
-		destinationId,
-		// companion contracts reply to an existing open contract
-		createContract.Companion,
-		ByteCount(createContract.TransferByteCount),
-		relationship,
-	)
-	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
+	// look for existing open contracts that the requestor does not have
+	contractId, contractByteCount, err := func()(bringyour.Id, ByteCount, error) {
+		haveContractIds := map[bringyour.Id]bool{}
+		for _, contractIdBytes := range createContract.HaveContractIds {
+			if contractId, err := bringyour.IdFromBytes(contractIdBytes); err == nil {
+				haveContractIds[contractId] = true
+			}
+		}
+		contractIdTransferByteCounts := model.GetOpenTransferEscrowsOrderedByCreateTime(
+			self.ctx,
+			self.clientId,
+			destinationId,
+			ByteCount(createContract.TransferByteCount),
+		)
+		for contractId, transferByteCount := range contractIdTransferByteCounts {
+			if !haveContractIds[contractId] {
+				return contractId, transferByteCount, nil
+			}
+		}
+		return bringyour.Id{}, ByteCount(0), errors.New("No existing contract.")
+	}()
 
 	if err != nil {
-		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
-		contractError := protocol.ContractError_InsufficientBalance
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
+		contractId, contractByteCount, err = self.residentContractManager.CreateContract(
+			self.clientId,
+			destinationId,
+			// companion contracts reply to an existing open contract
+			createContract.Companion,
+			ByteCount(createContract.TransferByteCount),
+			relationship,
+		)
+		bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
+
+		if err != nil {
+			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
+			contractError := protocol.ContractError_InsufficientBalance
+			result := &protocol.CreateContractResult{
+				Error: &contractError,
+			}
+			frame, err := connect.ToFrame(result)
+			bringyour.Raise(err)
+			self.client.Send(frame, connect.Id(self.clientId), nil)
+			return
 		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(self.clientId), nil)
-		return
 	}
 
 	storedContract := &protocol.StoredContract{

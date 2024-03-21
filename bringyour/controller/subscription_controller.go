@@ -28,7 +28,7 @@ import (
 
 
 
-const InitialTransferBalance = 30 * model.Gib
+const InitialTransferBalance = 32 * model.Gib
 
 // 30 days
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
@@ -894,10 +894,10 @@ func verifyPlayAuth(auth string) error {
 }
 
 
-func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) {
+func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) bool {
 	startTime := bringyour.NowUtc()
 	endTime := startTime.Add(InitialTransferBalanceDuration)
-	model.AddBasicTransferBalance(
+	return model.AddBasicTransferBalance(
 		ctx,
 		networkId,
 		InitialTransferBalance,
@@ -922,7 +922,7 @@ func ScheduleBackfillInitialTransferBalance(clientSession *session.ClientSession
         &BackfillInitialTransferBalanceArgs{},
         clientSession,
         task.RunOnce("backfill_initial_transfer_balance"),
-        task.RunAt(bringyour.NowUtc().Add(1 * time.Hour)),
+        task.RunAt(bringyour.NowUtc().Add(15 * time.Minute)),
     )
 }
 

@@ -3,30 +3,27 @@ package controller
 import (
 	// "time"
 
-	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
 
 
-type NetworkCreateResult struct {
-	Network *model.NetworkCreateResultNetwork `json:"network,omitempty"`
-	UserAuth *string `json:"user_auth,omitempty"`
-	VerificationRequired *model.NetworkCreateResultVerification `json:"verification_required,omitempty"`
-	Error *model.NetworkCreateResultError `json:"error,omitempty"`
-}
-
-
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
 	session *session.ClientSession,
-) (*NetworkCreateResult, error) {
+) (*model.NetworkCreateResult, error) {
 	result, err := model.NetworkCreate(networkCreate, session)
 	if err != nil {
 		return nil, err
 	}
+	if result.Error != nil {
+		return result, nil
+	}
 
-	AddInitialTransferBalance(session.Ctx, result.NetworkId)
+	if success := AddInitialTransferBalance(session.Ctx, result.Network.NetworkId); !success {
+		bringyour.Logger().Printf("Could not add initial transfer balance to networkId=%s\n", result.Network.NetworkId)
+	}
 
 	// if verification required, send it
 	if result.VerificationRequired != nil {
@@ -34,18 +31,13 @@ func NetworkCreate(
 			UserAuth: result.VerificationRequired.UserAuth,
 		}
 		AuthVerifySend(verifySend, session)
-	} else if result.Network != nil && result.UserAuth != nil {
+	} else {
         SendAccountMessageTemplate(
             *result.UserAuth,
             &NetworkWelcomeTemplate{},
         )
 	}
 
-	return &NetworkCreateResult{
-		Network: result.Network,
-		UserAuth: result.UserAuth,
-		VerificationRequired: result.VerificationRequired,
-		Error: result.Error,
-	}, nil
+	return result, nil
 }
 

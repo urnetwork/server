@@ -80,9 +80,18 @@ func (self *ClientSession) Auth(req *http.Request) error {
 
 func (self *ClientSession) ClientIpPort() (ip string, port int) {
 	parts := strings.Split(self.ClientAddress, ":")
-	ip = parts[0]
 	if 1 < len(parts) {
-		port, _ = strconv.Atoi(parts[1])
+		if port_, err := strconv.Atoi(parts[len(parts) - 1]); err == nil && 1024 <= port_ {
+			// ipv4 or ipv6 with port
+			ip = strings.Join(parts[:len(parts) - 1], ":")
+			port = port_
+		} else {
+			// ipv6 without port
+			ip = strings.Join(parts, ":")
+		}
+	} else {
+		// ipv4 without port
+		ip = parts[0]
 	}
 	return
 }

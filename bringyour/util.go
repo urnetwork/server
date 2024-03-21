@@ -175,6 +175,18 @@ func ErrorJsonNoStack(err any) string {
 }
 
 
+func ErrorJsonWithCustomNoStack(err any, custom map[string]any) string {
+    obj := map[string]any{
+        "error": fmt.Sprintf("%s", err),
+    }
+    for key, value := range custom {
+        obj[key] = value
+    }
+    errorJson, _ := json.Marshal(obj)
+    return string(errorJson)
+}
+
+
 // returns source if cannot compact
 func AttemptCompactJson(jsonBytes []byte) []byte {
     b := &bytes.Buffer{}

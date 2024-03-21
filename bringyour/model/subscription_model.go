@@ -679,11 +679,11 @@ func AddBasicTransferBalance(
     transferBalance ByteCount,
     startTime time.Time,
     endTime time.Time,
-) {
+) (success bool) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         balanceId := bringyour.NewId()
 
-        bringyour.RaisePgResult(tx.Exec(
+        tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
                 INSERT INTO transfer_balance (
@@ -704,7 +704,10 @@ func AddBasicTransferBalance(
             transferBalance,
             NanoCents(0),
         ))
+
+        success = (tag.RowsAffected() == 1)
     }))
+    return
 }
 
 
@@ -887,9 +890,10 @@ func createTransferEscrowInTx(
                 source_id,
                 destination_network_id,
                 destination_id,
-                transfer_byte_count
+                transfer_byte_count,
+                companion_contract_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
         `,
         contractId,
         sourceNetworkId,
@@ -897,6 +901,7 @@ func createTransferEscrowInTx(
         destinationNetworkId,
         destinationId,
         contractTransferByteCount,
+        companionContractId,
     ))
 
     balances := []*TransferEscrowBalance{}
@@ -973,7 +978,7 @@ func CreateCompanionTransferEscrow(
                 ORDER BY create_time ASC
                 LIMIT 1
             `,
-            // note origin sourceId == destinationId
+            // note the origin direction is reversed
             destinationId,
             sourceId,
         )
@@ -1015,16 +1020,19 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
     ctx context.Context,
     sourceId bringyour.Id,
     destinationId bringyour.Id,
-    contractTransferByteCount int,
-) []bringyour.Id {
-    contractIds := []bringyour.Id{}
+    contractTransferByteCount ByteCount,
+) map[bringyour.Id]ByteCount {
+    contractIdTransferByteCounts := map[bringyour.Id]ByteCount{}
 
     bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
                 SELECT
-                    DISTINCT transfer_contract.contract_id
+                    
+                    transfer_contract.contract_id,
+                    transfer_contract.transfer_byte_count
+
                 FROM transfer_contract
 
                 LEFT OUTER JOIN contract_close ON
@@ -1048,13 +1056,14 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var contractId bringyour.Id
-                bringyour.Raise(result.Scan(&contractId))
-                contractIds = append(contractIds, contractId)
+                var transferByteCount ByteCount
+                bringyour.Raise(result.Scan(&contractId, &transferByteCount))
+                contractIdTransferByteCounts[contractId] = transferByteCount
             }
         })
     }))
     
-    return contractIds
+    return contractIdTransferByteCounts
 }
 
 

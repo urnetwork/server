@@ -388,13 +388,14 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
         startTime := bringyour.NowUtc()
         endTime := startTime.Add(initialTransferBalanceDuration)
-        AddBasicTransferBalance(
+        success := AddBasicTransferBalance(
             ctx,
             networkId,
             initialTransferBalance,
             startTime,
             endTime,
         )
+        assert.Equal(t, true, success)
 
         transferBalances := GetActiveTransferBalances(ctx, networkId)
         assert.Equal(t, 1, len(transferBalances))

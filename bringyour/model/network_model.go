@@ -51,14 +51,12 @@ type NetworkCreateResult struct {
 	UserAuth *string `json:"user_auth,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error *NetworkCreateResultError `json:"error,omitempty"`
-
-	// not shared to the user outside of the jwt
-	NetworkId bringyour.Id
 }
 
 type NetworkCreateResultNetwork struct {
 	ByJwt *string `json:"by_jwt,omitempty"`
-	NetworkName *string `json:"network_name,omitempty"`
+	NetworkId bringyour.Id `json:"network_id,omitempty"`
+	NetworkName string `json:"network_name,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -205,7 +203,8 @@ func NetworkCreate(
 					UserAuth: *userAuth,
 				},
 				Network: &NetworkCreateResultNetwork{
-					NetworkName: &networkCreate.NetworkName,
+					NetworkName: networkCreate.NetworkName,
+					NetworkId: createdNetworkId,
 				},
 			}
 			return result, nil
@@ -308,6 +307,8 @@ func NetworkCreate(
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt: &byJwtSigned,
+						NetworkName: networkCreate.NetworkName,
+						NetworkId: createdNetworkId,
 					},
 					UserAuth: &authJwt.UserAuth,
 				}

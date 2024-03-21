@@ -217,7 +217,7 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
-	self.client.ContractManager().SetProvideModes(provideModes)
+	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
