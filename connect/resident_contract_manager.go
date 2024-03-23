@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"time"
+    "fmt"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -34,7 +35,7 @@ func newResidentContractManager(
         cancel: cancel,
         clientId: clientId,
         settings: settings,
-        pairContractIds: model.GetOpenContractIdsForSourceOrDestination(ctx, clientId),
+        pairContractIds: model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(ctx, clientId),
     }
 
     go bringyour.HandleError(residentContractManager.syncContracts, cancel)
@@ -50,7 +51,7 @@ func (self *residentContractManager) syncContracts() {
         case <- time.After(self.settings.ContractSyncTimeout):
         }
 
-        pairContractIds_ := model.GetOpenContractIdsForSourceOrDestination(self.ctx, self.clientId)
+        pairContractIds_ := model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(self.ctx, self.clientId)
         self.stateLock.Lock()
         self.pairContractIds = pairContractIds_
         // if a contract was added between the sync and set, it will be looked up from the model on miss
@@ -106,11 +107,7 @@ func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, de
     self.stateLock.Unlock()
 
     if !ok {
-        contractIds := model.GetOpenContractIds(self.ctx, sourceId, destinationId)
-        contracts := map[bringyour.Id]bool{}
-        for _, contractId := range contractIds {
-            contracts[contractId] = true
-        }
+        contracts := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
         self.stateLock.Lock()
         // if no contracts, store an empty map as a cache miss until the next `syncContracts` iteration
         self.pairContractIds[transferPair] = contracts
@@ -217,8 +214,10 @@ func (self *residentContractManager) CloseContract(
         }
     }()
 
+    fmt.Printf("CONTROLLER CLOSE CONTRACT (%s) %s\n", clientId.String(), contractId.String())
     err := model.CloseContract(self.ctx, contractId, clientId, usedTransferByteCount)
     if err != nil {
+        fmt.Printf("CLOSE CONTRACT ERROR %s\n", err)
         return err
     }
 

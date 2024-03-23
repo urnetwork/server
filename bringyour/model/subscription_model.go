@@ -121,8 +121,8 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 // 31 days
 const BalanceCodeDuration = 31 * 24 * time.Hour
 
-// up to 32MiB
-const AcceptableTransfersByteDifference = 32 * 1024 * 1024
+// up to 4MiB
+const AcceptableTransfersByteDifference = 4 * 1024 * 1024
 
 var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 
@@ -455,7 +455,7 @@ func RedeemBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }))
+    }, bringyour.TxReadCommitted))
 
     return
 }
@@ -533,7 +533,7 @@ func CheckBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }))
+    }, bringyour.TxReadCommitted))
 
     return
 }
@@ -597,6 +597,15 @@ func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*T
     }))
     
     return transferBalances
+}
+
+
+func GetActiveTransferBalanceByteCount(ctx context.Context, networkId bringyour.Id) ByteCount {
+    net := ByteCount(0)
+    for _, transferBalance := range GetActiveTransferBalances(ctx, networkId) {
+        net += transferBalance.BalanceByteCount
+    }
+    return net
 }
 
 
@@ -945,7 +954,7 @@ func CreateTransferEscrow(
             nil,
         )
 
-    }))
+    }, bringyour.TxReadCommitted))
 
     return
 }
@@ -1006,7 +1015,7 @@ func CreateCompanionTransferEscrow(
             contractTransferByteCount,
             companionContractId,
         )
-    }))
+    }, bringyour.TxReadCommitted))
 
     return
 }
@@ -1156,8 +1165,8 @@ func CloseContract(
     clientId bringyour.Id,
     usedTransferByteCount ByteCount,
 ) (returnErr error) {
-    settle := false
-    dispute := false
+    // settle := false
+    // dispute := false
 
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         var party ContractParty
@@ -1187,6 +1196,8 @@ func CloseContract(
                 }
             }
         })
+
+        fmt.Printf("CLOSE CONTRACT PARTY (%s) %s: %s\n", clientId.String(), contractId.String(), party)
 
         if party == "" {
             returnErr = fmt.Errorf("Client is not a party to the contract.")
@@ -1267,13 +1278,19 @@ func CloseContract(
 
         	if hasEscrow {
 	            diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
+                if 0 != diff {
+                    fmt.Printf("CONTRACT (%s) PARTY DIFF %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+                }
 	            if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
-	                settle = true
+                    fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
+	                returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
 	            } else {
-	                dispute = true
+	                fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
+                    setContractDisputeInTx(ctx, tx, contractId, true)
 	            }
 	        } else {
 	        	// nothing to settle, just close the transaction
+                fmt.Printf("CLOSE CONTRACT AWAITING OTHER PARTY (%s) %s\n", clientId.String(), contractId.String())
 	        	bringyour.RaisePgResult(tx.Exec(
 		        	ctx,
 		            `
@@ -1288,273 +1305,289 @@ func CloseContract(
 		        ))
 	        }
         }
-    }))
+    }, bringyour.TxReadCommitted))
 
     if returnErr != nil {
         return
     }
-
-    if settle {
-        returnErr = SettleEscrow(ctx, contractId, ContractOutcomeSettled)
-    } else if dispute {
-        SetContractDispute(ctx, contractId, true)
-    }
+    
     return
 }
 
 
+
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        var usedTransferByteCount ByteCount
+        returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
+    }, bringyour.TxReadCommitted))
 
-        switch outcome {
-        case ContractOutcomeSettled:
-            result, err := tx.Query(
-                ctx,
-                `
-                    SELECT
-                        used_transfer_byte_count
-                    FROM contract_close
-                    WHERE
-                        contract_id = $1
-                    FOR UPDATE
-                `,
-                contractId,
-            )
-            bringyour.WithPgResult(result, err, func() {
-                netUsedTransferByteCount := ByteCount(0)
-                partyCount := 0
-                for result.Next() {
-                    var usedTransferByteCountForParty ByteCount
-                    bringyour.Raise(result.Scan(&usedTransferByteCountForParty))
-                    netUsedTransferByteCount += usedTransferByteCountForParty
-                    partyCount += 1
-                }
-                usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
-            })
-        case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
-            var party ContractParty
-            switch outcome {
-            case ContractOutcomeDisputeResolvedToSource:
-                party = ContractPartySource
-            default:
-                party = ContractPartyDestination
-            }
-            result, err := tx.Query(
-                ctx,
-                `
-                    SELECT
-                        used_transfer_byte_count
-                    FROM contract_close
-                    WHERE
-                        contract_id = $1 AND
-                        party = $2
-                    FOR UPDATE
-                `,
-                contractId,
-                party,
-            )
-            bringyour.WithPgResult(result, err, func() {
-                if result.Next() {
-                    bringyour.Raise(result.Scan(&usedTransferByteCount))
-                }
-            })
-        default:
-            returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
-            return
-        }
+    return
+}
 
-        // order balances by end date, ascending
-        // take from the earlier before the later
+
+func settleEscrowInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    contractId bringyour.Id,
+    outcome ContractOutcome,
+) (returnErr error) {
+    var usedTransferByteCount ByteCount
+
+    switch outcome {
+    case ContractOutcomeSettled:
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    transfer_escrow.balance_id,
-                    transfer_escrow.balance_byte_count,
-                    transfer_balance.start_balance_byte_count,
-                    transfer_balance.net_revenue_nano_cents
-                FROM transfer_contract
-
-                INNER JOIN transfer_escrow ON
-                    transfer_escrow.contract_id = transfer_contract.contract_id
-
-                INNER JOIN transfer_balance ON
-                    transfer_balance.balance_id = transfer_escrow.balance_id
-
-                WHERE
-                    transfer_contract.contract_id = $1 AND
-                    transfer_contract.outcome IS NULL
-
-                ORDER BY transfer_balance.end_time ASC
-
-                FOR UPDATE
-            `,
-            contractId,
-        )
-
-        // balance id -> payout byte count, return byte count, payout
-        sweepPayouts := map[bringyour.Id]sweepPayout{}
-		netPayoutByteCount := ByteCount(0)
-		netPayout := NanoCents(0)
-
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var balanceId bringyour.Id
-                var escrowBalanceByteCount ByteCount
-                var startBalanceByteCount ByteCount
-                var netRevenue NanoCents
-                bringyour.Raise(result.Scan(
-                    &balanceId,
-                    &escrowBalanceByteCount,
-                    &startBalanceByteCount,
-                    &netRevenue,
-                ))
-
-                payoutByteCount := min(usedTransferByteCount - netPayoutByteCount, escrowBalanceByteCount)
-                returnByteCount := escrowBalanceByteCount - payoutByteCount
-                netPayoutByteCount += payoutByteCount
-                payout := NanoCents(math.Round(
-                    ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
-                ))
-                netPayout += payout
-                sweepPayouts[balanceId] = sweepPayout{
-                	payoutByteCount: payoutByteCount,
-                	returnByteCount: returnByteCount,
-                	payout: payout,
-                }
-            }
-        })
-
-        if len(sweepPayouts) == 0 {
-            returnErr = fmt.Errorf("Invalid contract.")
-            return
-        }
-
-        if netPayoutByteCount < usedTransferByteCount {
-            returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
-            return
-        }
-
-
-        var payoutNetworkId *bringyour.Id
-        result, err = tx.Query(
-            ctx,
-            `
-                SELECT
-                    destination_network_id
-                FROM transfer_contract
+                    used_transfer_byte_count,
+                    party
+                FROM contract_close
                 WHERE
                     contract_id = $1
                 FOR UPDATE
             `,
             contractId,
+        )
+        netUsedTransferByteCount := ByteCount(0)
+        partyCount := 0
+        bringyour.WithPgResult(result, err, func() {    
+            for result.Next() {
+                var usedTransferByteCountForParty ByteCount
+                var party ContractParty
+                bringyour.Raise(result.Scan(&usedTransferByteCountForParty, &party))
+                netUsedTransferByteCount += usedTransferByteCountForParty
+                partyCount += 1
+                fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
+            }
+        })
+        if partyCount != 2 {
+            returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
+            return
+        }
+        usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
+    case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
+        var party ContractParty
+        switch outcome {
+        case ContractOutcomeDisputeResolvedToSource:
+            party = ContractPartySource
+        default:
+            party = ContractPartyDestination
+        }
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    used_transfer_byte_count
+                FROM contract_close
+                WHERE
+                    contract_id = $1 AND
+                    party = $2
+                FOR UPDATE
+            `,
+            contractId,
+            party,
         )
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
-                bringyour.Raise(result.Scan(&payoutNetworkId))
+                bringyour.Raise(result.Scan(&usedTransferByteCount))
             }
         })
+    default:
+        returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
+        return
+    }
 
-        if payoutNetworkId == nil {
-            err = fmt.Errorf("Destination client does not exist.")
-            return
+    // order balances by end date, ascending
+    // take from the earlier before the later
+    result, err := tx.Query(
+        ctx,
+        `
+            SELECT
+                transfer_escrow.balance_id,
+                transfer_escrow.balance_byte_count,
+                transfer_balance.start_balance_byte_count,
+                transfer_balance.net_revenue_nano_cents
+            FROM transfer_contract
+
+            INNER JOIN transfer_escrow ON
+                transfer_escrow.contract_id = transfer_contract.contract_id
+
+            INNER JOIN transfer_balance ON
+                transfer_balance.balance_id = transfer_escrow.balance_id
+
+            WHERE
+                transfer_contract.contract_id = $1 AND
+                transfer_contract.outcome IS NULL
+
+            ORDER BY transfer_balance.end_time ASC
+
+            FOR UPDATE
+        `,
+        contractId,
+    )
+
+    // balance id -> payout byte count, return byte count, payout
+    sweepPayouts := map[bringyour.Id]sweepPayout{}
+	netPayoutByteCount := ByteCount(0)
+	netPayout := NanoCents(0)
+
+    bringyour.WithPgResult(result, err, func() {
+        for result.Next() {
+            var balanceId bringyour.Id
+            var escrowBalanceByteCount ByteCount
+            var startBalanceByteCount ByteCount
+            var netRevenue NanoCents
+            bringyour.Raise(result.Scan(
+                &balanceId,
+                &escrowBalanceByteCount,
+                &startBalanceByteCount,
+                &netRevenue,
+            ))
+
+            payoutByteCount := min(usedTransferByteCount - netPayoutByteCount, escrowBalanceByteCount)
+            returnByteCount := escrowBalanceByteCount - payoutByteCount
+            netPayoutByteCount += payoutByteCount
+            payout := NanoCents(math.Round(
+                ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
+            ))
+            netPayout += payout
+            sweepPayouts[balanceId] = sweepPayout{
+            	payoutByteCount: payoutByteCount,
+            	returnByteCount: returnByteCount,
+            	payout: payout,
+            }
+            fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
         }
+    })
+
+    if len(sweepPayouts) == 0 {
+        returnErr = fmt.Errorf("Invalid contract.")
+        return
+    }
+
+    if netPayoutByteCount < usedTransferByteCount {
+        returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
+        return
+    }
 
 
-        bringyour.CreateTempJoinTableInTx(
-            ctx,
-            tx,
-            "sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
-            sweepPayouts,
-        )
+    var payoutNetworkId *bringyour.Id
+    result, err = tx.Query(
+        ctx,
+        `
+            SELECT
+                destination_network_id
+            FROM transfer_contract
+            WHERE
+                contract_id = $1
+            FOR UPDATE
+        `,
+        contractId,
+    )
+    bringyour.WithPgResult(result, err, func() {
+        if result.Next() {
+            bringyour.Raise(result.Scan(&payoutNetworkId))
+        }
+    })
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                UPDATE transfer_contract
-                SET
-                    outcome = $2
-                WHERE
-                    contract_id = $1
-            `,
-            contractId,
-            ContractOutcomeSettled,
-        ))
+    if payoutNetworkId == nil {
+        returnErr = fmt.Errorf("Destination client does not exist.")
+        return
+    }
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                UPDATE transfer_escrow
-                SET
-                    settled = true,
-                    settle_time = $2,
-                    payout_byte_count = sweep_payout.payout_byte_count
-                FROM sweep_payout
-                WHERE
-                    transfer_escrow.contract_id = $1 AND
-                    transfer_escrow.balance_id = sweep_payout.balance_id
-            `,
-            contractId,
-            bringyour.NowUtc(),
-        ))
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                INSERT INTO transfer_escrow_sweep (
-                    contract_id,
-                    balance_id,
-                    network_id,
-                    payout_byte_count,
-                    payout_net_revenue_nano_cents
-                )
-                SELECT
-                    $1 AS contract_id,
-                    sweep_payout.balance_id,
-                    $2 AS network_id,
-                    sweep_payout.payout_byte_count,
-                    sweep_payout.payout_net_revenue_nano_cents
-                FROM sweep_payout
+    bringyour.CreateTempJoinTableInTx(
+        ctx,
+        tx,
+        "sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
+        sweepPayouts,
+    )
 
-                WHERE
-                    0 < sweep_payout.payout_byte_count
-            `,
-            contractId,
-            payoutNetworkId,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_balance
-                SET
-                    balance_byte_count = transfer_balance.balance_byte_count + sweep_payout.return_byte_count
-                FROM sweep_payout
-                WHERE
-                    transfer_balance.balance_id = sweep_payout.balance_id
-            `,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-            INSERT INTO account_balance (
-            	network_id,
-                provided_byte_count,
-                provided_net_revenue_nano_cents
-            )
-            VALUES ($1, $2, $3)
-            ON CONFLICT (network_id) DO UPDATE
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            UPDATE transfer_contract
             SET
-                provided_byte_count = account_balance.provided_byte_count + $2,
-                provided_net_revenue_nano_cents = account_balance.provided_net_revenue_nano_cents + $3
-            `,
-            payoutNetworkId,
-            netPayoutByteCount,
-            netPayout,
-        ))
-    }))
+                outcome = $2
+            WHERE
+                contract_id = $1
+        `,
+        contractId,
+        ContractOutcomeSettled,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            UPDATE transfer_escrow
+            SET
+                settled = true,
+                settle_time = $2,
+                payout_byte_count = sweep_payout.payout_byte_count
+            FROM sweep_payout
+            WHERE
+                transfer_escrow.contract_id = $1 AND
+                transfer_escrow.balance_id = sweep_payout.balance_id
+        `,
+        contractId,
+        bringyour.NowUtc(),
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            INSERT INTO transfer_escrow_sweep (
+                contract_id,
+                balance_id,
+                network_id,
+                payout_byte_count,
+                payout_net_revenue_nano_cents
+            )
+            SELECT
+                $1 AS contract_id,
+                sweep_payout.balance_id,
+                $2 AS network_id,
+                sweep_payout.payout_byte_count,
+                sweep_payout.payout_net_revenue_nano_cents
+            FROM sweep_payout
+
+            WHERE
+                0 < sweep_payout.payout_byte_count
+        `,
+        contractId,
+        payoutNetworkId,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_balance
+            SET
+                balance_byte_count = transfer_balance.balance_byte_count + sweep_payout.return_byte_count
+            FROM sweep_payout
+            WHERE
+                transfer_balance.balance_id = sweep_payout.balance_id
+        `,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+        INSERT INTO account_balance (
+        	network_id,
+            provided_byte_count,
+            provided_net_revenue_nano_cents
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (network_id) DO UPDATE
+        SET
+            provided_byte_count = account_balance.provided_byte_count + $2,
+            provided_net_revenue_nano_cents = account_balance.provided_net_revenue_nano_cents + $3
+        `,
+        payoutNetworkId,
+        netPayoutByteCount,
+        netPayout,
+    ))
 
     return
 }
@@ -1573,37 +1606,68 @@ func (self *sweepPayout) Values() []any {
 
 func SetContractDispute(ctx context.Context, contractId bringyour.Id, dispute bool) {
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_contract
-                SET
-                    dispute = $2
-                WHERE
-                    contract_id = $1 AND
-                    outcome IS NULL
-            `,
-            contractId,
-            dispute,
-        ))
+        setContractDisputeInTx(ctx, tx, contractId, dispute)
     }))
 }
 
 
+func setContractDisputeInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    contractId bringyour.Id,
+    dispute bool,
+) {
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_contract
+            SET
+                dispute = $2
+            WHERE
+                contract_id = $1 AND
+                outcome IS NULL
+        `,
+        contractId,
+        dispute,
+    ))
+}
+
+
+func GetOpenContractIdsWithNoPartialClose(
+    ctx context.Context,
+    sourceId bringyour.Id,
+    destinationId bringyour.Id,
+) map[bringyour.Id]bool {
+    contractIdPartialCloseParties := GetOpenContractIds(ctx, sourceId, destinationId)
+    contractIds := map[bringyour.Id]bool{}
+    for contractId, party := range contractIdPartialCloseParties {
+        if party == "" {
+            contractIds[contractId] = true
+        }
+    }
+    return contractIds
+}
+
+
+// contract id -> partially closed contract party, or "" if none
 func GetOpenContractIds(
     ctx context.Context,
     sourceId bringyour.Id,
     destinationId bringyour.Id,
-) []bringyour.Id {
-    contractIds := []bringyour.Id{}
+) map[bringyour.Id]ContractParty {
+    contractIdPartialCloseParties := map[bringyour.Id]ContractParty{}
 
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    contract_id
+                    transfer_contract.contract_id,
+                    contract_close.party
                 FROM transfer_contract
+
+                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+
                 WHERE
                     open = true AND
                     source_id = $1 AND
@@ -1615,13 +1679,40 @@ func GetOpenContractIds(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var contractId bringyour.Id
-                bringyour.Raise(result.Scan(&contractId))
-                contractIds = append(contractIds, contractId)
+                var party_ *ContractParty
+                bringyour.Raise(result.Scan(&contractId, &party_))
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
+                }
+                contractIdPartialCloseParties[contractId] = party
             }
         })
     }))
 
-    return contractIds
+    return contractIdPartialCloseParties
+}
+
+
+func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
+    ctx context.Context,
+    clientId bringyour.Id,
+) map[TransferPair]map[bringyour.Id]bool {
+    pairContractIdPartialCloseParties := GetOpenContractIdsForSourceOrDestination(ctx, clientId)
+    pairContractIds := map[TransferPair]map[bringyour.Id]bool{}
+    for transferPair, contractIdPartialCloseParties := range pairContractIdPartialCloseParties {
+        for contractId, party := range contractIdPartialCloseParties {
+            if party == "" {
+                contractIds, ok := pairContractIds[transferPair]
+                if !ok {
+                    contractIds = map[bringyour.Id]bool{}
+                    pairContractIds[transferPair] = contractIds
+                }
+                contractIds[contractId] = true
+            }
+        }
+    }
+    return pairContractIds
 }
 
 
@@ -1629,18 +1720,22 @@ func GetOpenContractIds(
 func GetOpenContractIdsForSourceOrDestination(
     ctx context.Context,
     clientId bringyour.Id,
-) map[TransferPair]map[bringyour.Id]bool {
-    pairContractIds := map[TransferPair]map[bringyour.Id]bool{}
+) map[TransferPair]map[bringyour.Id]ContractParty {
+    pairContractIdPartialCloseParties := map[TransferPair]map[bringyour.Id]ContractParty{}
 
     bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    source_id,
-                    destination_id,
-                    contract_id
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    transfer_contract.contract_id,
+                    contract_close.party
                 FROM transfer_contract
+
+                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+
                 WHERE
                     open = true AND (
                         source_id = $1 OR
@@ -1654,23 +1749,29 @@ func GetOpenContractIdsForSourceOrDestination(
                 var sourceId bringyour.Id
                 var destinationId bringyour.Id
                 var contractId bringyour.Id
+                var party_ *ContractParty
                 bringyour.Raise(result.Scan(
                     &sourceId,
                     &destinationId,
                     &contractId,
+                    &party_,
                 ))
                 transferPair := NewUnorderedTransferPair(sourceId, destinationId)
-                contractIds, ok := pairContractIds[transferPair]
-                if !ok {
-                    contractIds = map[bringyour.Id]bool{}
-                    pairContractIds[transferPair] = contractIds
+                contractIdPartialCloseParties, ok := pairContractIdPartialCloseParties[transferPair]
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
                 }
-                contractIds[contractId] = true
+                if !ok {
+                    contractIdPartialCloseParties = map[bringyour.Id]ContractParty{}
+                    pairContractIdPartialCloseParties[transferPair] = contractIdPartialCloseParties
+                }
+                contractIdPartialCloseParties[contractId] = party
             }
         })
     }))
 
-    return pairContractIds
+    return pairContractIdPartialCloseParties
 }
 
 
@@ -2220,7 +2321,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             WalletPayments: walletPayments,
             WithheldWalletIds: walletIdsToRemove,
         }
-    }))
+    }, bringyour.TxReadCommitted))
 
     return paymentPlan
 }

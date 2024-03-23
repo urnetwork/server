@@ -91,9 +91,9 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		// messages above this size will be ignored from clients and the exchange
 		MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
 
-		// 8Gib minimum contract
+		// 64kib minimum contract
 		// this is set high enough to limit the number of parallel contracts and avoid contract spam
-		MinContractTransferByteCount: ByteCount(8 * 1024 * 1024 * 1024),
+		MinContractTransferByteCount: ByteCount(64 * 1024),
 
 		// this must match the warp `settings.yml` for the environment
 		StartInternalPort: 5080,

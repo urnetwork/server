@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	// "sync"
-	"errors"
+	// "errors"
 
 	"crypto/hmac"
 	"crypto/sha256"
@@ -46,25 +46,31 @@ func newResidentController(
 	}
 }
 
-	
+
 // the message is verified from source `clientId`
 func (self *residentController) HandleControlMessage(message any) {
 
+	var replies []*protocol.Frame
+
 	switch v := message.(type) {
 	case *protocol.Provide:
-		self.handleProvide(v)
+		replies = self.handleProvide(v)
 
 	case *protocol.CreateContract:
-		self.handleCreateContract(v)
+		replies = self.handleCreateContract(v)
 
 	case *protocol.CloseContract:
-		self.handleCloseContract(v)
+		replies = self.handleCloseContract(v)
+	}
+
+	for _, frame := range replies {
+		self.client.Send(frame, connect.Id(self.clientId), nil)
 	}
 }
 
 
 
-func (self *residentController) handleProvide(provide *protocol.Provide) {
+func (self *residentController) handleProvide(provide *protocol.Provide) []*protocol.Frame {
 	secretKeys := map[model.ProvideMode][]byte{}			
 	for _, provideKey := range provide.Keys {
 		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
@@ -72,19 +78,21 @@ func (self *residentController) handleProvide(provide *protocol.Provide) {
 	// bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
 	model.SetProvide(self.ctx, self.clientId, secretKeys)
 	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
+
+	return []*protocol.Frame{}
 }
 
-func (self *residentController) handleCreateContract(createContract *protocol.CreateContract) {
+func (self *residentController) handleCreateContract(createContract *protocol.CreateContract) []*protocol.Frame {
 	bringyour.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
 
 
 	destinationId := bringyour.Id(createContract.DestinationId)
-	var relationship model.ProvideMode
+	var provideMode model.ProvideMode
 
 	if createContract.Companion {
 
 		// companion contracts use `ProvideModeStream`
- 		relationship = model.ProvideModeStream
+ 		provideMode = model.ProvideModeStream
 
 	} else {
 
@@ -100,14 +108,14 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 			}
 			frame, err := connect.ToFrame(result)
 			bringyour.Raise(err)
-			self.client.Send(frame, connect.Id(self.clientId), nil)
-			return
+			// self.client.Send(frame, connect.Id(self.clientId), nil)
+			return []*protocol.Frame{frame}
 		}
 
-		relationship = minRelationship
+		provideMode = minRelationship
 	}
 
-	provideSecretKey, err := model.GetProvideSecretKey(self.ctx, destinationId, relationship)
+	provideSecretKey, err := model.GetProvideSecretKey(self.ctx, destinationId, provideMode)
 	if err != nil {
 		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
 		contractError := protocol.ContractError_NoPermission
@@ -116,59 +124,29 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 		}
 		frame, err := connect.ToFrame(result)
 		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(self.clientId), nil)
-		return
+		// self.client.Send(frame, connect.Id(self.clientId), nil)
+		return []*protocol.Frame{frame}
 	}
 
-	// look for existing open contracts that the requestor does not have
-	contractId, contractByteCount, err := func()(bringyour.Id, ByteCount, error) {
-		haveContractIds := map[bringyour.Id]bool{}
-		for _, contractIdBytes := range createContract.HaveContractIds {
-			if contractId, err := bringyour.IdFromBytes(contractIdBytes); err == nil {
-				haveContractIds[contractId] = true
-			}
-		}
-		contractIdTransferByteCounts := model.GetOpenTransferEscrowsOrderedByCreateTime(
-			self.ctx,
-			self.clientId,
-			destinationId,
-			ByteCount(createContract.TransferByteCount),
-		)
-		for contractId, transferByteCount := range contractIdTransferByteCounts {
-			if !haveContractIds[contractId] {
-				return contractId, transferByteCount, nil
-			}
-		}
-		return bringyour.Id{}, ByteCount(0), errors.New("No existing contract.")
-	}()
+	contractId, transferByteCount, err := self.nextContract(createContract, provideMode)
+	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
-		contractId, contractByteCount, err = self.residentContractManager.CreateContract(
-			self.clientId,
-			destinationId,
-			// companion contracts reply to an existing open contract
-			createContract.Companion,
-			ByteCount(createContract.TransferByteCount),
-			relationship,
-		)
-		bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
-
-		if err != nil {
-			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
-			contractError := protocol.ContractError_InsufficientBalance
-			result := &protocol.CreateContractResult{
-				Error: &contractError,
-			}
-			frame, err := connect.ToFrame(result)
-			bringyour.Raise(err)
-			self.client.Send(frame, connect.Id(self.clientId), nil)
-			return
+		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
+		contractError := protocol.ContractError_InsufficientBalance
+		result := &protocol.CreateContractResult{
+			Error: &contractError,
 		}
+		frame, err := connect.ToFrame(result)
+		bringyour.Raise(err)
+		// self.client.Send(frame, connect.Id(self.clientId), nil)
+		return []*protocol.Frame{frame}
 	}
+
 
 	storedContract := &protocol.StoredContract{
 		ContractId: contractId.Bytes(),
-		TransferByteCount: uint64(contractByteCount),
+		TransferByteCount: uint64(transferByteCount),
 		SourceId: self.clientId.Bytes(),
 		DestinationId: destinationId.Bytes(),
 	}
@@ -181,8 +159,8 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 		}
 		frame, err := connect.ToFrame(result)
 		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(self.clientId), nil)
-		return
+		// self.client.Send(frame, connect.Id(self.clientId), nil)
+		return []*protocol.Frame{frame}
 	}
 	mac := hmac.New(sha256.New, provideSecretKey)
 	storedContractHmac := mac.Sum(storedContractBytes)
@@ -191,19 +169,56 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 		Contract: &protocol.Contract{
 			StoredContractBytes: storedContractBytes,
 			StoredContractHmac: storedContractHmac,
-			ProvideMode: protocol.ProvideMode(relationship),
+			ProvideMode: protocol.ProvideMode(provideMode),
 		},
 	}
 	frame, err := connect.ToFrame(result)
 	bringyour.Raise(err)
-	self.client.Send(frame, connect.Id(self.clientId), nil)
+	// self.client.Send(frame, connect.Id(self.clientId), nil)
 	bringyour.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
+	return []*protocol.Frame{frame}
 }
 
-func (self *residentController) handleCloseContract(closeContract *protocol.CloseContract) {
+// FIXME test this
+func (self *residentController) nextContract(createContract *protocol.CreateContract, provideMode model.ProvideMode) (bringyour.Id, ByteCount, error) {
+	destinationId := bringyour.Id(createContract.DestinationId)
+
+	// look for existing open contracts that the requestor does not have
+	usedContractIds := map[bringyour.Id]bool{}
+	for _, contractIdBytes := range createContract.UsedContractIds {
+		if contractId, err := bringyour.IdFromBytes(contractIdBytes); err == nil {
+			usedContractIds[contractId] = true
+		}
+	}
+	contractIdTransferByteCounts := model.GetOpenTransferEscrowsOrderedByCreateTime(
+		self.ctx,
+		self.clientId,
+		destinationId,
+		ByteCount(createContract.TransferByteCount),
+	)
+	for contractId, transferByteCount := range contractIdTransferByteCounts {
+		if !usedContractIds[contractId] {
+			return contractId, transferByteCount, nil
+		}
+	}
+
+	// new contract
+	return self.residentContractManager.CreateContract(
+		self.clientId,
+		destinationId,
+		// companion contracts reply to an existing open contract
+		createContract.Companion,
+		ByteCount(createContract.TransferByteCount),
+		provideMode,
+	)
+}
+
+func (self *residentController) handleCloseContract(closeContract *protocol.CloseContract) []*protocol.Frame {
 	self.residentContractManager.CloseContract(
 		bringyour.RequireIdFromBytes(closeContract.ContractId),
 		self.clientId,
 		ByteCount(closeContract.AckedByteCount),
 	)
+
+	return []*protocol.Frame{}
 }

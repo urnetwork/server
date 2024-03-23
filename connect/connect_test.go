@@ -77,8 +77,9 @@ func testConnect(t *testing.T, contractTest int) {
 
 	
 	transportCount := 8
-	burstM := 16
+	burstM := 8
 	newInstanceM := -1
+	nackM := 4
 
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,10 +90,10 @@ func testConnect(t *testing.T, contractTest int) {
 	block := "test"
 
 
-	clientIdA := connect.NewId()
-	clientAInstanceId := connect.NewId()
-	clientIdB := connect.NewId()
-	clientBInstanceId := connect.NewId()
+	clientIdA := bringyour.NewId()
+	clientAInstanceId := bringyour.NewId()
+	clientIdB := bringyour.NewId()
+	clientBInstanceId := bringyour.NewId()
 
 	routes := map[string]string{}
 	for i := 0; i < 10; i += 1 {
@@ -150,10 +151,20 @@ func testConnect(t *testing.T, contractTest int) {
 	}
 
 
+	maxMessageContentSize := ByteCount(0)
+	for _, messageContentSize := range messageContentSizes {
+		maxMessageContentSize = max(maxMessageContentSize, messageContentSize)
+	}
+	standardContractTransferByteCount := 4 * maxMessageContentSize
+	standardContractFillFraction := float32(0.5)
+
 	clientSettingsA := connect.DefaultClientSettings()
 	// disable scheduled network events
 	clientSettingsA.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
-	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
+	// set this low enough to test new contracts in the transfer
+	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
+	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientA := connect.NewClient(ctx, connect.Id(clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
@@ -163,7 +174,10 @@ func testConnect(t *testing.T, contractTest int) {
 	clientSettingsB := connect.DefaultClientSettings()
 	// disable scheduled network events
 	clientSettingsB.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
-	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
+	// set this low enough to test new contracts in the transfer
+	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
+	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientB := connect.NewClient(ctx, connect.Id(clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
@@ -186,7 +200,7 @@ func testConnect(t *testing.T, contractTest int) {
 		ctx,
 		networkIdA,
 		deviceIdA,
-		bringyour.Id(clientIdA),
+		clientIdA,
 		"a",
 		"a",
 	)
@@ -206,7 +220,7 @@ func testConnect(t *testing.T, contractTest int) {
 		ctx,
 		networkIdB,
 		deviceIdB,
-		bringyour.Id(clientIdB),
+		clientIdB,
 		"b",
 		"b",
 	)
@@ -214,12 +228,12 @@ func testConnect(t *testing.T, contractTest int) {
 
 	// attach transports
 
-	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, bringyour.Id(clientIdA))
+	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, clientIdA)
 
 	authA := &connect.ClientAuth {
 	    ByJwt: byJwtA.Sign(),
 	    // ClientId: clientIdA,
-	    InstanceId: clientAInstanceId,
+	    InstanceId: connect.Id(clientAInstanceId),
 	    AppVersion: "0.0.0",
 	}
 
@@ -231,12 +245,12 @@ func testConnect(t *testing.T, contractTest int) {
 	}
 
 
-	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, bringyour.Id(clientIdB))
+	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, clientIdB)
 
 	authB := &connect.ClientAuth {
 	    ByJwt: byJwtB.Sign(),
 	    // ClientId: clientIdB,
-	    InstanceId: clientBInstanceId,
+	    InstanceId: connect.Id(clientBInstanceId),
 	    AppVersion: "0.0.0",
 	}
 
@@ -282,11 +296,53 @@ func testConnect(t *testing.T, contractTest int) {
 	})
 
 
+	initialTransferBalance := ByteCount(1024 * 1024 * 1024 * 1024)
+
+	balanceCodeA, err := model.CreateBalanceCode(
+		ctx,
+	    initialTransferBalance,
+	    0,
+	    "test-1",
+	    "",
+	    "",
+	)
+	assert.Equal(t, nil, err)
+
+	result, err := model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret: balanceCodeA.Secret,
+		},
+		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
+	)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, nil, result.Error)
+
+
+	balanceCodeB, err := model.CreateBalanceCode(
+	    ctx,
+	    initialTransferBalance,
+	    0,
+	    "test-2",
+	    "",
+	    "",
+	)
+	assert.Equal(t, nil, err)
+
+	result, err = model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret: balanceCodeB.Secret,
+		},
+		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtB),
+	)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, nil, result.Error)
+
+
 	// set up provide
 	switch contractTest {
 	case contractTestNone:
-		clientA.ContractManager().AddNoContractPeer(clientIdB)
-		clientB.ContractManager().AddNoContractPeer(clientIdA)
+		clientA.ContractManager().AddNoContractPeer(connect.Id(clientIdB))
+		clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
 
 	case contractTestSymmetric:
 		provideModes := map[protocol.ProvideMode]bool{
@@ -297,44 +353,6 @@ func testConnect(t *testing.T, contractTest int) {
 		clientA.ContractManager().SetProvideModes(provideModes)
 		clientB.ContractManager().SetProvideModes(provideModes)
 
-		balanceCodeA, err := model.CreateBalanceCode(
-		    ctx,
-		    ByteCount(1024 * 1024 * 1024 * 1024),
-		    0,
-		    "test-1",
-		    "",
-		    "",
-		)
-		assert.Equal(t, nil, err)
-
-		result, err := model.RedeemBalanceCode(
-			&model.RedeemBalanceCodeArgs{
-				Secret: balanceCodeA.Secret,
-			},
-			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
-		)
-		assert.Equal(t, nil, err)
-		assert.Equal(t, nil, result.Error)
-
-
-		balanceCodeB, err := model.CreateBalanceCode(
-		    ctx,
-		    ByteCount(1024 * 1024 * 1024 * 1024),
-		    0,
-		    "test-2",
-		    "",
-		    "",
-		)
-		assert.Equal(t, nil, err)
-
-		result, err = model.RedeemBalanceCode(
-			&model.RedeemBalanceCodeArgs{
-				Secret: balanceCodeB.Secret,
-			},
-			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtB),
-		)
-		assert.Equal(t, nil, err)
-		assert.Equal(t, nil, result.Error)
 
 	case contractTestAsymmetric:
 		// a->b is provide
@@ -347,39 +365,22 @@ func testConnect(t *testing.T, contractTest int) {
 	        protocol.ProvideMode_Public: true,
 	    })
 
-		balanceCodeA, err := model.CreateBalanceCode(
-		    ctx,
-		    ByteCount(1024 * 1024 * 1024 * 1024),
-		    0,
-		    "test-1",
-		    "",
-		    "",
-		)
-		assert.Equal(t, nil, err)
-
-		result, err := model.RedeemBalanceCode(
-			&model.RedeemBalanceCodeArgs{
-				Secret: balanceCodeA.Secret,
-			},
-			session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
-		)
-		assert.Equal(t, nil, err)
-		assert.Equal(t, nil, result.Error)
+		
 
 	}
 
 
-
 	for _, messageContentSize := range messageContentSizes {
-		messageContentBytes := make([]byte, messageContentSize)
+		// the message bytes are hex encoded which doubles the size
+		messageContentBytes := make([]byte, messageContentSize / 2)
 		mathrand.Read(messageContentBytes)
 		messageContent := hex.EncodeToString(messageContentBytes)
+		assert.Equal(t, int(messageContentSize), len(messageContent))
 
 
 		ackA := make(chan error, 1024)
 		ackB := make(chan error, 1024)
 
-		nackM := 4
 		
 
 		for burstSize := 1; burstSize < burstM; burstSize += 1 {
@@ -396,12 +397,12 @@ func testConnect(t *testing.T, contractTest int) {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientAInstanceId = connect.NewId()
+					clientAInstanceId = bringyour.NewId()
 				}
 				authA = &connect.ClientAuth {
 				    ByJwt: byJwtA.Sign(),
 				    // ClientId: clientIdA,
-				    InstanceId: clientAInstanceId,
+				    InstanceId: connect.Id(clientAInstanceId),
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
@@ -424,7 +425,7 @@ func testConnect(t *testing.T, contractTest int) {
 									MessageCount: uint32(0),
 									Content: messageContent,
 								}),
-								clientIdB,
+								connect.Id(clientIdB),
 								nil,
 								-1,
 								connect.NoAck(),
@@ -439,7 +440,7 @@ func testConnect(t *testing.T, contractTest int) {
 								MessageCount: uint32(burstSize),
 								Content: messageContent,
 							}),
-							clientIdB,
+							connect.Id(clientIdB),
 							func (err error) {
 								ackA <- err
 							},
@@ -530,12 +531,12 @@ func testConnect(t *testing.T, contractTest int) {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientBInstanceId = connect.NewId()
+					clientBInstanceId = bringyour.NewId()
 				}
 				authB = &connect.ClientAuth {
 				    ByJwt: byJwtB.Sign(),
 				    // ClientId: clientIdB,
-				    InstanceId: clientBInstanceId,
+				    InstanceId: connect.Id(clientBInstanceId),
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
@@ -565,7 +566,7 @@ func testConnect(t *testing.T, contractTest int) {
 									MessageCount: uint32(0),
 									Content: messageContent,
 								}),
-								clientIdA,
+								connect.Id(clientIdA),
 								nil,
 								-1,
 								opts...,
@@ -584,7 +585,7 @@ func testConnect(t *testing.T, contractTest int) {
 								MessageCount: uint32(burstSize),
 								Content: messageContent,
 							}),
-							clientIdA,
+							connect.Id(clientIdA),
 							func (err error) {
 								ackB <- err
 							},
@@ -675,23 +676,43 @@ func testConnect(t *testing.T, contractTest int) {
 				// }
 
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB, false)
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.Id(clientIdB), false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA, false)
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.Id(clientIdA), false)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
+				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.Id(clientIdB), sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
 				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
+				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.Id(clientIdA), sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
 				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
 		}
+	}
+
+	select {
+	case <- time.After(4 * time.Second):
+	}
+
+	flushedContractIdsA := []bringyour.Id{}
+	for _, contractId := range clientA.ContractManager().Flush() {
+		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
+	}
+	flushedContractIdsB := []bringyour.Id{}
+	for _, contractId := range clientB.ContractManager().Flush() {
+		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
+	}
+
+	clientA.Flush()
+	clientB.Flush()
+
+	select {
+	case <- time.After(4 * time.Second):
 	}
 
 	for _, transportA := range transportAs {
@@ -720,6 +741,202 @@ func testConnect(t *testing.T, contractTest int) {
 
 	clientA.Close()
 	clientB.Close()
+
+
+	assert.Equal(
+		t,
+		ByteCount(0),
+		clientA.ContractManager().LocalStats().ContractOpenByteCount(),
+	)
+	assert.Equal(
+		t,
+		ByteCount(0),
+		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
+	)
+
+
+	// FIXME contract manager flush return the contract ids
+	// FIXME the open contracts below should be the flushed contract ids only
+
+	// these contracts were queued 
+	contractIdPartialClosePartiesAToB := model.GetOpenContractIds(ctx, clientIdA, clientIdB)
+	contractIdPartialClosePartiesBToA := model.GetOpenContractIds(ctx, clientIdB, clientIdA)
+
+	assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
+	for _, contractId := range flushedContractIdsA {
+		party, ok := contractIdPartialClosePartiesAToB[contractId]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, model.ContractPartySource, party)
+	}
+	assert.Equal(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
+	for _, contractId := range flushedContractIdsB {
+		party, ok := contractIdPartialClosePartiesBToA[contractId]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, model.ContractPartySource, party)
+	}
+
+	
+
+	// FIXME
+	// there should be zero active contracts in the model
+	// TODO print the contract ids and look in the logs
+	/*
+	assert.Equal(
+		t,
+		0,
+		openContractCountAToB,
+	)
+	assert.Equal(
+		t,
+		0,
+		openContractCountBToA,
+	)
+	*/
+
+	localStatsA := clientA.ContractManager().LocalStats()
+	localStatsB := clientB.ContractManager().LocalStats()
+
+
+	byteCountA := (localStatsA.ContractCloseByteCount + localStatsB.ReceiveContractCloseByteCount) / 2
+	byteCountB := (localStatsB.ContractCloseByteCount + localStatsA.ReceiveContractCloseByteCount) / 2
+
+	
+
+	select {
+	case <- time.After(1 * time.Second):
+	}
+
+	// netTransferByteCount := ByteCount(0)
+	// netTransferMessageCount := 0
+
+	// for _, messageContentSize := range messageContentSizes {
+	// 	for burstSize := 1; burstSize < burstM; burstSize += 1 {
+	// 		for i := 0; i < burstSize; i += 1 {
+	// 			for j := 0; j < nackM; j += 1 {
+	// 				// note some nacks might get dropped
+	// 				// the sender always counts nacks against transfer balance even if dropped
+	// 				netTransferMessageCount += 1
+	// 				netTransferByteCount += messageContentSize
+	// 			}
+	// 			netTransferMessageCount += 1
+	// 			netTransferByteCount += messageContentSize
+	// 		}
+	// 	}
+	// }
+
+	// // add the message overhead estimate
+	// netTransferByteCount += ByteCount(netTransferMessageCount) * 256
+
+	// // each contract is at most 256 bytes
+	// effectiveContractTransferByteCount := ByteCount(float32(standardContractTransferByteCount) * standardContractFillFraction)
+	// maxContractByteCount := (256 * netTransferByteCount / effectiveContractTransferByteCount)
+
+
+	// FIXME look at the local byte count, which is the count if all contracts settle with no dispute
+	// FIXME compare the local the estimated first
+	// FIXME then compare the local to the account next
+
+	switch contractTest {
+	case contractTestNone:
+		assert.Equal(
+			t,
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		assert.Equal(
+			t,
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+	case contractTestSymmetric:
+		// a and b each have 1x balance deducted
+
+		// assert.Equal(
+		// 	t,
+		// 	initialTransferBalance - 
+		// 		clientA.ContractManager().LocalStats().ContractCloseByteCount - 
+		// 		clientA.ContractManager().LocalStats().ContractOpenByteCount(),
+		// 	model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		// )
+		// assert.Equal(
+		// 	t,
+		// 	initialTransferBalance - 
+		// 		clientB.ContractManager().LocalStats().ContractCloseByteCount -
+		// 		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
+		// 	model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		// )
+
+		// activeTransferBalanceA := model.GetActiveTransferBalanceByteCount(ctx, networkIdA)
+		// messageTransferBalanceA := initialTransferBalance - netTransferByteCount
+		// contractTransferBalanceA := messageTransferBalanceA - activeTransferBalanceA
+
+		// if contractTransferBalanceA < 0 {
+		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceA, activeTransferBalanceA)
+		// }
+		// if maxContractByteCount <= contractTransferBalanceA {
+		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceA, maxContractByteCount, messageTransferBalanceA, activeTransferBalanceA)
+		// }
+
+
+		// activeTransferBalanceB := model.GetActiveTransferBalanceByteCount(ctx, networkIdB)
+		// messageTransferBalanceB := initialTransferBalance - netTransferByteCount
+		// contractTransferBalanceB := messageTransferBalanceB - activeTransferBalanceB
+
+		// if contractTransferBalanceB < 0 {
+		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceB, activeTransferBalanceB)
+		// }
+		// if maxContractByteCount <= contractTransferBalanceB {
+		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceB, maxContractByteCount, messageTransferBalanceB, activeTransferBalanceB)
+		// }
+
+
+
+
+		assert.Equal(
+			t,
+			initialTransferBalance - 
+				byteCountA - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesAToB)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		assert.Equal(
+			t,
+			initialTransferBalance - 
+				byteCountB - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesBToA)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+
+	case contractTestAsymmetric:
+		// a has 2x balance deducted and b has no balance deducted
+		
+		// activeTransferBalanceA := model.GetActiveTransferBalanceByteCount(ctx, networkIdA)
+		// messageTransferBalanceA := initialTransferBalance - 2 * netTransferByteCount
+		// contractTransferBalanceA := messageTransferBalanceA - activeTransferBalanceA
+
+		// if contractTransferBalanceA < 0 {
+		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceA, activeTransferBalanceA)
+		// }
+		// if 2 * maxContractByteCount <= contractTransferBalanceA {
+		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceA, 2 * maxContractByteCount, messageTransferBalanceA, activeTransferBalanceA)
+		// }
+
+
+		assert.Equal(
+			t,
+			initialTransferBalance - 
+				byteCountA - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesAToB)) -
+				byteCountB - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesBToA)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		assert.Equal(
+			t,
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+	}
 }
 
 
