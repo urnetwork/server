@@ -43,13 +43,18 @@ const TxSerializable = pgx.Serializable
 const TxReadCommitted = pgx.ReadCommitted
 
 
+var safePool = &safePgPool{
+	ctx: context.Background(),
+}
+
+func pool() *pgxpool.Pool {
+	return safePool.open()
+}
+
 // resets the connection pool
 // call this after changes to the env
 func PgReset() {
-	safePool.close()
-	safePool = &safePgPool{
-		ctx: context.Background(),
-	}
+	safePool.reset()
 }
 
 
@@ -114,6 +119,10 @@ func (self *safePgPool) open() *pgxpool.Pool {
 }
 
 func (self *safePgPool) close() {
+	self.reset()
+}
+
+func (self *safePgPool) reset() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -121,14 +130,6 @@ func (self *safePgPool) close() {
 		self.pool.Close()
 		self.pool = nil
 	}
-}
-
-var safePool = &safePgPool{
-	ctx: context.Background(),
-}
-
-func pool() *pgxpool.Pool {
-	return safePool.open()
 }
 
 

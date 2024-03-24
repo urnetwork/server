@@ -121,7 +121,9 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, err, nil)
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
-    assert.Equal(t, contractIds, []bringyour.Id{transferEscrow.ContractId})
+    assert.Equal(t, contractIds, map[bringyour.Id]ContractParty{
+        transferEscrow.ContractId: "",
+    })
 
     usedTransferByteCount := ByteCount(1024)
     CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)

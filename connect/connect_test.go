@@ -743,6 +743,11 @@ func testConnect(t *testing.T, contractTest int) {
 	clientB.Close()
 
 
+	select {
+	case <- time.After(1 * time.Second):
+	}
+	
+
 	assert.Equal(
 		t,
 		ByteCount(0),
@@ -754,11 +759,8 @@ func testConnect(t *testing.T, contractTest int) {
 		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
 	)
 
-
-	// FIXME contract manager flush return the contract ids
-	// FIXME the open contracts below should be the flushed contract ids only
-
-	// these contracts were queued 
+	// these contracts were queued in the contract manager
+	// and should be partially closed by the source
 	contractIdPartialClosePartiesAToB := model.GetOpenContractIds(ctx, clientIdA, clientIdB)
 	contractIdPartialClosePartiesBToA := model.GetOpenContractIds(ctx, clientIdB, clientIdA)
 
@@ -775,69 +777,15 @@ func testConnect(t *testing.T, contractTest int) {
 		assert.Equal(t, model.ContractPartySource, party)
 	}
 
-	
-
-	// FIXME
-	// there should be zero active contracts in the model
-	// TODO print the contract ids and look in the logs
-	/*
-	assert.Equal(
-		t,
-		0,
-		openContractCountAToB,
-	)
-	assert.Equal(
-		t,
-		0,
-		openContractCountBToA,
-	)
-	*/
-
 	localStatsA := clientA.ContractManager().LocalStats()
 	localStatsB := clientB.ContractManager().LocalStats()
-
 
 	byteCountA := (localStatsA.ContractCloseByteCount + localStatsB.ReceiveContractCloseByteCount) / 2
 	byteCountB := (localStatsB.ContractCloseByteCount + localStatsA.ReceiveContractCloseByteCount) / 2
 
-	
-
-	select {
-	case <- time.After(1 * time.Second):
-	}
-
-	// netTransferByteCount := ByteCount(0)
-	// netTransferMessageCount := 0
-
-	// for _, messageContentSize := range messageContentSizes {
-	// 	for burstSize := 1; burstSize < burstM; burstSize += 1 {
-	// 		for i := 0; i < burstSize; i += 1 {
-	// 			for j := 0; j < nackM; j += 1 {
-	// 				// note some nacks might get dropped
-	// 				// the sender always counts nacks against transfer balance even if dropped
-	// 				netTransferMessageCount += 1
-	// 				netTransferByteCount += messageContentSize
-	// 			}
-	// 			netTransferMessageCount += 1
-	// 			netTransferByteCount += messageContentSize
-	// 		}
-	// 	}
-	// }
-
-	// // add the message overhead estimate
-	// netTransferByteCount += ByteCount(netTransferMessageCount) * 256
-
-	// // each contract is at most 256 bytes
-	// effectiveContractTransferByteCount := ByteCount(float32(standardContractTransferByteCount) * standardContractFillFraction)
-	// maxContractByteCount := (256 * netTransferByteCount / effectiveContractTransferByteCount)
-
-
-	// FIXME look at the local byte count, which is the count if all contracts settle with no dispute
-	// FIXME compare the local the estimated first
-	// FIXME then compare the local to the account next
-
 	switch contractTest {
 	case contractTestNone:
+		// no balance deducted
 		assert.Equal(
 			t,
 			initialTransferBalance,
@@ -850,47 +798,6 @@ func testConnect(t *testing.T, contractTest int) {
 		)
 	case contractTestSymmetric:
 		// a and b each have 1x balance deducted
-
-		// assert.Equal(
-		// 	t,
-		// 	initialTransferBalance - 
-		// 		clientA.ContractManager().LocalStats().ContractCloseByteCount - 
-		// 		clientA.ContractManager().LocalStats().ContractOpenByteCount(),
-		// 	model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
-		// )
-		// assert.Equal(
-		// 	t,
-		// 	initialTransferBalance - 
-		// 		clientB.ContractManager().LocalStats().ContractCloseByteCount -
-		// 		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
-		// 	model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
-		// )
-
-		// activeTransferBalanceA := model.GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		// messageTransferBalanceA := initialTransferBalance - netTransferByteCount
-		// contractTransferBalanceA := messageTransferBalanceA - activeTransferBalanceA
-
-		// if contractTransferBalanceA < 0 {
-		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceA, activeTransferBalanceA)
-		// }
-		// if maxContractByteCount <= contractTransferBalanceA {
-		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceA, maxContractByteCount, messageTransferBalanceA, activeTransferBalanceA)
-		// }
-
-
-		// activeTransferBalanceB := model.GetActiveTransferBalanceByteCount(ctx, networkIdB)
-		// messageTransferBalanceB := initialTransferBalance - netTransferByteCount
-		// contractTransferBalanceB := messageTransferBalanceB - activeTransferBalanceB
-
-		// if contractTransferBalanceB < 0 {
-		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceB, activeTransferBalanceB)
-		// }
-		// if maxContractByteCount <= contractTransferBalanceB {
-		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceB, maxContractByteCount, messageTransferBalanceB, activeTransferBalanceB)
-		// }
-
-
-
 
 		assert.Equal(
 			t,
@@ -910,18 +817,6 @@ func testConnect(t *testing.T, contractTest int) {
 	case contractTestAsymmetric:
 		// a has 2x balance deducted and b has no balance deducted
 		
-		// activeTransferBalanceA := model.GetActiveTransferBalanceByteCount(ctx, networkIdA)
-		// messageTransferBalanceA := initialTransferBalance - 2 * netTransferByteCount
-		// contractTransferBalanceA := messageTransferBalanceA - activeTransferBalanceA
-
-		// if contractTransferBalanceA < 0 {
-		// 	t.Errorf("Expected message transfer %d <> %d", messageTransferBalanceA, activeTransferBalanceA)
-		// }
-		// if 2 * maxContractByteCount <= contractTransferBalanceA {
-		// 	t.Errorf("Expected contract transfer %d < %d (%d <> %d)", contractTransferBalanceA, 2 * maxContractByteCount, messageTransferBalanceA, activeTransferBalanceA)
-		// }
-
-
 		assert.Equal(
 			t,
 			initialTransferBalance - 
