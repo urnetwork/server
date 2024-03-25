@@ -84,10 +84,10 @@ func AuthVerifySend(
 }
 
 
-func TestAuthVerifyCode(userAuth string) {
+func Testing_SendAuthVerifyCode(userAuth string) {
     normalUserAuth, _ := model.NormalUserAuthV1(&userAuth)
 
-    verifyCode := model.TestCreateVerifyCode()
+    verifyCode := model.Testing_CreateVerifyCode()
 
     SendAccountMessageTemplate(
         *normalUserAuth,

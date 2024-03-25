@@ -5,7 +5,7 @@ import (
 	"errors"
 	"context"
 	"bytes"
-	// "strings"
+	"strings"
 	// "strconv"
 	"time"
 	"crypto/rand"
@@ -16,6 +16,10 @@ import (
 	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/jwt"
 )
+
+
+// 4 hours
+const VerifyCodeTimeout =  4 * time.Hour
 
 
 type AuthType = string
@@ -485,8 +489,7 @@ func AuthVerify(
 		return nil, maxUserAuthAttemptsError()
 	}
 
-	// 4 hours
-	verifyValidSeconds := 60 * 60 * 4
+	normalVerifyCode := strings.ToLower(strings.TrimSpace(verify.VerifyCode))
 
 	var userId bringyour.Id
 	var userAuthVerifyId *bringyour.Id
@@ -511,8 +514,8 @@ func AuthVerify(
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $3
 			`,
-			verify.VerifyCode,
-			verifyValidSeconds,
+			normalVerifyCode,
+			int(VerifyCodeTimeout / time.Second),
 			userAuth,
 		)
 		bringyour.WithPgResult(result, err, func() {

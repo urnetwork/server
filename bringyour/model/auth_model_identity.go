@@ -101,10 +101,10 @@ func createVerifyCode() string {
 	if err != nil {
 		panic(err)
 	}
-	return hex.EncodeToString(verifyCode)
+	return strings.ToLower(hex.EncodeToString(verifyCode))
 }
 
-func TestCreateVerifyCode() string {
+func Testing_CreateVerifyCode() string {
 	return createVerifyCode()
 }
 
