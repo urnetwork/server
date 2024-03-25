@@ -67,6 +67,8 @@ type ExchangeSettings struct {
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
 
+	ForwardEnforceActiveContracts bool
+
 	ExchangeChaosSettings
 }
 
@@ -123,6 +125,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 8,
+
+		ForwardEnforceActiveContracts: false,
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}
@@ -1526,15 +1530,13 @@ func (self *Resident) cleanupForwards() {
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
-	// sourceId := bringyour.Id(sourceId_)
+	sourceId := bringyour.Id(sourceId_)
 	destinationId := bringyour.Id(destinationId_)
 
 	// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD %s %s %s %s\n", self.clientId.String(), sourceId.String(), destinationId.String(), transferFrameBytes)
 
 	self.updateActivity()
 
-	// FIXME
-	/*
 	if sourceId != self.clientId {
 		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD BAD SOURCE\n")
 
@@ -1545,7 +1547,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		return
 	}
 
-	if !self.contractManager.HasActiveContract(sourceId, destinationId) {
+	if self.exchange.settings.ForwardEnforceActiveContracts && !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
 		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD NO CONTRACT\n")
 
 		// there is no active contract
@@ -1553,7 +1555,6 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		self.abuseLimiter.delay()
 		return
 	}
-	*/
 
 	var forward *ResidentForward
 

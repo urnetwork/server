@@ -17,6 +17,9 @@ import (
 var deviceLog = logFn("device")
 
 
+const DebugUseSingleClientConnect = false
+
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
     ReceivePacket(packet []byte)
@@ -126,9 +129,10 @@ func newBringYourDevice(
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
-	client := connect.NewClientWithDefaults(
+	client := connect.NewClient(
         cancelCtx,
         clientId,
+        connect.DefaultClientSettingsNoNetworkEvents(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -268,7 +272,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 
 		// connect to a single client
 		// no need to optimize this case, use the simplest user nat client
-		if len(connectSpecs) == len(paths) && len(paths) == 1 {
+		if DebugUseSingleClientConnect && len(connectSpecs) == len(paths) && len(paths) == 1 {
 			var err error
 			self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
 				self.client,
@@ -280,6 +284,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				return err
 			}
 		} else {
+			// FIXME be able to pass client settings here
 			generator := connect.NewApiMultiClientGenerator(
 				connectSpecs,
 				self.apiUrl,
@@ -288,6 +293,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,
+				connect.DefaultClientSettingsNoNetworkEvents,
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,

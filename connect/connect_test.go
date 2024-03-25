@@ -134,6 +134,11 @@ func testConnect(t *testing.T, contractTest int) {
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.01
+		switch contractTest {
+		case contractTestSymmetric, contractTestAsymmetric:
+			settings.ForwardEnforceActiveContracts = true
+		}
+
 
 		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
 		exchanges[host] = exchange
@@ -491,11 +496,13 @@ func testConnect(t *testing.T, contractTest int) {
 						// check in order
 						assert.Equal(t, 1, len(message.frames))
 						frame := message.frames[0]
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						if 0 < simpleMessage.MessageCount {
-							t.Fatal("Unexpected ack message.")
-						} else {
-							nackBCount += 1
+						switch v := connect.RequireFromFrame(frame).(type) {
+						case *protocol.SimpleMessage:
+							if 0 < v.MessageCount {
+								t.Fatal("Unexpected ack message.")
+							} else {
+								nackBCount += 1
+							}
 						}
 					case <- time.After(timeout):
 					}
@@ -641,11 +648,13 @@ func testConnect(t *testing.T, contractTest int) {
 						// check in order
 						assert.Equal(t, 1, len(message.frames))
 						frame := message.frames[0]
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						if 0 < simpleMessage.MessageCount {
-							t.Fatal("Unexpected ack message.")
-						} else {
-							nackACount += 1
+						switch v := connect.RequireFromFrame(frame).(type) {
+						case *protocol.SimpleMessage:
+							if 0 < v.MessageCount {
+								t.Fatal("Unexpected ack message.")
+							} else {
+								nackACount += 1
+							}
 						}
 					case <- time.After(timeout):
 					}
@@ -746,7 +755,7 @@ func testConnect(t *testing.T, contractTest int) {
 	select {
 	case <- time.After(1 * time.Second):
 	}
-	
+
 
 	assert.Equal(
 		t,

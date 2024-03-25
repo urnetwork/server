@@ -6,6 +6,8 @@ import (
 	"time"
     "fmt"
 
+    "golang.org/x/exp/maps"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 )
@@ -100,14 +102,23 @@ func (self *residentContractManager) GetProvideMode(destinationId bringyour.Id) 
 
 
 func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
-    transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
-
     self.stateLock.Lock()
-    contracts, ok := self.pairContractIds[transferPair]
-    self.stateLock.Unlock()
+    defer self.stateLock.Unlock()
 
+    transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)    
+    contracts, ok := self.pairContractIds[transferPair]
     if !ok {
-        contracts := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
+        contracts = map[bringyour.Id]bool{}
+        // match the behavior of `syncContracts`/`GetOpenContractIdsForSourceOrDestinationWithNoPartialClose`
+        // look for active contracts in either direction
+        maps.Copy(
+            contracts,
+            model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId),
+        )
+        maps.Copy(
+            contracts,
+            model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId),
+        )
         self.stateLock.Lock()
         // if no contracts, store an empty map as a cache miss until the next `syncContracts` iteration
         self.pairContractIds[transferPair] = contracts
