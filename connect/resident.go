@@ -1532,14 +1532,13 @@ func (self *Resident) cleanupForwards() {
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
-	// sourceId := bringyour.Id(sourceId_)
+	sourceId := bringyour.Id(sourceId_)
 	destinationId := bringyour.Id(destinationId_)
 
 	// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD %s %s %s %s\n", self.clientId.String(), sourceId.String(), destinationId.String(), transferFrameBytes)
 
 	self.updateActivity()
 
-	/*
 	if destinationId == ControlId {
 		panic("Bad forward.")
 	}
@@ -1563,7 +1562,6 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		self.abuseLimiter.delay()
 		return
 	}
-	*/
 
 	var forward *ResidentForward
 
