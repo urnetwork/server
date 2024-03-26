@@ -52,7 +52,8 @@ type ExchangeSettings struct {
 
 	ClientDrainTimeout time.Duration
 	TransportDrainTimeout time.Duration
-	ForwardTimeout time.Duration
+
+	ClientWriteTimeout time.Duration
 
 	ExchangeConnectTimeout time.Duration
 	ExchangePingTimeout time.Duration
@@ -111,7 +112,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ClientDrainTimeout: 30 * time.Second,
 		TransportDrainTimeout: 30 * time.Second,
-		ForwardTimeout: 5 * time.Second,
+
+		ClientWriteTimeout: 5 * time.Second,
 
 		ExchangeConnectTimeout: 1 * time.Second,
 		ExchangePingTimeout: exchangePingTimeout,
@@ -1530,15 +1532,20 @@ func (self *Resident) cleanupForwards() {
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
-	sourceId := bringyour.Id(sourceId_)
+	// sourceId := bringyour.Id(sourceId_)
 	destinationId := bringyour.Id(destinationId_)
 
 	// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD %s %s %s %s\n", self.clientId.String(), sourceId.String(), destinationId.String(), transferFrameBytes)
 
 	self.updateActivity()
 
+	/*
+	if destinationId == ControlId {
+		panic("Bad forward.")
+	}
+	
 	if sourceId != self.clientId {
-		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD BAD SOURCE\n")
+		bringyour.Logger().Printf("HANDLE CLIENT FORWARD NOT ALLOWED %s <> %s <> %s\n", sourceId.String(), self.clientId.String(), destinationId.String())
 
 		// the message is not from the client
 		// clients are not allowed to forward from other clients
@@ -1547,14 +1554,16 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		return
 	}
 
+
 	if self.exchange.settings.ForwardEnforceActiveContracts && !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
-		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD NO CONTRACT\n")
+		bringyour.Logger().Printf("HANDLE CLIENT FORWARD NO CONTRACT\n")
 
 		// there is no active contract
 		// drop
 		self.abuseLimiter.delay()
 		return
 	}
+	*/
 
 	var forward *ResidentForward
 
@@ -1582,7 +1591,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 	case <- forward.Done():
 	case forward.send <- transferFrameBytes:
 		return
-	case <- time.After(self.exchange.settings.ForwardTimeout):
+	case <- time.After(self.exchange.settings.ClientWriteTimeout):
 		// fmt.Printf("forward timeout\n")
 		// FIXME need to debug this timeout case
 		// bringyour.Logger().Printf("!!!! RESIDENT FORWARD TIMEOUT")	
@@ -1604,7 +1613,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		return
 	case forward.send <- transferFrameBytes:
 		return
-	case <- time.After(self.exchange.settings.ForwardTimeout):
+	case <- time.After(self.exchange.settings.ClientWriteTimeout):
 		// fmt.Printf("forward timeout\n")
 		// bringyour.Logger("TIMEOUT RG\n")
 		// drop the message
@@ -1705,7 +1714,7 @@ func (self *Resident) AddTransport() (
 
 func (self *Resident) Forward(transferFrameBytes []byte) bool {
 	self.updateActivity()
-	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.ForwardTimeout)
+	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.ClientWriteTimeout)
 }
 
 // idle if no transports and no activity in `ResidentIdleTimeout`

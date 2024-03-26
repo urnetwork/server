@@ -709,11 +709,11 @@ func testConnect(t *testing.T, contractTest int) {
 	}
 
 	flushedContractIdsA := []bringyour.Id{}
-	for _, contractId := range clientA.ContractManager().Flush() {
+	for _, contractId := range clientA.ContractManager().Flush(false) {
 		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
 	}
 	flushedContractIdsB := []bringyour.Id{}
-	for _, contractId := range clientB.ContractManager().Flush() {
+	for _, contractId := range clientB.ContractManager().Flush(false) {
 		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
 	}
 

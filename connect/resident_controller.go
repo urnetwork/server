@@ -4,6 +4,7 @@ import (
 	"context"
 	// "sync"
 	// "errors"
+	"fmt"
 
 	"crypto/hmac"
 	"crypto/sha256"
@@ -64,7 +65,17 @@ func (self *residentController) HandleControlMessage(message any) {
 	}
 
 	for _, frame := range replies {
-		self.client.Send(frame, connect.Id(self.clientId), nil)
+		success := self.client.SendWithTimeout(
+			frame,
+			connect.Id(self.clientId),
+			func(err error){},
+			self.settings.ClientWriteTimeout,
+		)
+		if success {
+			fmt.Printf("CONTROLLER SENT TO CLIENT %s\n", self.clientId.String())
+		} else {
+			fmt.Printf("CONTROLLER COULD NOT SEND TO CLIENT %s\n", self.clientId.String())
+		}
 	}
 }
 
