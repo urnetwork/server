@@ -111,7 +111,7 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		CreatedTime: bringyour.NowUtc().UnixMilli(),
 	}
 
-	bringyour.Raise(bringyour.Db(ctx, func (conn bringyour.PgConn) {
+	bringyour.Db(ctx, func (conn bringyour.PgConn) {
 		bringyour.Logger().Printf("ComputeStats90 computeStatsProvider\n")
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
@@ -139,7 +139,7 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		bringyour.Logger().Printf("ComputeStats90 computeStatsExtenderTransfer\n")
 		// extender transfer
 		computeStatsExtenderTransfer(ctx, stats, conn)
-	}))
+	})
 
 	return stats
 }
@@ -1035,7 +1035,7 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 
 
 func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
-	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1064,12 +1064,12 @@ func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
 			event.CityName,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }
 
 
 func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
-	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1092,12 +1092,12 @@ func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }
 
 
 func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
-	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1118,12 +1118,12 @@ func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }
 
 
 func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
-	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1146,12 +1146,12 @@ func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
 			event.EventDetails,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }
 
 
 func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
-	bringyour.Raise(bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1188,5 +1188,5 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 			event.TransferPackets,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }

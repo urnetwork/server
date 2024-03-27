@@ -66,7 +66,7 @@ func testConnect(t *testing.T, contractTest int) {
 	os.Setenv("WARP_BLOCK", "test")
 
 
-	receiveTimeout := 300 * time.Second
+	receiveTimeout := 60 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -133,7 +133,7 @@ func testConnect(t *testing.T, contractTest int) {
 		}
 
 		settings := DefaultExchangeSettings()
-		settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.01
+		settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		switch contractTest {
 		case contractTestSymmetric, contractTestAsymmetric:
 			settings.ForwardEnforceActiveContracts = true
@@ -411,6 +411,7 @@ func testConnect(t *testing.T, contractTest int) {
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
+					fmt.Printf("new transport a\n")
 					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
 					transportAs = append(transportAs, transportA)
 					// go transportA.Run(clientA.RouteManager())
@@ -547,6 +548,7 @@ func testConnect(t *testing.T, contractTest int) {
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
+					fmt.Printf("new transport b\n")
 					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
 					transportBs = append(transportBs, transportB)
 					// go transportB.Run(clientB.RouteManager())

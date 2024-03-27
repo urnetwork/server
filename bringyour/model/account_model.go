@@ -22,7 +22,7 @@ func PreferencesSet(
 	preferencesSet PreferencesSetArgs,
 	session *session.ClientSession,
 ) (*PreferencesSetResult, error) {
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			session.Ctx,
 			`
@@ -34,7 +34,7 @@ func PreferencesSet(
 			preferencesSet.ProductUpdates,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 
 	result := &PreferencesSetResult{}
 	return result, nil
@@ -75,7 +75,7 @@ func FeedbackSend(
 	feedbackSend FeedbackSendArgs,
 	session *session.ClientSession,
 ) (*FeedbackSendResult, error) {
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		feedbackId := bringyour.NewId()
 		_, err := tx.Exec(
 			session.Ctx,
@@ -127,7 +127,7 @@ func FeedbackSend(
 			feedbackSend.Needs.Other,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 
 	result := &FeedbackSendResult{}
 	return result, nil
@@ -150,7 +150,7 @@ func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetwork
 		return []*FindNetworkResult{}, nil
 	}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		args := []any{}
 		networkIdPlaceholders := []string{}
 		for i, searchResult := range searchResults {
@@ -184,7 +184,7 @@ func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetwork
 				findNetworkResults = append(findNetworkResults, findNetworkResult)
 			}
 		})
-	}))
+	})
 
 	return findNetworkResults, nil
 }
@@ -199,7 +199,7 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 		return nil, fmt.Errorf("Bad user auth: %s", userAuth)
 	}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -223,14 +223,14 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 				findNetworkResults = append(findNetworkResults, findNetworkResult)
 			}
 		})
-	}))
+	})
 
 	return findNetworkResults, nil
 }
 
 
 func RemoveNetwork(ctx context.Context, networkId bringyour.Id) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -251,6 +251,6 @@ func RemoveNetwork(ctx context.Context, networkId bringyour.Id) {
 		))
 
 		networkNameSearch.RemoveInTx(ctx, networkId, tx)
-    }))
+    })
 }
 

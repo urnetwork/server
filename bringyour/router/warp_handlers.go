@@ -67,12 +67,9 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
 func collectStatus(ctx context.Context) (string, error) {
     // ping postgres
     var dbError error
-    err := bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         dbError = conn.Ping(ctx)
     })
-    if err != nil {
-        return "", err
-    }
     if dbError != nil {
         return "", dbError
     }

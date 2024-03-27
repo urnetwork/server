@@ -42,7 +42,7 @@ func FindClientNetwork(
 	ctx context.Context,
 	clientId bringyour.Id,
 ) (networkId bringyour.Id, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -61,7 +61,7 @@ func FindClientNetwork(
 				returnErr = fmt.Errorf("Client does not exist.")
 			}
 		})
-	}))
+	})
 
 	return
 }
@@ -91,7 +91,7 @@ func AuthNetworkClient(
 ) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
 		// important: use serializable tx for rate limits
-		bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			result, err := tx.Query(
 				session.Ctx,
 				`
@@ -190,10 +190,10 @@ func AuthNetworkClient(
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
-		}))
+		})
 	} else {
 		// important: must check `network_id = session network_id`
-		bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			tag := bringyour.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
@@ -269,7 +269,7 @@ func AuthNetworkClient(
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 			}
-		}))
+		})
 	}
 
 	return
@@ -296,7 +296,7 @@ func RemoveNetworkClient(
 	var removeClientErr error
 
 	// important: must check `network_id = session network_id`
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		tag, err := tx.Exec(
 			session.Ctx,
 			`
@@ -317,7 +317,7 @@ func RemoveNetworkClient(
 		}
 
 		removeClientResult = &RemoveNetworkClientResult{}
-	}))
+	})
 
 	return removeClientResult, removeClientErr
 }
@@ -365,7 +365,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 	var clientsResult *NetworkClientsResult
 	var clientsErr error
 
-	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -523,7 +523,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		clientsResult = &NetworkClientsResult{
 			Clients: maps.Values(clientInfos),
 		}
-	}))
+	})
 
 	return clientsResult, clientsErr
 }
@@ -546,7 +546,7 @@ type NetworkClient struct {
 func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient {
 	var networkClient *NetworkClient
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -588,14 +588,14 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 				}
 			}
 		})
-	}))
+	})
 
 	return networkClient
 }
 
 
 func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode ProvideMode, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -611,7 +611,7 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode Pro
 				returnErr = fmt.Errorf("Client provide mode not set.")
 			}
 		})
-	}))
+	})
 	return
 }
 
@@ -621,7 +621,7 @@ func GetProvideSecretKey(
 	clientId bringyour.Id,
 	provideMode ProvideMode,
 ) (secretKey []byte, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -642,7 +642,7 @@ func GetProvideSecretKey(
 				returnErr = fmt.Errorf("Provide secret key not set.")
 			}
 		})
-	}))
+	})
 	return
 }
 
@@ -658,7 +658,7 @@ func SetProvide(
 			maxProvideMode = provideMode
 		}
 	}
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -692,7 +692,7 @@ func SetProvide(
 			clientId,
 		))
 
-		bringyour.Raise(bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 			for provideMode, secretKey := range secretKeys {
 				batch.Queue(
 					`
@@ -708,8 +708,8 @@ func SetProvide(
 					secretKey,
 				)
 			}
-		}))
-	}))
+		})
+	})
 }
 
 
@@ -729,7 +729,7 @@ func ConnectNetworkClient(
 ) bringyour.Id {
 	var connectionId bringyour.Id
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		connectionId = bringyour.NewId()
 		connectTime := bringyour.NowUtc()
 
@@ -756,7 +756,7 @@ func ConnectNetworkClient(
 			clientAddress,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 
 	return connectionId
 }
@@ -765,7 +765,7 @@ func ConnectNetworkClient(
 func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) error {
 	var disconnectErr error
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		disconnectTime := bringyour.NowUtc()
 		tag, err := tx.Exec(
 			ctx,
@@ -785,7 +785,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 			disconnectErr = errors.New("Connection does not exist.")
 			return
 		}
-	}))
+	})
 
 	return disconnectErr
 }
@@ -794,7 +794,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bool {
 	connected := false
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -808,7 +808,7 @@ func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bo
 				bringyour.Raise(result.Scan(&connected))
 			}
 		})
-	}))
+	})
 
 	return connected
 }
@@ -915,9 +915,9 @@ func dbGetResidentWithInstanceInTx(
 func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentInTx(ctx, tx, clientId)
-	}))
+	})
 
 	return resident
 }
@@ -926,16 +926,16 @@ func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResid
 func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		resident = dbGetResidentWithInstanceInTx(ctx, tx, clientId, instanceId)
-	}))
+	})
 
 	return resident
 }
 
 
 func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bringyour.Id, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -955,13 +955,13 @@ func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bring
 				returnErr = errors.New("No resident for client.")
 			}
 		})
-	}))
+	})
 	return
 }
 
 
 func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) (residentId bringyour.Id, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -983,7 +983,7 @@ func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, insta
 				returnErr = errors.New("No resident for client instance.")
 			}
 		})
-	}))
+	})
 	return
 }
 
@@ -994,7 +994,7 @@ func NominateResident(
 	residentIdToReplace *bringyour.Id,
 	nomination *NetworkClientResident,
 ) (resident *NetworkClientResident) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -1097,7 +1097,7 @@ func NominateResident(
 		})
 
 		resident = nomination
-	}, bringyour.TxReadCommitted))
+	}, bringyour.TxReadCommitted)
 	return
 }
 
@@ -1106,7 +1106,7 @@ func NominateResident(
 func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*NetworkClientResident {
 	residents := []*NetworkClientResident{}
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.CreateTempTableInTx(
 			ctx,
 			tx,
@@ -1146,7 +1146,7 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 			resident := dbGetResidentInTx(ctx, tx, clientId)
 			residents = append(residents, resident)
 		}
-	}))
+	})
 	
 	return residents
 }
@@ -1157,7 +1157,7 @@ func RemoveResident(
 	clientId bringyour.Id,
 	residentId bringyour.Id,
 ) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1183,7 +1183,7 @@ func RemoveResident(
 			residentId,
 		)
 		bringyour.Raise(err)
-	}))
+	})
 }
 
 
@@ -1258,7 +1258,7 @@ func Testing_CreateDevice(
 	deviceName string,
 	deviceSpec string,
 ) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		createTime := bringyour.NowUtc()
 
 		bringyour.RaisePgResult(tx.Exec(
@@ -1299,6 +1299,6 @@ func Testing_CreateDevice(
 			deviceName,
 			createTime,
 		))
-	}))
+	})
 }
 

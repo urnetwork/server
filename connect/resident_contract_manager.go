@@ -40,7 +40,7 @@ func newResidentContractManager(
         pairContractIds: model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(ctx, clientId),
     }
 
-    go bringyour.HandleError(residentContractManager.syncContracts, cancel)
+    // go bringyour.HandleError(residentContractManager.syncContracts, cancel)
 
     return residentContractManager
 }
@@ -53,11 +53,14 @@ func (self *residentContractManager) syncContracts() {
         case <- time.After(self.settings.ContractSyncTimeout):
         }
 
-        pairContractIds_ := model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(self.ctx, self.clientId)
-        self.stateLock.Lock()
-        self.pairContractIds = pairContractIds_
-        // if a contract was added between the sync and set, it will be looked up from the model on miss
-        self.stateLock.Unlock()
+        pairContractIds := model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(self.ctx, self.clientId)
+
+        func () {
+            self.stateLock.Lock()
+            defer self.stateLock.Unlock()
+            self.pairContractIds = pairContractIds
+            // if a contract was added between the sync and set, it will be looked up from the model on miss
+        }()
 
         // FIXME close expired contracts
     }
@@ -119,10 +122,8 @@ func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, de
             contracts,
             model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId),
         )
-        self.stateLock.Lock()
         // if no contracts, store an empty map as a cache miss until the next `syncContracts` iteration
         self.pairContractIds[transferPair] = contracts
-        self.stateLock.Unlock()
     }
 
     return 0 < len(contracts)

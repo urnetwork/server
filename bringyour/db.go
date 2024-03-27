@@ -10,6 +10,7 @@ import (
 	"errors"
 	"regexp"
 	"runtime/debug"
+	"runtime"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -209,18 +210,52 @@ func OptDebugTx() DbDebugOptions {
 // - chaning the timing of the query to avoid rollbacks
 // https://www.postgresql.org/docs/current/mvcc-serialization-failure-handling.html
 // https://www.postgresql.org/docs/current/errcodes-appendix.html
-func isTransient(pgErr *pgconn.PgError) bool {
-	if pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) {
-		return true
+func isTransientError(err error) bool {
+	switch v := err.(type) {
+	case *pgconn.PgError:
+		if pgerrcode.IsIntegrityConstraintViolation(v.Code) {
+			return true
+		}
+		if pgerrcode.IsTransactionRollback(v.Code) {
+			return true
+		}
+		// fmt.Printf("[db]intransient error = %d\n", v.Code)
+		return false
+	default:
+		return false
 	}
-	if pgerrcode.IsTransactionRollback(pgErr.Code) {
-		return true
-	}
-	return false
 }
 
+func isConnectionError(err error) bool {
+	switch v := err.(type) {
+	case *pgconn.PgError:
+		if pgerrcode.IsConnectionException(v.Code) {
+			// try a new connection
+			return true
+		}
+		return false
+	default:
+		switch err.Error() {
+		// pgconn.connLockError
+		// https://github.com/jackc/pgconn/blob/master/errors.go
+		case "conn closed":
+			// try a new connection
+			return true
+		default:
+			return false
+		}
+	}
+}
 
-func Db(ctx context.Context, callback func(PgConn), options ...any) error {
+// FIXME change return to void
+func Db(ctx context.Context, callback func(PgConn), options ...any) {
+	pc, filename, line, _ := runtime.Caller(1)
+	pcName := runtime.FuncForPC(pc).Name()
+	if pcName != "bringyour.com/bringyour.Tx" {
+		parts := strings.Split(filename, "/")
+		fmt.Printf("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+	}
+
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	// debugOptions := OptNoDebug()
@@ -238,17 +273,17 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
-		var pgErr *pgconn.PgError
+		var pgErr error
 		conn, connErr := pool().Acquire(ctx)
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
-					return DbContextDoneError
+					panic(DbContextDoneError)
 				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
-			return connErr
+			panic(connErr)
 		}
 
 		connErr = conn.Ping(ctx)
@@ -261,20 +296,22 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <- ctx.Done():
-					return DbContextDoneError
+					panic(DbContextDoneError)
 				case <- time.After(retryOptions.retryTimeout):
 				}
 			}
-			return connErr
+			panic(connErr)
 		}
 
 		func() {
 			defer func() {
 				if err := recover(); err != nil {
 					switch v := err.(type) {
-					case *pgconn.PgError:
-						if isTransient(v) && retryOptions.rerunOnTransientError {
+					case error:
+						if isTransientError(v) && retryOptions.rerunOnTransientError {
 							pgErr = v
+						} else if isConnectionError(v) && retryOptions.rerunOnConnectionError {
+							connErr = v
 						} else {
 							panic(v)
 						}
@@ -283,7 +320,16 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 					}
 				}
 			}()
-			defer conn.Release()
+			defer func() {
+				if connErr != nil {
+					// take the bad connection out of the pool
+					pgxConn := conn.Hijack()
+					pgxConn.Close(ctx)
+					conn = nil
+				} else {
+					conn.Release()
+				}
+			}()
 			// defer Logger().Printf("DB CLOSE\n")
 			if !rwOptions.readOnly {
 				// the default is read only, escalate to rw
@@ -293,10 +339,10 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 		}()
 
 		if pgErr != nil {
-			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
+			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
-					return DbContextDoneError
+					panic(DbContextDoneError)
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
@@ -310,13 +356,29 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) error {
 			}
 			panic(pgErr)
 		}
+		if connErr != nil {
+			if retryOptions.rerunOnConnectionError {
+				select {
+				case <- ctx.Done():
+					panic(DbContextDoneError)
+				case <- time.After(retryOptions.retryTimeout):
+				}
+				continue
+			}
+			panic(connErr)
+		}
 
-		return nil
+		return
 	}
 }
 
+// FIXME change return to void
+func Tx(ctx context.Context, callback func(PgTx), options ...any) {
+	pc, filename, line, _ := runtime.Caller(1)
+	pcName := runtime.FuncForPC(pc).Name()
+	parts := strings.Split(filename, "/")
+	fmt.Printf("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line)
 
-func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
@@ -346,12 +408,12 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
-		var pgErr *pgconn.PgError
+		var pgErr error
 		var commitErr error
-		err := Db(ctx, func (conn PgConn) {
+		Db(ctx, func (conn PgConn) {
 			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
-				return
+				panic(err)
 			}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
@@ -368,8 +430,8 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				defer func() {
 					if err := recover(); err != nil {
 						switch v := err.(type) {
-						case *pgconn.PgError:
-							if isTransient(v) && retryOptions.rerunOnTransientError {
+						case error:
+							if isTransientError(v) && retryOptions.rerunOnTransientError {
 								pgErr = v
 							} else {
 								panic(v)
@@ -390,15 +452,12 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				}
 			}
 		}, options...)
-		if err != nil {
-			return err
-		}
 
 		if pgErr != nil {
-			if isTransient(pgErr) && retryOptions.rerunOnTransientError {
+			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
 				select {
 				case <- ctx.Done():
-					return DbContextDoneError
+					panic(DbContextDoneError)
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
@@ -411,11 +470,12 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				continue
 			}
 			panic(pgErr)
-		} else if commitErr != nil {
+		}
+		if commitErr != nil {
 			if retryOptions.rerunOnCommitError {
 				select {
 				case <- ctx.Done():
-					return DbContextDoneError
+					panic(DbContextDoneError)
 				case <- time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
@@ -427,9 +487,10 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) error {
 				}
 				continue
 			}
-			return commitErr
+			panic(commitErr)
 		}
-		return nil
+
+		return
 	}
 }
 
@@ -506,11 +567,14 @@ func RaisePgResult[T any](result T, err error) T {
 }
 
 
-func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch)) error {
+func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch)) {
 	batch := &pgx.Batch{}
 	callback(batch)
 	results := tx.SendBatch(ctx, batch)
-	return results.Close()
+	err := results.Close()
+	if err != nil {
+		panic(err)
+	}
 }
 
 
@@ -553,7 +617,7 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.valueColumnNames, ", "),
 	)))
-	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
 			var pgValues = []any{}
 			pgValues = expandValue(value, pgValues)
@@ -573,7 +637,7 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 				pgValues...,
 			)
 		}
-	}))
+	})
 }
 
 
@@ -604,7 +668,7 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 		tableSpec.tableName,
 		strings.Join(pgParts, ", "),
 	)))
-	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for _, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(value, pgValues)
@@ -623,7 +687,7 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 				pgValues...,
 			)
 		}
-	}))
+	})
 }
 
 
@@ -670,7 +734,7 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.keyColumnNames, ", "),
 	)))
-	Raise(BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func (batch PgBatch) {
 		for key, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(key, pgValues)
@@ -691,7 +755,7 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 				pgValues...,
 			)
 		}
-	}))
+	})
 }
 
 

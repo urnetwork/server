@@ -52,7 +52,7 @@ func DeviceAdd(
     add *DeviceAddArgs,
     clientSession *session.ClientSession,
 ) (addResult *DeviceAddResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -251,7 +251,7 @@ func DeviceAdd(
         default:
             return
         }
-    }))
+    })
 
     if addResult == nil && returnErr == nil {
         // returnErr = errors.New("TEST default")
@@ -285,7 +285,7 @@ func DeviceCreateShareCode(
     createShareCode *DeviceCreateShareCodeArgs,
     clientSession *session.ClientSession,
 ) (createShareCodeResult *DeviceCreateShareCodeResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         // verify that the client id is owned by this network
         result, err := tx.Query(
             clientSession.Ctx,
@@ -363,7 +363,7 @@ func DeviceCreateShareCode(
             ShareCode: shareCode,
         }
         return
-    }))
+    })
 
     return
 }
@@ -415,7 +415,7 @@ func DeviceShareStatus(
     shareStatus *DeviceShareStatusArgs,
     clientSession *session.ClientSession,
 ) (shareStatusResult *DeviceShareStatusResult, returnErr error) {
-    bringyour.Raise(bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             clientSession.Ctx,
             `
@@ -454,7 +454,7 @@ func DeviceShareStatus(
                 }
             }
         })
-    }))
+    })
 
     return
 }
@@ -478,7 +478,7 @@ func DeviceConfirmShare(
     confirmShare *DeviceConfirmShareArgs,
     clientSession *session.ClientSession,
 ) (confirmShareResult *DeviceConfirmShareResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -530,7 +530,7 @@ func DeviceConfirmShare(
             AssociatedNetworkName: confirmShare.AssociatedNetworkName,
         }
         return
-    }))
+    })
 
     if confirmShareResult == nil && returnErr == nil {
         confirmShareResult = &DeviceConfirmShareResult{
@@ -565,7 +565,7 @@ func DeviceCreateAdoptCode(
     createAdoptCode *DeviceCreateAdoptCodeArgs,
     clientSession *session.ClientSession,
 ) (createAdoptCodeResult *DeviceCreateAdoptCodeResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         createTime := bringyour.NowUtc()
         expireTime := createTime.Add(AdoptCodeExpireTimeout)
 
@@ -627,7 +627,7 @@ func DeviceCreateAdoptCode(
             AdoptSecret: adoptSecret,
             DurationMinutes: float64(expireTime.Sub(createTime)) / float64(time.Minute),
         }
-    }))
+    })
 
     return
 }
@@ -679,7 +679,7 @@ func DeviceAdoptStatus(
     adoptStatus *DeviceAdoptStatusArgs,
     clientSession *session.ClientSession,
 ) (adoptStatusResult *DeviceAdoptStatusResult, returnErr error) {
-    bringyour.Raise(bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             clientSession.Ctx,
             `
@@ -718,7 +718,7 @@ func DeviceAdoptStatus(
                 }
             }
         })
-    }))
+    })
     
     return
 }
@@ -743,7 +743,7 @@ func DeviceConfirmAdopt(
     confirmAdopt *DeviceConfirmAdoptArgs,
     clientSession *session.ClientSession,
 ) (confirmAdoptResult *DeviceConfirmAdoptResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -925,7 +925,7 @@ func DeviceConfirmAdopt(
             // AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
             ByClientJwt: byJwtWithClientId,
         }
-    }))
+    })
 
     if confirmAdoptResult == nil && returnErr == nil {
         confirmAdoptResult = &DeviceConfirmAdoptResult{
@@ -956,7 +956,7 @@ func DeviceRemoveAdoptCode(
     removeAdoptCode *DeviceRemoveAdoptCodeArgs,
     clientSession *session.ClientSession,
 ) (removeAdoptCodeResult *DeviceRemoveAdoptCodeResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -1001,7 +1001,7 @@ func DeviceRemoveAdoptCode(
 
         removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{}
         return
-    }))
+    })
 
     if removeAdoptCodeResult == nil && returnErr == nil {
         removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{
@@ -1034,7 +1034,7 @@ type DeviceAssociation struct {
 func DeviceAssociations(
     clientSession *session.ClientSession,
 ) (associationResult *DeviceAssociationsResult, returnErr error) {
-    bringyour.Raise(bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
         pendingAdoptionDevices := []*DeviceAssociation{}
         incomingSharedDevices := []*DeviceAssociation{}
         outgoingSharedDevices := []*DeviceAssociation{}
@@ -1177,7 +1177,7 @@ func DeviceAssociations(
             OutgoingSharedDevices: outgoingSharedDevices,
         }
         return
-    }))
+    })
 
     return
 }
@@ -1199,7 +1199,7 @@ func DeviceRemoveAssociation(
     removeAssociation *DeviceRemoveAssociationArgs,
     clientSession *session.ClientSession,
 ) (removeAssociationResult *DeviceRemoveAssociationResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -1271,7 +1271,7 @@ func DeviceRemoveAssociation(
         default:
             return
         }
-    }))
+    })
 
     if removeAssociationResult == nil && returnErr == nil {
         removeAssociationResult = &DeviceRemoveAssociationResult{
@@ -1302,7 +1302,7 @@ func DeviceSetAssociationName(
     setAssociationName *DeviceSetAssociationNameArgs,
     clientSession *session.ClientSession,
 ) (setAssociationNameResult *DeviceSetAssociationNameResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -1434,7 +1434,7 @@ func DeviceSetAssociationName(
         default:
             return
         }
-    }))
+    })
 
     if setAssociationNameResult == nil && returnErr == nil {
         setAssociationNameResult = &DeviceSetAssociationNameResult{

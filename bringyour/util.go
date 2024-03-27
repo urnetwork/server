@@ -5,8 +5,8 @@ import (
     "regexp"
     "fmt"
     "strconv"
-    "runtime/debug"
-    "strings"
+    // "runtime/debug"
+    // "strings"
     "encoding/json"
     "bytes"
 )
@@ -83,38 +83,6 @@ func Raise(err error) {
 }
 
 
-func IsDoneError(r any) bool {
-    if err, ok := r.(error); ok {
-        switch err.Error() {
-        case "Done":
-            return true
-        // pgx
-        case "context canceled", "timeout: context already done: context canceled":
-            return true
-        default:
-            return false
-        }
-    }
-    return false
-}
-
-
-// this is meant to handle unexpected errors and do some cleanup
-func HandleError(do func(), handlers ...func()) {
-    defer func() {
-        if r := recover(); r != nil {
-            if IsDoneError(r) {
-                // the context was canceled and raised. this is a standard pattern, ignore
-            } else {
-                Logger().Printf("Unexpected error: %s\n", ErrorJson(r, debug.Stack()))
-                for _, handler := range handlers {
-                    handler()
-                }
-            }
-        }
-    }()
-    do()
-}
 
 
 
@@ -151,39 +119,6 @@ func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
 
     err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
     return
-}
-
-
-func ErrorJson(err any, stack []byte) string {
-    stackLines := []string{}
-    for _, line := range strings.Split(string(stack), "\n") {
-        stackLines = append(stackLines, strings.TrimSpace(line))
-    }
-    errorJson, _ := json.Marshal(map[string]any{
-        "error": fmt.Sprintf("%s", err),
-        "stack": stackLines,
-    })
-    return string(errorJson)
-}
-
-
-func ErrorJsonNoStack(err any) string {
-    errorJson, _ := json.Marshal(map[string]any{
-        "error": fmt.Sprintf("%s", err),
-    })
-    return string(errorJson)
-}
-
-
-func ErrorJsonWithCustomNoStack(err any, custom map[string]any) string {
-    obj := map[string]any{
-        "error": fmt.Sprintf("%s", err),
-    }
-    for key, value := range custom {
-        obj[key] = value
-    }
-    errorJson, _ := json.Marshal(obj)
-    return string(errorJson)
 }
 
 

@@ -43,7 +43,7 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 
 
 func DbVersion(ctx context.Context) int {
-    Raise(Tx(ctx, func(tx PgTx) {
+    Tx(ctx, func(tx PgTx) {
         RaisePgResult(tx.Exec(
             ctx,
             `
@@ -55,10 +55,10 @@ func DbVersion(ctx context.Context) int {
             )
             `,
         ))
-    }))
+    })
 
     var endVersionNumber int
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -72,7 +72,7 @@ func DbVersion(ctx context.Context) int {
                 Raise(result.Scan(&endVersionNumber))
             }
         })
-    }))
+    })
 
     return endVersionNumber
 }
@@ -80,16 +80,16 @@ func DbVersion(ctx context.Context) int {
 
 func ApplyDbMigrations(ctx context.Context) {
     for i := DbVersion(ctx); i < len(migrations); i += 1 {
-        Raise(Tx(ctx, func(tx PgTx) {
+        Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
                 i,
             ))
-        }))
+        })
         switch v := migrations[i].(type) {
             case *SqlMigration:
-                Raise(Tx(ctx, func(tx PgTx) {
+                Tx(ctx, func(tx PgTx) {
                 	defer func() {
 	            		if err := recover(); err != nil {
 	            			// print the sql for debugging
@@ -98,20 +98,20 @@ func ApplyDbMigrations(ctx context.Context) {
 	            		}
 	            	}()
                     RaisePgResult(tx.Exec(ctx, v.sql))
-                }))
+                })
             case *CodeMigration:
                 v.callback(ctx)
             default:
                 panic(fmt.Errorf("Unknown migration type %T", v))
         }
-        Raise(Tx(ctx, func(tx PgTx) {
+        Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
                 i,
                 i + 1,
             ))
-        }))
+        })
     }
 }
 

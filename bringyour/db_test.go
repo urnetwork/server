@@ -14,7 +14,7 @@ import (
 func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 	ctx := context.Background()
 
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
 			`
@@ -22,7 +22,7 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 			`,
 		)
 		Raise(err)
-	}, OptReadWrite()))
+	}, OptReadWrite())
 
 	id1 := NewId()
 	id2_ := NewId()
@@ -30,7 +30,7 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 	var id3 *Id
 	var id4 *Id
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -40,9 +40,9 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 			id2_,
 		)
 		Raise(err)
-	}))
+	})
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -55,9 +55,9 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 				Raise(result.Scan(&id2))
 			}
 		})
-	}))
+	})
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -66,9 +66,9 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 			id2,
 		)
 		Raise(err)
-	}))
+	})
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -81,7 +81,7 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 				Raise(result.Scan(&id3, &id4))
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, id2_, id2)
 	assert.Equal(t, id2, *id3)
@@ -92,7 +92,7 @@ func TestIdPgCodec(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 func TestBatch(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
     ctx := context.Background()
 
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
 			`
@@ -100,11 +100,11 @@ func TestBatch(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 			`,
 		)
 		Raise(err)
-	}, OptReadWrite()))
+	}, OptReadWrite())
 
 	n := 10000
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		BatchInTx(ctx, tx, func(batch PgBatch) {
 			for i := 0; i < n; i += 1 {
 				batch.Queue(
@@ -117,11 +117,11 @@ func TestBatch(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 				)
 			}
 		})
-	}))
+	})
 
 	var k int
 
-	Raise(Db(ctx, func(conn PgConn) {
+	Db(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -133,7 +133,7 @@ func TestBatch(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 				Raise(result.Scan(&k))
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, k)
 })}
@@ -149,7 +149,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 	}
 	tempIds := map[Id]bool{}
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		CreateTempTableInTx(ctx, tx, "temp1(a uuid)", ids...)
 		result, err := tx.Query(
 			ctx,
@@ -164,7 +164,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 				tempIds[id] = true
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, len(tempIds))
 	for _, id := range ids {
@@ -179,7 +179,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 	}
 	tempIdJoins := map[Id]Id{}
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		CreateTempJoinTableInTx(ctx, tx, "temp1(a uuid -> b uuid)", idJoins)
 		result, err := tx.Query(
 			ctx,
@@ -195,7 +195,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 				tempIdJoins[a] = b
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, len(tempIdJoins))
 	for a, b := range idJoins {
@@ -215,7 +215,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 	}
 	tempIdCJoins := map[Id]C{}
 
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		CreateTempJoinTableInTx(ctx, tx, "temp1(a uuid -> ca uuid, cb uuid, cc uuid)", idCJoins)
 		result, err := tx.Query(
 			ctx,
@@ -231,7 +231,7 @@ func TestTempTable(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func(
 				tempIdCJoins[a] = c
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, len(tempIdJoins))
 	for a, c := range idCJoins {
@@ -254,7 +254,7 @@ func (self *C) Values() []any {
 func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
     ctx := context.Background()
 
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
 			`
@@ -262,7 +262,7 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 			`,
 		)
 		Raise(err)
-	}, OptReadWrite()))
+	}, OptReadWrite())
 
 
 	n := 10
@@ -274,7 +274,7 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 	// now insert ids to trigger conflict
 	for i := 0; i < n; i += 1 {
 		j := -1
-		Raise(Tx(ctx, func(tx PgTx) {
+		Tx(ctx, func(tx PgTx) {
 			// increments on each retry until an ids[j] has not been inserted
 			j += 1
 			tx.Exec(
@@ -284,11 +284,11 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 				`,
 				ids[j],
 			)
-		}))
+		})
 	}
 
 	testIds := map[Id]bool{}
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -302,7 +302,7 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 				testIds[id] = true
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, len(testIds))
 	for _, id := range ids {
@@ -315,7 +315,7 @@ func TestRetry(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
 func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(func() {
     ctx := context.Background()
 
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
 			`
@@ -323,7 +323,7 @@ func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run
 			`,
 		)
 		Raise(err)
-	}, OptReadWrite()))
+	}, OptReadWrite())
 
 
 	n := 10
@@ -335,7 +335,7 @@ func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run
 	// now insert ids to trigger conflict
 	for i := 0; i < n; i += 1 {
 		j := -1
-		Raise(Tx(ctx, func(tx PgTx) {
+		Tx(ctx, func(tx PgTx) {
 			// increments on each retry until an ids[j] has not been inserted
 			// cause an error inside the transaction via `RaisePgResult`
 			j += 1
@@ -346,11 +346,11 @@ func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run
 				`,
 				ids[j],
 			))
-		}))
+		})
 	}
 
 	testIds := map[Id]bool{}
-	Raise(Tx(ctx, func(tx PgTx) {
+	Tx(ctx, func(tx PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -364,7 +364,7 @@ func TestRetryInnerError(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run
 				testIds[id] = true
 			}
 		})
-	}))
+	})
 
 	assert.Equal(t, n, len(testIds))
 	for _, id := range ids {
@@ -384,7 +384,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 		ids = append(ids, NewId())
 	}
 
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
 			`
@@ -404,7 +404,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 			)
 			Raise(err)
 		}
-	}, OptReadWrite()))
+	}, OptReadWrite())
 
 	end := make(chan error, k)
 
@@ -412,7 +412,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 	// now insert ids to trigger conflict
 	// conflicting transactions should retry until all are updated
 	for i := 0; i < k; i += 1 {
-		go Raise(Tx(ctx, func(tx PgTx) {
+		go Tx(ctx, func(tx PgTx) {
 			for _, id := range ids {
 				result, err := tx.Query(
 					ctx,
@@ -450,7 +450,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 			}
 
 			end <- nil
-		}, TxSerializable))
+		}, TxSerializable)
 	}
 
 	for i := 0; i < k; i += 1 {
@@ -462,7 +462,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 		}
 	}
 
-	Raise(Db(ctx, func(conn PgConn) {
+	Db(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -482,7 +482,7 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 		for _, b := range out {
 			assert.Equal(t, b, k)
 		}
-	}))
+	})
 })}
 
 

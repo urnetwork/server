@@ -113,9 +113,9 @@ func ScheduleTask[T any, R any](
 	clientSession *session.ClientSession,
 	opts ...any,
 ) {
-	bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
 		ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
-	}))
+	})
 }
 
 
@@ -221,7 +221,7 @@ func ScheduleTaskInTx[T any, R any](
 func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Task {
     tasks := map[bringyour.Id]*Task{}
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
     	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
 
     	result, err := tx.Query(
@@ -277,7 +277,7 @@ func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Ta
     			tasks[task.TaskId] = task
     		}
     	})
-    }))
+    })
 
     return tasks
 }
@@ -285,7 +285,7 @@ func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Ta
 func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*FinishedTask {
 	finishedTasks := map[bringyour.Id]*FinishedTask{}
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
     	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
 
     	result, err := tx.Query(
@@ -351,7 +351,7 @@ func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyou
     			finishedTasks[finishedTask.TaskId] = finishedTask
     		}
     	})
-    }))
+    })
 
     return finishedTasks
 }
@@ -360,7 +360,7 @@ func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyou
 func ListPendingTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -378,7 +378,7 @@ func ListPendingTasks(ctx context.Context) []bringyour.Id {
 				taskIds = append(taskIds, taskId)
 			}
 		})
-	}))
+	})
 
 	return taskIds
 }
@@ -388,7 +388,7 @@ func ListPendingTasks(ctx context.Context) []bringyour.Id {
 func ListRescheduledTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -406,7 +406,7 @@ func ListRescheduledTasks(ctx context.Context) []bringyour.Id {
 				taskIds = append(taskIds, taskId)
 			}
 		})
-	}))
+	})
 
 	return taskIds
 }
@@ -415,7 +415,7 @@ func ListRescheduledTasks(ctx context.Context) []bringyour.Id {
 func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -434,7 +434,7 @@ func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 				taskIds = append(taskIds, taskId)
 			}
 		})
-	}))
+	})
 
 	return taskIds
 }
@@ -443,7 +443,7 @@ func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 func ListFinishedTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -461,7 +461,7 @@ func ListFinishedTasks(ctx context.Context) []bringyour.Id {
 				taskIds = append(taskIds, taskId)
 			}
 		})
-	}))
+	})
 
 	return taskIds
 }
@@ -469,7 +469,7 @@ func ListFinishedTasks(ctx context.Context) []bringyour.Id {
 
 // removed finished tasks older than `minTime` where the post was successfully run
 func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount int64) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		tag := bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -482,7 +482,7 @@ func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount in
 		))
 
 		removeCount = tag.RowsAffected()
-	}))
+	})
 
 	return
 }
@@ -808,7 +808,7 @@ func (self *TaskWorker) RunPost(
 	}
 
 	if target, ok := self.targets[finishedTask.FunctionName]; ok {
-		bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
 			if err := target.RunPost(clientSession.Ctx, finishedTask, tx); err == nil {
 				runPostResult = &RunPostResult{}
 				return
@@ -816,7 +816,7 @@ func (self *TaskWorker) RunPost(
 				returnErr = err
 				return
 			}
-		}))
+		})
 		return
 	} else {
 		returnErr = errors.New("Target not found.")
@@ -851,7 +851,7 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 
 	var taskIds []bringyour.Id
 
-	bringyour.Raise(bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 
 		now := bringyour.NowUtc()
 		nowBlock := now.Unix() / BlockSizeSeconds
@@ -948,7 +948,7 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 			    )
 			}
 	    })
-	}, bringyour.TxReadCommitted))
+	}, bringyour.TxReadCommitted)
 
     return GetTasks(self.ctx, taskIds...), nil
 }
@@ -1017,7 +1017,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		case <- done:
 			break Wait
 		case <- time.After(ReleaseTimeout / 3):
-			bringyour.Raise(bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
+			bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 				bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
 					claimTime := bringyour.NowUtc()
 					releaseTime := claimTime.Add(ReleaseTimeout)
@@ -1037,7 +1037,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 						)
 					}
 				})
-			}))		
+			})
 		}
 	}
 
@@ -1053,7 +1053,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		}
 	}
 
-	bringyour.Raise(bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 		bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
 			for taskId, finished := range finishedTasks {
 				batch.Queue(
@@ -1166,7 +1166,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				}()
 			}
 		}
-	}))
+	})
 
 	for taskId, _ := range finishedTasks {
 		if _, postRescheduled := postRescheduledTasks[taskId]; !postRescheduled {

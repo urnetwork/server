@@ -69,7 +69,7 @@ func (self *residentController) HandleControlMessage(message any) {
 			frame,
 			connect.Id(self.clientId),
 			func(err error){},
-			self.settings.ClientWriteTimeout,
+			self.settings.WriteTimeout,
 		)
 		if success {
 			fmt.Printf("CONTROLLER SENT TO CLIENT %s\n", self.clientId.String())

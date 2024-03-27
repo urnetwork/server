@@ -23,7 +23,7 @@ func GetOrCreateCircleUserId(
     networkId bringyour.Id,
     userId bringyour.Id,
 ) (circleUserId bringyour.Id) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -65,7 +65,7 @@ func GetOrCreateCircleUserId(
             userId,
             circleUserId,
         ))
-    }))
+    })
     return
 }
 
@@ -77,7 +77,7 @@ func SetCircleUserId(
     userId bringyour.Id,
     circleUserId bringyour.Id,
 ) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
@@ -95,6 +95,6 @@ func SetCircleUserId(
             userId,
             circleUserId,
         ))
-    }))
+    })
 }
 

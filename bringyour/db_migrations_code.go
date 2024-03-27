@@ -7,7 +7,7 @@ import (
 
 // create entries for `network_client.device_id`
 func migration_20240124_PopulateDevice(ctx context.Context) {
-    Raise(Tx(ctx, func(tx PgTx) {
+    Tx(ctx, func(tx PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -78,5 +78,5 @@ func migration_20240124_PopulateDevice(ctx context.Context) {
                 device.deviceId,
             ))
         }
-    }))
+    })
 }
