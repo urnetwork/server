@@ -80,6 +80,7 @@ type BringYourDevice struct {
 	// when nil, packets get routed to the local user nat
 	remoteUserNatClient connect.UserNatClient
 
+	remoteUserNatProviderLocalUserNat *connect.LocalUserNat
 	remoteUserNatProvider *connect.RemoteUserNatProvider
 
 	openedViewControllers map[ViewController]bool
@@ -133,6 +134,7 @@ func newBringYourDevice(
         cancelCtx,
         clientId,
         connect.DefaultClientSettingsNoNetworkEvents(),
+        // connect.DefaultClientSettings(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -154,9 +156,12 @@ func newBringYourDevice(
 
     // go platformTransport.Run(connectClient.RouteManager())
 
-    localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx)
+    localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx, clientId.String())
 
-    remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(client, localUserNat)
+
+    remoteUserNatProviderLocalUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx, clientId.String())
+
+    remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(client, remoteUserNatProviderLocalUserNat)
 
     api := newBringYourApiWithContext(cancelCtx, apiUrl)
     api.SetByJwt(byJwt)
@@ -179,6 +184,7 @@ func newBringYourDevice(
 		platformTransport: platformTransport,
 		localUserNat: localUserNat,
 		remoteUserNatClient: nil,
+		remoteUserNatProviderLocalUserNat: remoteUserNatProviderLocalUserNat,
 		remoteUserNatProvider: remoteUserNatProvider,
 		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
@@ -294,6 +300,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.deviceSpec,
 				self.appVersion,
 				connect.DefaultClientSettingsNoNetworkEvents,
+				// connect.DefaultClientSettings,
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
@@ -406,7 +413,9 @@ func (self *BringYourDevice) Close() {
 	}
 	// self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	self.localUserNatUnsub()
+	self.remoteUserNatProviderLocalUserNat.Close()
 	self.remoteUserNatProvider.Close()
+
 
 	self.localUserNat.Close()
 
