@@ -110,10 +110,11 @@ type ExchangeChaosSettings struct {
 
 
 func DefaultExchangeSettings() *ExchangeSettings {
-	exchangePingTimeout := 5 * time.Second
-	exchangeResidentWaitTimeout := 1 * time.Second
+	connectionHandlerSettings := DefaultConnectHandlerSettings()
+	exchangePingTimeout := connectionHandlerSettings.WriteTimeout
+	exchangeResidentWaitTimeout := 5 * time.Second
 	return &ExchangeSettings{
-		ConnectHandlerSettings: *DefaultConnectHandlerSettings(),
+		ConnectHandlerSettings: *connectionHandlerSettings,
 
 		ExchangeBufferSize: 0,
 
@@ -126,10 +127,10 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		MaxConcurrentForwardsPerResident: 256,
 
-		ResidentIdleTimeout: 5 * time.Minute,
+		ResidentIdleTimeout: 60 * time.Second,
 		ResidentSyncTimeout: 30 * time.Second,
-		ForwardIdleTimeout: 5 * time.Minute,
-		ContractSyncTimeout: 30 * time.Second,
+		ForwardIdleTimeout: 60 * time.Second,
+		ContractSyncTimeout: 60 * time.Second,
 		AbuseMinTimeout: 5 * time.Second,
 		ControlMinTimeout: 200 * time.Millisecond,
 
@@ -141,9 +142,9 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeConnectTimeout: 5 * time.Second,
 		ExchangePingTimeout: exchangePingTimeout,
 		ExchangeReadTimeout: 2 * exchangePingTimeout,
-		ExchangeReadHeaderTimeout: 1 * time.Second,
+		ExchangeReadHeaderTimeout: exchangeResidentWaitTimeout,
 		// ExchangeWriteTimeout: 5 * time.Second,
-		ExchangeWriteHeaderTimeout: 1 * time.Second,
+		ExchangeWriteHeaderTimeout: exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
 		ExchangeConnectionResidentPollTimeout: 30 * time.Second,
 		// ExchangeForwardTimeout: 30 * time.Second,
@@ -185,7 +186,7 @@ type Exchange struct {
 
 	settings *ExchangeSettings
 
-	residentsLock sync.RWMutex
+	residentsLock sync.Mutex
 	// clientId -> Resident
 	residents map[bringyour.Id]*Resident
 }
@@ -338,7 +339,7 @@ func (self *Exchange) NominateLocalResident(
 // continually cleans up the local resident state, connections, and model based on the latest nominations
 func (self *Exchange) syncResidents() {
 	// watch for this resident to change
-	// FIMXE close all connection IDs for this resident on change
+	// FIXME close all connection IDs for this resident on change
 	lastRunTime := time.Now()
 	for {
 		timeout := lastRunTime.Add(self.settings.ResidentSyncTimeout).Sub(time.Now())
@@ -519,10 +520,15 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		func()(*Resident) {
 			endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
 			for {
-				self.residentsLock.RLock()
-				resident, ok := self.residents[header.ClientId]
-				// // bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %v\n", self.residents)
-				self.residentsLock.RUnlock()
+				var resident *Resident
+				var ok bool
+				func() {
+					self.residentsLock.Lock()
+					defer self.residentsLock.Unlock()
+
+					resident, ok = self.residents[header.ClientId]
+					// // bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %v\n", self.residents)
+				}()
 
 				if ok && resident.residentId == header.ResidentId {
 					// bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT MISSING RESIDENT %s %s (%t, %v) \n", header.ClientId.String(), header.ResidentId.String(), ok, resident)
@@ -733,6 +739,7 @@ func (self *Exchange) Close() {
 	func() {
 		self.residentsLock.Lock()
 		defer self.residentsLock.Unlock()
+
 		for _, resident := range self.residents {
 			resident.Close()
 			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)	
@@ -1717,6 +1724,7 @@ func (self *Resident) cleanupForwards() {
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
+
 			forwardsToRemove := []*ResidentForward{}
 			for _, forward := range self.forwards {
 				if forward.IsIdle() {
@@ -1892,7 +1900,7 @@ func (self *Resident) AddTransport() (
 	closeTransport = func() {
 		// bringyour.Logger().Printf("REMOVE TRANSPORT %s\n", self.clientId.String())
 
-		// func() {
+		func() {
 			routeManager := self.client.RouteManager()
 			routeManager.RemoveTransport(transport.sendTransport)
 			routeManager.RemoveTransport(transport.receiveTransport)
@@ -1900,11 +1908,9 @@ func (self *Resident) AddTransport() (
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
-		// }()
+		}()
 
 		// transport.Close()
-
-		// close(send)
 
 		/*
 		go func() {
@@ -1986,6 +1992,7 @@ func (self *Resident) Close() {
 		
 	}()
 
+	/*
 	go func() {
 		select {
 		case <- time.After(self.exchange.settings.ClientDrainTimeout):
@@ -2002,7 +2009,9 @@ func (self *Resident) Close() {
 		}()
 
 		self.client.Close()
+
 	}()
+	*/
 }
 
 // func (self *Resident) Cancel() {

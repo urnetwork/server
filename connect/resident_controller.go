@@ -161,18 +161,8 @@ func (self *residentController) handleCreateContract(createContract *protocol.Cr
 		SourceId: self.clientId.Bytes(),
 		DestinationId: destinationId.Bytes(),
 	}
-	storedContractBytes, err := proto.Marshal(storedContract)
-	if err != nil {
-		bringyour.Logger().Printf("CONTROL CREATE CONTRACT STORED ERROR\n")
-		contractError := protocol.ContractError_Setup
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		// self.client.Send(frame, connect.Id(self.clientId), nil)
-		return []*protocol.Frame{frame}
-	}
+	storedContractBytes, _ := proto.Marshal(storedContract)
+	
 	mac := hmac.New(sha256.New, provideSecretKey)
 	storedContractHmac := mac.Sum(storedContractBytes)
 
