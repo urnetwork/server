@@ -27,9 +27,9 @@ import (
 )
 
 
-// func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-// 	testConnect(t, contractTestNone, false)
-// })}
+func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, false)
+})}
 
 
 func TestConnectWithSymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -42,9 +42,9 @@ func TestConnectWithAsymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv
 })}
 
 
-// func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-// 	testConnect(t, contractTestNone, true)
-// })}
+func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, true)
+})}
 
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -151,13 +151,10 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 		if enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		}
-		// FIXME
-		/*
 		switch contractTest {
 		case contractTestSymmetric, contractTestAsymmetric:
 			settings.ForwardEnforceActiveContracts = true
 		}
-		*/
 
 
 		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
@@ -739,7 +736,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	}
 
 	select {
-	case <- time.After(4 * time.Second):
+	case <- time.After(10 * time.Second):
 	}
 
 	flushedContractIdsA := []bringyour.Id{}

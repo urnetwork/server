@@ -18,9 +18,8 @@ import (
 
 
 func IsDoneError(r any) bool {
-    switch v := r.(type) {
-    case error:
-        switch v.Error() {
+    isDoneMessage := func(message string)(bool) {
+        switch message {
         case "Done":
             return true
         // pgx
@@ -29,15 +28,15 @@ func IsDoneError(r any) bool {
         default:
             return false
         }
+    }
+    switch v := r.(type) {
+    case error:
+        return isDoneMessage(v.Error())
     case string:
-        switch v {
-        case "Done":
-            return true
-        default:
-            return false
-        }
-    } 
-    return false
+        return isDoneMessage(v)
+    default:
+        return false
+    }
 }
 
 
@@ -75,7 +74,7 @@ func ErrorJson(err any, stack []byte) string {
         stackLines = append(stackLines, strings.TrimSpace(line))
     }
     errorJson, _ := json.Marshal(map[string]any{
-        "error": fmt.Sprintf("%s", err),
+        "error": fmt.Sprintf("%T=%s", err, err),
         "stack": stackLines,
     })
     return string(errorJson)
@@ -84,7 +83,7 @@ func ErrorJson(err any, stack []byte) string {
 
 func ErrorJsonNoStack(err any) string {
     errorJson, _ := json.Marshal(map[string]any{
-        "error": fmt.Sprintf("%s", err),
+        "error": fmt.Sprintf("%T=%s", err, err),
     })
     return string(errorJson)
 }
@@ -92,7 +91,7 @@ func ErrorJsonNoStack(err any) string {
 
 func ErrorJsonWithCustomNoStack(err any, custom map[string]any) string {
     obj := map[string]any{
-        "error": fmt.Sprintf("%s", err),
+        "error": fmt.Sprintf("%T=%s", err, err),
     }
     for key, value := range custom {
         obj[key] = value

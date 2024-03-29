@@ -133,8 +133,8 @@ func newBringYourDevice(
 	client := connect.NewClient(
         cancelCtx,
         clientId,
-        connect.DefaultClientSettingsNoNetworkEvents(),
-        // connect.DefaultClientSettings(),
+        // connect.DefaultClientSettingsNoNetworkEvents(),
+        connect.DefaultClientSettings(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -299,8 +299,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,
-				connect.DefaultClientSettingsNoNetworkEvents,
-				// connect.DefaultClientSettings,
+				// connect.DefaultClientSettingsNoNetworkEvents,
+				connect.DefaultClientSettings,
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,

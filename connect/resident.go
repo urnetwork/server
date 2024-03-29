@@ -116,7 +116,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
 
-		ExchangeBufferSize: 0,
+		ExchangeBufferSize: 32,
 
 		// 64kib minimum contract
 		// this is set high enough to limit the number of parallel contracts and avoid contract spam
@@ -215,7 +215,7 @@ func NewExchange(
 	}
 
 	go bringyour.HandleError(exchange.Run, cancel)
-	// go bringyour.HandleError(exchange.syncResidents, cancel)
+	go bringyour.HandleError(exchange.syncResidents, cancel)
 
 	return exchange
 }
@@ -1631,7 +1631,7 @@ func NewResident(
 	// 	client.Run()
 	// }, cancel)
 
-	// go bringyour.HandleError(resident.cleanupForwards, cancel)
+	go bringyour.HandleError(resident.cleanupForwards, cancel)
 
 	// FIXME clean up
 	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {

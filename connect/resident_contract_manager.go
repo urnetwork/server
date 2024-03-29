@@ -40,7 +40,7 @@ func newResidentContractManager(
         pairContractIds: model.GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(ctx, clientId),
     }
 
-    // go bringyour.HandleError(residentContractManager.syncContracts, cancel)
+    go bringyour.HandleError(residentContractManager.syncContracts, cancel)
 
     return residentContractManager
 }
