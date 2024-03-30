@@ -181,12 +181,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
             clientId,
             instanceId,
         )
+        go func() {
+            defer handleCancel()
+            bringyour.HandleError(residentTransport.Run)
+            residentTransport.Close()
+            ws.Close()
+        }()
 
         go bringyour.HandleError(func() {
             // close the transport in the send
             defer func() {
                 handleCancel()
-                residentTransport.Close()
+                residentTransport.Cancel()
             }()
 
         	for {
@@ -229,11 +235,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 
         go bringyour.HandleError(func() {
-            defer handleCancel()
+            defer func() {
+                handleCancel()
+                residentTransport.Cancel()
+            }()
             
             for {
                 select {
                 case <- handleCtx.Done():
+                    return
+                case <- residentTransport.Done():
                     return
                 case message, ok := <- residentTransport.receive:
                     if !ok {
@@ -265,6 +276,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
         select {
         case <- handleCtx.Done():
+            return
+        case <- residentTransport.Done():
             return
         }
     })

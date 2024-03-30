@@ -133,8 +133,8 @@ func newBringYourDevice(
 	client := connect.NewClient(
         cancelCtx,
         clientId,
-        // connect.DefaultClientSettingsNoNetworkEvents(),
-        connect.DefaultClientSettings(),
+        connect.DefaultClientSettingsNoNetworkEvents(),
+        // connect.DefaultClientSettings(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -148,7 +148,7 @@ func newBringYourDevice(
     	AppVersion: Version,
     }
     platformTransport := connect.NewPlatformTransportWithDefaults(
-    	cancelCtx,
+    	client.Ctx(),
     	platformUrl,
     	auth,
     	client.RouteManager(),
@@ -156,12 +156,7 @@ func newBringYourDevice(
 
     // go platformTransport.Run(connectClient.RouteManager())
 
-    localUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx, clientId.String())
-
-
-    remoteUserNatProviderLocalUserNat := connect.NewLocalUserNatWithDefaults(cancelCtx, clientId.String())
-
-    remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(client, remoteUserNatProviderLocalUserNat)
+    localUserNat := connect.NewLocalUserNatWithDefaults(client.Ctx(), clientId.String())
 
     api := newBringYourApiWithContext(cancelCtx, apiUrl)
     api.SetByJwt(byJwt)
@@ -184,8 +179,8 @@ func newBringYourDevice(
 		platformTransport: platformTransport,
 		localUserNat: localUserNat,
 		remoteUserNatClient: nil,
-		remoteUserNatProviderLocalUserNat: remoteUserNatProviderLocalUserNat,
-		remoteUserNatProvider: remoteUserNatProvider,
+		remoteUserNatProviderLocalUserNat: nil,
+		remoteUserNatProvider: nil,
 		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
 		api: api,
@@ -220,6 +215,11 @@ func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpP
 }
 
 func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	// FIXME create a new provider only client
+
 	provideModes := map[protocol.ProvideMode]bool{}
 	if ProvideModePublic <= provideMode {
 		provideModes[protocol.ProvideMode_Public] = true
@@ -228,6 +228,20 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
 	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
+
+	if self.remoteUserNatProviderLocalUserNat != nil {
+		self.remoteUserNatProviderLocalUserNat.Close()
+		self.remoteUserNatProviderLocalUserNat = nil
+	}
+	if self.remoteUserNatProvider != nil {
+		self.remoteUserNatProvider.Close()
+		self.remoteUserNatProvider = nil
+	}
+
+	if ProvideModePublic <= provideMode {
+	    self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
+	    self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
+	}
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
@@ -299,8 +313,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,
-				// connect.DefaultClientSettingsNoNetworkEvents,
-				connect.DefaultClientSettings,
+				connect.DefaultClientSettingsNoNetworkEvents,
+				// connect.DefaultClientSettings,
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
@@ -413,8 +427,14 @@ func (self *BringYourDevice) Close() {
 	}
 	// self.localUserNat.RemoveReceivePacketCallback(self.receive)
 	self.localUserNatUnsub()
-	self.remoteUserNatProviderLocalUserNat.Close()
-	self.remoteUserNatProvider.Close()
+	if self.remoteUserNatProviderLocalUserNat != nil {
+		self.remoteUserNatProviderLocalUserNat.Close()
+		self.remoteUserNatProviderLocalUserNat = nil
+	}
+	if self.remoteUserNatProvider != nil {
+		self.remoteUserNatProvider.Close()
+		self.remoteUserNatProvider = nil
+	}
 
 
 	self.localUserNat.Close()
