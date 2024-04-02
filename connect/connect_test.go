@@ -21,6 +21,7 @@ import (
     "bringyour.com/protocol"
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/model"
+    "bringyour.com/bringyour/controller"
     "bringyour.com/bringyour/jwt"
     "bringyour.com/bringyour/router"
     "bringyour.com/bringyour/session"
@@ -69,6 +70,7 @@ const (
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
 // contract logic is optional so that the effects of contracts can be isolated
+// FIXME set all sequence buffer sizes to 0
 func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 	type Message struct {
@@ -186,7 +188,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	// set this low enough to test new contracts in the transfer
 	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
-	clientA := connect.NewClient(ctx, connect.Id(clientIdA), clientSettingsA)
+	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
@@ -199,7 +201,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	// set this low enough to test new contracts in the transfer
 	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
-	clientB := connect.NewClient(ctx, connect.Id(clientIdB), clientSettingsB)
+	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
@@ -882,12 +884,20 @@ func printAllStacks() {
 }
 
 
+type controllerOutOfBandControl struct {
+	ctx context.Context
+	clientId bringyour.Id
+}
 
-// FIXME TestConnectSmallBuffer
+func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId bringyour.Id) connect.OutOfBandControl {
+	return &controllerOutOfBandControl{
+		ctx: ctx,
+		clientId: clientId,
+	}
+} 
 
-
-
-
-
-
+func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
+	resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames)
+	callback(resultFrames, err)
+}
 

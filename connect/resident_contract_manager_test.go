@@ -1,17 +1,17 @@
 package main
 
 import (
-    "context"
-    "testing"
-    "time"
+    // "context"
+    // "testing"
+    // "time"
 
-    "github.com/go-playground/assert/v2"
+    // "github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/model"
+    // "bringyour.com/bringyour"
+    // "bringyour.com/bringyour/model"
 )
 
-
+/*
 func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -145,4 +145,4 @@ func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	assert.Equal(t, false, active)
 	
 })}
-
+*/

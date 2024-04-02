@@ -92,6 +92,7 @@ Options:
         router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
         router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
         router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
+        router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

@@ -129,10 +129,11 @@ func newBringYourDevice(
 	}
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
-
+	clientOob := connect.NewApiOutOfBandControl(cancelCtx, byJwt, apiUrl)
 	client := connect.NewClient(
         cancelCtx,
         clientId,
+        clientOob,
         // connect.DefaultClientSettingsNoNetworkEvents(),
         connect.DefaultClientSettings(),
     )

@@ -1529,7 +1529,7 @@ func NewResident(
 	// use a tag with the client so that the logging does not show up as the control id 
 	clientTag := fmt.Sprintf("c(%s)", clientId.String())
 	clientSettings := connect.DefaultClientSettings()
-	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, clientSettings)
+	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, connect.NewNoContractClientOob(), clientSettings)
 
 	// no contract is required between the platform and client
 	// because the platform creates the contracts for the client
@@ -1547,7 +1547,6 @@ func NewResident(
 		cancelCtx,
 		cancel,
 		clientId,
-		client,
 		residentContractManager,
 		exchange.settings,
 	)

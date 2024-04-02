@@ -66,42 +66,6 @@ func (self *residentContractManager) syncContracts() {
     }
 }
 
-// this is the "min" or most specific relationship
-func (self *residentContractManager) GetProvideRelationship(sourceId bringyour.Id, destinationId bringyour.Id) model.ProvideMode {
-    if sourceId == ControlId || destinationId == ControlId {
-        return model.ProvideModeNetwork
-    }
-
-    if sourceId == destinationId {
-        return model.ProvideModeNetwork
-    }
-
-    if sourceClient := model.GetNetworkClient(self.ctx, sourceId); sourceClient != nil {
-        if destinationClient := model.GetNetworkClient(self.ctx, destinationId); destinationClient != nil {
-            if sourceClient.NetworkId == destinationClient.NetworkId {
-                return model.ProvideModeNetwork
-            }
-        }
-    }
-
-    // TODO network and friends-and-family not implemented yet
-    // FIXME these exist in the association model now, can be added
-
-    return model.ProvideModePublic
-}
-
-func (self *residentContractManager) GetProvideMode(destinationId bringyour.Id) model.ProvideMode {
-
-    if destinationId == ControlId {
-        return model.ProvideModeNetwork
-    }
-
-    provideMode, err := model.GetProvideMode(self.ctx, destinationId)
-    if err != nil {
-        return model.ProvideModeNone
-    }
-    return provideMode
-}
 
 
 func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
@@ -129,73 +93,15 @@ func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, de
     return 0 < len(contracts)
 }
 
-func (self *residentContractManager) CreateContract(
-    sourceId bringyour.Id,
+
+
+
+func (self *residentContractManager) CreateContractHole(
     destinationId bringyour.Id,
-    companionContract bool,
-    transferByteCount ByteCount,
-    provideMode model.ProvideMode,
-) (contractId bringyour.Id, contractTransferByteCount ByteCount, returnErr error) {
-    sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
-    if err != nil {
-        // the source is not a real client
-        returnErr = err
-        return
-    }
-    destinationNetworkId, err := model.FindClientNetwork(self.ctx, destinationId)
-    if err != nil {
-        // the destination is not a real client
-        returnErr = err
-        return
-    }
-    
-    contractTransferByteCount = max(self.settings.MinContractTransferByteCount, transferByteCount)
-
-    if provideMode < model.ProvideModePublic {
-        contractId, err = model.CreateContractNoEscrow(
-            self.ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-    } else if companionContract {
-    	escrow, err := model.CreateCompanionTransferEscrow(
-            self.ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-        contractId = escrow.ContractId
-    } else {
-        escrow, err := model.CreateTransferEscrow(
-            self.ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-        contractId = escrow.ContractId
-    }
-
+    contractId bringyour.Id,
+) error {
     // update the cache
-    transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
+    transferPair := model.NewUnorderedTransferPair(self.clientId, destinationId)
     func() {
         self.stateLock.Lock()
         defer self.stateLock.Unlock()
@@ -207,12 +113,11 @@ func (self *residentContractManager) CreateContract(
         contracts[contractId] = true
     }()
 
-    return
+    return nil
 }
 
 func (self *residentContractManager) CloseContract(
     contractId bringyour.Id,
-    clientId bringyour.Id,
     usedTransferByteCount ByteCount,
 ) error {
     // update the cache
@@ -220,14 +125,14 @@ func (self *residentContractManager) CloseContract(
         self.stateLock.Lock()
         defer self.stateLock.Unlock()
         for transferPair, contracts := range self.pairContractIds {
-            if transferPair.A == clientId || transferPair.B == clientId {
+            if transferPair.A == self.clientId || transferPair.B == self.clientId {
                 delete(contracts, contractId)
             }
         }
     }()
 
-    fmt.Printf("CONTROLLER CLOSE CONTRACT (%s) %s\n", clientId.String(), contractId.String())
-    err := model.CloseContract(self.ctx, contractId, clientId, usedTransferByteCount)
+    fmt.Printf("CONTROLLER CLOSE CONTRACT (%s) %s\n", self.clientId.String(), contractId.String())
+    err := model.CloseContract(self.ctx, contractId, self.clientId, usedTransferByteCount)
     if err != nil {
         fmt.Printf("CLOSE CONTRACT ERROR %s\n", err)
         return err
