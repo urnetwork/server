@@ -187,7 +187,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
-	clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
+	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsA.ForwardBufferSettings.SequenceBufferSize = 0
 	// disable scheduled network events
 	clientSettingsA.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
@@ -205,7 +205,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
-	clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
+	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsB.ForwardBufferSettings.SequenceBufferSize = 0
 	// disable scheduled network events
 	clientSettingsB.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
