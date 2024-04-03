@@ -320,6 +320,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.appVersion,
 				// connect.DefaultClientSettingsNoNetworkEvents,
 				connect.DefaultClientSettings,
+				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
