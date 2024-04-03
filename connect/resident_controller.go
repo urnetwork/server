@@ -53,9 +53,6 @@ func (self *residentController) HandleControlMessage(message any) {
 	case *protocol.Provide:
 		self.handleProvide(v)
 
-	case *protocol.CreateContractHole:
-		self.handleCreateContractHole(v)
-
 	case *protocol.CloseContract:
 		self.handleCloseContract(v)
 
@@ -76,17 +73,11 @@ func (self *residentController) handleProvide(provide *protocol.Provide) {
 	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
 }
 
-func (self *residentController) handleCreateContractHole(createContractHole *protocol.CreateContractHole) {
-	self.residentContractManager.CreateContractHole(
-		bringyour.RequireIdFromBytes(createContractHole.DestinationId),
-		bringyour.RequireIdFromBytes(createContractHole.ContractId),
-	)
-}
-
 
 func (self *residentController) handleCloseContract(closeContract *protocol.CloseContract) {
 	self.residentContractManager.CloseContract(
 		bringyour.RequireIdFromBytes(closeContract.ContractId),
 		ByteCount(closeContract.AckedByteCount),
+		closeContract.Checkpoint,
 	)
 }

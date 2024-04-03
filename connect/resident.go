@@ -134,7 +134,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ForwardIdleTimeout: 60 * time.Second,
 		ContractSyncTimeout: 60 * time.Second,
 		AbuseMinTimeout: 5 * time.Second,
-		ControlMinTimeout: 200 * time.Millisecond,
+		ControlMinTimeout: 5 * time.Millisecond,
 
 		ClientDrainTimeout: 30 * time.Second,
 		TransportDrainTimeout: 30 * time.Second,
@@ -1681,8 +1681,11 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 
 	self.UpdateActivity()
 
+	if sourceId != self.clientId {
+		panic("Bad forward source.")
+	}
 	if destinationId == ControlId {
-		panic("Bad forward.")
+		panic("Bad forward destination.")
 	}
 	
 	if sourceId != self.clientId {
@@ -1694,8 +1697,9 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		return
 	}
 
-
-	if self.exchange.settings.ForwardEnforceActiveContracts {
+	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
+	/*
+	if self.exchange.settings.ForwardEnforceActiveContracts {		
 		start := time.Now()
 		hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
 		end := time.Now()
@@ -1709,6 +1713,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 			return
 		}
 	}
+	*/
 
 	bringyour.TraceWithReturn(
 		fmt.Sprintf("[rf]handle client forward %s->%s", sourceId, destinationId),
@@ -1830,7 +1835,9 @@ func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protoc
 	for _, frame := range frames {
 		// bringyour.Logger().Printf("HANDLE CLIENT RECEIVE FRAME %s\n", frame)
 		if message, err := connect.FromFrame(frame); err == nil {
-			self.residentController.HandleControlMessage(message)
+			bringyour.HandleError(func() {
+				self.residentController.HandleControlMessage(message)
+			})
 		}
 	}
 }

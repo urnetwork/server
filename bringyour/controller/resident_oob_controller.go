@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-
+	"time"
 	"crypto/hmac"
 	"crypto/sha256"
 
@@ -28,6 +28,9 @@ var MinContractTransferByteCount = func()(model.ByteCount) {
 		settings.ReceiveBufferSettings.MinMessageByteCount,
 	)
 }()
+
+// allow the return contract to be created for up to this timeout after the source contract was closed
+var OriginContractTimeout = 15 * time.Second
 
 
 type ConnectControlArgs struct {
@@ -105,6 +108,11 @@ func ConnectControlFrames(
 		switch v := message.(type) {
 		case *protocol.CreateContract:
 			outFrames, err = CreateContract(ctx, clientId, v)
+		case *protocol.CloseContract:
+			err = CloseContract(ctx, clientId, v)
+		case *protocol.Provide:
+			err = Provide(ctx, clientId, v)
+
 		default:
 			err = fmt.Errorf("Cannot handle oob control message: %T", message)
 		}
@@ -183,7 +191,7 @@ func CreateContract(
 
 		maxProvideMode := GetProvideMode(ctx, destinationId)
 		if maxProvideMode < minRelationship {
-			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION\n")
+			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION (%s->%s)\n", clientId.String(), destinationId.String())
 			contractError := protocol.ContractError_NoPermission
 			result := &protocol.CreateContractResult{
 				Error: &contractError,
@@ -330,6 +338,7 @@ func newContract(
             destinationNetworkId,
             destinationId,
             contractTransferByteCount,
+            OriginContractTimeout,
         )
         if err != nil {
             returnErr = err
@@ -353,4 +362,35 @@ func newContract(
     }
 
     return
+}
+
+
+func Provide(
+	ctx context.Context,
+	clientId bringyour.Id,
+	provide *protocol.Provide,
+) error {
+	secretKeys := map[model.ProvideMode][]byte{}
+	for _, provideKey := range provide.Keys {
+		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey
+	}
+	// bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
+	model.SetProvide(ctx, clientId, secretKeys)
+	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
+
+	return nil
+}
+
+
+func CloseContract(
+	ctx context.Context,
+	clientId bringyour.Id,
+	closeContract *protocol.CloseContract,
+) error {
+	contractId := bringyour.RequireIdFromBytes(closeContract.ContractId)
+	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
+	checkpoint := closeContract.Checkpoint
+
+    err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+    return err
 }

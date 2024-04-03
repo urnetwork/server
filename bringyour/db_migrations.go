@@ -1388,5 +1388,19 @@ var migrations = []any{
         ALTER TABLE device_share ALTER COLUMN create_time TYPE timestamp
     `),
 
+    newSqlMigration(`
+    ALTER TABLE contract_close ADD COLUMN checkpoint bool NOT NULL DEFAULT false
+    `),
+
+    newSqlMigration(`
+        DROP INDEX transfer_contract_open_source_id_companion_contract_id
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, close_time, create_time, contract_id)
+    `),
+
+
+
 }
 
