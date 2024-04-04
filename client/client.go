@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"hash/fnv"
 	"math"
+	"flag"
 
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
@@ -27,6 +28,14 @@ import (
 //
 // additionally, the entire bringyour.com/bringyour tree cannot be used because it pulls in the
 // `warp` environment expectations, which is not compatible with the client lib
+
+
+func init() {
+	// glog setup
+	flag.Set("logtostderr", "true")
+    flag.Set("stderrthreshold", "INFO")
+    flag.Set("v", "0")
+}
 
 
 // this value is set via the linker, e.g.

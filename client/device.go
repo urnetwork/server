@@ -43,13 +43,13 @@ type ReceivePacket interface {
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
 	SendTimeout time.Duration
-	ClientDrainTimeout time.Duration
+	// ClientDrainTimeout time.Duration
 }
 
 func defaultDeviceSettings() *deviceSettings {
 	return &deviceSettings{
 		SendTimeout: 5 * time.Second,
-		ClientDrainTimeout: 30 * time.Second,
+		// ClientDrainTimeout: 30 * time.Second,
 	}
 }
 
@@ -260,42 +260,56 @@ func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpP
     }
 }
 
-func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
+func (self *BringYourDevice) IsProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	// TODO create a new provider only client?
+	return self.remoteUserNatProvider != nil
+}
 
-	provideModes := map[protocol.ProvideMode]bool{}
-	if ProvideModePublic <= provideMode {
-		provideModes[protocol.ProvideMode_Public] = true
-	}
-	if ProvideModeFriendsAndFamily <= provideMode {
-		provideModes[protocol.ProvideMode_FriendsAndFamily] = true
-	}
-	if ProvideModeNetwork <= provideMode {
-		provideModes[protocol.ProvideMode_Network] = true
-	}
-	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
+func (self *BringYourDevice) IsConnectEnabled() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 
-	// recreate the provider user nat
-	if self.remoteUserNatProviderLocalUserNat != nil {
-		self.remoteUserNatProviderLocalUserNat.Close()
-		self.remoteUserNatProviderLocalUserNat = nil
-	}
-	if self.remoteUserNatProvider != nil {
-		self.remoteUserNatProvider.Close()
-		self.remoteUserNatProvider = nil
-	}
+	return self.remoteUserNatClient != nil
+}
 
-	if ProvideModeNone < provideMode {
-	    self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
-	    self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
 
-		self.provideChanged(true)
-	} else {
-		self.provideChanged(false)
-	}
+func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		// TODO create a new provider only client?
+
+		provideModes := map[protocol.ProvideMode]bool{}
+		if ProvideModePublic <= provideMode {
+			provideModes[protocol.ProvideMode_Public] = true
+		}
+		if ProvideModeFriendsAndFamily <= provideMode {
+			provideModes[protocol.ProvideMode_FriendsAndFamily] = true
+		}
+		if ProvideModeNetwork <= provideMode {
+			provideModes[protocol.ProvideMode_Network] = true
+		}
+		self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
+
+		// recreate the provider user nat
+		if self.remoteUserNatProviderLocalUserNat != nil {
+			self.remoteUserNatProviderLocalUserNat.Close()
+			self.remoteUserNatProviderLocalUserNat = nil
+		}
+		if self.remoteUserNatProvider != nil {
+			self.remoteUserNatProvider.Close()
+			self.remoteUserNatProvider = nil
+		}
+
+		if ProvideModeNone < provideMode {
+		    self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
+		    self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)	
+		}
+	}()
+	self.provideChanged(self.IsProvideEnabled())
 }
 
 func (self *BringYourDevice) GetProvideMode() ProvideMode {
@@ -330,69 +344,69 @@ func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
 }
 */
 
-func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) error {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
-	if self.remoteUserNatClient != nil {
-		self.remoteUserNatClient.Close()
-		self.remoteUserNatClient = nil
-	}
-
-	if specs != nil && 0 < specs.Len() {
-		connectSpecs := []*connect.ProviderSpec{}
-		for i := 0; i < specs.Len(); i += 1 {
-			connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
+		if self.remoteUserNatClient != nil {
+			self.remoteUserNatClient.Close()
+			self.remoteUserNatClient = nil
 		}
 
-		paths := []connect.Path{}
-		for _, connectSpec := range connectSpecs {
-			if connectSpec.ClientId != nil {
-				paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
+		if specs != nil && 0 < specs.Len() {
+			connectSpecs := []*connect.ProviderSpec{}
+			for i := 0; i < specs.Len(); i += 1 {
+				connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
+			}
+
+			paths := []connect.Path{}
+			for _, connectSpec := range connectSpecs {
+				if connectSpec.ClientId != nil {
+					paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
+				}
+			}
+
+			// connect to a single client
+			// no need to optimize this case, use the simplest user nat client
+			if DebugUseSingleClientConnect && len(connectSpecs) == len(paths) && len(paths) == 1 {
+				self.remoteUserNatClient, returnErr = connect.NewRemoteUserNatClient(
+					self.client,
+					self.receive,
+					paths,
+					protocol.ProvideMode_Network,
+				)
+				if returnErr != nil {
+					return
+				}
+			} else {
+				generator := connect.NewApiMultiClientGenerator(
+					connectSpecs,
+					self.apiUrl,
+					self.byJwt,
+					self.platformUrl,
+					self.deviceDescription,
+					self.deviceSpec,
+					self.appVersion,
+					connect.DefaultClientSettingsNoNetworkEvents,
+					// connect.DefaultClientSettings,
+					connect.DefaultApiMultiClientGeneratorSettings(),
+				)
+				self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
+					self.ctx,
+					generator,
+					self.receive,
+				)
 			}
 		}
-
-		// connect to a single client
-		// no need to optimize this case, use the simplest user nat client
-		if DebugUseSingleClientConnect && len(connectSpecs) == len(paths) && len(paths) == 1 {
-			var err error
-			self.remoteUserNatClient, err = connect.NewRemoteUserNatClient(
-				self.client,
-				self.receive,
-				paths,
-				protocol.ProvideMode_Network,
-			)
-			if err != nil {
-				return err
-			}
-		} else {
-			// FIXME be able to pass client settings here
-			generator := connect.NewApiMultiClientGenerator(
-				connectSpecs,
-				self.apiUrl,
-				self.byJwt,
-				self.platformUrl,
-				self.deviceDescription,
-				self.deviceSpec,
-				self.appVersion,
-				connect.DefaultClientSettingsNoNetworkEvents,
-				// connect.DefaultClientSettings,
-				connect.DefaultApiMultiClientGeneratorSettings(),
-			)
-			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
-				self.ctx,
-				generator,
-				self.receive,
-			)
-		}
-
-		self.connectChanged(true)
-		return nil
-	} else {
-		// no specs, not an error
-		self.connectChanged(false)
-		return nil
+		// else no specs, not an error
+	}()
+	if returnErr != nil {
+		return
 	}
+
+	self.connectChanged(self.IsConnectEnabled())
+	return
 }
 
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
@@ -510,14 +524,6 @@ func (self *BringYourDevice) Close() {
 		vc.Close()
 	}
 	clear(self.openedViewControllers)
-
-	go func() {
-		select {
-		case <- time.After(self.settings.ClientDrainTimeout):
-		}
-
-		self.client.Close()
-	}()
 }
 
 
