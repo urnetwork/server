@@ -20,6 +20,17 @@ var deviceLog = logFn("device")
 const DebugUseSingleClientConnect = false
 
 
+
+type ProvideChangeListener interface {
+	ProvideChanged(provideEnabled bool)
+}
+
+
+type ConnectChangeListener interface {
+	ConnectChanged(connectEnabled bool)
+}
+
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
     ReceivePacket(packet []byte)
@@ -43,11 +54,6 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 
-// FIXME call SetProvideModesWithReturnTraffic always
-// FIXME read the stored provide mode and restore it
-
-
-// conforms to `Router`
 type BringYourDevice struct {
 	ctx context.Context
 	cancel context.CancelFunc
@@ -86,6 +92,9 @@ type BringYourDevice struct {
 	openedViewControllers map[ViewController]bool
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
+
+	provideChangeListeners *connect.CallbackList[ProvideChangeListener]
+	connectChangeListeners *connect.CallbackList[ConnectChangeListener]
 
 	api *BringYourApi
 
@@ -134,8 +143,8 @@ func newBringYourDevice(
         cancelCtx,
         clientId,
         clientOob,
-        // connect.DefaultClientSettingsNoNetworkEvents(),
-        connect.DefaultClientSettings(),
+        connect.DefaultClientSettingsNoNetworkEvents(),
+        // connect.DefaultClientSettings(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -188,6 +197,8 @@ func newBringYourDevice(
 		remoteUserNatProvider: nil,
 		openedViewControllers: map[ViewController]bool{},
 		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
+		provideChangeListeners: connect.NewCallbackList[ProvideChangeListener](),
+		connectChangeListeners: connect.NewCallbackList[ConnectChangeListener](),
 		api: api,
 	}
 
@@ -211,6 +222,36 @@ func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
 }
 
+func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeListener) Sub {
+	callbackId := self.provideChangeListeners.Add(listener)
+	return newSub(func() {
+		self.provideChangeListeners.Remove(callbackId)
+	})
+}
+
+func (self *BringYourDevice) AddConnectChangeListener(listener ConnectChangeListener) Sub {
+	callbackId := self.connectChangeListeners.Add(listener)
+	return newSub(func() {
+		self.connectChangeListeners.Remove(callbackId)
+	})
+}
+
+func (self *BringYourDevice) provideChanged(provideEnabled bool) {
+	for _, listener := range self.provideChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ProvideChanged(provideEnabled)
+		})
+	}
+}
+
+func (self *BringYourDevice) connectChanged(connectEnabled bool) {
+	for _, listener := range self.connectChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectChanged(connectEnabled)
+		})
+	}
+}
+
 // `ReceivePacketFunction`
 func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
 	// deviceLog("GOT A PACKET %d", len(packet))
@@ -223,17 +264,21 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	// FIXME create a new provider only client
+	// TODO create a new provider only client?
 
 	provideModes := map[protocol.ProvideMode]bool{}
 	if ProvideModePublic <= provideMode {
 		provideModes[protocol.ProvideMode_Public] = true
+	}
+	if ProvideModeFriendsAndFamily <= provideMode {
+		provideModes[protocol.ProvideMode_FriendsAndFamily] = true
 	}
 	if ProvideModeNetwork <= provideMode {
 		provideModes[protocol.ProvideMode_Network] = true
 	}
 	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
 
+	// recreate the provider user nat
 	if self.remoteUserNatProviderLocalUserNat != nil {
 		self.remoteUserNatProviderLocalUserNat.Close()
 		self.remoteUserNatProviderLocalUserNat = nil
@@ -243,10 +288,22 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 		self.remoteUserNatProvider = nil
 	}
 
-	if ProvideModePublic <= provideMode {
+	if ProvideModeNone < provideMode {
 	    self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
 	    self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
+
+		self.provideChanged(true)
+	} else {
+		self.provideChanged(false)
 	}
+}
+
+func (self *BringYourDevice) GetProvideMode() ProvideMode {
+	maxProvideMode := protocol.ProvideMode_None
+	for provideMode, _ := range self.client.ContractManager().GetProvideModes() {
+		maxProvideMode = max(maxProvideMode, provideMode)
+	}
+	return ProvideMode(maxProvideMode)
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
@@ -318,8 +375,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,
-				// connect.DefaultClientSettingsNoNetworkEvents,
-				connect.DefaultClientSettings,
+				connect.DefaultClientSettingsNoNetworkEvents,
+				// connect.DefaultClientSettings,
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
@@ -327,11 +384,15 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				generator,
 				self.receive,
 			)
-			return nil
 		}
+
+		self.connectChanged(true)
+		return nil
+	} else {
+		// no specs, not an error
+		self.connectChanged(false)
+		return nil
 	}
-	// no specs, not an error
-	return nil
 }
 
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) {

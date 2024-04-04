@@ -178,6 +178,7 @@ type ProvideMode = int
 const (
 	ProvideModeNone ProvideMode = ProvideMode(protocol.ProvideMode_None)
 	ProvideModeNetwork ProvideMode = ProvideMode(protocol.ProvideMode_Network)
+	ProvideModeFriendsAndFamily ProvideMode = ProvideMode(protocol.ProvideMode_FriendsAndFamily)
 	ProvideModePublic ProvideMode = ProvideMode(protocol.ProvideMode_Public)
 )
 

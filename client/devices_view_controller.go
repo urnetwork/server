@@ -11,6 +11,11 @@ import (
 var dvcLog = logFn("device_view_controller")
 
 
+type NetworkClientsListener interface {
+	NetworkClientsChanged(networkClients *NetworkClientInfoList)
+}
+
+
 type DevicesViewController struct {
 	ctx context.Context
 	cancel context.CancelFunc
@@ -76,10 +81,9 @@ func (self *DevicesViewController) AddNetworkClientsListener(listener NetworkCli
 // `NetworkClientsListener`
 func (self *DevicesViewController) networkClientsChanged(networkClients *NetworkClientInfoList) {
 	for _, listener := range self.networkClientsListeners.Get() {
-		func() {
-			defer recover()
+		connect.HandleError(func() {
 			listener.NetworkClientsChanged(networkClients)
-		}()
+		})
 	}
 }
 
@@ -113,9 +117,4 @@ func (self *DevicesViewController) cmpNetworkClientLayout(a *NetworkClientInfo, 
 	}
 
 	return a.ClientId.Cmp(b.ClientId)
-}
-
-
-type NetworkClientsListener interface {
-	NetworkClientsChanged(networkClients *NetworkClientInfoList)
 }
