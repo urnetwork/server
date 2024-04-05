@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"math"
 	"flag"
+	"os"
 
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
@@ -31,10 +32,15 @@ import (
 
 
 func init() {
-	// glog setup
+	initGlog()
+}
+
+func initGlog() {
 	flag.Set("logtostderr", "true")
     flag.Set("stderrthreshold", "INFO")
     flag.Set("v", "0")
+    // unlike unix, the android/ios standard is for diagnostics to go to stdout
+    os.Stderr = os.Stdout
 }
 
 
