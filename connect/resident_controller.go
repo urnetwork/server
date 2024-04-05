@@ -4,17 +4,19 @@ import (
 	"context"
 	// "sync"
 	// "errors"
-	"fmt"
+	// "fmt"
 
 	// "crypto/hmac"
 	// "crypto/sha256"
 
 	// "google.golang.org/protobuf/proto"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	// "bringyour.com/bringyour/model"
 	// "bringyour.com/connect"
-	"bringyour.com/protocol"
+	// "bringyour.com/protocol"
 )
 
 
@@ -44,40 +46,14 @@ func newResidentController(
 	}
 }
 
-
 // the message is verified from source `clientId`
 // control messages are not allowed to have replies
 // messages with replies must use resident_oob_controller in the api
 func (self *residentController) HandleControlMessage(message any) {
 	switch v := message.(type) {
-	case *protocol.Provide:
-		self.handleProvide(v)
-
-	case *protocol.CloseContract:
-		self.handleCloseContract(v)
-
 	default:
-		fmt.Printf("[resident]Unknown control message: %T", message)
+		glog.Infof("[resident]Unknown control message: %T", v)
 	}
 }
 
-
-
-func (self *residentController) handleProvide(provide *protocol.Provide) {
-	secretKeys := map[model.ProvideMode][]byte{}			
-	for _, provideKey := range provide.Keys {
-		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
-	}
-	// bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
-	model.SetProvide(self.ctx, self.clientId, secretKeys)
-	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
-}
-
-
-func (self *residentController) handleCloseContract(closeContract *protocol.CloseContract) {
-	self.residentContractManager.CloseContract(
-		bringyour.RequireIdFromBytes(closeContract.ContractId),
-		ByteCount(closeContract.AckedByteCount),
-		closeContract.Checkpoint,
-	)
-}
+// all controller activity moved to `controller.resident_oob_controller` via the api

@@ -8,6 +8,8 @@ import (
 
     "github.com/gorilla/websocket"
 
+    "github.com/golang/glog"
+
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/jwt"
     "bringyour.com/bringyour/model"
@@ -72,8 +74,6 @@ func NewConnectHandler(ctx context.Context, exchange *Exchange, settings *Connec
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     handleCtx, handleCancel := context.WithCancel(self.ctx)
     defer handleCancel()
-
-    // bringyour.Logger().Printf("CONNECT\b")
 
     upgrader := websocket.Upgrader{
         ReadBufferSize: 4 * 1024,
@@ -144,34 +144,32 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     // find the client ip:port from the request header
     // `X-Forwarded-For` is added by the warp lb
     clientAddress := r.Header.Get("X-Forwarded-For")
-    // bringyour.Logger().Printf("X-Forwarded-For header is %s (%s)", clientAddress, r.RemoteAddr)
     if clientAddress == "" {
         // use the raw connection remote address
         clientAddress = r.RemoteAddr
     }
 
-    bringyour.Trace(fmt.Sprintf("[rt]connect %s", clientId.String()), func() {
+    c := func() {
         connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress)
         defer model.DisconnectNetworkClient(self.ctx, connectionId)
         
         go bringyour.HandleError(func() {
-        	// disconnect the client if the model marks the connection closed
+            // disconnect the client if the model marks the connection closed
             defer func() {
                 handleCancel()
             }()
 
-        	for  {
-        		select {
-        		case <- handleCtx.Done():
-        			return
-        		case <- time.After(self.settings.SyncConnectionTimeout):
-        		}
+            for  {
+                select {
+                case <- handleCtx.Done():
+                    return
+                case <- time.After(self.settings.SyncConnectionTimeout):
+                }
 
-        		if !model.IsNetworkClientConnected(handleCtx, connectionId) {
-                    // bringyour.Logger().Printf("NETWORK CLIENT DISCONNECTED\n",)
-        			return
-        		}
-        	}
+                if !model.IsNetworkClientConnected(handleCtx, connectionId) {
+                    return
+                }
+            }
         }, handleCancel)
 
 
@@ -195,12 +193,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                 residentTransport.Cancel()
             }()
 
-        	for {
+            for {
                 ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
                 messageType, message, err := ws.ReadMessage()
-                // // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
                 if err != nil {
-                    // bringyour.Logger("TIMEOUT HD\n")
                     return
                 }
 
@@ -209,13 +205,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                 case websocket.BinaryMessage:
                     if 0 == len(message) {
                         // ping
-                        // fmt.Printf("[rtr]ping <-%s\n", clientId.String())
                         continue
                     }
-
-
-                    // fmt.Printf("resident transport read message %s->\n", byJwt.ClientId)
-
 
                     select {
                     case <- handleCtx.Done():
@@ -223,10 +214,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                     case <- residentTransport.Done():
                         return
                     case residentTransport.send <- message:
-
-                        fmt.Printf("[rtr] <-%s\n", clientId.String())
+                        glog.V(2).Infof("[rtr] <-%s\n", clientId.String())
                     case <- time.After(self.settings.ReadTimeout):
-                        // bringyour.Logger("TIMEOUT HE\n")
                     }
                 // else ignore
                 }
@@ -251,25 +240,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                         return
                     }
                     
-                    // fmt.Printf("resident transport write message ->%s\n", byJwt.ClientId)
-
-                    // bringyour.Logger("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
-                    // // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
                     ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
                     if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
                         // note that for websocket a dealine timeout cannot be recovered
-                        // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
                         return
                     }
-                    fmt.Printf("[rts] ->%s\n", clientId.String())
+                    glog.V(2).Infof("[rts] ->%s\n", clientId.String())
                 case <- time.After(self.settings.PingTimeout):
                     ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
                     if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
                         // note that for websocket a dealine timeout cannot be recovered
-                        // bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
                         return
                     }
-                    // fmt.Printf("[rts]ping ->%s\n", clientId.String())
                 }
             }
         }, handleCancel)
@@ -280,5 +262,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         case <- residentTransport.Done():
             return
         }
-    })
+    }
+    if glog.V(2) {
+        bringyour.Trace(
+            fmt.Sprintf("[rt]connect %s", clientId.String()),
+            c,
+        )
+    } else {
+        c()
+    }
 }

@@ -4,12 +4,12 @@ import (
 	"context"
 	// "sync"
 	// "time"
-    "fmt"
+    // "fmt"
 
     // "golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	// "bringyour.com/bringyour/model"
 )
 
 
@@ -38,20 +38,4 @@ func newResidentContractManager(
     return residentContractManager
 }
 
-
-
-func (self *residentContractManager) CloseContract(
-    contractId bringyour.Id,
-    usedTransferByteCount ByteCount,
-    checkpoint bool,
-) error {
-
-    fmt.Printf("CONTROLLER CLOSE CONTRACT (%s) %s\n", self.clientId.String(), contractId.String())
-    err := model.CloseContract(self.ctx, contractId, self.clientId, usedTransferByteCount, checkpoint)
-    if err != nil {
-        fmt.Printf("CLOSE CONTRACT ERROR %s\n", err)
-        return err
-    }
-
-    return nil
-}
+// all controller activity moved to `controller.resident_oob_controller` via the api
