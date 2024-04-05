@@ -10,7 +10,7 @@ require (
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/gorilla/websocket v1.5.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
-	google.golang.org/protobuf v1.31.0
+	google.golang.org/protobuf v1.33.0
 )
 
 require (
@@ -20,6 +20,7 @@ require (
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-jose/go-jose/v3 v3.0.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.0 // indirect
+	github.com/golang/glog v1.2.1 // indirect
 	github.com/golang/protobuf v1.5.0 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa // indirect

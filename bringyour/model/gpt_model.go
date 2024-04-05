@@ -29,7 +29,7 @@ func NewCompletePrivacyPolicyPending(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(time.Now()),
+		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
 		Pending: true,
 	}
 }
@@ -43,7 +43,7 @@ func NewCompletePrivacyPolicy(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(time.Now()),
+		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
 		Pending: false,
 		PrivacyPolicyText: privacyPolicyText,
 		ExtractedUrls: extractedUrls,
@@ -55,7 +55,7 @@ func GetCompletePrivacyPolicy(
 	ctx context.Context,
 	serviceName string,
 ) (completePrivacyPolicy *CompletePrivacyPolicy, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -147,14 +147,14 @@ func GetCompletePrivacyPolicy(
 				)
 			}
 		})
-	}))
+	})
 
 	return
 }
 
 
 func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *CompletePrivacyPolicy) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		completePrivacyPolicy.PrivacyPolicyId = bringyour.NewId()
 
 		bringyour.RaisePgResult(tx.Exec(
@@ -217,7 +217,7 @@ func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *Comple
 			completePrivacyPolicy.PrivacyPolicyId,
 			completePrivacyPolicy.ServiceName,
 		))
-	}))
+	})
 }
 
 
@@ -247,7 +247,7 @@ func SetGptBeMyPrivacyAgentPending(
 ) (*GptBeMyPrivacyAgentResult, error) {
 	accepted := true
 
-	bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
 		privacyAgentRequestId := bringyour.NewId()
 
 		bringyour.RaisePgResult(tx.Exec(
@@ -277,7 +277,7 @@ func SetGptBeMyPrivacyAgentPending(
 			beMyPrivacyAgent.ServiceName,
 			beMyPrivacyAgent.ServiceUser,
 		))
-	}))
+	})
 
 	return &GptBeMyPrivacyAgentResult{
 		Accepted: accepted,

@@ -1,8 +1,9 @@
 package controller
 
 import (
+	// "time"
 
-	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
@@ -13,18 +14,30 @@ func NetworkCreate(
 	session *session.ClientSession,
 ) (*model.NetworkCreateResult, error) {
 	result, err := model.NetworkCreate(networkCreate, session)
+	if err != nil {
+		return nil, err
+	}
+	if result.Error != nil {
+		return result, nil
+	}
+
+	if success := AddInitialTransferBalance(session.Ctx, result.Network.NetworkId); !success {
+		bringyour.Logger().Printf("Could not add initial transfer balance to networkId=%s\n", result.Network.NetworkId)
+	}
+
 	// if verification required, send it
-	if result != nil && result.VerificationRequired != nil {
+	if result.VerificationRequired != nil {
 		verifySend := AuthVerifySendArgs{
 			UserAuth: result.VerificationRequired.UserAuth,
 		}
 		AuthVerifySend(verifySend, session)
-	} else if result.Network != nil && result.UserAuth != nil {
+	} else {
         SendAccountMessageTemplate(
             *result.UserAuth,
             &NetworkWelcomeTemplate{},
         )
 	}
-	return result, err
+
+	return result, nil
 }
 

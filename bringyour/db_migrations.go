@@ -43,7 +43,7 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 
 
 func DbVersion(ctx context.Context) int {
-    Raise(Tx(ctx, func(tx PgTx) {
+    Tx(ctx, func(tx PgTx) {
         RaisePgResult(tx.Exec(
             ctx,
             `
@@ -55,10 +55,10 @@ func DbVersion(ctx context.Context) int {
             )
             `,
         ))
-    }))
+    })
 
     var endVersionNumber int
-    Raise(Db(ctx, func(conn PgConn) {
+    Db(ctx, func(conn PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -72,7 +72,7 @@ func DbVersion(ctx context.Context) int {
                 Raise(result.Scan(&endVersionNumber))
             }
         })
-    }))
+    })
 
     return endVersionNumber
 }
@@ -80,16 +80,16 @@ func DbVersion(ctx context.Context) int {
 
 func ApplyDbMigrations(ctx context.Context) {
     for i := DbVersion(ctx); i < len(migrations); i += 1 {
-        Raise(Tx(ctx, func(tx PgTx) {
+        Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
                 i,
             ))
-        }))
+        })
         switch v := migrations[i].(type) {
             case *SqlMigration:
-                Raise(Tx(ctx, func(tx PgTx) {
+                Tx(ctx, func(tx PgTx) {
                 	defer func() {
 	            		if err := recover(); err != nil {
 	            			// print the sql for debugging
@@ -98,20 +98,20 @@ func ApplyDbMigrations(ctx context.Context) {
 	            		}
 	            	}()
                     RaisePgResult(tx.Exec(ctx, v.sql))
-                }))
+                })
             case *CodeMigration:
                 v.callback(ctx)
             default:
                 panic(fmt.Errorf("Unknown migration type %T", v))
         }
-        Raise(Tx(ctx, func(tx PgTx) {
+        Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
                 i,
                 i + 1,
             ))
-        }))
+        })
     }
 }
 
@@ -645,6 +645,7 @@ var migrations = []any{
     //  )
     // `),
 
+    // ADDED companion_contract_id
     newSqlMigration(`
         CREATE TABLE transfer_contract (
             contract_id uuid NOT NULL,
@@ -1079,6 +1080,7 @@ var migrations = []any{
         ) 
     `),
 
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE complete_privacy_policy (
             privacy_policy_id uuid NOT NULL,
@@ -1131,6 +1133,7 @@ var migrations = []any{
     `),
 
     // RESIZED device_spec to varchar(256)
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device (
             device_id uuid NOT NULL,
@@ -1153,6 +1156,7 @@ var migrations = []any{
         )
     `),
 
+    // ALTERED add_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_add_history (
             network_id uuid NOT NULL,
@@ -1181,6 +1185,8 @@ var migrations = []any{
     `),
 
     // RESIZED device_spec to varchar(256)
+    // ALTERED create_time timestamp with time zone -> timestamp
+    // ALTERED expire_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_adopt (
             device_association_id uuid NOT NULL,
@@ -1212,6 +1218,7 @@ var migrations = []any{
         )
     `),
 
+    // ALTERED create_time timestamp with time zone -> timestamp
     newSqlMigration(`
         CREATE TABLE device_share (
             device_association_id uuid NOT NULL,
@@ -1348,6 +1355,52 @@ var migrations = []any{
     newSqlMigration(`
         CREATE INDEX transfer_balance_purchase_token ON transfer_balance (purchase_token, end_time, start_time, balance_id)
     `),
+
+    newSqlMigration(`
+        ALTER TABLE transfer_contract ADD COLUMN companion_contract_id uuid NULL
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, create_time, contract_id)
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE complete_privacy_policy ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_add_history ALTER COLUMN add_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_adopt ALTER COLUMN expire_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE device_share ALTER COLUMN create_time TYPE timestamp
+    `),
+
+    newSqlMigration(`
+    ALTER TABLE contract_close ADD COLUMN checkpoint bool NOT NULL DEFAULT false
+    `),
+
+    newSqlMigration(`
+        DROP INDEX transfer_contract_open_source_id_companion_contract_id
+    `),
+
+    newSqlMigration(`
+        CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, close_time, create_time, contract_id)
+    `),
+
+
 
 }
 

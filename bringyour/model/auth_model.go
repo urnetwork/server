@@ -5,7 +5,7 @@ import (
 	"errors"
 	"context"
 	"bytes"
-	// "strings"
+	"strings"
 	// "strconv"
 	"time"
 	"crypto/rand"
@@ -16,6 +16,10 @@ import (
 	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/jwt"
 )
+
+
+// 4 hours
+const VerifyCodeTimeout =  4 * time.Hour
 
 
 type AuthType = string
@@ -46,7 +50,7 @@ func UserAuthAttempt(
 
 	clientIp, clientPort := session.ClientIpPort()
 
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -60,7 +64,7 @@ func UserAuthAttempt(
 			clientPort,
 			false,
 		))
-	}))
+	})
 
 	type UserAuthAttemptResult struct {
 		attemptTime time.Time
@@ -93,7 +97,7 @@ func UserAuthAttempt(
 	if userAuth != nil {
 		// lookback by user auth
 		var attempts []UserAuthAttemptResult
-		bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+		bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 			result, err := conn.Query(
 				session.Ctx,
 				`
@@ -112,14 +116,14 @@ func UserAuthAttempt(
 			bringyour.WithPgResult(result, err, func() {
 				attempts = parseAttempts(result)
 			})
-		}))
+		})
 		if !passesThreshold(attempts) {
 			return userAuthAttemptId, false
 		}
 	}
 
 	var attempts []UserAuthAttemptResult
-	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -138,7 +142,7 @@ func UserAuthAttempt(
 		bringyour.WithPgResult(result, err, func() {
 			attempts = parseAttempts(result)
 		})
-	}))
+	})
 	if !passesThreshold(attempts) {
 		return userAuthAttemptId, false
 	}
@@ -152,7 +156,7 @@ func SetUserAuthAttemptSuccess(
 	userAuthAttemptId bringyour.Id,
 	success bool,
 ) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -163,7 +167,7 @@ func SetUserAuthAttemptSuccess(
 			success,
 			userAuthAttemptId,
 		))
-	}))
+	})
 }
 
 
@@ -217,7 +221,7 @@ func AuthLogin(
 		}
 
 		var authType *string
-		bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+		bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 			result, err := conn.Query(
 				session.Ctx,
 				`
@@ -230,7 +234,7 @@ func AuthLogin(
 					bringyour.Raise(result.Scan(&authType))
 				}
 			})
-		}))
+		})
 		if authType == nil {
 			// new user
 			result := &AuthLoginResult{
@@ -254,7 +258,7 @@ func AuthLogin(
 			var authType string
 			var networkId bringyour.Id
 			var networkName string
-			bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+			bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 				bringyour.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 				result, err := conn.Query(
 					session.Ctx,
@@ -280,7 +284,7 @@ func AuthLogin(
 						))
 					}
 				})
-			}))
+			})
 
 			if userId == nil {
 				// new user
@@ -368,7 +372,7 @@ func AuthLoginWithPassword(
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -397,7 +401,7 @@ func AuthLoginWithPassword(
 				))
 			}
 		})
-	}))
+	})
 
 	if userId == nil {
 		return nil, errors.New("User does not exist.")
@@ -485,15 +489,14 @@ func AuthVerify(
 		return nil, maxUserAuthAttemptsError()
 	}
 
-	// 4 hours
-	verifyValidSeconds := 60 * 60 * 4
+	normalVerifyCode := strings.ToLower(strings.TrimSpace(verify.VerifyCode))
 
 	var userId bringyour.Id
 	var userAuthVerifyId *bringyour.Id
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -511,21 +514,21 @@ func AuthVerify(
 				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $3
 			`,
-			verify.VerifyCode,
-			verifyValidSeconds,
+			normalVerifyCode,
+			int(VerifyCodeTimeout / time.Second),
 			userAuth,
 		)
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
-				bringyour.Raise(result.Scan(
+				result.Scan(
 					&userId,
 					&userAuthVerifyId,
 					&networkId,
 					&networkName,
-				))
+				)
 			}
 		})
-	}))
+	})
 
 	if userAuthVerifyId == nil {
 		result := &AuthVerifyResult{
@@ -537,7 +540,7 @@ func AuthVerify(
 	}
 
 	// verified
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -557,7 +560,7 @@ func AuthVerify(
 			`,
 			userAuthVerifyId,
 		))
-	}))
+	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -608,7 +611,7 @@ func AuthVerifyCreateCode(
 	created := false
 	var verifyCode string
 
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		var result bringyour.PgResult
 		var err error
 
@@ -655,7 +658,7 @@ func AuthVerifyCreateCode(
 			userId,
 			verifyCode,
 		))
-	}))
+	})
 
 	if created {
 		result := &AuthVerifyCreateCodeResult{
@@ -699,7 +702,7 @@ func AuthPasswordResetCreateCode(
 	created := false
 	var resetCode string
 
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		var result bringyour.PgResult
 		var err error
 
@@ -746,7 +749,7 @@ func AuthPasswordResetCreateCode(
 			userId,
 			resetCode,
 		))
-	}))
+	})
 
 	if created {
 		result := &AuthPasswordResetCreateCodeResult{
@@ -787,7 +790,7 @@ func AuthPasswordSet(
 	var networkId bringyour.Id
 	var networkName string
 
-	bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -817,7 +820,7 @@ func AuthPasswordSet(
 				))
 			}
 		})
-	}))
+	})
 
 	if userAuthResetId == nil {
 		return nil, errors.New("Invalid login.")
@@ -827,7 +830,7 @@ func AuthPasswordSet(
 	passwordSalt := createPasswordSalt()
 	passwordHash := computePasswordHashV1([]byte(passwordSet.Password), passwordSalt)
 
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -849,7 +852,7 @@ func AuthPasswordSet(
 			`,
 			userAuthResetId,
 		))
-	}))
+	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -900,7 +903,7 @@ func AuthCodeCreate(
 		return
 	}
 
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			session.Ctx,
 			`
@@ -947,7 +950,7 @@ func AuthCodeCreate(
 		// the auth code assumes the create time of the root jwt
 		// this is to enable all derivative auth to be expired by expiring the root
 		createTime := session.ByJwt.CreateTime
-		endTime := time.Now().Add(duration)
+		endTime := bringyour.NowUtc().Add(duration)
 
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -974,7 +977,7 @@ func AuthCodeCreate(
 
 		// propagate the auth sessions
 		if 0 < len(session.ByJwt.AuthSessionIds) {
-			bringyour.Raise(bringyour.BatchInTx(session.Ctx, tx, func(batch bringyour.PgBatch) {
+			bringyour.BatchInTx(session.Ctx, tx, func(batch bringyour.PgBatch) {
 				for _, authSessionId := range session.ByJwt.AuthSessionIds {
 					batch.Queue(
 						`
@@ -987,7 +990,7 @@ func AuthCodeCreate(
 						authSessionId,
 					)
 				}
-			}))
+			})
 		}
 
 		codeCreateResult = &AuthCodeCreateResult{
@@ -995,14 +998,14 @@ func AuthCodeCreate(
 			DurationMinutes: float64(duration) / float64(time.Minute),
 			Uses: uses,
 		}
-	}))
+	})
 
 	return
 }
 
 
 func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCount int) {
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
@@ -1047,7 +1050,7 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 			WHERE auth_code_session.auth_code_id = temp_auth_code_id.auth_code_id
 			`,
 		)
-	}))
+	})
 
 	return
 }
@@ -1070,7 +1073,7 @@ func AuthCodeLogin(
 	codeLogin *AuthCodeLoginArgs,
 	session *session.ClientSession,
 ) (codeLoginResult *AuthCodeLoginResult, returnErr error) {
-	bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			session.Ctx,
 			`
@@ -1094,7 +1097,7 @@ func AuthCodeLogin(
 				FOR UPDATE
 			`,
 			codeLogin.AuthCode,
-			time.Now(),
+			bringyour.NowUtc(),
 		)
 
 		exists := false
@@ -1209,7 +1212,7 @@ func AuthCodeLogin(
 		codeLoginResult = &AuthCodeLoginResult{
 			ByJwt: byJwt.Sign(),
 		}
-	}))
+	})
 
 	return
 }
@@ -1218,7 +1221,7 @@ func AuthCodeLogin(
 func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 	// sessions and auth codes
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1231,14 +1234,14 @@ func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 					expire_time = $2
 			`,
 			networkId,
-			time.Now(),
+			bringyour.NowUtc(),
 		))
-	}))
+	})
 }
 
 
 func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, returnErr error) {
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -1262,7 +1265,7 @@ func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, 
 				}
 			}
 		})
-	}))
+	})
 	
 	return
 }

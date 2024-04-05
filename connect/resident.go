@@ -9,14 +9,16 @@ import (
 	"time"
 	"io"
 	"fmt"
-	"errors"
-	"crypto/hmac"
-	"crypto/sha256"
+	// "errors"
+	"slices"
 	mathrand "math/rand"
+	// "runtime/debug"
 
 	"golang.org/x/exp/maps"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
@@ -29,100 +31,649 @@ import (
 // we use one socket per client transport because the socket will block based on the slowest destination
 
 
+/*
+resident packet flow A->D
+
+client (A)
+	-> routes
+		-> client transport (ws)
+			-> exchange transport (ws)
+			    -> resident transport (exchange connection)
+			        -> routes 
+			            -> control resident A (clientId=ControlId) 
+			      	        -> client receive (resident_controller)
+			      	        -> client forward
+			      	        	-> resident forward D (exchange connection)
+			      	        		-> resident.forward
+			      	        			-> control resident D (clientId=ControlId)
+			      	        				resident.forward sends the data on the most appropriate route
+			      	        				which for D will put the transfer frame on client (D)  
+			      	        				(see the reflection of client to resident flow)
+			      	        				-> routes
+			      	        					-> resident transport (exchange connection)
+			      	        						-> exchange transport (ws)
+			      	        							-> client transport (ws)
+			      	        								-> routes
+			      	        									-> client(D)
+	*/
+
+
 type ByteCount = model.ByteCount
-
-
-const ExchangeBufferSize = 32
-
-
-// a single exchange message size is encoded as an `int32`
-// because message must be serialized/deserialized from memory,
-// there is a global limit on the size per message
-// messages above this size will be ignored from clients and the exchange
-const MaximumExchangeMessageByteCount = int(4 * 1024 * 1024)
-
-// 8Gib minimum contract
-// this is set high enough to limit the number of parallel contracts and avoid contract spam
-const MinContractTransferByteCount = ByteCount(8 * 1024 * 1024 * 1024)
-
-const StartInternalPort = 5080
-const MaxConcurrentForwardsPerResident = 32
-
-const ResidentIdleTimeout = 5 * time.Minute
-// const ForwardReconnectTimeout = 30 * time.Second
-const ResidentSyncTimeout = 30 * time.Second
-// const ForwardCleanupTimeout = 30 * time.Second
-const ForwardIdleTimeout = 5 * time.Minute
-const ContractSyncTimeout = 30 * time.Second
-const AbuseMinTimeout = 5 * time.Second
-const ControlMinTimeout = 200 * time.Millisecond
-
-
-// const NominateLocalResidentTimeout = 1 * time.Second
-
-const ClientDrainTimeout = 30 * time.Second
-const TransportDrainTimeout = 30 * time.Second
-const ForwardTimeout = 5 * time.Second
-
-const ExchangeConnectTimeout = 1 * time.Second
-const ExchangePingTimeout = 1 * time.Second
-const ExchangeReadTimeout = 2 * ExchangePingTimeout
-const ExchangeReadHeaderTimeout = 1 * time.Second
-const ExchangeWriteTimeout = 5 * time.Second
-const ExchangeWriteHeaderTimeout = 1 * time.Second
-const ExchangeReconnectAfterErrorTimeout = 1 * time.Second
-
-const ExchangeConnectionResidentPollTimeout = 1 * time.Second
-
-const ExchangeResidentWaitTimeout = 1 * time.Second
-const ExchangeResidentPollTimeout = ExchangeResidentWaitTimeout / 8
-
-
-var ChaosResidentShutdownPerSecond = float64(0.0)
 
 
 var ControlId = bringyour.Id(connect.ControlId)
 
 
-// FIXME heartbeat timeout
-// FIXME read/write timeout is 2*heartbeat
+// use 0 for deadlock testing
+const DefaultExchangeBufferSize = 32
+
+
+const VerifyResidentRoutes = false
+
+
+// message writes on all layers have a single `WriteTimeout`
+// this is because all layers have the same back pressure
+// layers may have different read timeouts because of different keep alive/ping settings
+type ExchangeSettings struct {
+	ConnectHandlerSettings
+
+	ExchangeBufferSize int
+
+	MinContractTransferByteCount ByteCount
+
+	StartInternalPort int
+	MaxConcurrentForwardsPerResident int
+
+	ResidentIdleTimeout time.Duration
+	ResidentSyncTimeout time.Duration
+	ForwardIdleTimeout time.Duration
+	ContractSyncTimeout time.Duration
+	AbuseMinTimeout time.Duration
+	ControlMinTimeout time.Duration
+
+	ClientDrainTimeout time.Duration
+	TransportDrainTimeout time.Duration
+
+	ExchangeConnectTimeout time.Duration
+	ExchangePingTimeout time.Duration
+	ExchangeReadTimeout time.Duration
+	ExchangeReadHeaderTimeout time.Duration
+	ExchangeWriteHeaderTimeout time.Duration
+	ExchangeReconnectAfterErrorTimeout time.Duration
+
+	ExchangeConnectionResidentPollTimeout time.Duration
+
+	ExchangeResidentWaitTimeout time.Duration
+	ExchangeResidentPollTimeout time.Duration
+
+	ForwardEnforceActiveContracts bool
+
+	ExchangeChaosSettings
+}
+
+
+type ExchangeChaosSettings struct {
+	ResidentShutdownPerSecond float64
+}
+
+
+func DefaultExchangeSettings() *ExchangeSettings {
+	connectionHandlerSettings := DefaultConnectHandlerSettings()
+	exchangePingTimeout := connectionHandlerSettings.WriteTimeout
+	exchangeResidentWaitTimeout := 5 * time.Second
+	return &ExchangeSettings{
+		ConnectHandlerSettings: *connectionHandlerSettings,
+
+		ExchangeBufferSize: DefaultExchangeBufferSize,
+
+		// 64kib minimum contract
+		// this is set high enough to limit the number of parallel contracts and avoid contract spam
+		MinContractTransferByteCount: ByteCount(64 * 1024),
+
+		// this must match the warp `settings.yml` for the environment
+		StartInternalPort: 5080,
+
+		MaxConcurrentForwardsPerResident: 256,
+
+		ResidentIdleTimeout: 60 * time.Second,
+		ResidentSyncTimeout: 30 * time.Second,
+		ForwardIdleTimeout: 60 * time.Second,
+		ContractSyncTimeout: 60 * time.Second,
+		AbuseMinTimeout: 5 * time.Second,
+		ControlMinTimeout: 5 * time.Millisecond,
+
+		ClientDrainTimeout: 30 * time.Second,
+		TransportDrainTimeout: 30 * time.Second,
+
+		ExchangeConnectTimeout: 5 * time.Second,
+		ExchangePingTimeout: exchangePingTimeout,
+		ExchangeReadTimeout: 2 * exchangePingTimeout,
+		ExchangeReadHeaderTimeout: exchangeResidentWaitTimeout,
+		// ExchangeWriteTimeout: 5 * time.Second,
+		ExchangeWriteHeaderTimeout: exchangeResidentWaitTimeout,
+		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
+		ExchangeConnectionResidentPollTimeout: 30 * time.Second,
+
+		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
+		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 8,
+
+		ForwardEnforceActiveContracts: false,
+
+		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
+	}
+}
+
+
+func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
+	return &ExchangeChaosSettings{
+		ResidentShutdownPerSecond: 0.0,
+	}
+}
+
+
+// residents live in the exchange
+// a resident for a client id can be nominated to live in the exchange with `NominateLocalResident`
+// any time a resident is not reachable by a transport, the transport should nominate a local resident
+type Exchange struct {
+	// cleanupCtx context.Context
+	ctx context.Context
+	cancel context.CancelFunc
+
+	host string
+	service string
+	block string
+	// any of the ports may be used
+	// a range of ports are used to scale one socket per transport or forward,
+	// since each port allows at most 65k connections from another connect instance
+	hostToServicePorts map[int]int
+	routes map[string]string
+
+	settings *ExchangeSettings
+
+	residentsLock sync.Mutex
+	residents map[bringyour.Id]*Resident
+}
+
+func NewExchange(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+) *Exchange {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	exchange := &Exchange{
+		ctx: cancelCtx,
+		cancel: cancel,
+		host: host,
+		service: service,
+		block: block,
+		hostToServicePorts: hostToServicePorts,
+		routes: routes,
+		residents: map[bringyour.Id]*Resident{},
+		settings: settings,
+	}
+
+	go bringyour.HandleError(exchange.Run, cancel)
+
+	return exchange
+}
+
+func NewExchangeWithDefaults(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+) *Exchange {
+	return NewExchange(ctx, host, service, block, hostToServicePorts, routes, DefaultExchangeSettings())
+}
+
+// reads the host and port configuration from the env
+func NewExchangeFromEnv(ctx context.Context, settings *ExchangeSettings) *Exchange {
+	host := bringyour.RequireHost()
+	service := bringyour.RequireService()
+	block := bringyour.RequireBlock()
+	routes := bringyour.Routes()
+
+	// service port -> host port
+	hostPorts := bringyour.RequireHostPorts()
+	// internal ports start at `StartInternalPort` and proceed consecutively
+	// each port can handle 65k connections
+	// the number of connections depends on the number of expected concurrent destinations
+	// the expected port usage is `number_of_residents * expected(number_of_destinations_per_resident)`,
+	// and at most `number_of_residents * MaxConcurrentForwardsPerResident`
+
+	// host port -> service port
+	hostToServicePorts := map[int]int{}
+	servicePort := settings.StartInternalPort
+	for {
+		hostPort, ok := hostPorts[servicePort]
+		if !ok {
+			break
+		}
+		hostToServicePorts[hostPort] = servicePort
+		servicePort += 1
+	}
+	if len(hostToServicePorts) == 0 {
+		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", settings.StartInternalPort))
+	}
+
+	return NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
+}
+
+func NewExchangeFromEnvWithDefaults(ctx context.Context) *Exchange {
+	return NewExchangeFromEnv(ctx, DefaultExchangeSettings())
+}
+
+func (self *Exchange) NominateLocalResident(
+	clientId bringyour.Id,
+	instanceId bringyour.Id,
+	residentIdToReplace *bringyour.Id,
+) bool {
+	residentId := bringyour.NewId()
+
+	nominated := model.NominateResident(self.ctx, residentIdToReplace, &model.NetworkClientResident{
+		ClientId: clientId,
+		InstanceId: instanceId,
+		ResidentId: residentId,
+		ResidentHost: self.host,
+		ResidentService: self.service,
+		ResidentBlock: self.block,
+		ResidentInternalPorts: maps.Keys(self.hostToServicePorts),
+	})
+	if nominated.ResidentId != residentId {
+		return false
+	}
+
+	func() {
+		self.residentsLock.Lock()
+		defer self.residentsLock.Unlock()
+
+		resident := NewResident(
+			self.ctx,
+			self,
+			clientId,
+			instanceId,
+			residentId,
+		)
+		go bringyour.HandleError(func() {
+			bringyour.HandleError(resident.Run)
+			resident.Close()
+
+			self.residentsLock.Lock()
+			defer self.residentsLock.Unlock()
+			if currentResident := self.residents[clientId]; resident == currentResident {
+				delete(self.residents, clientId)
+				model.RemoveResident(
+					self.ctx,
+					resident.clientId,
+					resident.residentId,
+				)	
+			}
+		})
+		go func() {
+			defer resident.Cancel()
+
+			for {
+				if resident.IsIdle() {
+					return
+				}
+
+				select {
+				case <- resident.Done():
+					return
+				case <- time.After(self.settings.ResidentIdleTimeout):
+				}
+			}
+		}()
+		
+		if replacedResident, ok := self.residents[clientId]; ok {
+			replacedResident.Cancel()
+		}
+		self.residents[clientId] = resident
+	}()
+
+	return true
+}
+
+// runs the exchange to expose local nominated residents
+// there should be one local exchange per service
+func (self *Exchange) Run() {
+	// remove existing residents at host:port
+	func() {
+		self.residentsLock.Lock()
+		defer self.residentsLock.Unlock()
+		residentIds := map[bringyour.Id]bool{}
+		for _, resident := range self.residents {
+			residentIds[resident.residentId] = true
+		}
+		residentsForHostPort := model.GetResidentsForHostPorts(
+			self.ctx,
+			self.host,
+			maps.Keys(self.hostToServicePorts),
+		)
+		for _, residentForHostPort := range residentsForHostPort {
+			if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
+				model.RemoveResident(
+					self.ctx,
+					residentForHostPort.ClientId,
+					residentForHostPort.ResidentId,
+				)
+			}
+		}
+	}()
+
+	// start exchange connection servers
+	for _, servicePort := range self.hostToServicePorts {
+		port := servicePort
+		go bringyour.HandleError(
+			func() {
+				self.serveExchangeConnection(port)
+			},
+			self.cancel,
+		)
+	}
+
+	select {
+	case <- self.ctx.Done():
+	}
+}
+
+func (self *Exchange) serveExchangeConnection(port int) {
+	defer self.cancel()
+
+	// leave host part empty to listen on all available interfaces
+	server, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return
+	}
+	defer server.Close()
+
+	go bringyour.HandleError(func() {
+		defer self.cancel()
+
+		for {
+			select {
+			case <- self.ctx.Done():
+				return
+			default:
+			}
+
+			conn, err := server.Accept()
+			if err != nil {
+				return
+			}
+			go bringyour.HandleError(
+				func() {
+					self.handleExchangeConnection(conn)
+				},
+				self.cancel,
+			)
+		}
+	}, self.cancel)
+
+	select {
+	case <- self.ctx.Done():
+	}
+}
+
+func (self *Exchange) handleExchangeConnection(conn net.Conn) {
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	defer func() {
+		handleCancel()
+		conn.Close()
+	}()
+
+	receiveBuffer := NewReceiveOnlyExchangeBuffer(self.settings)
+
+	header, err := receiveBuffer.ReadHeader(handleCtx, conn)
+	if err != nil {
+		return
+	}
+
+	c := func()(*Resident) {
+		endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
+		for {
+			var resident *Resident
+			var ok bool
+			func() {
+				self.residentsLock.Lock()
+				defer self.residentsLock.Unlock()
+
+				resident, ok = self.residents[header.ClientId]
+			}()
+
+			if ok && resident.residentId == header.ResidentId {
+				return resident
+			}
+
+			glog.V(1).Infof("[ecr]wait for resident %s/%s\n", header.ClientId, header.ResidentId)
+
+			timeout := endTime.Sub(time.Now())
+			if timeout <= 0 {
+				return nil
+			}
+			select {
+			case <- handleCtx.Done():
+				return nil
+			case <- time.After(self.settings.ExchangeResidentPollTimeout):
+			case <- time.After(timeout):
+			}
+		}
+	}
+	var resident *Resident
+	if glog.V(2) {
+		// use shallow log to avoid unsafe memory reads on print
+		bringyour.TraceWithReturnShallowLog(
+			fmt.Sprintf("[ecr]wait for resident %s/%s", header.ClientId, header.ResidentId),
+			c,
+		)
+	} else {
+		resident = c()
+	}
+
+	if resident == nil {
+		return
+	}
+
+	if resident.IsDone() {
+		return
+	}
+
+	// echo back the header
+	if err := receiveBuffer.WriteHeader(handleCtx, conn, header); err != nil {
+		return
+	}
+
+	switch header.Op {
+	case ExchangeOpTransport:
+		// this must close `receive`
+		send, receive, closeTransport := resident.AddTransport()
+		defer closeTransport()
+
+		go bringyour.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <- handleCtx.Done():
+					return
+				case <- resident.Done():
+					return
+				case message, ok := <- send:
+					if !ok {
+						return
+					}
+					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
+						return
+					}
+
+					glog.V(1).Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
+
+				case <- time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		}, handleCancel)
+		
+		go bringyour.HandleError(func() {
+			defer func() {
+				handleCancel()
+				close(receive)
+			}()
+
+			// read
+			// messages from the transport are to be received by the resident
+			// messages not destined for the control id are handled by the resident forward
+			for {
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					continue
+				}
+				
+				if resident.client.IsDone() {
+					glog.Info("[ecrr] %s/%s client done\n", resident.clientId, resident.residentId)
+				}
+				
+				if VerifyResidentRoutes {
+					multiRouteReader := resident.client.RouteManager().OpenMultiRouteReader(resident.client.ClientId())
+					if !slices.Contains(multiRouteReader.GetActiveRoutes(), receive) {
+						glog.Warning("[ecrr] %s/%s missing receive route\n", resident.clientId, resident.residentId)
+					}
+					resident.client.RouteManager().CloseMultiRouteReader(multiRouteReader)
+				}
+
+				glog.V(2).Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+
+				select {
+				case <- handleCtx.Done():
+					return
+				case <- resident.Done():
+					return
+				case receive <- message:
+					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+				case <- time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
+				}
+			}
+		}, handleCancel)
+
+		
+	case ExchangeOpForward:
+		// read
+		// messages from the forward are to be forwarded by the resident
+		// the only route a resident has is to its client_id
+		// a forward is a send where the source id does not match the client
+		go bringyour.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <- handleCtx.Done():
+					return
+				case <- resident.Done():
+					return
+				case <- time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		}, handleCancel)
+
+		go bringyour.HandleError(func() {
+			defer handleCancel()
+
+			for {
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					continue
+				}
+				select {
+				case <- handleCtx.Done():
+					return
+				case <- resident.Done():
+					return
+				default:
+				}
+
+				c := func()(bool) {
+					return resident.Forward(message) 
+				}
+				if glog.V(2) {
+					bringyour.TraceWithReturn(
+						fmt.Sprintf("[ecrf]forward %s/%s", resident.clientId, resident.residentId),
+						c,
+					)
+				} else {
+					c()
+				}
+			}
+		}, handleCancel)
+	}
+
+	select {
+	case <- handleCtx.Done():
+	case <- resident.Done():
+	}
+}
+
+func (self *Exchange) Close() {
+	self.cancel()
+}
 
 
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
+	settings *ExchangeSettings
 	buffer []byte
 }
 
-func NewDefaultExchangeBuffer() *ExchangeBuffer {
+func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 	return &ExchangeBuffer{
-		buffer: make([]byte, MaximumExchangeMessageByteCount + 4),
+		settings: settings,
+		buffer: make([]byte, settings.MaximumExchangeMessageByteCount + 4),
 	} 
 }
 
-func NewReceiveOnlyExchangeBuffer() *ExchangeBuffer {
+func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 	return &ExchangeBuffer{
+		settings: settings,
 		buffer: make([]byte, 33),
 	} 
 }
 
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
-	conn.SetWriteDeadline(time.Now().Add(ExchangeWriteHeaderTimeout))
-
 	copy(self.buffer[0:16], header.ClientId.Bytes())
 	copy(self.buffer[16:32], header.ResidentId.Bytes())
 	self.buffer[32] = byte(header.Op)
 
-	// conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
 	_, err := conn.Write(self.buffer[0:33])
-	// if 33 != n_ {
-	// 	panic(fmt.Errorf("Bad write %s", err))
-	// }
 	return err
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
-	conn.SetReadDeadline(time.Now().Add(ExchangeReadHeaderTimeout))
-
+	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
 	if _, err := io.ReadFull(conn, self.buffer[0:33]); err != nil {
 		return nil, err
 	}
@@ -134,47 +685,33 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	}, nil
 }
 
-func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte) error {
-	conn.SetWriteDeadline(time.Now().Add(ExchangeWriteTimeout))
+func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte) error {	
+	n := ByteCount(len(transferFrameBytes))
 
-	n := len(transferFrameBytes)
-
-	if MaximumExchangeMessageByteCount < n {
-		return errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumExchangeMessageByteCount, n))
+	if self.settings.MaximumExchangeMessageByteCount < n {
+		return fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
 	}
 
 	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
 
-	/*
-	copy(self.buffer[4:4+n], transferFrameBytes)
-
-	_, err := conn.Write(self.buffer[:4+n])
-	return err
-	*/
-
-	// conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	_, err := conn.Write(self.buffer[0:4])
 	if err != nil {
 		return err
 	}
 	_, err = conn.Write(transferFrameBytes)
-	// if 4+n != n_ {
-	// 	panic(fmt.Errorf("Bad write %s", err))
-	// }
 	return err
 }
 
 func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(ExchangeReadTimeout))
-
-	// conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
 	if _, err := io.ReadFull(conn, self.buffer[0:4]); err != nil {
 		return nil, err
 	}
 
-	n := int(binary.LittleEndian.Uint32(self.buffer[0:4]))
-	if MaximumExchangeMessageByteCount < n {
-		return nil, errors.New(fmt.Sprintf("Maximum message size is %d (%d).", MaximumExchangeMessageByteCount, n))
+	n := ByteCount(int(binary.LittleEndian.Uint32(self.buffer[0:4])))
+	if self.settings.MaximumExchangeMessageByteCount < n {
+		return nil, fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
 	}
 
 	// read into a new buffer
@@ -193,7 +730,7 @@ type ExchangeOp byte
 const (
 	ExchangeOpTransport ExchangeOp = 0x01
 	// forward does not add a transport to the client
-	// in forward op, call Send on the Resident not Receive
+	// forward calls `Forward` on the resident and does not use routes
 	ExchangeOpForward ExchangeOp = 0x02
 )
 
@@ -214,6 +751,12 @@ type ExchangeConnection struct {
 	receiveBuffer *ExchangeBuffer
 	send chan []byte
 	receive chan []byte
+	settings *ExchangeSettings
+
+	clientId bringyour.Id
+	residentId bringyour.Id
+	host string
+	port int
 }
 
 func NewExchangeConnection(
@@ -224,9 +767,9 @@ func NewExchangeConnection(
 	port int,
 	op ExchangeOp,
 	routes map[string]string,
+	settings *ExchangeSettings,
 ) (*ExchangeConnection, error) {
 	// look up the host in the env routes
-	// bringyour.Logger().Printf("EXCHANGE CONNECTION USING ROUTES %v\n", routes)
 	hostRoute, ok := routes[host]
 	if !ok {
 		// use the hostname as the route
@@ -236,22 +779,15 @@ func NewExchangeConnection(
 
 	authority := fmt.Sprintf("%s:%d", hostRoute, port)
 
-	// bringyour.Logger().Printf("EXCHANGE CONNECTION DIAL %s\n", authority)
-
 	dialer := net.Dialer{
-		Timeout: ExchangeConnectTimeout,
+		Timeout: settings.ExchangeConnectTimeout,
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", authority)
 	if err != nil {
-		// bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR CONNECT %s\n", err)
 		return nil, err
 	}
-	tcpConn := conn.(*net.TCPConn)
-	tcpConn.SetNoDelay(false)
-	// tcpConn.SetWriteBuffer(MaximumExchangeMessageByteCount + 4)
-	// tcpConn.SetReadBuffer(MaximumExchangeMessageByteCount + 4)
-	// tcpConn.SetKeepAlive(true)
-	// tcpConn.SetKeepAlivePeriod(1 * time.Second)
+	// tcpConn := conn.(*net.TCPConn)
+	// tcpConn.SetNoDelay(false)
 
 	success := false
 	defer func() {
@@ -260,7 +796,7 @@ func NewExchangeConnection(
 		}
 	}()
 
-	sendBuffer := NewDefaultExchangeBuffer()
+	sendBuffer := NewDefaultExchangeBuffer(settings)
 
 	// write header
 	err = sendBuffer.WriteHeader(ctx, conn, &ExchangeHeader{
@@ -269,7 +805,6 @@ func NewExchangeConnection(
 		ResidentId: residentId,
 	})
 	if err != nil {
-		// bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR WRITE HEADER %s\n", err)
 		return nil, err
 	}
 
@@ -277,24 +812,26 @@ func NewExchangeConnection(
 	// else the connection is closed
 	_, err = sendBuffer.ReadHeader(ctx, conn)
 	if err != nil {
-		// bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR READ HEADER %s\n", err)
 		return nil, err
 	}
-
 
 	success = true
 
 	cancelCtx, cancel := context.WithCancel(ctx)
-
 	connection := &ExchangeConnection{
 		ctx: cancelCtx,
 		cancel: cancel,
 		op: op,
 		conn: conn,
 		sendBuffer: sendBuffer,
-		receiveBuffer: NewReceiveOnlyExchangeBuffer(),
-		send: make(chan []byte, ExchangeBufferSize),
-		receive: make(chan []byte, ExchangeBufferSize),
+		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
+		send: make(chan []byte, settings.ExchangeBufferSize),
+		receive: make(chan []byte, settings.ExchangeBufferSize),
+		settings: settings,
+		clientId: clientId,
+		residentId: residentId,
+		host: host,
+		port: port,
 	}
 	go bringyour.HandleError(connection.Run, cancel)
 
@@ -324,30 +861,29 @@ func (self *ExchangeConnection) Run() {
 				}
 				message, err := self.receiveBuffer.ReadMessage(self.ctx, self.conn)
 				if err != nil {
-					// bringyour.Logger("TIMEOUT RA\n")
 					return
 				}
 				if len(message) == 0 {
 					// just a ping
 					continue
 				}
+
 				select {
 				case <- self.ctx.Done():
 					return
 				case self.receive <- message:
-				case <- time.After(WriteTimeout):
-					// bringyour.Logger("TIMEOUT RB\n")
+					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+				case <- time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
 				}
 			}
 		}, self.cancel)
-	default:
+	case ExchangeOpForward:
 		// nothing to receive, but time out on missing pings
 		close(self.receive)
 
 		go bringyour.HandleError(func() {
-			defer func() {
-				self.cancel()
-			}()
+			defer self.cancel()
 
 			for {
 				select {
@@ -357,7 +893,6 @@ func (self *ExchangeConnection) Run() {
 				}
 				message, err := self.receiveBuffer.ReadMessage(self.ctx, self.conn)
 				if err != nil {
-					// bringyour.Logger("TIMEOUT RA\n")
 					return
 				}
 				if len(message) == 0 {
@@ -380,14 +915,12 @@ func (self *ExchangeConnection) Run() {
 					return
 				}
 				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message); err != nil {
-					// bringyour.Logger("ERROR WRITING MESSAGE %s\n", err)
-					// fmt.Printf("write error\n")
 					return
 				}
-			case <- time.After(ExchangePingTimeout):
+				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+			case <- time.After(self.settings.ExchangePingTimeout):
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0)); err != nil {
-					// bringyour.Logger("ERROR WRITING PING MESSAGE %s\n", err)
 					return
 				}
 			}
@@ -400,6 +933,19 @@ func (self *ExchangeConnection) Run() {
 	}
 }
 
+func (self *ExchangeConnection) IsDone() bool {
+	select {
+	case <- self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ExchangeConnection) Done() <-chan struct{} {
+	return self.ctx.Done()
+}
+
 func (self *ExchangeConnection) Close() {
 	self.cancel()
 
@@ -408,10 +954,6 @@ func (self *ExchangeConnection) Close() {
 
 func (self *ExchangeConnection) Cancel() {
 	self.cancel()
-}
-
-func (self *ExchangeConnection) Done() <-chan struct{} {
-	return self.ctx.Done()
 }
 
 
@@ -443,10 +985,9 @@ func NewResidentTransport(
 		exchange: exchange,
 		clientId: clientId,
 		instanceId: instanceId,
-		send: make(chan []byte, ExchangeBufferSize),
-		receive: make(chan []byte, ExchangeBufferSize),
+		send: make(chan []byte, exchange.settings.ExchangeBufferSize),
+		receive: make(chan []byte, exchange.settings.ExchangeBufferSize),
 	}
-	go bringyour.HandleError(transport.Run, cancel)
 	return transport
 }
 
@@ -466,7 +1007,7 @@ func (self *ResidentTransport) Run() {
 				select {
 				case <- handleCtx.Done():
 					return
-				case <- time.After(ExchangeConnectionResidentPollTimeout):
+				case <- time.After(self.exchange.settings.ExchangeConnectionResidentPollTimeout):
 				}
 				if !pollResident() {
 					return
@@ -484,13 +1025,11 @@ func (self *ResidentTransport) Run() {
 			for {
 				select {
 				case <- handleCtx.Done():
-					// bringyour.Logger().Printf("WRITE 3\n")
 					return
 				case <- connection.Done():
 					return
 				case message, ok := <- self.send:
 					if !ok {
-						// bringyour.Logger().Printf("WRITE 1\n")
 						// transport closed
 						self.cancel()
 						return
@@ -501,9 +1040,7 @@ func (self *ResidentTransport) Run() {
 					case <- connection.Done():
 						return
 					case connection.send <- message:
-					case <- time.After(WriteTimeout):
-						// fmt.Printf("c timeout\n")
-						// bringyour.Logger("TIMEOUT RD\n")
+					case <- time.After(self.exchange.settings.WriteTimeout):
 					}
 				}
 			}
@@ -513,13 +1050,11 @@ func (self *ResidentTransport) Run() {
 		for {
 			select {
 			case <- handleCtx.Done():
-				// bringyour.Logger().Printf("READ 3\n")
 				return
 			case <- connection.Done():
 				return
 			case message, ok := <- connection.receive:
 				if !ok {
-					// bringyour.Logger().Printf("READ 1\n")
 					// need a new connection
 					return
 				}
@@ -529,9 +1064,8 @@ func (self *ResidentTransport) Run() {
 				case <- connection.Done():
 					return
 				case self.receive <- message:
-				case <- time.After(WriteTimeout):
-					// fmt.Printf("c timeout\n")
-					// bringyour.Logger("TIMEOUT RC\n")
+				case <- time.After(self.exchange.settings.WriteTimeout):
+					glog.V(1).Infof("[rt]drop %s->\n", self.clientId)
 				}
 			}
 		}
@@ -539,15 +1073,9 @@ func (self *ResidentTransport) Run() {
 
 	for {
 		resident := model.GetResidentWithInstance(self.ctx, self.clientId, self.instanceId)
-		// if resident != nil {
-		// 	fmt.Printf("transport hasResident=true %s (%d ports)\n", resident.ResidentHost, len(resident.ResidentInternalPorts))
-		// } else {
-		// 	fmt.Printf("transport hasResident=false\n")
-		// }
-		// bringyour.Logger().Printf("EXCHANGE FOUND RESIDENT %v\n", resident)
+		retryDelay := false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
-			// fmt.Printf("transport exchange connect %s %d\n", resident.ResidentHost, port)
 			exchangeConnection, err := NewExchangeConnection(
 				self.ctx,
 				self.clientId,
@@ -556,45 +1084,84 @@ func (self *ResidentTransport) Run() {
 				port,
 				ExchangeOpTransport,
 				self.exchange.routes,
+				self.exchange.settings,
 			)
 
+			if err != nil {
+				glog.Info("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				retryDelay = true
+			}
+
 			if err == nil {
-				// bringyour.Logger().Printf("EXCHANGE CONNECTION ENTER\n")
-				// TODO the current test would be more efficient as a model notification instead of polling
-				handle(exchangeConnection, func()(bool) {
-					currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, self.clientId, self.instanceId)
-					if err != nil {
-						return false
-					}
-					return resident.ResidentId == currentResidentId
-				})
-				// fmt.Printf("transport exchange connect done\n")
-				// bringyour.Logger().Printf("EXCHANGE CONNECTION EXIT\n")
-			} else {
-				// bringyour.Logger().Printf("EXCHANGE CONNECTION ERROR: %s\n", err)
-				// fmt.Printf("transport exchange connect error (%s)\n", err)
-				select {
-				case <- self.ctx.Done():
-					return
-				case <- time.After(ExchangeReconnectAfterErrorTimeout):
+				c := func() {
+					// TODO the current test would be more efficient as a model notification instead of polling
+					handle(exchangeConnection, func()(bool) {
+						currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, self.clientId, self.instanceId)
+						if err != nil {
+							return false
+						}
+						return resident.ResidentId == currentResidentId
+					})
+				}
+				if glog.V(2) {
+					bringyour.Trace(
+						fmt.Sprintf("[rt]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+						c,
+					)
+				} else {
+					c()
 				}
 			}
+		}
+		
+		if retryDelay {
+			select {
+			case <- self.ctx.Done():
+				return
+			case <- time.After(self.exchange.settings.ExchangeReconnectAfterErrorTimeout):
+			}
 		} else {
-			// bringyour.Logger().Printf("EXCHANGE SKIP RESIDENT\n")
+			select {
+			case <- self.ctx.Done():
+				return
+			default:
+			}
 		}
-		select {
-		case <- self.ctx.Done():
-			return
-		default:
-		}
+
 		var residentIdToReplace *bringyour.Id
 		if resident != nil {
 			residentIdToReplace = &resident.ResidentId
 		}
-		
-		self.exchange.NominateLocalResident(self.clientId, self.instanceId, residentIdToReplace)
-		// fmt.Printf("transport nominated success=%t %s\n", success, self.exchange.host)
+
+		c := func()(bool) {				
+			return self.exchange.NominateLocalResident(
+				self.clientId,
+				self.instanceId,
+				residentIdToReplace,
+			)
+		}
+		if glog.V(2) {
+			bringyour.TraceWithReturn(
+				fmt.Sprintf("[rt]nominate %s", self.clientId),
+				c,
+			)
+		} else {
+			c()
+		}
 	}
+}
+
+func (self *ResidentTransport) IsDone() bool {
+	select {
+	case <- self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ResidentTransport) Done() <-chan struct{} {
+	return self.ctx.Done()
 }
 
 func (self *ResidentTransport) Close() {
@@ -605,10 +1172,6 @@ func (self *ResidentTransport) Close() {
 
 func (self *ResidentTransport) Cancel() {
 	self.cancel()
-}
-
-func (self *ResidentTransport) Done() <-chan struct{} {
-	return self.ctx.Done()
 }
 
 
@@ -622,6 +1185,7 @@ type ResidentForward struct {
 
 	send chan []byte
 
+	stateLock sync.Mutex
 	lastActivityTime time.Time
 }
 
@@ -636,10 +1200,9 @@ func NewResidentForward(
 		cancel: cancel,
 		exchange: exchange,
 		clientId: clientId,
-		send: make(chan []byte, ExchangeBufferSize),
+		send: make(chan []byte, exchange.settings.ExchangeBufferSize),
 		lastActivityTime: time.Now(),
 	}
-	go bringyour.HandleError(transport.Run, cancel)
 	return transport
 }
 
@@ -659,7 +1222,7 @@ func (self *ResidentForward) Run() {
 				select {
 				case <- handleCtx.Done():
 					return
-				case <- time.After(ExchangeConnectionResidentPollTimeout):
+				case <- time.After(self.exchange.settings.ExchangeConnectionResidentPollTimeout):
 				}
 				if !pollResident() {
 					return
@@ -683,16 +1246,14 @@ func (self *ResidentForward) Run() {
 				case <- connection.Done():
 					return
 				case connection.send <- message:
-				case <- time.After(WriteTimeout):
-					// fmt.Printf("f timeout\n")
-					// bringyour.Logger("TIMEOUT RE\n")
+				case <- time.After(self.exchange.settings.WriteTimeout):
+					glog.Infof("[rf]drop %s->\n", self.clientId)
 				}
 			}
 		}
 	}
 
 	for {
-		// bringyour.Logger().Printf("FORWARD GET A NEW CONNECTION -> %s\n", self.clientId.String())
 		resident := model.GetResident(self.ctx, self.clientId)
 		retryDelay := true
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
@@ -705,42 +1266,38 @@ func (self *ResidentForward) Run() {
 				port,
 				ExchangeOpForward,
 				self.exchange.routes,
+				self.exchange.settings,
 			)
+			if err != nil {
+				glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+			}
 			if err == nil {
-				// handleCtx, handleCancel := context.WithCancel(self.ctx)
-				handle(exchangeConnection, func()(bool) {
-					currentResidentId, err := model.GetResidentId(self.ctx, self.clientId)
-					if err != nil {
-						return false
-					}
-					return resident.ResidentId == currentResidentId
-				})
-				retryDelay = false
-				// go func() {
-				// 	defer handleCancel()
-				// 	for {
-				// 		select {
-				// 		case <- handleCtx.Done():
-				// 			return
-				// 		case <- time.After(1 * time.Second):
-				// 		}
-
-				// 		currentResident := model.GetResident(self.ctx, self.clientId)
-				// 		if currentResident == nil {
-				// 			return
-				// 		}
-				// 		if currentResident.ResidentId != resident.ResidentId {
-				// 			return
-				// 		}
-				// 	}
-				// }()
+				c := func() {
+					// handleCtx, handleCancel := context.WithCancel(self.ctx)
+					handle(exchangeConnection, func()(bool) {
+						currentResidentId, err := model.GetResidentId(self.ctx, self.clientId)
+						if err != nil {
+							return false
+						}
+						return resident.ResidentId == currentResidentId
+					})
+					retryDelay = false
+				}
+				if glog.V(2) {
+					bringyour.Trace(
+						fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+						c,
+					)
+				} else {
+					c()
+				}
 			}
 		}
 		if retryDelay {
 			select {
 			case <- self.ctx.Done():
 				return
-			case <- time.After(ExchangeReconnectAfterErrorTimeout):
+			case <- time.After(self.exchange.settings.ExchangeReconnectAfterErrorTimeout):
 			}
 		} else {
 			select {
@@ -750,6 +1307,34 @@ func (self *ResidentForward) Run() {
 			}
 		}
 	}
+}
+
+func (self *ResidentForward) UpdateActivity() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	self.lastActivityTime = time.Now()
+}
+
+func (self *ResidentForward) IsIdle() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	idleTimeout := time.Now().Sub(self.lastActivityTime)
+	return self.exchange.settings.ForwardIdleTimeout <= idleTimeout
+}
+
+func (self *ResidentForward) IsDone() bool {
+	select {
+	case <- self.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (self *ResidentForward) Done() <-chan struct{} {
+	return self.ctx.Done()
 }
 
 func (self *ResidentForward) Close() {
@@ -759,538 +1344,6 @@ func (self *ResidentForward) Close() {
 }
 
 func (self *ResidentForward) Cancel() {
-	self.cancel()
-}
-
-func (self *ResidentForward) Done() <-chan struct{} {
-	return self.ctx.Done()
-}
-
-
-// residents live in the exchange
-// a resident for a client id can be nominated to live in the exchange with `NominateLocalResident`
-// any time a resident is not reachable by a transport, the transport should nominate a local resident
-type Exchange struct {
-	cleanupCtx context.Context
-	ctx context.Context
-	cancel context.CancelFunc
-
-	host string
-	service string
-	block string
-	// any of the ports may be used
-	// a range of ports are used to scale one socket per transport or forward,
-	// since each port allows at most 65k connections from another connect instance
-	hostToServicePorts map[int]int
-	routes map[string]string
-
-	residentsLock sync.RWMutex
-	// clientId -> Resident
-	residents map[bringyour.Id]*Resident
-}
-
-func NewExchange(
-	ctx context.Context,
-	host string,
-	service string,
-	block string,
-	hostToServicePorts map[int]int,
-	routes map[string]string,
-) *Exchange {
-	cancelCtx, cancel := context.WithCancel(ctx)
-
-	exchange := &Exchange{
-		ctx: cancelCtx,
-		cancel: cancel,
-		host: host,
-		service: service,
-		block: block,
-		hostToServicePorts: hostToServicePorts,
-		routes: routes,
-		residents: map[bringyour.Id]*Resident{},
-	}
-
-	go bringyour.HandleError(exchange.Run, cancel)
-
-	return exchange
-}
-
-// reads the host and port configuration from the env
-func NewExchangeFromEnv(ctx context.Context) *Exchange {
-	host := bringyour.RequireHost()
-	service := bringyour.RequireService()
-	block := bringyour.RequireBlock()
-	routes := bringyour.Routes()
-
-	// service port -> host port
-	hostPorts := bringyour.RequireHostPorts()
-	// internal ports start at `StartInternalPort` and proceed consecutively
-	// each port can handle 65k connections
-	// the number of connections depends on the number of expected concurrent destinations
-	// the expected port usage is `number_of_residents * expected(number_of_destinations_per_resident)`,
-	// and at most `number_of_residents * MaxConcurrentForwardsPerResident`
-
-	// host port -> service port
-	hostToServicePorts := map[int]int{}
-	servicePort := StartInternalPort
-	for {
-		hostPort, ok := hostPorts[servicePort]
-		if !ok {
-			break
-		}
-		hostToServicePorts[hostPort] = servicePort
-		servicePort += 1
-	}
-	if len(hostToServicePorts) == 0 {
-		panic(fmt.Errorf("No exchange internal ports found (starting with service port %d).", StartInternalPort))
-	}
-
-	// bringyour.Logger().Printf("FOUND EXCHANGE PORTS %v\n", hostToServicePorts)
-
-	return NewExchange(ctx, host, service, block, hostToServicePorts, routes)
-}
-
-func (self *Exchange) NominateLocalResident(
-	clientId bringyour.Id,
-	instanceId bringyour.Id,
-	residentIdToReplace *bringyour.Id,
-) bool {
-	residentId := bringyour.NewId()
-	
-
-	
-
-	nominated := model.NominateResident(self.ctx, residentIdToReplace, &model.NetworkClientResident{
-		ClientId: clientId,
-		InstanceId: instanceId,
-		ResidentId: residentId,
-		ResidentHost: self.host,
-		ResidentService: self.service,
-		ResidentBlock: self.block,
-		ResidentInternalPorts: maps.Keys(self.hostToServicePorts),
-	})
-	// fmt.Printf("exchange nominated=%s proposed=%s\n", nominated.ResidentId, residentId)
-	// bringyour.Logger().Printf("NOMINATED RESIDENT %s <> %s\n", nominated.ResidentId.String(), resident.residentId.String())
-	if nominated.ResidentId == residentId {
-		// defer func() {
-		// 	r := model.GetResidentWithInstance(self.ctx, clientId, instanceId)
-		// 	// bringyour.Logger().Printf("NOMINATED RESIDENT VERIFIED %s <> %s\n", nominated.ResidentId.String(), r.ResidentId.String())
-		// }()
-
-
-		func() {
-			self.residentsLock.Lock()
-			defer self.residentsLock.Unlock()
-			
-			replacedResident := self.residents[clientId]
-			// bringyour.Logger().Printf("SET LOCAL RESIDENT %s\n", clientId.String())
-
-			if replacedResident != nil {
-				replacedResident.Close()
-				model.RemoveResident(self.ctx, replacedResident.clientId, replacedResident.residentId)
-			}
-			// fmt.Printf("exchange set resident clientId=%s\n", clientId)
-			self.residents[clientId] = NewResident(
-				self.ctx,
-				self,
-				clientId,
-				instanceId,
-				residentId,
-			)
-		}()
-
-		return true
-	} else {
-		// another was nominated
-		// self.residentsLock.Lock()
-		// if currentResident, ok := self.residents[clientId]; ok && currentResident == resident {
-		// 	// bringyour.Logger().Printf("DELETE LOCAL RESIDENT %s\n", clientId.String())
-		// 	resident.Close()
-		// 	fmt.Printf("exchange remove resident 3\n")
-		// 	delete(self.residents, clientId)
-		// }
-		// self.residentsLock.Unlock()
-
-		return false
-	}
-
-}
-
-// continually cleans up the local resident state, connections, and model based on the latest nominations
-func (self *Exchange) syncResidents() {
-	// watch for this resident to change
-	// FIMXE close all connection IDs for this resident on change
-	lastRunTime := time.Now()
-	for {
-		timeout := lastRunTime.Add(ResidentSyncTimeout).Sub(time.Now())
-		if 0 < timeout {
-			select {
-			case <- self.ctx.Done():
-				return
-			case <- time.After(ResidentSyncTimeout):
-			}
-		} else {
-			select {
-			case <- self.ctx.Done():
-				return
-			default:
-			}
-		}
-
-		lastRunTime = time.Now()
-
-
-		// check for differences between local residents and the model
-
-		residentsForHostPort := model.GetResidentsForHostPorts(self.ctx, self.host, maps.Keys(self.hostToServicePorts))
-		
-		func() {
-			self.residentsLock.Lock()
-			defer self.residentsLock.Unlock()
-
-			residentsToClose := []*Resident{}
-			
-			residentIdsForHostPort := map[bringyour.Id]bool{}
-			for _, residentsForHostPort := range residentsForHostPort {
-				residentIdsForHostPort[residentsForHostPort.ResidentId] = true
-			}
-
-			residentsForHostPortToRemove := []*model.NetworkClientResident{}
-
-			// check for residents with no transports, and have no activity in some time
-			residentsToRemove := []*Resident{}
-
-
-			residentIds := map[bringyour.Id]bool{}
-			for _, resident := range self.residents {
-				residentIds[resident.residentId] = true
-			}
-			for _, residentForHostPort := range residentsForHostPort {
-				if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
-					residentsForHostPortToRemove = append(residentsForHostPortToRemove, residentForHostPort)
-				}
-			}
-			for _, resident := range self.residents {
-				if _, ok := residentIdsForHostPort[resident.residentId]; !ok {
-					// this resident has been removed from the model
-					residentsToClose = append(residentsToClose, resident)
-					// fmt.Printf("exchange remove resident 1\n")
-					delete(self.residents, resident.clientId)
-				}
-			}
-
-			for _, resident := range residentsToClose {
-				// bringyour.Logger("CLOSE RESIDENT\n")
-				resident.Close()
-			}
-
-			for _, residentForHostPort := range residentsForHostPortToRemove {
-				// bringyour.Logger("REMOVE RESIDENT\n")
-				model.RemoveResident(self.ctx, residentForHostPort.ClientId, residentForHostPort.ResidentId)
-			}
-
-			for _, resident := range self.residents {
-				if resident.IsIdle() || resident.IsDone() {
-					residentsToRemove = append(residentsToRemove, resident)
-					// fmt.Printf("exchange remove resident 2\n")
-					delete(self.residents, resident.clientId)
-				}
-			}
-
-			for _, resident := range residentsToRemove {
-				// bringyour.Logger("CLOSE AND REMOVE RESIDENT\n")
-				resident.Close()
-				model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
-			}
-		}()
-	}
-}
-
-// runs the exchange to expose local nominated residents
-// there should be one local exchange per service
-func (self *Exchange) Run() {
-	// defer func() {
-	// 	residentsCopy := map[bringyour.Id]*Resident{}
-	// 	self.residentsLock.Lock()
-	// 	maps.Copy(residentsCopy, self.residents)
-	// 	clear(self.residents)
-	// 	self.residentsLock.Unlock()
-	// 	for _, resident := range residentsCopy {
-	// 		resident.Close()
-	// 		model.RemoveResident(self.ctx, resident.clientId, resident.residentId)
-	// 	}
-	// }()
-
-	// bringyour.Logger().Printf("START EXCHANGE LISTEN ON HOST %s PORTS %v", self.host, self.hostToServicePorts)
-
-	for _, servicePort := range self.hostToServicePorts {
-		port := servicePort
-		go bringyour.HandleError(func() {
-			defer self.cancel()
-
-			// bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d", port)
-			// leave host part empty to listen on all available interfaces
-			server, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
-				// bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ERROR %s", port, err)
-				return
-			}
-			defer server.Close()
-
-			go bringyour.HandleError(func() {
-				for {
-					select {
-					case <- self.ctx.Done():
-						return
-					default:
-					}
-
-					conn, err := server.Accept()
-					if err != nil {
-						// bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ACCEPT ERROR %s", port, err)
-						return
-					}
-					// fmt.Printf("exchange %s accept connection\n", self.host)
-					// bringyour.Logger().Printf("EXCHANGE LISTEN ON PORT %d ACCEPT %s", port, self.host)
-					go bringyour.HandleError(
-						func() {
-							self.handleExchangeConnection(conn)
-						},
-						self.Close,
-					)
-				}
-			}, self.cancel)
-
-			select {
-			case <- self.ctx.Done():
-			}
-		}, self.cancel)
-	}
-
-	self.syncResidents()
-}
-
-func (self *Exchange) handleExchangeConnection(conn net.Conn) {
-
-	handleCtx, handleCancel := context.WithCancel(self.ctx)
-	defer func() {
-		handleCancel()
-		conn.Close()
-	}()
-
-	// tcpConn := conn.(*net.TCPConn)
-	// tcpConn.SetKeepAlive(true)
-	// tcpConn.SetKeepAlivePeriod(1 * time.Second)
-
-	// bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT\n")
-
-	receiveBuffer := NewReceiveOnlyExchangeBuffer()
-
-	header, err := receiveBuffer.ReadHeader(handleCtx, conn)
-	if err != nil {
-		// fmt.Printf("exchange %s connection end 1\n", self.host)
-		// bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT READ HEADER ERROR %s\n", err)
-		return
-	}
-
-	waitForResident := func()(*Resident) {
-		endTime := time.Now().Add(ExchangeResidentWaitTimeout)
-		for {
-			self.residentsLock.RLock()
-			resident, ok := self.residents[header.ClientId]
-			// // bringyour.Logger().Printf("EXCHANGE ALL RESIDENTS %v\n", self.residents)
-			self.residentsLock.RUnlock()
-
-			if ok && resident.residentId == header.ResidentId {
-				// bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT MISSING RESIDENT %s %s (%t, %v) \n", header.ClientId.String(), header.ResidentId.String(), ok, resident)
-				return resident
-			}
-
-			timeout := endTime.Sub(time.Now())
-			if timeout <= 0 {
-				return nil
-			}
-			select {
-			case <- handleCtx.Done():
-				return nil
-			case <- time.After(ExchangeResidentPollTimeout):
-			case <- time.After(timeout):
-			}
-		}
-	}
-
-	resident := waitForResident()
-
-	if resident == nil {
-		// fmt.Printf("exchange %s connection end 2 clientId=%s (%v)\n", self.host, header.ClientId, resident)
-		return
-	}
-
-	if resident.IsDone() {
-		// fmt.Printf("exchange %s connection end 3\n", self.host)
-		// bringyour.Logger().Printf("RESIDENT DONE.\n")
-		return
-	}
-
-	// echo back the header
-	if err := receiveBuffer.WriteHeader(handleCtx, conn, header); err != nil {
-		// fmt.Printf("exchange %s connection end 4\n", self.host)
-		// bringyour.Logger().Printf("EXCHANGE HANDLE CLIENT WRITE HEADER ERROR %s\n", err)
-		return
-	}
-
-	// fmt.Printf("exchange %s connection start\n", self.host)
-
-	switch header.Op {
-	case ExchangeOpTransport:
-		// this must close `receive`
-		send, receive, closeTransport := resident.AddTransport()
-		defer closeTransport()
-
-		go bringyour.HandleError(func() {
-			defer handleCancel()
-
-			sendBuffer := NewDefaultExchangeBuffer()
-			for {
-				select {
-				case <- handleCtx.Done():
-					return
-				case <- resident.Done():
-					return
-				case message, ok := <- send:
-					// // bringyour.Logger().Printf("RESIDENT SEND %s %s\n", message, ok)
-					if !ok {
-						return
-					}
-					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
-						// fmt.Printf("bw timeout\n")
-						// bringyour.Logger().Printf("RESIDENT SEND ERROR %s\n", err)
-						return
-					}
-				case <- time.After(ExchangePingTimeout):
-					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
-						// bringyour.Logger().Printf("RESIDENT PING ERROR %s\n", err)
-						return
-					}
-				}
-			}
-		}, handleCancel)
-		
-		go bringyour.HandleError(func() {
-			defer func() {
-				handleCancel()
-				close(receive)
-			}()
-
-			// read
-			// messages from the transport are to be received by the resident
-			// messages not destined for the control id are handled by the resident forward
-			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
-				// // bringyour.Logger().Printf("RESIDENT RECEIVE %s %s\n", message, err)
-				if err != nil {
-					// bringyour.Logger().Printf("RESIDENT RECEIVE ERROR %s\n", err)
-					return
-				}
-				if len(message) == 0 {
-					// just a ping
-					continue
-				}
-				select {
-				case <- handleCtx.Done():
-					return
-				case <- resident.Done():
-					return
-				case receive <- message:
-				case <- time.After(WriteTimeout):
-					// fmt.Printf("rw timeout\n")
-					// bringyour.Logger("TIMEOUT RF\n")
-				}
-			}
-		}, handleCancel)
-
-		
-	case ExchangeOpForward:
-		// read
-		// messages from the forward are to be forwarded by the resident
-		// the only route a resident has is to its client_id
-		// a forward is a send where the source id does not match the client
-		go bringyour.HandleError(func() {
-			defer handleCancel()
-
-			sendBuffer := NewDefaultExchangeBuffer()
-			for {
-				select {
-				case <- handleCtx.Done():
-					return
-				case <- resident.Done():
-					return
-				case <- time.After(ExchangePingTimeout):
-					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
-						// bringyour.Logger().Printf("RESIDENT PING ERROR %s\n", err)
-						return
-					}
-				}
-			}
-		}, handleCancel)
-
-		go bringyour.HandleError(func() {
-			defer handleCancel()
-
-			// // bringyour.Logger().Printf("RESIDENT FORWARD %s\n", header.ClientId.String())
-			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
-				// // bringyour.Logger().Printf("RESIDENT FORWARD %s %s\n", message, err)
-				if err != nil {
-					// bringyour.Logger().Printf("RESIDENT FORWARD ERROR %s\n", err)
-					return
-				}
-				if len(message) == 0 {
-					// just a ping
-					continue
-				}
-				select {
-				case <- handleCtx.Done():
-					return
-				case <- resident.Done():
-					return
-				default:
-				}
-				success := resident.Forward(message) 
-				if !success {
-					// bringyour.Logger().Printf("RESIDENT FORWARD FALSE\n")
-					// FIXME messages can be dropped - make sure back pressure is fine
-					// return
-				}
-			}
-		}, handleCancel)
-	}
-
-	select {
-	case <- handleCtx.Done():
-		// bringyour.Logger().Printf("!!!! HANDLE DONE\n")
-	case <- resident.Done():
-		// bringyour.Logger().Printf("!!!! RESIDENT DONE\n")
-	}
-}
-
-func (self *Exchange) Close() {
-	
-	
-	// close all residents
-	func() {
-		self.residentsLock.Lock()
-		defer self.residentsLock.Unlock()
-		for _, resident := range self.residents {
-			resident.Close()
-			model.RemoveResident(self.ctx, resident.clientId, resident.residentId)	
-		}
-		// fmt.Printf("exchange clear residents\n")
-		clear(self.residents)
-	}()
-
 	self.cancel()
 }
 
@@ -1307,9 +1360,8 @@ type Resident struct {
 
 	// the client id in the resident is always `connect.ControlId`
 	client *connect.Client
-	// clientRouteManager *connect.RouteManager
-	// clientContractManager *connect.ContractManager
-	contractManager *contractManager
+	residentContractManager *residentContractManager
+	residentController *residentController
 
 	stateLock sync.Mutex
 
@@ -1318,10 +1370,10 @@ type Resident struct {
 	// destination id -> forward
 	forwards map[bringyour.Id]*ResidentForward
 
-	lastActivityTime time.Time
-
 	abuseLimiter *limiter
 	controlLimiter *limiter
+
+	lastActivityTime time.Time
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
@@ -1336,13 +1388,30 @@ func NewResident(
 ) *Resident {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	client := connect.NewClientWithDefaults(cancelCtx, connect.ControlId)
+	// use a tag with the client so that the logging does not show up as the control id 
+	clientTag := fmt.Sprintf("c(%s)", clientId.String())
+	clientSettings := connect.DefaultClientSettings()
+	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, connect.NewNoContractClientOob(), clientSettings)
 
-	// clientRouteManager := connect.NewRouteManager(client)
-	// clientContractManager := connect.NewContractManagerWithDefaults(client)
 	// no contract is required between the platform and client
-	// // bringyour.Logger().Printf("NO CONTRACT PEER %s\n", clientId.String())
+	// because the platform creates the contracts for the client
 	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
+
+
+	residentContractManager := newResidentContractManager(
+		cancelCtx,
+		cancel,
+		clientId,
+		exchange.settings,
+	)
+
+	residentController := newResidentController(
+		cancelCtx,
+		cancel,
+		clientId,
+		residentContractManager,
+		exchange.settings,
+	)
 
 	resident := &Resident{
 		ctx: cancelCtx,
@@ -1352,13 +1421,13 @@ func NewResident(
 		instanceId: instanceId,
 		residentId: residentId,
 		client: client,
-		// clientRouteManager: clientRouteManager,
-		// clientContractManager: clientContractManager,
-		contractManager: newContractManager(cancelCtx, cancel, clientId),
+		residentContractManager: residentContractManager,
+		residentController: residentController,
 		transports: map[*clientTransport]bool{},
 		forwards: map[bringyour.Id]*ResidentForward{},
-		abuseLimiter: newLimiter(cancelCtx, AbuseMinTimeout),
-		controlLimiter: newLimiter(cancelCtx, ControlMinTimeout),
+		abuseLimiter: newLimiter(cancelCtx, exchange.settings.AbuseMinTimeout),
+		controlLimiter: newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
+		lastActivityTime: time.Now(),
 	}
 
 	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
@@ -1367,87 +1436,98 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
-	// client.Setup(clientRouteManager, clientContractManager)
-
-	// go bringyour.HandleError(func() {
-	// 	client.Run()
-	// }, cancel)
-
-	go bringyour.HandleError(resident.cleanupForwards, cancel)
-
-	// FIXME clean up
-	if 0 < ChaosResidentShutdownPerSecond {
-		go bringyour.HandleError(func() {
-			for {
-				select {
-				case <- cancelCtx.Done():
-					return
-				case <- time.After(1 * time.Second):
-				}
-
-				// bringyour.Logger("RESIDENT ALIVE host=%s clientId=%s residentId=%s\n", exchange.host, clientId.String(), residentId.String())
-
-				
-				if mathrand.Float64() < ChaosResidentShutdownPerSecond {
-					// bringyour.Logger("RESIDENT CHAOS SHUTDOWN host=%s clientId=%s residentId=%s\n", exchange.host, clientId.String(), residentId.String())
-					resident.Cancel()
-				}
-			}
-		}, cancel)
+	go bringyour.HandleError(resident.clientForward, cancel)
+	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
+		go bringyour.HandleError(resident.chaos, cancel)
 	}
 
 	return resident
 }
 
-func (self *Resident) updateActivity() {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	self.lastActivityTime = time.Now()
-}
-
-func (self *Resident) cleanupForwards() {
+func (self *Resident) chaos() {
 	for {
 		select {
 		case <- self.ctx.Done():
 			return
-		case <- time.After(ForwardIdleTimeout):
+		case <- time.After(1 * time.Second):
 		}
 
-		// clean up forwards that have not been used after an idle timeout
+		if mathrand.Float64() < self.exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
+			glog.Info("[chaos]%s\n", self.residentId)
+			self.Cancel()
+		}
+	}
+}
 
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			forwardsToRemove := []*ResidentForward{}
-			for _, forward := range self.forwards {
-				if ForwardIdleTimeout <= time.Now().Sub(forward.lastActivityTime) {
-					forwardsToRemove = append(forwardsToRemove, forward)
-				}
+func (self *Resident) Run() {
+	defer self.cancel()
+
+	select {
+	case <- self.ctx.Done():
+	case <- self.client.Done():
+	}
+}
+
+func (self *Resident) clientForward() {
+	defer self.cancel()
+	
+	// resident transports via `AddTransport` will route to the clientId only
+	// add a route for all other destinations to route via the exchange forward
+
+	forward := make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	forwardTransport := connect.NewSendClientTransportWithComplement(true, connect.Id(self.clientId))
+
+	routeManager := self.client.RouteManager()
+	routeManager.UpdateTransport(forwardTransport, []connect.Route{forward})
+
+	defer func() {
+		routeManager.RemoveTransport(forwardTransport)
+	}()
+
+	for {
+		select {
+		case <- self.ctx.Done():
+			return
+		case transferFrameBytes := <- forward:
+			filteredTransferFrame := &protocol.FilteredTransferFrame{}
+			if err := proto.Unmarshal(transferFrameBytes, filteredTransferFrame); err != nil {
+				// bad protobuf (unexpected)
+				continue
 			}
-			for _, forward := range forwardsToRemove {
-				// bringyour.Logger().Printf("CLEAN UP FORWARD\n")
-				forward.Close()
-				delete(self.forwards, forward.clientId)
+			if filteredTransferFrame.TransferPath == nil {
+				// bad protobuf (unexpected)
+				continue
 			}
-		}()
+			sourceId, err := connect.IdFromBytes(filteredTransferFrame.TransferPath.SourceId)
+			if err != nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+			destinationId, err := connect.IdFromBytes(filteredTransferFrame.TransferPath.DestinationId)
+			if err != nil {
+				// bad protobuf (unexpected)
+				continue
+			}
+
+			self.handleClientForward(sourceId, destinationId, transferFrameBytes)
+		}
 	}
 }
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
-	// sourceId := bringyour.Id(sourceId_)
+	sourceId := bringyour.Id(sourceId_)
 	destinationId := bringyour.Id(destinationId_)
 
-	// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD %s %s %s %s\n", self.clientId.String(), sourceId.String(), destinationId.String(), transferFrameBytes)
+	self.UpdateActivity()
 
-	self.updateActivity()
-
-	// FIXME
-	/*
+	if destinationId == ControlId {
+		// the resident client id is `ControlId`. It should never forward to itself.
+		panic("Bad forward destination.")
+	}
+	
 	if sourceId != self.clientId {
-		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD BAD SOURCE\n")
-
+		glog.Infof("[rf]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
 		// the message is not from the client
 		// clients are not allowed to forward from other clients
 		// drop
@@ -1455,69 +1535,117 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		return
 	}
 
-	if !self.contractManager.HasActiveContract(sourceId, destinationId) {
-		// // bringyour.Logger().Printf("HANDLE CLIENT FORWARD NO CONTRACT\n")
-
-		// there is no active contract
-		// drop
-		self.abuseLimiter.delay()
-		return
+	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
+	/*
+	if self.exchange.settings.ForwardEnforceActiveContracts {		
+		start := time.Now()
+		hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
+		end := time.Now()
+		millis := float32(end.Sub(start)) / float32(time.Millisecond)
+		fmt.Printf("active contract = %t (%.2fms)\n", hasActiveContract, millis)
+		if !hasActiveContract {
+			fmt.Printf("[abuse] No active contract (%s->%s)\n", sourceId.String(), destinationId.String())
+			// there is no active contract
+			// drop
+			self.abuseLimiter.delay()
+			return
+		}
 	}
 	*/
 
-	var forward *ResidentForward
+	c := func()(bool) {
+		nextForward := func()(*ResidentForward) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
 
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		var ok bool
-		forward, ok = self.forwards[destinationId]
-		if ok {
-			forward.lastActivityTime = time.Now()
-		} else if len(self.forwards) < MaxConcurrentForwardsPerResident {
-			forward = NewResidentForward(self.ctx, self.exchange, destinationId)
+			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
+			go func() {
+				bringyour.HandleError(forward.Run)
+				forward.Close()
+
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				
+				if currentForward := self.forwards[destinationId]; forward == currentForward {
+					delete(self.forwards, destinationId)
+				}
+			}()
+			go func(){
+				defer forward.Cancel()
+				for {
+					if forward.IsIdle() {
+						return
+					}
+
+					select {
+					case <- self.ctx.Done():
+						return
+					case <- forward.Done():
+						return
+					case <- time.After(self.exchange.settings.ForwardIdleTimeout):
+					}
+				}
+			}()
+			
+			if replacedForward, ok := self.forwards[destinationId]; ok {
+				replacedForward.Cancel()
+			}
+
 			self.forwards[destinationId] = forward
+
+			return forward
 		}
-	}()
 
-	if forward == nil {
-		// drop the message
-		return
-	}
+
+		var forward *ResidentForward
+		limit := false
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			var ok bool
+			forward, ok = self.forwards[destinationId]
+			if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
+				limit = true
+			}
+		}()
+
+		if forward == nil && limit {
+			glog.Info("[rf]abuse forward limit %s->%s", sourceId, destinationId)
+			self.abuseLimiter.delay()
+			return false
+		}
+
+		if forward == nil {
+			forward = nextForward()
+		}
+
+		// test if the forward is alive
+		if forward.IsDone() {
+			// recreate the forward
+			forward = nextForward()
+		}
 	
-	select {
-	case <- self.ctx.Done():
-		return
-	case <- forward.Done():
-	case forward.send <- transferFrameBytes:
-		return
-	case <- time.After(ForwardTimeout):
-		// fmt.Printf("forward timeout\n")
-		// FIXME need to debug this timeout case
-		// bringyour.Logger().Printf("!!!! RESIDENT FORWARD TIMEOUT")	
+		select {
+		case <- self.ctx.Done():
+			return false
+		case <- forward.Done():
+			return false
+		case forward.send <- transferFrameBytes:
+			forward.UpdateActivity()
+			return true
+		case <- time.After(self.exchange.settings.WriteTimeout):
+			glog.Infof("[rf]drop %s->%s", sourceId, destinationId)
+			return false
+		}
 	}
 
-	// recreate the forward and try again
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		forward.Cancel()
-		forward = NewResidentForward(self.ctx, self.exchange, destinationId)
-		self.forwards[destinationId] = forward
-	}()
-
-	select {
-	case <- self.ctx.Done():
-		return
-	case <- forward.Done():
-		return
-	case forward.send <- transferFrameBytes:
-		return
-	case <- time.After(ForwardTimeout):
-		// fmt.Printf("forward timeout\n")
-		// bringyour.Logger("TIMEOUT RG\n")
-		// drop the message
-		return
+	if glog.V(2) {
+		bringyour.TraceWithReturn(
+			fmt.Sprintf("[rf]handle client forward %s->%s", sourceId, destinationId),
+			c,
+		)
+	} else {
+		c()
 	}
 }
 
@@ -1525,145 +1653,26 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 	sourceId := bringyour.Id(sourceId_)
 
-	// // bringyour.Logger().Printf("HANDLE CLIENT RECEIVE %s %s %s\n", sourceId.String(), provideMode, frames)
-
-	// these are messages to the control id
-	// use `client.Send` to send messages back to the client
-
-	// the provideMode should always be `Network`, by configuration
-	// `Network` is the highest privilege in the user network
-	if model.ProvideMode(provideMode) != model.ProvideModeNetwork {
-		// // bringyour.Logger().Printf("HANDLE CLIENT RECEIVE NOT IN NETWORK\n")
+	if sourceId != self.clientId {
+		glog.Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
+		// only messages from the resident client are processed by the resident
+		// drop
+		self.abuseLimiter.delay()
 		return
 	}
 
-	self.updateActivity()
+	self.UpdateActivity()
 	self.controlLimiter.delay()
 
 	for _, frame := range frames {
-		// bringyour.Logger().Printf("HANDLE CLIENT RECEIVE FRAME %s\n", frame)
 		if message, err := connect.FromFrame(frame); err == nil {
-		switch v := message.(type) {
-			case *protocol.Provide:
-				// FIXME sourceId is not clientId
-				self.controlProvide(sourceId, v)
-
-			case *protocol.CreateContract:
-				self.controlCreateContract(sourceId, v)
-
-			case *protocol.CloseContract:
-				self.controlCloseContract(sourceId, v)
-			}
+			bringyour.HandleError(func() {
+				self.residentController.HandleControlMessage(message)
+			})
 		}
 	}
 }
 
-func (self *Resident) controlProvide(sourceId bringyour.Id, provide *protocol.Provide) {
-	secretKeys := map[model.ProvideMode][]byte{}			
-	for _, provideKey := range provide.Keys {
-		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey	
-	}
-	// bringyour.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
-	model.SetProvide(self.ctx, sourceId, secretKeys)
-	// bringyour.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
-}
-
-func (self *Resident) controlCreateContract(sourceId bringyour.Id, createContract *protocol.CreateContract) {
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT\n")
-
-	destinationId := bringyour.Id(createContract.DestinationId)
-
-	minRelationship := self.contractManager.GetProvideRelationship(sourceId, destinationId)
-
-	maxProvideMode := self.contractManager.GetProvideMode(destinationId)
-	if maxProvideMode < minRelationship {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION\n")
-		contractError := protocol.ContractError_NoPermission
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	provideSecretKey, err := model.GetProvideSecretKey(self.ctx, destinationId, minRelationship)
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
-		contractError := protocol.ContractError_NoPermission
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	// if `minRelationship < Public`, use CreateContractNoEscrow
-	// else use CreateTransferEscrow
-	contractId, contractByteCount, err := self.contractManager.CreateContract(
-		sourceId,
-		destinationId,
-		ByteCount(createContract.TransferByteCount),
-		minRelationship,
-	)
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", ByteCount(createContract.TransferByteCount), contractByteCount, uint64(contractByteCount))
-
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR INSUFFICIENT BALANCE\n")
-		contractError := protocol.ContractError_InsufficientBalance
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-
-	storedContract := &protocol.StoredContract{
-		ContractId: contractId.Bytes(),
-		TransferByteCount: uint64(contractByteCount),
-		SourceId: sourceId.Bytes(),
-		DestinationId: destinationId.Bytes(),
-	}
-	storedContractBytes, err := proto.Marshal(storedContract)
-	if err != nil {
-		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT STORED ERROR\n")
-		contractError := protocol.ContractError_Setup
-		result := &protocol.CreateContractResult{
-			Error: &contractError,
-		}
-		frame, err := connect.ToFrame(result)
-		bringyour.Raise(err)
-		self.client.Send(frame, connect.Id(sourceId), nil)
-		return
-	}
-	mac := hmac.New(sha256.New, provideSecretKey)
-	storedContractHmac := mac.Sum(storedContractBytes)
-
-	result := &protocol.CreateContractResult{
-		Contract: &protocol.Contract{
-			StoredContractBytes: storedContractBytes,
-			StoredContractHmac: storedContractHmac,
-			ProvideMode: protocol.ProvideMode(minRelationship),
-		},
-	}
-	frame, err := connect.ToFrame(result)
-	bringyour.Raise(err)
-	self.client.Send(frame, connect.Id(sourceId), nil)
-	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
-}
-
-func (self *Resident) controlCloseContract(sourceId bringyour.Id, closeContract *protocol.CloseContract) {
-	self.contractManager.CloseContract(
-		bringyour.RequireIdFromBytes(closeContract.ContractId),
-		sourceId,
-		ByteCount(closeContract.AckedByteCount),
-	)
-}
 
 // caller must close `receive`
 func (self *Resident) AddTransport() (
@@ -1671,52 +1680,45 @@ func (self *Resident) AddTransport() (
 	receive chan[] byte,
 	closeTransport func(),
 ) {
-	// fmt.Printf("resident add transport\n")
-
-	send = make(chan []byte, ExchangeBufferSize)
-	receive = make(chan []byte, ExchangeBufferSize)
+	send = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	receive = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 
 	// in `connect` the transport is bidirectional
 	// in the resident, each transport is a single direction
 	transport := &clientTransport{
-		sendTransport: newClientSendTransport(self.clientId),
-		receiveTransport: newClientReceiveTransport(),
+		sendTransport: connect.NewSendClientTransport(connect.Id(self.clientId)),
+		receiveTransport: connect.NewReceiveGatewayTransport(),
 	}
 
-	// bringyour.Logger().Printf("ADD TRANSPORT %s\n", self.clientId.String())
-
 	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.transports[transport] = true
 		routeManager := self.client.RouteManager()
 		routeManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
 		routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
+
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.transports[transport] = true
 	}()
 
 	closeTransport = func() {
-		// bringyour.Logger().Printf("REMOVE TRANSPORT %s\n", self.clientId.String())
-
 		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
 			routeManager := self.client.RouteManager()
 			routeManager.RemoveTransport(transport.sendTransport)
 			routeManager.RemoveTransport(transport.receiveTransport)
+
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
 		}()
 
-		// transport.Close()
-
-		// close(send)
-
 		go func() {
 			select {
-			case <- time.After(TransportDrainTimeout):
+			case <- self.ctx.Done():
+				return
+			case <- time.After(self.exchange.settings.TransportDrainTimeout):
 			}
 
 			close(send)
-			// close(receive)
 		}()
 	}
 
@@ -1724,8 +1726,15 @@ func (self *Resident) AddTransport() (
 }
 
 func (self *Resident) Forward(transferFrameBytes []byte) bool {
-	self.updateActivity()
-	return self.client.ForwardWithTimeout(transferFrameBytes, ForwardTimeout)
+	self.UpdateActivity()
+	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.WriteTimeout)
+}
+
+func (self *Resident) UpdateActivity() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	self.lastActivityTime = time.Now()
 }
 
 // idle if no transports and no activity in `ResidentIdleTimeout`
@@ -1738,16 +1747,22 @@ func (self *Resident) IsIdle() bool {
 	}
 
 	idleTimeout := time.Now().Sub(self.lastActivityTime)
-	return ResidentIdleTimeout <= idleTimeout
+	return self.exchange.settings.ResidentIdleTimeout <= idleTimeout
 }
 
 func (self *Resident) IsDone() bool {
 	select {
 	case <- self.ctx.Done():
 		return true
+	case <- self.client.Done():
+		return true
 	default:
 		return false
 	}
+}
+
+func (self *Resident) Done() <-chan struct{} {
+	return self.ctx.Done()
 }
 
 func (self *Resident) Cancel() {
@@ -1761,371 +1776,23 @@ func (self *Resident) Close() {
 
 	self.client.Cancel()
 
-	// self.client.RemoveReceiveCallback(self.handleClientReceive)
-	// self.client.RemoveForwardCallback(self.handleClientForward)
 	self.clientReceiveUnsub()
 	self.clientForwardUnsub()
 	
-
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		// clear forwards
 		for _, forward := range self.forwards {
 			forward.Cancel()
 		}
-		// clear transports
-		// for transport, _ := range self.transports {
-		// 	self.clientRouteManager.RemoveTransport(transport.sendTransport)
-		// 	self.clientRouteManager.RemoveTransport(transport.receiveTransport)
-		// 	transport.Close()
-		// }
-		// clear(self.transports)
-		
-	}()
-
-	go func() {
-		select {
-		case <- time.After(ClientDrainTimeout):
-		}
-
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			// close forwards
-			for _, forward := range self.forwards {
-				forward.Close()
-			}
-			clear(self.forwards)
-		}()
-
-		self.client.Close()
 	}()
 }
-
-// func (self *Resident) Cancel() {
-// 	self.cancel()
-// 	self.client.Cancel()
-// }
-
-func (self *Resident) Done() <-chan struct{} {
-	return self.ctx.Done()
-}
-
-
-type contractManager struct {
-	ctx context.Context
-	cancel context.CancelFunc
-
-	clientId bringyour.Id
-
-	stateLock sync.Mutex
-	// unordered transfer pair -> contract ids
-	pairContractIds map[model.TransferPair]map[bringyour.Id]bool
-}
-
-func newContractManager(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	clientId bringyour.Id,
-) *contractManager {
-	contractManager := &contractManager {
-		ctx: ctx,
-		cancel: cancel,
-		clientId: clientId,
-		pairContractIds: model.GetOpenContractIdsForSourceOrDestination(ctx, clientId),
-	}
-
-	go bringyour.HandleError(contractManager.syncContracts, cancel)
-
-	return contractManager
-}
-
-func (self *contractManager) syncContracts() {
-	for {
-		select {
-		case <- self.ctx.Done():
-			return
-		case <- time.After(ContractSyncTimeout):
-		}
-
-		pairContractIds_ := model.GetOpenContractIdsForSourceOrDestination(self.ctx, self.clientId)
-		self.stateLock.Lock()
-		self.pairContractIds = pairContractIds_
-		// if a contract was added between the sync and set, it will be looked up from the model on miss
-		self.stateLock.Unlock()
-
-		// FIXME close expired contracts
-	}
-}
-
-// this is the "min" or most specific relationship
-func (self *contractManager) GetProvideRelationship(sourceId bringyour.Id, destinationId bringyour.Id) model.ProvideMode {
-	if sourceId == ControlId || destinationId == ControlId {
-		return model.ProvideModeNetwork
-	}
-
-	if sourceId == destinationId {
-		return model.ProvideModeNetwork
-	}
-
-	if sourceClient := model.GetNetworkClient(self.ctx, sourceId); sourceClient != nil {
-		if destinationClient := model.GetNetworkClient(self.ctx, destinationId); destinationClient != nil {
-			if sourceClient.NetworkId == destinationClient.NetworkId {
-				return model.ProvideModeNetwork
-			}
-		}
-	}
-
-	// TODO network and friends-and-family not implemented yet
-
-	return model.ProvideModePublic
-}
-
-func (self *contractManager) GetProvideMode(destinationId bringyour.Id) model.ProvideMode {
-
-	if destinationId == ControlId {
-		return model.ProvideModeNetwork
-	}
-
-	provideMode, err := model.GetProvideMode(self.ctx, destinationId)
-	if err != nil {
-		return model.ProvideModeNone
-	}
-	return provideMode
-}
-
-
-func (self *contractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
-	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
-
-	self.stateLock.Lock()
-	contracts, ok := self.pairContractIds[transferPair]
-	self.stateLock.Unlock()
-
-	if !ok {
-		contractIds := model.GetOpenContractIds(self.ctx, sourceId, destinationId)
-		contracts := map[bringyour.Id]bool{}
-		for _, contractId := range contractIds {
-			contracts[contractId] = true
-		}
-		self.stateLock.Lock()
-		// if no contracts, store an empty map as a cache miss until the next `syncContracts` iteration
-		self.pairContractIds[transferPair] = contracts
-		self.stateLock.Unlock()
-	}
-
-	return 0 < len(contracts)
-}
-
-func (self *contractManager) CreateContract(
-	sourceId bringyour.Id,
-	destinationId bringyour.Id,
-	transferByteCount ByteCount,
-	provideMode model.ProvideMode,
-) (contractId bringyour.Id, contractTransferByteCount ByteCount, returnErr error) {
-	sourceNetworkId, err := model.FindClientNetwork(self.ctx, sourceId)
-	if err != nil {
-		// the source is not a real client
-		returnErr = err
-		return
-	}
-	destinationNetworkId, err := model.FindClientNetwork(self.ctx, destinationId)
-	if err != nil {
-		// the destination is not a real client
-		returnErr = err
-		return
-	}
-	
-	contractTransferByteCount = max(MinContractTransferByteCount, transferByteCount)
-
-	if provideMode < model.ProvideModePublic {
-		contractId, err = model.CreateContractNoEscrow(
-			self.ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-	} else {
-		// FIXME companion contract support
-		// FIXME
-		// FIXME the payment hole around this will be fixed with stream ids
-		// if there is a non-companion escrow contract in the opposite direction,
-		// create the escrow using the opposite direction as the payer
-		// can create as many as needed. Mark the contract as companion.
-
-		escrow, err := model.CreateTransferEscrow(
-			self.ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-		contractId = escrow.ContractId
-	}
-
-	// update the cache
-	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		contracts, ok := self.pairContractIds[transferPair]
-		if !ok {
-			contracts = map[bringyour.Id]bool{}
-			self.pairContractIds[transferPair] = contracts
-		}
-		contracts[contractId] = true
-	}()
-
-	return
-}
-
-func (self *contractManager) CloseContract(
-	contractId bringyour.Id,
-	clientId bringyour.Id,
-	usedTransferByteCount ByteCount,
-) error {
-	// update the cache
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		for transferPair, contracts := range self.pairContractIds {
-			if transferPair.A == clientId || transferPair.B == clientId {
-				delete(contracts, contractId)
-			}
-		}
-	}()
-
-	err := model.CloseContract(self.ctx, contractId, clientId, usedTransferByteCount)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-
-// each send on the forward updates the send time
-// the cleanup removes forwards that haven't been used in some time
-// type clientForward struct {
-// 	ResidentForward
-// 	lastActivityTime time.Time
-// }
 
 
 type clientTransport struct {
-	sendTransport *clientSendTransport
-	receiveTransport *clientReceiveTransport
+	sendTransport connect.Transport
+	receiveTransport connect.Transport
 }
-
-// func (self *clientTransport) Close() {
-// 	self.sendTransport.Close()
-// 	self.receiveTransport.Close()
-// }
-
-
-// conforms to `connect.Transport`
-type clientSendTransport struct {
-	transportId bringyour.Id
-	clientId bringyour.Id
-}
-
-func newClientSendTransport(clientId bringyour.Id) *clientSendTransport {
-	return &clientSendTransport{
-		transportId: bringyour.NewId(),
-		clientId: clientId,
-	}
-}
-
-func (self *clientSendTransport) TransportId() connect.Id {
-	return connect.Id(self.transportId)
-}
-
-func (self *clientSendTransport) Priority() int {
-	return 100
-}
-
-func (self *clientSendTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
-	return true
-}
-
-func (self *clientSendTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
-	// uniform weight
-	return 1.0 / float32(1 + len(remainingStats))
-}
-
-func (self *clientSendTransport) MatchesSend(destinationId connect.Id) bool {
-	// send to client id only
-	return bringyour.Id(destinationId) == self.clientId
-}
-
-func (self *clientSendTransport) MatchesReceive(destinationId connect.Id) bool {
-	return false
-}
-
-func (self *clientSendTransport) Downgrade(sourceId connect.Id) {
-	// nothing to downgrade
-}
-
-// func (self *clientSendTransport) Close() {
-// 	close(self.send)
-// }
-
-
-// conforms to `connect.Transport`
-type clientReceiveTransport struct {
-	transportId bringyour.Id
-}
-
-func newClientReceiveTransport() *clientReceiveTransport {
-	return &clientReceiveTransport{
-		transportId: bringyour.NewId(),
-	}
-}
-
-func (self *clientReceiveTransport) TransportId() connect.Id {
-	return connect.Id(self.transportId)
-}
-
-func (self *clientReceiveTransport) Priority() int {
-	return 100
-}
-
-func (self *clientReceiveTransport) CanEvalRouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) bool {
-	return true
-}
-
-func (self *clientReceiveTransport) RouteWeight(stats *connect.RouteStats, remainingStats map[connect.Transport]*connect.RouteStats) float32 {
-	// uniform weight
-	return 1.0 / float32(1 + len(remainingStats))
-}
-
-func (self *clientReceiveTransport) MatchesSend(destinationId connect.Id) bool {
-	return false
-}
-
-func (self *clientReceiveTransport) MatchesReceive(destinationId connect.Id) bool {
-	return true
-}
-
-func (self *clientReceiveTransport) Downgrade(sourceId connect.Id) {
-	// nothing to downgrade
-}
-
-// func (self *clientReceiveTransport) Close() {
-// 	close(self.receive)
-// }
 
 
 type limiter struct {
@@ -2150,8 +1817,8 @@ func (self *limiter) delay() {
 	now := time.Now()
 	timeout := self.minTimeout - now.Sub(self.lastCheckTime)
 	self.lastCheckTime = now
-	// bringyour.Logger().Printf("DELAY FOR %s", timeout)
 	if 0 < timeout {
+		glog.V(2).Infof("[limiter]delay for %.2fms\n", float64(timeout)/float64(time.Millisecond))
 		select {
 		case <- self.ctx.Done():
 		case <- time.After(timeout):

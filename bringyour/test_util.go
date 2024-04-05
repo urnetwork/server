@@ -3,7 +3,7 @@ package bringyour
 import (
 	"context"
 	"testing"
-	"time"
+	// "time"
 	"os"
 	"fmt"
 	"crypto/rand"
@@ -58,7 +58,7 @@ func (self *TestEnv) setup() func() {
 	Raise(err)
 	testPgDbName := fmt.Sprintf(
 		"test_%d_%s",
-		time.Now().UnixMilli(),
+		NowUtc().UnixMilli(),
 		hex.EncodeToString(bytes),
 	)
 

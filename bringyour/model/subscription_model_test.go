@@ -4,6 +4,8 @@ package model
 import (
     "context"
     "testing"
+    "slices"
+    "time"
 
     "golang.org/x/exp/maps"
 
@@ -16,7 +18,7 @@ import (
 
 
 func TestByteCount(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:false}).Run(func() {
-    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0MiB")
+    assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0B")
     assert.Equal(t, ByteCountHumanReadable(ByteCount(5 * 1024 * 1024 * 1024 * 1024)), "5TiB")
 
     count, err := ParseByteCount("5MiB")
@@ -119,7 +121,9 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     assert.Equal(t, err, nil)
 
     contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
-    assert.Equal(t, contractIds, []bringyour.Id{transferEscrow.ContractId})
+    assert.Equal(t, contractIds, map[bringyour.Id]ContractParty{
+        transferEscrow.ContractId: "",
+    })
 
     usedTransferByteCount := ByteCount(1024)
     CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
@@ -360,4 +364,46 @@ func TestSubscriptionPaymentId(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
     resultNetworkId, err := SubscriptionGetNetworkIdForPaymentId(ctx, result.SubscriptionPaymentId)
     assert.Equal(t, err, nil)
     assert.Equal(t, networkIdA, resultNetworkId)
+})}
+
+
+func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+    userIdA := bringyour.NewId()
+
+    networkIdB := bringyour.NewId()
+    userIdB := bringyour.NewId()
+
+    Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+    Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+    networkIds := FindNetworksWithoutTransferBalance(ctx)
+    assert.Equal(t, 2, len(networkIds))
+    assert.Equal(t, true, slices.Contains(networkIds, networkIdA))
+    assert.Equal(t, true, slices.Contains(networkIds, networkIdB))
+
+    for _, networkId := range networkIds {
+        initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+        initialTransferBalanceDuration := 30 * 24 * time.Hour
+
+        startTime := bringyour.NowUtc()
+        endTime := startTime.Add(initialTransferBalanceDuration)
+        success := AddBasicTransferBalance(
+            ctx,
+            networkId,
+            initialTransferBalance,
+            startTime,
+            endTime,
+        )
+        assert.Equal(t, true, success)
+
+        transferBalances := GetActiveTransferBalances(ctx, networkId)
+        assert.Equal(t, 1, len(transferBalances))
+        transferBalance := transferBalances[0]
+        assert.Equal(t, initialTransferBalance, transferBalance.BalanceByteCount)
+        assert.Equal(t, startTime, transferBalance.StartTime)
+        assert.Equal(t, endTime, transferBalance.EndTime)
+    }
 })}

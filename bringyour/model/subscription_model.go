@@ -22,6 +22,10 @@ import (
 
 type ByteCount = int64
 
+const Kib = ByteCount(1024)
+const Mib = ByteCount(1024 * 1024)
+const Gib = ByteCount(1024 * 1024 * 1024)
+
 func ByteCountHumanReadable(count ByteCount) string {
     trimFloatString := func(value float64, precision int, suffix string)(string) {
         s := fmt.Sprintf("%." + strconv.Itoa(precision) + "f", value)
@@ -117,8 +121,8 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 // 31 days
 const BalanceCodeDuration = 31 * 24 * time.Hour
 
-// up to 32MiB
-const AcceptableTransfersByteDifference = 32 * 1024 * 1024
+// up to 4MiB
+const AcceptableTransfersByteDifference = 4 * 1024 * 1024
 
 var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 
@@ -173,7 +177,7 @@ type BalanceCode struct {
 
 
 func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId string) (balanceCodeId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -189,7 +193,7 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId str
             	returnErr = fmt.Errorf("Purchase event not found.")
             }
         })
-    }))
+    })
     return
 }
 
@@ -198,7 +202,7 @@ func GetBalanceCode(
     ctx context.Context,
     balanceCodeId bringyour.Id,
 ) (balanceCode *BalanceCode, returnErr error) {
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -237,7 +241,7 @@ func GetBalanceCode(
                 returnErr = fmt.Errorf("Balance code not found.")
             }
         })
-    }))
+    })
     return
 }
 
@@ -251,7 +255,7 @@ func CreateBalanceCode(
     purchaseRecord string,
     purchaseEmail string,
 ) (balanceCode *BalanceCode, returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         purchaseEventIdExists := false
 
         result, err := tx.Query(
@@ -282,7 +286,7 @@ func CreateBalanceCode(
             return
         }
 
-        createTime := time.Now().UTC()
+        createTime := bringyour.NowUtc()
         // round down to 00:00 the day of create time
         startTime := time.Date(
             createTime.Year(),
@@ -335,7 +339,7 @@ func CreateBalanceCode(
             PurchaseRecord: purchaseRecord,
             PurchaseEmail: purchaseEmail,
         }
-    }))
+    })
     return
 }
 
@@ -364,7 +368,7 @@ func RedeemBalanceCode(
     redeemBalanceCode *RedeemBalanceCodeArgs,
     session *session.ClientSession,
 ) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {        
+    bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {        
         result, err := tx.Query(
             session.Ctx,
             `
@@ -417,7 +421,7 @@ func RedeemBalanceCode(
                     balance_code_id = $1
             `,
             balanceCode.BalanceCodeId,
-            time.Now(),
+            bringyour.NowUtc(),
             balanceId,
         ))
 
@@ -451,7 +455,7 @@ func RedeemBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }))
+    }, bringyour.TxReadCommitted)
 
     return
 }
@@ -480,7 +484,7 @@ func CheckBalanceCode(
     checkBalanceCode *CheckBalanceCodeArgs,
     session *session.ClientSession,
 ) (checkBalanceCodeResult *CheckBalanceCodeResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
         var balanceCode *BalanceCode
 
         result, err := tx.Query(
@@ -529,7 +533,7 @@ func CheckBalanceCode(
                 BalanceByteCount: balanceCode.BalanceByteCount,
             },
         }
-    }))
+    }, bringyour.TxReadCommitted)
 
     return
 }
@@ -550,11 +554,11 @@ type TransferBalance struct {
 
 
 func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*TransferBalance {
-    now := time.Now()
+    now := bringyour.NowUtc()
 
     transferBalances := []*TransferBalance{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -590,14 +594,23 @@ func GetActiveTransferBalances(ctx context.Context, networkId bringyour.Id) []*T
                 transferBalances = append(transferBalances, transferBalance)
             }
         })
-    }))
+    })
     
     return transferBalances
 }
 
 
+func GetActiveTransferBalanceByteCount(ctx context.Context, networkId bringyour.Id) ByteCount {
+    net := ByteCount(0)
+    for _, transferBalance := range GetActiveTransferBalances(ctx, networkId) {
+        net += transferBalance.BalanceByteCount
+    }
+    return net
+}
+
+
 func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         balanceId := bringyour.NewId()
 
         bringyour.RaisePgResult(tx.Exec(
@@ -626,10 +639,8 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
         ))
 
         transferBalance.BalanceId = balanceId
-    }))
+    })
 }
-
-
 
 
 // TODO GetLastTransferData returns the transfer data with
@@ -638,7 +649,7 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
 // TODO with the max end time
 // TODO if none, return err
 func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -662,8 +673,78 @@ func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, ex
                 returnErr = errors.New("Overlapping transfer balance not found.")
             }
         })
-    }))
+    })
 
+    return
+}
+
+
+// add balance to a network at no cost
+func AddBasicTransferBalance(
+    ctx context.Context,
+    networkId bringyour.Id,
+    transferBalance ByteCount,
+    startTime time.Time,
+    endTime time.Time,
+) (success bool) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        balanceId := bringyour.NewId()
+
+        tag := bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                INSERT INTO transfer_balance (
+                    balance_id,
+                    network_id,
+                    start_time,
+                    end_time,
+                    start_balance_byte_count,
+                    net_revenue_nano_cents,
+                    balance_byte_count
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $5)
+            `,
+            balanceId,
+            networkId,
+            startTime,
+            endTime,
+            transferBalance,
+            NanoCents(0),
+        ))
+
+        success = (tag.RowsAffected() == 1)
+    })
+    return
+}
+
+
+// this finds networks with no entries in transfer_balance
+// this is potentially different than networks with zero transfer balance
+func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []bringyour.Id) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT 
+                    network.network_id
+                FROM network
+                
+                LEFT JOIN transfer_balance ON transfer_balance.network_id = network.network_id
+
+                GROUP BY (network.network_id)
+                HAVING COUNT(transfer_balance.balance_id) = 0
+            `,
+        )
+
+        networkIds = []bringyour.Id{}
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var networkId bringyour.Id
+                bringyour.Raise(result.Scan(&networkId))
+                networkIds = append(networkIds, networkId)
+            }
+        })
+    })
     return
 }
 
@@ -711,7 +792,143 @@ type TransferEscrowBalance struct {
 }
 
 
-// FIXME support a third payerId and payerNetwork
+func createTransferEscrowInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    payeeNetworkId bringyour.Id,
+    contractTransferByteCount ByteCount,
+    companionContractId *bringyour.Id,
+) (transferEscrow *TransferEscrow, returnErr error) {
+    contractId := bringyour.NewId()
+
+    // order balances by end date, ascending
+    // take from the earlier before the later
+    result, err := tx.Query(
+        ctx,
+        `
+            SELECT
+                balance_id,
+                balance_byte_count
+            FROM transfer_balance
+            WHERE
+                network_id = $1 AND
+                active = true AND
+                start_time <= $2 AND $2 < end_time
+
+            ORDER BY end_time ASC
+
+            FOR UPDATE
+        `,
+        payeeNetworkId,
+        bringyour.NowUtc(),
+    )
+    // add up the balance_byte_count until >= contractTransferByteCount
+    // if not enough, error
+    escrow := map[bringyour.Id]ByteCount{}
+    netEscrowBalanceByteCount := ByteCount(0)
+    bringyour.WithPgResult(result, err, func() {
+        for result.Next() {
+            var balanceId bringyour.Id
+            var balanceByteCount ByteCount
+            bringyour.Raise(result.Scan(
+                &balanceId,
+                &balanceByteCount,
+            ))
+            escrowBalanceByteCount := min(contractTransferByteCount - netEscrowBalanceByteCount, balanceByteCount)
+            escrow[balanceId] = escrowBalanceByteCount
+            netEscrowBalanceByteCount += escrowBalanceByteCount
+            if contractTransferByteCount <= netEscrowBalanceByteCount {
+                break
+            }
+        }
+    })
+
+    if netEscrowBalanceByteCount < contractTransferByteCount {
+        returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
+        return
+    }
+
+    bringyour.CreateTempJoinTableInTx(
+        ctx,
+        tx,
+        "escrow(balance_id uuid -> balance_byte_count bigint)",
+        escrow,
+    )
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_balance
+            SET
+                balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
+            FROM escrow
+            WHERE
+                transfer_balance.balance_id = escrow.balance_id
+        `,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            INSERT INTO transfer_escrow (
+                contract_id,
+                balance_id,
+                balance_byte_count
+            )
+            SELECT
+                $1 AS contract_id,
+                balance_id,
+                balance_byte_count
+            FROM escrow
+        `,
+        contractId,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            INSERT INTO transfer_contract (
+                contract_id,
+                source_network_id,
+                source_id,
+                destination_network_id,
+                destination_id,
+                transfer_byte_count,
+                companion_contract_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `,
+        contractId,
+        sourceNetworkId,
+        sourceId,
+        destinationNetworkId,
+        destinationId,
+        contractTransferByteCount,
+        companionContractId,
+    ))
+
+    balances := []*TransferEscrowBalance{}
+    for balanceId, escrowBalanceByteCount := range escrow {
+        balance := &TransferEscrowBalance{
+            BalanceId: balanceId,
+            BalanceByteCount: escrowBalanceByteCount,
+        }
+        balances = append(balances, balance)
+    }
+
+    transferEscrow = &TransferEscrow{
+        ContractId: contractId,
+        Balances: balances,
+    }
+
+    return
+}
+
+
 func CreateTransferEscrow(
     ctx context.Context,
     sourceNetworkId bringyour.Id,
@@ -720,127 +937,97 @@ func CreateTransferEscrow(
     destinationId bringyour.Id,
     contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        contractId := bringyour.NewId()
-
-        // order balances by end date, ascending
-        // take from the earlier before the later
-        result, err := tx.Query(
-            ctx,
-            `
-                SELECT
-                    balance_id,
-                    balance_byte_count
-                FROM transfer_balance
-                WHERE
-                    network_id = $1 AND
-                    active = true AND
-                    start_time <= $2 AND $2 < end_time
-
-                ORDER BY end_time ASC
-
-                FOR UPDATE
-            `,
-            sourceNetworkId,
-            time.Now(),
-        )
-        // add up the balance_byte_count until >= contractTransferByteCount
-        // if not enough, error
-        escrow := map[bringyour.Id]ByteCount{}
-        netEscrowBalanceByteCount := ByteCount(0)
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var balanceId bringyour.Id
-                var balanceByteCount ByteCount
-                bringyour.Raise(result.Scan(
-                    &balanceId,
-                    &balanceByteCount,
-                ))
-                escrowBalanceByteCount := min(contractTransferByteCount - netEscrowBalanceByteCount, balanceByteCount)
-                escrow[balanceId] = escrowBalanceByteCount
-                netEscrowBalanceByteCount += escrowBalanceByteCount
-                if contractTransferByteCount <= netEscrowBalanceByteCount {
-                    break
-                }
-            }
-        })
-
-        if netEscrowBalanceByteCount < contractTransferByteCount {
-            returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
-            return
-        }
-
-        bringyour.CreateTempJoinTableInTx(
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        
+        transferEscrow, returnErr = createTransferEscrowInTx(
             ctx,
             tx,
-            "escrow(balance_id uuid -> balance_byte_count bigint)",
-            escrow,
-        )
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_balance
-                SET
-                    balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
-                FROM escrow
-                WHERE
-                    transfer_balance.balance_id = escrow.balance_id
-            `,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO transfer_escrow (
-                    contract_id,
-                    balance_id,
-                    balance_byte_count
-                )
-                SELECT
-                    $1 AS contract_id,
-                    balance_id,
-                    balance_byte_count
-                FROM escrow
-            `,
-            contractId,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO transfer_contract (
-                    contract_id,
-                    source_network_id,
-                    source_id,
-                    destination_network_id,
-                    destination_id,
-                    transfer_byte_count
-                )
-                VALUES ($1, $2, $3, $4, $5, $6)
-            `,
-            contractId,
             sourceNetworkId,
             sourceId,
             destinationNetworkId,
             destinationId,
+            // source is payer
+            sourceNetworkId,
             contractTransferByteCount,
-        ))
+            nil,
+        )
 
-        balances := []*TransferEscrowBalance{}
-        for balanceId, escrowBalanceByteCount := range escrow {
-            balance := &TransferEscrowBalance{
-                BalanceId: balanceId,
-                BalanceByteCount: escrowBalanceByteCount,
+    }, bringyour.TxReadCommitted)
+
+    return
+}
+
+
+func CreateCompanionTransferEscrow(
+    ctx context.Context,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferByteCount ByteCount,
+    originContractTimeout time.Duration,
+) (transferEscrow *TransferEscrow, returnErr error) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        // find the earliest open transfer contract in the opposite direction
+        // with null companion_contract_id
+        // there can be many companion contracts for an original contract
+
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    contract_id
+                FROM transfer_contract
+                WHERE
+                    (
+                        open = true AND
+                        source_id = $1 AND
+                        destination_id = $2 AND
+                        companion_contract_id IS NULL
+                    )
+
+                    OR
+
+                    (
+                        open = false AND
+                        $3 <= close_time AND
+                        source_id = $1 AND
+                        destination_id = $2 AND
+                        companion_contract_id IS NULL
+                    )
+                ORDER BY create_time ASC
+                LIMIT 1
+            `,
+            // note the origin direction is reversed
+            destinationId,
+            sourceId,
+            bringyour.NowUtc().Add(-originContractTimeout),
+        )
+        var companionContractId *bringyour.Id
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                bringyour.Raise(result.Scan(&companionContractId))
             }
-            balances = append(balances, balance)
+        })
+
+        if companionContractId == nil {
+            returnErr = fmt.Errorf("Missing origin contract for companion.")
+            return
         }
 
-        transferEscrow = &TransferEscrow{
-            ContractId: contractId,
-            Balances: balances,
-        }
-    }))
+        transferEscrow, returnErr = createTransferEscrowInTx(
+            ctx,
+            tx,
+            sourceNetworkId,
+            sourceId,
+            destinationNetworkId,
+            destinationId,
+            // destination is payer
+            destinationNetworkId,
+            contractTransferByteCount,
+            companionContractId,
+        )
+    }, bringyour.TxReadCommitted)
 
     return
 }
@@ -854,16 +1041,19 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
     ctx context.Context,
     sourceId bringyour.Id,
     destinationId bringyour.Id,
-    contractTransferByteCount int,
-) []bringyour.Id {
-    contractIds := []bringyour.Id{}
+    contractTransferByteCount ByteCount,
+) map[bringyour.Id]ByteCount {
+    contractIdTransferByteCounts := map[bringyour.Id]ByteCount{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
                 SELECT
-                    DISTINCT transfer_contract.contract_id
+                    
+                    transfer_contract.contract_id,
+                    transfer_contract.transfer_byte_count
+
                 FROM transfer_contract
 
                 LEFT OUTER JOIN contract_close ON
@@ -887,18 +1077,19 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var contractId bringyour.Id
-                bringyour.Raise(result.Scan(&contractId))
-                contractIds = append(contractIds, contractId)
+                var transferByteCount ByteCount
+                bringyour.Raise(result.Scan(&contractId, &transferByteCount))
+                contractIdTransferByteCounts[contractId] = transferByteCount
             }
         })
-    }))
+    })
     
-    return contractIds
+    return contractIdTransferByteCounts
 }
 
 
 func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEscrow *TransferEscrow) {
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -934,7 +1125,7 @@ func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEs
             ContractId: contractId,
             Balances: balances,
         }
-    }))
+    })
 
     return
 }
@@ -950,7 +1141,7 @@ func CreateContractNoEscrow(
     destinationId bringyour.Id,
     contractTransferByteCount ByteCount,
 ) (contractId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         contractId = bringyour.NewId()
 
         bringyour.RaisePgResult(tx.Exec(
@@ -973,7 +1164,7 @@ func CreateContractNoEscrow(
             destinationId,
             contractTransferByteCount,
         ))
-    }))
+    })
     return
 }
 
@@ -985,31 +1176,38 @@ func CloseContract(
     contractId bringyour.Id,
     clientId bringyour.Id,
     usedTransferByteCount ByteCount,
+    checkpoint bool,
 ) (returnErr error) {
-    settle := false
-    dispute := false
+    // settle := false
+    // dispute := false
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        found := false
+        var sourceId bringyour.Id
+        var destinationId bringyour.Id
+        var outcome *ContractOutcome
+        var dispute bool
         var party ContractParty
+
         result, err := tx.Query(
             ctx,
             `
                 SELECT
                     source_id,
-                    destination_id
+                    destination_id,
+                    outcome,
+                    dispute
                 FROM transfer_contract
                 WHERE
-                    contract_id = $1 AND
-                    outcome IS NULL
+                    contract_id = $1
                 FOR UPDATE
             `,
             contractId,
         )
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
-                var sourceId bringyour.Id
-                var destinationId bringyour.Id
-                bringyour.Raise(result.Scan(&sourceId, &destinationId))
+                found = true
+                bringyour.Raise(result.Scan(&sourceId, &destinationId, &outcome, &dispute))
                 if clientId == sourceId {
                     party = ContractPartySource
                 } else if clientId == destinationId {
@@ -1018,373 +1216,428 @@ func CloseContract(
             }
         })
 
+        if !found {
+            returnErr = fmt.Errorf("Contract not found: %s", contractId.String())
+            return
+        }
         if party == "" {
-            returnErr = fmt.Errorf("Client is not a party to the contract.")
+            returnErr = fmt.Errorf("Client is not a party to the contract: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+            return
+        }
+        if outcome != nil {
+            returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+            return
+        }
+        if dispute {
+            returnErr = fmt.Errorf("Contract in dispute: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
             return
         }
 
-        // make sure the reported amount does not exceed the contract value
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                INSERT INTO contract_close (
-                    contract_id,
+        if checkpoint {
+            bringyour.RaisePgResult(tx.Exec(
+                ctx,
+                `
+                    INSERT INTO contract_close (
+                        contract_id,
+                        party,
+                        used_transfer_byte_count,
+                        checkpoint
+                    )
+                    VALUES ($1, $2, $3, true)
+                    ON CONFLICT (contract_id, party) DO UPDATE
+                    SET
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3
+                `,
+                contractId,
+                party,
+                usedTransferByteCount,
+            ))
+
+        } else {
+
+            bringyour.RaisePgResult(tx.Exec(
+                ctx,
+                `
+                    INSERT INTO contract_close (
+                        contract_id,
+                        party,
+                        used_transfer_byte_count,
+                        checkpoint
+                    )
+                    VALUES ($1, $2, $3, false)
+                    ON CONFLICT (contract_id, party) DO UPDATE
+                    SET
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        checkpoint = false
+                `,
+                contractId,
+                party,
+                usedTransferByteCount,
+            ))
+
+            // party -> used transfer byte count
+            closes := map[ContractParty]ByteCount{}
+            result, err = tx.Query(
+                ctx,
+                `
+                SELECT
                     party,
                     used_transfer_byte_count
-                )
-                SELECT
-                    contract_id,
-                    $2 AS party,
-                    LEAST($3, transfer_byte_count) AS used_transfer_byte_count
-                FROM transfer_contract
+                FROM contract_close
                 WHERE
-                    contract_id = $1
-                ON CONFLICT (contract_id, party) DO UPDATE
-                SET
-                    used_transfer_byte_count = $3
-            `,
-            contractId,
-            party,
-            usedTransferByteCount,
-        ))
-
-        result, err = tx.Query(
-            ctx,
-            `
-            SELECT
-                party,
-                used_transfer_byte_count
-            FROM contract_close
-            WHERE
-                contract_id = $1
-            `,
-            contractId,
-        )
-        // party -> used transfer byte count
-        closes := map[ContractParty]ByteCount{}
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var closeParty ContractParty
-                var closeUsedTransferByteCount ByteCount
-                bringyour.Raise(result.Scan(
-                    &closeParty,
-                    &closeUsedTransferByteCount,
-                ))
-                closes[closeParty] = closeUsedTransferByteCount
+                    contract_id = $1 AND
+                    checkpoint = false
+                `,
+                contractId,
+            )
+            bringyour.WithPgResult(result, err, func() {
+                for result.Next() {
+                    var closeParty ContractParty
+                    var closeUsedTransferByteCount ByteCount
+                    bringyour.Raise(result.Scan(
+                        &closeParty,
+                        &closeUsedTransferByteCount,
+                    ))
+                    closes[closeParty] = closeUsedTransferByteCount
+                }
+            })
+            for closeParty, closeUsedTransferByteCount := range closes {
+                fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
             }
-        })
 
-        sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
-        destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
+            sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
+            destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
 
-        if sourceOk && destinationOk {
-        	hasEscrow := false
+            if sourceOk && destinationOk {
+            	hasEscrow := false
 
-        	result, err := tx.Query(
-        		ctx,
-        		`
-        			SELECT balance_id FROM transfer_escrow
-        			WHERE contract_id = $1
-        			LIMIT 1
-        		`,
-        		contractId,
-        	)
-        	bringyour.WithPgResult(result, err, func() {
-        		if result.Next() {
-        			hasEscrow = true
-        		}
-        	})
+            	result, err := tx.Query(
+            		ctx,
+            		`
+            			SELECT balance_id FROM transfer_escrow
+            			WHERE contract_id = $1
+            			LIMIT 1
+            		`,
+            		contractId,
+            	)
+            	bringyour.WithPgResult(result, err, func() {
+            		if result.Next() {
+            			hasEscrow = true
+            		}
+            	})
 
-        	if hasEscrow {
-	            diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
-	            if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
-	                settle = true
-	            } else {
-	                dispute = true
-	            }
-	        } else {
-	        	// nothing to settle, just close the transaction
-	        	bringyour.RaisePgResult(tx.Exec(
-		        	ctx,
-		            `
-		                UPDATE transfer_contract
-		                SET
-		                    outcome = $2
-		                WHERE
-		                    contract_id = $1
-		            `,
-		            contractId,
-		            ContractOutcomeSettled,
-		        ))
-	        }
+            	if hasEscrow {
+    	            diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
+                    if 0 != diff {
+                        fmt.Printf("CONTRACT (%s) PARTY DIFF %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+                    }
+    	            if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
+                        fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
+    	                returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+    	            } else {
+    	                fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
+                        setContractDisputeInTx(ctx, tx, contractId, true)
+    	            }
+    	        } else {
+    	        	// nothing to settle, just close the transaction
+    	        	bringyour.RaisePgResult(tx.Exec(
+    		        	ctx,
+    		            `
+    		                UPDATE transfer_contract
+    		                SET
+    		                    outcome = $2,
+                                close_time = $3
+    		                WHERE
+    		                    contract_id = $1
+    		            `,
+    		            contractId,
+    		            ContractOutcomeSettled,
+                        bringyour.NowUtc(),
+    		        ))
+    	        }
+            }
         }
-    }))
+    }, bringyour.TxReadCommitted)
 
-    if returnErr != nil {
-        return
-    }
-
-    if settle {
-        returnErr = SettleEscrow(ctx, contractId, ContractOutcomeSettled)
-    } else if dispute {
-        SetContractDispute(ctx, contractId, true)
-    }
     return
 }
 
 
+
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        var usedTransferByteCount ByteCount
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
+    }, bringyour.TxReadCommitted)
 
-        switch outcome {
-        case ContractOutcomeSettled:
-            result, err := tx.Query(
-                ctx,
-                `
-                    SELECT
-                        used_transfer_byte_count
-                    FROM contract_close
-                    WHERE
-                        contract_id = $1
-                    FOR UPDATE
-                `,
-                contractId,
-            )
-            bringyour.WithPgResult(result, err, func() {
-                netUsedTransferByteCount := ByteCount(0)
-                partyCount := 0
-                for result.Next() {
-                    var usedTransferByteCountForParty ByteCount
-                    bringyour.Raise(result.Scan(&usedTransferByteCountForParty))
-                    netUsedTransferByteCount += usedTransferByteCountForParty
-                    partyCount += 1
-                }
-                usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
-            })
-        case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
-            var party ContractParty
-            switch outcome {
-            case ContractOutcomeDisputeResolvedToSource:
-                party = ContractPartySource
-            default:
-                party = ContractPartyDestination
-            }
-            result, err := tx.Query(
-                ctx,
-                `
-                    SELECT
-                        used_transfer_byte_count
-                    FROM contract_close
-                    WHERE
-                        contract_id = $1 AND
-                        party = $2
-                    FOR UPDATE
-                `,
-                contractId,
-                party,
-            )
-            bringyour.WithPgResult(result, err, func() {
-                if result.Next() {
-                    bringyour.Raise(result.Scan(&usedTransferByteCount))
-                }
-            })
-        default:
-            returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
-            return
-        }
+    return
+}
 
-        // order balances by end date, ascending
-        // take from the earlier before the later
+
+func settleEscrowInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    contractId bringyour.Id,
+    outcome ContractOutcome,
+) (returnErr error) {
+    var usedTransferByteCount ByteCount
+
+    switch outcome {
+    case ContractOutcomeSettled:
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    transfer_escrow.balance_id,
-                    transfer_escrow.balance_byte_count,
-                    transfer_balance.start_balance_byte_count,
-                    transfer_balance.net_revenue_nano_cents
-                FROM transfer_contract
-
-                INNER JOIN transfer_escrow ON
-                    transfer_escrow.contract_id = transfer_contract.contract_id
-
-                INNER JOIN transfer_balance ON
-                    transfer_balance.balance_id = transfer_escrow.balance_id
-
-                WHERE
-                    transfer_contract.contract_id = $1 AND
-                    transfer_contract.outcome IS NULL
-
-                ORDER BY transfer_balance.end_time ASC
-
-                FOR UPDATE
-            `,
-            contractId,
-        )
-
-        // balance id -> payout byte count, return byte count, payout
-        sweepPayouts := map[bringyour.Id]sweepPayout{}
-		netPayoutByteCount := ByteCount(0)
-		netPayout := NanoCents(0)
-
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var balanceId bringyour.Id
-                var escrowBalanceByteCount ByteCount
-                var startBalanceByteCount ByteCount
-                var netRevenue NanoCents
-                bringyour.Raise(result.Scan(
-                    &balanceId,
-                    &escrowBalanceByteCount,
-                    &startBalanceByteCount,
-                    &netRevenue,
-                ))
-
-                payoutByteCount := min(usedTransferByteCount - netPayoutByteCount, escrowBalanceByteCount)
-                returnByteCount := escrowBalanceByteCount - payoutByteCount
-                netPayoutByteCount += payoutByteCount
-                payout := NanoCents(math.Round(
-                    ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
-                ))
-                netPayout += payout
-                sweepPayouts[balanceId] = sweepPayout{
-                	payoutByteCount: payoutByteCount,
-                	returnByteCount: returnByteCount,
-                	payout: payout,
-                }
-            }
-        })
-
-        if len(sweepPayouts) == 0 {
-            returnErr = fmt.Errorf("Invalid contract.")
-            return
-        }
-
-        if netPayoutByteCount < usedTransferByteCount {
-            returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
-            return
-        }
-
-
-        var payoutNetworkId *bringyour.Id
-        result, err = tx.Query(
-            ctx,
-            `
-                SELECT
-                    destination_network_id
-                FROM transfer_contract
+                    used_transfer_byte_count,
+                    party
+                FROM contract_close
                 WHERE
                     contract_id = $1
                 FOR UPDATE
             `,
             contractId,
+        )
+        netUsedTransferByteCount := ByteCount(0)
+        partyCount := 0
+        bringyour.WithPgResult(result, err, func() {    
+            for result.Next() {
+                var usedTransferByteCountForParty ByteCount
+                var party ContractParty
+                bringyour.Raise(result.Scan(&usedTransferByteCountForParty, &party))
+                netUsedTransferByteCount += usedTransferByteCountForParty
+                partyCount += 1
+                fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
+            }
+        })
+        if partyCount != 2 {
+            returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
+            return
+        }
+        usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
+    case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
+        var party ContractParty
+        switch outcome {
+        case ContractOutcomeDisputeResolvedToSource:
+            party = ContractPartySource
+        default:
+            party = ContractPartyDestination
+        }
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    used_transfer_byte_count
+                FROM contract_close
+                WHERE
+                    contract_id = $1 AND
+                    party = $2
+                FOR UPDATE
+            `,
+            contractId,
+            party,
         )
         bringyour.WithPgResult(result, err, func() {
             if result.Next() {
-                bringyour.Raise(result.Scan(&payoutNetworkId))
+                bringyour.Raise(result.Scan(&usedTransferByteCount))
             }
         })
+    default:
+        returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
+        return
+    }
 
-        if payoutNetworkId == nil {
-            err = fmt.Errorf("Destination client does not exist.")
-            return
+    // order balances by end date, ascending
+    // take from the earlier before the later
+    result, err := tx.Query(
+        ctx,
+        `
+            SELECT
+                transfer_escrow.balance_id,
+                transfer_escrow.balance_byte_count,
+                transfer_balance.start_balance_byte_count,
+                transfer_balance.net_revenue_nano_cents
+            FROM transfer_contract
+
+            INNER JOIN transfer_escrow ON
+                transfer_escrow.contract_id = transfer_contract.contract_id
+
+            INNER JOIN transfer_balance ON
+                transfer_balance.balance_id = transfer_escrow.balance_id
+
+            WHERE
+                transfer_contract.contract_id = $1 AND
+                transfer_contract.outcome IS NULL
+
+            ORDER BY transfer_balance.end_time ASC
+
+            FOR UPDATE
+        `,
+        contractId,
+    )
+
+    // balance id -> payout byte count, return byte count, payout
+    sweepPayouts := map[bringyour.Id]sweepPayout{}
+	netPayoutByteCount := ByteCount(0)
+	netPayout := NanoCents(0)
+
+    bringyour.WithPgResult(result, err, func() {
+        for result.Next() {
+            var balanceId bringyour.Id
+            var escrowBalanceByteCount ByteCount
+            var startBalanceByteCount ByteCount
+            var netRevenue NanoCents
+            bringyour.Raise(result.Scan(
+                &balanceId,
+                &escrowBalanceByteCount,
+                &startBalanceByteCount,
+                &netRevenue,
+            ))
+
+            payoutByteCount := min(usedTransferByteCount - netPayoutByteCount, escrowBalanceByteCount)
+            returnByteCount := escrowBalanceByteCount - payoutByteCount
+            netPayoutByteCount += payoutByteCount
+            payout := NanoCents(math.Round(
+                ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
+            ))
+            netPayout += payout
+            sweepPayouts[balanceId] = sweepPayout{
+            	payoutByteCount: payoutByteCount,
+            	returnByteCount: returnByteCount,
+            	payout: payout,
+            }
+            fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
         }
+    })
+
+    if len(sweepPayouts) == 0 {
+        returnErr = fmt.Errorf("Invalid contract.")
+        return
+    }
+
+    if netPayoutByteCount < usedTransferByteCount {
+        returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
+        return
+    }
 
 
-        bringyour.CreateTempJoinTableInTx(
-            ctx,
-            tx,
-            "sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
-            sweepPayouts,
-        )
+    var payoutNetworkId *bringyour.Id
+    result, err = tx.Query(
+        ctx,
+        `
+            SELECT
+                destination_network_id
+            FROM transfer_contract
+            WHERE
+                contract_id = $1
+            FOR UPDATE
+        `,
+        contractId,
+    )
+    bringyour.WithPgResult(result, err, func() {
+        if result.Next() {
+            bringyour.Raise(result.Scan(&payoutNetworkId))
+        }
+    })
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                UPDATE transfer_contract
-                SET
-                    outcome = $2
-                WHERE
-                    contract_id = $1
-            `,
-            contractId,
-            ContractOutcomeSettled,
-        ))
+    if payoutNetworkId == nil {
+        returnErr = fmt.Errorf("Destination client does not exist.")
+        return
+    }
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                UPDATE transfer_escrow
-                SET
-                    settled = true,
-                    settle_time = $2,
-                    payout_byte_count = sweep_payout.payout_byte_count
-                FROM sweep_payout
-                WHERE
-                    transfer_escrow.contract_id = $1 AND
-                    transfer_escrow.balance_id = sweep_payout.balance_id
-            `,
-            contractId,
-            time.Now(),
-        ))
 
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-                INSERT INTO transfer_escrow_sweep (
-                    contract_id,
-                    balance_id,
-                    network_id,
-                    payout_byte_count,
-                    payout_net_revenue_nano_cents
-                )
-                SELECT
-                    $1 AS contract_id,
-                    sweep_payout.balance_id,
-                    $2 AS network_id,
-                    sweep_payout.payout_byte_count,
-                    sweep_payout.payout_net_revenue_nano_cents
-                FROM sweep_payout
+    bringyour.CreateTempJoinTableInTx(
+        ctx,
+        tx,
+        "sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
+        sweepPayouts,
+    )
 
-                WHERE
-                    0 < sweep_payout.payout_byte_count
-            `,
-            contractId,
-            payoutNetworkId,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_balance
-                SET
-                    balance_byte_count = transfer_balance.balance_byte_count + sweep_payout.return_byte_count
-                FROM sweep_payout
-                WHERE
-                    transfer_balance.balance_id = sweep_payout.balance_id
-            `,
-        ))
-
-        bringyour.RaisePgResult(tx.Exec(
-        	ctx,
-            `
-            INSERT INTO account_balance (
-            	network_id,
-                provided_byte_count,
-                provided_net_revenue_nano_cents
-            )
-            VALUES ($1, $2, $3)
-            ON CONFLICT (network_id) DO UPDATE
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            UPDATE transfer_contract
             SET
-                provided_byte_count = account_balance.provided_byte_count + $2,
-                provided_net_revenue_nano_cents = account_balance.provided_net_revenue_nano_cents + $3
-            `,
-            payoutNetworkId,
-            netPayoutByteCount,
-            netPayout,
-        ))
-    }))
+                outcome = $2,
+                close_time = $3
+            WHERE
+                contract_id = $1
+        `,
+        contractId,
+        ContractOutcomeSettled,
+        bringyour.NowUtc(),
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            UPDATE transfer_escrow
+            SET
+                settled = true,
+                settle_time = $2,
+                payout_byte_count = sweep_payout.payout_byte_count
+            FROM sweep_payout
+            WHERE
+                transfer_escrow.contract_id = $1 AND
+                transfer_escrow.balance_id = sweep_payout.balance_id
+        `,
+        contractId,
+        bringyour.NowUtc(),
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+            INSERT INTO transfer_escrow_sweep (
+                contract_id,
+                balance_id,
+                network_id,
+                payout_byte_count,
+                payout_net_revenue_nano_cents
+            )
+            SELECT
+                $1 AS contract_id,
+                sweep_payout.balance_id,
+                $2 AS network_id,
+                sweep_payout.payout_byte_count,
+                sweep_payout.payout_net_revenue_nano_cents
+            FROM sweep_payout
+
+            WHERE
+                0 < sweep_payout.payout_byte_count
+        `,
+        contractId,
+        payoutNetworkId,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_balance
+            SET
+                balance_byte_count = transfer_balance.balance_byte_count + sweep_payout.return_byte_count
+            FROM sweep_payout
+            WHERE
+                transfer_balance.balance_id = sweep_payout.balance_id
+        `,
+    ))
+
+    bringyour.RaisePgResult(tx.Exec(
+    	ctx,
+        `
+        INSERT INTO account_balance (
+        	network_id,
+            provided_byte_count,
+            provided_net_revenue_nano_cents
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (network_id) DO UPDATE
+        SET
+            provided_byte_count = account_balance.provided_byte_count + $2,
+            provided_net_revenue_nano_cents = account_balance.provided_net_revenue_nano_cents + $3
+        `,
+        payoutNetworkId,
+        netPayoutByteCount,
+        netPayout,
+    ))
 
     return
 }
@@ -1402,36 +1655,85 @@ func (self *sweepPayout) Values() []any {
 
 
 func SetContractDispute(ctx context.Context, contractId bringyour.Id, dispute bool) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
-                UPDATE transfer_contract
-                SET
-                    dispute = $2
-                WHERE
-                    contract_id = $1 AND
-                    outcome IS NULL
-            `,
-        ))
-    }))
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        setContractDisputeInTx(ctx, tx, contractId, dispute)
+    })
 }
 
 
+func setContractDisputeInTx(
+    ctx context.Context,
+    tx bringyour.PgTx,
+    contractId bringyour.Id,
+    dispute bool,
+) {
+    bringyour.RaisePgResult(tx.Exec(
+        ctx,
+        `
+            UPDATE transfer_contract
+            SET
+                dispute = $2,
+                close_time = $3
+            WHERE
+                contract_id = $1 AND
+                outcome IS NULL
+        `,
+        contractId,
+        dispute,
+        bringyour.NowUtc(),
+    ))
+}
+
+
+func GetOpenContractIdsWithNoPartialClose(
+    ctx context.Context,
+    sourceId bringyour.Id,
+    destinationId bringyour.Id,
+) map[bringyour.Id]bool {
+    contractIds := map[bringyour.Id]bool{}
+    for contractId, party := range GetOpenContractIds(ctx, sourceId, destinationId) {
+        if party == "" {
+            contractIds[contractId] = true
+        }
+    }
+    return contractIds
+}
+
+
+func GetOpenContractIdsWithPartialClose(
+    ctx context.Context,
+    sourceId bringyour.Id,
+    destinationId bringyour.Id,
+) map[bringyour.Id]ContractParty {
+    contractIdPartialCloseParties := map[bringyour.Id]ContractParty{}
+    for contractId, party := range GetOpenContractIds(ctx, sourceId, destinationId) {
+        if party != "" {
+            contractIdPartialCloseParties[contractId] = party
+        }
+    }
+    return contractIdPartialCloseParties
+}
+
+
+// contract id -> partially closed contract party, or "" if none
 func GetOpenContractIds(
     ctx context.Context,
     sourceId bringyour.Id,
     destinationId bringyour.Id,
-) []bringyour.Id {
-    contractIds := []bringyour.Id{}
+) map[bringyour.Id]ContractParty {
+    contractIdPartialCloseParties := map[bringyour.Id]ContractParty{}
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    contract_id
+                    transfer_contract.contract_id,
+                    contract_close.party
                 FROM transfer_contract
+
+                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+
                 WHERE
                     open = true AND
                     source_id = $1 AND
@@ -1443,13 +1745,40 @@ func GetOpenContractIds(
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var contractId bringyour.Id
-                bringyour.Raise(result.Scan(&contractId))
-                contractIds = append(contractIds, contractId)
+                var party_ *ContractParty
+                bringyour.Raise(result.Scan(&contractId, &party_))
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
+                }
+                contractIdPartialCloseParties[contractId] = party
             }
         })
-    }))
+    })
 
-    return contractIds
+    return contractIdPartialCloseParties
+}
+
+
+func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
+    ctx context.Context,
+    clientId bringyour.Id,
+) map[TransferPair]map[bringyour.Id]bool {
+    pairContractIdPartialCloseParties := GetOpenContractIdsForSourceOrDestination(ctx, clientId)
+    pairContractIds := map[TransferPair]map[bringyour.Id]bool{}
+    for transferPair, contractIdPartialCloseParties := range pairContractIdPartialCloseParties {
+        for contractId, party := range contractIdPartialCloseParties {
+            if party == "" {
+                contractIds, ok := pairContractIds[transferPair]
+                if !ok {
+                    contractIds = map[bringyour.Id]bool{}
+                    pairContractIds[transferPair] = contractIds
+                }
+                contractIds[contractId] = true
+            }
+        }
+    }
+    return pairContractIds
 }
 
 
@@ -1457,18 +1786,22 @@ func GetOpenContractIds(
 func GetOpenContractIdsForSourceOrDestination(
     ctx context.Context,
     clientId bringyour.Id,
-) map[TransferPair]map[bringyour.Id]bool {
-    pairContractIds := map[TransferPair]map[bringyour.Id]bool{}
+) map[TransferPair]map[bringyour.Id]ContractParty {
+    pairContractIdPartialCloseParties := map[TransferPair]map[bringyour.Id]ContractParty{}
 
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             ctx,
             `
                 SELECT
-                    source_id,
-                    destination_id,
-                    contract_id
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    transfer_contract.contract_id,
+                    contract_close.party
                 FROM transfer_contract
+
+                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+
                 WHERE
                     open = true AND (
                         source_id = $1 OR
@@ -1482,23 +1815,29 @@ func GetOpenContractIdsForSourceOrDestination(
                 var sourceId bringyour.Id
                 var destinationId bringyour.Id
                 var contractId bringyour.Id
+                var party_ *ContractParty
                 bringyour.Raise(result.Scan(
                     &sourceId,
                     &destinationId,
                     &contractId,
+                    &party_,
                 ))
                 transferPair := NewUnorderedTransferPair(sourceId, destinationId)
-                contractIds, ok := pairContractIds[transferPair]
-                if !ok {
-                    contractIds = map[bringyour.Id]bool{}
-                    pairContractIds[transferPair] = contractIds
+                contractIdPartialCloseParties, ok := pairContractIdPartialCloseParties[transferPair]
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
                 }
-                contractIds[contractId] = true
+                if !ok {
+                    contractIdPartialCloseParties = map[bringyour.Id]ContractParty{}
+                    pairContractIdPartialCloseParties[transferPair] = contractIdPartialCloseParties
+                }
+                contractIdPartialCloseParties[contractId] = party
             }
         })
-    }))
+    })
 
-    return pairContractIds
+    return pairContractIdPartialCloseParties
 }
 
 
@@ -1561,18 +1900,18 @@ func dbGetAccountWallet(ctx context.Context, conn bringyour.PgConn, walletId bri
 
 func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet {
     var wallet *AccountWallet
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         wallet = dbGetAccountWallet(ctx, conn, walletId)
-    }))
+    })
     return wallet
 }
 
 
 func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         wallet.WalletId = bringyour.NewId()
         wallet.Active = true
-        wallet.CreateTime = time.Now()
+        wallet.CreateTime = bringyour.NowUtc()
 
         bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -1598,7 +1937,7 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
             wallet.DefaultTokenType,
             wallet.CreateTime,
         ))
-    }))
+    })
 }
 
 
@@ -1610,7 +1949,7 @@ func FindActiveAccountWallets(
 ) []*AccountWallet {
     wallets := []*AccountWallet{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1642,14 +1981,14 @@ func FindActiveAccountWallets(
                 wallets = append(wallets, wallet)
             }
         }
-    }))
+    })
 
     return wallets
 }
 
 
 func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
@@ -1665,7 +2004,7 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
             networkId,
             walletId,
         ))
-    }))
+    })
 }
 
 
@@ -1676,7 +2015,7 @@ type GetAccountWalletsResult struct {
 func GetActiveAccountWallets(ctx context.Context, session *session.ClientSession) *GetAccountWalletsResult {
     wallets := []*AccountWallet{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1704,7 +2043,7 @@ func GetActiveAccountWallets(ctx context.Context, session *session.ClientSession
                 wallets = append(wallets, wallet)
             }
         }
-    }))
+    })
 
     return &GetAccountWalletsResult{
         Wallets: wallets,
@@ -1790,9 +2129,9 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
 
 func GetPayment(ctx context.Context, paymentId bringyour.Id) *AccountPayment {
     var payment *AccountPayment
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         payment = dbGetPayment(ctx, conn, paymentId)
-    }))
+    })
     return payment
 }
 
@@ -1800,7 +2139,7 @@ func GetPayment(ctx context.Context, paymentId bringyour.Id) *AccountPayment {
 func GetPendingPayments(ctx context.Context) []*AccountPayment {
     payments := []*AccountPayment{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1824,7 +2163,7 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
                 payments = append(payments, payment)
             }
         }
-    }))
+    })
     
     return payments
 }
@@ -1833,7 +2172,7 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
 func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) []*AccountPayment {
     payments := []*AccountPayment{}
 
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -1859,7 +2198,7 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) [
                 payments = append(payments, payment)
             }
         }
-    }))
+    })
     
     return payments
 }
@@ -1879,7 +2218,7 @@ type PaymentPlan struct {
 // all of the returned payments are tagged with the same payment_plan_id
 func PlanPayments(ctx context.Context) *PaymentPlan {
     var paymentPlan *PaymentPlan
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 
         bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -1962,7 +2301,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                         PaymentId: paymentId,
                         PaymentPlanId: paymentPlanId,
                         WalletId: walletId,
-                        CreateTime: time.Now(),
+                        CreateTime: bringyour.NowUtc(),
                     }
                     walletPayments[walletId] = payment
                 }
@@ -1986,7 +2325,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
         // apply wallet minimum payout threshold
         // any wallet that does not meet the threshold will not be included in this plan
         walletIdsToRemove := []bringyour.Id{}
-        payoutExpirationTime := time.Now().Add(-WalletPayoutTimeout)
+        payoutExpirationTime := bringyour.NowUtc().Add(-WalletPayoutTimeout)
         for walletId, payment := range walletPayments {
             // cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
             if payment.Payout < MinWalletPayoutThreshold && payoutExpirationTime.Before(payment.MinSweepTime) {
@@ -1997,7 +2336,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             delete(walletPayments, walletId)
         }
 
-        bringyour.Raise(bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+        bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
             for _, payment := range walletPayments {
                 batch.Queue(
                     `
@@ -2021,7 +2360,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                     payment.CreateTime,
                 )
             }
-        }))
+        })
 
         bringyour.CreateTempJoinTableInTx(
             ctx,
@@ -2048,7 +2387,7 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
             WalletPayments: walletPayments,
             WithheldWalletIds: walletIdsToRemove,
         }
-    }))
+    }, bringyour.TxReadCommitted)
 
     return paymentPlan
 }
@@ -2064,7 +2403,7 @@ func SetPaymentRecord(
     tokenAmount float64,
     paymentRecord string,
 ) (returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
@@ -2086,13 +2425,13 @@ func SetPaymentRecord(
             returnErr = fmt.Errorf("Invalid payment.")
             return 
         }
-    }))
+    })
     return
 }
 
 
 func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt string) (returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
@@ -2107,7 +2446,7 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
             `,
             paymentId,
             paymentReceipt,
-            time.Now(),
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
@@ -2129,13 +2468,13 @@ func CompletePayment(ctx context.Context, paymentId bringyour.Id, paymentReceipt
             `,
             paymentId,
         ))
-    }))
+    })
     return
 }
 
 
 func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
             `
@@ -2148,13 +2487,13 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
                     NOT completed AND NOT canceled
             `,
             paymentId,
-            time.Now(),
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
             return 
         }
-    }))
+    })
     return
 }
 
@@ -2179,7 +2518,7 @@ type GetAccountBalanceError struct {
 
 func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult {
     getAccountBalanceResult := &GetAccountBalanceResult{}
-    bringyour.Raise(bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             session.Ctx,
             `
@@ -2209,7 +2548,7 @@ func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult 
             // else empty balance
             getAccountBalanceResult.Balance = balance
         })
-    }))
+    })
     return getAccountBalanceResult
 }
 
@@ -2250,7 +2589,7 @@ type SubscriptionCreatePaymentIdError struct {
 }
 
 func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArgs, clientSession *session.ClientSession) (createPaymentIdResult *SubscriptionCreatePaymentIdResult, returnErr error) {
-    bringyour.Raise(bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
         result, err := tx.Query(
             clientSession.Ctx,
             `
@@ -2262,7 +2601,7 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
                 $2 <= create_time
             `,
             clientSession.ByJwt.NetworkId,
-            time.Now().Add(-1 * time.Hour),
+            bringyour.NowUtc().Add(-1 * time.Hour),
         )
 
         limitExceeded := false
@@ -2305,14 +2644,14 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
         createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
             SubscriptionPaymentId: subscriptionPaymentId,
         }
-    }))
+    })
 
     return
 }
 
 
 func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPaymentId bringyour.Id) (networkId bringyour.Id, returnErr error) {
-    bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
         result, err := conn.Query(
             ctx,
             `
@@ -2328,7 +2667,7 @@ func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPayme
                 returnErr = errors.New("Invalid subscription payment.")
             }
         })
-    }))
+    })
     return
 }
 

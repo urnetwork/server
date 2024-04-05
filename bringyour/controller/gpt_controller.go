@@ -20,6 +20,7 @@ import (
     "golang.org/x/net/html"
     "golang.org/x/exp/maps"
 
+    "bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
 )
@@ -80,7 +81,7 @@ func GptPrivacyPolicy(
         returnPrivacyPolicyText = completePrivacyPolicy.PrivacyPolicyText
 
         // check soft refresh
-        age := time.Now().Sub(completePrivacyPolicy.CreateTime)
+        age := bringyour.NowUtc().Sub(completePrivacyPolicy.CreateTime)
         
         var refresh bool
         if maxPrivacyPolicyAge <= age {

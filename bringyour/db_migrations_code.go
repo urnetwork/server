@@ -2,12 +2,12 @@ package bringyour
 
 import (
     "context"
-    "time"
+    // "time"
 )
 
 // create entries for `network_client.device_id`
 func migration_20240124_PopulateDevice(ctx context.Context) {
-    Raise(Tx(ctx, func(tx PgTx) {
+    Tx(ctx, func(tx PgTx) {
         result, err := tx.Query(
             ctx,
             `
@@ -44,7 +44,7 @@ func migration_20240124_PopulateDevice(ctx context.Context) {
             }
         })
 
-        createTime := time.Now()
+        createTime := NowUtc()
 
         for clientId, device := range devices {
             RaisePgResult(tx.Exec(
@@ -78,5 +78,5 @@ func migration_20240124_PopulateDevice(ctx context.Context) {
                 device.deviceId,
             ))
         }
-    }))
+    })
 }

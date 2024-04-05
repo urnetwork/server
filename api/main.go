@@ -51,8 +51,8 @@ Options:
         router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
         router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
         router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),
-        router.NewRoute("POST", "/auth/network-check", handlers.AuthNetworkCheck),
-        router.NewRoute("POST", "/auth/network-create", handlers.AuthNetworkCreate),
+        router.NewRoute("POST", "/auth/network-check", handlers.NetworkCheck),
+        router.NewRoute("POST", "/auth/network-create", handlers.NetworkCreate),
         router.NewRoute("POST", "/auth/code-create", handlers.AuthCodeCreate),
         router.NewRoute("POST", "/auth/code-login", handlers.AuthCodeLogin),
         router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
@@ -92,6 +92,7 @@ Options:
         router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
         router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
         router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
+        router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

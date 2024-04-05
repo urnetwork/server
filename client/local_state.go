@@ -16,6 +16,8 @@ import (
 
 const AsyncQueueSize = 32
 
+const LocalStorageFilePermissions = 0700
+
 
 type ByJwt struct {
 	UserId *Id
@@ -31,7 +33,14 @@ type LocalState struct {
 	localStorageDir string
 }
 
-func newLocalState(ctx context.Context, localStorageDir string) *LocalState {
+func newLocalState(ctx context.Context, localStorageHome string) *LocalState {
+	// FIXME local storage dir is always a sub dir of the passed dir
+	// localStorageHome/.by
+	localStorageDir := filepath.Join(localStorageHome, ".by")
+	err := os.MkdirAll(localStorageDir, LocalStorageFilePermissions)
+	if err != nil {
+		panic(err)
+	}
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &LocalState{
@@ -99,7 +108,7 @@ func (self *LocalState) SetByJwt(byJwt string) error {
 		os.Remove(path)
 		return nil
 	} else {
-		return os.WriteFile(path, []byte(byJwt), 0700)
+		return os.WriteFile(path, []byte(byJwt), LocalStorageFilePermissions)
 	}
 }
 
@@ -129,7 +138,7 @@ func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 	} else {
 		instanceId := connect.NewId()
 		self.setInstanceId(newId(instanceId))
-		return os.WriteFile(path, []byte(byClientJwt), 0700)
+		return os.WriteFile(path, []byte(byClientJwt), LocalStorageFilePermissions)
 	}
 }
 
@@ -148,15 +157,31 @@ func (self *LocalState) setInstanceId(instanceId *Id) error {
 		os.Remove(path)
 		return nil
 	} else {
-		return os.WriteFile(path, instanceId.Bytes(), 0700)
+		return os.WriteFile(path, instanceId.Bytes(), LocalStorageFilePermissions)
 	}
+}
+
+func (self *LocalState) SetProvideMode(provideMode ProvideMode) error {
+	path := filepath.Join(self.localStorageDir, ".provide_mode")
+	provideModeBytes := []byte(fmt.Sprintf("%d", provideMode))
+	return os.WriteFile(path, provideModeBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetProvideMode() (ProvideMode, error) {
+	var provideMode ProvideMode
+	path := filepath.Join(self.localStorageDir, ".provide_mode")
+	if provideModeBytes, err := os.ReadFile(path); err == nil {
+		_, err := fmt.Sscanf(string(provideModeBytes), "%d", &provideMode)
+		return provideMode, err
+	}
+	return provideMode, fmt.Errorf("Not found.")
 }
 
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(
-		self.SetByJwt(""),
-		self.SetByClientJwt(""),
+		os.RemoveAll(self.localStorageDir),
+		os.MkdirAll(self.localStorageDir, LocalStorageFilePermissions),
 	)
 }
 
@@ -203,10 +228,10 @@ type AsyncLocalState struct {
 	jobs chan *job
 }
 
-func NewAsyncLocalState(localStorageDir string) *AsyncLocalState {
+func NewAsyncLocalState(localStorageHome string) *AsyncLocalState {
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
-	localState := newLocalState(cancelCtx, localStorageDir)
+	localState := newLocalState(cancelCtx, localStorageHome)
 
 	asyncLocalState := &AsyncLocalState{
 		ctx: cancelCtx,

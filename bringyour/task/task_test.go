@@ -202,7 +202,7 @@ func TestTask(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		netTaskCount += runCount
 	}
 
-	removedCount := RemoveFinishedTasks(ctx, time.Now())
+	removedCount := RemoveFinishedTasks(ctx, bringyour.NowUtc())
 	assert.Equal(t, int(removedCount), netTaskCount)
 	assert.Equal(t, 0, len(ListFinishedTasks(ctx)))
 })}

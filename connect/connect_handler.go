@@ -4,9 +4,11 @@ import (
     "context"
     "time"
     "net/http"
-    // "fmt"
+    "fmt"
 
     "github.com/gorilla/websocket"
+
+    "github.com/golang/glog"
 
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/jwt"
@@ -23,30 +25,55 @@ import (
 // where each connection will be a `connect.Transport` and traffic will be distributed across the transports
 
 
-const PingTimeout = connect.DefaultPingTimeout
-const WriteTimeout = connect.DefaultWriteTimeout
-const ReadTimeout = connect.DefaultReadTimeout
+type ConnectHandlerSettings struct {
+    PingTimeout time.Duration
+    WriteTimeout time.Duration
+    ReadTimeout time.Duration
+    SyncConnectionTimeout time.Duration
+    MaximumExchangeMessageByteCount ByteCount
+}
 
-const SyncConnectionTimeout = 60 * time.Second
+
+func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
+    platformTransportSettings := connect.DefaultPlatformTransportSettings()
+    return &ConnectHandlerSettings{
+        PingTimeout: platformTransportSettings.PingTimeout,
+        WriteTimeout: platformTransportSettings.WriteTimeout,
+        ReadTimeout: platformTransportSettings.ReadTimeout,
+        SyncConnectionTimeout: 60 * time.Second,
+
+        // a single exchange message size is encoded as an `int32`
+        // because message must be serialized/deserialized from memory,
+        // there is a global limit on the size per message
+        // messages above this size will be ignored from clients and the exchange
+        MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
+
+    }
+}
 
 
 type ConnectHandler struct {
     ctx context.Context
 	exchange *Exchange
+    settings *ConnectHandlerSettings
 }
 
-func NewConnectHandler(ctx context.Context, exchange *Exchange) *ConnectHandler {
+
+func NewConnectHandlerWithDefaults(ctx context.Context, exchange *Exchange) *ConnectHandler {
+    return NewConnectHandler(ctx, exchange, DefaultConnectHandlerSettings())
+}
+
+func NewConnectHandler(ctx context.Context, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
     return &ConnectHandler{
         ctx: ctx,
         exchange: exchange,
+        settings: settings,
     }
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     handleCtx, handleCancel := context.WithCancel(self.ctx)
     defer handleCancel()
-
-    // bringyour.Logger().Printf("CONNECT\b")
 
     upgrader := websocket.Upgrader{
         ReadBufferSize: 4 * 1024,
@@ -59,7 +86,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     }
     defer ws.Close()
 
-    ws.SetReadDeadline(time.Now().Add(ReadTimeout))
+    // enforce the message size limit on messages in
+    ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
+
+    ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
     messageType, authFrameBytes, err := ws.ReadMessage()
     if err != nil {
         // bringyour.Logger("TIMEOUT HA\n")
@@ -87,21 +117,24 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    clientId := *byJwt.ClientId
+
     instanceId, err := bringyour.IdFromBytes(auth.InstanceId)
     if err != nil {
         return
     }
 
+
     // verify the client is still part of the network
     // this will fail for example if the client has been removed
-    client := model.GetNetworkClient(handleCtx, *byJwt.ClientId)
+    client := model.GetNetworkClient(handleCtx, clientId)
     if client == nil || client.NetworkId != byJwt.NetworkId {
         // bringyour.Logger("ERROR HB\n")
         return
     }
 
     // echo the auth message on successful auth
-    ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
+    ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
     err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
     if err != nil {
         // bringyour.Logger("TIMEOUT HC\n")
@@ -111,106 +144,131 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
     // find the client ip:port from the request header
     // `X-Forwarded-For` is added by the warp lb
     clientAddress := r.Header.Get("X-Forwarded-For")
-    // bringyour.Logger().Printf("X-Forwarded-For header is %s (%s)", clientAddress, r.RemoteAddr)
     if clientAddress == "" {
         // use the raw connection remote address
         clientAddress = r.RemoteAddr
     }
 
-    connectionId := controller.ConnectNetworkClient(handleCtx, *byJwt.ClientId, clientAddress)
-    defer model.DisconnectNetworkClient(self.ctx, connectionId)
-    
-    go bringyour.HandleError(func() {
-    	// disconnect the client if the model marks the connection closed
-        defer func() {
-            handleCancel()
+    c := func() {
+        connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress)
+        defer model.DisconnectNetworkClient(self.ctx, connectionId)
+        
+        go bringyour.HandleError(func() {
+            // disconnect the client if the model marks the connection closed
+            defer func() {
+                handleCancel()
+            }()
+
+            for  {
+                select {
+                case <- handleCtx.Done():
+                    return
+                case <- time.After(self.settings.SyncConnectionTimeout):
+                }
+
+                if !model.IsNetworkClientConnected(handleCtx, connectionId) {
+                    return
+                }
+            }
+        }, handleCancel)
+
+
+        residentTransport := NewResidentTransport(
+            handleCtx,
+            self.exchange,
+            clientId,
+            instanceId,
+        )
+        go func() {
+            defer handleCancel()
+            bringyour.HandleError(residentTransport.Run)
+            residentTransport.Close()
+            ws.Close()
         }()
 
-    	for  {
-    		select {
-    		case <- handleCtx.Done():
-    			return
-    		case <- time.After(SyncConnectionTimeout):
-    		}
+        go bringyour.HandleError(func() {
+            // close the transport in the send
+            defer func() {
+                handleCancel()
+                residentTransport.Cancel()
+            }()
 
-    		if !model.IsNetworkClientConnected(handleCtx, connectionId) {
-                // bringyour.Logger().Printf("NETWORK CLIENT DISCONNECTED\n",)
-    			return
-    		}
-    	}
-    }, handleCancel)
-
-
-    residentTransport := NewResidentTransport(
-        handleCtx,
-        self.exchange,
-        *byJwt.ClientId,
-        instanceId,
-    )
-
-    go bringyour.HandleError(func() {
-        // close the transport in the send
-        defer residentTransport.Close()
-
-    	for {
-            ws.SetReadDeadline(time.Now().Add(ReadTimeout))
-            messageType, message, err := ws.ReadMessage()
-            // // bringyour.Logger().Printf("CONNECT HANDLER RECEIVE MESSAGE %s %s\n", message, err)
-            if err != nil {
-                // bringyour.Logger("TIMEOUT HD\n")
-                return
-            }
-
-
-            switch messageType {
-            case websocket.BinaryMessage:
-                if 0 == len(message) {
-                    // ping
-                    continue
+            for {
+                ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+                messageType, message, err := ws.ReadMessage()
+                if err != nil {
+                    return
                 }
 
 
-                // fmt.Printf("resident transport read message %s->\n", byJwt.ClientId)
+                switch messageType {
+                case websocket.BinaryMessage:
+                    if 0 == len(message) {
+                        // ping
+                        continue
+                    }
 
+                    select {
+                    case <- handleCtx.Done():
+                        return
+                    case <- residentTransport.Done():
+                        return
+                    case residentTransport.send <- message:
+                        glog.V(2).Infof("[rtr] <-%s\n", clientId.String())
+                    case <- time.After(self.settings.ReadTimeout):
+                    }
+                // else ignore
+                }
+            }
+        }, handleCancel)
+
+
+        go bringyour.HandleError(func() {
+            defer func() {
+                handleCancel()
+                residentTransport.Cancel()
+            }()
+            
+            for {
                 select {
                 case <- handleCtx.Done():
                     return
                 case <- residentTransport.Done():
                     return
-                case residentTransport.send <- message:
-                case <- time.After(WriteTimeout):
-                    // bringyour.Logger("TIMEOUT HE\n")
+                case message, ok := <- residentTransport.receive:
+                    if !ok {
+                        return
+                    }
+                    
+                    ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+                    if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
+                        // note that for websocket a dealine timeout cannot be recovered
+                        return
+                    }
+                    glog.V(2).Infof("[rts] ->%s\n", clientId.String())
+                case <- time.After(self.settings.PingTimeout):
+                    ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+                    if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
+                        // note that for websocket a dealine timeout cannot be recovered
+                        return
+                    }
                 }
-            // else ignore
             }
-        }
-    }, handleCancel)
+        }, handleCancel)
 
-
-    for {
         select {
         case <- handleCtx.Done():
             return
-        case message, ok := <- residentTransport.receive:
-            if !ok {
-                return
-            }
-            
-            // fmt.Printf("resident transport write message ->%s\n", byJwt.ClientId)
-
-            // bringyour.Logger("WRITE (%d) -> %s\n", len(message), byJwt.ClientId.String())
-            // // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE %s\n", message)
-            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
-            if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
-                // bringyour.Logger().Printf("CONNECT HANDLER SEND MESSAGE ERROR %s\n", err)
-                return
-            }
-        case <- time.After(PingTimeout):
-            ws.SetWriteDeadline(time.Now().Add(WriteTimeout))
-            if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
-                // bringyour.Logger().Printf("CONNECT HANDLER SEND PING ERROR %s\n", err)
-                return
-            }
+        case <- residentTransport.Done():
+            return
         }
+    }
+    if glog.V(2) {
+        bringyour.Trace(
+            fmt.Sprintf("[rt]connect %s", clientId.String()),
+            c,
+        )
+    } else {
+        c()
     }
 }

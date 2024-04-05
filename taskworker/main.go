@@ -12,6 +12,7 @@ import (
     
     "bringyour.com/service/taskworker/work"    
     "bringyour.com/bringyour"
+    "bringyour.com/bringyour/controller"
     "bringyour.com/bringyour/session"
     "bringyour.com/bringyour/router"
     "bringyour.com/bringyour/task"
@@ -98,6 +99,7 @@ func initTasks(ctx context.Context) {
         work.ScheduleExportStats(clientSession, tx)
         work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
         ScheduleTaskCleanup(clientSession, tx)
+        controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
     }))
 }
 
@@ -111,6 +113,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
         task.NewTaskTargetWithPost(work.RemoveExpiredAuthCodes, work.RemoveExpiredAuthCodesPost),
         task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
         task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
+        task.NewTaskTargetWithPost(controller.BackfillInitialTransferBalance, controller.BackfillInitialTransferBalancePost),
     )
 
     return taskWorker

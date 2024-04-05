@@ -17,6 +17,9 @@ import (
 )
 
 
+// const BanMessage = "This client has been temporarily banned by bandit. support@bringyour.com"
+
+
 type ImplFunction[R any] func(*session.ClientSession)(R, error)
 type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession)(R, error)
 type BodyFormatFunction func(*http.Request)(io.Reader, error)
@@ -51,6 +54,11 @@ func wrap[R any](
 		http.Error(w, err.Error(), http.StatusInternalServerError)
         return
 	}
+
+	// if bringyour.Banned(session.ClientIpPort()) {
+	// 	http.Error(w, BanMessage, http.StatusForbidden)
+	// 	return
+	// }
 
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(session)
@@ -139,6 +147,17 @@ func wrapWithInput[T any, R any](
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
+	session, err := session.NewClientSessionFromRequest(req)
+    if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+	}
+
+	// if bringyour.Banned(session.ClientIpPort()) {
+	// 	http.Error(w, BanMessage, http.StatusForbidden)
+	// 	return
+	// }
+
 	body, err := bodyFormatter(req)
 	if err != nil {
     	bringyour.Logger().Printf("Request body formatter error %s\n", err)
@@ -163,16 +182,13 @@ func wrapWithInput[T any, R any](
         return
     }
 
-    session, err := session.NewClientSessionFromRequest(req)
-    if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-	}
-
 	// bringyour.Logger().Printf("Handling %s\n", impl)
     result, err := impl(input, session)
 	if err != nil {
-		bringyour.Logger().Printf("Request impl error: %s\n", bringyour.ErrorJsonNoStack(err))
+		custom := map[string]any{
+			"headers": req.Header,
+		}
+		bringyour.Logger().Printf("Request impl error (%T): %s\n", input, bringyour.ErrorJsonWithCustomNoStack(err, custom))
 		RaiseHttpError(err, w)
         return
 	}

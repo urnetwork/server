@@ -55,7 +55,8 @@ type NetworkCreateResult struct {
 
 type NetworkCreateResultNetwork struct {
 	ByJwt *string `json:"by_jwt,omitempty"`
-	NetworkName *string `json:"network_name,omitempty"`
+	NetworkId bringyour.Id `json:"network_id,omitempty"`
+	NetworkName string `json:"network_name,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -112,7 +113,7 @@ func NetworkCreate(
 		created := false
 		var createdNetworkId bringyour.Id
 		
-		bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			var result bringyour.PgResult
 			var err error
 
@@ -191,7 +192,7 @@ func NetworkCreate(
 				createdUserId,
 			)
 			bringyour.Raise(err)
-		}))
+		})
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
@@ -202,7 +203,8 @@ func NetworkCreate(
 					UserAuth: *userAuth,
 				},
 				Network: &NetworkCreateResultNetwork{
-					NetworkName: &networkCreate.NetworkName,
+					NetworkName: networkCreate.NetworkName,
+					NetworkId: createdNetworkId,
 				},
 			}
 			return result, nil
@@ -229,7 +231,7 @@ func NetworkCreate(
 			var createdNetworkId bringyour.Id
 			var createdUserId bringyour.Id
 
-			bringyour.Raise(bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+			bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 				var userId *bringyour.Id
 
 				result, err := tx.Query(
@@ -287,7 +289,7 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
-			}))
+			})
 			if created {
 				auditNetworkCreate(networkCreate, createdNetworkId, session)
 
@@ -305,6 +307,8 @@ func NetworkCreate(
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt: &byJwtSigned,
+						NetworkName: networkCreate.NetworkName,
+						NetworkId: createdNetworkId,
 					},
 					UserAuth: &authJwt.UserAuth,
 				}
@@ -360,7 +364,7 @@ func Testing_CreateNetwork(
 ) (userAuth string) {
 	userAuth = fmt.Sprintf("%s@bringyour.com", networkId)
 
-	bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -384,7 +388,7 @@ func Testing_CreateNetwork(
 			userAuth,
 			true,
 		))
-	}))
+	})
 
 	return
 }

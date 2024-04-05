@@ -75,7 +75,7 @@ func NewByJwt(
 		networkId,
 		userId,
 		networkName,
-		time.Now(),
+		bringyour.NowUtc(),
 		authSessionIds...,
 	)
 }
@@ -181,7 +181,7 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 
 	var hasInactiveSession bool
 
-	bringyour.Raise(bringyour.Db(ctx, func(conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		if len(byJwt.AuthSessionIds) == 0 {
 			result, err := conn.Query(
 				ctx,
@@ -235,7 +235,7 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 				hasInactiveSession = result.Next()
 			})
 		}
-	}))
+	})
 
 	return !hasInactiveSession
 }

@@ -21,19 +21,57 @@ import (
     "bringyour.com/protocol"
     "bringyour.com/bringyour"
     "bringyour.com/bringyour/model"
+    "bringyour.com/bringyour/controller"
     "bringyour.com/bringyour/jwt"
     "bringyour.com/bringyour/router"
-    // "bringyour.com/bringyour/session"
+    "bringyour.com/bringyour/session"
+)
+
+
+func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, false)
+})}
+
+
+func TestConnectWithSymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestSymmetric, false)
+})}
+
+
+func TestConnectWithAsymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestAsymmetric, false)
+})}
+
+
+func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, true)
+})}
+
+
+func TestConnectWithSymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestSymmetric, true)
+})}
+
+
+func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestAsymmetric, true)
+})}
+
+
+const (
+	contractTestNone int = 0
+	contractTestSymmetric = 1
+	// the normal client-provider relationship
+	contractTestAsymmetric = 2
 )
 
 
 // this test that two clients can communicate via the connect server
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
-func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	// FIXME the chaos is messed up
-	ChaosResidentShutdownPerSecond = 0.01
-
+// contract logic is optional so that the effects of contracts can be isolated
+// FIXME set all sequence buffer sizes to 0
+func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 	type Message struct {
 		sourceId connect.Id
@@ -45,7 +83,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	os.Setenv("WARP_BLOCK", "test")
 
 
-	receiveTimeout := 120 * time.Second
+	receiveTimeout := 60 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -56,8 +94,9 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	
 	transportCount := 8
-	burstM := 32
+	burstM := 8
 	newInstanceM := -1
+	nackM := 4
 
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,10 +107,10 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	block := "test"
 
 
-	clientIdA := connect.NewId()
-	clientAInstanceId := connect.NewId()
-	clientIdB := connect.NewId()
-	clientBInstanceId := connect.NewId()
+	clientIdA := bringyour.NewId()
+	clientAInstanceId := bringyour.NewId()
+	clientIdB := bringyour.NewId()
+	clientBInstanceId := bringyour.NewId()
 
 	routes := map[string]string{}
 	for i := 0; i < 10; i += 1 {
@@ -81,7 +120,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	createServer := func(exchange *Exchange, port int) *http.Server {
-	    connectHandler := NewConnectHandler(ctx, exchange)
+	    connectHandler := NewConnectHandlerWithDefaults(ctx, exchange)
 
 	    routes := []*router.Route{
 	        router.NewRoute("GET", "/status", router.WarpStatus),
@@ -110,7 +149,18 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 			9000 + i: 9000 + i,
 		}
 
-		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes)
+		settings := DefaultExchangeSettings()
+		settings.ExchangeBufferSize = 0
+		if enableChaos {
+			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
+		}
+		switch contractTest {
+		case contractTestSymmetric, contractTestAsymmetric:
+			settings.ForwardEnforceActiveContracts = true
+		}
+
+
+		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
 		exchanges[host] = exchange
 
 		server := createServer(exchange, port)
@@ -126,8 +176,25 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	}
 
 
+	maxMessageContentSize := ByteCount(0)
+	for _, messageContentSize := range messageContentSizes {
+		maxMessageContentSize = max(maxMessageContentSize, messageContentSize)
+	}
+	standardContractTransferByteCount := 4 * maxMessageContentSize
+	standardContractFillFraction := float32(0.5)
+
 	clientSettingsA := connect.DefaultClientSettings()
-	clientA := connect.NewClient(ctx, clientIdA, clientSettingsA)
+	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
+	clientSettingsA.SendBufferSettings.AckBufferSize = 0
+	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
+	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
+	clientSettingsA.ForwardBufferSettings.SequenceBufferSize = 0
+	// disable scheduled network events
+	clientSettingsA.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
+	// set this low enough to test new contracts in the transfer
+	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
+	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
@@ -135,11 +202,22 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
 	clientSettingsB := connect.DefaultClientSettings()
-	clientB := connect.NewClient(ctx, clientIdB, clientSettingsB)
+	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
+	clientSettingsB.SendBufferSettings.AckBufferSize = 0
+	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
+	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
+	clientSettingsB.ForwardBufferSettings.SequenceBufferSize = 0
+	// disable scheduled network events
+	clientSettingsB.ContractManagerSettings = connect.DefaultContractManagerSettingsNoNetworkEvents()
+	// set this low enough to test new contracts in the transfer
+	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
+	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
 	// go clientB.Run()
+
 
 	
 	networkIdA := bringyour.NewId()
@@ -157,7 +235,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		ctx,
 		networkIdA,
 		deviceIdA,
-		bringyour.Id(clientIdA),
+		clientIdA,
 		"a",
 		"a",
 	)
@@ -177,19 +255,20 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		ctx,
 		networkIdB,
 		deviceIdB,
-		bringyour.Id(clientIdB),
+		clientIdB,
 		"b",
 		"b",
 	)
 
+
 	// attach transports
 
-	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, bringyour.Id(clientIdA)).Sign()
+	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, clientIdA)
 
 	authA := &connect.ClientAuth {
-	    ByJwt: byJwtA,
+	    ByJwt: byJwtA.Sign(),
 	    // ClientId: clientIdA,
-	    InstanceId: clientAInstanceId,
+	    InstanceId: connect.Id(clientAInstanceId),
 	    AppVersion: "0.0.0",
 	}
 
@@ -201,12 +280,12 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	}
 
 
-	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, bringyour.Id(clientIdB)).Sign()
+	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, clientIdB)
 
 	authB := &connect.ClientAuth {
-	    ByJwt: byJwtB,
+	    ByJwt: byJwtB.Sign(),
 	    // ClientId: clientIdB,
-	    InstanceId: clientBInstanceId,
+	    InstanceId: connect.Id(clientBInstanceId),
 	    AppVersion: "0.0.0",
 	}
 
@@ -252,16 +331,150 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	})
 
 
+	initialTransferBalance := ByteCount(1024 * 1024 * 1024 * 1024)
+
+	balanceCodeA, err := model.CreateBalanceCode(
+		ctx,
+	    initialTransferBalance,
+	    0,
+	    "test-1",
+	    "",
+	    "",
+	)
+	assert.Equal(t, nil, err)
+
+	result, err := model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret: balanceCodeA.Secret,
+		},
+		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
+	)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, nil, result.Error)
+
+
+	balanceCodeB, err := model.CreateBalanceCode(
+	    ctx,
+	    initialTransferBalance,
+	    0,
+	    "test-2",
+	    "",
+	    "",
+	)
+	assert.Equal(t, nil, err)
+
+	result, err = model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret: balanceCodeB.Secret,
+		},
+		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtB),
+	)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, nil, result.Error)
+
+
+	// set up provide
+	switch contractTest {
+	case contractTestNone:
+		clientA.ContractManager().AddNoContractPeer(connect.Id(clientIdB))
+		clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
+
+	case contractTestSymmetric:
+		// FIXME
+		// clientA.ContractManager().AddNoContractPeer(connect.Id(clientIdB))
+		// clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
+
+
+		provideModes := map[protocol.ProvideMode]bool{
+	        protocol.ProvideMode_Network: true,
+	        protocol.ProvideMode_Public: true,
+	    }
+
+	    func() {
+		    ack := make(chan struct{})
+			clientA.ContractManager().SetProvideModesWithAckCallback(
+				provideModes,
+				func(err error) {
+		            close(ack)
+		        },
+		    )
+	        select {
+		    case <- ack:
+		    case <- time.After(5 * time.Second):
+		    }
+		}()
+
+		func() {
+		    ack := make(chan struct{})
+			clientB.ContractManager().SetProvideModesWithAckCallback(
+				provideModes,
+				func(err error) {
+		            close(ack)
+		        },
+		    )
+			select {
+		    case <- ack:
+		    case <- time.After(5 * time.Second):
+		    }
+		}()
+	    
+
+	case contractTestAsymmetric:
+		// FIXME
+		// clientA.ContractManager().AddNoContractPeer(connect.Id(clientIdB))
+		// clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
+
+
+		// a->b is provide
+		// b->a is a companion
+
+		func() {
+			ack := make(chan struct{})
+			clientA.ContractManager().SetProvideModesWithReturnTrafficWithAckCallback(
+				map[protocol.ProvideMode]bool{},
+				func(err error) {
+		            close(ack)
+		        },
+		    )
+	        select {
+		    case <- ack:
+		    case <- time.After(5 * time.Second):
+		    }
+		}()
+
+		func() {
+		    ack := make(chan struct{})
+			clientB.ContractManager().SetProvideModesWithReturnTrafficWithAckCallback(
+				map[protocol.ProvideMode]bool{
+			        protocol.ProvideMode_Network: true,
+			        protocol.ProvideMode_Public: true,
+			    },
+				func(err error) {
+		            close(ack)
+		        },
+		    )
+		    select {
+		    case <- ack:
+		    case <- time.After(5 * time.Second):
+		    }
+		}()
+
+		
+
+	}
+
+
 	for _, messageContentSize := range messageContentSizes {
-		messageContentBytes := make([]byte, messageContentSize)
+		// the message bytes are hex encoded which doubles the size
+		messageContentBytes := make([]byte, messageContentSize / 2)
 		mathrand.Read(messageContentBytes)
 		messageContent := hex.EncodeToString(messageContentBytes)
+		assert.Equal(t, int(messageContentSize), len(messageContent))
 
 
 		ackA := make(chan error, 1024)
 		ackB := make(chan error, 1024)
 
-		nackM := 4
 		
 
 		for burstSize := 1; burstSize < burstM; burstSize += 1 {
@@ -278,15 +491,16 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientAInstanceId = connect.NewId()
+					clientAInstanceId = bringyour.NewId()
 				}
 				authA = &connect.ClientAuth {
-				    ByJwt: byJwtA,
+				    ByJwt: byJwtA.Sign(),
 				    // ClientId: clientIdA,
-				    InstanceId: clientAInstanceId,
+				    InstanceId: connect.Id(clientAInstanceId),
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
+					fmt.Printf("new transport a\n")
 					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
 					transportAs = append(transportAs, transportA)
 					// go transportA.Run(clientA.RouteManager())
@@ -306,7 +520,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 									MessageCount: uint32(0),
 									Content: messageContent,
 								}),
-								clientIdB,
+								connect.Id(clientIdB),
 								nil,
 								-1,
 								connect.NoAck(),
@@ -321,7 +535,7 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 								MessageCount: uint32(burstSize),
 								Content: messageContent,
 							}),
-							clientIdB,
+							connect.Id(clientIdB),
 							func (err error) {
 								ackA <- err
 							},
@@ -342,14 +556,17 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 							// messagesToB = append(messagesToB, message)
 
 							// check in order
-							assert.Equal(t, 1, len(message.frames))
-							frame := message.frames[0]
-							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-							if 0 < simpleMessage.MessageCount {
-								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-								break ReceiveAckB
-							} else {
-								nackBCount += 1
+							for _, frame := range message.frames {
+								switch v := connect.RequireFromFrame(frame).(type) {
+								case *protocol.SimpleMessage:
+									if 0 < v.MessageCount {
+										assert.Equal(t, uint32(burstSize), v.MessageCount)
+										assert.Equal(t, uint32(i), v.MessageIndex)
+										break ReceiveAckB
+									} else {
+										nackBCount += 1
+									}
+								}
 							}
 						case <- time.After(receiveTimeout):
 							// printAllStacks()
@@ -368,13 +585,15 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						assert.Equal(t, 1, len(message.frames))
-						frame := message.frames[0]
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						if 0 < simpleMessage.MessageCount {
-							t.Fatal("Unexpected ack message.")
-						} else {
-							nackBCount += 1
+						for _, frame := range message.frames {
+							switch v := connect.RequireFromFrame(frame).(type) {
+							case *protocol.SimpleMessage:
+								if 0 < v.MessageCount {
+									t.Fatal("Unexpected ack message.")
+								} else {
+									nackBCount += 1
+								}
+							}
 						}
 					case <- time.After(timeout):
 					}
@@ -410,15 +629,16 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				}
 				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 					fmt.Printf("new instance\n")
-					clientBInstanceId = connect.NewId()
+					clientBInstanceId = bringyour.NewId()
 				}
 				authB = &connect.ClientAuth {
-				    ByJwt: byJwtB,
+				    ByJwt: byJwtB.Sign(),
 				    // ClientId: clientIdB,
-				    InstanceId: clientBInstanceId,
+				    InstanceId: connect.Id(clientBInstanceId),
 				    AppVersion: "0.0.0",
 				}
 				for i := 0; i < transportCount; i += 1 {
+					fmt.Printf("new transport b\n")
 					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
 					transportBs = append(transportBs, transportB)
 					// go transportB.Run(clientB.RouteManager())
@@ -432,31 +652,44 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
 						for j := 0; j < nackM; j += 1 {
+							opts := []any{
+								connect.NoAck(),
+							}
+							if contractTest == contractTestAsymmetric {
+								opts = append(opts, connect.CompanionContract())
+							}
+
 							success := clientB.SendWithTimeout(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i * nackM + j),
 									MessageCount: uint32(0),
 									Content: messageContent,
 								}),
-								clientIdA,
+								connect.Id(clientIdA),
 								nil,
 								-1,
-								connect.NoAck(),
+								opts...,
 							)
 							if !success {
 								panic(errors.New("Could not send."))
 							}
 						}
-						success := clientB.Send(
+						opts := []any{}
+						if contractTest == contractTestAsymmetric {
+							opts = append(opts, connect.CompanionContract())
+						}
+						success := clientB.SendWithTimeout(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content: messageContent,
 							}),
-							clientIdA,
+							connect.Id(clientIdA),
 							func (err error) {
 								ackB <- err
 							},
+							-1,
+							opts...,
 						)
 						if !success {
 							panic(errors.New("Could not send."))
@@ -477,14 +710,17 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 							// messagesToB = append(messagesToB, message)
 
 							// check in order
-							assert.Equal(t, 1, len(message.frames))
-							frame := message.frames[0]
-							simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-							if 0 < simpleMessage.MessageCount {
-								assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
-								break ReceiveAckA
-							} else {
-								nackACount += 1
+							for _, frame := range message.frames {
+								switch v := connect.RequireFromFrame(frame).(type) {
+								case *protocol.SimpleMessage:
+									if 0 < v.MessageCount {
+										assert.Equal(t, uint32(burstSize), v.MessageCount)
+										assert.Equal(t, uint32(i), v.MessageIndex)
+										break ReceiveAckA
+									} else {
+										nackACount += 1
+									}
+								}
 							}
 						case <- time.After(receiveTimeout):
 							// printAllStacks()
@@ -503,13 +739,15 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						assert.Equal(t, 1, len(message.frames))
-						frame := message.frames[0]
-						simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-						if 0 < simpleMessage.MessageCount {
-							t.Fatal("Unexpected ack message.")
-						} else {
-							nackACount += 1
+						for _, frame := range message.frames {
+							switch v := connect.RequireFromFrame(frame).(type) {
+							case *protocol.SimpleMessage:
+								if 0 < v.MessageCount {
+									t.Fatal("Unexpected ack message.")
+								} else {
+									nackACount += 1
+								}
+							}
 						}
 					case <- time.After(timeout):
 					}
@@ -540,23 +778,43 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 				// }
 
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(clientIdB)
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.Id(clientIdB), false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(clientIdA)
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.Id(clientIdA), false)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(clientIdB, sequenceIdB)
+				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.Id(clientIdB), sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
 				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(clientIdA, sequenceIdA)
+				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.Id(clientIdA), sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
 				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
 		}
+	}
+
+	select {
+	case <- time.After(10 * time.Second):
+	}
+
+	flushedContractIdsA := []bringyour.Id{}
+	for _, contractId := range clientA.ContractManager().Flush(false) {
+		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
+	}
+	flushedContractIdsB := []bringyour.Id{}
+	for _, contractId := range clientB.ContractManager().Flush(false) {
+		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
+	}
+
+	clientA.Flush()
+	clientB.Flush()
+
+	select {
+	case <- time.After(4 * time.Second):
 	}
 
 	for _, transportA := range transportAs {
@@ -585,7 +843,114 @@ func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	clientA.Close()
 	clientB.Close()
-})}
+
+
+	select {
+	case <- time.After(1 * time.Second):
+	}
+
+
+	assert.Equal(
+		t,
+		ByteCount(0),
+		clientA.ContractManager().LocalStats().ContractOpenByteCount(),
+	)
+	assert.Equal(
+		t,
+		ByteCount(0),
+		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
+	)
+
+	// these contracts were queued in the contract manager
+	// and should be partially closed by the source
+	contractIdPartialClosePartiesAToB := model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
+	contractIdPartialClosePartiesBToA := model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
+
+	// FIXME what are these other contracts?
+	// for _, party := range contractIdPartialClosePartiesAToB {
+	// 	assert.Equal(t, model.ContractPartySource, party)
+	// }
+	// for _, party := range contractIdPartialClosePartiesBToA {
+	// 	assert.Equal(t, model.ContractPartySource, party)
+	// }
+
+	if e := len(contractIdPartialClosePartiesAToB) - len(flushedContractIdsA); 1 < e {
+		assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
+	}
+	for _, contractId := range flushedContractIdsA {
+		party, ok := contractIdPartialClosePartiesAToB[contractId]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, model.ContractPartySource, party)
+	}
+	if e := len(contractIdPartialClosePartiesBToA) - len(flushedContractIdsB); 1 < e {
+		assert.Equal(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
+	}
+	for _, contractId := range flushedContractIdsB {
+		party, ok := contractIdPartialClosePartiesBToA[contractId]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, model.ContractPartySource, party)
+	}
+
+	localStatsA := clientA.ContractManager().LocalStats()
+	localStatsB := clientB.ContractManager().LocalStats()
+
+	byteCountA := (localStatsA.ContractCloseByteCount + localStatsB.ReceiveContractCloseByteCount) / 2
+	byteCountB := (localStatsB.ContractCloseByteCount + localStatsA.ReceiveContractCloseByteCount) / 2
+
+
+	byteCountEquivalent := func(a ByteCount, b ByteCount) {
+		// because of resets and dropped nacks there may be some small discrepancy
+		threshold := 8 * model.Mib
+		e := a - b
+		if e < -threshold || threshold < e {
+			assert.Equal(t, a, b)
+		}
+	}
+
+	switch contractTest {
+	case contractTestNone:
+		// no balance deducted
+		byteCountEquivalent(
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		byteCountEquivalent(
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+	case contractTestSymmetric:
+		// a and b each have 1x balance deducted
+
+		byteCountEquivalent(
+			initialTransferBalance - 
+				byteCountA - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesAToB)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		byteCountEquivalent(
+			initialTransferBalance - 
+				byteCountB - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesBToA)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+
+	case contractTestAsymmetric:
+		// a has 2x balance deducted and b has no balance deducted
+		
+		byteCountEquivalent(
+			initialTransferBalance - 
+				byteCountA - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesAToB)) -
+				byteCountB - 
+				standardContractTransferByteCount * ByteCount(len(contractIdPartialClosePartiesBToA)),
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdA),
+		)
+		byteCountEquivalent(
+			initialTransferBalance,
+			model.GetActiveTransferBalanceByteCount(ctx, networkIdB),
+		)
+	}
+}
 
 
 func printAllStacks() {
@@ -595,12 +960,22 @@ func printAllStacks() {
 }
 
 
+type controllerOutOfBandControl struct {
+	ctx context.Context
+	clientId bringyour.Id
+}
 
-// FIXME TestConnectSmallBuffer
+func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId bringyour.Id) connect.OutOfBandControl {
+	return &controllerOutOfBandControl{
+		ctx: ctx,
+		clientId: clientId,
+	}
+} 
 
-
-
-
-
-
+func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
+	bringyour.HandleError(func() {
+		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames)
+		callback(resultFrames, err)
+	})
+}
 

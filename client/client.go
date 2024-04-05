@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"hash/fnv"
 	"math"
+	"flag"
+	"os"
 
 	"bringyour.com/protocol"
 	"bringyour.com/connect"
@@ -27,6 +29,19 @@ import (
 //
 // additionally, the entire bringyour.com/bringyour tree cannot be used because it pulls in the
 // `warp` environment expectations, which is not compatible with the client lib
+
+
+func init() {
+	initGlog()
+}
+
+func initGlog() {
+	flag.Set("logtostderr", "true")
+    flag.Set("stderrthreshold", "INFO")
+    flag.Set("v", "0")
+    // unlike unix, the android/ios standard is for diagnostics to go to stdout
+    os.Stderr = os.Stdout
+}
 
 
 // this value is set via the linker, e.g.
@@ -178,6 +193,7 @@ type ProvideMode = int
 const (
 	ProvideModeNone ProvideMode = ProvideMode(protocol.ProvideMode_None)
 	ProvideModeNetwork ProvideMode = ProvideMode(protocol.ProvideMode_Network)
+	ProvideModeFriendsAndFamily ProvideMode = ProvideMode(protocol.ProvideMode_FriendsAndFamily)
 	ProvideModePublic ProvideMode = ProvideMode(protocol.ProvideMode_Public)
 )
 

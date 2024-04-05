@@ -27,6 +27,13 @@ import (
 )
 
 
+
+const InitialTransferBalance = 32 * model.Gib
+
+// 30 days
+const InitialTransferBalanceDuration = 30 * 24 * time.Hour
+
+
 const SubscriptionGracePeriod = 24 * time.Hour
 
 
@@ -199,7 +206,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		ActiveTransferBalances: transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		WalletInfo: walletInfo,
-		UpdateTime: time.Now(),
+		UpdateTime: bringyour.NowUtc(),
 	}, nil
 }
 
@@ -776,9 +783,9 @@ func PlaySubscriptionRenewalPost(
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else if time.Now().Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+	} else if bringyour.NowUtc().Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
 		// check again in 30 minutes
-		playSubscriptionRenewal.CheckTime = time.Now().Add(30 * time.Minute)
+		playSubscriptionRenewal.CheckTime = bringyour.NowUtc().Add(30 * time.Minute)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
@@ -885,4 +892,65 @@ func verifyPlayAuth(auth string) error {
 	}
 	return errors.New("Missing authorization.")
 }
+
+
+func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) bool {
+	startTime := bringyour.NowUtc()
+	endTime := startTime.Add(InitialTransferBalanceDuration)
+	return model.AddBasicTransferBalance(
+		ctx,
+		networkId,
+		InitialTransferBalance,
+		startTime,
+		endTime,
+	)
+}
+
+
+// BACKFILL INITIAL TRANSFER BALANCE
+
+type BackfillInitialTransferBalanceArgs struct {
+}
+
+type BackfillInitialTransferBalanceResult struct {
+}
+
+func ScheduleBackfillInitialTransferBalance(clientSession *session.ClientSession, tx bringyour.PgTx) {
+    task.ScheduleTaskInTx(
+        tx,
+        BackfillInitialTransferBalance,
+        &BackfillInitialTransferBalanceArgs{},
+        clientSession,
+        task.RunOnce("backfill_initial_transfer_balance"),
+        task.RunAt(bringyour.NowUtc().Add(15 * time.Minute)),
+    )
+}
+
+func BackfillInitialTransferBalance(
+    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+    clientSession *session.ClientSession,
+) (*BackfillInitialTransferBalanceResult, error) {
+    networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
+	for _, networkId := range networkIds {
+		// add initial transfer balance
+		AddInitialTransferBalance(clientSession.Ctx, networkId)
+	}
+	return &BackfillInitialTransferBalanceResult{}, nil
+}
+
+func BackfillInitialTransferBalancePost(
+    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+    backfillInitialTransferBalanceResult *BackfillInitialTransferBalanceResult,
+    clientSession *session.ClientSession,
+    tx bringyour.PgTx,
+) error {
+    ScheduleBackfillInitialTransferBalance(clientSession, tx)
+    return nil
+}
+
+
+// FIXME
+// FIXME
+// FIXME PlanPayments and payment loop
+
 

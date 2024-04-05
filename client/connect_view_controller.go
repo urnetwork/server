@@ -17,6 +17,21 @@ import (
 var cvcLog = logFn("connect_view_controller")
 
 
+type ConnectionListener interface {
+	ConnectionChanged(location *ConnectLocation)
+}
+
+
+type FilteredLocationsListener interface {
+	FilteredLocationsChanged(filteredLocations *ConnectLocationList)
+}
+
+
+type LocationListener interface {
+	LocationChanged(location *ConnectLocation)
+}
+
+
 type ConnectViewController struct {
 	glViewController
 
@@ -59,18 +74,24 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 }
 
 func (self *ConnectViewController) Start() {
-	var activeLocation *ConnectLocation
-	self.stateLock.Lock()
-	activeLocation = self.activeLocation
-	self.stateLock.Unlock()
+	// var activeLocation *ConnectLocation
+	// self.stateLock.Lock()
+	// activeLocation = self.activeLocation
+	// self.stateLock.Unlock()
 
-	self.connectionChanged(activeLocation, activeLocation != nil)
+	// self.connectionChanged(activeLocation, activeLocation != nil)
 
 	// TODO filtered results
 }
 
 func (self *ConnectViewController) Stop() {
 	// FIXME	
+}
+
+func (self *ConnectViewController) GetActiveLocation() *ConnectLocation {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.activeLocation
 }
 
 func (self *ConnectViewController) AddConnectionListener(listener ConnectionListener) Sub {
@@ -81,12 +102,11 @@ func (self *ConnectViewController) AddConnectionListener(listener ConnectionList
 }
 
 // `ConnectionListener`
-func (self *ConnectViewController) connectionChanged(location *ConnectLocation, connected bool) {
+func (self *ConnectViewController) connectionChanged(location *ConnectLocation) {
 	for _, listener := range self.connectionListeners.Get() {
-		func() {
-			defer recover()
-			listener.ConnectionChanged(location, connected)
-		}()
+		connect.HandleError(func() {
+			listener.ConnectionChanged(location)
+		})
 	}
 }
 
@@ -100,10 +120,9 @@ func (self *ConnectViewController) AddFilteredLocationsListener(listener Filtere
 // `FilteredLocationsListener`
 func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *ConnectLocationList) {
 	for _, listener := range self.filteredLocationListeners.Get() {
-		func() {
-			defer recover()
+		connect.HandleError(func() {
 			listener.FilteredLocationsChanged(filteredLocations)
-		}()
+		})
 	}
 }
 
@@ -168,7 +187,7 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 			*location.ConnectLocationId.ClientId,
 		}
 		self.setDestinations(clientIds)
-		self.connectionChanged(location, true)
+		self.connectionChanged(location)
 	} else {
 		exportedExcludeClientIds := NewIdList()
 		// exclude self
@@ -190,7 +209,7 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 						clientIds = append(clientIds, *clientId)
 					}
 					self.setDestinations(clientIds)
-					self.connectionChanged(location, true)
+					self.connectionChanged(location)
 				}
 			},
 		)))
@@ -317,7 +336,7 @@ func (self *ConnectViewController) Disconnect() {
 	clear(self.activeDestinationIds)
 	self.stateLock.Unlock()
 
-	self.connectionChanged(nil, false)
+	self.connectionChanged(nil)
 }
 
 func (self *ConnectViewController) FilterLocations(filter string) {
@@ -556,21 +575,6 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 
 		return a.ConnectLocationId.Cmp(b.ConnectLocationId)
 	}
-}
-
-
-type ConnectionListener interface {
-	ConnectionChanged(location *ConnectLocation, connected bool)
-}
-
-
-type FilteredLocationsListener interface {
-	FilteredLocationsChanged(filteredLocations *ConnectLocationList)
-}
-
-
-type LocationListener interface {
-	LocationChanged(location *ConnectLocation)
 }
 
 
