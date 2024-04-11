@@ -222,6 +222,15 @@ func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
 }
 
+func (self *BringYourDevice) WindowEvents() *WindowEvents {
+	switch v := self.remoteUserNatClient.(type) {
+	case *connect.RemoteUserNatMultiClient:
+		return newWindowEvents(v.Monitor().Events())
+	default:
+		return nil
+	}
+}
+
 func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeListener) Sub {
 	callbackId := self.provideChangeListeners.Add(listener)
 	return newSub(func() {
@@ -543,3 +552,66 @@ func parseByJwtClientId(byJwt string) (connect.Id, error) {
     }
 }
 
+
+type WindowEvents struct {
+	windowExpandEvent *connect.WindowExpandEvent
+	providerEvents map[connect.Id]*connect.ProviderEvent
+}
+
+func newWindowEvents(
+	windowExpandEvent *connect.WindowExpandEvent,
+	providerEvents map[connect.Id]*connect.ProviderEvent,
+) *WindowEvents {
+	return &WindowEvents{
+		windowExpandEvent: windowExpandEvent,
+		providerEvents: providerEvents,
+	}
+}
+
+func (self *WindowEvents) CurrentSize() int {
+	return self.windowExpandEvent.CurrentSize
+}
+
+func (self *WindowEvents) TargetSize() int {
+	return self.windowExpandEvent.TargetSize
+}
+
+func (self *WindowEvents) InEvaluationClientCount() int {
+	count := 0
+	for _, providerEvent := range self.providerEvents {
+		if providerEvent.State == connect.ProviderStateInEvaluation {
+			count += 1
+		}
+	}
+	return count
+}
+
+func (self *WindowEvents) AddedClientCount() int {
+	count := 0
+	for _, providerEvent := range self.providerEvents {
+		if providerEvent.State == connect.ProviderStateAdded {
+			count += 1
+		}
+	}
+	return count
+}
+
+func (self *WindowEvents) NotAddedClientCount() int {
+	count := 0
+	for _, providerEvent := range self.providerEvents {
+		if providerEvent.State == connect.ProviderStateNotAdded {
+			count += 1
+		}
+	}
+	return count
+}
+
+func (self *WindowEvents) EvaluationFailedClientCount() int {
+	count := 0
+	for _, providerEvent := range self.providerEvents {
+		if providerEvent.State == connect.ProviderStateEvaluationFailed {
+			count += 1
+		}
+	}
+	return count
+}
