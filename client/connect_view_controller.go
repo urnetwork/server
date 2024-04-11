@@ -217,104 +217,31 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 }
 
 func (self *ConnectViewController) Shuffle() {
-
-
-	// FIXME remoteClient.Shuffle()
-
-
-	var connectLocationId *ConnectLocationId
-	
-	exportedExcludeClientIds := NewIdList()
-	// exclude self
-	exportedExcludeClientIds.Add(self.device.ClientId())
-	self.stateLock.Lock()
-	// eclude all tried so far
-	for clientId, _ := range self.usedDestinationIds {
-		exportedExcludeClientIds.Add(&clientId)
-	}
-	connectLocationId = self.activeLocation.ConnectLocationId
-	self.stateLock.Unlock()
-
-	findProviders := &FindProvidersArgs{
-		LocationId: connectLocationId.LocationId,
-		LocationGroupId: connectLocationId.LocationGroupId,
-		Count: 1,
-		ExcludeClientIds: exportedExcludeClientIds,
-	}
-	self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
-		func(result *FindProvidersResult, err error) {
-			if err == nil {
-				if result.ClientIds != nil && 1 <= result.ClientIds.Len() {
-					clientIds := []Id{}
-					for i := 0; i < result.ClientIds.Len(); i += 1 {
-						clientId := result.ClientIds.Get(i)
-						clientIds = append(clientIds, *clientId)
-					}
-					self.setDestinations(clientIds)
-				} else {
-					// no more destinations to try. Reset `usedDestinationIds` and try again once.
-
-					var update bool
-					self.stateLock.Lock()
-					if len(self.usedDestinationIds) == 0 {
-						// noting to reset
-						update = false
-					} else {
-						clear(self.usedDestinationIds)						
-						update = true
-					}
-					self.stateLock.Unlock()
-
-					if update {
-						exportedExcludeClientIds := NewIdList()
-						// exclude self
-						exportedExcludeClientIds.Add(self.device.ClientId())
-
-						findProviders := &FindProvidersArgs{
-							LocationId: connectLocationId.LocationId,
-							LocationGroupId: connectLocationId.LocationGroupId,
-							Count: 1,
-							ExcludeClientIds: exportedExcludeClientIds,
-						}
-
-						self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
-							func(result *FindProvidersResult, err error) {
-								if err == nil && result.ClientIds != nil {
-									clientIds := []Id{}
-									for i := 0; i < result.ClientIds.Len(); i += 1 {
-										clientId := result.ClientIds.Get(i)
-										clientIds = append(clientIds, *clientId)
-									}
-									self.setDestinations(clientIds)
-								}
-							},
-						)))
-					}
-				}
-			}
-		},
-	)))
+	self.device.Shuffle()
 }
 
 func (self *ConnectViewController) Broaden() {
 	// FIXME
 	var upLocation *ConnectLocation
-	self.stateLock.Lock()
-	if self.activeLocation != nil {
-		if !self.activeLocation.IsGroup() {
-			// a location
-			switch self.activeLocation.LocationType {
-			case LocationTypeCity:
-				upLocation = self.activeLocation.ToRegion()
-			case LocationTypeRegion:
-				upLocation = self.activeLocation.ToCountry()
-			// TODO Mark each country with an upgroup
-			// case Country:
-			// 	upLocation = self.activeLocation.UpGroup()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.activeLocation != nil {
+			if !self.activeLocation.IsGroup() {
+				// a location
+				switch self.activeLocation.LocationType {
+				case LocationTypeCity:
+					upLocation = self.activeLocation.ToRegion()
+				case LocationTypeRegion:
+					upLocation = self.activeLocation.ToCountry()
+				// TODO Mark each country with an upgroup
+				// case Country:
+				// 	upLocation = self.activeLocation.UpGroup()
+				}
 			}
 		}
-	}
-	self.stateLock.Unlock()
+	}()
 
 	if upLocation != nil {
 		self.Connect(upLocation)
@@ -608,13 +535,47 @@ func (self *ConnectLocation) IsDevice() bool {
 }
 
 func (self *ConnectLocation) ToRegion() *ConnectLocation {
-	// FIXME
-	return self
+	return &ConnectLocation{
+		ConnectLocationId: self.ConnectLocationId,
+		Name: self.Region,
+
+		ProviderCount: self.ProviderCount,
+	    Promoted: false,
+	    MatchDistance: 0,
+
+	    LocationType: LocationTypeRegion,
+
+		City: "",
+		Region: self.Region,
+		Country: self.Country,
+		CountryCode: self.CountryCode,
+
+		CityLocationId: nil,
+	    RegionLocationId: self.RegionLocationId,
+	    CountryLocationId: self.CountryLocationId,
+	}
 }
 
 func (self *ConnectLocation) ToCountry() *ConnectLocation {
-	// FIXME
-	return self
+	return &ConnectLocation{
+		ConnectLocationId: self.ConnectLocationId,
+		Name: self.Country,
+
+		ProviderCount: self.ProviderCount,
+	    Promoted: false,
+	    MatchDistance: 0,
+
+	    LocationType: LocationTypeCountry,
+
+		City: "",
+		Region: "",
+		Country: self.Country,
+		CountryCode: self.CountryCode,
+
+		CityLocationId: nil,
+	    RegionLocationId: nil,
+	    CountryLocationId: self.CountryLocationId,
+	}
 }
 
 

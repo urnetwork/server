@@ -143,8 +143,8 @@ func newBringYourDevice(
         cancelCtx,
         clientId,
         clientOob,
-        connect.DefaultClientSettingsNoNetworkEvents(),
-        // connect.DefaultClientSettings(),
+        // connect.DefaultClientSettingsNoNetworkEvents(),
+        connect.DefaultClientSettings(),
     )
 
     // routeManager := connect.NewRouteManager(connectClient)
@@ -397,8 +397,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 					self.deviceDescription,
 					self.deviceSpec,
 					self.appVersion,
-					connect.DefaultClientSettingsNoNetworkEvents,
-					// connect.DefaultClientSettings,
+					// connect.DefaultClientSettingsNoNetworkEvents,
+					connect.DefaultClientSettings,
 					connect.DefaultApiMultiClientGeneratorSettings(),
 				)
 				self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
@@ -416,6 +416,16 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 
 	self.connectChanged(self.IsConnectEnabled())
 	return
+}
+
+func (self *BringYourDevice) Shuffle() {
+	self.stateLock.Lock()
+	remoteUserNatClient := self.remoteUserNatClient
+	self.stateLock.Unlock()
+
+	if remoteUserNatClient != nil {
+		remoteUserNatClient.Shuffle()
+	}
 }
 
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
