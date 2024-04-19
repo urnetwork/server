@@ -17,6 +17,8 @@ import (
 	// "github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgerrcode"
+
+	"github.com/golang/glog"
 )
 
 
@@ -35,6 +37,7 @@ var DbContextDoneError = errors.New("Done")
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
 type PgResult = pgx.Rows
+type PgTag = pgconn.CommandTag
 type PgNamedArgs = pgx.NamedArgs
 type PgBatch = *pgx.Batch
 type PgBatchResults = pgx.BatchResults
@@ -143,7 +146,7 @@ type DbRetryOptions struct {
 	rerunOnTransientError bool
 	retryTimeout time.Duration
 	endRetryTimeout time.Duration
-	debugRetryTimeout time.Duration
+	// debugRetryTimeout time.Duration
 }
 
 // this is the default for `Db` and `Tx`
@@ -154,7 +157,7 @@ func OptRetryDefault() DbRetryOptions {
 		rerunOnTransientError: true,
 		retryTimeout: 200 * time.Millisecond,
 		endRetryTimeout: 60 * time.Second,
-		debugRetryTimeout: 90 * time.Second,
+		// debugRetryTimeout: 90 * time.Second,
 	}
 }
 
@@ -247,13 +250,14 @@ func isConnectionError(err error) bool {
 	}
 }
 
-// FIXME change return to void
 func Db(ctx context.Context, callback func(PgConn), options ...any) {
-	pc, filename, line, _ := runtime.Caller(1)
-	pcName := runtime.FuncForPC(pc).Name()
-	if pcName != "bringyour.com/bringyour.Tx" {
-		parts := strings.Split(filename, "/")
-		fmt.Printf("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		if pcName != "bringyour.com/bringyour.Tx" {
+			parts := strings.Split(filename, "/")
+			glog.Infof("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+		}
 	}
 
 	retryOptions := OptRetryDefault()
@@ -271,7 +275,7 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
-	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
 		var pgErr error
 		conn, connErr := pool().Acquire(ctx)
@@ -348,9 +352,10 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
 				}
-				Logger().Printf("Transient error, retry (%v)\n", pgErr)
-				if retryDebugTime.Before(NowUtc()) {
-					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
+				if glog.V(2) {
+					glog.Infof("Transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
+				} else {
+					glog.Infof("Transient error, retry = %v\n", pgErr)
 				}
 				continue
 			}
@@ -374,10 +379,12 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 
 // FIXME change return to void
 func Tx(ctx context.Context, callback func(PgTx), options ...any) {
-	pc, filename, line, _ := runtime.Caller(1)
-	pcName := runtime.FuncForPC(pc).Name()
-	parts := strings.Split(filename, "/")
-	fmt.Printf("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		glog.Infof("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+	}
 
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
@@ -406,7 +413,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 	}
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
-	retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
 		var pgErr error
 		var commitErr error
@@ -463,9 +470,10 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
 				}
-				Logger().Printf("Transient error, retry (%v)\n", pgErr)
-				if retryDebugTime.Before(NowUtc()) {
-					Logger().Printf("%s\n", ErrorJson(pgErr, debug.Stack()))
+				if glog.V(2) {
+					glog.Infof("Transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
+				} else {
+					glog.Infof("Transient error, retry = %v\n", pgErr)
 				}
 				continue
 			}
@@ -481,9 +489,10 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)
 				}
-				Logger().Printf("Commit error, retry (%v)\n", commitErr)
-				if retryDebugTime.Before(NowUtc()) {
-					Logger().Printf("%s\n", ErrorJson(commitErr, debug.Stack()))
+				if glog.V(2) {
+					glog.Infof("Commit error, retry: %s\n", ErrorJson(commitErr, debug.Stack()))
+				} else {
+					glog.Infof("Commit error, retry = %v\n", commitErr)
 				}
 				continue
 			}

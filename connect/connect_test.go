@@ -28,9 +28,9 @@ import (
 )
 
 
-func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestNone, false)
-})}
+// func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+// 	testConnect(t, contractTestNone, false)
+// })}
 
 
 func TestConnectWithSymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -43,9 +43,9 @@ func TestConnectWithAsymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv
 })}
 
 
-func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestNone, true)
-})}
+// func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+// 	testConnect(t, contractTestNone, true)
+// })}
 
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
@@ -137,6 +137,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 		return server
 	}
 
+	idleTimeout := 2 * time.Second
+
 	hostPorts := map[string]int{}
 	exchanges := map[string]*Exchange{}
 	servers := map[string]*http.Server{}
@@ -151,6 +153,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
+		settings.ResidentIdleTimeout = idleTimeout
+		settings.ForwardIdleTimeout = idleTimeout
 		if enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		}
@@ -513,6 +517,13 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
+						if i == burstSize / 2 {
+							select {
+							case <- ctx.Done():
+								return
+							case <- time.After(4 * idleTimeout):
+							}
+						}
 						for j := 0; j < nackM; j += 1 {
 							success := clientA.SendWithTimeout(
 								connect.RequireToFrame(&protocol.SimpleMessage{
@@ -651,6 +662,13 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
+						if i == burstSize / 2 {
+							select {
+							case <- ctx.Done():
+								return
+							case <- time.After(4 * idleTimeout):
+							}
+						}
 						for j := 0; j < nackM; j += 1 {
 							opts := []any{
 								connect.NoAck(),

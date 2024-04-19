@@ -1735,9 +1735,9 @@ func GetOpenContractIds(
                 LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
-                    open = true AND
-                    source_id = $1 AND
-                    destination_id = $2
+                    transfer_contract.open = true AND
+                    transfer_contract.source_id = $1 AND
+                    transfer_contract.destination_id = $2
             `,
             sourceId,
             destinationId,
@@ -1803,9 +1803,9 @@ func GetOpenContractIdsForSourceOrDestination(
                 LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
-                    open = true AND (
-                        source_id = $1 OR
-                        destination_id = $1
+                    transfer_contract.open = true AND (
+                        transfer_contract.source_id = $1 OR
+                        transfer_contract.destination_id = $1
                     )
             `,
             clientId,

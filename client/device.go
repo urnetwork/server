@@ -428,7 +428,7 @@ func (self *BringYourDevice) Shuffle() {
 	}
 }
 
-func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
+func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 	packetCopy := make([]byte, n)
 	copy(packetCopy, packet[0:n])
 	source := connect.Path{ClientId: self.clientId}
@@ -439,7 +439,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 	self.stateLock.Unlock()
 
 	if remoteUserNatClient != nil {
-		remoteUserNatClient.SendPacket(
+		return remoteUserNatClient.SendPacket(
 			source,
 			protocol.ProvideMode_Network,
 			packetCopy,
@@ -447,7 +447,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) {
 		)
 	} else {
 		// route locally
-		localUserNat.SendPacket(
+		return localUserNat.SendPacket(
 			source,
 			protocol.ProvideMode_Network,
 			packetCopy,

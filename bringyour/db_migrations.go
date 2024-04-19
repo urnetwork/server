@@ -590,6 +590,7 @@ var migrations = []any{
         CREATE INDEX network_client_location_country_client_id ON network_client_location (country_location_id, client_id)
     `),
 
+    // ALTERED No columns are allowed null
     newSqlMigration(`
         CREATE TABLE network_client_resident (
             client_id uuid NOT NULL,
@@ -1399,6 +1400,23 @@ var migrations = []any{
     newSqlMigration(`
         CREATE INDEX transfer_contract_open_source_id_companion_contract_id ON transfer_contract (open, source_id, destination_id, companion_contract_id, close_time, create_time, contract_id)
     `),
+
+    newSqlMigration(`
+        ALTER TABLE network_client_resident ALTER COLUMN resident_id SET NOT NULL
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE network_client_resident ALTER COLUMN resident_host SET NOT NULL
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE network_client_resident ALTER COLUMN resident_service SET NOT NULL
+    `),
+
+    newSqlMigration(`
+        ALTER TABLE network_client_resident ALTER COLUMN resident_block SET NOT NULL
+    `),
+
 
 
     // results of actively pinging providers
