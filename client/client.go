@@ -38,7 +38,7 @@ func init() {
 func initGlog() {
 	flag.Set("logtostderr", "true")
     flag.Set("stderrthreshold", "INFO")
-    flag.Set("v", "2")
+    flag.Set("v", "0")
     // unlike unix, the android/ios standard is for diagnostics to go to stdout
     os.Stderr = os.Stdout
 }
