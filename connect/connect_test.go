@@ -29,32 +29,42 @@ import (
 
 
 func TestConnect(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestNone, false)
+	testConnect(t, contractTestNone, false, true)
 })}
 
 
 func TestConnectWithSymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestSymmetric, false)
+	testConnect(t, contractTestSymmetric, false, true)
 })}
 
 
 func TestConnectWithAsymmetricContracts(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestAsymmetric, false)
+	testConnect(t, contractTestAsymmetric, false, true)
 })}
 
 
 func TestConnectWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestNone, true)
+	testConnect(t, contractTestNone, true, true)
 })}
 
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestSymmetric, true)
+	testConnect(t, contractTestSymmetric, true, true)
 })}
 
 
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	testConnect(t, contractTestAsymmetric, true)
+	testConnect(t, contractTestAsymmetric, true, true)
+})}
+
+
+func TestConnectNoTransportReform(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, false, false)
+})}
+
+
+func TestConnectWithChaosNoTransportReform(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+	testConnect(t, contractTestNone, true, false)
 })}
 
 
@@ -71,7 +81,7 @@ const (
 // send message bursts between the clients
 // contract logic is optional so that the effects of contracts can be isolated
 // FIXME set all sequence buffer sizes to 0
-func testConnect(t *testing.T, contractTest int, enableChaos bool) {
+func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTransportReform bool) {
 
 	type Message struct {
 		sourceId connect.Id
@@ -97,6 +107,19 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	burstM := 8
 	newInstanceM := -1
 	nackM := 4
+
+
+	idleTimeout := 200 * time.Millisecond
+	pauseTimeout := 3 * idleTimeout
+	var sequenceIdleTimeout time.Duration
+	if enableChaos {
+		// if the receive sequence times out, we may get duplicate receives
+		// the timeout should be greater than the write/read and reconnect timeouts in the exchange,
+		// due to chaos
+		sequenceIdleTimeout = 10 * time.Second
+	} else {
+		sequenceIdleTimeout = 2 * idleTimeout
+	}
 
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -151,6 +174,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
+		settings.ResidentIdleTimeout = idleTimeout
+		settings.ForwardIdleTimeout = idleTimeout
 		if enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		}
@@ -194,6 +219,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	// set this low enough to test new contracts in the transfer
 	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientSettingsA.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
@@ -212,6 +240,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	// set this low enough to test new contracts in the transfer
 	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
+	clientSettingsB.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
@@ -486,33 +517,49 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 					b,
 				)
 
-				for _, transportA := range transportAs {
-					transportA.Close()
-				}
-				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
-					fmt.Printf("new instance\n")
-					clientAInstanceId = bringyour.NewId()
-				}
-				authA = &connect.ClientAuth {
-				    ByJwt: byJwtA.Sign(),
-				    // ClientId: clientIdA,
-				    InstanceId: connect.Id(clientAInstanceId),
-				    AppVersion: "0.0.0",
-				}
-				for i := 0; i < transportCount; i += 1 {
-					fmt.Printf("new transport a\n")
-					transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
-					transportAs = append(transportAs, transportA)
-					// go transportA.Run(clientA.RouteManager())
-				}
-				// let the closed transports remove, otherwise messages will be send to closing tranports
-				// (this will affect the nack delivery)
-				select {
-				case <- time.After(200 * time.Millisecond):
+				if enableTransportReform {
+					for _, transportA := range transportAs {
+						transportA.Close()
+					}
+					fmt.Printf("pause\n")
+					select {
+					case <- ctx.Done():
+						return
+					case <- time.After(pauseTimeout):
+					}
+					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+						fmt.Printf("new instance\n")
+						clientAInstanceId = bringyour.NewId()
+					}
+					authA = &connect.ClientAuth {
+					    ByJwt: byJwtA.Sign(),
+					    // ClientId: clientIdA,
+					    InstanceId: connect.Id(clientAInstanceId),
+					    AppVersion: "0.0.0",
+					}
+					for i := 0; i < transportCount; i += 1 {
+						fmt.Printf("new transport a\n")
+						transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
+						transportAs = append(transportAs, transportA)
+						// go transportA.Run(clientA.RouteManager())
+					}
+					// let the closed transports remove, otherwise messages will be send to closing tranports
+					// (this will affect the nack delivery)
+					select {
+					case <- time.After(200 * time.Millisecond):
+					}
 				}
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
+						if i == burstSize / 2 {
+							fmt.Printf("pause\n")
+							select {
+							case <- ctx.Done():
+								return
+							case <- time.After(pauseTimeout):
+							}
+						}
 						for j := 0; j < nackM; j += 1 {
 							success := clientA.SendWithTimeout(
 								connect.RequireToFrame(&protocol.SimpleMessage{
@@ -623,34 +670,49 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 				// 	}
 				// }
 
-
-				for _, transportB := range transportBs {
-					transportB.Close()
-				}
-				if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
-					fmt.Printf("new instance\n")
-					clientBInstanceId = bringyour.NewId()
-				}
-				authB = &connect.ClientAuth {
-				    ByJwt: byJwtB.Sign(),
-				    // ClientId: clientIdB,
-				    InstanceId: connect.Id(clientBInstanceId),
-				    AppVersion: "0.0.0",
-				}
-				for i := 0; i < transportCount; i += 1 {
-					fmt.Printf("new transport b\n")
-					transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
-					transportBs = append(transportBs, transportB)
-					// go transportB.Run(clientB.RouteManager())
-				}
-				// let the closed transports remove, otherwise messages will be send to closing tranports
-				// (this will affect the nack delivery)
-				select {
-				case <- time.After(200 * time.Millisecond):
+				if enableTransportReform {
+					for _, transportB := range transportBs {
+						transportB.Close()
+					}
+					fmt.Printf("pause\n")
+					select {
+					case <- ctx.Done():
+						return
+					case <- time.After(pauseTimeout):
+					}
+					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+						fmt.Printf("new instance\n")
+						clientBInstanceId = bringyour.NewId()
+					}
+					authB = &connect.ClientAuth {
+					    ByJwt: byJwtB.Sign(),
+					    // ClientId: clientIdB,
+					    InstanceId: connect.Id(clientBInstanceId),
+					    AppVersion: "0.0.0",
+					}
+					for i := 0; i < transportCount; i += 1 {
+						fmt.Printf("new transport b\n")
+						transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
+						transportBs = append(transportBs, transportB)
+						// go transportB.Run(clientB.RouteManager())
+					}
+					// let the closed transports remove, otherwise messages will be send to closing tranports
+					// (this will affect the nack delivery)
+					select {
+					case <- time.After(200 * time.Millisecond):
+					}
 				}
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
+						if i == burstSize / 2 {
+							fmt.Printf("pause\n")
+							select {
+							case <- ctx.Done():
+								return
+							case <- time.After(pauseTimeout):
+							}
+						}
 						for j := 0; j < nackM; j += 1 {
 							opts := []any{
 								connect.NoAck(),
@@ -865,6 +927,19 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool) {
 	// and should be partially closed by the source
 	contractIdPartialClosePartiesAToB := model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
 	contractIdPartialClosePartiesBToA := model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
+
+	for contractId, party := range contractIdPartialClosePartiesAToB {
+		if party == model.ContractPartyCheckpoint {
+			model.CloseContract(ctx, contractId, clientIdB, 0, false)
+			delete(contractIdPartialClosePartiesAToB, contractId)
+		}
+	}
+	for contractId, party := range contractIdPartialClosePartiesBToA {
+		if party == model.ContractPartyCheckpoint {
+			model.CloseContract(ctx, contractId, clientIdA, 0, false)
+			delete(contractIdPartialClosePartiesBToA, contractId)
+		}
+	}
 
 	// FIXME what are these other contracts?
 	// for _, party := range contractIdPartialClosePartiesAToB {

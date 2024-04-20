@@ -105,8 +105,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     _, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
     assert.NotEqual(t, err, nil)
 
-    CloseContract(ctx, transferEscrow.ContractId, sourceId, 0)
-    CloseContract(ctx, transferEscrow.ContractId, destinationId, 0)
+    CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false)
+    CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false)
 
     transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
     netBalanceByteCount = ByteCount(0)
@@ -126,8 +126,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     })
 
     usedTransferByteCount := ByteCount(1024)
-    CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
-    CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
+    CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+    CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
     paidByteCount := usedTransferByteCount
     paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
@@ -178,9 +178,9 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
         assert.Equal(t, err, nil)
 
-        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
+        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
         assert.Equal(t, err, nil)
-        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
+        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
         assert.Equal(t, err, nil)
         paidByteCount += usedTransferByteCount
         paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
@@ -233,8 +233,8 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
             assert.Equal(t, err, nil)
         }
 
-        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount)
-        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount)
+        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
         paidByteCount += usedTransferByteCount
         paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }

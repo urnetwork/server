@@ -847,8 +847,7 @@ func dbGetResidentInTx(
 				resident_block
 			FROM network_client_resident
 			WHERE
-				client_id = $1 AND
-				resident_id IS NOT NULL
+				client_id = $1
 		`,
 		clientId,
 	)
@@ -943,8 +942,7 @@ func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bring
 					resident_id
 				FROM network_client_resident
 				WHERE
-					client_id = $1 AND
-					resident_id IS NOT NULL
+					client_id = $1
 			`,
 			clientId,
 		)
@@ -970,8 +968,7 @@ func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, insta
 				FROM network_client_resident
 				WHERE
 					client_id = $1 AND
-					instance_id = $2 AND
-					resident_id IS NOT NULL
+					instance_id = $2
 			`,
 			clientId,
 			instanceId,
@@ -993,78 +990,112 @@ func NominateResident(
 	ctx context.Context,
 	residentIdToReplace *bringyour.Id,
 	nomination *NetworkClientResident,
-) (resident *NetworkClientResident) {
+) (nominated bool) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
 			ctx,
 			`
 				SELECT
-					instance_id,
 					resident_id
 				FROM network_client_resident
 				WHERE
-					client_id = $1
+					client_id = $1 AND
+					instance_id = $2
 				FOR UPDATE
 			`,
 			nomination.ClientId,
+			nomination.InstanceId,
 		)
 
 		hasResident := false
-		var residentId bringyour.Id
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
-				var instanceId bringyour.Id
-				var residentId_ *bringyour.Id
-				bringyour.Raise(result.Scan(&instanceId, &residentId_))
-				if instanceId == nomination.InstanceId && residentId_ != nil {
+				var residentId bringyour.Id
+				bringyour.Raise(result.Scan(&residentId))
+				if residentIdToReplace != nil && *residentIdToReplace == residentId {
 					hasResident = true
-					residentId = *residentId_
 				}
+			} else if residentIdToReplace == nil {
+				hasResident = true
 			}
 		})
 
 		// fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
 
-		if hasResident {
-			if residentIdToReplace == nil || residentId != *residentIdToReplace {
-				// already replaced
-				resident = dbGetResidentWithInstanceInTx(
-					ctx,
-					tx,
-					nomination.ClientId,
-					nomination.InstanceId,
-				)
-				return
-			}
+		if !hasResident {
+			// already replaced
+			nominated = false
+			return
 		}
 
-		bringyour.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_client_resident (
-					client_id,
-					instance_id,
-					resident_id,
-					resident_host,
-					resident_service,
-					resident_block
-				)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (client_id) DO UPDATE
-				SET
-					instance_id = $2,
-					resident_id = $3,
-					resident_host = $4,
-					resident_service = $5,
-					resident_block = $6
-			`,
-			nomination.ClientId,
-			nomination.InstanceId,
-			nomination.ResidentId,
-			nomination.ResidentHost,
-			nomination.ResidentService,
-			nomination.ResidentBlock,
-		))
+		var tag bringyour.PgTag
+		if residentIdToReplace == nil {
+			tag = bringyour.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_client_resident (
+						client_id,
+						instance_id,
+						resident_id,
+						resident_host,
+						resident_service,
+						resident_block
+					)
+					VALUES ($1, $2, $3, $4, $5, $6)
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						instance_id = $2,
+						resident_id = $3,
+						resident_host = $4,
+						resident_service = $5,
+						resident_block = $6
+					WHERE
+						network_client_resident.instance_id != $2
+				`,
+				nomination.ClientId,
+				nomination.InstanceId,
+				nomination.ResidentId,
+				nomination.ResidentHost,
+				nomination.ResidentService,
+				nomination.ResidentBlock,
+			))
+		} else {
+			tag = bringyour.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_client_resident (
+						client_id,
+						instance_id,
+						resident_id,
+						resident_host,
+						resident_service,
+						resident_block
+					)
+					VALUES ($1, $2, $3, $4, $5, $6)
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						instance_id = $2,
+						resident_id = $3,
+						resident_host = $4,
+						resident_service = $5,
+						resident_block = $6
+					WHERE
+						network_client_resident.instance_id != $2 OR
+							network_client_resident.resident_id = $7
+				`,
+				nomination.ClientId,
+				nomination.InstanceId,
+				nomination.ResidentId,
+				nomination.ResidentHost,
+				nomination.ResidentService,
+				nomination.ResidentBlock,
+				residentIdToReplace,
+			))
+		}
+		if tag.RowsAffected() != 1 {
+			nominated = false
+			return
+		}
 
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
@@ -1096,7 +1127,7 @@ func NominateResident(
 			}
 		})
 
-		resident = nomination
+		nominated = true
 	}, bringyour.TxReadCommitted)
 	return
 }

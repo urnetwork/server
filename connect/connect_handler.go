@@ -155,9 +155,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         
         go bringyour.HandleError(func() {
             // disconnect the client if the model marks the connection closed
-            defer func() {
-                handleCancel()
-            }()
+            defer handleCancel()
 
             for  {
                 select {
@@ -182,15 +180,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
         go func() {
             defer handleCancel()
             bringyour.HandleError(residentTransport.Run)
-            residentTransport.Close()
-            ws.Close()
+            // close is done in the write
         }()
 
         go bringyour.HandleError(func() {
-            // close the transport in the send
             defer func() {
                 handleCancel()
-                residentTransport.Cancel()
+                residentTransport.Close()
             }()
 
             for {
@@ -199,7 +195,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
                 if err != nil {
                     return
                 }
-
 
                 switch messageType {
                 case websocket.BinaryMessage:
@@ -224,10 +219,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 
         go bringyour.HandleError(func() {
-            defer func() {
-                handleCancel()
-                residentTransport.Cancel()
-            }()
+            defer handleCancel()
             
             for {
                 select {

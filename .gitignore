@@ -9,4 +9,3 @@ api/api
 taskworker/taskworker
 gpt/gpt
 connect/connect.test
-connect/profile
