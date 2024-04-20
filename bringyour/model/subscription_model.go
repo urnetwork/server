@@ -1247,9 +1247,9 @@ func CloseContract(
                     VALUES ($1, $2, $3, true)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3
                     WHERE
-                        checkpoint = true
+                        contract_close.checkpoint = true
                 `,
                 contractId,
                 party,
@@ -1273,7 +1273,7 @@ func CloseContract(
                         used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
                         checkpoint = false
                     WHERE
-                        checkpoint = true
+                        contract_close.checkpoint = true
                 `,
                 contractId,
                 party,

@@ -110,7 +110,16 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 
 
 	idleTimeout := 200 * time.Millisecond
-	pauseTimeout := 2 * idleTimeout
+	pauseTimeout := 3 * idleTimeout
+	var sequenceIdleTimeout time.Duration
+	if enableChaos {
+		// if the receive sequence times out, we may get duplicate receives
+		// the timeout should be greater than the write/read and reconnect timeouts in the exchange,
+		// due to chaos
+		sequenceIdleTimeout = 10 * time.Second
+	} else {
+		sequenceIdleTimeout = 2 * idleTimeout
+	}
 
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,9 +219,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	// set this low enough to test new contracts in the transfer
 	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
-	clientSettingsA.SendBufferSettings.IdleTimeout = idleTimeout
-	clientSettingsA.ReceiveBufferSettings.IdleTimeout = idleTimeout
-	clientSettingsA.ForwardBufferSettings.IdleTimeout = idleTimeout
+	clientSettingsA.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
@@ -231,9 +240,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	// set this low enough to test new contracts in the transfer
 	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
-	clientSettingsB.SendBufferSettings.IdleTimeout = idleTimeout
-	clientSettingsB.ReceiveBufferSettings.IdleTimeout = idleTimeout
-	clientSettingsB.ForwardBufferSettings.IdleTimeout = idleTimeout
+	clientSettingsB.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)

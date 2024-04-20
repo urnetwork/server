@@ -82,14 +82,9 @@ type ExchangeSettings struct {
 	MaxConcurrentForwardsPerResident int
 
 	ResidentIdleTimeout time.Duration
-	// ResidentSyncTimeout time.Duration
 	ForwardIdleTimeout time.Duration
-	// ContractSyncTimeout time.Duration
 	AbuseMinTimeout time.Duration
 	ControlMinTimeout time.Duration
-
-	// ClientDrainTimeout time.Duration
-	// TransportDrainTimeout time.Duration
 
 	ExchangeConnectTimeout time.Duration
 	ExchangePingTimeout time.Duration
@@ -135,20 +130,14 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		MaxConcurrentForwardsPerResident: 256,
 
 		ResidentIdleTimeout: 60 * time.Minute,
-		// ResidentSyncTimeout: 30 * time.Second,
 		ForwardIdleTimeout: 60 * time.Minute,
-		// ContractSyncTimeout: 60 * time.Second,
 		AbuseMinTimeout: 5 * time.Second,
 		ControlMinTimeout: 5 * time.Millisecond,
-
-		// ClientDrainTimeout: 30 * time.Second,
-		// TransportDrainTimeout: 30 * time.Second,
 
 		ExchangeConnectTimeout: 5 * time.Second,
 		ExchangePingTimeout: exchangePingTimeout,
 		ExchangeReadTimeout: 2 * exchangePingTimeout,
 		ExchangeReadHeaderTimeout: exchangeResidentWaitTimeout,
-		// ExchangeWriteTimeout: 5 * time.Second,
 		ExchangeWriteHeaderTimeout: exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
 		ExchangeConnectionResidentPollTimeout: 30 * time.Second,
@@ -1722,25 +1711,16 @@ func (self *Resident) AddTransport() (
 	}()
 
 	closeTransport = func() {
-		func() {
-			routeManager := self.client.RouteManager()
-			routeManager.RemoveTransport(transport.sendTransport)
-			routeManager.RemoveTransport(transport.receiveTransport)
+		routeManager := self.client.RouteManager()
+		routeManager.RemoveTransport(transport.sendTransport)
+		routeManager.RemoveTransport(transport.receiveTransport)
 
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			delete(self.transports, transport)
-		}()
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		delete(self.transports, transport)
 
-		// go func() {
-		// 	select {
-		// 	case <- self.ctx.Done():
-		// 		return
-		// 	case <- time.After(self.exchange.settings.TransportDrainTimeout):
-		// 	}
-
-		// 	close(send)
-		// }()
+		// note `send` is not closed. This channel is left open.
+        // it used to be closed after a delay, but it is not needed to close it.
 	}
 
 	return
