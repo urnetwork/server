@@ -8,7 +8,7 @@ for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -
         export WARP_ENV="local"; \
             export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"; \
             export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"; \
-            GORACE="log_path=profile/race.out halt_on_error=1" go test -v -race -cpuprofile profile/cpu -memprofile profile/memory -timeout 30m -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
+            GORACE="log_path=profile/race.out halt_on_error=1" go test -v -race -cpuprofile profile/cpu -memprofile profile/memory -timeout 60m -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
             # -trace profile/trace -coverprofile profile/cover 
         if [[ ${PIPESTATUS[0]} != 0 ]]; then
             exit ${PIPESTATUS[0]}

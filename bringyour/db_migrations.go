@@ -1390,7 +1390,7 @@ var migrations = []any{
     `),
 
     newSqlMigration(`
-    ALTER TABLE contract_close ADD COLUMN checkpoint bool NOT NULL DEFAULT false
+        ALTER TABLE contract_close ADD COLUMN checkpoint bool NOT NULL DEFAULT false
     `),
 
     newSqlMigration(`

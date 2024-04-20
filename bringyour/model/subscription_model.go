@@ -777,6 +777,7 @@ type ContractParty = string
 const (
     ContractPartySource ContractParty = "source"
     ContractPartyDestination ContractParty = "destination"
+    ContractPartyCheckpoint ContractParty = "checkpoint"
 )
 
 
@@ -1246,7 +1247,9 @@ func CloseContract(
                     VALUES ($1, $2, $3, true)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                    WHERE
+                        checkpoint = true
                 `,
                 contractId,
                 party,
@@ -1269,6 +1272,8 @@ func CloseContract(
                     SET
                         used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
                         checkpoint = false
+                    WHERE
+                        checkpoint = true
                 `,
                 contractId,
                 party,
@@ -1729,7 +1734,8 @@ func GetOpenContractIds(
             `
                 SELECT
                     transfer_contract.contract_id,
-                    contract_close.party
+                    contract_close.party,
+                    contract_close.checkpoint
                 FROM transfer_contract
 
                 LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
@@ -1746,12 +1752,24 @@ func GetOpenContractIds(
             for result.Next() {
                 var contractId bringyour.Id
                 var party_ *ContractParty
-                bringyour.Raise(result.Scan(&contractId, &party_))
+                var checkpoint_ *bool
+                bringyour.Raise(result.Scan(&contractId, &party_, &checkpoint_))
                 var party ContractParty
                 if party_ != nil {
                     party = *party_
                 }
-                contractIdPartialCloseParties[contractId] = party
+                var checkpoint bool
+                if checkpoint_ != nil {
+                    checkpoint = *checkpoint_
+                }
+                // there can be up to two rows per contractId (one checkpoint)
+                // checkpoint takes precedence
+                if checkpoint {
+                    party = ContractPartyCheckpoint
+                }
+                if contractIdPartialCloseParties[contractId] != ContractPartyCheckpoint {
+                    contractIdPartialCloseParties[contractId] = party
+                }
             }
         })
     })

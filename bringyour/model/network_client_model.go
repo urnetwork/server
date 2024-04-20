@@ -847,8 +847,7 @@ func dbGetResidentInTx(
 				resident_block
 			FROM network_client_resident
 			WHERE
-				client_id = $1 AND
-				resident_id IS NOT NULL
+				client_id = $1
 		`,
 		clientId,
 	)
@@ -943,8 +942,7 @@ func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bring
 					resident_id
 				FROM network_client_resident
 				WHERE
-					client_id = $1 AND
-					resident_id IS NOT NULL
+					client_id = $1
 			`,
 			clientId,
 		)
@@ -970,8 +968,7 @@ func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, insta
 				FROM network_client_resident
 				WHERE
 					client_id = $1 AND
-					instance_id = $2 AND
-					resident_id IS NOT NULL
+					instance_id = $2
 			`,
 			clientId,
 			instanceId,

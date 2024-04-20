@@ -251,15 +251,23 @@ func isConnectionError(err error) bool {
 }
 
 func Db(ctx context.Context, callback func(PgConn), options ...any) {
+	c := func() {
+		db(ctx, callback, options...)
+	}
 	if glog.V(2) {
 		pc, filename, line, _ := runtime.Caller(1)
 		pcName := runtime.FuncForPC(pc).Name()
-		if pcName != "bringyour.com/bringyour.Tx" {
-			parts := strings.Split(filename, "/")
-			glog.Infof("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line)
-		}
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
 	}
+}
 
+func db(ctx context.Context, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	// debugOptions := OptNoDebug()
@@ -377,15 +385,24 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
-// FIXME change return to void
 func Tx(ctx context.Context, callback func(PgTx), options ...any) {
+	c := func() {
+		tx(ctx, callback, options...)
+	}
 	if glog.V(2) {
 		pc, filename, line, _ := runtime.Caller(1)
 		pcName := runtime.FuncForPC(pc).Name()
 		parts := strings.Split(filename, "/")
-		glog.Infof("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line)
+		Trace(
+			fmt.Sprintf("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
 	}
+}
 
+func tx(ctx context.Context, callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
@@ -417,7 +434,7 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 	for {
 		var pgErr error
 		var commitErr error
-		Db(ctx, func (conn PgConn) {
+		db(ctx, func (conn PgConn) {
 			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
 				panic(err)

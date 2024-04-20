@@ -88,8 +88,8 @@ type ExchangeSettings struct {
 	AbuseMinTimeout time.Duration
 	ControlMinTimeout time.Duration
 
-	ClientDrainTimeout time.Duration
-	TransportDrainTimeout time.Duration
+	// ClientDrainTimeout time.Duration
+	// TransportDrainTimeout time.Duration
 
 	ExchangeConnectTimeout time.Duration
 	ExchangePingTimeout time.Duration
@@ -134,15 +134,15 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		MaxConcurrentForwardsPerResident: 256,
 
-		ResidentIdleTimeout: 60 * time.Second,
+		ResidentIdleTimeout: 60 * time.Minute,
 		// ResidentSyncTimeout: 30 * time.Second,
-		ForwardIdleTimeout: 60 * time.Second,
+		ForwardIdleTimeout: 60 * time.Minute,
 		// ContractSyncTimeout: 60 * time.Second,
 		AbuseMinTimeout: 5 * time.Second,
 		ControlMinTimeout: 5 * time.Millisecond,
 
-		ClientDrainTimeout: 30 * time.Second,
-		TransportDrainTimeout: 30 * time.Second,
+		// ClientDrainTimeout: 30 * time.Second,
+		// TransportDrainTimeout: 30 * time.Second,
 
 		ExchangeConnectTimeout: 5 * time.Second,
 		ExchangePingTimeout: exchangePingTimeout,
@@ -312,6 +312,8 @@ func (self *Exchange) NominateLocalResident(
 			if currentResident := self.residents[clientId]; resident == currentResident {
 				delete(self.residents, clientId)
 			}
+			// this will remove the resident only if current
+			// it will always clear ports associated with the resident
 			model.RemoveResident(
 				self.ctx,
 				resident.clientId,
@@ -328,6 +330,7 @@ func (self *Exchange) NominateLocalResident(
 				}
 				
 				if resident.IsIdle() {
+					glog.Infof("[r]idle %s\n", clientId)
 					return
 				}
 			}
@@ -351,6 +354,7 @@ func (self *Exchange) NominateLocalResident(
 				}
 				
 				if !pollResident() {
+					glog.Infof("[r]not current %s\n", clientId)
 					return
 				}
 			}
@@ -492,7 +496,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	var resident *Resident
 	if glog.V(2) {
 		// use shallow log to avoid unsafe memory reads on print
-		bringyour.TraceWithReturnShallowLog(
+		resident = bringyour.TraceWithReturnShallowLog(
 			fmt.Sprintf("[ecr]wait for resident %s/%s", header.ClientId, header.ResidentId),
 			c,
 		)
@@ -501,15 +505,18 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	}
 
 	if resident == nil {
+		glog.Infof("[ecr]no resident\n")
 		return
 	}
 
 	if resident.IsDone() {
+		glog.Infof("[ecr]resident done %s/%s\n", header.ClientId, header.ResidentId)
 		return
 	}
 
 	// echo back the header
 	if err := receiveBuffer.WriteHeader(handleCtx, conn, header); err != nil {
+		glog.Infof("[ecr]write header %s/%s error = %s\n", header.ClientId, header.ResidentId, err)
 		return
 	}
 
@@ -533,6 +540,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					if !ok {
 						return
 					}
+					resident.UpdateActivity()
 					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
 						return
 					}
@@ -568,8 +576,8 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 				
 				if glog.V(2) {
-					if resident.client.IsDone() {
-						glog.Warning("[ecrr] %s/%s client done\n", resident.clientId, resident.residentId)
+					if resident.IsDone() {
+						glog.Warning("[ecrr] %s/%s done\n", resident.clientId, resident.residentId)
 					}
 
 					multiRouteReader := resident.client.RouteManager().OpenMultiRouteReader(resident.client.ClientId())
@@ -587,6 +595,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				case <- resident.Done():
 					return
 				case receive <- message:
+					resident.UpdateActivity()
 					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
 				case <- time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
@@ -656,7 +665,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	select {
 	case <- handleCtx.Done():
+		glog.Infof("[ecr]handle done\n")
 	case <- resident.Done():
+		glog.Infof("[ecr]resident done\n")
 	}
 }
 
@@ -1110,7 +1121,7 @@ func (self *ResidentTransport) Run() {
 			)
 
 			if err != nil {
-				glog.Info("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
 				retryDelay = true
 			}
 
@@ -1458,7 +1469,7 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
-	go bringyour.HandleError(resident.clientForward, cancel)
+	// go bringyour.HandleError(resident.clientForward, cancel)
 	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
 		go bringyour.HandleError(resident.chaos, cancel)
 	}
@@ -1475,7 +1486,7 @@ func (self *Resident) chaos() {
 		}
 
 		if mathrand.Float64() < self.exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
-			glog.Info("[chaos]%s\n", self.residentId)
+			glog.Infof("[chaos]%s\n", self.residentId)
 			self.Cancel()
 		}
 	}
@@ -1490,6 +1501,7 @@ func (self *Resident) Run() {
 	}
 }
 
+/*
 func (self *Resident) clientForward() {
 	defer self.cancel()
 	
@@ -1535,6 +1547,7 @@ func (self *Resident) clientForward() {
 		}
 	}
 }
+*/
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
@@ -1593,6 +1606,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 				defer forward.Cancel()
 				for {
 					if forward.IsIdle() {
+						glog.Infof("[rf]idle %s->%s\n", sourceId, destinationId)
 						return
 					}
 
@@ -1623,7 +1637,7 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 		}
 
 		if forward == nil && limit {
-			glog.Info("[rf]abuse forward limit %s->%s", sourceId, destinationId)
+			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
 			self.abuseLimiter.delay()
 			return false
 		}
@@ -1718,15 +1732,15 @@ func (self *Resident) AddTransport() (
 			delete(self.transports, transport)
 		}()
 
-		go func() {
-			select {
-			case <- self.ctx.Done():
-				return
-			case <- time.After(self.exchange.settings.TransportDrainTimeout):
-			}
+		// go func() {
+		// 	select {
+		// 	case <- self.ctx.Done():
+		// 		return
+		// 	case <- time.After(self.exchange.settings.TransportDrainTimeout):
+		// 	}
 
-			close(send)
-		}()
+		// 	close(send)
+		// }()
 	}
 
 	return
@@ -1749,9 +1763,9 @@ func (self *Resident) IsIdle() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	// if 0 < len(self.transports) {
-	// 	return false
-	// }
+	if 0 < len(self.transports) {
+		return false
+	}
 
 	idleTimeout := time.Now().Sub(self.lastActivityTime)
 	return self.exchange.settings.ResidentIdleTimeout <= idleTimeout
