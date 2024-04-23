@@ -10,11 +10,14 @@ import (
     "strconv"
     "sync"
     "slices"
+    "flag"
 
     "golang.org/x/exp/maps"
 
     "gopkg.in/yaml.v3"
     "github.com/coreos/go-semver/semver"
+
+    // _ "github.com/golang/glog"
 )
 
 
@@ -25,6 +28,17 @@ support two deployment cases:
 2. warp container deployment. Each container has mounted at $WARP_HOME/{vault,config,site}
 
 */
+
+
+func initGlog() {
+    if !slices.Contains(os.Args, "-logtostderr") {
+        fmt.Printf("[env]glog not configured from command line. Using default configuration.\n")
+        
+        flag.Set("logtostderr", "true")
+        flag.Set("stderrthreshold", "INFO")
+        flag.Set("v", "0")
+    }
+}
 
 
 type MountType = string
@@ -43,6 +57,7 @@ var DefaultWarpHome = "/srv/warp"
 
 
 func init() {
+    initGlog()
     settingsObj := GetSettings()
     Logger().Printf("Found settings %s\n", settingsObj)
     if envObj, ok := settingsObj["env_vars"]; ok {
