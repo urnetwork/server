@@ -2,6 +2,8 @@ package jwt
 
 
 import (
+	"context"
+	"sync"
 	"errors"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
@@ -14,7 +16,18 @@ type AppleJwt struct {
 }
 
 
-var appleJwkValidator = NewJwkValidator("https://appleid.apple.com/auth/keys")
+func NewAppleJwkValidator(ctx context.Context) *JwkValidator {
+	return NewJwkValidator(
+		ctx,
+		"apple",
+		"https://appleid.apple.com/auth/keys",
+	)
+}
+
+
+var appleJwkValidator = sync.OnceValue(func()(*JwkValidator) {
+	return NewAppleJwkValidator(context.Background())
+})
 
 
 // fixme use cache-control header in the response to know when to refresh the list
@@ -25,7 +38,7 @@ var appleJwkValidator = NewJwkValidator("https://appleid.apple.com/auth/keys")
 // we do not do real time lookups against the api. new versions of the api will contain up to date keys
 
 func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
-	for _, key := range appleJwkValidator.Keys() {
+	for _, key := range appleJwkValidator().Keys() {
 		// var err error
 		// var token gojwt.Token
 		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (interface{}, error) {

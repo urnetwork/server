@@ -2,11 +2,12 @@ package jwt
 
 
 import (
+	"context"
+	"sync"
 	"errors"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 )
-
 
 
 type GoogleJwt struct {
@@ -14,9 +15,19 @@ type GoogleJwt struct {
 	UserName string
 }
 
-var googleJwkValidator = NewJwkValidator("https://www.googleapis.com/oauth2/v3/certs")
+
+func NewGoogleJwkValidator(ctx context.Context) *JwkValidator {
+	return NewJwkValidator(
+		ctx,
+		"google",
+		"https://www.googleapis.com/oauth2/v3/certs",
+	)
+}
 
 
+var googleJwkValidator = sync.OnceValue(func()(*JwkValidator) {
+	return NewGoogleJwkValidator(context.Background())
+})
 
 
 // see https://developers.google.com/identity/sign-in/web/backend-auth
@@ -24,7 +35,7 @@ var googleJwkValidator = NewJwkValidator("https://www.googleapis.com/oauth2/v3/c
 
 
 func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
-	for _, key := range googleJwkValidator.Keys() {
+	for _, key := range googleJwkValidator().Keys() {
 		// var err error
 		// var token gojwt.Token
 		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
