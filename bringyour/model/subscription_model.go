@@ -1778,6 +1778,78 @@ func GetOpenContractIds(
 }
 
 
+// expired contracts are open:
+// - 2 closes - one source and one checkpoint
+// TODO - 0 closes can be used if the contract has a max lived time
+// TODO   add this to the protocol 
+func GetExpiredOpenContractIds(
+    ctx context.Context,
+    contractCloseTimeout time.Duration,
+) map[bringyour.Id]bool {
+    contractIdPartialCloseParties := map[bringyour.Id]map[ContractParty]bool{}
+
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    transfer_contract.contract_id,
+                    contract_close.party,
+                    contract_close.checkpoint
+                FROM transfer_contract
+
+                INNER JOIN contract_close ON
+                    contract_close.contract_id = transfer_contract.contract_id AND
+                    contract_close.close_time < $1
+
+                WHERE
+                    transfer_contract.open = true
+            `,
+            time.Now().Sub(contractCloseTimeout),
+        )
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var contractId bringyour.Id
+                var party_ *ContractParty
+                var checkpoint_ *bool
+                bringyour.Raise(result.Scan(&contractId, &party_, &checkpoint_))
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
+                }
+                var checkpoint bool
+                if checkpoint_ != nil {
+                    checkpoint = *checkpoint_
+                }
+                // there can be up to two rows per contractId (one checkpoint)
+                // checkpoint takes precedence
+                if checkpoint {
+                    party = ContractPartyCheckpoint
+                }
+                partialCloseParties, ok = contractIdPartialCloseParties[contractId]
+                if !ok {
+                    partialCloseParties = map[ContractParty]bool{}
+                    contractIdPartialCloseParties[contractId] = partialCloseParties
+                }
+                partialCloseParties[party] = true
+            }
+        })
+    })
+
+    contractIdCloses := map[bringyour.Id]bool{}
+    for contractId, partialCloseParties := range contractIdPartialCloseParties {
+        hasSource := partialCloseParties[ContractPartySource]
+        hasCheckpoint := partialCloseParties[ContractPartyCheckpoint]
+        if hasSource && hasCheckpoint {
+            contractIdCloses[contractId] = true
+        }
+    }
+
+    return contractIdCloses
+}
+
+
+/*
 func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
     ctx context.Context,
     clientId bringyour.Id,
@@ -1798,8 +1870,9 @@ func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
     }
     return pairContractIds
 }
+*/
 
-
+/*
 // return key is unordered transfer pair
 func GetOpenContractIdsForSourceOrDestination(
     ctx context.Context,
@@ -1857,7 +1930,7 @@ func GetOpenContractIdsForSourceOrDestination(
 
     return pairContractIdPartialCloseParties
 }
-
+*/
 
 type WalletType = string
 const (

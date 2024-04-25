@@ -954,3 +954,16 @@ func BackfillInitialTransferBalancePost(
 // FIXME PlanPayments and payment loop
 
 
+// clean up checkpoint contracts
+
+
+
+func CloseExpiredContracts() {
+	GetExpiredOpenContractIds()
+
+}
+
+
+
+
+
