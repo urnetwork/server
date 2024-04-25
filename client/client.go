@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"bytes"
 	"encoding/hex"
-	"hash/fnv"
+	// "hash/fnv"
 	"math"
 	"flag"
 	"os"
@@ -51,11 +51,14 @@ var Version string
 
 type Id struct {
 	id [16]byte
+	// store this on the object to support gomobile "equals" and "hashCode"
+	IdStr string
 }
 
 func newId(id [16]byte) *Id {
 	return &Id{
 		id: id,
+		IdStr: encodeUuid(id),
 	}
 }
 
@@ -72,7 +75,7 @@ func (self *Id) Bytes() []byte {
 }
 
 func (self *Id) String() string {
-	return encodeUuid(self.id)
+	return self.IdStr
 }
 
 func (self *Id) Cmp(b *Id) int {
@@ -112,23 +115,24 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 		return err
 	}
 	self.id = buf
+	self.IdStr = encodeUuid(buf)
 	return nil
 }
 
 // Android support
 
-func (self *Id) IdEquals(b *Id) bool {
-	if b == nil {
-		return false
-	}
-	return self.id == b.id
-}
+// func (self *Id) IdEquals(b *Id) bool {
+// 	if b == nil {
+// 		return false
+// 	}
+// 	return self.id == b.id
+// }
 
-func (self *Id) IdHashCode() int32 {
-	h := fnv.New32()
-	h.Write(self.id[:])
-	return int32(h.Sum32())
-}
+// func (self *Id) IdHashCode() int32 {
+// 	h := fnv.New32()
+// 	h.Write(self.id[:])
+// 	return int32(h.Sum32())
+// }
 
 
 // parseUuid converts a string UUID in standard form to a byte array.
