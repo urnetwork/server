@@ -49,45 +49,94 @@ func SendPayments() {
 
 
 
+type CoinbasePaymentArgs struct {
+	PaymentId bringyour.Id
+}
 
-func CoinbasePayment(paymentId bringyour.Id) (string, error) {
+type CoinbasePaymentResult struct {
+	
+}
+
+
+func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *session.ClientSession) (string, error) {
 
 
 	// if has payment record, get the status of the transaction
 	// if complete, finish and send email
+	// if in progress, wait
 
+	// GET https://api.coinbase.com/v2/accounts/:account_id/transactions/:transaction_id
+	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions
 
-
-	// if error, try again
-	// if no payment record, start a new record
-
-	// use the send api
-
-	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions#send-money
-
-	// POST https://api.coinbase.com/v2/accounts/:account_id/transactions
-	path := fmt.Sprintf("/v2/accounts/%s/transactions", coinbaseAccountId())
-	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
-
-	// Authentication: Bearer $jwt
-
-
-	
-	// to get the status of the transaction, use
-	// /v2/accounts/2bbf394c-193b-5b2a-9155-3b4732659ede/transactions/3c04e35e-8e5a-5ff1-9155-00675db4ac02
-
-
-
-	&SendRequest{
-		Type: "send",
-		To: WALLETADDR,
-		Amount: fmt.Sprintf("%.4f", AMOUNT_USD),
-		Currency: "USDC",
-		// don't expose descriptions on the blockchain
-		Description: "",
-		Idem: paymentId.String(),
+	if payment.Completed || payment.Canceled {
+		return &CoinbasePaymentResult{
+			Complete: true,
+		}, nil
 	}
 
+	var status string
+
+	transactionId := payment.PaymentRecord
+	if transactionId != "" {
+
+		path := fmt.Sprintf("/v2/accounts/%s/transactions/%s", coinbaseAccountId(), transactionId)
+		jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
+
+	}
+
+	// "completed"
+	// "pending", "waiting_for_clearing", "waiting_for_signature"
+
+	switch status {
+	case "pending", "waiting_for_clearing", "waiting_for_signature":
+		// check later		
+		return &CoinbasePaymentResult{
+			Complete: false,
+		}, nil
+
+	case "completed":
+		// set payment completed
+
+		// send an email
+
+		// do not rerun task
+
+		CompletePayment(ctx, paymentId, string(responseBodyBytes))
+
+		GETUSERINFO(payment.NetworkId)
+
+		SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
+
+		return &CoinbasePaymentResult{
+			Complete: true,
+		}, nil
+
+	default:
+		// no transaction or error
+
+		path := fmt.Sprintf("/v2/accounts/%s/transactions", coinbaseAccountId())
+		jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
+
+		&SendRequest{
+			Type: "send",
+			To: WALLETADDR,
+			Amount: fmt.Sprintf("%.4f", AMOUNT_USD),
+			Currency: "USDC",
+			// don't expose descriptions on the blockchain
+			Description: "",
+			Idem: paymentId.String(),
+		}
+
+
+		// TODO set the payment record
+
+		SetPaymentRecord(ctx, paymentId, "USDC", AMOUNT_USDC, transactionId)
+
+		return &CoinbasePaymentResult{
+			Complete: false,
+		}, nil
+
+	}
 }
 
 
@@ -109,22 +158,40 @@ var coinbaseApiKeySecret = sync.OnceValue(func()(string) {
 })
 
 
+type CoinbaseTransactionResponse struct {
+	Data *CoinbaseTransactionResponseData `json:"data"`
+}
+
+type CoinbaseTransactionResponseData struct {
+	TransactionId string `json:"id"`
+	Type string  `json:"type"`
+	Status string  `json:"status"`
+}
+
+
 type CoinbaseSendRequest struct {
-	Type string
-	To string
-	Amount string
-	Currency string
-	Description string
-	// SkipNotifications bool
-	Idem string
+	Type string `json:"type"`
+	To string `json:"to"`
+	Amount string `json:"amount"`
+	Currency string `json:"currency"`
+	Description string `json:"description"`
+	Idem string `json:"idem"`
 }
 
 type CoinbaseSendResponse struct {
-	Data *SendResponseData
+	Data *CoinbaseSendResponseData `json:"data"`
 }
 
 type CoinbaseSendResponseData struct {
 	TransactionId string `json:"id"`
+	Network *CoinbaseSendResponseNetwork `json:"network"`
+}
+
+type CoinbaseSendResponseNetwork struct {
+	Status string `json:"status"`
+	StatusDescription string `json:"status_description"`
+	Hash string `json:"hash"`
+	NetworkName string `json:"network_name"`
 }
 
 

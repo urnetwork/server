@@ -2146,6 +2146,7 @@ type AccountPayment struct {
     PaymentId bringyour.Id
     PaymentPlanId bringyour.Id
     WalletId bringyour.Id
+    NetworkId bringyour.Id
     PayoutByteCount ByteCount
     Payout NanoCents
     MinSweepTime time.Time
@@ -2171,22 +2172,27 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
         ctx,
         `
             SELECT
-                payment_plan_id,
-                wallet_id,
-                payout_byte_count,
-                payout_nano_cents,
-                min_sweep_time,
-                create_time,
-                payment_record,
-                token_type,
-                token_amount,
-                payment_time,
-                payment_receipt,
-                completed,
-                complete_time,
-                canceled,
-                cancel_time
+                account_payment.payment_plan_id,
+                account_payment.wallet_id,
+                account_payment.payout_byte_count,
+                account_payment.payout_nano_cents,
+                account_payment.min_sweep_time,
+                account_payment.create_time,
+                account_payment.payment_record,
+                account_payment.token_type,
+                account_payment.token_amount,
+                account_payment.payment_time,
+                account_payment.payment_receipt,
+                account_payment.completed,
+                account_payment.complete_time,
+                account_payment.canceled,
+                account_payment.cancel_time,
+                account_wallet.network_id
             FROM account_payment
+
+            INNER JOIN account_wallet ON
+                account_wallet.wallet_id = account_payment.wallet_id
+
             WHERE
                 payment_id = $1
         `,
@@ -2211,6 +2217,7 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
                 &payment.CompleteTime,
                 &payment.Canceled,
                 &payment.CancelTime,
+                &payment.NetworkId,
             ))
         }
     })
