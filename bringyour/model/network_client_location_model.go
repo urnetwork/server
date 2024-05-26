@@ -1827,9 +1827,9 @@ func FindProviders2(
                     network_client_connection.connection_id = network_client_location.connection_id
 
                 INNER JOIN temp_location_ids ON 
-                    temp_location_id.location_id = network_client_location.city_location_id OR
-                    temp_location_id.location_id = network_client_location.region_location_id OR
-                    temp_location_id.location_id = network_client_location.country_location_id
+                    temp_location_ids.location_id = network_client_location.city_location_id OR
+                    temp_location_ids.location_id = network_client_location.region_location_id OR
+                    temp_location_ids.location_id = network_client_location.country_location_id
 
                 WHERE
                     network_client_connection.connected = true
