@@ -47,7 +47,7 @@ func WarmEmail(
     // todo add mail.com, hushmail, mailfence, tutanota
 
     for _, email := range emails {
-        controller.TestAuthVerifyCode(email)
+        controller.Testing_SendAuthVerifyCode(email)
     }
     return &WarmEmailResult{}, nil
 }

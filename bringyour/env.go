@@ -415,8 +415,8 @@ func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
     // try versioned directories
     // at each directory level, look for <dir>/<version>, and iterate them in descending order
     for _, home := range homes {
-        if path, err := versionLookup(home, strings.Split(relPath, "/")); err == nil {
-            paths = append(paths, path)
+        if versionedPaths, err := versionLookup(home, strings.Split(relPath, "/")); err == nil {
+            paths = append(paths, versionedPaths...)
         }
     }
 
@@ -585,19 +585,20 @@ func getAll[T any](obj map[string]any, objPath []string, out *[]T) {
 }
 
 
-func versionLookup(root string, path []string) (string, error) {
+func versionLookup(root string, path []string) (returnPaths []string, returnErr error) {
     // try root/<path[0]>/<versioned path[1:]>
     // try root/<version>/<path[0]>/<versioned path[1:]>
 
     Logger().Printf("Try %s, %s\n", root, path)
 
     if len(path) == 0 {
-        panic("Empty path")
+        returnErr = errors.New("Empty path")
+        return
     }
     if len(path) == 1 {
         versionedPath := filepath.Join(root, path[0])
         if info, err := os.Stat(versionedPath); err == nil && info.Mode().IsRegular() {
-            return versionedPath, nil
+            returnPaths = append(returnPaths, versionedPath)
         }
         //  else {
         //     return "", errors.New("Not found.")
@@ -606,8 +607,8 @@ func versionLookup(root string, path []string) (string, error) {
 
     if 1 < len(path) {
         // the versioned version takes precedence
-        if path, err := versionLookup(filepath.Join(root, path[0]), path[1:]); err == nil {
-            return filepath.Join(path), nil
+        if versionedPaths, err := versionLookup(filepath.Join(root, path[0]), path[1:]); err == nil {
+            returnPaths = append(returnPaths, versionedPaths...)
         }
     }
 
@@ -628,14 +629,18 @@ func versionLookup(root string, path []string) (string, error) {
         versionedRoot := filepath.Join(root, versionNames[versions[i]])
         Logger().Printf("Test %s, %s\n", versionedRoot, path)
         if info, err := os.Stat(versionedRoot); err == nil && info.Mode().IsDir() {
-            path, err := versionLookup(versionedRoot, path)
-            if err == nil {
-                return path, nil
+            if versionedPaths, err := versionLookup(versionedRoot, path); err == nil {
+                returnPaths = append(returnPaths, versionedPaths...)
             }
         }
     }
 
-    return "", errors.New("Not found.")
+    if len(returnPaths) == 0 {
+        returnErr = errors.New("Not found.")
+        return
+    }
+
+    return
 }
 
 

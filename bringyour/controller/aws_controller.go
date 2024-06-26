@@ -150,6 +150,16 @@ func (self *SubscriptionEndedTemplate) Name() string {
 }
 
 
+type NetworkUserInterviewRequest1Template struct {
+    BaseTemplate
+}
+
+func (self *NetworkUserInterviewRequest1Template) Name() string {
+    return "network_user_interview_request_1"
+}
+
+
+
 func SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 

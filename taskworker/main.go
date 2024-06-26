@@ -91,7 +91,7 @@ Options:
 
 
 func initTasks(ctx context.Context) {
-    bringyour.Raise(bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
         defer clientSession.Cancel()
 
@@ -100,7 +100,7 @@ func initTasks(ctx context.Context) {
         work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
         ScheduleTaskCleanup(clientSession, tx)
         controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
-    }))
+    })
 }
 
 

@@ -3,7 +3,7 @@ package task
 import (
 	"context"
 	// "net/http"
-	// "strings"
+	"strings"
 	// "strconv"
 	// "encoding/base64"
 	"encoding/json"
@@ -219,31 +219,63 @@ func ScheduleTaskInTx[T any, R any](
 
 
 func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Task {
+	if len(taskIds) == 0 {
+		return map[bringyour.Id]*Task{}
+	}
+
     tasks := map[bringyour.Id]*Task{}
 
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
+    	selectSql := `
+    		SELECT
+		    	pending_task.task_id,
+		        pending_task.function_name,
+		        pending_task.args_json,
+		        pending_task.client_address,
+		        pending_task.client_by_jwt_json,
+		        pending_task.run_at,
+		        pending_task.run_once_key,
+		        pending_task.run_priority,
+		        pending_task.run_max_time_seconds,
+		        pending_task.claim_time,
+		        pending_task.release_time,
+		        pending_task.reschedule_error
+		    FROM pending_task
+		`
 
-    	result, err := tx.Query(
-    		ctx,
-    		`
-			    SELECT
-			    	pending_task.task_id,
-			        pending_task.function_name,
-			        pending_task.args_json,
-			        pending_task.client_address,
-			        pending_task.client_by_jwt_json,
-			        pending_task.run_at,
-			        pending_task.run_once_key,
-			        pending_task.run_priority,
-			        pending_task.run_max_time_seconds,
-			        pending_task.claim_time,
-			        pending_task.release_time,
-			        pending_task.reschedule_error
-			    FROM pending_task
-			    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
-		    `,
-    	)
+		var result bringyour.PgResult
+		var err error
+
+    	if len(taskIds) < 32 {
+    		// `task_id IN (...)` is more efficient than a temp table for small lists
+
+	    	taskIdParams := []string{}
+	    	for i := 0; i < len(taskIds); i += 1 {
+	    		taskIdParams = append(taskIdParams, fmt.Sprintf("$%d", i + 1))
+	    	}
+
+	    	taskIdValues := []any{}
+	    	for _, taskId := range taskIds {
+	    		taskIdValues = append(taskIdValues, taskId)
+	    	}
+
+	    	result, err = tx.Query(
+	    		ctx,
+	    		selectSql + `
+				    WHERE task_id IN (` + strings.Join(taskIdParams, ",") + `)
+			    `,
+			    taskIdValues...,
+	    	)
+	    } else {
+	    	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
+
+	    	result, err = tx.Query(
+	    		ctx,
+	    		selectSql + `
+				    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
+			    `,
+	    	)
+	    }
 
     	bringyour.WithPgResult(result, err, func() {
     		for result.Next() {
