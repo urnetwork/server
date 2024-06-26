@@ -853,41 +853,44 @@ func createTransferEscrowInTx(
         return
     }
 
+    /*
     bringyour.CreateTempJoinTableInTx(
         ctx,
         tx,
         "escrow(balance_id uuid -> balance_byte_count bigint)",
         escrow,
     )
+    */
 
-    bringyour.RaisePgResult(tx.Exec(
-        ctx,
-        `
-            UPDATE transfer_balance
-            SET
-                balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
-            FROM escrow
-            WHERE
-                transfer_balance.balance_id = escrow.balance_id
-        `,
-    ))
-
-    bringyour.RaisePgResult(tx.Exec(
-        ctx,
-        `
-            INSERT INTO transfer_escrow (
-                contract_id,
-                balance_id,
-                balance_byte_count
+    bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+        for balanceId, balanceByteCount := range escrow {
+            batch.Queue(
+                `
+                    UPDATE transfer_balance
+                    SET
+                        balance_byte_count = transfer_balance.balance_byte_count - $2
+                    WHERE
+                        transfer_balance.balance_id = $1
+                `,
+                balanceId,
+                balanceByteCount,
             )
-            SELECT
-                $1 AS contract_id,
-                balance_id,
-                balance_byte_count
-            FROM escrow
-        `,
-        contractId,
-    ))
+
+            batch.Queue(
+                `
+                    INSERT INTO transfer_escrow (
+                        contract_id,
+                        balance_id,
+                        balance_byte_count
+                    )
+                    VALUES ($1, $2, $3)
+                `,
+                contractId,
+                balanceId,
+                balanceByteCount,
+            )
+        }
+    })
 
     bringyour.RaisePgResult(tx.Exec(
         ctx,
@@ -1064,6 +1067,7 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
                     transfer_escrow.contract_id = transfer_contract.contract_id
 
                 WHERE
+                    transfer_contract.open = true AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
                     transfer_contract.transfer_byte_count <= $3 AND

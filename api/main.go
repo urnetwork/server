@@ -93,6 +93,7 @@ Options:
         router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
         router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
         router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
+        router.NewRoute("GET", "/hello", handlers.Hello),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

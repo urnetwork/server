@@ -40,6 +40,7 @@ Usage:
     bringyourctl send auth-password-reset --user_auth=<user_auth>
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
+    bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
 
 Options:
     -h --help     Show this screen.
@@ -111,6 +112,8 @@ Options:
             sendAuthPasswordSet(opts)
         } else if subscriptionTransferBalanceCode, _ := opts.Bool("subscription-transfer-balance-code"); subscriptionTransferBalanceCode {
             sendSubscriptionTransferBalanceCode(opts)
+        } else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
+            sendNetworkUserInterviewRequest1(opts)
         }
     }
 }
@@ -352,10 +355,25 @@ func sendAuthPasswordSet(opts docopt.Opts) {
 func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    ctx := context.Background()
+
+    balanceByteCount := model.ByteCount(10 * 1024 * 1024 * 1024 * 1024)
+    netRevenue := model.UsdToNanoCents(100.0)
+
+    balanceCode, err := model.CreateBalanceCode(
+        ctx,
+        balanceByteCount,
+        netRevenue,
+        bringyour.NewId().String(),
+        bringyour.NewId().String(),
+        userAuth,
+    )
+
+    err = controller.SendAccountMessageTemplate(
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
-            Secret: "hi there bar now",
+            Secret: balanceCode.Secret,
+            BalanceByteCount: balanceByteCount,
         },
     )
     if err != nil {
@@ -364,3 +382,17 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     fmt.Printf("Sent\n")
 }
 
+
+func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    err := controller.SendAccountMessageTemplate(
+        userAuth,
+        &controller.NetworkUserInterviewRequest1Template{},
+        controller.SenderEmail("brien@bringyour.com"),
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
