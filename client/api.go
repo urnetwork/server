@@ -36,7 +36,8 @@ func defaultClient() *http.Client {
   	}
 	transport := &http.Transport{
 	  	// DialTLSContext: NewResilientTlsDialContext(dialer),
-	  	DialContext: connect.NewExtenderDialContext(connect.ExtenderConnectModeQuic, dialer, connect.TestExtenderConfig()),
+	  	// DialContext: connect.NewExtenderDialContext(connect.ExtenderConnectModeQuic, dialer, connect.TestExtenderConfig()),
+	  	DialContext: dialer.DialContext,
 	  	TLSHandshakeTimeout: defaultHttpTlsTimeout,
 	}
 	return &http.Client{
