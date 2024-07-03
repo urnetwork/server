@@ -156,20 +156,20 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
     wallet := &AccountWallet{
-        NetworkId: destinationNetworkId,
-        WalletType: WalletTypeCircleUserControlled,
-        Blockchain: "matic",
-        WalletAddress: "",
+        NetworkId:        destinationNetworkId,
+        WalletType:       WalletTypeCircleUserControlled,
+        Blockchain:       "matic",
+        WalletAddress:    "",
         DefaultTokenType: "usdc",
     }
-    CreateAccountWallet(wallet, sourceSession)
+    CreateAccountWallet(wallet, destinationSession)
 
     payoutArgs := &SetPayoutWalletArgs{
-        WalletId: wallet.WalletId,
-        NetworkId: sourceNetworkId,
+        WalletId:  wallet.WalletId,
+        NetworkId: destinationNetworkId,
     }
 
-    SetPayoutWallet(*payoutArgs, sourceSession)
+    SetPayoutWallet(*payoutArgs, destinationSession)
 
     // plan a payment and complete the payment
     // nothing to plan because the payout does not meet the min threshold
