@@ -164,10 +164,10 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     }
     CreateAccountWallet(wallet, sourceSession)
 
-		payoutArgs := &SetPayoutWalletArgs{
-			WalletId: wallet.WalletId,
-			NetworkId: sourceNetworkId,
-		}
+    payoutArgs := &SetPayoutWalletArgs{
+        WalletId: wallet.WalletId,
+        NetworkId: sourceNetworkId,
+    }
 
     SetPayoutWallet(*payoutArgs, sourceSession)
 
