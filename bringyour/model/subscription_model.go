@@ -1928,7 +1928,9 @@ func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet
     return wallet
 }
 
-type CreateAccountWalletResult struct{}
+type CreateAccountWalletResult struct{
+	WalletId bringyour.Id `json:"wallet_id"`
+}
 
 func CreateAccountWallet(
 	wallet *AccountWallet,
@@ -1963,6 +1965,8 @@ func CreateAccountWallet(
 			wallet.DefaultTokenType,
 			wallet.CreateTime,
 		))
+
+		
 	})
 }
 

@@ -253,7 +253,7 @@ func CreateAccountWallet(
 		session,
 	)
 
-	return &model.CreateAccountWalletResult{}, nil
+	return &model.CreateAccountWalletResult{WalletId: wallet.WalletId}, nil
 }
 
 
