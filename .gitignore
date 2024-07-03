@@ -9,3 +9,5 @@ api/api
 taskworker/taskworker
 gpt/gpt
 connect/connect.test
+
+.vscode

@@ -1,16 +1,16 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
+	"context"
+	"fmt"
+	"net/http"
+	"os"
 
-    "github.com/docopt/docopt-go"
-    
-    "bringyour.com/service/api/handlers"
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/router"
+	"github.com/docopt/docopt-go"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/service/api/handlers"
 )
 
 
@@ -78,6 +78,8 @@ Options:
         router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
         router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
         router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
+        router.NewRoute("POST", "/subscription/payout-wallet", handlers.SubscriptionSetPayoutWallet),
+        router.NewRoute("POST", "/subscription/create-wallet", handlers.SubscriptionCreateAccountWallet),
         router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
         router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
         router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),

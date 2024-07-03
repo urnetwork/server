@@ -1,22 +1,22 @@
 package model
 
-
 import (
-    "context"
-    "time"
-    "fmt"
-    "math"
-    // "crypto/rand"
-    // "encoding/hex"
-    // "slices"
-    "errors"
-    "strings"
-    "strconv"
+	"context"
+	"fmt"
+	"math"
+	"time"
 
-    // "golang.org/x/exp/maps"
+	// "crypto/rand"
+	// "encoding/hex"
+	// "slices"
+	"errors"
+	"strconv"
+	"strings"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/session"
+	// "golang.org/x/exp/maps"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -1928,16 +1928,20 @@ func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet
     return wallet
 }
 
+type CreateAccountWalletResult struct{}
 
-func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        wallet.WalletId = bringyour.NewId()
-        wallet.Active = true
-        wallet.CreateTime = bringyour.NowUtc()
+func CreateAccountWallet(
+	wallet *AccountWallet,
+	session *session.ClientSession,
+) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		wallet.WalletId = bringyour.NewId()
+		wallet.Active = true
+		wallet.CreateTime = bringyour.NowUtc()
 
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
                 INSERT INTO account_wallet (
                     wallet_id,
                     network_id,
@@ -1950,16 +1954,16 @@ func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
-            wallet.WalletId,
-            wallet.NetworkId,
-            wallet.WalletType,
-            wallet.Blockchain,
-            wallet.WalletAddress,
-            wallet.Active,
-            wallet.DefaultTokenType,
-            wallet.CreateTime,
-        ))
-    })
+			wallet.WalletId,
+			wallet.NetworkId,
+			wallet.WalletType,
+			wallet.Blockchain,
+			wallet.WalletAddress,
+			wallet.Active,
+			wallet.DefaultTokenType,
+			wallet.CreateTime,
+		))
+	})
 }
 
 
@@ -2008,12 +2012,21 @@ func FindActiveAccountWallets(
     return wallets
 }
 
+type SetPayoutWalletArgs struct {
+	NetworkId bringyour.Id `json:"network_id"`
+	WalletId  bringyour.Id `json:"wallet_id"`
+}
 
-func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
+type SetPayoutWalletResult struct{}
+
+func SetPayoutWallet(
+	setPayoutWallet SetPayoutWalletArgs,
+	session *session.ClientSession,
+) {
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
                 INSERT INTO payout_wallet (
                     network_id,
                     wallet_id
@@ -2023,12 +2036,34 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
                 SET
                     wallet_id = $2
             `,
-            networkId,
-            walletId,
-        ))
-    })
+			setPayoutWallet.NetworkId,
+			setPayoutWallet.WalletId,
+		))
+	})
 }
 
+func GetPayoutWallet(ctx context.Context, networkId bringyour.Id) *bringyour.Id {
+	var walletId *bringyour.Id
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    wallet_id
+                FROM payout_wallet
+                WHERE
+                    network_id = $1
+            `,
+			networkId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&walletId))
+			}
+		})
+	})
+	return walletId
+}
 
 type GetAccountWalletsResult struct {
     Wallets []*AccountWallet

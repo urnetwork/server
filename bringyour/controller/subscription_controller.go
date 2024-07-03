@@ -1,29 +1,29 @@
 package controller
 
 import (
+	"bytes"
 	"context"
-	"time"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"net/http"
 	"net/url"
-	"bytes"
+	"strconv"
 	"strings"
-	"crypto/hmac"
-	"crypto/sha256"
-	"errors"
 	"sync"
+	"time"
 
 	stripewebhook "github.com/stripe/stripe-go/v76/webhook"
 
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
+	"bringyour.com/bringyour/task"
 )
 
 
@@ -220,9 +220,40 @@ func AutoPayout() {
 }
 
 
-// call from api
-func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
-	
+/**
+ * Associates the AccountWallet as the payout wallet for the network.
+ */
+ func SetPayoutWallet(
+	setWalletPayout model.SetPayoutWalletArgs,
+	session *session.ClientSession,
+) (*model.SetPayoutWalletResult, error) {
+
+	model.SetPayoutWallet(
+		setWalletPayout,
+		session,
+	)
+
+	return &model.SetPayoutWalletResult{}, nil
+
+}
+
+func CreateAccountWallet(
+	wallet *model.AccountWallet,
+	session *session.ClientSession,
+) (*model.CreateAccountWalletResult, error) {
+
+	// TODO: validate wallet blockchain
+
+	// TODO: validate wallet.WalletAddress
+	// currently we are only validating by the Circle API
+	// possibly migrate to https://docs.cdp.coinbase.com/intx/reference/validate-address/
+
+	model.CreateAccountWallet(
+		wallet,
+		session,
+	)
+
+	return &model.CreateAccountWalletResult{}, nil
 }
 
 

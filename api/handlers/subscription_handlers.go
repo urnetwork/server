@@ -1,22 +1,20 @@
 package handlers
 
 import (
-	"net/http"
-	"io"
-	"encoding/json"
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 
-	"bringyour.com/bringyour/router"
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/router"
 )
-
 
 func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.SubscriptionBalance, w, r)
 }
-
 
 func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
@@ -27,7 +25,6 @@ func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-
 func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyCoinbaseBody,
@@ -36,7 +33,6 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 		r,
 	)
 }
-
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
@@ -47,13 +43,12 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-
 // TODO this is not used currently
 func CircleWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
+		return
 	}
 
 	out := &bytes.Buffer{}
@@ -62,21 +57,25 @@ func CircleWebhook(w http.ResponseWriter, r *http.Request) {
 	bringyour.Logger().Printf("Circle webhook body: %s\n", out.Bytes())
 
 	w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte("{}"))
+	w.Write([]byte("{}"))
 }
-
 
 func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.CheckBalanceCode, w, r)
 }
 
-
 func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.RedeemBalanceCode, w, r)
 }
-
 
 func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.SubscriptionCreatePaymentId, w, r)
 }
 
+func SubscriptionSetPayoutWallet(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SetPayoutWallet, w, r)
+}
+
+func SubscriptionCreateAccountWallet(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.CreateAccountWallet, w, r)
+}

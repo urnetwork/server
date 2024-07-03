@@ -1,19 +1,18 @@
 package model
 
-
 import (
-    "context"
-    "testing"
-    "slices"
-    "time"
+	"context"
+	"slices"
+	"testing"
+	"time"
 
-    "golang.org/x/exp/maps"
+	"golang.org/x/exp/maps"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -163,8 +162,14 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         WalletAddress: "",
         DefaultTokenType: "usdc",
     }
-    CreateAccountWallet(ctx, wallet)
-    SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+    CreateAccountWallet(wallet, sourceSession)
+
+		payoutArgs := &SetPayoutWalletArgs{
+			WalletId: wallet.WalletId,
+			NetworkId: sourceNetworkId,
+		}
+
+    SetPayoutWallet(*payoutArgs, sourceSession)
 
     // plan a payment and complete the payment
     // nothing to plan because the payout does not meet the min threshold
@@ -407,3 +412,60 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         assert.Equal(t, endTime, transferBalance.EndTime)
     }
 })}
+
+func TestPayoutWallet(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+		sourceNetworkId := bringyour.NewId()
+		sourceId := bringyour.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+
+		wallet1 := &AccountWallet{
+			NetworkId:        sourceNetworkId,
+			WalletType:       WalletTypeCircleUserControlled,
+			Blockchain:       "matic",
+			WalletAddress:    "0x0",
+			DefaultTokenType: "usdc",
+		}
+
+		wallet2 := &AccountWallet{
+			NetworkId:        sourceNetworkId,
+			WalletType:       WalletTypeCircleUserControlled,
+			Blockchain:       "matic",
+			WalletAddress:    "0x1",
+			DefaultTokenType: "usdc",
+		}
+
+		CreateAccountWallet(wallet1, sourceSession)
+		CreateAccountWallet(wallet2, sourceSession)
+
+		setPayoutWalletArgs := &SetPayoutWalletArgs{
+			WalletId:  wallet1.WalletId,
+			NetworkId: sourceNetworkId,
+		}
+
+		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
+
+		payoutWalletId := GetPayoutWallet(ctx, sourceNetworkId)
+		payoutAccountWallet := GetAccountWallet(ctx, *payoutWalletId)
+
+		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
+
+		setPayoutWalletArgs = &SetPayoutWalletArgs{
+			WalletId:  wallet2.WalletId,
+			NetworkId: sourceNetworkId,
+		}
+
+		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
+
+		payoutWalletId = GetPayoutWallet(ctx, sourceNetworkId)
+		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)
+
+		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
+	})
+}
