@@ -1936,6 +1936,9 @@ func CreateAccountWallet(
 	wallet *AccountWallet,
 	session *session.ClientSession,
 ) {
+
+    networkId := session.ByJwt.NetworkId
+
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		wallet.WalletId = bringyour.NewId()
 		wallet.Active = true
@@ -1957,7 +1960,7 @@ func CreateAccountWallet(
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
 			wallet.WalletId,
-			wallet.NetworkId,
+			networkId,
 			wallet.WalletType,
 			wallet.Blockchain,
 			wallet.WalletAddress,
@@ -2017,7 +2020,6 @@ func FindActiveAccountWallets(
 }
 
 type SetPayoutWalletArgs struct {
-	NetworkId bringyour.Id `json:"network_id"`
 	WalletId  bringyour.Id `json:"wallet_id"`
 }
 
@@ -2027,6 +2029,9 @@ func SetPayoutWallet(
 	setPayoutWallet SetPayoutWalletArgs,
 	session *session.ClientSession,
 ) {
+
+    networkId := session.ByJwt.NetworkId
+
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -2040,7 +2045,7 @@ func SetPayoutWallet(
                 SET
                     wallet_id = $2
             `,
-			setPayoutWallet.NetworkId,
+			networkId,
 			setPayoutWallet.WalletId,
 		))
 	})
