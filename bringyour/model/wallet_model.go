@@ -1,17 +1,21 @@
 package model
 
 import (
-    "context"
-    // "time"
-    // "fmt"
-    // "math"
-    // "crypto/rand"
-    // "encoding/hex"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
 
-    "bringyour.com/bringyour"
-    // "bringyour.com/bringyour/session"
+	// "time"
+	// "fmt"
+	// "math"
+	// "crypto/rand"
+	// "encoding/hex"
+
+	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour/session"
 )
-
 
 // this user id is what is used for the Circle api:
 // - create a user token
@@ -98,3 +102,72 @@ func SetCircleUserId(
     })
 }
 
+type WalletValidateAddressArgs struct {
+    Address string `json:"address,omitempty"`
+    Chain   string `json:"chain,omitempty"` // https://developers.circle.com/w3s/reference/createvalidateaddress for valid blockchain params
+}
+
+type WalletValidateAddressResult struct {
+    Valid bool `json:"valid,omitempty"`
+}
+
+func WalletValidateAddress(
+    walletValidateAddress *WalletValidateAddressArgs,
+) (*WalletValidateAddressResult, error) {
+    return bringyour.HttpPostRequireStatusOk(
+        "https://api.circle.com/v1/w3s/transactions/validateAddress",
+        map[string]any{
+            "blockchain": walletValidateAddress.Chain,
+            "address": walletValidateAddress.Address,
+        },
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", CircleConfig()["api_token"]))
+        },
+        func(response *http.Response, responseBodyBytes []byte)(*WalletValidateAddressResult, error) {
+            _, data, err := ParseCircleResponseData(responseBodyBytes)
+            if err != nil {
+                return nil, err
+            }
+
+            valid := false
+            if validAny := data["isValid"]; validAny != nil {
+                if v, ok := validAny.(bool); ok {
+                    valid = v
+                } 
+            }
+
+            return &WalletValidateAddressResult{
+                Valid: valid,
+            }, nil
+        },
+    )
+}
+
+var CircleConfig = sync.OnceValue(func() map[string]any {
+    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+    return c["circle"].(map[string]any)
+})
+
+func ParseCircleResponseData(responseBodyBytes []byte) (
+    responseBody map[string]any,
+    resultData map[string]any,
+    resultErr error,
+) {
+    responseBody = map[string]any{}
+    err := json.Unmarshal(responseBodyBytes, &responseBody)
+    if err != nil {
+        resultErr = err
+        return
+    }
+
+    if data, ok := responseBody["data"]; ok {
+        switch v := data.(type) {
+        case map[string]any:
+            resultData = v
+            return
+        }
+    }
+    err = fmt.Errorf("Response is missing data.")
+    return
+}

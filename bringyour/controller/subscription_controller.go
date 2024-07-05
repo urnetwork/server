@@ -242,11 +242,22 @@ func CreateAccountWallet(
 	session *session.ClientSession,
 ) (*model.CreateAccountWalletResult, error) {
 
-	// TODO: validate wallet blockchain
+	if wallet.Blockchain != "SOL" && wallet.Blockchain != "MATIC" {
+		return nil, errors.New("invalid blockchain, use SOL or MATIC")
+	}
 
-	// TODO: validate wallet.WalletAddress
-	// currently we are only validating by the Circle API
-	// possibly migrate to https://docs.cdp.coinbase.com/intx/reference/validate-address/
+	walletValidateAddressArgs := model.WalletValidateAddressArgs{
+		Address: wallet.WalletAddress,
+		Chain: wallet.Blockchain,
+	}
+	validationResult, err := WalletValidateAddress(&walletValidateAddressArgs, session)
+	if err != nil {
+		return nil, err
+	}
+
+	if !validationResult.Valid {
+		return nil, errors.New("invalid wallet address")
+	}
 
 	model.CreateAccountWallet(
 		wallet,

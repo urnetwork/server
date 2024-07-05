@@ -64,10 +64,12 @@ func TestWalletValidateAddress(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
 	assert.NotEqual(t, result.ChallengeId, "")
 
 
+	// check valid ethereum address
 	validateResult, err := WalletValidateAddress(
-		&WalletValidateAddressArgs{
+		&model.WalletValidateAddressArgs{
 			// BringYour USDC Polygon
 			Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
+			Chain: "ETH",
 		},
 		session,
 	)
@@ -75,11 +77,36 @@ func TestWalletValidateAddress(t *testing.T) { bringyour.DefaultTestEnv().Run(fu
 	assert.Equal(t, err, nil)
 	assert.Equal(t, validateResult.Valid, true)
 
-
+	// check valid solana address
 	validateResult, err = WalletValidateAddress(
-		&WalletValidateAddressArgs{
+		&model.WalletValidateAddressArgs{
 			// BringYour USDC Solana
 			Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+			Chain: "SOL",
+		},
+		session,
+	)
+
+	assert.Equal(t, err, nil)
+	assert.Equal(t, validateResult.Valid, true)
+
+	// check invaid ethereum address
+	validateResult, err = WalletValidateAddress(
+		&model.WalletValidateAddressArgs{
+			Address: "0xB3F448b9C395F9833BE866577254799C23BGa68A",
+			Chain: "ETH",
+		},
+		session,
+	)
+
+	assert.Equal(t, err, nil)
+	assert.Equal(t, validateResult.Valid, false)
+
+	// check invaid Solana address
+	validateResult, err = WalletValidateAddress(
+		&model.WalletValidateAddressArgs{
+			Address: "1GtYzxzYRpkGQ8e3Un71GoQf494VLDBNyqXNXB38MP7A",
+			Chain: "SOL",
 		},
 		session,
 	)

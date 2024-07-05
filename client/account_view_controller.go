@@ -49,8 +49,8 @@ func (self *AccountViewController) Close() {
 	self.cancel()
 }
 
-func (self *AccountViewController) WalletValidateAddress(address string, callback WalletValidateAddressCallback) {
-	self.walletValidateAddress.Queue(address, callback)
+func (self *AccountViewController) WalletValidateAddress(address string, chain string, callback WalletValidateAddressCallback) {
+	self.walletValidateAddress.Queue(address, chain, callback)
 }
 
 
@@ -68,6 +68,7 @@ type walletValidateAddress struct {
 
 	updateCount int
 	address string
+	chain string
 	callback WalletValidateAddressCallback
 }
 
@@ -95,6 +96,7 @@ func (self *walletValidateAddress) run() {
 		self.stateLock.Lock()
 		notify := self.monitor.NotifyChannel()
 		address := self.address
+		chain := self.chain
 		updateCount := self.updateCount
 		callback := self.callback
 		self.stateLock.Unlock()
@@ -105,6 +107,7 @@ func (self *walletValidateAddress) run() {
 			self.api.WalletValidateAddress(
 				&WalletValidateAddressArgs{
 					Address: address,
+					Chain: chain,
 				},
 				newApiCallback[*WalletValidateAddressResult](func(result *WalletValidateAddressResult, err error) {
 					self.stateLock.Lock()
@@ -135,11 +138,12 @@ func (self *walletValidateAddress) run() {
 	}
 }
 
-func (self *walletValidateAddress) Queue(address string, callback WalletValidateAddressCallback) {
+func (self *walletValidateAddress) Queue(address string, chain string, callback WalletValidateAddressCallback) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.updateCount += 1
 	self.address = address
+	self.chain = chain
 	self.callback = callback
 	self.monitor.NotifyAll()
 }

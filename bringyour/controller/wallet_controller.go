@@ -2,7 +2,6 @@ package controller
 
 import (
     "fmt"
-    "sync"
     "net/http"
     "encoding/json"
     // "io"
@@ -14,12 +13,6 @@ import (
     "bringyour.com/bringyour/model"
     "bringyour.com/bringyour"
 )
-
-
-var circleConfig = sync.OnceValue(func() map[string]any {
-    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-    return c["circle"].(map[string]any)
-})
 
 
 type WalletCircleInitResult struct {
@@ -53,12 +46,12 @@ func WalletCircleInit(
             "idempotencyKey": bringyour.NewId(),
             "accountType": "SCA",
             "blockchains": []string{
-                circleConfig()["blockchain"].(string),
+                model.CircleConfig()["blockchain"].(string),
             },
         },
         func(header http.Header) {
             header.Add("Accept", "application/json")
-            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", model.CircleConfig()["api_token"]))
             header.Add("X-User-Token", circleUserToken.UserToken)
         },
         func(response *http.Response, responseBodyBytes []byte)(*WalletCircleInitResult, error) {
@@ -81,54 +74,11 @@ func WalletCircleInit(
 }
 
 
-type WalletValidateAddressArgs struct {
-    Address string `json:"address,omitempty"`
-}
-
-
-type WalletValidateAddressResult struct {
-    Valid bool `json:"valid,omitempty"`
-}
-
-
 func WalletValidateAddress(
-    walletValidateAddress *WalletValidateAddressArgs,
+    walletValidateAddress *model.WalletValidateAddressArgs,
     session *session.ClientSession,
-) (*WalletValidateAddressResult, error) {
-    circleUserToken, err := createCircleUserToken(session)
-    if err != nil {
-        return nil, err
-    }
-
-    return bringyour.HttpPostRequireStatusOk(
-        "https://api.circle.com/v1/w3s/transactions/validateAddress",
-        map[string]any{
-            "blockchain": circleConfig()["blockchain"],
-            "address": walletValidateAddress.Address,
-        },
-        func(header http.Header) {
-            header.Add("Accept", "application/json")
-            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-            header.Add("X-User-Token", circleUserToken.UserToken)
-        },
-        func(response *http.Response, responseBodyBytes []byte)(*WalletValidateAddressResult, error) {
-            _, data, err := parseCircleResponseData(responseBodyBytes)
-            if err != nil {
-                return nil, err
-            }
-
-            valid := false
-            if validAny := data["isValid"]; validAny != nil {
-                if v, ok := validAny.(bool); ok {
-                    valid = v
-                } 
-            }
-
-            return &WalletValidateAddressResult{
-                Valid: valid,
-            }, nil
-        },
-    )
+) (*model.WalletValidateAddressResult, error) {
+    return model.WalletValidateAddress(walletValidateAddress)
 }
 
 
@@ -201,7 +151,7 @@ func WalletCircleTransferOut(
         },
         func(header http.Header) {
             header.Add("Accept", "application/json")
-            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", model.CircleConfig()["api_token"]))
             header.Add("X-User-Token", circleUserToken.UserToken)
         },
         func(response *http.Response, responseBodyBytes []byte)(*WalletCircleTransferOutResult, error) {
@@ -234,7 +184,7 @@ func createCircleUser(session *session.ClientSession) (
         session.ByJwt.UserId,
     )
 
-    circleApiToken := circleConfig()["api_token"]
+    circleApiToken := model.CircleConfig()["api_token"]
 
     _, resultErr = bringyour.HttpPost(
         "https://api.circle.com/v1/w3s/users",
@@ -290,7 +240,7 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
         session.ByJwt.UserId,
     )
 
-    circleApiToken := circleConfig()["api_token"]
+    circleApiToken := model.CircleConfig()["api_token"]
 
     return bringyour.HttpPostRequireStatusOk(
         "https://api.circle.com/v1/w3s/users/token",
@@ -302,7 +252,7 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
             header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
         },
         func(response *http.Response, responseBodyBytes []byte)(*CircleUserToken, error) {
-            _, data, err := parseCircleResponseData(responseBodyBytes)
+            _, data, err := model.ParseCircleResponseData(responseBodyBytes)
             if err != nil {
                 return nil, err
             }
@@ -335,33 +285,8 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
     )
 }
 
-
-func parseCircleResponseData(responseBodyBytes []byte) (
-    responseBody map[string]any,
-    resultData map[string]any,
-    resultErr error,
-) {
-    responseBody = map[string]any{}
-    err := json.Unmarshal(responseBodyBytes, &responseBody)
-    if err != nil {
-        resultErr = err
-        return
-    }
-
-    if data, ok := responseBody["data"]; ok {
-        switch v := data.(type) {
-        case map[string]any:
-            resultData = v
-            return
-        }
-    }
-    err = fmt.Errorf("Response is missing data.")
-    return
-}
-
-
 func parseCircleChallengeId(responseBodyBytes []byte) (string, error) {
-    _, data, err := parseCircleResponseData(responseBodyBytes)
+    _, data, err := model.ParseCircleResponseData(responseBodyBytes)
     if err != nil {
         return "", err
     }
@@ -419,7 +344,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
         return nil, err
     }
 
-    circleApiToken := circleConfig()["api_token"]
+    circleApiToken := model.CircleConfig()["api_token"]
 
     walletInfos, err := bringyour.HttpGetRequireStatusOk(
         "https://api.circle.com/v1/w3s/wallets",
@@ -429,7 +354,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
             header.Add("X-User-Token", circleUserToken.UserToken)
         },
         func(response *http.Response, responseBodyBytes []byte)([]*CircleWalletInfo, error) {
-            _, data, err := parseCircleResponseData(responseBodyBytes)
+            _, data, err := model.ParseCircleResponseData(responseBodyBytes)
             if err != nil {
                 return nil, err
             }
@@ -499,7 +424,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
                 header.Add("X-User-Token", circleUserToken.UserToken)
             },
             func(response *http.Response, responseBodyBytes []byte)(map[string]any, error) {
-                _, data, err := parseCircleResponseData(responseBodyBytes)
+                _, data, err := model.ParseCircleResponseData(responseBodyBytes)
                 return data, err
             },
         )
@@ -514,8 +439,8 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
             if v, ok := tokenBalancesAny.([]any); ok {
                 if len(v) == 0 {
                     // there are no tokens in this wallet
-                    walletInfo.Blockchain = circleConfig()["blockchain_name"].(string)
-                    walletInfo.BlockchainSymbol = circleConfig()["blockchain"].(string)
+                    walletInfo.Blockchain = model.CircleConfig()["blockchain_name"].(string)
+                    walletInfo.BlockchainSymbol = model.CircleConfig()["blockchain"].(string)
                     parsedNative = true
                     parsedUsdc = true
                 } else {
