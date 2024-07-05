@@ -166,7 +166,6 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
     payoutArgs := &SetPayoutWalletArgs{
         WalletId:  wallet.WalletId,
-        NetworkId: destinationNetworkId,
     }
 
     SetPayoutWallet(*payoutArgs, destinationSession)
@@ -446,7 +445,6 @@ func TestPayoutWallet(t *testing.T) {
 
 		setPayoutWalletArgs := &SetPayoutWalletArgs{
 			WalletId:  wallet1.WalletId,
-			NetworkId: sourceNetworkId,
 		}
 
 		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
@@ -458,7 +456,6 @@ func TestPayoutWallet(t *testing.T) {
 
 		setPayoutWalletArgs = &SetPayoutWalletArgs{
 			WalletId:  wallet2.WalletId,
-			NetworkId: sourceNetworkId,
 		}
 
 		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
