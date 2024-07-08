@@ -149,6 +149,14 @@ func (self *SubscriptionEndedTemplate) Name() string {
     return "subscription_ended"
 }
 
+type SendPaymentTemplate struct {
+    BaseTemplate
+}
+
+func (self *SendPaymentTemplate) Name() string {
+    return "subscription_send_payment"
+}
+
 
 func SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
