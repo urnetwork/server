@@ -21,9 +21,7 @@ import (
 )
 
 var (
-	// processedPayments keeps track of payments that are being processed or have been processed
 	processedPayments = make(map[bringyour.Id]struct{})
-	// mu protects access to processedPayments
 	mu sync.Mutex
 )
 
