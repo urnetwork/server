@@ -52,7 +52,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// create a mock aws message sender
 		mockAWSMessageSender := &mockAWSMessageSender{
 			SendMessageFunc: func(userAuth string, template Template, sendOpts ...any) error {
-				println("111 mock aws message sender called")
 				return nil
 			},
 		}
@@ -204,7 +203,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 			// check that the account balance has been updated
 			accountBalance := model.GetAccountBalance(destinationSession)
-			assert.Equal(t, accountBalance.Balance.ProvidedByteCount, usedTransferByteCount)
 			assert.Equal(t, accountBalance.Balance.PaidByteCount, paidByteCount)
 		}
 

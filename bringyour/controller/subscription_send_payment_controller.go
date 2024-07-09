@@ -150,8 +150,6 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		status = tx.Status
 	}
 
-	println("tx.Status: ", status)
-
 	// "completed"
 	// "pending", "waiting_for_clearing", "waiting_for_signature"
 	switch status {
@@ -168,8 +166,6 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 
 		// do not rerun task
 
-		println("COMPLETED HIT")
-
 		model.CompletePayment(
 			clientSession.Ctx, 
 			payment.PaymentId, 
@@ -184,7 +180,6 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		// TODO we need to stub this in tests
 		awsMessageSender := GetAWSMessageSender()
 		// TODO handler error
-		println("about to send email")
 		awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
 
 		return &CoinbasePaymentResult{
@@ -194,7 +189,6 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 	default:
 		// no transaction or error
 		// send the payment
-		println("!!! Sending payment: ", payment.PaymentId.String())
 
 		// get the wallet by wallet id
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
@@ -218,7 +212,6 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 			clientSession,
 		)
 		if err != nil {
-			println("!!! Error sending payment: ", err.Error())
 			return nil, err
 		}
 
@@ -253,9 +246,6 @@ type GetCoinbaseTxDataResult struct {
 
 func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
 
-	// should not be hit during tests
-	return nil, fmt.Errorf("getTransactionData Should not be hit during tests")
-
 	path := fmt.Sprintf("/v2/accounts/%s/transactions/%s", coinbaseAccountId(), transactionId)
 	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
 	if err != nil {
@@ -288,9 +278,6 @@ func (c *CoreCoinbaseApiClient) sendPayment(
 	sendRequest *CoinbaseSendRequest, 
 	session *session.ClientSession,
 ) (*CoinbaseSendResponseData, error) {
-
-	// should not be hit during tests
-	return nil, fmt.Errorf("sendPayment Should not be hit during tests")
 
 	path := fmt.Sprintf("/v2/accounts/%s/transactions", coinbaseAccountId())
 	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)

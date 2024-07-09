@@ -2260,15 +2260,12 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
                 var paymentId bringyour.Id
-                println("about to scan payment_id")
                 bringyour.Raise(result.Scan(&paymentId))
-                println("this line is never reached")
                 paymentIds = append(paymentIds, paymentId)
             }
         })
 
         for _, paymentId := range paymentIds {
-            println("about to fetch payment", paymentId.String())
             payment := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)

@@ -178,9 +178,6 @@ type AWSMessageSender struct {}
 
 func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 
-    println("SendAccountMessageTemplate SHOULD NOT BE CALLED IN TESTS")
-    return fmt.Errorf("should not be called")
-
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 
     switch userAuthType {
