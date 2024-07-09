@@ -2199,11 +2199,8 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
         paymentId,
     )
 
-    totalResultCount := 0
-
     bringyour.WithPgResult(result, err, func() {
         if result.Next() {
-            totalResultCount += 1
             payment = &AccountPayment{
                 PaymentId: paymentId,
             }
@@ -2513,13 +2510,6 @@ func SetPaymentRecord(
     tokenAmount float64,
     paymentRecord string,
 ) (returnErr error) {
-
-    println("SetPaymentRecord")
-    println("paymentId", paymentId.String())
-    println("tokenType", tokenType)
-    println("tokenAmount", tokenAmount)
-    println("paymentRecord", paymentRecord)
-
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -2539,7 +2529,6 @@ func SetPaymentRecord(
             paymentRecord,
         ))
         if tag.RowsAffected() != 1 {
-            println("SetPaymentRecord failed")
             returnErr = fmt.Errorf("Invalid payment.")
             return 
         }

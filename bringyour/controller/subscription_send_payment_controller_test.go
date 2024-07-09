@@ -39,8 +39,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 				ClientId: &destinationId,
 		})
 
-		// model.Testing_CreateNetwork(ctx, sourceNetworkId, "a", sourceId)
-
 		mockCoinbaseClient := &mockCoinbaseApiClient{
 			GetTransactionDataFunc: defaultGetTransactionDataHandler,
 			SendPaymentFunc: defaultSendPaymentHandler,
@@ -93,8 +91,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		}
 		model.CreateAccountWallet(ctx, wallet)
 
-		// STU_TODO: why does SetPayoutWallet not populate plan payments
-		// but model.SetPayoutWallet works?
 		model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 
 		paymentPlan := model.PlanPayments(ctx)
@@ -103,7 +99,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
-		// this is creating payment contracts from the client to the provider?
     for paid < model.MinWalletPayoutThreshold {
         transferEscrow, err := model.CreateTransferEscrow(
 					ctx, 
@@ -146,7 +141,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		}
 
 		pendingPayments := model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
-		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		// coinbase api will return a pending status
 		// should return that payment is incomplete
@@ -185,8 +179,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		SetCoinbaseClient(mockCoinbaseClient)
 
-		// paymentPlan = model.PlanPayments(ctx)
-		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 		pendingPayments = model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
 
 		// these should hit completed
