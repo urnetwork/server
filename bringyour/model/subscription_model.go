@@ -1805,7 +1805,7 @@ func GetExpiredOpenContractIds(
                 WHERE
                     transfer_contract.open = true
             `,
-            time.Now().Sub(contractCloseTimeout),
+            time.Now().Add(-contractCloseTimeout),
         )
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
@@ -1826,7 +1826,7 @@ func GetExpiredOpenContractIds(
                 if checkpoint {
                     party = ContractPartyCheckpoint
                 }
-                partialCloseParties, ok = contractIdPartialCloseParties[contractId]
+                partialCloseParties, ok := contractIdPartialCloseParties[contractId]
                 if !ok {
                     partialCloseParties = map[ContractParty]bool{}
                     contractIdPartialCloseParties[contractId] = partialCloseParties

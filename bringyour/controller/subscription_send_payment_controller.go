@@ -111,7 +111,6 @@ type CoinbasePaymentResult struct {
 	Complete bool
 }
 
-
 func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *session.ClientSession) (*CoinbasePaymentResult, error) {
 
 
@@ -119,6 +118,7 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 	// if complete, finish and send email
 	// if in progress, wait
 	payment := coinbasePayment.Payment
+	coinbaseClient := CoinbaseClient()
 
 	// GET https://api.coinbase.com/v2/accounts/:account_id/transactions/:transaction_id
 	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions
@@ -135,7 +135,7 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 	if payment.PaymentRecord != "" {
 
 		// get the status of the transaction
-		getTxDataResult, err := getCoinbaseTxData(payment.PaymentRecord)
+		getTxDataResult, err := coinbaseClient.getTransactionData(payment.PaymentRecord)
 		if err != nil {
 			return nil, err
 		}
@@ -172,12 +172,13 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 			string(txResponseBodyBytes), // STU_TODO: check this
 		)
 
-		userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
-		if err != nil {
-			return nil, err
-		}
+		// userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
+		// if err != nil {
+		// 	return nil, err
+		// }
 
-		SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
+		// TODO we need to stub this in tests
+		// SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
 
 		return &CoinbasePaymentResult{
 			Complete: true,
@@ -196,7 +197,7 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		// TODO: ensure payout - transaction fees >= minimum payout amount
 
 		// send the payment
-		txData, err := sendCoinbasePayment(
+		txData, err := coinbaseClient.sendPayment(
 				&CoinbaseSendRequest{
 				Type: "send",
 				To: accountWallet.WalletAddress,
@@ -228,13 +229,20 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 	}
 }
 
+type CoinbaseAPI interface {
+	getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error)
+	sendPayment(sendRequest *CoinbaseSendRequest, session *session.ClientSession) (*CoinbaseSendResponseData, error)
+}
+
+type CoreCoinbaseApiClient struct {}
+
 type GetCoinbaseTxDataResult struct {
 	TxData *CoinbaseTransactionResponseData
 	ResponseBodyBytes []byte
 }
 
 
-func getCoinbaseTxData(transactionId string) (*GetCoinbaseTxDataResult, error) {
+func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
 
 	path := fmt.Sprintf("/v2/accounts/%s/transactions/%s", coinbaseAccountId(), transactionId)
 	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
@@ -264,7 +272,7 @@ func getCoinbaseTxData(transactionId string) (*GetCoinbaseTxDataResult, error) {
 	)
 }
 
-func sendCoinbasePayment(
+func (c *CoreCoinbaseApiClient) sendPayment(
 	sendRequest *CoinbaseSendRequest, 
 	session *session.ClientSession,
 ) (*CoinbaseSendResponseData, error) {
@@ -282,17 +290,27 @@ func sendCoinbasePayment(
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
 		},
 		func(response *http.Response, responseBodyBytes []byte)(*CoinbaseSendResponseData, error) {
-				result := &CoinbaseSendResponseData{}
+				result := &CoinbaseSendResponse{}
 				err := json.Unmarshal(responseBodyBytes, result)
 
 				if err != nil {
 						return nil, err
 				}
 
-				return result, nil
+				return result.Data, nil
 		},
 	)
+}
 
+var coinbaseClientInstance CoinbaseAPI = &CoreCoinbaseApiClient{}
+
+func CoinbaseClient() CoinbaseAPI {
+	return coinbaseClientInstance
+}
+
+// used for mocking in tests
+func SetCoinbaseClient(client CoinbaseAPI) {
+	coinbaseClientInstance = client
 }
 
 // CoinbaseApiHost = "api.coinbase.com"
@@ -351,9 +369,8 @@ type CoinbaseSendResponseData struct {
 
 type CoinbaseSendResponseNetwork struct {
 	Status string `json:"status"`
-	StatusDescription string `json:"status_description"`
 	Hash string `json:"hash"`
-	NetworkName string `json:"network_name"`
+	Name string `json:"name"`
 }
 
 

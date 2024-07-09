@@ -957,10 +957,9 @@ func BackfillInitialTransferBalancePost(
 // clean up checkpoint contracts
 
 
-
-func CloseExpiredContracts() {
-	GetExpiredOpenContractIds()
-
+// STU_TODO what else does this need?
+func CloseExpiredContracts(duration time.Duration, session session.ClientSession) {
+	model.GetExpiredOpenContractIds(session.Ctx, duration)
 }
 
 
