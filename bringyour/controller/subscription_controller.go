@@ -339,8 +339,9 @@ func StripeWebhook(
 						return nil, err
 					}
 				} else if sku.Special == SpecialCompany {
+					awsMessageSender := GetAWSMessageSender()
 					// company shared data
-					err := SendAccountMessageTemplate(
+					err := awsMessageSender.SendAccountMessageTemplate(
 				        purchaseEmail,
 				        &SubscriptionTransferBalanceCompanyTemplate{
 				        	BalanceByteCount: sku.BalanceByteCount,
@@ -472,7 +473,9 @@ func CreateBalanceCode(
 			return err
 		}
 
-		return SendAccountMessageTemplate(
+		awsMessageSender := GetAWSMessageSender()
+
+		return awsMessageSender.SendAccountMessageTemplate(
 	        balanceCode.PurchaseEmail,
 	        &SubscriptionTransferBalanceCodeTemplate{
 	        	Secret: balanceCode.Secret,
@@ -494,7 +497,9 @@ func CreateBalanceCode(
 			return err
 		}
 
-		return SendAccountMessageTemplate(
+		awsMessageSender := GetAWSMessageSender()
+
+		return awsMessageSender.SendAccountMessageTemplate(
 	        balanceCode.PurchaseEmail,
 	        &SubscriptionTransferBalanceCodeTemplate{
 	        	Secret: balanceCode.Secret,
@@ -797,7 +802,9 @@ func PlaySubscriptionRenewalPost(
 	    if err != nil {
 	        return err
 	    }
-		SendAccountMessageTemplate(
+			
+		awsMessageSender := GetAWSMessageSender()
+		awsMessageSender.SendAccountMessageTemplate(
             userAuth,
             &SubscriptionEndedTemplate{},
         )

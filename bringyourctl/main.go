@@ -292,7 +292,9 @@ func balanceCodeCheck(opts docopt.Opts) {
 func sendNetworkWelcome(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.NetworkWelcomeTemplate{},
     )
@@ -306,7 +308,9 @@ func sendNetworkWelcome(opts docopt.Opts) {
 func sendAuthVerify(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthVerifyTemplate{
             VerifyCode: "abcdefghij",
@@ -322,7 +326,9 @@ func sendAuthVerify(opts docopt.Opts) {
 func sendAuthPasswordReset(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthPasswordResetTemplate{
             ResetCode: "abcdefghij",
@@ -338,7 +344,9 @@ func sendAuthPasswordReset(opts docopt.Opts) {
 func sendAuthPasswordSet(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthPasswordSetTemplate{},
     )
@@ -352,7 +360,9 @@ func sendAuthPasswordSet(opts docopt.Opts) {
 func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
             Secret: "hi there bar now",

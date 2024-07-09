@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"golang.org/x/exp/maps"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/model"
@@ -37,14 +39,27 @@ func TestSubscriptionSendPayment(t *testing.T) {
 				ClientId: &destinationId,
 		})
 
-		model.Testing_CreateNetwork(ctx, sourceNetworkId, "a", sourceId)
+		// model.Testing_CreateNetwork(ctx, sourceNetworkId, "a", sourceId)
 
 		mockCoinbaseClient := &mockCoinbaseApiClient{
 			GetTransactionDataFunc: defaultGetTransactionDataHandler,
 			SendPaymentFunc: defaultSendPaymentHandler,
 		}
 
+		// set a mock coinbase client so we don't make real api calls to coinbase
 		SetCoinbaseClient(mockCoinbaseClient)
+
+		// create a mock aws message sender
+		mockAWSMessageSender := &mockAWSMessageSender{
+			SendMessageFunc: func(userAuth string, template Template, sendOpts ...any) error {
+				println("111 mock aws message sender called")
+				return nil
+			},
+		}
+
+		// set the mock aws message sender
+		// we don't want to send out messages in our tests
+		SetMessageSender(mockAWSMessageSender)
 
 		balanceCode, err := model.CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
     assert.Equal(t, err, nil)
@@ -55,10 +70,15 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		// what is a transfer escrow used for?
 		// when a client connects to a provider, this is created?
-		model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+		transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+		assert.Equal(t, err, nil)					
 
     usedTransferByteCount := model.ByteCount(1024)
     paidByteCount := usedTransferByteCount
+
+
+		model.CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+    model.CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
 
 		// is this "paid" or more like "debt incurred"?
     paid := model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
@@ -73,7 +93,14 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			DefaultTokenType: "usdc",
 		}
 		model.CreateAccountWallet(ctx, wallet)
-		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+		// STU_TODO: why does SetPayoutWallet not populate plan payments
+		// but model.SetPayoutWallet works?
+		model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+		paymentPlan := model.PlanPayments(ctx)
+    assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+    assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
@@ -97,7 +124,11 @@ func TestSubscriptionSendPayment(t *testing.T) {
         paid += model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
     }
 
-		paymentPlan := model.PlanPayments(ctx)
+		contractIds := model.GetOpenContractIds(ctx, sourceId, destinationId)
+    assert.Equal(t, len(contractIds), 0)
+
+		paymentPlan = model.PlanPayments(ctx)
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		// these should hit -> default
 		// payment.PaymentRecord should all be empty
@@ -112,12 +143,15 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			paymentRecord := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
 			assert.Equal(t, paymentRecord.TokenAmount, payment.TokenAmount)
-			assert.Equal(t, paymentRecord.PaymentReceipt, sendPaymentTransactionId)
+			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
+
+		pendingPayments := model.GetPendingPayments(ctx)
+		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		// coinbase api will return a pending status
 		// should return that payment is incomplete
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range pendingPayments {
 			paymentResult, err := CoinbasePayment(&CoinbasePaymentArgs{
 				Payment: payment,
 			}, destinationSession)
@@ -126,7 +160,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 			// account balance should not yet be updated
 			accountBalance := model.GetAccountBalance(destinationSession)
-			assert.Equal(t, accountBalance.Balance.PaidByteCount, 0)
+			assert.Equal(t, int64(0), accountBalance.Balance.PaidByteCount)
 		}
 
 		// set coinbase mock to return a completed status
@@ -139,8 +173,10 @@ func TestSubscriptionSendPayment(t *testing.T) {
 						Status:      "completed",
 					},
 					ResponseBodyBytes: []byte(
-						fmt.Sprintf(`{"id":"%s","type":"send","status":"completed"}`, 
-						sendPaymentTransactionId),
+						fmt.Sprintf(
+							`{"id":"%s","type":"send","status":"completed"}`, 
+							sendPaymentTransactionId,
+						),
 					),
 				}
 			
@@ -150,8 +186,12 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		SetCoinbaseClient(mockCoinbaseClient)
 
+		// paymentPlan = model.PlanPayments(ctx)
+		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		pendingPayments = model.GetPendingPayments(ctx)
+
 		// these should hit completed
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range pendingPayments {
 
 			paymentResult, err := CoinbasePayment(&CoinbasePaymentArgs{
 				Payment: payment,
@@ -207,10 +247,9 @@ func defaultSendPaymentHandler(
 	sendRequest *CoinbaseSendRequest, 
 	session *session.ClientSession,
 ) (*CoinbaseSendResponseData, error) {
-	println("defaultSendPaymentHandler!")
 	staticData := &CoinbaseSendResponseData{
 		TransactionId: sendPaymentTransactionId,
-		Network: 			&CoinbaseSendResponseNetwork{
+		Network: &CoinbaseSendResponseNetwork{
 			Status: "pending",
 			Hash: "0x0123",
 			Name: "ethereum",
@@ -218,4 +257,12 @@ func defaultSendPaymentHandler(
 	}
 
 	return staticData, nil
+}
+
+type mockAWSMessageSender struct {
+	SendMessageFunc func(userAuth string, template Template, sendOpts ...any) error
+}
+
+func (c *mockAWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+	return c.SendMessageFunc(userAuth, template, sendOpts...)
 }

@@ -2143,26 +2143,26 @@ func GetActiveAccountWallets(ctx context.Context, session *session.ClientSession
 
 
 type AccountPayment struct {
-    PaymentId bringyour.Id
-    PaymentPlanId bringyour.Id
-    WalletId bringyour.Id
-    NetworkId bringyour.Id
-    PayoutByteCount ByteCount
-    Payout NanoCents
-    MinSweepTime time.Time
-    CreateTime time.Time
+    PaymentId bringyour.Id `json:"payment_id"`
+    PaymentPlanId bringyour.Id `json:"payment_plan_id"`
+    WalletId bringyour.Id `json:"wallet_id"`
+    NetworkId bringyour.Id `json:"network_id"`
+    PayoutByteCount ByteCount `json:"payout_byte_count"`
+    Payout NanoCents `json:"payout_nano_cents"`
+    MinSweepTime time.Time `json:"min_sweep_time"`
+    CreateTime time.Time `json:"create_time"`
 
-    PaymentRecord string
-    TokenType string
-    TokenAmount float64
-    PaymentTime time.Time
-    PaymentReceipt string
+    PaymentRecord string `json:"payment_record"`
+    TokenType string `json:"token_type"`
+    TokenAmount float64 `json:"token_amount"`
+    PaymentTime *time.Time `json:"payment_time"`
+    PaymentReceipt *string `json:"payment_receipt"`
 
-    Completed bool
-    CompleteTime time.Time
+    Completed bool `json:"completed"`
+    CompleteTime *time.Time `json:"complete_time"`
 
-    Canceled bool
-    CancelTime time.Time
+    Canceled bool `json:"canceled"`
+    CancelTime *time.Time `json:"cancel_time"`
 }
 
 
@@ -2198,10 +2198,17 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
         `,
         paymentId,
     )
+
+    totalResultCount := 0
+
     bringyour.WithPgResult(result, err, func() {
         if result.Next() {
-            payment = &AccountPayment{}
+            totalResultCount += 1
+            payment = &AccountPayment{
+                PaymentId: paymentId,
+            }
             bringyour.Raise(result.Scan(
+                // &payment.PaymentId,
                 &payment.PaymentPlanId,
                 &payment.WalletId,
                 &payment.PayoutByteCount,
@@ -2221,10 +2228,11 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
             ))
         }
     })
+
     return payment
 }
 
-
+// STU_TODO: add tests for this
 func GetPayment(ctx context.Context, paymentId bringyour.Id) *AccountPayment {
     var payment *AccountPayment
     bringyour.Db(ctx, func(conn bringyour.PgConn) {
@@ -2251,11 +2259,14 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
         paymentIds := []bringyour.Id{}
         bringyour.WithPgResult(result, err, func() {
             var paymentId bringyour.Id
+            println("about to scan payment_id")
             bringyour.Raise(result.Scan(&paymentId))
+            println("this line is never reached")
             paymentIds = append(paymentIds, paymentId)
         })
 
         for _, paymentId := range paymentIds {
+            println("about to fetch payment", paymentId.String())
             payment := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)
@@ -2501,6 +2512,13 @@ func SetPaymentRecord(
     tokenAmount float64,
     paymentRecord string,
 ) (returnErr error) {
+
+    println("SetPaymentRecord")
+    println("paymentId", paymentId.String())
+    println("tokenType", tokenType)
+    println("tokenAmount", tokenAmount)
+    println("paymentRecord", paymentRecord)
+
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
             ctx,
@@ -2520,6 +2538,7 @@ func SetPaymentRecord(
             paymentRecord,
         ))
         if tag.RowsAffected() != 1 {
+            println("SetPaymentRecord failed")
             returnErr = fmt.Errorf("Invalid payment.")
             return 
         }

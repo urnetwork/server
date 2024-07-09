@@ -158,7 +158,29 @@ func (self *SendPaymentTemplate) Name() string {
 }
 
 
-func SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+// TODO we can clean this up so all public functions are in the interface
+type MessageSender interface {
+    SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error
+}
+
+var messageSenderInstance MessageSender = &AWSMessageSender{}
+
+func GetAWSMessageSender() MessageSender {
+    return messageSenderInstance
+}
+
+// Used for testing
+func SetMessageSender(messageSender MessageSender) {
+    messageSenderInstance = messageSender
+}
+
+type AWSMessageSender struct {}
+
+func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+
+    println("SendAccountMessageTemplate SHOULD NOT BE CALLED IN TESTS")
+    return fmt.Errorf("should not be called")
+
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 
     switch userAuthType {
