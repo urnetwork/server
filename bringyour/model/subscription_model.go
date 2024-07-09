@@ -2258,11 +2258,13 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
         )
         paymentIds := []bringyour.Id{}
         bringyour.WithPgResult(result, err, func() {
-            var paymentId bringyour.Id
-            println("about to scan payment_id")
-            bringyour.Raise(result.Scan(&paymentId))
-            println("this line is never reached")
-            paymentIds = append(paymentIds, paymentId)
+            for result.Next() {
+                var paymentId bringyour.Id
+                println("about to scan payment_id")
+                bringyour.Raise(result.Scan(&paymentId))
+                println("this line is never reached")
+                paymentIds = append(paymentIds, paymentId)
+            }
         })
 
         for _, paymentId := range paymentIds {
@@ -2296,9 +2298,11 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) [
         )
         paymentIds := []bringyour.Id{}
         bringyour.WithPgResult(result, err, func() {
-            var paymentId bringyour.Id
-            bringyour.Raise(result.Scan(&paymentId))
-            paymentIds = append(paymentIds, paymentId)
+            for result.Next() {
+                var paymentId bringyour.Id
+                bringyour.Raise(result.Scan(&paymentId))
+                paymentIds = append(paymentIds, paymentId)
+            }
         })
 
         for _, paymentId := range paymentIds {

@@ -146,7 +146,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
 
-		pendingPayments := model.GetPendingPayments(ctx)
+		pendingPayments := model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
 		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		// coinbase api will return a pending status
@@ -188,7 +188,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		// paymentPlan = model.PlanPayments(ctx)
 		// assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
-		pendingPayments = model.GetPendingPayments(ctx)
+		pendingPayments = model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
 
 		// these should hit completed
 		for _, payment := range pendingPayments {
