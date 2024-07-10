@@ -426,42 +426,36 @@ func TestGetPendingPayments(t *testing.T) {
         })
 
         // populate source balance
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "user_balance_a", "", "")
         assert.Equal(t, err, nil)
         RedeemBalanceCode(&RedeemBalanceCodeArgs{
             Secret: balanceCode.Secret,
         }, sourceSession)
 
-        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
-		assert.Equal(t, err, nil)
-
         usedTransferByteCount := ByteCount(1024)
         paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
         paidByteCount := usedTransferByteCount
-    
-        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
 
         usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 
         for paid < MinWalletPayoutThreshold {
             transferEscrow, err := CreateTransferEscrow(
-                        ctx, 
-                        sourceNetworkId, 
-                        sourceId, 
-                        destinationNetworkId, 
-                        destinationId, 
-                        usedTransferByteCount,
-                    )
+                ctx, 
+                sourceNetworkId, 
+                sourceId, 
+                destinationNetworkId,
+                destinationId, 
+                usedTransferByteCount,
+            )
             assert.Equal(t, err, nil)
     
             err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
             assert.Equal(t, err, nil)
             err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
             assert.Equal(t, err, nil)
+
             paidByteCount += usedTransferByteCount
             paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-            println("paid", paid)
         }
 
         wallet := &AccountWallet{
@@ -477,22 +471,45 @@ func TestGetPendingPayments(t *testing.T) {
 
         plan := PlanPayments(ctx)
 
-        paymentMap := make(map[bringyour.Id]bool)
+        paymentMap := make(map[bringyour.Id]map[bringyour.Id]bool)
+        planPaymentCount := make(map[bringyour.Id]int)
 
         for _, payment := range plan.WalletPayments {
             SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-            paymentMap[payment.PaymentId] = true
+
+            if _, exists := paymentMap[payment.PaymentPlanId]; !exists {
+                paymentMap[payment.PaymentPlanId] = make(map[bringyour.Id]bool)
+                planPaymentCount[payment.PaymentPlanId] = 0
+            }
+
+            paymentMap[payment.PaymentPlanId][payment.PaymentId] = true
+            planPaymentCount[payment.PaymentPlanId] += 1
         }
 
         pendingPayments := GetPendingPayments(ctx)
 
+        // this should match the planned payments we just created
         assert.Equal(t, len(pendingPayments), len(plan.WalletPayments))
 
-        for _, pendingPayment := range pendingPayments {
-            if _, exists := paymentMap[pendingPayment.PaymentId]; !exists {
+        pendingPaymentsByPlan := GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+
+        assert.Equal(t, planPaymentCount[plan.PaymentPlanId], len(pendingPaymentsByPlan))
+
+        for _, pendingPayment := range pendingPaymentsByPlan {
+            if _, exists := paymentMap[pendingPayment.PaymentPlanId][pendingPayment.PaymentId]; !exists {
                 t.Errorf("Pending payment ID %v not found in planned payments", pendingPayment.PaymentId)
+                continue
             }
+            CompletePayment(ctx, pendingPayment.PaymentId, "")
         }
 
+        // since payments have been marked completed
+        // this should be empty
+        pendingPaymentsByPlan = GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+        
+        assert.Equal(t, len(pendingPaymentsByPlan), 0)
+
+        pendingPayments = GetPendingPayments(ctx)
+        assert.Equal(t, len(pendingPayments), 0)
     })
 }
