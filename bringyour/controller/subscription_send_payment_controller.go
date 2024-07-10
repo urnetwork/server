@@ -74,7 +74,7 @@ func SendPayments(session *session.ClientSession) {
 	// create coinbase payment records
 	// schedule a task for CoinbasePayment for each paymentId
 	// (use balk because the payment id might already be worked on)
-	for _, payment := range plan.WalletPayments { // STU_TODO: is plan.WalletPayments the correct field?
+	for _, payment := range plan.WalletPayments {
 		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
 			continue
 		}
@@ -99,7 +99,30 @@ func SendPayments(session *session.ClientSession) {
 
 // TODO start a task to retry a payment until it completes
 // payment_id
-func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {}
+func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {
+	// get the payment
+	// schedule a task for CoinbasePayment for the payment
+	// (use balk because the payment id might already be worked on)
+	payment, err := model.GetPayment(session.Ctx, payment_id)
+	if err != nil {
+		bringyour.Logger().Println("RetryPayment - Error getting payment", err)
+		return
+	}
+
+	if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
+		return
+	}
+
+	markAsProcessed(payment.PaymentId)
+
+	task.ScheduleTask(
+		CoinbasePayment,
+		&CoinbasePaymentArgs{
+			Payment: payment,
+		},
+		&session,
+	)
+}
 
 
 

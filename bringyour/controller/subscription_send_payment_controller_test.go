@@ -129,7 +129,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, false)
 
-			paymentRecord := model.GetPayment(ctx, payment.PaymentId)
+			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
+			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
 			assert.Equal(t, paymentRecord.TokenAmount, payment.TokenAmount)
 			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
@@ -185,7 +186,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, true)
 
-			paymentRecord := model.GetPayment(ctx, payment.PaymentId)
+			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
+			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.Completed, true)
 
 			// check that the account balance has been updated

@@ -2166,8 +2166,7 @@ type AccountPayment struct {
 }
 
 
-func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyour.Id) *AccountPayment {
-    var payment *AccountPayment
+func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyour.Id) (payment *AccountPayment, returnErr error) {
     result, err := conn.Query(
         ctx,
         `
@@ -2198,14 +2197,23 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
         `,
         paymentId,
     )
+    if err != nil {
+        returnErr = err
+        return
+    }
 
     bringyour.WithPgResult(result, err, func() {
+
+        if err != nil {
+            returnErr = err
+        }
+
         if result.Next() {
             payment = &AccountPayment{
                 PaymentId: paymentId,
             }
             bringyour.Raise(result.Scan(
-                // &payment.PaymentId,
+                // &payment.PaymentId, // this was returning an empty id
                 &payment.PaymentPlanId,
                 &payment.WalletId,
                 &payment.PayoutByteCount,
@@ -2226,18 +2234,16 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
         }
     })
 
-    return payment
+    return
 }
 
-// STU_TODO: add tests for this
-func GetPayment(ctx context.Context, paymentId bringyour.Id) *AccountPayment {
-    var payment *AccountPayment
+// TODO - tests for this
+func GetPayment(ctx context.Context, paymentId bringyour.Id) (payment *AccountPayment, err error) {
     bringyour.Db(ctx, func(conn bringyour.PgConn) {
-        payment = dbGetPayment(ctx, conn, paymentId)
+        payment, err = dbGetPayment(ctx, conn, paymentId)
     })
-    return payment
+    return
 }
-
 
 func GetPendingPayments(ctx context.Context) []*AccountPayment {
     payments := []*AccountPayment{}
@@ -2263,7 +2269,7 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
         })
 
         for _, paymentId := range paymentIds {
-            payment := dbGetPayment(ctx, conn, paymentId)
+            payment, _ := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)
             }
@@ -2300,7 +2306,7 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) [
         })
 
         for _, paymentId := range paymentIds {
-            payment := dbGetPayment(ctx, conn, paymentId)
+            payment, _ := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)
             }
