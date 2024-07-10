@@ -64,20 +64,15 @@ func TestSubscriptionSendPayment(t *testing.T) {
         Secret: balanceCode.Secret,
     }, sourceSession)
 
-
-		// what is a transfer escrow used for?
-		// when a client connects to a provider, this is created?
 		transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
 		assert.Equal(t, err, nil)					
 
     usedTransferByteCount := model.ByteCount(1024)
     paidByteCount := usedTransferByteCount
 
-
 		model.CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
     model.CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
 
-		// is this "paid" or more like "debt incurred"?
     paid := model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
 		destinationWalletAddress := "0x1234567890"

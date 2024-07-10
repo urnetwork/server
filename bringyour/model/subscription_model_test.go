@@ -407,3 +407,92 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         assert.Equal(t, endTime, transferBalance.EndTime)
     }
 })}
+
+func TestGetPendingPayments(t *testing.T) { 
+    bringyour.DefaultTestEnv().Run(func() {
+        ctx := context.Background()
+
+        netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+        netRevenue := UsdToNanoCents(10.00)
+
+        sourceNetworkId := bringyour.NewId()
+        sourceId := bringyour.NewId()
+        destinationNetworkId := bringyour.NewId()
+        destinationId := bringyour.NewId()
+
+        sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+            NetworkId: sourceNetworkId,
+            ClientId: &sourceId,
+        })
+
+        // populate source balance
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+        assert.Equal(t, err, nil)
+        RedeemBalanceCode(&RedeemBalanceCodeArgs{
+            Secret: balanceCode.Secret,
+        }, sourceSession)
+
+        transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024 * 1024)
+		assert.Equal(t, err, nil)
+
+        usedTransferByteCount := ByteCount(1024)
+        paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+        paidByteCount := usedTransferByteCount
+    
+        CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+        CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+
+        usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+
+        for paid < MinWalletPayoutThreshold {
+            transferEscrow, err := CreateTransferEscrow(
+                        ctx, 
+                        sourceNetworkId, 
+                        sourceId, 
+                        destinationNetworkId, 
+                        destinationId, 
+                        usedTransferByteCount,
+                    )
+            assert.Equal(t, err, nil)
+    
+            err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+            assert.Equal(t, err, nil)
+            err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+            assert.Equal(t, err, nil)
+            paidByteCount += usedTransferByteCount
+            paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+            println("paid", paid)
+        }
+
+        wallet := &AccountWallet{
+            NetworkId: destinationNetworkId,
+            WalletType: WalletTypeCircleUserControlled,
+            Blockchain: "matic",
+            WalletAddress: "0x1234567890",
+            DefaultTokenType: "usdc",
+        }
+        CreateAccountWallet(ctx, wallet)
+
+        SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+        plan := PlanPayments(ctx)
+
+        paymentMap := make(map[bringyour.Id]bool)
+
+        for _, payment := range plan.WalletPayments {
+            SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+            paymentMap[payment.PaymentId] = true
+        }
+
+        pendingPayments := GetPendingPayments(ctx)
+
+        assert.Equal(t, len(pendingPayments), len(plan.WalletPayments))
+
+        for _, pendingPayment := range pendingPayments {
+            if _, exists := paymentMap[pendingPayment.PaymentId]; !exists {
+                t.Errorf("Pending payment ID %v not found in planned payments", pendingPayment.PaymentId)
+            }
+        }
+
+    })
+}
