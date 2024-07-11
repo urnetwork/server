@@ -53,6 +53,9 @@ func SchedulePendingPayments(session *session.ClientSession) {
 			continue
 		}
 
+		// avoid coinbase rate limiting
+		time.Sleep(250 * time.Millisecond)
+
 		markAsProcessed(payment.PaymentId)
 
 		task.ScheduleTask(
@@ -78,6 +81,9 @@ func SendPayments(session *session.ClientSession) {
 		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
 			continue
 		}
+
+		// avoid coinbase rate limiting
+		time.Sleep(250 * time.Millisecond)
 
 		markAsProcessed(payment.PaymentId)
 
