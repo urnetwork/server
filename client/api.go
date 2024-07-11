@@ -603,6 +603,7 @@ type WalletValidateAddressCallback apiCallback[*WalletValidateAddressResult]
 
 type WalletValidateAddressArgs struct {
     Address string `json:"address,omitempty"`
+		Chain 	string `json:"chain,omitempty"`
 }
 
 type WalletValidateAddressResult struct {

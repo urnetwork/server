@@ -26,37 +26,30 @@ import (
 	"bringyour.com/bringyour/task"
 )
 
-
-
 const InitialTransferBalance = 32 * model.Gib
 
 // 30 days
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
-
 const SubscriptionGracePeriod = 24 * time.Hour
-
 
 type Sku struct {
 	// the fees on the payment amount
-	FeeFraction float64
+	FeeFraction      float64
 	BalanceByteCount model.ByteCount
-	Special string
+	Special          string
 }
-
 
 const SpecialCompany = "company"
 
-
 // FIXME read from yml
 
-
-var stripeWebhookSigningSecret = sync.OnceValue(func()(string) {
+var stripeWebhookSigningSecret = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
 	return c["webhook"].(map[string]any)["signing_secret"].(string)
 })
 
-var stripeApiToken = sync.OnceValue(func()(string) {
+var stripeApiToken = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
 	return c["api"].(map[string]any)["token"].(string)
 })
@@ -67,35 +60,35 @@ func stripeSkus() map[string]*Sku {
 	return map[string]*Sku{
 		// 300GiB
 		"prod_OlUgT5brBfOBiT": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(300 * 1024 * 1024 * 1024),
 		},
 		// 1TiB
 		"prod_Om2V4ElmxY5Civ": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(1024 * 1024 * 1024 * 1024),
 		},
 		// 2Tib
 		"prod_Om2XiaUQlgzawz": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(2 * 1024 * 1024 * 1024 * 1024),
 		},
 		// 10TiB company
 		"prod_PYvFxhlBrr1FAN": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(10 * 1024 * 1024 * 1024 * 1024),
-			Special: SpecialCompany,
+			Special:          SpecialCompany,
 		},
 		// 100TiB company
 		"prod_PYvNGYsoREsTVZ": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(100 * 1024 * 1024 * 1024 * 1024),
-			Special: SpecialCompany,
+			Special:          SpecialCompany,
 		},
 	}
 }
 
-var coinbaseWebhookSharedSecret = sync.OnceValue(func()(string) {
+var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
 	return c["webhook"].(map[string]any)["shared_secret"].(string)
 })
@@ -105,26 +98,26 @@ func coinbaseSkus() map[string]*Sku {
 	// FIXME read from json
 	return map[string]*Sku{
 		"300GiB": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(300 * 1024 * 1024 * 1024),
 		},
 		"1TiB": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(1024 * 1024 * 1024 * 1024),
 		},
 		"2TiB": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(2 * 1024 * 1024 * 1024 * 1024),
 		},
 	}
 }
 
-var playPublisherEmail = sync.OnceValue(func()(string) {
+var playPublisherEmail = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["webhook"].(map[string]any)["publisher_email"].(string)
 })
 
-var playPackageName = sync.OnceValue(func()(string) {
+var playPackageName = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["webhook"].(map[string]any)["package_name"].(string)
 })
@@ -135,15 +128,15 @@ func playSkus() map[string]*Sku {
 	// FIXME read from json
 	return map[string]*Sku{
 		"monthly_transfer_300gib": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(300) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
 		},
 		"monthly_transfer_1tib": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
 		},
 		"ultimate": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
+			FeeFraction:      playSubscriptionFeeFraction,
 			BalanceByteCount: model.ByteCount(10) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
 		},
 	}
@@ -153,36 +146,33 @@ func companySenderEmail() string {
 	return "brien@bringyour.com"
 }
 
-var playClientId = sync.OnceValue(func()(string) {
+var playClientId = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["oauth"].(map[string]any)["client_id"].(string)
 })
 
-var playClientSecret = sync.OnceValue(func()(string) {
+var playClientSecret = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["oauth"].(map[string]any)["client_secret"].(string)
 })
 
-var playRefreshToken = sync.OnceValue(func()(string) {
+var playRefreshToken = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["oauth"].(map[string]any)["refresh_token"].(string)
 })
-
 
 // app initially calls "get info"
 // then if no wallet, show a button to initialize wallet
 // if wallet, show a button to refresh, and to withdraw
 
-
 type SubscriptionBalanceResult struct {
-	BalanceByteCount model.ByteCount `json:"balance_byte_count"`
-	CurrentSubscription *model.Subscription `json:"current_subscription,omitempty"`
-	ActiveTransferBalances []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
-	PendingPayoutUsdNanoCents model.NanoCents `json:"pending_payout_usd_nano_cents"`
-	WalletInfo *CircleWalletInfo `json:"wallet_info,omitempty"`
-	UpdateTime time.Time `json:"update_time"`
+	BalanceByteCount          model.ByteCount          `json:"balance_byte_count"`
+	CurrentSubscription       *model.Subscription      `json:"current_subscription,omitempty"`
+	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
+	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
+	WalletInfo                *CircleWalletInfo        `json:"wallet_info,omitempty"`
+	UpdateTime                time.Time                `json:"update_time"`
 }
-
 
 func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
 	transferBalances := model.GetActiveTransferBalances(session.Ctx, session.ByJwt.NetworkId)
@@ -196,20 +186,19 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 
 	pendingPayout := model.GetNetPendingPayout(session.Ctx, session.ByJwt.NetworkId)
 
-	// ignore any error with circle, 
+	// ignore any error with circle,
 	// since the model won't allow the wallet to enter a corrupt state
 	walletInfo, _ := findMostRecentCircleWallet(session)
 
 	return &SubscriptionBalanceResult{
-		BalanceByteCount: netBalanceByteCount,
-		CurrentSubscription: currentSubscription,
-		ActiveTransferBalances: transferBalances,
+		BalanceByteCount:          netBalanceByteCount,
+		CurrentSubscription:       currentSubscription,
+		ActiveTransferBalances:    transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
-		WalletInfo: walletInfo,
-		UpdateTime: bringyour.NowUtc(),
+		WalletInfo:                walletInfo,
+		UpdateTime:                bringyour.NowUtc(),
 	}, nil
 }
-
 
 // run this every 15 minutes
 // circle.yml
@@ -219,11 +208,10 @@ func AutoPayout() {
 	// FIXME use circle
 }
 
-
 /**
  * Associates the AccountWallet as the payout wallet for the network.
  */
- func SetPayoutWallet(
+func SetPayoutWallet(
 	setWalletPayout model.SetPayoutWalletArgs,
 	session *session.ClientSession,
 ) (*model.SetPayoutWalletResult, error) {
@@ -242,11 +230,22 @@ func CreateAccountWallet(
 	session *session.ClientSession,
 ) (*model.CreateAccountWalletResult, error) {
 
-	// TODO: validate wallet blockchain
+	if wallet.Blockchain != "SOL" && wallet.Blockchain != "MATIC" {
+		return nil, errors.New("invalid blockchain, use SOL or MATIC")
+	}
 
-	// TODO: validate wallet.WalletAddress
-	// currently we are only validating by the Circle API
-	// possibly migrate to https://docs.cdp.coinbase.com/intx/reference/validate-address/
+	walletValidateAddressArgs := WalletValidateAddressArgs{
+		Address: wallet.WalletAddress,
+		Chain:   wallet.Blockchain,
+	}
+	validationResult, err := WalletValidateAddress(&walletValidateAddressArgs, session)
+	if err != nil {
+		return nil, err
+	}
+
+	if !validationResult.Valid {
+		return nil, errors.New("invalid wallet address")
+	}
 
 	model.CreateAccountWallet(
 		wallet,
@@ -255,7 +254,6 @@ func CreateAccountWallet(
 
 	return &model.CreateAccountWalletResult{WalletId: wallet.WalletId}, nil
 }
-
 
 // notification_count
 // next_notify_time
@@ -269,10 +267,9 @@ func notifyBalanceCode(balanceCodeId bringyour.Id) {
 
 }
 
-
 type StripeWebhookArgs struct {
-	Id string `json:"id"`
-	Type string `json:"type"`
+	Id   string           `json:"id"`
+	Type string           `json:"type"`
 	Data *StripeEventData `json:"data"`
 }
 
@@ -281,10 +278,10 @@ type StripeEventData struct {
 }
 
 type StripeEventDataObject struct {
-	Id string `json:"id"`
-	AmountTotal int `json:"amount_total"`
+	Id              string                                `json:"id"`
+	AmountTotal     int                                   `json:"amount_total"`
 	CustomerDetails *StripeEventDataObjectCustomerDetails `json:"customer_details"`
-	PaymentStatus string `json:"payment_status"`
+	PaymentStatus   string                                `json:"payment_status"`
 }
 
 type StripeEventDataObjectCustomerDetails struct {
@@ -293,7 +290,6 @@ type StripeEventDataObjectCustomerDetails struct {
 }
 
 type StripeWebhookResult struct {
-
 }
 
 type StripeLineItems struct {
@@ -301,18 +297,18 @@ type StripeLineItems struct {
 }
 
 type StripeLineItem struct {
-	Id string `json:"id"`
-	AmountTotal int `json:"amount_total"`
-	Currency string `json:"currency"`
-	Description string `json:"description"`
-	Price *StripeLineItemProduct `json:"price"`
-	Quantity int `json:"quantity"`
+	Id          string                 `json:"id"`
+	AmountTotal int                    `json:"amount_total"`
+	Currency    string                 `json:"currency"`
+	Description string                 `json:"description"`
+	Price       *StripeLineItemProduct `json:"price"`
+	Quantity    int                    `json:"quantity"`
 }
 
 type StripeLineItemProduct struct {
-	Id string `json:"id"`
-	Product string `json:"product"`
-	UnitAmount int `json:"unit_amount"`
+	Id         string `json:"id"`
+	Product    string `json:"product"`
+	UnitAmount int    `json:"unit_amount"`
 }
 
 func StripeWebhook(
@@ -330,7 +326,7 @@ func StripeWebhook(
 		)
 		lineItems, err := bringyour.HttpGetRequireStatusOk[*StripeLineItems](
 			url,
-			func (header http.Header) {
+			func(header http.Header) {
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
 			},
 			bringyour.ResponseJsonObject[*StripeLineItems],
@@ -372,13 +368,13 @@ func StripeWebhook(
 				} else if sku.Special == SpecialCompany {
 					// company shared data
 					err := SendAccountMessageTemplate(
-				        purchaseEmail,
-				        &SubscriptionTransferBalanceCompanyTemplate{
-				        	BalanceByteCount: sku.BalanceByteCount,
-				        },
-				        SenderEmail(companySenderEmail()),
-				    )
-				    if err != nil {
+						purchaseEmail,
+						&SubscriptionTransferBalanceCompanyTemplate{
+							BalanceByteCount: sku.BalanceByteCount,
+						},
+						SenderEmail(companySenderEmail()),
+					)
+					if err != nil {
 						return nil, err
 					}
 				} else {
@@ -394,24 +390,23 @@ func StripeWebhook(
 	return &StripeWebhookResult{}, nil
 }
 
-
 type CoinbaseWebhookArgs struct {
 	Event *CoinbaseEvent `json:"event"`
 }
 
 type CoinbaseEvent struct {
-	Id string `json:"id"`
-	Type string `json:"type"`
+	Id   string             `json:"id"`
+	Type string             `json:"type"`
 	Data *CoinbaseEventData `json:"data"`
 }
 
 type CoinbaseEventData struct {
-	Id string `json:"id"`
-	Name string `json:"name"`
-	Description string `json:"description"`
-	Payments []*CoinbaseEventDataPayment `json:"payments"`
-	Checkout *CoinbaseEventDataCheckout `json:"checkout"`
-	Metadata *CoinbaseEventDataMetadata `json:"metadata"`
+	Id          string                      `json:"id"`
+	Name        string                      `json:"name"`
+	Description string                      `json:"description"`
+	Payments    []*CoinbaseEventDataPayment `json:"payments"`
+	Checkout    *CoinbaseEventDataCheckout  `json:"checkout"`
+	Metadata    *CoinbaseEventDataMetadata  `json:"metadata"`
 }
 
 type CoinbaseEventDataCheckout struct {
@@ -427,17 +422,16 @@ type CoinbaseEventDataPayment struct {
 }
 
 type CoinbaseEventDataPaymentNet struct {
-	Local *CoinbaseEventDataPaymentAmount `json:"local"`
+	Local  *CoinbaseEventDataPaymentAmount `json:"local"`
 	Crypto *CoinbaseEventDataPaymentAmount `json:"crypto"`
 }
 
 type CoinbaseEventDataPaymentAmount struct {
-	Amount string `json:"amount"`
+	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
 }
 
 type CoinbaseWebhookResult struct {
-
 }
 
 func CoinbaseWebhook(
@@ -485,7 +479,6 @@ func CoinbaseWebhook(
 	return &CoinbaseWebhookResult{}, nil
 }
 
-
 func CreateBalanceCode(
 	ctx context.Context,
 	balanceByteCount model.ByteCount,
@@ -504,15 +497,15 @@ func CreateBalanceCode(
 		}
 
 		return SendAccountMessageTemplate(
-	        balanceCode.PurchaseEmail,
-	        &SubscriptionTransferBalanceCodeTemplate{
-	        	Secret: balanceCode.Secret,
-	        	BalanceByteCount: balanceCode.BalanceByteCount,
-	        },
-	    )
+			balanceCode.PurchaseEmail,
+			&SubscriptionTransferBalanceCodeTemplate{
+				Secret:           balanceCode.Secret,
+				BalanceByteCount: balanceCode.BalanceByteCount,
+			},
+		)
 	} else {
 		// new code
-		
+
 		balanceCode, err := model.CreateBalanceCode(
 			ctx,
 			balanceByteCount,
@@ -526,15 +519,14 @@ func CreateBalanceCode(
 		}
 
 		return SendAccountMessageTemplate(
-	        balanceCode.PurchaseEmail,
-	        &SubscriptionTransferBalanceCodeTemplate{
-	        	Secret: balanceCode.Secret,
-	        	BalanceByteCount: balanceCode.BalanceByteCount,
-	        },
-	    )
+			balanceCode.PurchaseEmail,
+			&SubscriptionTransferBalanceCodeTemplate{
+				Secret:           balanceCode.Secret,
+				BalanceByteCount: balanceCode.BalanceByteCount,
+			},
+		)
 	}
 }
-
 
 // https://developers.google.com/android-publisher/authorization
 func playAuth() (string, error) {
@@ -569,33 +561,32 @@ func playAuthHeaders(header http.Header) {
 	}
 }
 
-
 type PlayRtdnMessage struct {
-	Version string `json:"version"`
-	PackageName string  `json:"packageName"`
+	Version                  string                        `json:"version"`
+	PackageName              string                        `json:"packageName"`
 	SubscriptionNotification *PlaySubscriptionNotification `json:"subscriptionNotification,omitempty"`
 }
 
 type PlaySubscriptionNotification struct {
-	Version string `json:"version"`
-	NotificationType int `json:"notificationType"`
-	PurchaseToken string `json:"purchaseToken"`
-	SubscriptionId string `json:"subscriptionId"`
+	Version          string `json:"version"`
+	NotificationType int    `json:"notificationType"`
+	PurchaseToken    string `json:"purchaseToken"`
+	SubscriptionId   string `json:"subscriptionId"`
 }
 
 // https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions
 type PlaySubscription struct {
-	StartTimeMillis string `json:"startTimeMillis"`
-	ExpiryTimeMillis string `json:"expiryTimeMillis"`
-	AutoRenewing bool `json:"autoRenewing"`
-	PriceCurrencyCode string `json:"priceCurrencyCode"`
-	PriceAmountMicros string `json:"priceAmountMicros"`
-	CountryCode string `json:"countryCode"`
-	DeveloperPayload string `json:"developerPayload"`
-	PaymentState int `json:"paymentState"`
-	OrderId string `json:"orderId"`
-	AcknowledgementState int `json:"acknowledgementState"`
-	Kind string `json:"kind"`
+	StartTimeMillis             string `json:"startTimeMillis"`
+	ExpiryTimeMillis            string `json:"expiryTimeMillis"`
+	AutoRenewing                bool   `json:"autoRenewing"`
+	PriceCurrencyCode           string `json:"priceCurrencyCode"`
+	PriceAmountMicros           string `json:"priceAmountMicros"`
+	CountryCode                 string `json:"countryCode"`
+	DeveloperPayload            string `json:"developerPayload"`
+	PaymentState                int    `json:"paymentState"`
+	OrderId                     string `json:"orderId"`
+	AcknowledgementState        int    `json:"acknowledgementState"`
+	Kind                        string `json:"kind"`
 	ObfuscatedExternalAccountId string `json:"obfuscatedExternalAccountId"`
 }
 
@@ -615,7 +606,6 @@ func (self *PlaySubscription) requireExpiryTimeMillis() int64 {
 	return i
 }
 
-
 type PlayWebhookArgs struct {
 	Message *PlayWebhookMessage `json:"message"`
 }
@@ -625,7 +615,6 @@ type PlayWebhookMessage struct {
 }
 
 type PlayWebhookResult struct {
-
 }
 
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
@@ -693,11 +682,11 @@ func PlayWebhook(
 				task.ScheduleTask(
 					PlaySubscriptionRenewal,
 					&PlaySubscriptionRenewalArgs{
-						NetworkId: networkId,
-						PackageName: rtdnMessage.PackageName,
+						NetworkId:      networkId,
+						PackageName:    rtdnMessage.PackageName,
 						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
-						PurchaseToken: rtdnMessage.SubscriptionNotification.PurchaseToken,
-						CheckTime: time.UnixMilli(sub.requireExpiryTimeMillis()),
+						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+						CheckTime:      time.UnixMilli(sub.requireExpiryTimeMillis()),
 					},
 					clientSession,
 				)
@@ -709,19 +698,18 @@ func PlayWebhook(
 	return &PlayWebhookResult{}, nil
 }
 
-
 type PlaySubscriptionRenewalArgs struct {
-	NetworkId bringyour.Id `json:"network_id"`
-	PackageName string `json:"package_name"`
-	SubscriptionId string `json:"subscription_id"`
-	PurchaseToken string `json:"purchase_token"`
-	CheckTime time.Time `json:"check_time"`
+	NetworkId      bringyour.Id `json:"network_id"`
+	PackageName    string       `json:"package_name"`
+	SubscriptionId string       `json:"subscription_id"`
+	PurchaseToken  string       `json:"purchase_token"`
+	CheckTime      time.Time    `json:"check_time"`
 	// ExpiryTime time.Time `json:"expiry_time"`
 }
 
 type PlaySubscriptionRenewalResult struct {
 	ExpiryTime time.Time `json:"expiry_time"`
-	Renewed bool `json:"renewed"`
+	Renewed    bool      `json:"renewed"`
 }
 
 func SchedulePlaySubscriptionRenewal(
@@ -730,13 +718,13 @@ func SchedulePlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 ) {
 	task.ScheduleTaskInTx(
-        tx,
-        PlaySubscriptionRenewal,
-        playSubscriptionRenewal,
-        clientSession,
-        task.RunOnce("play_subscription_renewal", playSubscriptionRenewal.PurchaseToken),
-        task.RunAt(playSubscriptionRenewal.CheckTime),
-    )
+		tx,
+		PlaySubscriptionRenewal,
+		playSubscriptionRenewal,
+		clientSession,
+		task.RunOnce("play_subscription_renewal", playSubscriptionRenewal.PurchaseToken),
+		task.RunAt(playSubscriptionRenewal.CheckTime),
+	)
 }
 
 func PlaySubscriptionRenewal(
@@ -771,13 +759,13 @@ func PlaySubscriptionRenewal(
 		skuName := playSubscriptionRenewal.SubscriptionId
 		if sku, ok := skus[skuName]; ok {
 			transferBalance := &model.TransferBalance{
-				NetworkId: playSubscriptionRenewal.NetworkId,
-				StartTime: startTime,
-				EndTime: expiryTime.Add(SubscriptionGracePeriod),
+				NetworkId:             playSubscriptionRenewal.NetworkId,
+				StartTime:             startTime,
+				EndTime:               expiryTime.Add(SubscriptionGracePeriod),
 				StartBalanceByteCount: sku.BalanceByteCount,
-				NetRevenue: model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000 * 1000)),
-				BalanceByteCount: sku.BalanceByteCount,
-				PurchaseToken: playSubscriptionRenewal.PurchaseToken,
+				NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
+				BalanceByteCount:      sku.BalanceByteCount,
+				PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 			}
 			model.AddTransferBalance(
 				clientSession.Ctx,
@@ -789,14 +777,14 @@ func PlaySubscriptionRenewal(
 
 		return &PlaySubscriptionRenewalResult{
 			ExpiryTime: expiryTime,
-			Renewed: true,
+			Renewed:    true,
 		}, nil
 	} else {
 		// a transfer balance was already for the current expiry time
 		// hence, the subscription has not been extended/renewed
 		return &PlaySubscriptionRenewalResult{
 			ExpiryTime: expiryTime,
-			Renewed: false,
+			Renewed:    false,
 		}, nil
 	}
 }
@@ -825,19 +813,18 @@ func PlaySubscriptionRenewalPost(
 	} else {
 		// else not renewed, stop trying
 		userAuth, err := model.GetUserAuth(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
-	    if err != nil {
-	        return err
-	    }
+		if err != nil {
+			return err
+		}
 		SendAccountMessageTemplate(
-            userAuth,
-            &SubscriptionEndedTemplate{},
-        )
+			userAuth,
+			&SubscriptionEndedTemplate{},
+		)
 	}
 	return nil
 }
 
-
-func VerifyStripeBody(req *http.Request)(io.Reader, error) {
+func VerifyStripeBody(req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -856,8 +843,7 @@ func VerifyStripeBody(req *http.Request)(io.Reader, error) {
 	return bytes.NewReader(bodyBytes), nil
 }
 
-
-func VerifyCoinbaseBody(req *http.Request)(io.Reader, error) {
+func VerifyCoinbaseBody(req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -888,8 +874,7 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 	return errors.New("Invalid authentication.")
 }
 
-
-func VerifyPlayBody(req *http.Request)(io.Reader, error) {
+func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
 	err := verifyPlayAuth(req.Header.Get("Authorization"))
 	if err != nil {
@@ -924,7 +909,6 @@ func verifyPlayAuth(auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-
 func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) bool {
 	startTime := bringyour.NowUtc()
 	endTime := startTime.Add(InitialTransferBalanceDuration)
@@ -937,7 +921,6 @@ func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) bool
 	)
 }
 
-
 // BACKFILL INITIAL TRANSFER BALANCE
 
 type BackfillInitialTransferBalanceArgs struct {
@@ -947,21 +930,21 @@ type BackfillInitialTransferBalanceResult struct {
 }
 
 func ScheduleBackfillInitialTransferBalance(clientSession *session.ClientSession, tx bringyour.PgTx) {
-    task.ScheduleTaskInTx(
-        tx,
-        BackfillInitialTransferBalance,
-        &BackfillInitialTransferBalanceArgs{},
-        clientSession,
-        task.RunOnce("backfill_initial_transfer_balance"),
-        task.RunAt(bringyour.NowUtc().Add(15 * time.Minute)),
-    )
+	task.ScheduleTaskInTx(
+		tx,
+		BackfillInitialTransferBalance,
+		&BackfillInitialTransferBalanceArgs{},
+		clientSession,
+		task.RunOnce("backfill_initial_transfer_balance"),
+		task.RunAt(bringyour.NowUtc().Add(15*time.Minute)),
+	)
 }
 
 func BackfillInitialTransferBalance(
-    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
-    clientSession *session.ClientSession,
+	backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+	clientSession *session.ClientSession,
 ) (*BackfillInitialTransferBalanceResult, error) {
-    networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
+	networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
 	for _, networkId := range networkIds {
 		// add initial transfer balance
 		AddInitialTransferBalance(clientSession.Ctx, networkId)
@@ -970,18 +953,15 @@ func BackfillInitialTransferBalance(
 }
 
 func BackfillInitialTransferBalancePost(
-    backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
-    backfillInitialTransferBalanceResult *BackfillInitialTransferBalanceResult,
-    clientSession *session.ClientSession,
-    tx bringyour.PgTx,
+	backfillInitialTransferBalance *BackfillInitialTransferBalanceArgs,
+	backfillInitialTransferBalanceResult *BackfillInitialTransferBalanceResult,
+	clientSession *session.ClientSession,
+	tx bringyour.PgTx,
 ) error {
-    ScheduleBackfillInitialTransferBalance(clientSession, tx)
-    return nil
+	ScheduleBackfillInitialTransferBalance(clientSession, tx)
+	return nil
 }
-
 
 // FIXME
 // FIXME
 // FIXME PlanPayments and payment loop
-
-

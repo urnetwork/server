@@ -1,172 +1,198 @@
 package controller
 
 import (
-    "context"
-    "testing"
-    "time"
+	"context"
+	"testing"
+	"time"
 
-    // "golang.org/x/exp/maps"
+	// "golang.org/x/exp/maps"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
 )
-
 
 // these were set up manually on main
 // var circleUserIdWithWallet = bringyour.RequireParseId("018c3c3c-8265-1b71-e827-902beb3233c4")
 var circleUserIdWithWallet = bringyour.RequireParseId("018c4b12-1a76-aaca-acce-72ddae03f60d")
 var circleUserIdWithWalletAndBalance = bringyour.RequireParseId("018c3c7f-82f3-341b-6fd9-fe8d180c366c")
 
+func TestWalletCircleInit(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
-func TestWalletCircleInit(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId:   bringyour.NewId(),
+			NetworkName: "test",
+			UserId:      bringyour.NewId(),
+		})
+		result, err := WalletCircleInit(session)
 
-	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		NetworkId: bringyour.NewId(),
-		NetworkName: "test",
-		UserId: bringyour.NewId(),
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.UserToken, nil)
+		assert.NotEqual(t, result.ChallengeId, "")
+
+		// a second init should not create an error
+		result, err = WalletCircleInit(session)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.UserToken, nil)
+		assert.NotEqual(t, result.ChallengeId, "")
 	})
-	result, err := WalletCircleInit(session)
+}
 
-	assert.Equal(t, err, nil)
-	assert.Equal(t, result.Error, nil)
-	assert.NotEqual(t, result.UserToken, nil)
-	assert.NotEqual(t, result.ChallengeId, "")
+func TestWalletValidateAddress(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId:   bringyour.NewId(),
+			NetworkName: "test",
+			UserId:      bringyour.NewId(),
+		})
+		result, err := WalletCircleInit(session)
 
-	// a second init should not create an error
-	result, err = WalletCircleInit(session)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.UserToken, nil)
+		assert.NotEqual(t, result.ChallengeId, "")
 
-	assert.Equal(t, err, nil)
-	assert.Equal(t, result.Error, nil)
-	assert.NotEqual(t, result.UserToken, nil)
-	assert.NotEqual(t, result.ChallengeId, "")
-})}
+		// check valid ethereum address
+		validateResult, err := WalletValidateAddress(
+			&WalletValidateAddressArgs{
+				// BringYour USDC Polygon
+				Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
+				Chain:   "ETH",
+			},
+			session,
+		)
 
+		assert.Equal(t, err, nil)
+		assert.Equal(t, validateResult.Valid, true)
 
-func TestWalletValidateAddress(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
+		// check valid solana address
+		validateResult, err = WalletValidateAddress(
+			&WalletValidateAddressArgs{
+				// BringYour USDC Solana
+				Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+				Chain:   "SOL",
+			},
+			session,
+		)
 
-	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		NetworkId: bringyour.NewId(),
-		NetworkName: "test",
-		UserId: bringyour.NewId(),
+		assert.Equal(t, err, nil)
+		assert.Equal(t, validateResult.Valid, true)
+
+		// check invaid ethereum address
+		validateResult, err = WalletValidateAddress(
+			&WalletValidateAddressArgs{
+				Address: "0xB3F448b9C395F9833BE866577254799C23BGa68A",
+				Chain:   "ETH",
+			},
+			session,
+		)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, validateResult.Valid, false)
+
+		// check invaid Solana address
+		validateResult, err = WalletValidateAddress(
+			&WalletValidateAddressArgs{
+				Address: "1GtYzxzYRpkGQ8e3Un71GoQf494VLDBNyqXNXB38MP7A",
+				Chain:   "SOL",
+			},
+			session,
+		)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, validateResult.Valid, false)
 	})
-	result, err := WalletCircleInit(session)
+}
 
-	assert.Equal(t, err, nil)
-	assert.Equal(t, result.Error, nil)
-	assert.NotEqual(t, result.UserToken, nil)
-	assert.NotEqual(t, result.ChallengeId, "")
+func TestWalletBalance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId:   bringyour.NewId(),
+			NetworkName: "test",
+			UserId:      bringyour.NewId(),
+		})
 
-	validateResult, err := WalletValidateAddress(
-		&WalletValidateAddressArgs{
-			// BringYour USDC Polygon
-			Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
-		},
-		session,
-	)
+		model.SetCircleUserId(
+			ctx,
+			session.ByJwt.NetworkId,
+			session.ByJwt.UserId,
+			circleUserIdWithWallet,
+		)
 
-	assert.Equal(t, err, nil)
-	assert.Equal(t, validateResult.Valid, true)
+		result, err := WalletBalance(session)
 
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.WalletInfo, nil)
+		assert.NotEqual(t, result.WalletInfo.WalletId, "")
+		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
+		// the wallet is empty so these are the defaults
+		assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
+		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
+		assert.Equal(t, result.WalletInfo.TokenId, "")
+		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
 
-	validateResult, err = WalletValidateAddress(
-		&WalletValidateAddressArgs{
-			// BringYour USDC Solana
-			Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
-		},
-		session,
-	)
+		model.SetCircleUserId(
+			ctx,
+			session.ByJwt.NetworkId,
+			session.ByJwt.UserId,
+			circleUserIdWithWalletAndBalance,
+		)
 
-	assert.Equal(t, err, nil)
-	assert.Equal(t, validateResult.Valid, false)
-})}
+		result, err = WalletBalance(session)
 
-
-func TestWalletBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
-
-	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		NetworkId: bringyour.NewId(),
-		NetworkName: "test",
-		UserId: bringyour.NewId(),
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.WalletInfo, nil)
+		assert.NotEqual(t, result.WalletInfo.WalletId, "")
+		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
+		assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
+		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
+		assert.NotEqual(t, result.WalletInfo.TokenId, "")
+		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
 	})
+}
 
-	model.SetCircleUserId(
-		ctx,
-		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
-		circleUserIdWithWallet,
-	)
-	
-	result, err := WalletBalance(session)
+func TestWalletCircleTransferOut(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, result.WalletInfo, nil)
-	assert.NotEqual(t, result.WalletInfo.WalletId, "")
-	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
-	// the wallet is empty so these are the defaults
-	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
-	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
-	assert.Equal(t, result.WalletInfo.TokenId, "")
-	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId:   bringyour.NewId(),
+			NetworkName: "test",
+			UserId:      bringyour.NewId(),
+		})
 
+		model.SetCircleUserId(
+			ctx,
+			session.ByJwt.NetworkId,
+			session.ByJwt.UserId,
+			circleUserIdWithWalletAndBalance,
+		)
 
-	model.SetCircleUserId(
-		ctx,
-		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
-		circleUserIdWithWalletAndBalance,
-	)
-	
-	result, err = WalletBalance(session)
+		result, err := WalletCircleTransferOut(
+			&WalletCircleTransferOutArgs{
+				Terms: true,
+				// BringYour USDC Polygon
+				ToAddress:           "0xB3f448b9C395F9833BE866577254799c23BBa682",
+				AmountUsdcNanoCents: model.UsdToNanoCents(1.0),
+			},
+			session,
+		)
 
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, result.WalletInfo, nil)
-	assert.NotEqual(t, result.WalletInfo.WalletId, "")
-	assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
-	assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
-	assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
-	assert.NotEqual(t, result.WalletInfo.TokenId, "")
-	assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
-})}
-
-
-func TestWalletCircleTransferOut(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
-
-	session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		NetworkId: bringyour.NewId(),
-		NetworkName: "test",
-		UserId: bringyour.NewId(),
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.UserToken, nil)
+		assert.NotEqual(t, result.ChallengeId, "")
 	})
-
-	model.SetCircleUserId(
-		ctx,
-		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
-		circleUserIdWithWalletAndBalance,
-	)
-
-	result, err := WalletCircleTransferOut(
-		&WalletCircleTransferOutArgs{
-			Terms: true,
-			// BringYour USDC Polygon
-			ToAddress: "0xB3f448b9C395F9833BE866577254799c23BBa682",
-			AmountUsdcNanoCents: model.UsdToNanoCents(1.0),
-		},
-		session,
-	)
-
-	assert.Equal(t, err, nil)
-	assert.Equal(t, result.Error, nil)
-	assert.NotEqual(t, result.UserToken, nil)
-	assert.NotEqual(t, result.ChallengeId, "")
-})}
-
+}

@@ -1,17 +1,17 @@
 package model
 
 import (
-    "context"
-    // "time"
-    // "fmt"
-    // "math"
-    // "crypto/rand"
-    // "encoding/hex"
+	"context"
 
-    "bringyour.com/bringyour"
-    // "bringyour.com/bringyour/session"
+	// "time"
+	// "fmt"
+	// "math"
+	// "crypto/rand"
+	// "encoding/hex"
+
+	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour/session"
 )
-
 
 // this user id is what is used for the Circle api:
 // - create a user token
@@ -19,14 +19,14 @@ import (
 // - create a wallet challenge
 // https://developers.circle.com/w3s/reference
 func GetOrCreateCircleUserId(
-    ctx context.Context,
-    networkId bringyour.Id,
-    userId bringyour.Id,
+	ctx context.Context,
+	networkId bringyour.Id,
+	userId bringyour.Id,
 ) (circleUserId bringyour.Id) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            ctx,
-            `
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
                 SELECT
                     circle_uc_user_id
                 FROM circle_uc
@@ -34,26 +34,26 @@ func GetOrCreateCircleUserId(
                     network_id = $1 AND
                     user_id = $2
             `,
-            networkId,
-            userId,
-        )
-        set := false
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&circleUserId))
-                set = true
-            }
-        })
+			networkId,
+			userId,
+		)
+		set := false
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&circleUserId))
+				set = true
+			}
+		})
 
-        if set {
-            return
-        }
+		if set {
+			return
+		}
 
-        circleUserId = bringyour.NewId()
+		circleUserId = bringyour.NewId()
 
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
                 INSERT INTO circle_uc (
                     network_id,
                     user_id,
@@ -61,26 +61,25 @@ func GetOrCreateCircleUserId(
                 )
                 VALUES ($1, $2, $3)
             `,
-            networkId,
-            userId,
-            circleUserId,
-        ))
-    })
-    return
+			networkId,
+			userId,
+			circleUserId,
+		))
+	})
+	return
 }
-
 
 // used for testing
 func SetCircleUserId(
-    ctx context.Context,
-    networkId bringyour.Id,
-    userId bringyour.Id,
-    circleUserId bringyour.Id,
+	ctx context.Context,
+	networkId bringyour.Id,
+	userId bringyour.Id,
+	circleUserId bringyour.Id,
 ) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        bringyour.RaisePgResult(tx.Exec(
-            ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
                 INSERT INTO circle_uc (
                     network_id,
                     user_id,
@@ -91,10 +90,9 @@ func SetCircleUserId(
                 SET
                 	circle_uc_user_id = $3
             `,
-            networkId,
-            userId,
-            circleUserId,
-        ))
-    })
+			networkId,
+			userId,
+			circleUserId,
+		))
+	})
 }
-
