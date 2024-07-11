@@ -1,19 +1,16 @@
 package model
 
-
 import (
 	"fmt"
-	
+
 	"bringyour.com/bringyour/jwt"
 )
-
 
 type AuthJwt struct {
 	AuthType AuthType
 	UserAuth string
 	UserName string
 }
-
 
 func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 	switch authJwtType {

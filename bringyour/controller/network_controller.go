@@ -4,10 +4,9 @@ import (
 	// "time"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
 )
-
 
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
@@ -32,12 +31,11 @@ func NetworkCreate(
 		}
 		AuthVerifySend(verifySend, session)
 	} else {
-        SendAccountMessageTemplate(
-            *result.UserAuth,
-            &NetworkWelcomeTemplate{},
-        )
+		SendAccountMessageTemplate(
+			*result.UserAuth,
+			&NetworkWelcomeTemplate{},
+		)
 	}
 
 	return result, nil
 }
-

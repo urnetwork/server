@@ -1,10 +1,8 @@
 package client
 
-
 type Sub interface {
 	Close()
 }
-
 
 type simpleSub struct {
 	unsubFn func()

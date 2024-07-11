@@ -2,21 +2,18 @@ package client
 
 import (
 	"context"
-	"time"
 	"sync"
+	"time"
 
 	"bringyour.com/connect"
 )
 
-
 var avcLog = logFn("account_view_controller")
-
 
 const defaultAccountCheckTimeout = 5 * time.Second
 
-
 type AccountViewController struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	device *BringYourDevice
@@ -27,9 +24,9 @@ type AccountViewController struct {
 func newAccountViewController(ctx context.Context, device *BringYourDevice) *AccountViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	vc := &AccountViewController{
-		ctx: cancelCtx,
-		cancel: cancel,
-		device: device,
+		ctx:                   cancelCtx,
+		cancel:                cancel,
+		device:                device,
 		walletValidateAddress: newWalletValidateAddress(cancelCtx, device.Api(), defaultAccountCheckTimeout),
 	}
 	return vc
@@ -40,7 +37,7 @@ func (self *AccountViewController) Start() {
 }
 
 func (self *AccountViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *AccountViewController) Close() {
@@ -53,9 +50,8 @@ func (self *AccountViewController) WalletValidateAddress(address string, callbac
 	self.walletValidateAddress.Queue(address, callback)
 }
 
-
 type walletValidateAddress struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	api *BringYourApi
@@ -67,8 +63,8 @@ type walletValidateAddress struct {
 	monitor *connect.Monitor
 
 	updateCount int
-	address string
-	callback WalletValidateAddressCallback
+	address     string
+	callback    WalletValidateAddressCallback
 }
 
 func newWalletValidateAddress(
@@ -78,12 +74,12 @@ func newWalletValidateAddress(
 ) *walletValidateAddress {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	walletValidateAddress := &walletValidateAddress{
-		ctx: cancelCtx,
-		cancel: cancel,
-		api: api,
-		timeout: timeout,
-		stateLock: sync.Mutex{},
-		monitor: connect.NewMonitor(),
+		ctx:         cancelCtx,
+		cancel:      cancel,
+		api:         api,
+		timeout:     timeout,
+		stateLock:   sync.Mutex{},
+		monitor:     connect.NewMonitor(),
 		updateCount: 0,
 	}
 	go walletValidateAddress.run()
@@ -118,19 +114,19 @@ func (self *walletValidateAddress) run() {
 			)
 
 			select {
-			case <- self.ctx.Done():
+			case <-self.ctx.Done():
 				return
-			case <- done:
+			case <-done:
 				// continue
-			case <- time.After(self.timeout):
+			case <-time.After(self.timeout):
 				// continue
 			}
 		}
 
 		select {
-		case <- self.ctx.Done():
+		case <-self.ctx.Done():
 			return
-		case <- notify:
+		case <-notify:
 		}
 	}
 }
@@ -147,4 +143,3 @@ func (self *walletValidateAddress) Queue(address string, callback WalletValidate
 func (self *walletValidateAddress) Close() {
 	self.cancel()
 }
-

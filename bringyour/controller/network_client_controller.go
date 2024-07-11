@@ -8,7 +8,6 @@ import (
 	"bringyour.com/bringyour/model"
 )
 
-
 func ConnectNetworkClient(
 	ctx context.Context,
 	clientId bringyour.Id,
@@ -25,7 +24,6 @@ func ConnectNetworkClient(
 	return connectionId
 }
 
-
 func setConnectionLocation(
 	ctx context.Context,
 	connectionId bringyour.Id,
@@ -36,8 +34,7 @@ func setConnectionLocation(
 		bringyour.Logger().Printf("Get ip for location error: %s", err)
 		return
 	}
-	
-	model.CreateLocation(ctx, location)
-	model.SetConnectionLocation(ctx, connectionId, location.LocationId) 
-}
 
+	model.CreateLocation(ctx, location)
+	model.SetConnectionLocation(ctx, connectionId, location.LocationId)
+}

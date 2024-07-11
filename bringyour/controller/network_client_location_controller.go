@@ -2,27 +2,24 @@ package controller
 
 import (
 	"context"
-	"net/http"
 	"encoding/json"
+	"net/http"
 	// "encoding/base64"
-	"time"
-	"sync"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 )
-
 
 var ipInfoConfig = sync.OnceValue(func() map[string]any {
 	c := bringyour.Vault.RequireSimpleResource("ipinfo.yml").Parse()
 	return c["ipinfo"].(map[string]any)
 })
 
-
 const LocationLookupResultExpiration = 24 * time.Hour
-
 
 func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error) {
 	earliestResultTime := bringyour.NowUtc().Add(-LocationLookupResultExpiration)
@@ -45,7 +42,6 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 		bringyour.Logger().Printf("Ipinfo token: %s", token)
 
 		// tokenBase64 := base64.StdEncoding.EncodeToString([]byte(token))
-
 
 		req.Header.Add(
 			"Authorization",
@@ -74,22 +70,22 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 	bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
 
 	/*
-	example result:
-	{
-	  "ip": "64.124.162.234",
-	  "hostname": "64.124.162.234.idia-242364-zyo.zip.zayo.com",
-	  "city": "Palo Alto",
-	  "region": "California",
-	  "country": "US",
-	  "loc": "37.4180,-122.1274",
-	  "org": "AS6461 Zayo Bandwidth",
-	  "postal": "94306",
-	  "timezone": "America/Los_Angeles"
-	}
+		example result:
+		{
+		  "ip": "64.124.162.234",
+		  "hostname": "64.124.162.234.idia-242364-zyo.zip.zayo.com",
+		  "city": "Palo Alto",
+		  "region": "California",
+		  "country": "US",
+		  "loc": "37.4180,-122.1274",
+		  "org": "AS6461 Zayo Bandwidth",
+		  "postal": "94306",
+		  "timezone": "America/Los_Angeles"
+		}
 	*/
 	type IpInfoResult struct {
-		City string `json:"city,omitempty"`
-		Region string `json:"region,omitempty"`
+		City        string `json:"city,omitempty"`
+		Region      string `json:"region,omitempty"`
 		CountryCode string `json:"country,omitempty"`
 	}
 	var ipInfoResult IpInfoResult
@@ -99,8 +95,8 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 	}
 
 	location := &model.Location{
-		City: ipInfoResult.City,
-		Region: ipInfoResult.Region,
+		City:        ipInfoResult.City,
+		Region:      ipInfoResult.Region,
 		CountryCode: ipInfoResult.CountryCode,
 	}
 	location.LocationType, err = location.GuessLocationType()
@@ -110,4 +106,3 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 
 	return location, nil
 }
-

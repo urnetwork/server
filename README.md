@@ -1,6 +1,6 @@
 # bringyour
 
+## Code style
 
-code style -
-use a pointer when the value can be nil
-
+- Use a pointer when the value can be nil
+- Use gofmt for go formatting
