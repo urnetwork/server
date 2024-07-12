@@ -1,18 +1,18 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "os"
-    "encoding/json"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 
-    "github.com/docopt/docopt-go"
+	"github.com/docopt/docopt-go"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour/controller"
-    "bringyour.com/bringyour/search"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/search"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -20,6 +20,7 @@ func main() {
     usage := `BringYour control.
 
 Usage:
+    bringyourctl payout check
     bringyourctl db version
     bringyourctl db migrate
     bringyourctl search --realm=<realm> --type=<type> add <value>
@@ -112,7 +113,48 @@ Options:
         } else if subscriptionTransferBalanceCode, _ := opts.Bool("subscription-transfer-balance-code"); subscriptionTransferBalanceCode {
             sendSubscriptionTransferBalanceCode(opts)
         }
+    } else if payout, _ := opts.Bool("payout"); payout {
+        livePayoutTest()
     }
+}
+
+func livePayoutTest() {
+
+    fmt.Println("Payout test")
+
+    // controller.ListAccounts()
+    // controller.GetProfiles()
+    // controller.ListTransactions()
+
+    client := controller.CoinbaseClient()
+
+    idem := bringyour.NewId()
+
+    // // what is 10 cents USDC in nano cents?
+    payoutAmount := float64(1)
+
+    result, err := client.SendPayment(
+        &controller.CoinbaseSendRequest{
+            WalletAccountId: "bec06785-c05d-5aff-8c7a-cb82fda8243f",
+            Type: "send",
+            To: "7VKiiiHHxrrLNjydRXsrJg6jT8FtBEJFv5kdGMPZVmps",
+            Amount: fmt.Sprintf("%.4f", payoutAmount),
+            Currency: "USDC",
+            // don't expose descriptions on the blockchain
+            Description: "",
+            Idem: idem.String(),
+        },
+    )
+    if err != nil {
+        fmt.Printf("Error: %v", err.Error())
+        return
+    }
+
+    fmt.Printf("TransactionId: %s\n", result.TransactionId)
+    fmt.Printf("Network Status: %s\n", result.Network.Status)
+    fmt.Printf("Network Hash: %s\n", result.Network.Hash)
+    fmt.Printf("Network Name: %s\n", result.Network.Name)
+
 }
 
 

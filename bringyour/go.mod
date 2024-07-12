@@ -21,12 +21,14 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v76 v76.16.0
 	github.com/tyler-smith/go-bip39 v1.1.0
-	golang.org/x/crypto v0.14.0
+	golang.org/x/crypto v0.25.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
-	golang.org/x/net v0.17.0
+	golang.org/x/net v0.21.0
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+require github.com/stretchr/testify v1.9.0 // indirect
 
 require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
@@ -40,9 +42,9 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
-	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/sys v0.13.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/sync v0.7.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
 )
 
 replace bringyour.com/connect v0.0.0 => ../../connect/connect

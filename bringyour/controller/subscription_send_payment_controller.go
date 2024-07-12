@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -226,10 +227,15 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		payoutAmount := payment.TokenAmount
 
 		// TODO: ensure payout - transaction fees >= minimum payout amount
+		networkAccountId, err := getNetworkAccountId(accountWallet.Blockchain)
+		if err != nil {
+			return nil, err
+		}
 
 		// send the payment
-		txData, err := coinbaseClient.sendPayment(
-				&CoinbaseSendRequest{
+		txData, err := coinbaseClient.SendPayment(
+			&CoinbaseSendRequest{
+				WalletAccountId: networkAccountId,
 				Type: "send",
 				To: accountWallet.WalletAddress,
 				Amount: fmt.Sprintf("%.4f", payoutAmount),
@@ -237,8 +243,7 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 				// don't expose descriptions on the blockchain
 				Description: "",
 				Idem: payment.PaymentId.String(),
-			}, 
-			clientSession,
+			},
 		)
 		if err != nil {
 			return nil, err
@@ -262,7 +267,7 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 
 type CoinbaseAPI interface {
 	getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error)
-	sendPayment(sendRequest *CoinbaseSendRequest, session *session.ClientSession) (*CoinbaseSendResponseData, error)
+	SendPayment(sendRequest *CoinbaseSendRequest) (*CoinbaseSendResponseData, error)
 }
 
 type CoreCoinbaseApiClient struct {}
@@ -276,7 +281,8 @@ type GetCoinbaseTxDataResult struct {
 func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
 
 	path := fmt.Sprintf("/v2/accounts/%s/transactions/%s", coinbaseAccountId(), transactionId)
-	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
+
+	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +294,7 @@ func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCo
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
 		},
 		func(response *http.Response, responseBodyBytes []byte)(*GetCoinbaseTxDataResult, error) {
-				txResult := &CoinbaseTransactionResponse{}
+				txResult := &CoinbaseResponse[CoinbaseTransactionResponseData]{}
 				err := json.Unmarshal(responseBodyBytes, txResult)
 
 				if err != nil {
@@ -296,27 +302,173 @@ func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCo
 				}
 
 				return &GetCoinbaseTxDataResult{
-					TxData: txResult.Data,
+					TxData: &txResult.Data,
 					ResponseBodyBytes: responseBodyBytes,
 				}, nil
 		},
 	)
 }
 
-func (c *CoreCoinbaseApiClient) sendPayment(
-	sendRequest *CoinbaseSendRequest, 
-	session *session.ClientSession,
+
+// for testing
+func ShowAccount() {
+
+	fmt.Println("ShowAccount")
+
+	path := fmt.Sprintf("/v2/accounts/%s", coinbaseAccountId())
+
+	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
+	if err != nil {
+		fmt.Println("Error getting jwt", err)
+		return
+	}
+
+	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+
+	bodyString, err := bringyour.HttpGetRequireStatusOk(
+		uri,
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
+		},
+		func(response *http.Response, responseBodyBytes []byte) (string, error) {
+			
+			// fmt.Println("responseBodyBytes", string(responseBodyBytes))
+			fmt.Println("Inside of the response callback")
+
+			// Convert the byte slice to a string
+			bodyString := string(responseBodyBytes)
+
+			// Log the raw JSON response body to the terminal
+			fmt.Println("Raw JSON response body:", bodyString)
+
+			return bodyString, nil
+		},
+	)
+
+	fmt.Println("bodyString", bodyString)
+
+	if err != nil {
+		fmt.Println("Error getting account", err)
+		return
+	}
+
+}
+
+// for testing
+func ListTransactions() {
+	
+	fmt.Println("List Transactions")
+
+	path := fmt.Sprintf("/v2/accounts/%s/transactions", solanaAccountId())
+
+	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
+	if err != nil {
+		fmt.Println("Error getting jwt", err)
+		return
+	}
+
+	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+
+	bodyString, err := bringyour.HttpGetRequireStatusOk(
+		uri,
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
+		},
+		func(response *http.Response, responseBodyBytes []byte) (string, error) {
+
+			// Convert the byte slice to a string
+			bodyString := string(responseBodyBytes)
+
+			return bodyString, nil
+		},
+	)
+
+	fmt.Println("bodyString", bodyString)
+
+	if err != nil {
+		fmt.Println("Error getting account", err)
+		return
+	}
+
+
+}
+
+// for testing
+func ListAccounts() {
+
+	fmt.Println("List Accounts")
+
+	path := "/v2/accounts"
+
+	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
+	if err != nil {
+		fmt.Println("Error getting jwt", err)
+		return
+	}
+
+	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+
+	bodyString, err := bringyour.HttpGetRequireStatusOk(
+		uri,
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
+		},
+		func(response *http.Response, responseBodyBytes []byte) (string, error) {
+			
+			// fmt.Println("responseBodyBytes", string(responseBodyBytes))
+			fmt.Println("Inside of the response callback")
+
+			// Convert the byte slice to a string
+			bodyString := string(responseBodyBytes)
+
+			// Log the raw JSON response body to the terminal
+			fmt.Println("Raw JSON response body:", bodyString)
+
+			return bodyString, nil
+		},
+	)
+
+	fmt.Println("bodyString", bodyString)
+
+	if err != nil {
+		fmt.Println("Error getting account", err)
+		return
+	}
+
+}
+
+func (c *CoreCoinbaseApiClient) SendPayment(
+	sendRequest *CoinbaseSendRequest,
 ) (*CoinbaseSendResponseData, error) {
 
-	path := fmt.Sprintf("/v2/accounts/%s/transactions", coinbaseAccountId())
+	fmt.Println("wallet account id is: ", sendRequest.WalletAccountId)
+
+	path := fmt.Sprintf("/v2/accounts/%s/transactions", sendRequest.WalletAccountId)
+
+	// available networks for USDC
+	// https://api.international.coinbase.com/api/v1/assets/USDC/networks
+
 	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
 
 	if err != nil {
 		return nil, err
 	}
 
-	return bringyour.HttpGetRequireStatusOk(
-		path,
+	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+
+	return bringyour.HttpPostRequireStatusOk(
+		uri,
+		map[string]any{
+			"type": "send",
+			"to": sendRequest.To,
+			"amount": sendRequest.Amount,
+			"currency": sendRequest.Currency,
+			"description": sendRequest.Description,
+			"idem": sendRequest.Idem,
+		},
 		func(header http.Header) {
 				header.Add("Accept", "application/json")
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
@@ -369,9 +521,38 @@ var coinbaseAccountId = sync.OnceValue(func()(string) {
 	return c["api"].(map[string]any)["account_id"].(string)
 })
 
+var solanaAccountId = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	return c["api"].(map[string]any)["solana_account_id"].(string)
+})
 
-type CoinbaseTransactionResponse struct {
-	Data *CoinbaseTransactionResponseData `json:"data"`
+var maticAccountId = sync.OnceValue(func()(string) {
+	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	return c["api"].(map[string]any)["matic_account_id"].(string)
+})
+
+func getNetworkAccountId(networkName string) (string, error) {
+
+	fmt.Println("networkName is: ", networkName)
+
+	networkName = strings.TrimSpace(networkName)
+	networkName = strings.ToUpper(networkName)
+
+	fmt.Println("formatted network name is: ", networkName)
+
+	switch networkName {
+	case "SOLANA":
+		return solanaAccountId(), nil
+	case "MATIC":
+		return maticAccountId(), nil
+	default:
+		return "", fmt.Errorf("unknown network name %s", networkName)
+	}
+
+}
+
+type CoinbaseResponse[T any] struct {
+	Data T `json:"data"`
 }
 
 type CoinbaseTransactionResponseData struct {
@@ -382,12 +563,13 @@ type CoinbaseTransactionResponseData struct {
 
 
 type CoinbaseSendRequest struct {
-	Type string `json:"type"`
-	To string `json:"to"`
-	Amount string `json:"amount"`
-	Currency string `json:"currency"`
-	Description string `json:"description"`
-	Idem string `json:"idem"`
+	WalletAccountId string
+	Type string
+	To string
+	Amount string
+	Currency string
+	Description string
+	Idem string
 }
 
 type CoinbaseSendResponse struct {
@@ -407,7 +589,7 @@ type CoinbaseSendResponseNetwork struct {
 
 
 func coinbaseJwt(requestMethod string, requestHost string, requestPath string) (string, error) {
-	uri := fmt.Sprintf("%s %s%s", requestMethod, requestHost, requestPath)
+		uri := fmt.Sprintf("%s %s%s", requestMethod, requestHost, requestPath)
 
     block, _ := pem.Decode([]byte(coinbaseApiKeySecret()))
     if block == nil {

@@ -80,7 +80,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		wallet := &model.AccountWallet{
 			NetworkId: destinationNetworkId,
 			WalletType: model.WalletTypeCircleUserControlled,
-			Blockchain: "matic",
+			Blockchain: "MATIC",
 			WalletAddress: destinationWalletAddress,
 			DefaultTokenType: "usdc",
 		}
@@ -200,18 +200,17 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 type mockCoinbaseApiClient struct {
 	GetTransactionDataFunc func(transactionId string) (*GetCoinbaseTxDataResult, error)
-	SendPaymentFunc func(sendRequest *CoinbaseSendRequest, session *session.ClientSession) (*CoinbaseSendResponseData, error)
+	SendPaymentFunc func(sendRequest *CoinbaseSendRequest) (*CoinbaseSendResponseData, error)
 }
 
 func (m *mockCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
 	return m.GetTransactionDataFunc(transactionId)
 }
 
-func (m *mockCoinbaseApiClient) sendPayment(
+func (m *mockCoinbaseApiClient) SendPayment(
 	sendRequest *CoinbaseSendRequest, 
-	session *session.ClientSession,
 ) (*CoinbaseSendResponseData, error) {
-	return m.SendPaymentFunc(sendRequest, session)
+	return m.SendPaymentFunc(sendRequest)
 }
 
 func defaultGetTransactionDataHandler(transactionId string) (*GetCoinbaseTxDataResult, error) {
@@ -231,8 +230,7 @@ func defaultGetTransactionDataHandler(transactionId string) (*GetCoinbaseTxDataR
 }
 
 func defaultSendPaymentHandler(
-	sendRequest *CoinbaseSendRequest, 
-	session *session.ClientSession,
+	sendRequest *CoinbaseSendRequest,
 ) (*CoinbaseSendResponseData, error) {
 	staticData := &CoinbaseSendResponseData{
 		TransactionId: sendPaymentTransactionId,
