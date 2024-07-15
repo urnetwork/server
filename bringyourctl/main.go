@@ -120,41 +120,90 @@ Options:
 
 func livePayoutTest() {
 
-    fmt.Println("Payout test")
+    // fmt.Println("Payout test")
 
     // controller.ListAccounts()
     // controller.GetProfiles()
     // controller.ListTransactions()
 
-    client := controller.CoinbaseClient()
+    // controller.GenerateEntitySecretCipher()
+    // controller.CreateDeveloperWalletSet("URNetwork Payout Wallet")
+    // controller.CreateDeveloperWallet("0190aa1d-07b3-7765-a172-aff1c20ea982")
+    // feeEstimate, _ := controller.EstimateTransferFee(
+    //     controller.EstimateTransferFeeArgs{
+    //         Amount: 1,
+    //         // DestinationAddress: "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
+    //         DestinationAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+    //         // WalletId: "3eb00864-2064-5daa-95fb-7a75539832b9",
+    //         Network: "MATIC",
+    //     },
+    // )
 
-    idem := bringyour.NewId()
 
-    // // what is 10 cents USDC in nano cents?
-    payoutAmount := float64(1)
+    // fmt.Println("Fee Estimate High Gas Limit: ", feeEstimate.High.GasLimit)
+    // fmt.Println("Fee Estimate High Priority Fee: ", feeEstimate.High.PriorityFee)
+    // fmt.Println("Fee Estimate High Base Fee: ", feeEstimate.High.BaseFee)
+    // fmt.Println("====================================")
+    // fmt.Println("Fee Estimate Medium Gas Limit: ", feeEstimate.Medium.GasLimit)
+    // fmt.Println("Fee Estimate Medium Priority Fee: ", feeEstimate.Medium.PriorityFee)
+    // fmt.Println("Fee Estimate Medium Base Fee: ", feeEstimate.Medium.BaseFee)
+    // fmt.Println("====================================")
+    // fmt.Println("Fee Estimate Low Gas Limit: ", feeEstimate.Low.GasLimit)
+    // fmt.Println("Fee Estimate Low Priority Fee: ", feeEstimate.Low.PriorityFee)
+    // fmt.Println("Fee Estimate Low Base Fee: ", feeEstimate.Low.BaseFee)
 
-    result, err := client.SendPayment(
-        &controller.CoinbaseSendRequest{
-            WalletAccountId: "bec06785-c05d-5aff-8c7a-cb82fda8243f",
-            Type: "send",
-            To: "7VKiiiHHxrrLNjydRXsrJg6jT8FtBEJFv5kdGMPZVmps",
-            Amount: fmt.Sprintf("%.4f", payoutAmount),
-            Currency: "USDC",
-            // don't expose descriptions on the blockchain
-            Description: "",
-            Idem: idem.String(),
-        },
-    )
+
+
+
+    // controller.SendPayment(
+    //     controller.SendPaymentArgs{
+    //         Amount: .10,
+    //         // DestinationAddress: "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
+    //         // Network: "SOL",
+    //         DestinationAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+    //         Network: "MATIC",
+    //     },
+    // )
+
+    // _, err := controller.CalcuateFeePolygon(
+    //     controller.FeeEstimate{
+    //         GasLimit: "58858",
+    //         PriorityFee: "36.499999998",
+    //         BaseFee: "0.000000035",
+    //     },
+    // )
+    // if err != nil {
+    //     panic(err)
+    // }
+
+    // solana
+    // ====================================
+    // Fee Estimate Medium Gas Limit:  18281
+    // Fee Estimate Medium Priority Fee:  2023952
+    // Fee Estimate Medium Base Fee:  0.00204928
+    // unsure how to estimate fee
+    // actual fee was 0.000046574
+
+    // polygon
+    // ====================================
+    // Fee Estimate Medium Gas Limit:  81441
+    // Fee Estimate Medium Priority Fee:  37.518543992
+    // Fee Estimate Medium Base Fee:  0.000000031
+    // baseFee * gasLimit = estimated fee
+    // 0.000000031 * 81441 = 0.002525671
+    // actual fee was 0.002307251577677021
+    // pretty accurate
+
+    // controller.FetchConvertionRate(
+    //     1, "USD", "SOL",
+    // )
+
+    fee, err := controller.ConvertFeeToUSDC("MATIC", 0.002060)
     if err != nil {
-        fmt.Printf("Error: %v", err.Error())
-        return
+        panic(err)
     }
 
-    fmt.Printf("TransactionId: %s\n", result.TransactionId)
-    fmt.Printf("Network Status: %s\n", result.Network.Status)
-    fmt.Printf("Network Hash: %s\n", result.Network.Hash)
-    fmt.Printf("Network Name: %s\n", result.Network.Name)
-
+    fmt.Printf(fmt.Sprintf("%f\n", *fee))
 }
 
 

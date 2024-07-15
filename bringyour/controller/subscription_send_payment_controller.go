@@ -526,7 +526,7 @@ var solanaAccountId = sync.OnceValue(func()(string) {
 	return c["api"].(map[string]any)["solana_account_id"].(string)
 })
 
-var maticAccountId = sync.OnceValue(func()(string) {
+var polygonAccountId = sync.OnceValue(func()(string) {
 	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
 	return c["api"].(map[string]any)["matic_account_id"].(string)
 })
@@ -544,7 +544,7 @@ func getNetworkAccountId(networkName string) (string, error) {
 	case "SOLANA":
 		return solanaAccountId(), nil
 	case "MATIC":
-		return maticAccountId(), nil
+		return polygonAccountId(), nil
 	default:
 		return "", fmt.Errorf("unknown network name %s", networkName)
 	}
@@ -639,4 +639,39 @@ func (n nonceSource) Nonce() (string, error) {
         return "", err
     }
     return r.String(), nil
+}
+
+type CoinbaseExchangeRatesResults struct {
+	Currency string `json:"currency"`
+	Rates map[string]string `json:"rates"`
+}
+
+func CoinbaseFetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
+	path := fmt.Sprintf("/v2/exchange-rates?currency=%s", currencyTicker)
+	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+
+	exchangeRatesResult, err := bringyour.HttpGetRequireStatusOk(
+		uri,
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+		},
+		func(response *http.Response, responseBodyBytes []byte) (*CoinbaseExchangeRatesResults, error) {
+			result := &CoinbaseResponse[CoinbaseExchangeRatesResults]{}
+
+			err := json.Unmarshal(responseBodyBytes, result)
+			if err != nil {
+				return nil, err
+			}
+
+			return &result.Data, nil
+		},
+	)
+
+	if err != nil {
+		fmt.Println("Error fetching exchange rates", err)
+		return nil, err
+	}
+
+	return exchangeRatesResult, nil
+
 }
