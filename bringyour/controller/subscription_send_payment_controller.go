@@ -214,14 +214,10 @@ func ProviderPayout(
 
 
 		// STU_TODO: check this
-		payoutAmount := payment.TokenAmount
-
-		println("Payout Amount: ", payoutAmount)
-		println("Account Wallet: ", accountWallet.WalletAddress)
-		println("Account Blockchain: ", accountWallet.Blockchain)
+		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
 		estimatedFees, err := circleClient.EstimateTransferFee(
-			payoutAmount,
+			payoutAmount, // TODO check this
 			accountWallet.WalletAddress,
 			accountWallet.Blockchain,
 		)
@@ -260,19 +256,16 @@ func ProviderPayout(
 
 		// set the payment record
 		model.SetPaymentRecord(
-			clientSession.Ctx, 
-			model.SetPaymentRecordArgs{
-				PaymentId: payment.PaymentId,
-				TokenType: "USDC",
-				TokenAmount: payoutAmount,
-				PaymentRecord: transferResult.Id,
-			},
+			clientSession.Ctx,
+			payment.PaymentId,
+			payment.TokenType,
+			payoutAmount,
+			transferResult.Id,
 		)
 
 		return &ProviderPayoutResult{
 			Complete: false,
 		}, nil
-
 	}
 }
 
@@ -314,7 +307,6 @@ func CoinbaseFetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesRe
 	)
 
 	if err != nil {
-		fmt.Println("Error fetching exchange rates", err)
 		return nil, err
 	}
 

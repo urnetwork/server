@@ -18,7 +18,7 @@ type CircleApi interface {
 		network string,
 	) (*FeeEstimateResult, error)
 	CreateTransferTransaction(
-		amount float64,
+		amountInUsd float64,
 		destinationAddress string,
 		network string,
 		walletId string,
@@ -50,7 +50,7 @@ type CreateTransferTransactionResult struct {
 }
 
 func (c *CoreCircleApiClient) CreateTransferTransaction(
-	amount float64,
+	amountInUsd float64,
 	destinationAddress string,
 	network string,
 	walletId string,
@@ -70,7 +70,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 		uri,
 		map[string]any{
 			"idempotencyKey": bringyour.NewId(),
-			"amounts": []string{fmt.Sprintf("%f", amount)},
+			"amounts": []string{fmt.Sprintf("%f", amountInUsd)},
 			"destinationAddress": destinationAddress,
 			"entitySecretCiphertext": cipher,
 			"tokenAddress": tokenAddress,
