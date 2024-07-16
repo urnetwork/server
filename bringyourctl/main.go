@@ -198,12 +198,25 @@ func livePayoutTest() {
     //     1, "USD", "SOL",
     // )
 
-    fee, err := controller.ConvertFeeToUSDC("MATIC", 0.002060)
+    // fee, err := controller.ConvertFeeToUSDC("MATIC", 0.002060)
+    // if err != nil {
+    //     panic(err)
+    // }
+
+    // fmt.Printf(fmt.Sprintf("%f\n", *fee))
+
+    client := controller.NewCircleClient()
+    tx, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
     if err != nil {
         panic(err)
     }
 
-    fmt.Printf(fmt.Sprintf("%f\n", *fee))
+    fmt.Println("tx id: ", tx.Id)
+    fmt.Println("tx state: ", tx.State)
+    fmt.Println("tx amount in USD: ", tx.AmountInUSD)
+    fmt.Println("tx destination address: ", tx.DestinationAddress)
+    fmt.Println("tx source address: ", tx.SourceAddress)
+
 }
 
 

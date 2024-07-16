@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 
 	// "io"
@@ -23,7 +22,6 @@ import (
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
-
 
 var circleConfig = sync.OnceValue(func() map[string]any {
     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
@@ -236,14 +234,14 @@ func WalletCircleTransferOut(
     )
 }
 
-type CircleResponse[T any] struct {
-	Data T `json:"data"`
-}
+// type CircleResponse[T any] struct {
+// 	Data T `json:"data"`
+// }
 
-var entitySecret = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-	return c["circle"].(map[string]any)["entity_secret"].(string)
-})
+// var entitySecret = sync.OnceValue(func()(string) {
+// 	c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+// 	return c["circle"].(map[string]any)["entity_secret"].(string)
+// })
 
 type WalletSet struct {
     Id string `json:"id"`
@@ -835,246 +833,137 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
     return completeWalletInfos, nil
 }
 
-type FeeEstimate struct {
-    GasLimit     string  `json:"gasLimit"`
-    PriorityFee  string `json:"priorityFee"`
-    BaseFee      string `json:"baseFee"`
-}
+// type CircleTransferTransactionResult struct {
+//     Id string `json:"id"`
+//     State string `json:"state"`
+// }
 
-type FeeEstimateResult struct {
-    High *FeeEstimate `json:"high,omitempty"`
-    Medium *FeeEstimate `json:"medium,omitempty"`
-    Low *FeeEstimate `json:"low,omitempty"`
-}
+// func SendPayment(sendPayment SendPaymentArgs) (*CircleTransferTransactionResult, error) {
 
-type SendPaymentArgs struct {
-    Amount float64
-    DestinationAddress string
-    Network string
-}
+//     hexEncodedEntitySecret := entitySecret()
 
-func EstimateTransferFee(
-	estimateTransferFee SendPaymentArgs,
-) (*FeeEstimateResult, error) {
-    circleApiToken := circleConfig()["api_token"]
+//     cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+//     if err != nil {
+//         fmt.Printf("Error generating entity secret cipher: %s", err)
+//         return nil, err
+//     }
 
-    url := "https://api.circle.com/v1/w3s/transactions/transfer/estimateFee"
+//     usdcNetworkAddress, err := getUsdcAddressByNetwork(sendPayment.Network)
+//     if err != nil {
+//         return nil, err
+//     }
 
-    usdcNetworkAddress, err := getUsdcAddressByNetwork(estimateTransferFee.Network)
-    if err != nil {
-        return nil, err
-    }
+//     // estimateFees, err := EstimateTransferFee(
+//     //     SendPaymentArgs{
+//     //         Amount: sendPayment.Amount,
+//     //         DestinationAddress: sendPayment.DestinationAddress,
+//     //         Network: sendPayment.Network,
+//     //     },
+//     // )
+//     // if err != nil {
+//     //     return nil, err
+//     // }
 
-    walletId, err := getWalletIdByNetwork(estimateTransferFee.Network)
-    if err != nil {
-        return nil, err
-    }
+//     walletId, err := getWalletIdByNetwork(sendPayment.Network)
+//     if err != nil {
+//         return nil, err
+//     }
 
-    feeEstimate, err := bringyour.HttpPostRequireStatusOk(
-        url,
-        map[string]any{
-            "amounts": []string{fmt.Sprintf("%f", estimateTransferFee.Amount)},
-            "destinationAddress": estimateTransferFee.DestinationAddress,
-            "walletId": walletId,
-            "tokenAddress": usdcNetworkAddress,
-            "blockchain": estimateTransferFee.Network,
-        },
-        func(header http.Header) {
-            header.Add("Accept", "application/json")
-            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
-        },
-        func(response *http.Response, responseBodyBytes []byte)(*FeeEstimateResult, error) {
-            result := &CircleResponse[FeeEstimateResult]{}
+//     uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
 
-            err := json.Unmarshal(responseBodyBytes, result)
+// 	res, err := bringyour.HttpPostRequireStatusOk(
+// 		uri,
+// 		map[string]any{
+//             "idempotencyKey": bringyour.NewId(),
+//             "amounts": []string{fmt.Sprintf("%f", sendPayment.Amount)},
+//             "destinationAddress": sendPayment.DestinationAddress,
+//             "entitySecretCiphertext": cipher,
+//             "tokenAddress": usdcNetworkAddress,
+//             "walletId": walletId,
+//             "blockchain": sendPayment.Network,
+//             // for testing
+//             "feeLevel": "MEDIUM",
+// 		},
+// 		func(header http.Header) {
+// 				header.Add("Accept", "application/json")
+// 				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+// 		},
+// 		func(response *http.Response, responseBodyBytes []byte)(*CircleTransferTransactionResult, error) {
+//             result := &CircleResponse[CircleTransferTransactionResult]{}
 
-            if err != nil {
-                return nil, err
-            }
+//             err := json.Unmarshal(responseBodyBytes, result)
 
-            return &result.Data, nil
-        },
-    )
+//             if err != nil {
+//                 return nil, err
+//             }
 
-    if err != nil {
-        return nil, err
-    }
+//             return &result.Data, nil
+// 		},
+// 	)
 
-    return feeEstimate, nil
-}
+//     if err != nil {
+//         fmt.Printf("Error sending payment: %s", err)
+//         return nil, err
+//     }
 
-type CircleTransferTransactionResult struct {
-    Id string `json:"id"`
-    State string `json:"state"`
-}
+//     fmt.Println("Transaction ID: ", res.Id)
+//     fmt.Println("Transaction State: ", res.State)
 
-type SendPaymentResult struct {}
+//     return res, nil
 
-func SendPayment(sendPayment SendPaymentArgs) (*CircleTransferTransactionResult, error) {
+// }
 
-    hexEncodedEntitySecret := entitySecret()
+// var solanaUSDCAddress = sync.OnceValue(func() string {
+//     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+//     return c["circle"].(map[string]any)["solana_usdc_address"].(string)
+// })
 
-    cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
-    if err != nil {
-        fmt.Printf("Error generating entity secret cipher: %s", err)
-        return nil, err
-    }
+// var polygonUSDCAddress = sync.OnceValue(func() string {
+//     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+//     return c["circle"].(map[string]any)["polygon_usdc_address"].(string)
+// })
 
-    usdcNetworkAddress, err := getUsdcAddressByNetwork(sendPayment.Network)
-    if err != nil {
-        return nil, err
-    }
+// func getUsdcAddressByNetwork(network string) (address string, err error) {
+//     network = strings.TrimSpace(network)
+//     network = strings.ToUpper(network)
 
-    // estimateFees, err := EstimateTransferFee(
-    //     SendPaymentArgs{
-    //         Amount: sendPayment.Amount,
-    //         DestinationAddress: sendPayment.DestinationAddress,
-    //         Network: sendPayment.Network,
-    //     },
-    // )
-    // if err != nil {
-    //     return nil, err
-    // }
+//     switch network {
+//     case "SOL", "SOLANA":
+//         address = solanaUSDCAddress()
+//     case "MATIC", "POLY", "POLYGON":
+//         address = polygonUSDCAddress()
+//     default:
+//         err = fmt.Errorf("unsupported network: %s", network)
+//     }
 
-    walletId, err := getWalletIdByNetwork(sendPayment.Network)
-    if err != nil {
-        return nil, err
-    }
+//     return
+// }
 
-    uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
+// var solanaWalletId = sync.OnceValue(func()(string) {
+//     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+// 	return c["circle"].(map[string]any)["solana_wallet_id"].(string)
+// })
 
-	res, err := bringyour.HttpPostRequireStatusOk(
-		uri,
-		map[string]any{
-            "idempotencyKey": bringyour.NewId(),
-            "amounts": []string{fmt.Sprintf("%f", sendPayment.Amount)},
-            "destinationAddress": sendPayment.DestinationAddress,
-            "entitySecretCiphertext": cipher,
-            "tokenAddress": usdcNetworkAddress,
-            "walletId": walletId,
-            "blockchain": sendPayment.Network,
-            // for testing
-            "feeLevel": "MEDIUM",
-		},
-		func(header http.Header) {
-				header.Add("Accept", "application/json")
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-		},
-		func(response *http.Response, responseBodyBytes []byte)(*CircleTransferTransactionResult, error) {
-            result := &CircleResponse[CircleTransferTransactionResult]{}
+// var polygonWalletId = sync.OnceValue(func()(string) {
+//     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+// 	return c["circle"].(map[string]any)["polygon_wallet_id"].(string)
+// })
 
-            err := json.Unmarshal(responseBodyBytes, result)
+// func getWalletIdByNetwork(network string) (id string, err error) {
+//     network = strings.TrimSpace(network)
+//     network = strings.ToUpper(network)
+//     fmt.Println("Network: ", network)
 
-            if err != nil {
-                return nil, err
-            }
+//     switch network {
+//     case "SOL", "SOLANA":
+//         id = solanaWalletId()
+//         fmt.Println("Solana Wallet ID: ", id)
+//     case "MATIC", "POLY", "POLYGON":
+//         id = polygonWalletId()
+//     default:
+//         err = fmt.Errorf("unsupported network: %s", network)
+//     }
 
-            return &result.Data, nil
-		},
-	)
+//     return
+// }
 
-    if err != nil {
-        fmt.Printf("Error sending payment: %s", err)
-        return nil, err
-    }
-
-    fmt.Println("Transaction ID: ", res.Id)
-    fmt.Println("Transaction State: ", res.State)
-
-    return res, nil
-
-}
-
-var solanaUSDCAddress = sync.OnceValue(func() string {
-    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-    return c["circle"].(map[string]any)["solana_usdc_address"].(string)
-})
-
-var polygonUSDCAddress = sync.OnceValue(func() string {
-    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-    return c["circle"].(map[string]any)["polygon_usdc_address"].(string)
-})
-
-func getUsdcAddressByNetwork(network string) (address string, err error) {
-    network = strings.TrimSpace(network)
-    network = strings.ToUpper(network)
-
-    switch network {
-    case "SOL", "SOLANA":
-        address = solanaUSDCAddress()
-    case "MATIC", "POLY", "POLYGON":
-        address = polygonUSDCAddress()
-    default:
-        err = fmt.Errorf("unsupported network: %s", network)
-    }
-
-    return
-}
-
-var solanaWalletId = sync.OnceValue(func()(string) {
-    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-	return c["circle"].(map[string]any)["solana_wallet_id"].(string)
-})
-
-var polygonWalletId = sync.OnceValue(func()(string) {
-    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
-	return c["circle"].(map[string]any)["polygon_wallet_id"].(string)
-})
-
-func getWalletIdByNetwork(network string) (id string, err error) {
-    network = strings.TrimSpace(network)
-    network = strings.ToUpper(network)
-    fmt.Println("Network: ", network)
-
-    switch network {
-    case "SOL", "SOLANA":
-        id = solanaWalletId()
-        fmt.Println("Solana Wallet ID: ", id)
-    case "MATIC", "POLY", "POLYGON":
-        id = polygonWalletId()
-    default:
-        err = fmt.Errorf("unsupported network: %s", network)
-    }
-
-    return
-}
-
-func CalcuateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
-
-    gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
-    if err != nil {
-        return nil, err
-    }
-
-    baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
-    if err != nil {
-        return nil, err
-    }
-
-    totalFee := baseFee * gasLimit
-
-    return &totalFee, nil
-}
-
-func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
-
-    ratesResult, err := CoinbaseFetchExchangeRates(currencyTicker)
-    if err != nil {
-        return nil, err
-    }
-
-    rateStr, exists := ratesResult.Rates["USDC"]
-    if !exists {
-        return nil, fmt.Errorf("currency ticker not found for %s", currencyTicker)
-    }
-
-    rate, err := strconv.ParseFloat(rateStr, 64)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse rate: %v", err)
-    }
-
-    feeUsdc := fee * rate
-
-    return &feeUsdc, nil
-
-}

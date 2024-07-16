@@ -1,22 +1,22 @@
 package model
 
-
 import (
-    "context"
-    "time"
-    "fmt"
-    "math"
-    // "crypto/rand"
-    // "encoding/hex"
-    // "slices"
-    "errors"
-    "strings"
-    "strconv"
+	"context"
+	"fmt"
+	"math"
+	"time"
 
-    // "golang.org/x/exp/maps"
+	// "crypto/rand"
+	// "encoding/hex"
+	// "slices"
+	"errors"
+	"strconv"
+	"strings"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/session"
+	// "golang.org/x/exp/maps"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -2505,16 +2505,20 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
     return paymentPlan
 }
 
+type SetPaymentRecordArgs struct {
+    PaymentId bringyour.Id
+    TokenType string
+    TokenAmount float64
+    PaymentRecord string
+}
+
 
 // set the record before submitting to the processor
 // the controller should check if the payment already has a record before processing - 
 //    these are in a bad state and need to be investigated manually
 func SetPaymentRecord(
     ctx context.Context,
-    paymentId bringyour.Id,
-    tokenType string,
-    tokenAmount float64,
-    paymentRecord string,
+    setPaymentRecord SetPaymentRecordArgs,
 ) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
         tag := bringyour.RaisePgResult(tx.Exec(
@@ -2529,10 +2533,10 @@ func SetPaymentRecord(
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
             `,
-            paymentId,
-            tokenType,
-            tokenAmount,
-            paymentRecord,
+            setPaymentRecord.PaymentId,
+            setPaymentRecord.TokenType,
+            setPaymentRecord.TokenAmount,
+            setPaymentRecord.PaymentRecord,
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")

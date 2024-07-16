@@ -1,15 +1,10 @@
 package controller
 
 import (
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math"
-	"math/big"
 	"net/http"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -17,8 +12,6 @@ import (
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/task"
-	"github.com/go-jose/go-jose/v3"
-	"github.com/go-jose/go-jose/v3/jwt"
 )
 
 var (
@@ -60,8 +53,8 @@ func SchedulePendingPayments(session *session.ClientSession) {
 		markAsProcessed(payment.PaymentId)
 
 		task.ScheduleTask(
-			CoinbasePayment,
-			&CoinbasePaymentArgs{
+			CirclePayment,
+			&CirclePaymentArgs{
 				Payment: payment,
 			},
 			session,
@@ -89,8 +82,8 @@ func SendPayments(session *session.ClientSession) {
 		markAsProcessed(payment.PaymentId)
 
 		task.ScheduleTask(
-			CoinbasePayment,
-			&CoinbasePaymentArgs{
+			CirclePayment,
+			&CirclePaymentArgs{
 				Payment: payment,
 			},
 			session,
@@ -100,9 +93,6 @@ func SendPayments(session *session.ClientSession) {
 	
 }
 
-
-
-// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-key-authentication
 
 // TODO start a task to retry a payment until it completes
 // payment_id
@@ -123,79 +113,83 @@ func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {
 	markAsProcessed(payment.PaymentId)
 
 	task.ScheduleTask(
-		CoinbasePayment,
-		&CoinbasePaymentArgs{
+		CirclePayment,
+		&CirclePaymentArgs{
 			Payment: payment,
 		},
 		&session,
 	)
 }
 
-
-
-type CoinbasePaymentArgs struct {
+type CirclePaymentArgs struct {
 	Payment *model.AccountPayment
 }
 
-type CoinbasePaymentResult struct {
+type CirclePaymentResult struct {
 	Complete bool
 }
 
-func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *session.ClientSession) (*CoinbasePaymentResult, error) {
+func CirclePayment(
+	circlePayment *CirclePaymentArgs, 
+	clientSession *session.ClientSession,
+) (*CirclePaymentResult, error) {
 
 	// if has payment record, get the status of the transaction
 	// if complete, finish and send email
 	// if in progress, wait
-	payment := coinbasePayment.Payment
-	coinbaseClient := CoinbaseClient()
+	payment := circlePayment.Payment
+	circleClient := NewCircleClient()
 
 	// GET https://api.coinbase.com/v2/accounts/:account_id/transactions/:transaction_id
 	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions
 
 	if payment.Completed || payment.Canceled {
-		return &CoinbasePaymentResult{
+		return &CirclePaymentResult{
 			Complete: true,
 		}, nil
 	}
 
-	var tx *CoinbaseTransactionResponseData
+	var tx *CircleTransaction
 	var txResponseBodyBytes []byte // STU_TODO: this is ResponseBodyBytes from fetching the transaction data?
 	var status string
 
 	if payment.PaymentRecord != "" {
 
 		// get the status of the transaction
-		getTxDataResult, err := coinbaseClient.getTransactionData(payment.PaymentRecord)
+		txResult, err := circleClient.GetTransaction(payment.PaymentRecord)
 		if err != nil {
 			return nil, err
 		}
 
-		if getTxDataResult.TxData == nil {
-			// no transaction
-			return nil, fmt.Errorf("No transaction data found for payment %s", payment.PaymentId)
-		}
-
-		tx = getTxDataResult.TxData
-		txResponseBodyBytes = getTxDataResult.ResponseBodyBytes
-		status = tx.Status
+		tx = &txResult.Transaction
+		txResponseBodyBytes = txResult.ResponseBodyBytes
+		status = tx.State
 	}
 
-	// "completed"
-	// "pending", "waiting_for_clearing", "waiting_for_signature"
+	// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
 	switch status {
-	case "pending", "waiting_for_clearing", "waiting_for_signature":
-		// check later		
-		return &CoinbasePaymentResult{
+	case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
+		// check later	
+		return &CirclePaymentResult{
 			Complete: false,
 		}, nil
 
-	case "completed":
-		// set payment completed
+	case "DENIED", "FAILED", "CANCELLED":
 
-		// send an email
+		// Cancel this payment in our DB
+		err := model.CancelPayment(clientSession.Ctx, payment.PaymentId)
+		if err != nil {
+			return nil, err
+		}
 
-		// do not rerun task
+		// Returns complete, since we don't want to retry this payment
+		return &CirclePaymentResult{
+			Complete: true,
+		}, nil
 
+	case "COMPLETE":
+
+		// mark the payment complete in our DB
 		model.CompletePayment(
 			clientSession.Ctx, 
 			payment.PaymentId, 
@@ -207,12 +201,11 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 			return nil, err
 		}
 
-		// TODO we need to stub this in tests
 		awsMessageSender := GetAWSMessageSender()
 		// TODO handler error
 		awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
 
-		return &CoinbasePaymentResult{
+		return &CirclePaymentResult{
 			Complete: true,
 		}, nil
 
@@ -226,23 +219,35 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		// STU_TODO: check this
 		payoutAmount := payment.TokenAmount
 
-		// TODO: ensure payout - transaction fees >= minimum payout amount
-		networkAccountId, err := getNetworkAccountId(accountWallet.Blockchain)
+		sendPaymentArgs := SendPaymentArgs{
+			Amount: payoutAmount,
+			DestinationAddress: accountWallet.WalletAddress,
+			Network: accountWallet.Blockchain,
+		}
+
+		estimatedFees, err := circleClient.EstimateTransferFee(sendPaymentArgs)
 		if err != nil {
 			return nil, err
 		}
 
+		fee, err := CalculateFee(*estimatedFees.Medium, accountWallet.Blockchain)
+		if err != nil {
+			return nil, err
+		}
+
+		feeInUSDC, err := ConvertFeeToUSDC("MATIC", *fee)
+		if err != nil {
+			return nil, err
+		}
+
+		payoutAmount = payoutAmount - *feeInUSDC
+
 		// send the payment
-		txData, err := coinbaseClient.SendPayment(
-			&CoinbaseSendRequest{
-				WalletAccountId: networkAccountId,
-				Type: "send",
-				To: accountWallet.WalletAddress,
-				Amount: fmt.Sprintf("%.4f", payoutAmount),
-				Currency: "USDC",
-				// don't expose descriptions on the blockchain
-				Description: "",
-				Idem: payment.PaymentId.String(),
+		transferResult, err := circleClient.SendPayment(
+			SendPaymentArgs{
+				Amount: payoutAmount,
+				DestinationAddress: accountWallet.WalletAddress,
+				Network: accountWallet.Blockchain,
 			},
 		)
 		if err != nil {
@@ -252,252 +257,20 @@ func CoinbasePayment(coinbasePayment *CoinbasePaymentArgs, clientSession *sessio
 		// set the payment record
 		model.SetPaymentRecord(
 			clientSession.Ctx, 
-			payment.PaymentId, 
-			"USDC", 
-			payoutAmount, 
-			txData.TransactionId,
+			model.SetPaymentRecordArgs{
+				PaymentId: payment.PaymentId,
+				TokenType: "USDC",
+				TokenAmount: payoutAmount,
+				PaymentRecord: transferResult.Id,
+			},
 		)
 
-		return &CoinbasePaymentResult{
+		return &CirclePaymentResult{
 			Complete: false,
 		}, nil
 
 	}
 }
-
-type CoinbaseAPI interface {
-	getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error)
-	SendPayment(sendRequest *CoinbaseSendRequest) (*CoinbaseSendResponseData, error)
-}
-
-type CoreCoinbaseApiClient struct {}
-
-type GetCoinbaseTxDataResult struct {
-	TxData *CoinbaseTransactionResponseData
-	ResponseBodyBytes []byte
-}
-
-
-func (c *CoreCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
-
-	path := fmt.Sprintf("/v2/accounts/%s/transactions/%s", coinbaseAccountId(), transactionId)
-
-	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
-	if err != nil {
-		return nil, err
-	}
-
-	return bringyour.HttpGetRequireStatusOk(
-		path,
-		func(header http.Header) {
-				header.Add("Accept", "application/json")
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		},
-		func(response *http.Response, responseBodyBytes []byte)(*GetCoinbaseTxDataResult, error) {
-				txResult := &CoinbaseResponse[CoinbaseTransactionResponseData]{}
-				err := json.Unmarshal(responseBodyBytes, txResult)
-
-				if err != nil {
-						return nil, err
-				}
-
-				return &GetCoinbaseTxDataResult{
-					TxData: &txResult.Data,
-					ResponseBodyBytes: responseBodyBytes,
-				}, nil
-		},
-	)
-}
-
-
-// for testing
-func ShowAccount() {
-
-	fmt.Println("ShowAccount")
-
-	path := fmt.Sprintf("/v2/accounts/%s", coinbaseAccountId())
-
-	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
-	if err != nil {
-		fmt.Println("Error getting jwt", err)
-		return
-	}
-
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
-
-	bodyString, err := bringyour.HttpGetRequireStatusOk(
-		uri,
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (string, error) {
-			
-			// fmt.Println("responseBodyBytes", string(responseBodyBytes))
-			fmt.Println("Inside of the response callback")
-
-			// Convert the byte slice to a string
-			bodyString := string(responseBodyBytes)
-
-			// Log the raw JSON response body to the terminal
-			fmt.Println("Raw JSON response body:", bodyString)
-
-			return bodyString, nil
-		},
-	)
-
-	fmt.Println("bodyString", bodyString)
-
-	if err != nil {
-		fmt.Println("Error getting account", err)
-		return
-	}
-
-}
-
-// for testing
-func ListTransactions() {
-	
-	fmt.Println("List Transactions")
-
-	path := fmt.Sprintf("/v2/accounts/%s/transactions", solanaAccountId())
-
-	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
-	if err != nil {
-		fmt.Println("Error getting jwt", err)
-		return
-	}
-
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
-
-	bodyString, err := bringyour.HttpGetRequireStatusOk(
-		uri,
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (string, error) {
-
-			// Convert the byte slice to a string
-			bodyString := string(responseBodyBytes)
-
-			return bodyString, nil
-		},
-	)
-
-	fmt.Println("bodyString", bodyString)
-
-	if err != nil {
-		fmt.Println("Error getting account", err)
-		return
-	}
-
-
-}
-
-// for testing
-func ListAccounts() {
-
-	fmt.Println("List Accounts")
-
-	path := "/v2/accounts"
-
-	jwt, err := coinbaseJwt("GET", coinbaseApiHost(), path)
-	if err != nil {
-		fmt.Println("Error getting jwt", err)
-		return
-	}
-
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
-
-	bodyString, err := bringyour.HttpGetRequireStatusOk(
-		uri,
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (string, error) {
-			
-			// fmt.Println("responseBodyBytes", string(responseBodyBytes))
-			fmt.Println("Inside of the response callback")
-
-			// Convert the byte slice to a string
-			bodyString := string(responseBodyBytes)
-
-			// Log the raw JSON response body to the terminal
-			fmt.Println("Raw JSON response body:", bodyString)
-
-			return bodyString, nil
-		},
-	)
-
-	fmt.Println("bodyString", bodyString)
-
-	if err != nil {
-		fmt.Println("Error getting account", err)
-		return
-	}
-
-}
-
-func (c *CoreCoinbaseApiClient) SendPayment(
-	sendRequest *CoinbaseSendRequest,
-) (*CoinbaseSendResponseData, error) {
-
-	fmt.Println("wallet account id is: ", sendRequest.WalletAccountId)
-
-	path := fmt.Sprintf("/v2/accounts/%s/transactions", sendRequest.WalletAccountId)
-
-	// available networks for USDC
-	// https://api.international.coinbase.com/api/v1/assets/USDC/networks
-
-	jwt, err := coinbaseJwt("POST", coinbaseApiHost(), path)
-
-	if err != nil {
-		return nil, err
-	}
-
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
-
-	return bringyour.HttpPostRequireStatusOk(
-		uri,
-		map[string]any{
-			"type": "send",
-			"to": sendRequest.To,
-			"amount": sendRequest.Amount,
-			"currency": sendRequest.Currency,
-			"description": sendRequest.Description,
-			"idem": sendRequest.Idem,
-		},
-		func(header http.Header) {
-				header.Add("Accept", "application/json")
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		},
-		func(response *http.Response, responseBodyBytes []byte)(*CoinbaseSendResponseData, error) {
-				result := &CoinbaseSendResponse{}
-				err := json.Unmarshal(responseBodyBytes, result)
-
-				if err != nil {
-						return nil, err
-				}
-
-				return result.Data, nil
-		},
-	)
-}
-
-var coinbaseClientInstance CoinbaseAPI = &CoreCoinbaseApiClient{}
-
-func CoinbaseClient() CoinbaseAPI {
-	return coinbaseClientInstance
-}
-
-// used for mocking in tests
-func SetCoinbaseClient(client CoinbaseAPI) {
-	coinbaseClientInstance = client
-}
-
-// CoinbaseApiHost = "api.coinbase.com"
 
 var coinbaseApiHost = sync.OnceValue(func()(string) {
 	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
@@ -505,141 +278,10 @@ var coinbaseApiHost = sync.OnceValue(func()(string) {
 })
 
 
-var coinbaseApiKeyName = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["key_name"].(string)
-})
-
-
-var coinbaseApiKeySecret = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["private_key"].(string)
-})
-
-var coinbaseAccountId = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["account_id"].(string)
-})
-
-var solanaAccountId = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["solana_account_id"].(string)
-})
-
-var polygonAccountId = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["matic_account_id"].(string)
-})
-
-func getNetworkAccountId(networkName string) (string, error) {
-
-	fmt.Println("networkName is: ", networkName)
-
-	networkName = strings.TrimSpace(networkName)
-	networkName = strings.ToUpper(networkName)
-
-	fmt.Println("formatted network name is: ", networkName)
-
-	switch networkName {
-	case "SOLANA":
-		return solanaAccountId(), nil
-	case "MATIC":
-		return polygonAccountId(), nil
-	default:
-		return "", fmt.Errorf("unknown network name %s", networkName)
-	}
-
-}
-
 type CoinbaseResponse[T any] struct {
 	Data T `json:"data"`
 }
 
-type CoinbaseTransactionResponseData struct {
-	TransactionId string `json:"id"`
-	Type string  `json:"type"`
-	Status string  `json:"status"`
-}
-
-
-type CoinbaseSendRequest struct {
-	WalletAccountId string
-	Type string
-	To string
-	Amount string
-	Currency string
-	Description string
-	Idem string
-}
-
-type CoinbaseSendResponse struct {
-	Data *CoinbaseSendResponseData `json:"data"`
-}
-
-type CoinbaseSendResponseData struct {
-	TransactionId string `json:"id"`
-	Network *CoinbaseSendResponseNetwork `json:"network"`
-}
-
-type CoinbaseSendResponseNetwork struct {
-	Status string `json:"status"`
-	Hash string `json:"hash"`
-	Name string `json:"name"`
-}
-
-
-func coinbaseJwt(requestMethod string, requestHost string, requestPath string) (string, error) {
-		uri := fmt.Sprintf("%s %s%s", requestMethod, requestHost, requestPath)
-
-    block, _ := pem.Decode([]byte(coinbaseApiKeySecret()))
-    if block == nil {
-        return "", fmt.Errorf("jwt: Could not decode private key")
-    }
-
-    key, err := x509.ParseECPrivateKey(block.Bytes)
-    if err != nil {
-        return "", fmt.Errorf("jwt: %w", err)
-    }
-
-    sig, err := jose.NewSigner(
-        jose.SigningKey{Algorithm: jose.ES256, Key: key},
-        (&jose.SignerOptions{NonceSource: nonceSource{}}).WithType("JWT").WithHeader("kid", coinbaseApiKeyName()),
-    )
-    if err != nil {
-        return "", fmt.Errorf("jwt: %w", err)
-    }
-
-    type CoinbaseKeyClaims struct {
-	    *jwt.Claims
-	    URI string `json:"uri"`
-	}
-
-    cl := &CoinbaseKeyClaims{
-        Claims: &jwt.Claims{
-            Subject:   coinbaseApiKeyName(),
-            Issuer:    "coinbase-cloud",
-            NotBefore: jwt.NewNumericDate(time.Now()),
-            Expiry:    jwt.NewNumericDate(time.Now().Add(2 * time.Minute)),
-        },
-        URI: uri,
-    }
-    jwtStr, err := jwt.Signed(sig).Claims(cl).CompactSerialize()
-    if err != nil {
-        return "", fmt.Errorf("jwt: %w", err)
-    }
-    return jwtStr, nil
-}
-
-
-type nonceSource struct{}
-
-func (n nonceSource) Nonce() (string, error) {
-    r, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
-    if err != nil {
-        return "", err
-    }
-    return r.String(), nil
-}
 
 type CoinbaseExchangeRatesResults struct {
 	Currency string `json:"currency"`
@@ -674,4 +316,57 @@ func CoinbaseFetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesRe
 
 	return exchangeRatesResult, nil
 
+}
+
+func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
+	
+	switch network {
+	case "SOL", "SOLANA":
+		// TODO calculate fee solana
+		return nil, fmt.Errorf("TODO Solana Fee Calculation")
+	case "MATIC":
+		return calculateFeePolygon(feeEstimate)
+	default:
+		return nil, fmt.Errorf("unsupported network: %s", network)
+	}
+
+}
+
+func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
+
+	gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
+	if err != nil {
+			return nil, err
+	}
+
+	baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
+	if err != nil {
+			return nil, err
+	}
+
+	totalFee := baseFee * gasLimit
+
+	return &totalFee, nil
+}
+
+func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
+
+	ratesResult, err := CoinbaseFetchExchangeRates(currencyTicker)
+	if err != nil {
+			return nil, err
+	}
+
+	rateStr, exists := ratesResult.Rates["USDC"]
+	if !exists {
+			return nil, fmt.Errorf("currency ticker not found for %s", currencyTicker)
+	}
+
+	rate, err := strconv.ParseFloat(rateStr, 64)
+	if err != nil {
+			return nil, fmt.Errorf("failed to parse rate: %v", err)
+	}
+
+	feeUsdc := fee * rate
+
+	return &feeUsdc, nil
 }
