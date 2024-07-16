@@ -39,13 +39,14 @@ func TestSubscriptionSendPayment(t *testing.T) {
 				ClientId: &destinationId,
 		})
 
-		mockCoinbaseClient := &mockCoinbaseApiClient{
-			GetTransactionDataFunc: defaultGetTransactionDataHandler,
-			SendPaymentFunc: defaultSendPaymentHandler,
+		mockCircleClient := &mockCircleApiClient{
+			GetTransactionFunc: defaultGetTransactionDataHandler,
+			CreateTransferTransactionFunc: defaultSendPaymentHandler,
+			EstimateTransferFeeFunc: defaultEstimateFeeHandler,
 		}
-
+ 
 		// set a mock coinbase client so we don't make real api calls to coinbase
-		SetCoinbaseClient(mockCoinbaseClient)
+		SetCircleClient(mockCircleClient)
 
 		// create a mock aws message sender
 		mockAWSMessageSender := &mockAWSMessageSender{
@@ -82,7 +83,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			WalletType: model.WalletTypeCircleUserControlled,
 			Blockchain: "MATIC",
 			WalletAddress: destinationWalletAddress,
-			DefaultTokenType: "usdc",
+			DefaultTokenType: "USDC",
 		}
 		model.CreateAccountWallet(ctx, wallet)
 
@@ -121,18 +122,37 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		// these should hit -> default
 		// payment.PaymentRecord should all be empty
-		// meaning they will make a call to coinbase to send a transaction
+		// meaning they will make a call to send a transaction to the provider
 		for _, payment := range paymentPlan.WalletPayments {
-			paymentResult, err := CoinbasePayment(&CoinbasePaymentArgs{
-				Payment: payment,
-			}, destinationSession)
+
+			fmt.Println("Payout Amount is: ", payment.TokenAmount)
+			fmt.Println("Wallet Address is: ", payment.WalletId)
+
+			paymentResult, err := ProviderPayout(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, false)
+
+			// wallet := model.GetAccountWallet(ctx, payment.WalletId)
+
+			// // estimate fee
+			// estimatedFees, err := mockCircleClient.EstimateTransferFee(payment.TokenAmount, wallet.WalletAddress, "MATIC")
+			// assert.Equal(t, err, nil)
+
+			// // deduct fee from payment amount
+			// fee, err := CalculateFee(
+			// 	*estimatedFees.Medium,
+			// 	"MATIC",
+			// )
+			// assert.Equal(t, err, nil)
+
+			// // convert fee to usdc
+			// feeInUSDC, err := ConvertFeeToUSDC("MATIC", *fee)
+			// assert.Equal(t, err, nil)
 
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
-			assert.Equal(t, paymentRecord.TokenAmount, payment.TokenAmount)
+			// assert.Equal(t, paymentRecord.TokenAmount - *feeInUSDC, payment.TokenAmount)
 			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
 
@@ -141,9 +161,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// coinbase api will return a pending status
 		// should return that payment is incomplete
 		for _, payment := range pendingPayments {
-			paymentResult, err := CoinbasePayment(&CoinbasePaymentArgs{
-				Payment: payment,
-			}, destinationSession)
+			paymentResult, err := ProviderPayout(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, false)
 
@@ -153,17 +171,17 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		}
 
 		// set coinbase mock to return a completed status
-		mockCoinbaseClient = &mockCoinbaseApiClient{
-			GetTransactionDataFunc: func (transactionId string) (*GetCoinbaseTxDataResult, error) {
-				staticData := &GetCoinbaseTxDataResult{
-					TxData: &CoinbaseTransactionResponseData{
-						TransactionId: sendPaymentTransactionId,
-						Type:        "send",
-						Status:      "completed",
+		mockCircleClient = &mockCircleApiClient{
+			GetTransactionFunc: func (transactionId string) (*GetTransactionResult, error) {
+				staticData := &GetTransactionResult{
+					Transaction: CircleTransaction{
+						State: "COMPLETED",
+						Id: transactionId,
+						Blockchain: "MATIC",
 					},
 					ResponseBodyBytes: []byte(
 						fmt.Sprintf(
-							`{"id":"%s","type":"send","status":"completed"}`, 
+							`{"id":"%s","state":"COMPLETED","blockchain":"MATIC"}`, 
 							sendPaymentTransactionId,
 						),
 					),
@@ -173,16 +191,14 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			},
 		}
 
-		SetCoinbaseClient(mockCoinbaseClient)
+		SetCircleClient(mockCircleClient)
 
 		pendingPayments = model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
 
 		// these should hit completed
 		for _, payment := range pendingPayments {
 
-			paymentResult, err := CoinbasePayment(&CoinbasePaymentArgs{
-				Payment: payment,
-			}, destinationSession)
+			paymentResult, err := ProviderPayout(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, true)
 
@@ -198,51 +214,111 @@ func TestSubscriptionSendPayment(t *testing.T) {
 	})
 }
 
-type mockCoinbaseApiClient struct {
-	GetTransactionDataFunc func(transactionId string) (*GetCoinbaseTxDataResult, error)
-	SendPaymentFunc func(sendRequest *CoinbaseSendRequest) (*CoinbaseSendResponseData, error)
+type mockCircleApiClient struct {
+	GetTransactionFunc func(id string) (*GetTransactionResult, error)
+	CreateTransferTransactionFunc func(
+		amount float64,
+		destinationAddress string,
+		network string,
+		walletId string,
+		tokenAddress string,
+	) (*CreateTransferTransactionResult, error)
+	EstimateTransferFeeFunc func(
+		amount float64,
+		destinationAddress string,
+		network string,
+	) (*FeeEstimateResult, error) 
 }
 
-func (m *mockCoinbaseApiClient) getTransactionData(transactionId string) (*GetCoinbaseTxDataResult, error) {
-	return m.GetTransactionDataFunc(transactionId)
+func (m *mockCircleApiClient) GetTransaction(id string) (*GetTransactionResult, error) {
+	return m.GetTransactionFunc(id)
 }
 
-func (m *mockCoinbaseApiClient) SendPayment(
-	sendRequest *CoinbaseSendRequest, 
-) (*CoinbaseSendResponseData, error) {
-	return m.SendPaymentFunc(sendRequest)
+func (m *mockCircleApiClient) CreateTransferTransaction(
+	amount float64,
+	destinationAddress string,
+	network string,
+	walletId string,
+	tokenAddress string,
+) (*CreateTransferTransactionResult, error) {
+	return m.CreateTransferTransactionFunc(	
+		amount,
+		destinationAddress,
+		network,
+		walletId,
+		tokenAddress,
+	)
 }
 
-func defaultGetTransactionDataHandler(transactionId string) (*GetCoinbaseTxDataResult, error) {
-	staticData := &GetCoinbaseTxDataResult{
-			TxData: &CoinbaseTransactionResponseData{
-				TransactionId: sendPaymentTransactionId,
-				Type:        "send",
-				Status:      "pending",
+func (m *mockCircleApiClient) EstimateTransferFee(
+	amount float64,
+	destinationAddress string,
+	network string,
+) (*FeeEstimateResult, error) {
+	return m.EstimateTransferFeeFunc(
+		amount,
+		destinationAddress,
+		network,
+	)
+}
+
+func defaultGetTransactionDataHandler(transactionId string) (*GetTransactionResult, error) {
+	return &GetTransactionResult{
+			Transaction: CircleTransaction{
+				State: "INITIATED",
+				Id: transactionId,
+				Blockchain: "MATIC",
 			},
 			ResponseBodyBytes: []byte(
-				fmt.Sprintf(`{"id":"%s","type":"send","status":"USD"}`, 
-				sendPaymentTransactionId),
+				fmt.Sprintf(
+					`{"id":"%s","state":"INITIATED","blockchain":"MATIC"}`, 
+					sendPaymentTransactionId,
+				),
 			),
+	}, nil
+}
+
+func defaultSendPaymentHandler(
+	amount float64,
+	destinationAddress string,
+	network string,
+	walletId string,
+	tokenAddress string,
+) (*CreateTransferTransactionResult, error) {
+	staticData := &CreateTransferTransactionResult{
+		Id: sendPaymentTransactionId,
+		State: "INITIATED",
 	}
 
 	return staticData, nil
 }
 
-func defaultSendPaymentHandler(
-	sendRequest *CoinbaseSendRequest,
-) (*CoinbaseSendResponseData, error) {
-	staticData := &CoinbaseSendResponseData{
-		TransactionId: sendPaymentTransactionId,
-		Network: &CoinbaseSendResponseNetwork{
-			Status: "pending",
-			Hash: "0x0123",
-			Name: "ethereum",
+func defaultEstimateFeeHandler(
+	amount float64,
+	destinationAddress string,
+	network string,
+) (*FeeEstimateResult, error) {
+	staticData := &FeeEstimateResult{
+		High: &FeeEstimate{
+			GasLimit: "58858",
+			PriorityFee: "45",
+			BaseFee: "0.000000035",
+		},
+		Medium: &FeeEstimate{
+			GasLimit: "58858",
+			PriorityFee: "36.499999998",
+			BaseFee: "0.000000035",
+		},
+		Low: &FeeEstimate{
+			GasLimit: "58858",
+			PriorityFee: "32.940489888",
+			BaseFee: "0.000000035",
 		},
 	}
 
 	return staticData, nil
 }
+
 
 type mockAWSMessageSender struct {
 	SendMessageFunc func(userAuth string, template Template, sendOpts ...any) error

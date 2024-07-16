@@ -206,10 +206,12 @@ func livePayoutTest() {
     // fmt.Printf(fmt.Sprintf("%f\n", *fee))
 
     client := controller.NewCircleClient()
-    tx, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
+    txResult, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
     if err != nil {
         panic(err)
     }
+
+    tx := txResult.Transaction
 
     fmt.Println("tx id: ", tx.Id)
     fmt.Println("tx state: ", tx.State)

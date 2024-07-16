@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,8 +12,18 @@ import (
 )
 
 type CircleApi interface {
-	EstimateTransferFee(estimateTransferFee SendPaymentArgs) (*FeeEstimateResult, error)
-	SendPayment(sendPayment SendPaymentArgs) (*CircleTransferTransactionResult, error)
+	EstimateTransferFee(
+		amount float64,
+		destinationAddress string,
+		network string,
+	) (*FeeEstimateResult, error)
+	CreateTransferTransaction(
+		amount float64,
+		destinationAddress string,
+		network string,
+		walletId string,
+		tokenAddress string,
+	) (*CreateTransferTransactionResult, error)
 	GetTransaction(id string) (*GetTransactionResult, error)
 }
 
@@ -33,88 +44,63 @@ type CircleResponse[T any] struct {
 	Data T `json:"data"`
 }
 
-type SendPaymentArgs struct {
-	Amount float64
-	DestinationAddress string
-	Network string
-}
-
-type CircleTransferTransactionResult struct {
+type CreateTransferTransactionResult struct {
 	Id string `json:"id"`
 	State string `json:"state"`
 }
 
-func (c *CoreCircleApiClient) SendPayment(sendPayment SendPaymentArgs) (*CircleTransferTransactionResult, error) {
+func (c *CoreCircleApiClient) CreateTransferTransaction(
+	amount float64,
+	destinationAddress string,
+	network string,
+	walletId string,
+	tokenAddress string,
+) (*CreateTransferTransactionResult, error) {
 
-    hexEncodedEntitySecret := entitySecret()
+	hexEncodedEntitySecret := entitySecret()
 
-    cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
-    if err != nil {
-        return nil, err
-    }
+	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	if err != nil {
+			return nil, err
+	}
 
-    usdcNetworkAddress, err := getUsdcAddressByNetwork(sendPayment.Network)
-    if err != nil {
-        return nil, err
-    }
-
-    // estimateFees, err := EstimateTransferFee(
-    //     SendPaymentArgs{
-    //         Amount: sendPayment.Amount,
-    //         DestinationAddress: sendPayment.DestinationAddress,
-    //         Network: sendPayment.Network,
-    //     },
-    // )
-    // if err != nil {
-    //     return nil, err
-    // }
-
-    walletId, err := getWalletIdByNetwork(sendPayment.Network)
-    if err != nil {
-        return nil, err
-    }
-
-    uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
+	uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
 
 	res, err := bringyour.HttpPostRequireStatusOk(
 		uri,
 		map[string]any{
-            "idempotencyKey": bringyour.NewId(),
-            "amounts": []string{fmt.Sprintf("%f", sendPayment.Amount)},
-            "destinationAddress": sendPayment.DestinationAddress,
-            "entitySecretCiphertext": cipher,
-            "tokenAddress": usdcNetworkAddress,
-            "walletId": walletId,
-            "blockchain": sendPayment.Network,
-            // for testing
-            "feeLevel": "MEDIUM",
+			"idempotencyKey": bringyour.NewId(),
+			"amounts": []string{fmt.Sprintf("%f", amount)},
+			"destinationAddress": destinationAddress,
+			"entitySecretCiphertext": cipher,
+			"tokenAddress": tokenAddress,
+			"walletId": walletId,
+			"blockchain": network,
+			"feeLevel": "MEDIUM",
 		},
 		func(header http.Header) {
 				header.Add("Accept", "application/json")
 				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
 		},
-		func(response *http.Response, responseBodyBytes []byte)(*CircleTransferTransactionResult, error) {
-            result := &CircleResponse[CircleTransferTransactionResult]{}
+		func(response *http.Response, responseBodyBytes []byte)(*CreateTransferTransactionResult, error) {
+			result := &CircleResponse[CreateTransferTransactionResult]{}
 
-            err := json.Unmarshal(responseBodyBytes, result)
+			err := json.Unmarshal(responseBodyBytes, result)
 
-            if err != nil {
-                return nil, err
-            }
+			if err != nil {
+				return nil, err
+			}
 
-            return &result.Data, nil
+			return &result.Data, nil
 		},
 	)
 
-    if err != nil {
-        fmt.Printf("Error sending payment: %s", err)
-        return nil, err
-    }
+	if err != nil {
+			fmt.Printf("Error sending payment: %s", err)
+			return nil, err
+	}
 
-    fmt.Println("Transaction ID: ", res.Id)
-    fmt.Println("Transaction State: ", res.State)
-
-    return res, nil
+	return res, nil
 
 }
 
@@ -131,30 +117,32 @@ type FeeEstimateResult struct {
 }
 
 func (c *CoreCircleApiClient) EstimateTransferFee(
-	estimateTransferFee SendPaymentArgs,
+	amount float64,
+	destinationAddress string,
+	network string,
 ) (*FeeEstimateResult, error) {
     circleApiToken := circleConfig()["api_token"]
 
     url := "https://api.circle.com/v1/w3s/transactions/transfer/estimateFee"
 
-    usdcNetworkAddress, err := getUsdcAddressByNetwork(estimateTransferFee.Network)
+    usdcNetworkAddress, err := getUsdcAddressByNetwork(network)
     if err != nil {
         return nil, err
     }
 
-    walletId, err := getWalletIdByNetwork(estimateTransferFee.Network)
+    walletId, err := getWalletIdByNetwork(network)
     if err != nil {
         return nil, err
     }
 
-    feeEstimate, err := bringyour.HttpPostRequireStatusOk(
+    return bringyour.HttpPostRequireStatusOk(
         url,
         map[string]any{
-            "amounts": []string{fmt.Sprintf("%f", estimateTransferFee.Amount)},
-            "destinationAddress": estimateTransferFee.DestinationAddress,
+            "amounts": []string{fmt.Sprintf("%f", amount)},
+            "destinationAddress": destinationAddress,
             "walletId": walletId,
             "tokenAddress": usdcNetworkAddress,
-            "blockchain": estimateTransferFee.Network,
+            "blockchain": network,
         },
         func(header http.Header) {
             header.Add("Accept", "application/json")
@@ -172,12 +160,6 @@ func (c *CoreCircleApiClient) EstimateTransferFee(
             return &result.Data, nil
         },
     )
-
-    if err != nil {
-        return nil, err
-    }
-
-    return feeEstimate, nil
 }
 
 type CircleTransactionResult struct {
@@ -292,3 +274,155 @@ var polygonWalletId = sync.OnceValue(func()(string) {
 	c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
 return c["circle"].(map[string]any)["polygon_wallet_id"].(string)
 })
+
+type WalletSet struct {
+	Id string `json:"id"`
+	CustodyType string `json:"custodyType"`
+}
+
+type WalletSetResult struct {
+	WalletSet *WalletSet `json:"walletSet,omitempty"`
+}
+
+// for developers to create a new wallet set for payouts
+func CreateDeveloperWalletSet(name string) {
+	hexEncodedEntitySecret := entitySecret()
+
+	circleApiToken := circleConfig()["api_token"]
+
+	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	if err != nil {
+			fmt.Printf("Error generating entity secret cipher: %s", err)
+			return
+	}
+
+	url := "https://api.circle.com/v1/w3s/developer/walletSets"
+	idemKey := bringyour.NewId()
+
+	walletSet, err := bringyour.HttpPostRequireStatusOk(
+			url,
+			map[string]any{
+					"idempotencyKey": idemKey,
+					"name": name,
+					"entitySecretCiphertext": cipher,
+			},
+			func(header http.Header) {
+					header.Add("Accept", "application/json")
+					header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
+			},
+			func(response *http.Response, responseBodyBytes []byte)(*WalletSet, error) {
+					result := &CircleResponse[WalletSetResult]{}
+
+					err := json.Unmarshal(responseBodyBytes, result)
+
+					if err != nil {
+							return nil, err
+					}
+
+					return result.Data.WalletSet, nil
+			},
+	)
+
+	if err != nil {
+			fmt.Printf("Error creating wallet set: %s", err)
+			return
+	}
+
+	fmt.Println("Created Wallet Set ID: ", walletSet.Id)
+	
+}
+
+type DeveloperWallet struct {
+	Id string `json:"id"`
+	State string `json:"state"`
+	WalletSetId string `json:"walletSetId"`
+	CustodyType string `json:"custodyType"`
+	Address string `json:"address"`
+	Blockchain string `json:"blockchain"`
+	AccountType string `json:"accountType"`
+}
+
+type DeveloperWalletResult struct {
+	Wallets []*DeveloperWallet `json:"wallets,omitempty"`
+}
+
+// for developers to create a new wallet for payouts
+// not for end users
+func CreateDeveloperWallet(walletSetId string) {
+	hexEncodedEntitySecret := entitySecret()
+
+	circleApiToken := circleConfig()["api_token"]
+
+	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	if err != nil {
+			fmt.Printf("Error generating entity secret cipher: %s", err)
+			return
+	}
+
+	url := "https://api.circle.com/v1/w3s/developer/wallets"
+	idemKey := bringyour.NewId()
+
+	wallets, err := bringyour.HttpPostRequireStatusOk(
+			url,
+			map[string]any{
+					"idempotencyKey": idemKey,
+					"accountType": "EOA",
+					"blockchains": []string{"MATIC", "SOL"},
+					"count": 1,
+					"entitySecretCiphertext": cipher,
+					"walletSetId": walletSetId,
+			},
+			func(header http.Header) {
+					header.Add("Accept", "application/json")
+					header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
+			},
+			func(response *http.Response, responseBodyBytes []byte)([]*DeveloperWallet, error) {
+					result := &CircleResponse[DeveloperWalletResult]{}
+
+					err := json.Unmarshal(responseBodyBytes, result)
+
+					if err != nil {
+							return nil, err
+					}
+
+					return result.Data.Wallets, nil
+			},
+	)
+
+	if err != nil {
+			fmt.Printf("Error creating wallet set: %s", err)
+			return
+	}
+
+	for _, wallet := range wallets {
+			fmt.Println(":: Created Wallet ========")
+			fmt.Println("Created Wallet ID: ", wallet.Id)
+			fmt.Println("Wallet Address: ", wallet.Address)
+	}
+	
+}
+
+func generateEntitySecretCipher(hexEncodedEntitySecret string) ([]byte, error) {
+
+	entitySecret, err := hex.DecodeString(hexEncodedEntitySecret)
+	if err != nil {
+		panic(err)
+	}
+
+	publicKeyString, err := getPublicKey()
+	if err != nil {
+			return nil, err
+	}
+
+	pubKey, err := parseRsaPublicKeyFromPem([]byte(*publicKeyString))
+	if err != nil {
+			return nil, err
+	}
+
+	cipher, err := encryptOAEP(pubKey, entitySecret)
+	if err != nil {
+			panic(err)
+	}
+
+	return cipher, nil
+}

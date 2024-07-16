@@ -53,10 +53,8 @@ func SchedulePendingPayments(session *session.ClientSession) {
 		markAsProcessed(payment.PaymentId)
 
 		task.ScheduleTask(
-			CirclePayment,
-			&CirclePaymentArgs{
-				Payment: payment,
-			},
+			ProviderPayout,
+			payment,
 			session,
 		)
 
@@ -82,10 +80,8 @@ func SendPayments(session *session.ClientSession) {
 		markAsProcessed(payment.PaymentId)
 
 		task.ScheduleTask(
-			CirclePayment,
-			&CirclePaymentArgs{
-				Payment: payment,
-			},
+			ProviderPayout,
+			payment,
 			session,
 		)
 
@@ -113,38 +109,32 @@ func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {
 	markAsProcessed(payment.PaymentId)
 
 	task.ScheduleTask(
-		CirclePayment,
-		&CirclePaymentArgs{
-			Payment: payment,
-		},
+		ProviderPayout,
+		payment,
 		&session,
 	)
 }
 
-type CirclePaymentArgs struct {
-	Payment *model.AccountPayment
-}
-
-type CirclePaymentResult struct {
+type ProviderPayoutResult struct {
 	Complete bool
 }
 
-func CirclePayment(
-	circlePayment *CirclePaymentArgs, 
+func ProviderPayout(
+	payment *model.AccountPayment,
 	clientSession *session.ClientSession,
-) (*CirclePaymentResult, error) {
+) (*ProviderPayoutResult, error) {
 
 	// if has payment record, get the status of the transaction
 	// if complete, finish and send email
 	// if in progress, wait
-	payment := circlePayment.Payment
+	// payment := circlePayment.Payment
 	circleClient := NewCircleClient()
 
 	// GET https://api.coinbase.com/v2/accounts/:account_id/transactions/:transaction_id
 	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions
 
 	if payment.Completed || payment.Canceled {
-		return &CirclePaymentResult{
+		return &ProviderPayoutResult{
 			Complete: true,
 		}, nil
 	}
@@ -170,7 +160,7 @@ func CirclePayment(
 	switch status {
 	case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
 		// check later	
-		return &CirclePaymentResult{
+		return &ProviderPayoutResult{
 			Complete: false,
 		}, nil
 
@@ -183,7 +173,7 @@ func CirclePayment(
 		}
 
 		// Returns complete, since we don't want to retry this payment
-		return &CirclePaymentResult{
+		return &ProviderPayoutResult{
 			Complete: true,
 		}, nil
 
@@ -205,7 +195,7 @@ func CirclePayment(
 		// TODO handler error
 		awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
 
-		return &CirclePaymentResult{
+		return &ProviderPayoutResult{
 			Complete: true,
 		}, nil
 
@@ -213,19 +203,28 @@ func CirclePayment(
 		// no transaction or error
 		// send the payment
 
-		// get the wallet by wallet id
+		// get the user wallet to send the payment to
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
+
+		// get the admin wallet to send the payment from
+		adminWalletId, err := getWalletIdByNetwork(accountWallet.Blockchain)
+		if err != nil {
+				return nil, err
+		}
+
 
 		// STU_TODO: check this
 		payoutAmount := payment.TokenAmount
 
-		sendPaymentArgs := SendPaymentArgs{
-			Amount: payoutAmount,
-			DestinationAddress: accountWallet.WalletAddress,
-			Network: accountWallet.Blockchain,
-		}
+		println("Payout Amount: ", payoutAmount)
+		println("Account Wallet: ", accountWallet.WalletAddress)
+		println("Account Blockchain: ", accountWallet.Blockchain)
 
-		estimatedFees, err := circleClient.EstimateTransferFee(sendPaymentArgs)
+		estimatedFees, err := circleClient.EstimateTransferFee(
+			payoutAmount,
+			accountWallet.WalletAddress,
+			accountWallet.Blockchain,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -240,15 +239,20 @@ func CirclePayment(
 			return nil, err
 		}
 
+		usdcNetworkAddress, err := getUsdcAddressByNetwork(accountWallet.Blockchain)
+		if err != nil {
+				return nil, err
+		}
+
 		payoutAmount = payoutAmount - *feeInUSDC
 
 		// send the payment
-		transferResult, err := circleClient.SendPayment(
-			SendPaymentArgs{
-				Amount: payoutAmount,
-				DestinationAddress: accountWallet.WalletAddress,
-				Network: accountWallet.Blockchain,
-			},
+		transferResult, err := circleClient.CreateTransferTransaction(
+			payoutAmount,
+			accountWallet.WalletAddress,
+			accountWallet.Blockchain,
+			adminWalletId,
+			usdcNetworkAddress,
 		)
 		if err != nil {
 			return nil, err
@@ -265,7 +269,7 @@ func CirclePayment(
 			},
 		)
 
-		return &CirclePaymentResult{
+		return &ProviderPayoutResult{
 			Complete: false,
 		}, nil
 
