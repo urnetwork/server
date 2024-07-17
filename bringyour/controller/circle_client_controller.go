@@ -105,9 +105,11 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 }
 
 type FeeEstimate struct {
-	GasLimit     string  `json:"gasLimit"`
-	PriorityFee  string `json:"priorityFee"`
-	BaseFee      string `json:"baseFee"`
+	GasLimit     	string  `json:"gasLimit"`
+	PriorityFee  	string `json:"priorityFee"`
+	BaseFee      	string `json:"baseFee"`
+	GasPrice		 	string `json:"gasPrice"`
+	MaxFee 				string `json:"maxFee"`
 }
 
 type FeeEstimateResult struct {

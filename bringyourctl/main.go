@@ -120,6 +120,8 @@ Options:
 
 func livePayoutTest() {
 
+    // client := controller.NewCircleClient()
+
     // fmt.Println("Payout test")
 
     // controller.ListAccounts()
@@ -129,30 +131,86 @@ func livePayoutTest() {
     // controller.GenerateEntitySecretCipher()
     // controller.CreateDeveloperWalletSet("URNetwork Payout Wallet")
     // controller.CreateDeveloperWallet("0190aa1d-07b3-7765-a172-aff1c20ea982")
-    // feeEstimate, _ := controller.EstimateTransferFee(
-    //     controller.EstimateTransferFeeArgs{
-    //         Amount: 1,
-    //         // DestinationAddress: "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
-    //         DestinationAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+
+    // # ==== Estimate Fee ====
+    // feeEstimate, _ := client.EstimateTransferFee(
+    //     .10,
+    //     // "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
+    //     "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
     //         // WalletId: "3eb00864-2064-5daa-95fb-7a75539832b9",
-    //         Network: "MATIC",
-    //     },
+    //     "MATIC",
+    //     // "SOL",
     // )
 
 
     // fmt.Println("Fee Estimate High Gas Limit: ", feeEstimate.High.GasLimit)
     // fmt.Println("Fee Estimate High Priority Fee: ", feeEstimate.High.PriorityFee)
     // fmt.Println("Fee Estimate High Base Fee: ", feeEstimate.High.BaseFee)
+    // fmt.Println("Fee Estimate High GasPrice: ", feeEstimate.High.GasPrice)
+    // fmt.Println("Fee Estimate High MaxFee: ", feeEstimate.High.MaxFee)
     // fmt.Println("====================================")
     // fmt.Println("Fee Estimate Medium Gas Limit: ", feeEstimate.Medium.GasLimit)
     // fmt.Println("Fee Estimate Medium Priority Fee: ", feeEstimate.Medium.PriorityFee)
     // fmt.Println("Fee Estimate Medium Base Fee: ", feeEstimate.Medium.BaseFee)
+    // fmt.Println("Fee Estimate Medium GasPrice: ", feeEstimate.Medium.GasPrice)
+    // fmt.Println("Fee Estimate Medium MaxFee: ", feeEstimate.Medium.MaxFee)
     // fmt.Println("====================================")
     // fmt.Println("Fee Estimate Low Gas Limit: ", feeEstimate.Low.GasLimit)
     // fmt.Println("Fee Estimate Low Priority Fee: ", feeEstimate.Low.PriorityFee)
     // fmt.Println("Fee Estimate Low Base Fee: ", feeEstimate.Low.BaseFee)
+    // fmt.Println("Fee Estimate Low GasPrice: ", feeEstimate.Low.GasPrice)
+    // fmt.Println("Fee Estimate Low MaxFee: ", feeEstimate.Low.MaxFee)
+
+    // real tx fee was 0.000046954 SOL
+
+    // result
+    // Fee Estimate High Gas Limit:  18281
+    // Fee Estimate High Priority Fee:  2011071
+    // Fee Estimate High Base Fee:  0.00204928
+    // ====================================
+    // Fee Estimate Medium Gas Limit:  18281
+    // Fee Estimate Medium Priority Fee:  2011071
+    // Fee Estimate Medium Base Fee:  0.00204928
+    // ====================================
+    // Fee Estimate Low Gas Limit:  18281
+    // Fee Estimate Low Priority Fee:  2011071
+    // Fee Estimate Low Base Fee:  0.00204928
+
+    testFee := &controller.FeeEstimate{
+        GasLimit: "58858",
+        PriorityFee: "30.899209216",
+        BaseFee: "0.013595696",
+        MaxFee: "30.926400608",
+    }
+
+    calculatedFee, err := controller.CalculateFee(*testFee, "MATIC")
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("calculated fee: ", fmt.Sprintf("%v", *calculatedFee))
 
 
+    // # ==== Create Transfer ====
+    // tx, err := client.CreateTransferTransaction(
+    //     .10,
+    //     // Solana USDC Transfer
+    //     // "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
+    //     // "SOL",
+    //     // "3eb00864-2064-5daa-95fb-7a75539832b9",
+    //     // "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    //     // Polygon USDC Transfer
+    //     "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+    //     "MATIC",
+    //     "58ca9b43-4768-50d4-bec2-f9bb4da3ab2b",
+    //     "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+    // )
+
+    // if err != nil {
+    //     panic(err)
+    // }
+
+    // fmt.Println("tx id: ", tx.Id)
+    // fmt.Println("tx state: ", tx.State)
 
 
     // controller.SendPayment(
@@ -205,19 +263,19 @@ func livePayoutTest() {
 
     // fmt.Printf(fmt.Sprintf("%f\n", *fee))
 
-    client := controller.NewCircleClient()
-    txResult, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
-    if err != nil {
-        panic(err)
-    }
+    // # ==== GET TX ====
+    // txResult, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
+    // if err != nil {
+    //     panic(err)
+    // }
 
-    tx := txResult.Transaction
+    // tx := txResult.Transaction
 
-    fmt.Println("tx id: ", tx.Id)
-    fmt.Println("tx state: ", tx.State)
-    fmt.Println("tx amount in USD: ", tx.AmountInUSD)
-    fmt.Println("tx destination address: ", tx.DestinationAddress)
-    fmt.Println("tx source address: ", tx.SourceAddress)
+    // fmt.Println("tx id: ", tx.Id)
+    // fmt.Println("tx state: ", tx.State)
+    // fmt.Println("tx amount in USD: ", tx.AmountInUSD)
+    // fmt.Println("tx destination address: ", tx.DestinationAddress)
+    // fmt.Println("tx source address: ", tx.SourceAddress)
 
 }
 

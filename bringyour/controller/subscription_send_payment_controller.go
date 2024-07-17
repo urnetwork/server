@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -335,14 +336,21 @@ func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
 			return nil, err
 	}
 
+	priorityFee, err := strconv.ParseFloat(feeEstimate.PriorityFee, 64)
+	if err != nil {
+			return nil, err
+	}
+
 	baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
 	if err != nil {
 			return nil, err
 	}
 
-	totalFee := baseFee * gasLimit
+	totalFeeGwei := gasLimit * (baseFee + priorityFee)
 
-	return &totalFee, nil
+	totalFeeMATIC := totalFeeGwei * math.Pow(10, -9)
+
+	return &totalFeeMATIC, nil
 }
 
 func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
