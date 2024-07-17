@@ -1,10 +1,8 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -270,50 +268,6 @@ func ProviderPayout(
 	}
 }
 
-var coinbaseApiHost = sync.OnceValue(func()(string) {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	return c["api"].(map[string]any)["host"].(string)
-})
-
-
-type CoinbaseResponse[T any] struct {
-	Data T `json:"data"`
-}
-
-
-type CoinbaseExchangeRatesResults struct {
-	Currency string `json:"currency"`
-	Rates map[string]string `json:"rates"`
-}
-
-func CoinbaseFetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
-	path := fmt.Sprintf("/v2/exchange-rates?currency=%s", currencyTicker)
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
-
-	exchangeRatesResult, err := bringyour.HttpGetRequireStatusOk(
-		uri,
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*CoinbaseExchangeRatesResults, error) {
-			result := &CoinbaseResponse[CoinbaseExchangeRatesResults]{}
-
-			err := json.Unmarshal(responseBodyBytes, result)
-			if err != nil {
-				return nil, err
-			}
-
-			return &result.Data, nil
-		},
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return exchangeRatesResult, nil
-
-}
 
 func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
 	
@@ -355,7 +309,9 @@ func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
 
 func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
 
-	ratesResult, err := CoinbaseFetchExchangeRates(currencyTicker)
+	coinbaseClient := NewCoinbaseClient()
+
+	ratesResult, err := coinbaseClient.FetchExchangeRates(currencyTicker)
 	if err != nil {
 			return nil, err
 	}

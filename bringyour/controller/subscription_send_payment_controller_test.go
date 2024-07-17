@@ -211,6 +211,31 @@ func TestSubscriptionSendPayment(t *testing.T) {
 	})
 }
 
+func TestFeeToUsd(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		coinbaseClient := &mockCoinbaseClient{
+			FetchExchangeRatesFunc: func(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
+				staticData := &CoinbaseExchangeRatesResults{
+					Currency: "MATIC",
+					Rates: map[string]string{
+						"USDC": "0.50",
+					},
+				}
+
+				return staticData, nil
+			},
+		}
+
+		SetCoinbaseClient(coinbaseClient)
+		// fee of 1 Matic for testing
+		fee := 1.0
+		
+		feeInUSDC, err := ConvertFeeToUSDC("MATIC", fee)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *feeInUSDC, 0.50)
+	})
+}
+
 type mockCircleApiClient struct {
 	GetTransactionFunc func(id string) (*GetTransactionResult, error)
 	CreateTransferTransactionFunc func(
@@ -300,16 +325,19 @@ func defaultEstimateFeeHandler(
 			GasLimit: "58858",
 			PriorityFee: "45",
 			BaseFee: "0.000000035",
+			MaxFee: "30.926400608",
 		},
 		Medium: &FeeEstimate{
 			GasLimit: "58858",
 			PriorityFee: "36.499999998",
 			BaseFee: "0.000000035",
+			MaxFee: "30.926400608",
 		},
 		Low: &FeeEstimate{
 			GasLimit: "58858",
 			PriorityFee: "32.940489888",
 			BaseFee: "0.000000035",
+			MaxFee: "30.926400608",
 		},
 	}
 
@@ -323,4 +351,12 @@ type mockAWSMessageSender struct {
 
 func (c *mockAWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 	return c.SendMessageFunc(userAuth, template, sendOpts...)
+}
+
+type mockCoinbaseClient struct {
+	FetchExchangeRatesFunc func(currencyTicker string) (*CoinbaseExchangeRatesResults, error)
+}
+
+func (m *mockCoinbaseClient) FetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
+	return m.FetchExchangeRatesFunc(currencyTicker)
 }
