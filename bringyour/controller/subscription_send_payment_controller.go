@@ -46,8 +46,8 @@ func SchedulePendingPayments(session *session.ClientSession) {
 			continue
 		}
 
-		// avoid coinbase rate limiting
-		time.Sleep(250 * time.Millisecond)
+		// avoid circl rate limiting
+		time.Sleep(500 * time.Millisecond)
 
 		markAsProcessed(payment.PaymentId)
 
@@ -56,7 +56,6 @@ func SchedulePendingPayments(session *session.ClientSession) {
 			payment,
 			session,
 		)
-
 	}
 }
 
@@ -73,8 +72,8 @@ func SendPayments(session *session.ClientSession) {
 			continue
 		}
 
-		// avoid coinbase rate limiting
-		time.Sleep(250 * time.Millisecond)
+		// avoid circl rate limiting
+		time.Sleep(500 * time.Millisecond)
 
 		markAsProcessed(payment.PaymentId)
 

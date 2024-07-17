@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/docopt/docopt-go"
 
@@ -20,7 +21,6 @@ func main() {
     usage := `BringYour control.
 
 Usage:
-    bringyourctl payout check
     bringyourctl db version
     bringyourctl db migrate
     bringyourctl search --realm=<realm> --type=<type> add <value>
@@ -41,6 +41,8 @@ Usage:
     bringyourctl send auth-password-reset --user_auth=<user_auth>
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
+    bringyourctl payout --account_payment_id=<account_payment_id>
+    bringyourctl payouts list-pending
 
 Options:
     -h --help     Show this screen.
@@ -114,171 +116,13 @@ Options:
             sendSubscriptionTransferBalanceCode(opts)
         }
     } else if payout, _ := opts.Bool("payout"); payout {
-        livePayoutTest()
+        payoutByPaymentId(opts)
+    } else if payouts, _ := opts.Bool("payouts"); payouts {
+        if listPending, _ := opts.Bool("list-pending"); listPending {
+            listPendingPayouts()
+        }
     }
 }
-
-func livePayoutTest() {
-
-    // client := controller.NewCircleClient()
-
-    // fmt.Println("Payout test")
-
-    // controller.ListAccounts()
-    // controller.GetProfiles()
-    // controller.ListTransactions()
-
-    // controller.GenerateEntitySecretCipher()
-    // controller.CreateDeveloperWalletSet("URNetwork Payout Wallet")
-    // controller.CreateDeveloperWallet("0190aa1d-07b3-7765-a172-aff1c20ea982")
-
-    // # ==== Estimate Fee ====
-    // feeEstimate, _ := client.EstimateTransferFee(
-    //     .10,
-    //     // "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
-    //     "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
-    //         // WalletId: "3eb00864-2064-5daa-95fb-7a75539832b9",
-    //     "MATIC",
-    //     // "SOL",
-    // )
-
-
-    // fmt.Println("Fee Estimate High Gas Limit: ", feeEstimate.High.GasLimit)
-    // fmt.Println("Fee Estimate High Priority Fee: ", feeEstimate.High.PriorityFee)
-    // fmt.Println("Fee Estimate High Base Fee: ", feeEstimate.High.BaseFee)
-    // fmt.Println("Fee Estimate High GasPrice: ", feeEstimate.High.GasPrice)
-    // fmt.Println("Fee Estimate High MaxFee: ", feeEstimate.High.MaxFee)
-    // fmt.Println("====================================")
-    // fmt.Println("Fee Estimate Medium Gas Limit: ", feeEstimate.Medium.GasLimit)
-    // fmt.Println("Fee Estimate Medium Priority Fee: ", feeEstimate.Medium.PriorityFee)
-    // fmt.Println("Fee Estimate Medium Base Fee: ", feeEstimate.Medium.BaseFee)
-    // fmt.Println("Fee Estimate Medium GasPrice: ", feeEstimate.Medium.GasPrice)
-    // fmt.Println("Fee Estimate Medium MaxFee: ", feeEstimate.Medium.MaxFee)
-    // fmt.Println("====================================")
-    // fmt.Println("Fee Estimate Low Gas Limit: ", feeEstimate.Low.GasLimit)
-    // fmt.Println("Fee Estimate Low Priority Fee: ", feeEstimate.Low.PriorityFee)
-    // fmt.Println("Fee Estimate Low Base Fee: ", feeEstimate.Low.BaseFee)
-    // fmt.Println("Fee Estimate Low GasPrice: ", feeEstimate.Low.GasPrice)
-    // fmt.Println("Fee Estimate Low MaxFee: ", feeEstimate.Low.MaxFee)
-
-    // real tx fee was 0.000046954 SOL
-
-    // result
-    // Fee Estimate High Gas Limit:  18281
-    // Fee Estimate High Priority Fee:  2011071
-    // Fee Estimate High Base Fee:  0.00204928
-    // ====================================
-    // Fee Estimate Medium Gas Limit:  18281
-    // Fee Estimate Medium Priority Fee:  2011071
-    // Fee Estimate Medium Base Fee:  0.00204928
-    // ====================================
-    // Fee Estimate Low Gas Limit:  18281
-    // Fee Estimate Low Priority Fee:  2011071
-    // Fee Estimate Low Base Fee:  0.00204928
-
-    testFee := &controller.FeeEstimate{
-        GasLimit: "58858",
-        PriorityFee: "30.899209216",
-        BaseFee: "0.013595696",
-        MaxFee: "30.926400608",
-    }
-
-    calculatedFee, err := controller.CalculateFee(*testFee, "MATIC")
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("calculated fee: ", fmt.Sprintf("%v", *calculatedFee))
-
-
-    // # ==== Create Transfer ====
-    // tx, err := client.CreateTransferTransaction(
-    //     .10,
-    //     // Solana USDC Transfer
-    //     // "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
-    //     // "SOL",
-    //     // "3eb00864-2064-5daa-95fb-7a75539832b9",
-    //     // "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    //     // Polygon USDC Transfer
-    //     "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
-    //     "MATIC",
-    //     "58ca9b43-4768-50d4-bec2-f9bb4da3ab2b",
-    //     "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
-    // )
-
-    // if err != nil {
-    //     panic(err)
-    // }
-
-    // fmt.Println("tx id: ", tx.Id)
-    // fmt.Println("tx state: ", tx.State)
-
-
-    // controller.SendPayment(
-    //     controller.SendPaymentArgs{
-    //         Amount: .10,
-    //         // DestinationAddress: "4Hvvk6Ax7JXKXUCf8HCosJKMqYyoyNMPMPu4D9x3vTjj",
-    //         // Network: "SOL",
-    //         DestinationAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
-    //         Network: "MATIC",
-    //     },
-    // )
-
-    // _, err := controller.CalcuateFeePolygon(
-    //     controller.FeeEstimate{
-    //         GasLimit: "58858",
-    //         PriorityFee: "36.499999998",
-    //         BaseFee: "0.000000035",
-    //     },
-    // )
-    // if err != nil {
-    //     panic(err)
-    // }
-
-    // solana
-    // ====================================
-    // Fee Estimate Medium Gas Limit:  18281
-    // Fee Estimate Medium Priority Fee:  2023952
-    // Fee Estimate Medium Base Fee:  0.00204928
-    // unsure how to estimate fee
-    // actual fee was 0.000046574
-
-    // polygon
-    // ====================================
-    // Fee Estimate Medium Gas Limit:  81441
-    // Fee Estimate Medium Priority Fee:  37.518543992
-    // Fee Estimate Medium Base Fee:  0.000000031
-    // baseFee * gasLimit = estimated fee
-    // 0.000000031 * 81441 = 0.002525671
-    // actual fee was 0.002307251577677021
-    // pretty accurate
-
-    // controller.FetchConvertionRate(
-    //     1, "USD", "SOL",
-    // )
-
-    // fee, err := controller.ConvertFeeToUSDC("MATIC", 0.002060)
-    // if err != nil {
-    //     panic(err)
-    // }
-
-    // fmt.Printf(fmt.Sprintf("%f\n", *fee))
-
-    // # ==== GET TX ====
-    // txResult, err := client.GetTransaction("2181114a-22a7-527e-b16a-89c798be0799")
-    // if err != nil {
-    //     panic(err)
-    // }
-
-    // tx := txResult.Transaction
-
-    // fmt.Println("tx id: ", tx.Id)
-    // fmt.Println("tx state: ", tx.State)
-    // fmt.Println("tx amount in USD: ", tx.AmountInUSD)
-    // fmt.Println("tx destination address: ", tx.DestinationAddress)
-    // fmt.Println("tx source address: ", tx.SourceAddress)
-
-}
-
 
 func dbVersion(opts docopt.Opts) {
     version := bringyour.DbVersion(context.Background())
@@ -536,5 +380,61 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
         panic(err)
     }
     fmt.Printf("Sent\n")
+}
+
+func listPendingPayouts() {
+    ctx := context.Background()
+    payouts := model.GetPendingPayments(ctx)
+
+    if len(payouts) == 0 {
+        fmt.Println("No pending payouts")
+        return
+    }
+    fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
+    fmt.Println(strings.Repeat("-", 56))
+
+    for _, payout := range payouts {
+        payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payout.Payout))
+        fmt.Printf("%-40s %-16s\n", payout.WalletId, payoutUsd)
+    }   
+}
+
+func payoutByPaymentId(opts docopt.Opts) {
+    accountPaymentIdStr, err := opts.String("--account_payment_id")
+    if err != nil {
+        panic(err)
+    }
+
+    ctx := context.Background()
+
+    accountPaymentId, err := bringyour.ParseId(accountPaymentIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    accountPayment, err := model.GetPayment(ctx, accountPaymentId)
+    if err != nil {
+        panic(err)
+    }
+
+    if accountPayment.Completed {
+        fmt.Println("Payment already completed at ", accountPayment.CompleteTime.String())
+        return
+    }
+
+    if accountPayment.Canceled {
+        fmt.Println("Payment canceled at ", accountPayment.CancelTime.String())
+        return
+    }
+
+    clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+    res, err := controller.ProviderPayout(accountPayment, clientSession)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Payout to %s processing complete: \n", accountPaymentIdStr)
+    fmt.Println("Complete Status: ", res.Complete)
 }
 
