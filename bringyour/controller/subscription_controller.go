@@ -61,21 +61,14 @@ var stripeApiToken = sync.OnceValue(func()(string) {
 	return c["api"].(map[string]any)["token"].(string)
 })
 
-type VaultStripeSkus struct {
-	Skus []VaultSku `yaml:"skus"`
-}
-
 type VaultSku struct {
 	ID string `yaml:"id"`
 	BalanceByteCount int64 `yaml:"balance_byte_count"`
 }
 
-var vaultStripeSkus = sync.OnceValue(func()([]VaultSku) {
-	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
-
+func parseVaultSkus(skusInterface []interface{}) []VaultSku {
 	var skus []VaultSku
 
-	skusInterface := c["skus"].([]interface{})
 	for _, skuInterface := range skusInterface {
 		sku := skuInterface.(map[string]any)
 		skus = append(skus, VaultSku{
@@ -85,6 +78,12 @@ var vaultStripeSkus = sync.OnceValue(func()([]VaultSku) {
 	}
 
 	return skus
+}
+
+var vaultStripeSkus = sync.OnceValue(func()([]VaultSku) {
+	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
+
+	return parseVaultSkus(c["skus"].([]interface{}))
 })
 
 func stripeSkus() map[string]*Sku {
@@ -114,23 +113,27 @@ var coinbaseWebhookSharedSecret = sync.OnceValue(func()(string) {
 	return c["webhook"].(map[string]any)["shared_secret"].(string)
 })
 
+var vaultCoinbaseSkus = sync.OnceValue(func()([]VaultSku) {
+	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
+
+	return parseVaultSkus(c["skus"].([]interface{}))
+})
+
 func coinbaseSkus() map[string]*Sku {
 	playSubscriptionFeeFraction := 0.3
-	// FIXME read from json
-	return map[string]*Sku{
-		"300GiB": &Sku{
+	vaultSkus := vaultCoinbaseSkus()
+
+	skus := make(map[string]*Sku)
+
+	for _, vaultSku := range vaultSkus {
+
+		skus[vaultSku.ID] = &Sku{
 			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(300 * 1024 * 1024 * 1024),
-		},
-		"1TiB": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(1024 * 1024 * 1024 * 1024),
-		},
-		"2TiB": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(2 * 1024 * 1024 * 1024 * 1024),
-		},
+			BalanceByteCount: model.ByteCount(vaultSku.BalanceByteCount),
+		}
 	}
+
+	return skus
 }
 
 var playPublisherEmail = sync.OnceValue(func()(string) {
