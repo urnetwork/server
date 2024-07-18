@@ -1,29 +1,29 @@
 package controller
 
 import (
+	"bytes"
 	"context"
-	"time"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"net/http"
 	"net/url"
-	"bytes"
+	"strconv"
 	"strings"
-	"crypto/hmac"
-	"crypto/sha256"
-	"errors"
 	"sync"
+	"time"
 
 	stripewebhook "github.com/stripe/stripe-go/v76/webhook"
 
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
+	"bringyour.com/bringyour/task"
 )
 
 
@@ -61,38 +61,52 @@ var stripeApiToken = sync.OnceValue(func()(string) {
 	return c["api"].(map[string]any)["token"].(string)
 })
 
+type VaultStripeSkus struct {
+	Skus []VaultSku `yaml:"skus"`
+}
+
+type VaultSku struct {
+	ID string `yaml:"id"`
+	BalanceByteCount int64 `yaml:"balance_byte_count"`
+}
+
+var vaultStripeSkus = sync.OnceValue(func()([]VaultSku) {
+	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
+
+	var skus []VaultSku
+
+	skusInterface := c["skus"].([]interface{})
+	for _, skuInterface := range skusInterface {
+		sku := skuInterface.(map[string]any)
+		skus = append(skus, VaultSku{
+			ID: sku["id"].(string),
+			BalanceByteCount: int64(sku["balance_byte_count"].(int)),
+		})
+	}
+
+	return skus
+})
+
 func stripeSkus() map[string]*Sku {
 	playSubscriptionFeeFraction := 0.3
-	// FIXME read from json
-	return map[string]*Sku{
-		// 300GiB
-		"prod_OlUgT5brBfOBiT": &Sku{
+	vaultSkus := vaultStripeSkus()
+
+	skus := make(map[string]*Sku)
+
+	for _, vaultSku := range vaultSkus {
+		skus[vaultSku.ID] = &Sku{
 			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(300 * 1024 * 1024 * 1024),
-		},
-		// 1TiB
-		"prod_Om2V4ElmxY5Civ": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(1024 * 1024 * 1024 * 1024),
-		},
-		// 2Tib
-		"prod_Om2XiaUQlgzawz": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(2 * 1024 * 1024 * 1024 * 1024),
-		},
-		// 10TiB company
-		"prod_PYvFxhlBrr1FAN": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(10 * 1024 * 1024 * 1024 * 1024),
-			Special: SpecialCompany,
-		},
-		// 100TiB company
-		"prod_PYvNGYsoREsTVZ": &Sku{
-			FeeFraction: playSubscriptionFeeFraction,
-			BalanceByteCount: model.ByteCount(100 * 1024 * 1024 * 1024 * 1024),
-			Special: SpecialCompany,
-		},
+			BalanceByteCount: model.ByteCount(vaultSku.BalanceByteCount),
+		}
+
+		// If Balance Byte Count is over 10TiB, add a special company flag
+		if vaultSku.BalanceByteCount >= 10 * 1024 * 1024 * 1024 * 1024 {
+			skus[vaultSku.ID].Special = SpecialCompany
+		}
+
 	}
+
+	return skus
 }
 
 var coinbaseWebhookSharedSecret = sync.OnceValue(func()(string) {
