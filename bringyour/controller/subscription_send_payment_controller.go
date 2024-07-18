@@ -210,8 +210,6 @@ func ProviderPayout(
 				return nil, err
 		}
 
-
-		// STU_TODO: check this
 		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
 		estimatedFees, err := circleClient.EstimateTransferFee(
@@ -272,8 +270,7 @@ func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
 	
 	switch network {
 	case "SOL", "SOLANA":
-		// TODO calculate fee solana
-		return nil, fmt.Errorf("TODO Solana Fee Calculation")
+		return calculateFeeSolana(feeEstimate)
 	case "MATIC":
 		return calculateFeePolygon(feeEstimate)
 	default:
@@ -304,6 +301,26 @@ func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
 	totalFeeMATIC := totalFeeGwei * math.Pow(10, -9)
 
 	return &totalFeeMATIC, nil
+}
+
+func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
+	gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
+	if err != nil {
+			return nil, err
+	}
+
+	priorityFee, err := strconv.ParseFloat(feeEstimate.PriorityFee, 64)
+	if err != nil {
+			return nil, err
+	}
+
+	baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
+	if err != nil {
+			return nil, err
+	}
+
+	fee := baseFee + (gasLimit * priorityFee * math.Pow(10, -15))
+	return &fee, nil
 }
 
 func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
