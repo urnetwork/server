@@ -42,7 +42,7 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl payout --account_payment_id=<account_payment_id>
-    bringyourctl payouts list-pending
+    bringyourctl payouts list-pending [--plan_id=<plan_id>]
 
 Options:
     -h --help     Show this screen.
@@ -119,7 +119,7 @@ Options:
         payoutByPaymentId(opts)
     } else if payouts, _ := opts.Bool("payouts"); payouts {
         if listPending, _ := opts.Bool("list-pending"); listPending {
-            listPendingPayouts()
+            listPendingPayouts(opts)
         }
     }
 }
@@ -382,9 +382,22 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     fmt.Printf("Sent\n")
 }
 
-func listPendingPayouts() {
+func listPendingPayouts(opts docopt.Opts) {
     ctx := context.Background()
-    payouts := model.GetPendingPayments(ctx)
+
+    planIdStr, _ := opts.String("--plan_id")
+
+    var payouts []*model.AccountPayment
+
+    if planIdStr != "" {
+        planId, err := bringyour.ParseId(planIdStr)
+        if err != nil {
+            panic(err)
+        }
+        payouts = model.GetPendingPaymentsInPlan(ctx, planId)
+    } else {
+        payouts = model.GetPendingPayments(ctx)
+    }
 
     if len(payouts) == 0 {
         fmt.Println("No pending payouts")
