@@ -43,6 +43,7 @@ Usage:
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl payout --account_payment_id=<account_payment_id>
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
+    bringyourctl payouts plan
 
 Options:
     -h --help     Show this screen.
@@ -120,6 +121,9 @@ Options:
     } else if payouts, _ := opts.Bool("payouts"); payouts {
         if listPending, _ := opts.Bool("list-pending"); listPending {
             listPendingPayouts(opts)
+        }
+        if plan, _ := opts.Bool("plan"); plan {
+            planPayouts()
         }
     }
 }
@@ -380,6 +384,17 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
         panic(err)
     }
     fmt.Printf("Sent\n")
+}
+
+func planPayouts() {
+    plan := model.PlanPayments(context.Background())
+    fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
+    fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
+    fmt.Println(strings.Repeat("-", 56))
+    for _, payment := range plan.WalletPayments {
+        payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
+        fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+    }
 }
 
 func listPendingPayouts(opts docopt.Opts) {
