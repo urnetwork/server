@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 
 	"bringyour.com/bringyour"
 )
@@ -40,6 +41,8 @@ func GetCircleUCByCircleUCUserId(
 
             if result.Next() {
                 bringyour.Raise(result.Scan(&circleUC.NetworkId, &circleUC.UserId, &circleUC.CircleUCUserId))
+            } else {
+                err = fmt.Errorf("no circle_uc row found for circle_uc_user_id: %s", circleUCUserId)
             }
         })
     })
