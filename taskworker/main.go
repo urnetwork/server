@@ -96,6 +96,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
+		work.SchedulePopulateAccountWallets(clientSession, tx)
 		ScheduleTaskCleanup(clientSession, tx)
 		controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 	})
@@ -112,6 +113,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
 		task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
 		task.NewTaskTargetWithPost(controller.BackfillInitialTransferBalance, controller.BackfillInitialTransferBalancePost),
+		task.NewTaskTargetWithPost(work.PopulateAccountWallets, work.PopulateAccountWalletsPost),
 	)
 
 	return taskWorker
