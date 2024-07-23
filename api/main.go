@@ -74,7 +74,6 @@ Options:
         router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
         router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
         router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
-        router.NewRoute("POST", "/wallet/circle/event", handlers.CircleWalletWebhook),
         router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
         router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
         router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),

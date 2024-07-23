@@ -526,7 +526,16 @@ func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBod
 	}
 }
 
-type CircleWalletEvent struct {
+type CircleNotification[T any] struct {
+    SubscriptionId string `json:"subscriptionId"`
+    NotificationId string `json:"notificationId"`
+    NotificationType string `json:"notificationType"`
+    Notification T `json:"notification"`
+    Timestamp time.Time `json:"timestamp"`
+    Version int `json:"version"`
+}
+
+type CircleWallet struct {
     ID           string     `json:"id"`
     State        string     `json:"state"`
     WalletSetId  string     `json:"walletSetId"`
@@ -539,62 +548,112 @@ type CircleWalletEvent struct {
     CreateDate   time.Time  `json:"createDate"`
 }
 
+type CircleChallengeEvent struct {
+    ID string `json:"id"`
+    UserId string `json:"userId"`
+    Status string `json:"status"`
+    CorrelationIds []string `json:"correlationIds"`
+    ErrorCode int `json:"errorCode"`
+    Type string `json:"type"`
+}
+
 type CircleWalletWebhookResult struct {}
 
 func CircleWalletWebhook(
-    circleWalletWebhook *CircleWalletEvent,
+    circleWalletWebhook *CircleNotification[CircleChallengeEvent],
     clientSession *session.ClientSession,
 ) (*CircleWalletWebhookResult, error) {
 
-    state := strings.ToUpper(circleWalletWebhook.State)
-    custodyType := strings.ToUpper(circleWalletWebhook.CustodyType)
+    if circleWalletWebhook.NotificationType == "challenges.initialize" {
 
-    if state == "LIVE" && custodyType == "ENDUSER" {
+        event := circleWalletWebhook.Notification
+        status := strings.ToUpper(event.Status)
+        eventType := strings.ToUpper(event.Type)
+    
+        if eventType == "INITIALIZE" && status == "COMPLETE" {
 
-        walletId, err := bringyour.ParseId(circleWalletWebhook.ID)
-        if err != nil {
-            return nil, err
+            if len(event.CorrelationIds) <= 0 {
+                return nil, fmt.Errorf("no correlation ids")
+            }
+    
+            walletId, err := bringyour.ParseId(event.CorrelationIds[0])
+            if err != nil {
+                return nil, err
+            }
+
+            wallet, err := getCircleWallet(walletId)
+            if err != nil {
+                return nil, err
+            }
+    
+            userId, err := bringyour.ParseId(event.UserId)
+            if err != nil {
+                return nil, err
+            }
+    
+            userUC, err := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
+            if err != nil {
+                return nil, err
+            }
+    
+            blockchain := strings.ToUpper(wallet.Blockchain)
+    
+            // check for an existing wallet
+            existingAccountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+            if existingAccountWallet != nil {
+                return nil, fmt.Errorf("account wallet already exists")
+            }
+    
+            // no account_wallet exists, create a new one
+            model.CreateAccountWallet(
+                clientSession.Ctx,
+                &model.AccountWallet{
+                    WalletId: walletId,
+                    NetworkId: userUC.NetworkId,
+                    WalletType: model.WalletTypeCircleUserControlled,
+                    Blockchain: blockchain,
+                    WalletAddress: wallet.Address,
+                    DefaultTokenType: "USDC",
+                },
+            )
+    
+            // fixme: check if a payout wallet is set for this network
+            // depends on feature/set-payout-wallet
+    
         }
-
-        userId, err := bringyour.ParseId(circleWalletWebhook.UserId)
-        if err != nil {
-            return nil, err
-        }
-
-        userUC, err := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
-        if err != nil {
-            return nil, err
-        }
-
-        blockchain := strings.ToUpper(circleWalletWebhook.Blockchain)
-
-        // check for an existing wallet
-        existingAccountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
-        if existingAccountWallet != nil {
-            return nil, fmt.Errorf("account wallet already exists")
-        }
-
-        // no account_wallet exists, create a new one
-        model.CreateAccountWallet(
-            clientSession.Ctx,
-            &model.AccountWallet{
-                WalletId: walletId,
-                NetworkId: userUC.NetworkId,
-                WalletType: model.WalletTypeCircleUserControlled,
-                Blockchain: blockchain,
-                WalletAddress: circleWalletWebhook.Address,
-                DefaultTokenType: "USDC",
-            },
-        )
-
-        // fixme: check if a payout wallet is set for this network
-        // depends on feature/set-payout-wallet
-
 
     }
 
     return &CircleWalletWebhookResult{}, nil
 
+}
+
+type CircleResult[T any] struct {
+    Data T `json:"data"`
+}
+
+type CircleWalletResult struct {
+    Wallet CircleWallet `json:"wallet"`
+}
+
+func getCircleWallet(walletId bringyour.Id) (*CircleWallet, error) {
+    return bringyour.HttpGetRequireStatusOk(
+        fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s", walletId),
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+        },
+        func(response *http.Response, responseBodyBytes []byte)(*CircleWallet, error) {
+			result := &CircleResult[CircleWalletResult]{}
+
+			err := json.Unmarshal(responseBodyBytes, result)
+			if err != nil {
+				return nil, err
+			}
+
+			return &result.Data.Wallet, nil
+        },
+    )
 }
 
 func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
