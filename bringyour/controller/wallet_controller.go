@@ -568,6 +568,13 @@ func CircleWalletWebhook(
 
         blockchain := strings.ToUpper(circleWalletWebhook.Blockchain)
 
+        // check for an existing wallet
+        existingAccountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+        if existingAccountWallet != nil {
+            return nil, fmt.Errorf("account wallet already exists")
+        }
+
+        // no account_wallet exists, create a new one
         model.CreateAccountWallet(
             clientSession.Ctx,
             &model.AccountWallet{
@@ -579,6 +586,10 @@ func CircleWalletWebhook(
                 DefaultTokenType: "USDC",
             },
         )
+
+        // fixme: check if a payout wallet is set for this network
+        // depends on feature/set-payout-wallet
+
 
     }
 
