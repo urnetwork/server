@@ -468,7 +468,7 @@ type CircleWalletInfo struct {
 
 
 func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletInfo, error) {
-    circleWallets, err := findCircleWallets(session)
+    circleWallets, err := FindCircleWallets(session)
 
     if err != nil {
         return nil, err
@@ -488,7 +488,7 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
 }
 
 
-func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
+func FindCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
     // list wallets for user. Choose most recent wallet
     // https://api.circle.com/v1/w3s/wallets
     // get token balances for each wallet
