@@ -1,18 +1,29 @@
 package controller
 
 import (
-    "fmt"
-    "sync"
-    "net/http"
-    "encoding/json"
-    // "io"
-    "time"
-    "strconv"
-    // "strings"
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"strings"
+	"sync"
 
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour"
+	// "io"
+	"strconv"
+	"time"
+
+	// "strings"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -407,6 +418,173 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
     return mostRecentWalletInfo, nil
 }
 
+func VerifyCircleBody(req *http.Request)(io.Reader, error) {
+
+    bodyBytes, err := io.ReadAll(req.Body)
+    if err != nil {
+        return nil, err
+    }
+
+	err = verifyCircleAuth(
+		req.Header.Get("X-Circle-Key-Id"), 
+		req.Header.Get("X-Circle-Signature"),
+        bodyBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) error {
+
+    circleApiToken := circleConfig()["api_token"]
+
+	pk, err := bringyour.HttpGetRequireStatusOk(
+		fmt.Sprintf("https://api.circle.com/v2/notifications/publicKey/%s", keyId),
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
+        },
+        func(response *http.Response, responseBodyBytes []byte) (*string, error) {
+            _, data, err := parseCircleResponseData(responseBodyBytes)
+            if err != nil {
+                return nil, err
+            }
+
+            if publicKey := data["publicKey"]; publicKey != nil {
+                if pk, ok := publicKey.(string); ok {
+                    return &pk, nil
+                }
+            }
+
+            return nil, fmt.Errorf("no public key found")
+        },
+    )
+    
+
+    if err != nil {
+        return err
+    }
+
+    err = verifySignature(*pk, signature, responseBodyBytes)
+    if err != nil {
+        return err
+    }
+
+	return nil
+}
+
+func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
+	// Decode the public key from base64
+	publicKeyDer, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode public key: %w", err)
+	}
+
+	// Parse the public key
+	publicKey, err := x509.ParsePKIXPublicKey(publicKeyDer)
+	if err != nil {
+		return fmt.Errorf("failed to parse public key: %w", err)
+	}
+	ecdsaPublicKey, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return errors.New("failed to cast public key to ECDSA")
+	}
+
+	// Decode the signature from base64
+	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode signature: %w", err)
+	}
+
+	// Format the JSON response body
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(responseBodyBytes, &jsonData); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON response body: %w", err)
+	}
+	formattedJson, err := json.Marshal(jsonData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON data: %w", err)
+	}
+
+	// Hash the formatted JSON response body
+	hash := sha256.Sum256(formattedJson)
+
+	// Verify the signature
+	r := big.Int{}
+	s := big.Int{}
+	sigLen := len(signatureBytes)
+	r.SetBytes(signatureBytes[:sigLen/2])
+	s.SetBytes(signatureBytes[sigLen/2:])
+
+	if ecdsa.Verify(ecdsaPublicKey, hash[:], &r, &s) {
+		return nil // Signature is valid
+	} else {
+        return fmt.Errorf("signature is invalid")
+	}
+}
+
+type CircleWalletEvent struct {
+    ID           string     `json:"id"`
+    State        string     `json:"state"`
+    WalletSetId  string     `json:"walletSetId"`
+    CustodyType  string     `json:"custodyType"`
+    UserId       string     `json:"userId"`
+    Address      string     `json:"address"`
+    AddressIndex int        `json:"addressIndex"`
+    Blockchain   string     `json:"blockchain"`
+    UpdateDate   time.Time  `json:"updateDate"`
+    CreateDate   time.Time  `json:"createDate"`
+}
+
+type CircleWalletWebhookResult struct {}
+
+func CircleWalletWebhook(
+    circleWalletWebhook *CircleWalletEvent,
+    clientSession *session.ClientSession,
+) (*CircleWalletWebhookResult, error) {
+
+    state := strings.ToUpper(circleWalletWebhook.State)
+    custodyType := strings.ToUpper(circleWalletWebhook.CustodyType)
+
+    if state == "LIVE" && custodyType == "ENDUSER" {
+
+        walletId, err := bringyour.ParseId(circleWalletWebhook.ID)
+        if err != nil {
+            return nil, err
+        }
+
+        userId, err := bringyour.ParseId(circleWalletWebhook.UserId)
+        if err != nil {
+            return nil, err
+        }
+
+        userUC, err := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
+        if err != nil {
+            return nil, err
+        }
+
+        blockchain := strings.ToUpper(circleWalletWebhook.Blockchain)
+
+        model.CreateAccountWallet(
+            clientSession.Ctx,
+            &model.AccountWallet{
+                WalletId: walletId,
+                NetworkId: userUC.NetworkId,
+                WalletType: model.WalletTypeCircleUserControlled,
+                Blockchain: blockchain,
+                WalletAddress: circleWalletWebhook.Address,
+                DefaultTokenType: "USDC",
+            },
+        )
+
+    }
+
+    return &CircleWalletWebhookResult{}, nil
+
+}
 
 func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
     // list wallets for user. Choose most recent wallet

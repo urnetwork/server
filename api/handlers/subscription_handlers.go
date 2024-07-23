@@ -1,15 +1,15 @@
 package handlers
 
 import (
-	"net/http"
-	"io"
-	"encoding/json"
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
 
-	"bringyour.com/bringyour/router"
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/router"
 )
 
 
@@ -42,6 +42,15 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyPlayBody,
 		controller.PlayWebhook,
+		w,
+		r,
+	)
+}
+
+func CircleWalletWebhook(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyCircleBody,
+		controller.CircleWalletWebhook,
 		w,
 		r,
 	)
