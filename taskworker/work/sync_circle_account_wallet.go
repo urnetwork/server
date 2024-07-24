@@ -59,6 +59,8 @@ func PopulateAccountWallets(
 		if err != nil {
 				return nil, err
 		}
+
+		time.Sleep(500 * time.Millisecond)
 	
 		for i, wallet := range walletInfo {
 			fmt.Println("Wallet ID: ", wallet.WalletId)
