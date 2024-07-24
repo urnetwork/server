@@ -2000,7 +2000,7 @@ func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet
 
 func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        wallet.WalletId = bringyour.NewId()
+        // wallet.WalletId = bringyour.NewId()
         wallet.Active = true
         wallet.CreateTime = bringyour.NowUtc()
 

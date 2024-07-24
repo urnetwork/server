@@ -1,19 +1,18 @@
 package model
 
-
 import (
-    "context"
-    "testing"
-    "slices"
-    "time"
+	"context"
+	"slices"
+	"testing"
+	"time"
 
-    "golang.org/x/exp/maps"
+	"golang.org/x/exp/maps"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -157,6 +156,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
     wallet := &AccountWallet{
+        WalletId: bringyour.NewId(),
         NetworkId: destinationNetworkId,
         WalletType: WalletTypeCircleUserControlled,
         Blockchain: "matic",
@@ -459,6 +459,7 @@ func TestGetPendingPayments(t *testing.T) {
         }
 
         wallet := &AccountWallet{
+            WalletId: bringyour.NewId(),
             NetworkId: destinationNetworkId,
             WalletType: WalletTypeCircleUserControlled,
             Blockchain: "matic",

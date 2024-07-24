@@ -79,6 +79,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		destinationWalletAddress := "0x1234567890"
 
 		wallet := &model.AccountWallet{
+			WalletId: bringyour.NewId(),
 			NetworkId: destinationNetworkId,
 			WalletType: model.WalletTypeCircleUserControlled,
 			Blockchain: "MATIC",

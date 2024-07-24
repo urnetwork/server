@@ -18,6 +18,7 @@ import (
 	// "strings"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -468,7 +469,7 @@ type CircleWalletInfo struct {
 
 
 func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletInfo, error) {
-    circleWallets, err := FindCircleWallets(session)
+    circleWallets, err := findCircleWallets(session)
 
     if err != nil {
         return nil, err
@@ -488,7 +489,7 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
 }
 
 
-func FindCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
+func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
     // list wallets for user. Choose most recent wallet
     // https://api.circle.com/v1/w3s/wallets
     // get token balances for each wallet
@@ -671,4 +672,93 @@ func FindCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
     }
 
     return completeWalletInfos, nil
+}
+
+type PopulateAccountWalletsArgs struct {
+}
+
+type PopulateAccountWalletsResult struct {
+}
+
+func PopulateAccountWallets(
+	populateAccountWallet *PopulateAccountWalletsArgs,
+	clientSession *session.ClientSession,
+) (*PopulateAccountWalletsResult, error) {
+
+	circleUCUsers := model.GetCircleUCUsers(clientSession.Ctx)
+
+	if len(circleUCUsers) == 0 {
+			return nil, fmt.Errorf("no users found")
+	}
+
+    fmt.Printf("%d circle users found \n", len(circleUCUsers))
+
+    errUserIds := []bringyour.Id{}
+
+	for _, user := range circleUCUsers {
+        time.Sleep(500 * time.Millisecond)
+		err := handleUser(user, clientSession)
+		if err != nil {
+			fmt.Printf("Error for user %s: %v \n", user.UserId.String(), err)
+            errUserIds = append(errUserIds, user.CircleUCUserId)
+		}
+	}
+
+    // create a JSON file with the user ids that failed
+    if len(errUserIds) > 0 {
+        fmt.Println("Error creating account wallets for the following users:")
+        for _, userId := range errUserIds {
+            fmt.Println(userId.String())
+        }
+    }
+
+    fmt.Println("PopulateAccountWallets done")
+
+	return &PopulateAccountWalletsResult{}, nil
+
+}
+
+func handleUser(user model.CircleUC, clientSession *session.ClientSession) (error) {
+	userSession := session.NewLocalClientSession(clientSession.Ctx, "0.0.0.0:0", &jwt.ByJwt{
+        NetworkId: user.NetworkId,
+        UserId: user.UserId,
+	})
+
+	walletInfo, err := findCircleWallets(userSession)
+	if err != nil {
+		return err
+	}
+
+	for i, wallet := range walletInfo {
+		walletId, err := bringyour.ParseId(wallet.WalletId)
+		if err != nil {
+            fmt.Printf("Error for wallet id %s: %v \n", wallet.WalletId, err)
+            continue
+		}
+
+        // check if account wallet exists
+        accountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+        if accountWallet != nil {
+            fmt.Printf("Account wallet already exists for wallet id %s \n", wallet.WalletId)
+            continue
+        }
+
+		accountWallet = &model.AccountWallet{
+			WalletId: walletId,
+			NetworkId: user.NetworkId,
+			WalletType: model.WalletTypeCircleUserControlled,
+			Blockchain: wallet.Blockchain,
+			WalletAddress: wallet.Address,
+			DefaultTokenType: "USDC",
+			CreateTime: wallet.CreateDate,
+		}
+		model.CreateAccountWallet(clientSession.Ctx, accountWallet)
+	
+		// set the payout wallet
+		if i == 0 {
+			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, walletId)
+		}
+	}
+
+	return nil
 }
