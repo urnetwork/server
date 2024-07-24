@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"bringyour.com/bringyour"
@@ -30,12 +29,11 @@ func TestCircleUC(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	)
 
 	// fetch circle_uc row by circle_uc_user_id
-	circleUC, err := GetCircleUCByCircleUCUserId(ctx, circleUserIdWithWallet)
-	assert.Equal(t, err, nil)
+	circleUC := GetCircleUCByCircleUCUserId(ctx, circleUserIdWithWallet)
 	assert.Equal(t, circleUC.CircleUCUserId, circleUserIdWithWallet)
 
 	// attempt to fetch with incorrect circle_uc_user_id
 	failId := bringyour.NewId()
-	_, err = GetCircleUCByCircleUCUserId(ctx, failId)
-	assert.Equal(t, err, fmt.Errorf("no circle_uc row found for circle_uc_user_id: %s", failId))
+	circleUC = GetCircleUCByCircleUCUserId(ctx, failId)
+	assert.Equal(t, circleUC, nil)
 })}

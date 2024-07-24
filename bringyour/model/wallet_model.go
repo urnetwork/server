@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 
 	"bringyour.com/bringyour"
 )
@@ -16,9 +15,11 @@ type CircleUC struct {
 func GetCircleUCByCircleUCUserId(
     ctx context.Context, 
     circleUCUserId bringyour.Id,
-) (circleUC CircleUC, err error) {
+) *CircleUC {
+    var circleUC *CircleUC
+
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, txErr := tx.Query(
+        result, err := tx.Query(
             ctx,
             `
                 SELECT
@@ -32,21 +33,14 @@ func GetCircleUCByCircleUCUserId(
             circleUCUserId,
         )
 
-        bringyour.WithPgResult(result, txErr, func() {
-
-            if txErr != nil {
-                err = txErr
-                return
-            }
-
+        bringyour.WithPgResult(result, err, func() {
             if result.Next() {
+                circleUC = &CircleUC{}
                 bringyour.Raise(result.Scan(&circleUC.NetworkId, &circleUC.UserId, &circleUC.CircleUCUserId))
-            } else {
-                err = fmt.Errorf("no circle_uc row found for circle_uc_user_id: %s", circleUCUserId)
             }
         })
     })
-    return
+    return circleUC
 }
 
 
