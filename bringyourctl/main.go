@@ -513,6 +513,13 @@ func adminWalletEstimateFee(opts docopt.Opts) {
     }
 
     fmt.Printf("Total Fee: %f\n", *fee)
+
+    usdFee, err := controller.ConvertFeeToUSDC(blockchain, *fee)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Total Fee in USD: %f\n", *usdFee)
 }
 
 func adminWalletTransfer(opts docopt.Opts) {
