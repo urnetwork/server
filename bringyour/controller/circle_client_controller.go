@@ -21,8 +21,6 @@ type CircleApi interface {
 		amountInUsd float64,
 		destinationAddress string,
 		network string,
-		walletId string,
-		tokenAddress string,
 	) (*CreateTransferTransactionResult, error)
 	GetTransaction(id string) (*GetTransactionResult, error)
 }
@@ -53,11 +51,19 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	amountInUsd float64,
 	destinationAddress string,
 	network string,
-	walletId string,
-	tokenAddress string,
 ) (*CreateTransferTransactionResult, error) {
 
 	hexEncodedEntitySecret := entitySecret()
+
+	adminWalletId, err := getWalletIdByNetwork(network)
+	if err != nil {
+			return nil, err
+	}
+
+	usdcNetworkAddress, err := getUsdcAddressByNetwork(network)
+	if err != nil {
+			return nil, err
+	}
 
 	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
 	if err != nil {
@@ -73,8 +79,8 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 			"amounts": []string{fmt.Sprintf("%f", amountInUsd)},
 			"destinationAddress": destinationAddress,
 			"entitySecretCiphertext": cipher,
-			"tokenAddress": tokenAddress,
-			"walletId": walletId,
+			"tokenAddress": usdcNetworkAddress,
+			"walletId": adminWalletId,
 			"blockchain": network,
 			"feeLevel": "MEDIUM",
 		},

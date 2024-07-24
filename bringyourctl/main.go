@@ -44,6 +44,8 @@ Usage:
     bringyourctl payout --account_payment_id=<account_payment_id>
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts plan
+    bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
+    bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 
 Options:
     -h --help     Show this screen.
@@ -55,7 +57,10 @@ Options:
     --user_auth=<user_auth>
     --network_name=<network_name>
     --network_id=<network_id>
-    --secret=<secret>`
+    --secret=<secret>
+    --amount_usd=<amount_usd>   Amount in USD.
+    --destination_address=<destination_address>  Destination address.
+    --blockchain=<blockchain>  Blockchain.`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
@@ -124,6 +129,13 @@ Options:
         }
         if plan, _ := opts.Bool("plan"); plan {
             planPayouts()
+        }
+    } else if wallet, _ := opts.Bool("wallet"); wallet {
+        if send, _ := opts.Bool("transfer"); send {
+            adminWalletTransfer(opts)
+        }
+        if estimate, _ := opts.Bool("estimate-fee"); estimate {
+            adminWalletEstimateFee(opts)
         }
     }
 }
@@ -466,3 +478,68 @@ func payoutByPaymentId(opts docopt.Opts) {
     fmt.Println("Complete Status: ", res.Complete)
 }
 
+func adminWalletEstimateFee(opts docopt.Opts) {
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    blockchain, err := opts.String("--blockchain")
+    if err != nil {
+        panic(err)
+    }
+
+    destinationAddress, err := opts.String("--destination_address")
+    if err != nil {
+        panic(err)
+    }
+
+    client := controller.NewCircleClient()
+
+    fees, err := client.EstimateTransferFee(amountUsd, destinationAddress, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println("Medium BaseFee: ", fees.Medium.BaseFee)
+    fmt.Println("Medium GasLimit: ", fees.Medium.GasLimit)
+    fmt.Println("Medium GasPrice: ", fees.Medium.GasPrice)
+    fmt.Println("Medium MaxFee: ", fees.Medium.MaxFee)
+    fmt.Println("Medium PriorityFee: ", fees.Medium.PriorityFee)
+
+    fee, err := controller.CalculateFee(*fees.Medium, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Total Fee: %f\n", *fee)
+}
+
+func adminWalletTransfer(opts docopt.Opts) {
+
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    destinationAddress, err := opts.String("--destination_address")
+    if err != nil {
+        panic(err)
+    }
+
+    blockchain, err := opts.String("--blockchain")
+    if err != nil {
+        panic(err)
+    }
+
+    client := controller.NewCircleClient()
+
+    res, err := client.CreateTransferTransaction(amountUsd, destinationAddress, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println("Transaction Successful")
+    fmt.Println("Transaction ID: ", res.Id)
+    fmt.Println("Transaction State: ", res.State)
+}

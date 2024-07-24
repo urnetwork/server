@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,12 +205,6 @@ func ProviderPayout(
 		// get the user wallet to send the payment to
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
 
-		// get the admin wallet to send the payment from
-		adminWalletId, err := getWalletIdByNetwork(accountWallet.Blockchain)
-		if err != nil {
-				return nil, err
-		}
-
 		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
 		estimatedFees, err := circleClient.EstimateTransferFee(
@@ -226,14 +221,9 @@ func ProviderPayout(
 			return nil, err
 		}
 
-		feeInUSDC, err := ConvertFeeToUSDC("MATIC", *fee)
+		feeInUSDC, err := ConvertFeeToUSDC(accountWallet.Blockchain, *fee)
 		if err != nil {
 			return nil, err
-		}
-
-		usdcNetworkAddress, err := getUsdcAddressByNetwork(accountWallet.Blockchain)
-		if err != nil {
-				return nil, err
 		}
 
 		payoutAmount = payoutAmount - *feeInUSDC
@@ -243,8 +233,6 @@ func ProviderPayout(
 			payoutAmount,
 			accountWallet.WalletAddress,
 			accountWallet.Blockchain,
-			adminWalletId,
-			usdcNetworkAddress,
 		)
 		if err != nil {
 			return nil, err
@@ -267,6 +255,8 @@ func ProviderPayout(
 
 
 func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
+
+	network = strings.ToUpper(network)
 	
 	switch network {
 	case "SOL", "SOLANA":
@@ -304,6 +294,7 @@ func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
 }
 
 func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
+
 	gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
 	if err != nil {
 			return nil, err
@@ -320,10 +311,13 @@ func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
 	}
 
 	fee := baseFee + (gasLimit * priorityFee * math.Pow(10, -15))
+
 	return &fee, nil
 }
 
 func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
+
+	currencyTicker = strings.ToUpper(currencyTicker)
 
 	coinbaseClient := NewCoinbaseClient()
 

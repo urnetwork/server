@@ -243,8 +243,6 @@ type mockCircleApiClient struct {
 		amount float64,
 		destinationAddress string,
 		network string,
-		walletId string,
-		tokenAddress string,
 	) (*CreateTransferTransactionResult, error)
 	EstimateTransferFeeFunc func(
 		amount float64,
@@ -261,15 +259,11 @@ func (m *mockCircleApiClient) CreateTransferTransaction(
 	amount float64,
 	destinationAddress string,
 	network string,
-	walletId string,
-	tokenAddress string,
 ) (*CreateTransferTransactionResult, error) {
 	return m.CreateTransferTransactionFunc(	
 		amount,
 		destinationAddress,
 		network,
-		walletId,
-		tokenAddress,
 	)
 }
 
@@ -305,8 +299,6 @@ func defaultSendPaymentHandler(
 	amount float64,
 	destinationAddress string,
 	network string,
-	walletId string,
-	tokenAddress string,
 ) (*CreateTransferTransactionResult, error) {
 	staticData := &CreateTransferTransactionResult{
 		Id: sendPaymentTransactionId,
