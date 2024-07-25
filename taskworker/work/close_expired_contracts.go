@@ -32,17 +32,16 @@ func CloseExpiredContracts(
 ) (*CloseExpiredContractsResult, error) {
 	expiredContracts := model.GetExpiredTransferContracts(clientSession.Ctx)
 
-	for _, expired := range expiredContracts {
-			contract := expired.TransferContract
+	for _, expiredContract := range expiredContracts {
 			err := model.CloseContract(
-					clientSession.Ctx, 
-					contract.ContractId, 
-					contract.DestinationId,
-					expired.UsedByteCount,
-					false,
+				clientSession.Ctx, 
+				expiredContract.ContractId, 
+				expiredContract.DestinationId,
+				expiredContract.UsedTransferByteCount,
+				false,
 			)
 			if err != nil {
-					return nil, err
+				return nil, err
 			}
 	}
 

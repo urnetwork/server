@@ -408,14 +408,13 @@ func closeExpiredContracts() {
 
     fmt.Println("# of contracts to close: ", len(expiredContracts))
 
-    for _, expired := range expiredContracts {
-        contract := expired.TransferContract
-        fmt.Println("Closing contract: ", contract.ContractId.String())
+    for _, expiredContract := range expiredContracts {
+        fmt.Println("Closing contract: ", expiredContract.ContractId.String())
         err := model.CloseContract(
             ctx, 
-            contract.ContractId, 
-            contract.DestinationId,
-            expired.UsedByteCount,
+            expiredContract.ContractId, 
+            expiredContract.DestinationId,
+            expiredContract.UsedTransferByteCount,
             false,
         )
         if err != nil {

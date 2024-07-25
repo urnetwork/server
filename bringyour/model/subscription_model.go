@@ -1371,188 +1371,55 @@ func CloseContract(
     return
 }
 
-type ContractClose struct {
+type ExpiredContract struct {
     ContractId bringyour.Id
-    CloseTime time.Time
-    Party ContractParty
+    DestinationId bringyour.Id
     UsedTransferByteCount ByteCount
-    Checkpoint bool
 }
 
-func GetContractCloseById(ctx context.Context, contractId bringyour.Id) (*ContractClose) {
-    var contractClose *ContractClose
-    bringyour.Db(ctx, func(conn bringyour.PgConn) {
-        result, err := conn.Query(
-            ctx,
-            `
-                SELECT
-                    close_time,
-                    party,
-                    used_transfer_byte_count,
-                    checkpoint
-                FROM contract_close
-                WHERE
-                    contract_id = $1
-            `,
-            contractId,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                contractClose = &ContractClose{
-                    ContractId: contractId,
-                }
-                bringyour.Raise(result.Scan(
-                    &contractClose.CloseTime,
-                    &contractClose.Party,
-                    &contractClose.UsedTransferByteCount,
-                    &contractClose.Checkpoint,
-                ))
-            }
-        })
-    })
-    return contractClose
-}
-
-type ExpiredTransferContract struct {
-    UsedByteCount ByteCount // the used_transfer_byte_count of the contract_close
-    TransferContract *TransferContract // the transfer_contract
-}
-
-func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredTransferContract) {
-    transferContracts := []ExpiredTransferContract{}
+func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
+    expiredContracts := []ExpiredContract{}
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 
         result, err := tx.Query(
             ctx,
             `
+            WITH filtered_contracts AS (
                 SELECT 
-                    contract_id, 
-                    COUNT(*), 
-                    string_agg(party, ' '), 
-                    SUM(used_transfer_byte_count) 
+                    contract_id
                 FROM contract_close 
+                WHERE party = 'source'
+                AND close_time > NOW() - INTERVAL '24 hours'
                 GROUP BY contract_id 
-                HAVING COUNT(*) <> 2;
+                HAVING COUNT(*) <> 2
+            )
+            SELECT
+                tc.contract_id,
+                tc.destination_id,
+                cc.used_transfer_byte_count
+            FROM transfer_contract tc
+            JOIN contract_close cc ON tc.contract_id = cc.contract_id
+            WHERE tc.contract_id IN (SELECT contract_id FROM filtered_contracts)
+            AND cc.party = 'source'
+            AND cc.close_time > NOW() - INTERVAL '24 hours';
             `,
         )
-
-        type PartiallyClosedContract struct {
-            ContractId bringyour.Id
-            Count int
-            Party string `json:"str_agg"`
-            Sum ByteCount
-        }
-
-        pccs := []PartiallyClosedContract{}
 
         bringyour.WithPgResult(result, err, func() {
             for result.Next() {
-                pcc := PartiallyClosedContract{}
+                expiredContract := ExpiredContract{}
                 bringyour.Raise(result.Scan(
-                    &pcc.ContractId,
-                    &pcc.Count,
-                    &pcc.Party,
-                    &pcc.Sum,
+                    &expiredContract.ContractId,
+                    &expiredContract.DestinationId,
+                    &expiredContract.UsedTransferByteCount,
                 ))
-                pccs = append(pccs, pcc)
-            }
-        })
 
-        now := bringyour.NowUtc()
-
-        for _, pcc := range pccs {
-
-            if pcc.Party == "source" {
-
-                closeContract := GetContractCloseById(ctx, pcc.ContractId)
-
-                if closeContract == nil {
-                    continue
-                }
-
-                // we only want to close contracts that have been open for more than 24 hours
-                if now.Sub(closeContract.CloseTime) > 24 * time.Hour {
-
-                    transferContract := GetTransferContract(pcc.ContractId, ctx)
-                    if transferContract == nil {
-                        continue
-                    }
-
-                    transferContracts = append(transferContracts, 
-                        ExpiredTransferContract{
-                            UsedByteCount: closeContract.UsedTransferByteCount,
-                            TransferContract: transferContract,
-                        },
-                    )
-                }
-            }
-        }
-    })
-    return transferContracts
-}
-
-type TransferContract struct {
-    ContractId bringyour.Id
-    SourceNetworkId bringyour.Id
-    SourceId bringyour.Id
-    DestinationNetworkId bringyour.Id
-    DestinationId bringyour.Id
-    Open bool
-    TransferByteCount ByteCount
-    CreateTime time.Time
-    CloseTime *time.Time
-    Dispute bool
-    Outcome *ContractOutcome
-    CompanionContractId *bringyour.Id
-}
-
-func GetTransferContract(contractId bringyour.Id, ctx context.Context) (*TransferContract) {
-    var transferContract *TransferContract
-    bringyour.Db(ctx, func(conn bringyour.PgConn) {
-        result, err := conn.Query(
-            ctx,
-            `
-                SELECT
-                    source_network_id,
-                    source_id,
-                    destination_network_id,
-                    destination_id,
-                    open,
-                    transfer_byte_count,
-                    create_time,
-                    close_time,
-                    dispute,
-                    outcome,
-                    companion_contract_id
-                FROM transfer_contract
-                WHERE
-                    contract_id = $1
-            `,
-            contractId,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                transferContract = &TransferContract{}
-                bringyour.Raise(result.Scan(
-                    &transferContract.SourceNetworkId,
-                    &transferContract.SourceId,
-                    &transferContract.DestinationNetworkId,
-                    &transferContract.DestinationId,
-                    &transferContract.Open,
-                    &transferContract.TransferByteCount,
-                    &transferContract.CreateTime,
-                    &transferContract.CloseTime,
-                    &transferContract.Dispute,
-                    &transferContract.Outcome,
-                    &transferContract.CompanionContractId,
-                ))
-                transferContract.ContractId = contractId
+                expiredContracts = append(expiredContracts, expiredContract)
             }
         })
     })
-    return transferContract
+    return expiredContracts
 }
-
 
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
