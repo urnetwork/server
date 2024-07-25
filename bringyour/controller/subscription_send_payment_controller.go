@@ -197,10 +197,16 @@ func ProviderPayout(
 
 		networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
 		
-		if explorerBasePath != nil && networkReferralCode != nil {
+		if networkReferralCode != nil {
 			awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
-				ExplorerLink: fmt.Sprintf("%s/%s", *explorerBasePath, tx.TxHash),
+				PaymentId: payment.PaymentId,
+				ExplorerBasePath: *explorerBasePath,
+				TxHash: tx.TxHash,
 				ReferralCode: networkReferralCode.ReferralCode.String(),
+				Blockchain: tx.Blockchain,
+				DestinationAddress: tx.DestinationAddress,
+				AmountUsd: tx.AmountInUSD,
+				PaymentCreatedAt: payment.CreateTime,
 			})
 		}
 

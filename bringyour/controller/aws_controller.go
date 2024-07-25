@@ -3,6 +3,7 @@ package controller
 import (
 	htmltemplate "html/template"
 	texttemplate "text/template"
+	"time"
 
 	// "net/url"
 	"embed"
@@ -150,13 +151,31 @@ func (self *SubscriptionEndedTemplate) Name() string {
 }
 
 type SendPaymentTemplate struct {
-    ExplorerLink string
+    PaymentId bringyour.Id
+    TxHash string
+    ExplorerBasePath string
     ReferralCode string
+    Blockchain string
+    DestinationAddress string
+    AmountUsd string
+    PaymentCreatedAt time.Time
     BaseTemplate
 }
 
 func (self *SendPaymentTemplate) Name() string {
     return "subscription_send_payment"
+}
+
+func (self *SendPaymentTemplate) Funcs(funcs texttemplate.FuncMap) {
+    self.BaseTemplate.Funcs(funcs)
+    funcs["ExplorerBasePath"] = self.ExplorerBasePath
+    funcs["ReferralCode"] = self.ReferralCode
+    funcs["TxHash"] = self.TxHash
+    funcs["Blockchain"] = self.Blockchain
+    funcs["PaymentId"] = self.PaymentId
+    funcs["DestinationAddress"] = self.DestinationAddress
+    funcs["AmountUsd"] = self.AmountUsd
+    funcs["PaymentCreatedAt"] = self.PaymentCreatedAt.Format("1/2 15:04")
 }
 
 
