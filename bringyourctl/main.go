@@ -1,18 +1,18 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "os"
-    "encoding/json"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 
-    "github.com/docopt/docopt-go"
+	"github.com/docopt/docopt-go"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour/controller"
-    "bringyour.com/bringyour/search"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/search"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -41,6 +41,7 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
+    bringyourctl contracts close-expired
 
 Options:
     -h --help     Show this screen.
@@ -114,6 +115,10 @@ Options:
             sendSubscriptionTransferBalanceCode(opts)
         } else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
             sendNetworkUserInterviewRequest1(opts)
+        }
+    } else if contracts, _ := opts.Bool("contracts"); contracts {
+        if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
+            closeExpiredContracts()
         }
     }
 }
@@ -395,4 +400,29 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
         panic(err)
     }
     fmt.Printf("Sent\n")
+}
+
+func closeExpiredContracts() {
+    ctx := context.Background()
+    expiredContracts := model.GetExpiredTransferContracts(ctx)
+
+    fmt.Println("# of contracts to close: ", len(expiredContracts))
+
+    for _, expired := range expiredContracts {
+        contract := expired.TransferContract
+        fmt.Println("Closing contract: ", contract.ContractId.String())
+        err := model.CloseContract(
+            ctx, 
+            contract.ContractId, 
+            contract.DestinationId,
+            expired.UsedByteCount,
+            false,
+        )
+        if err != nil {
+            fmt.Println("Error closing contract: ", err)
+        }
+    }
+
+    fmt.Println("Contracts closed")
+
 }
