@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
@@ -41,6 +42,7 @@ Usage:
     bringyourctl send auth-password-reset --user_auth=<user_auth>
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
+    bringyourctl send payout-email --user_auth=<user_auth>
     bringyourctl payout --account_payment_id=<account_payment_id>
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts plan
@@ -120,6 +122,8 @@ Options:
             sendAuthPasswordSet(opts)
         } else if subscriptionTransferBalanceCode, _ := opts.Bool("subscription-transfer-balance-code"); subscriptionTransferBalanceCode {
             sendSubscriptionTransferBalanceCode(opts)
+        } else if payoutEmail, _ := opts.Bool("payout-email"); payoutEmail {
+            sendPayoutEmail(opts)
         }
     } else if payout, _ := opts.Bool("payout"); payout {
         payoutByPaymentId(opts)
@@ -390,6 +394,30 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
             Secret: "hi there bar now",
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+func sendPayoutEmail(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
+        userAuth,
+        &controller.SendPaymentTemplate{
+            PaymentId: bringyour.NewId(),
+            TxHash: "0x1234567890",
+            ExplorerBasePath: "https://explorer.solana.com/tx",
+            ReferralCode: bringyour.NewId().String(),
+            Blockchain: "Solana",
+            DestinationAddress: "0x1234567890",
+            AmountUsd: "100.00",
+            PaymentCreatedAt: time.Now().UTC(),
         },
     )
     if err != nil {

@@ -166,16 +166,13 @@ func (self *SendPaymentTemplate) Name() string {
     return "subscription_send_payment"
 }
 
+func (self *SendPaymentTemplate) CreatedAt() string {
+    return self.PaymentCreatedAt.Format("1/2 15:04")
+}
+
 func (self *SendPaymentTemplate) Funcs(funcs texttemplate.FuncMap) {
     self.BaseTemplate.Funcs(funcs)
-    funcs["ExplorerBasePath"] = self.ExplorerBasePath
-    funcs["ReferralCode"] = self.ReferralCode
-    funcs["TxHash"] = self.TxHash
-    funcs["Blockchain"] = self.Blockchain
-    funcs["PaymentId"] = self.PaymentId
-    funcs["DestinationAddress"] = self.DestinationAddress
-    funcs["AmountUsd"] = self.AmountUsd
-    funcs["PaymentCreatedAt"] = self.PaymentCreatedAt.Format("1/2 15:04")
+    funcs["CreatedAt"] = self.CreatedAt
 }
 
 
