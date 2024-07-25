@@ -1,29 +1,29 @@
 package controller
 
-
 import (
-    texttemplate "text/template"
-    htmltemplate "html/template"
-    // "net/url"
-    "fmt"
-    "embed"
-    "strings"
-    // "time"
+	htmltemplate "html/template"
+	texttemplate "text/template"
 
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/ses"
-    "github.com/aws/aws-sdk-go/service/sns"
-    // "github.com/aws/aws-sdk-go/aws/awserr"
+	// "net/url"
+	"embed"
+	"fmt"
+	"strings"
+
+	// "time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ses"
+	"github.com/aws/aws-sdk-go/service/sns"
+
+	// "github.com/aws/aws-sdk-go/aws/awserr"
 
 	"bringyour.com/bringyour"
-    "bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/model"
 )
-
 
 // IMPORTANT this controller is for account messages only
 // marketing messages are sent via a separate channel
-
 
 //go:embed email_templates/*
 var emailTemplates embed.FS
@@ -150,6 +150,8 @@ func (self *SubscriptionEndedTemplate) Name() string {
 }
 
 type SendPaymentTemplate struct {
+    ExplorerLink string
+    ReferralCode string
     BaseTemplate
 }
 
@@ -158,7 +160,7 @@ func (self *SendPaymentTemplate) Name() string {
 }
 
 
-// TODO we can clean this up so all public functions are in the interface
+// fixme - we can clean this up so all public functions are in the interface
 type MessageSender interface {
     SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error
 }

@@ -1,10 +1,9 @@
 package bringyour
 
 import (
-    "fmt"
-    "context"
+	"context"
+	"fmt"
 )
-
 
 /*
 Use manual editing to fix or backport changes.
@@ -97,6 +96,7 @@ func ApplyDbMigrations(ctx context.Context) {
 	            			panic(err)
 	            		}
 	            	}()
+                    fmt.Println(v.sql)
                     RaisePgResult(tx.Exec(ctx, v.sql))
                 })
             case *CodeMigration:
@@ -1417,6 +1417,16 @@ var migrations = []any{
         ALTER TABLE network_client_resident ALTER COLUMN resident_block SET NOT NULL
     `),
 
+    newSqlMigration(`
+        CREATE TABLE network_referral_code (
+            network_id uuid NOT NULL,
+            referral_code uuid NOT NULL,
+
+            PRIMARY KEY (network_id)
+        )
+    `),
+
+    newCodeMigration(migration_20240725_PopulateNetworkReferralCodes),
 
 
     // results of actively pinging providers

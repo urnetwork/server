@@ -192,7 +192,17 @@ func ProviderPayout(
 
 		awsMessageSender := GetAWSMessageSender()
 		// TODO handler error
-		awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{})
+
+		explorerBasePath := getExplorerTxPath(tx.Blockchain)
+
+		networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
+		
+		if explorerBasePath != nil && networkReferralCode != nil {
+			awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
+				ExplorerLink: fmt.Sprintf("%s/%s", *explorerBasePath, tx.TxHash),
+				ReferralCode: networkReferralCode.ReferralCode.String(),
+			})
+		}
 
 		return &ProviderPayoutResult{
 			Complete: true,
@@ -339,4 +349,19 @@ func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
 	feeUsdc := fee * rate
 
 	return &feeUsdc, nil
+}
+
+func getExplorerTxPath(network string) *string {
+	network = strings.ToUpper(network)
+
+	switch network {
+	case "SOL", "SOLANA":
+			explorerPath := "https://explorer.solana.com/tx"
+			return &explorerPath
+	case "MATIC", "POLY", "POLYGON":
+			explorerPath := "https://polygonscan.com/tx"
+			return &explorerPath
+	}
+
+	return nil
 }
