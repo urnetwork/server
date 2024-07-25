@@ -1422,7 +1422,6 @@ func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredTransferContract
     transferContracts := []ExpiredTransferContract{}
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 
-        // todo - need to follow up on this query
         result, err := tx.Query(
             ctx,
             `
