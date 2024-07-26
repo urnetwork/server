@@ -22,7 +22,7 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx brin
 		&CloseExpiredContractsArgs{},
 		clientSession,
 		task.RunOnce("close_expired_contracts"),
-		task.RunAt(time.Now().Add(2 * time.Hour)),
+		task.RunAt(time.Now().Add(1 * time.Hour)),
   )
 }
 
