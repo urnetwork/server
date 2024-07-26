@@ -34,17 +34,21 @@ func CloseExpiredContracts(
 
 	for _, expiredContract := range expiredContracts {
 
-		var targetId bringyour.Id
+		var targetId *bringyour.Id
 		if expiredContract.Party == model.ContractPartySource {
-				targetId = expiredContract.DestinationId
-		} else {
-				targetId = expiredContract.SourceId
+				targetId = &expiredContract.DestinationId
+		} else if expiredContract.Party == model.ContractPartyDestination {
+				targetId = &expiredContract.SourceId
+		}
+
+		if targetId == nil {
+				continue
 		}
 
 			err := model.CloseContract(
 				clientSession.Ctx, 
 				expiredContract.ContractId, 
-				targetId,
+				*targetId,
 				expiredContract.UsedTransferByteCount,
 				false,
 			)
