@@ -33,10 +33,18 @@ func CloseExpiredContracts(
 	expiredContracts := model.GetExpiredTransferContracts(clientSession.Ctx)
 
 	for _, expiredContract := range expiredContracts {
+
+		var targetId bringyour.Id
+		if expiredContract.Party == model.ContractPartySource {
+				targetId = expiredContract.DestinationId
+		} else {
+				targetId = expiredContract.SourceId
+		}
+
 			err := model.CloseContract(
 				clientSession.Ctx, 
 				expiredContract.ContractId, 
-				expiredContract.DestinationId,
+				targetId,
 				expiredContract.UsedTransferByteCount,
 				false,
 			)

@@ -410,10 +410,18 @@ func closeExpiredContracts() {
 
     for _, expiredContract := range expiredContracts {
         fmt.Println("Closing contract: ", expiredContract.ContractId.String())
+
+        var targetId bringyour.Id
+        if expiredContract.Party == model.ContractPartySource {
+            targetId = expiredContract.DestinationId
+        } else {
+            targetId = expiredContract.SourceId
+        }
+
         err := model.CloseContract(
             ctx, 
             expiredContract.ContractId, 
-            expiredContract.DestinationId,
+            targetId,
             expiredContract.UsedTransferByteCount,
             false,
         )

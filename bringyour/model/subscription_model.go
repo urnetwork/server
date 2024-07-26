@@ -1373,8 +1373,10 @@ func CloseContract(
 
 type ExpiredContract struct {
     ContractId bringyour.Id
+    SourceId bringyour.Id
     DestinationId bringyour.Id
     UsedTransferByteCount ByteCount
+    Party ContractParty
 }
 
 func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
@@ -1386,8 +1388,10 @@ func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
             `
                 SELECT
                     transfer_contract.contract_id,
+                    transfer_contract.source_id,
                     transfer_contract.destination_id,
-                    contract_close.used_transfer_byte_count
+                    contract_close.used_transfer_byte_count,
+                    contract_close.party
 
                 FROM contract_close
 
@@ -1413,8 +1417,10 @@ func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
                 expiredContract := ExpiredContract{}
                 bringyour.Raise(result.Scan(
                     &expiredContract.ContractId,
+                    &expiredContract.SourceId,
                     &expiredContract.DestinationId,
                     &expiredContract.UsedTransferByteCount,
+                    &expiredContract.Party,
                 ))
 
                 expiredContracts = append(expiredContracts, expiredContract)
