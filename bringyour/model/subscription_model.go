@@ -1384,24 +1384,27 @@ func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
         result, err := tx.Query(
             ctx,
             `
-            WITH filtered_contracts AS (
-                SELECT 
-                    contract_id
-                FROM contract_close 
-                WHERE party = 'source'
-                AND close_time > NOW() - INTERVAL '24 hours'
-                GROUP BY contract_id 
-                HAVING COUNT(*) <> 2
-            )
-            SELECT
-                tc.contract_id,
-                tc.destination_id,
-                cc.used_transfer_byte_count
-            FROM transfer_contract tc
-            JOIN contract_close cc ON tc.contract_id = cc.contract_id
-            WHERE tc.contract_id IN (SELECT contract_id FROM filtered_contracts)
-            AND cc.party = 'source'
-            AND cc.close_time > NOW() - INTERVAL '24 hours';
+                SELECT
+                    transfer_contract.contract_id,
+                    transfer_contract.destination_id,
+                    contract_close.used_transfer_byte_count
+
+                FROM contract_close
+
+                INNER JOIN transfer_contract ON
+                    transfer_contract.contract_id = contract_close.contract_id
+                        AND (transfer_contract.outcome IS NULL AND NOT transfer_contract.dispute)
+
+                INNER JOIN (
+                    SELECT
+                        contract_id
+                    FROM contract_close
+                    GROUP BY contract_id
+                    HAVING COUNT(*) = 1
+                ) t ON
+                    t.contract_id = contract_close.contract_id
+
+                WHERE contract_close.close_time < now() - INTERVAL '24 hours';
             `,
         )
 
