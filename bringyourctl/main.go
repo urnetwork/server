@@ -422,6 +422,8 @@ func closeExpiredContracts() {
             continue
         }
 
+        // forcing the contract to be closed 
+        // due to lack of response from the counterparty
         err := model.CloseContract(
             ctx, 
             expiredContract.ContractId, 

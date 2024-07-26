@@ -45,16 +45,18 @@ func CloseExpiredContracts(
 				continue
 		}
 
-			err := model.CloseContract(
-				clientSession.Ctx, 
-				expiredContract.ContractId, 
-				*targetId,
-				expiredContract.UsedTransferByteCount,
-				false,
-			)
-			if err != nil {
-				return nil, err
-			}
+		// forcing the contract to be closed 
+		// due to lack of response from the counterparty
+		err := model.CloseContract(
+			clientSession.Ctx, 
+			expiredContract.ContractId, 
+			*targetId,
+			expiredContract.UsedTransferByteCount,
+			false,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &CloseExpiredContractsResult{}, nil
