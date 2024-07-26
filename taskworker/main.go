@@ -1,21 +1,21 @@
 package main
 
 import (
-    "context"
-    "time"
-    "fmt"
-    "net/http"
-    "os"
-    "syscall"
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"syscall"
+	"time"
 
-    "github.com/docopt/docopt-go"
-    
-    "bringyour.com/service/taskworker/work"    
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/controller"
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/router"
-    "bringyour.com/bringyour/task"
+	"github.com/docopt/docopt-go"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/bringyour/session"
+	"bringyour.com/bringyour/task"
+	"bringyour.com/service/taskworker/work"
 )
 
 
@@ -98,6 +98,7 @@ func initTasks(ctx context.Context) {
         work.ScheduleWarmEmail(clientSession, tx)
         work.ScheduleExportStats(clientSession, tx)
         work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
+        work.ScheduleCloseExpiredContracts(clientSession, tx)
         ScheduleTaskCleanup(clientSession, tx)
         controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
     })
@@ -114,6 +115,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
         task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
         task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
         task.NewTaskTargetWithPost(controller.BackfillInitialTransferBalance, controller.BackfillInitialTransferBalancePost),
+        task.NewTaskTargetWithPost(work.CloseExpiredContracts, work.CloseExpiredContractsPost),
     )
 
     return taskWorker

@@ -1,22 +1,22 @@
 package model
 
-
 import (
-    "context"
-    "time"
-    "fmt"
-    "math"
-    // "crypto/rand"
-    // "encoding/hex"
-    // "slices"
-    "errors"
-    "strings"
-    "strconv"
+	"context"
+	"fmt"
+	"math"
+	"time"
 
-    // "golang.org/x/exp/maps"
+	// "crypto/rand"
+	// "encoding/hex"
+	// "slices"
+	"errors"
+	"strconv"
+	"strings"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/session"
+	// "golang.org/x/exp/maps"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -1371,7 +1371,64 @@ func CloseContract(
     return
 }
 
+type ExpiredContract struct {
+    ContractId bringyour.Id
+    SourceId bringyour.Id
+    DestinationId bringyour.Id
+    UsedTransferByteCount ByteCount
+    Party ContractParty
+}
 
+func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
+    expiredContracts := []ExpiredContract{}
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    transfer_contract.contract_id,
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    contract_close.used_transfer_byte_count,
+                    contract_close.party
+
+                FROM contract_close
+
+                INNER JOIN transfer_contract ON
+                    transfer_contract.contract_id = contract_close.contract_id
+                        AND (transfer_contract.outcome IS NULL AND NOT transfer_contract.dispute)
+
+                INNER JOIN (
+                    SELECT
+                        contract_id
+                    FROM contract_close
+                    GROUP BY contract_id
+                    HAVING COUNT(*) = 1
+                ) t ON
+                    t.contract_id = contract_close.contract_id
+
+                WHERE contract_close.close_time < now() - INTERVAL '24 hours';
+            `,
+        )
+
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                expiredContract := ExpiredContract{}
+                bringyour.Raise(result.Scan(
+                    &expiredContract.ContractId,
+                    &expiredContract.SourceId,
+                    &expiredContract.DestinationId,
+                    &expiredContract.UsedTransferByteCount,
+                    &expiredContract.Party,
+                ))
+
+                expiredContracts = append(expiredContracts, expiredContract)
+            }
+        })
+    })
+    return expiredContracts
+}
 
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
@@ -1380,7 +1437,6 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
 
     return
 }
-
 
 func settleEscrowInTx(
     ctx context.Context,
