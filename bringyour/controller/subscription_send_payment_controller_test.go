@@ -126,31 +126,39 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// meaning they will make a call to send a transaction to the provider
 		for _, payment := range paymentPlan.WalletPayments {
 	
+			// initiate payment
 			paymentResult, err := ProviderPayout(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentResult.Complete, false)
 
-			// // estimate fee
-			estimatedFees, err := mockCircleClient.EstimateTransferFee(payment.TokenAmount, wallet.WalletAddress, "MATIC")
+			// fetch the payment record which should have some updated fields
+			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 
-			// // deduct fee from payment amount
+			// estimate fee
+			estimatedFees, err := mockCircleClient.EstimateTransferFee(
+				*paymentRecord.TokenAmount, 
+				wallet.WalletAddress, 
+				"MATIC",
+			)
+			assert.Equal(t, err, nil)
+
+			// deduct fee from payment amount
 			fee, err := CalculateFee(
 				*estimatedFees.Medium,
 				"MATIC",
 			)
 			assert.Equal(t, err, nil)
 
-			// // convert fee to usdc
+			// convert fee to usdc
 			feeInUSDC, err := ConvertFeeToUSDC("MATIC", *fee)
 			assert.Equal(t, err, nil)
 
-			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
 
 			// payoutAmount (in USD) - fee (in USD) = token amount
-			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout) - *feeInUSDC, float64(paymentRecord.TokenAmount))
+			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout) - *feeInUSDC, float64(*paymentRecord.TokenAmount))
 			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
 

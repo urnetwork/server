@@ -142,10 +142,10 @@ func ProviderPayout(
 	var txResponseBodyBytes []byte // STU_TODO: this is ResponseBodyBytes from fetching the transaction data?
 	var status string
 
-	if payment.PaymentRecord != "" {
+	if payment.PaymentRecord != nil {
 
 		// get the status of the transaction
-		txResult, err := circleClient.GetTransaction(payment.PaymentRecord)
+		txResult, err := circleClient.GetTransaction(*payment.PaymentRecord)
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +258,7 @@ func ProviderPayout(
 		model.SetPaymentRecord(
 			clientSession.Ctx,
 			payment.PaymentId,
-			payment.TokenType,
+			"USDC", // For token type
 			payoutAmount,
 			transferResult.Id,
 		)
