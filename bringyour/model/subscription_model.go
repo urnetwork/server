@@ -2152,9 +2152,9 @@ type AccountPayment struct {
     MinSweepTime time.Time `json:"min_sweep_time"`
     CreateTime time.Time `json:"create_time"`
 
-    PaymentRecord string `json:"payment_record"`
-    TokenType string `json:"token_type"`
-    TokenAmount float64 `json:"token_amount"`
+    PaymentRecord *string `json:"payment_record"`
+    TokenType *string `json:"token_type"`
+    TokenAmount *float64 `json:"token_amount"`
     PaymentTime *time.Time `json:"payment_time"`
     PaymentReceipt *string `json:"payment_receipt"`
 
@@ -2610,6 +2610,33 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
     return
 }
 
+// used in bringyourctl to apply a bonus to a payment plan
+func PayoutPlanAppyBonus(
+    ctx context.Context,
+    paymentPlanId bringyour.Id,
+    bonusNanoCents NanoCents,
+) (returnErr error) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        tag := bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                UPDATE account_payment
+                SET
+                    payout_nano_cents = payout_nano_cents + $2
+                WHERE
+                    payment_plan_id = $1 AND
+                    NOT completed AND NOT canceled
+            `,
+            paymentPlanId,
+            bonusNanoCents,
+        ))
+        if tag.RowsAffected() == 0 {
+            returnErr = fmt.Errorf("invalid payment plan")
+            return
+        }
+    })
+    return
+}
 
 type AccountBalance struct {
     NetworkId bringyour.Id

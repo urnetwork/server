@@ -45,6 +45,7 @@ Usage:
     bringyourctl send payout-email --user_auth=<user_auth>
     bringyourctl payout --account_payment_id=<account_payment_id>
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
+    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
     bringyourctl payouts plan
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -133,6 +134,9 @@ Options:
         }
         if plan, _ := opts.Bool("plan"); plan {
             planPayouts()
+        }
+        if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
+            payoutPlanAppyBonus(opts)
         }
     } else if wallet, _ := opts.Bool("wallet"); wallet {
         if send, _ := opts.Bool("transfer"); send {
@@ -504,6 +508,29 @@ func payoutByPaymentId(opts docopt.Opts) {
 
     fmt.Printf("Payout to %s processing complete: \n", accountPaymentIdStr)
     fmt.Println("Complete Status: ", res.Complete)
+}
+
+func payoutPlanAppyBonus(opts docopt.Opts) {
+    ctx := context.Background()
+
+    planIdStr, err := opts.String("--plan_id")
+    if err != nil {
+        panic(err)
+    }
+
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    amountNanoCents := model.UsdToNanoCents(amountUsd)
+
+    planId, err := bringyour.ParseId(planIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    model.PayoutPlanAppyBonus(ctx, planId, amountNanoCents)
 }
 
 func adminWalletEstimateFee(opts docopt.Opts) {

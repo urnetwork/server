@@ -408,7 +408,7 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
     }
 })}
 
-func TestGetPendingPayments(t *testing.T) { 
+func TestPayouts(t *testing.T) { 
     bringyour.DefaultTestEnv().Run(func() {
         ctx := context.Background()
 
@@ -514,3 +514,91 @@ func TestGetPendingPayments(t *testing.T) {
         assert.Equal(t, len(pendingPayments), 0)
     })
 }
+
+func TestPayoutPlanAppyBonus(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+
+    ctx := context.Background()
+
+    bringyour.DefaultTestEnv().Run(func() {
+    netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+    netRevenue := UsdToNanoCents(10.00)
+
+    sourceNetworkId := bringyour.NewId()
+    sourceId := bringyour.NewId()
+    destinationNetworkId := bringyour.NewId()
+    destinationId := bringyour.NewId()
+
+    sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+        NetworkId: sourceNetworkId,
+        ClientId: &sourceId,
+    })
+
+    // populate source balance
+    balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "user_balance_a", "", "")
+    assert.Equal(t, err, nil)
+    RedeemBalanceCode(&RedeemBalanceCodeArgs{
+        Secret: balanceCode.Secret,
+    }, sourceSession)
+
+    usedTransferByteCount := ByteCount(1024)
+    paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+    paidByteCount := usedTransferByteCount
+
+    usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+
+    for paid < MinWalletPayoutThreshold {
+        transferEscrow, err := CreateTransferEscrow(
+            ctx, 
+            sourceNetworkId, 
+            sourceId, 
+            destinationNetworkId,
+            destinationId, 
+            usedTransferByteCount,
+        )
+        assert.Equal(t, err, nil)
+
+        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+        assert.Equal(t, err, nil)
+        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+        assert.Equal(t, err, nil)
+
+        paidByteCount += usedTransferByteCount
+        paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+    }
+
+    wallet := &AccountWallet{
+        WalletId: bringyour.NewId(),
+        NetworkId: destinationNetworkId,
+        WalletType: WalletTypeCircleUserControlled,
+        Blockchain: "matic",
+        WalletAddress: "0x1234567890",
+        DefaultTokenType: "usdc",
+    }
+    CreateAccountWallet(ctx, wallet)
+
+    SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+    plan := PlanPayments(ctx)
+
+    bonusAmountUsd := 5.00
+    bonusAmount := UsdToNanoCents(bonusAmountUsd)
+
+    paymentMap := make(map[bringyour.Id]NanoCents)
+
+    assert.NotEqual(t, len(plan.WalletPayments), 0)
+
+    for _, payment := range plan.WalletPayments {
+        paymentMap[payment.PaymentId] = payment.Payout
+    }
+
+    err = PayoutPlanAppyBonus(ctx, plan.PaymentPlanId, bonusAmount)
+    assert.Equal(t, err, nil)
+
+    payments := GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+    assert.Equal(t, len(payments), len(paymentMap))
+
+    for _, payment := range payments {
+        assert.Equal(t, payment.Payout, paymentMap[payment.PaymentId] + bonusAmount)
+    }
+
+})})}
