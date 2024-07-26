@@ -591,9 +591,9 @@ func CircleWalletWebhook(
                 return nil, err
             }
     
-            userUC, err := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
-            if err != nil {
-                return nil, err
+            userUC := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
+            if userUC == nil {
+                return nil, fmt.Errorf("no circle user control found")
             }
     
             blockchain := strings.ToUpper(wallet.Blockchain)
