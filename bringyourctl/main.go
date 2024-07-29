@@ -42,6 +42,7 @@ Usage:
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
     bringyourctl contracts close-expired
+    bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
 
 Options:
     -h --help     Show this screen.
@@ -53,7 +54,10 @@ Options:
     --user_auth=<user_auth>
     --network_name=<network_name>
     --network_id=<network_id>
-    --secret=<secret>`
+    --secret=<secret>
+    --contract_id=<contract_id> The contract to close
+    --target_id=<target_id>     The contract_close.party (either "destination" or "source")
+    --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
@@ -119,6 +123,9 @@ Options:
     } else if contracts, _ := opts.Bool("contracts"); contracts {
         if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
             closeExpiredContracts()
+        }
+        if close, _ := opts.Bool("close"); close {
+            closeContract(opts)
         }
     }
 }
@@ -437,5 +444,48 @@ func closeExpiredContracts() {
     }
 
     fmt.Println("Contracts closed")
+
+}
+
+func closeContract(opts docopt.Opts) {
+
+    ctx := context.Background()
+
+    contractIdStr, err := opts.String("--contract_id")
+    if err != nil {
+        panic(err)
+    }
+    contractId, err := bringyour.ParseId(contractIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    // this is either destinationId or sourceId from the transfer_contract table
+    targetIdStr, err := opts.String("--target_id")
+    if err != nil {
+        panic(err)
+    }
+    targetId, err := bringyour.ParseId(targetIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    usedTransferByteCount, err := opts.Int("--used_transfer_byte_count")
+    if err != nil {
+        panic(err)
+    }
+
+    err = model.CloseContract(
+        ctx, 
+        contractId, 
+        targetId,
+        int64(usedTransferByteCount),
+        false,
+    )
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Contract closed %s \n", contractIdStr)
 
 }
