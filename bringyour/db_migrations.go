@@ -1434,6 +1434,10 @@ var migrations = []any{
         DROP INDEX network_client_network_id_create_time
     `),
 
+    newSqlMigration(`
+        ALTER TABLE transfer_contract ADD COLUMN payee_network_id uuid NULL
+    `),
+
 
 
     // results of actively pinging providers

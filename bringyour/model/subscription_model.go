@@ -892,6 +892,7 @@ func createTransferEscrowInTx(
         }
     })
 
+    // TODO add payee_network_id to transfer_contract
     bringyour.RaisePgResult(tx.Exec(
         ctx,
         `
@@ -902,9 +903,10 @@ func createTransferEscrowInTx(
                 destination_network_id,
                 destination_id,
                 transfer_byte_count,
-                companion_contract_id
+                companion_contract_id,
+                payee_network_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
         contractId,
         sourceNetworkId,
@@ -913,6 +915,7 @@ func createTransferEscrowInTx(
         destinationId,
         contractTransferByteCount,
         companionContractId,
+        payeeNetworkId,
     ))
 
     balances := []*TransferEscrowBalance{}
@@ -1533,7 +1536,10 @@ func settleEscrowInTx(
         ctx,
         `
             SELECT
-                destination_network_id
+                source_network_id,
+                destination_network_id,
+                payee_network_id,
+                companion_contract_id
             FROM transfer_contract
             WHERE
                 contract_id = $1
@@ -1543,7 +1549,30 @@ func settleEscrowInTx(
     )
     bringyour.WithPgResult(result, err, func() {
         if result.Next() {
-            bringyour.Raise(result.Scan(&payoutNetworkId))
+            var sourceNetworkId bringyour.Id
+            var destinationNetworkId bringyour.Id
+            var payeeNetworkId *bringyour.Id
+            var companionContractId *bringyour.Id
+            bringyour.Raise(result.Scan(
+                &sourceNetworkId,
+                &destinationNetworkId,
+                #&payeeNetworkId,
+                &companionContractId,
+            ))
+            if payoutNetworkId != nil {
+                if payeeNetworkId == sourceNetworkId {
+                    payoutNetworkId = &destinationNetworkId
+                } else {
+                    payoutNetworkId = &sourceNetworkId
+                }
+            } else {
+                // migration, infer for older contracts
+                if companionContractId == nil {
+                    payoutNetworkId = &destinationNetworkId
+                } else {
+                    payoutNetworkId = &sourceNetworkId
+                }
+            }
         }
     })
 
