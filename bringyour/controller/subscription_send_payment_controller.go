@@ -244,6 +244,11 @@ func ProviderPayout(
 
 		payoutAmount = payoutAmount - *feeInUSDC
 
+		// ensure paymout amount is greater than minimum payout threshold
+		if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
+			return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
+		}
+
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
 			payoutAmount,
