@@ -1,18 +1,29 @@
 package controller
 
 import (
-    "fmt"
-    "sync"
-    "net/http"
-    "encoding/json"
-    // "io"
-    "time"
-    "strconv"
-    // "strings"
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"strings"
+	"sync"
 
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/model"
-    "bringyour.com/bringyour"
+	// "io"
+	"strconv"
+	"time"
+
+	// "strings"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -407,6 +418,243 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
     return mostRecentWalletInfo, nil
 }
 
+func VerifyCircleBody(req *http.Request)(io.Reader, error) {
+
+    bodyBytes, err := io.ReadAll(req.Body)
+    if err != nil {
+        return nil, err
+    }
+
+	err = verifyCircleAuth(
+		req.Header.Get("X-Circle-Key-Id"), 
+		req.Header.Get("X-Circle-Signature"),
+        bodyBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) error {
+
+    circleApiToken := circleConfig()["api_token"]
+
+	pk, err := bringyour.HttpGetRequireStatusOk(
+		fmt.Sprintf("https://api.circle.com/v2/notifications/publicKey/%s", keyId),
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
+        },
+        func(response *http.Response, responseBodyBytes []byte) (*string, error) {
+            _, data, err := parseCircleResponseData(responseBodyBytes)
+            if err != nil {
+                return nil, err
+            }
+
+            if publicKey := data["publicKey"]; publicKey != nil {
+                if pk, ok := publicKey.(string); ok {
+                    return &pk, nil
+                }
+            }
+
+            return nil, fmt.Errorf("no public key found")
+        },
+    )
+    
+
+    if err != nil {
+        return err
+    }
+
+    err = verifySignature(*pk, signature, responseBodyBytes)
+    if err != nil {
+        return err
+    }
+
+	return nil
+}
+
+func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
+	// Decode the public key from base64
+	publicKeyDer, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode public key: %w", err)
+	}
+
+	// Parse the public key
+	publicKey, err := x509.ParsePKIXPublicKey(publicKeyDer)
+	if err != nil {
+		return fmt.Errorf("failed to parse public key: %w", err)
+	}
+	ecdsaPublicKey, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return errors.New("failed to cast public key to ECDSA")
+	}
+
+	// Decode the signature from base64
+	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode signature: %w", err)
+	}
+
+	// Format the JSON response body
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(responseBodyBytes, &jsonData); err != nil {
+		return fmt.Errorf("failed to unmarshal JSON response body: %w", err)
+	}
+	formattedJson, err := json.Marshal(jsonData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON data: %w", err)
+	}
+
+	// Hash the formatted JSON response body
+	hash := sha256.Sum256(formattedJson)
+
+	// Verify the signature
+	r := big.Int{}
+	s := big.Int{}
+	sigLen := len(signatureBytes)
+	r.SetBytes(signatureBytes[:sigLen/2])
+	s.SetBytes(signatureBytes[sigLen/2:])
+
+	if ecdsa.Verify(ecdsaPublicKey, hash[:], &r, &s) {
+		return nil // Signature is valid
+	} else {
+        return fmt.Errorf("signature is invalid")
+	}
+}
+
+type CircleNotification[T any] struct {
+    SubscriptionId string `json:"subscriptionId"`
+    NotificationId string `json:"notificationId"`
+    NotificationType string `json:"notificationType"`
+    Notification T `json:"notification"`
+    Timestamp time.Time `json:"timestamp"`
+    Version int `json:"version"`
+}
+
+type CircleWallet struct {
+    ID           string     `json:"id"`
+    State        string     `json:"state"`
+    WalletSetId  string     `json:"walletSetId"`
+    CustodyType  string     `json:"custodyType"`
+    UserId       string     `json:"userId"`
+    Address      string     `json:"address"`
+    AddressIndex int        `json:"addressIndex"`
+    Blockchain   string     `json:"blockchain"`
+    UpdateDate   time.Time  `json:"updateDate"`
+    CreateDate   time.Time  `json:"createDate"`
+}
+
+type CircleChallengeEvent struct {
+    ID string `json:"id"`
+    UserId string `json:"userId"`
+    Status string `json:"status"`
+    CorrelationIds []string `json:"correlationIds"`
+    ErrorCode int `json:"errorCode"`
+    Type string `json:"type"`
+}
+
+type CircleWalletWebhookResult struct {}
+
+func CircleWalletWebhook(
+    circleWalletWebhook *CircleNotification[CircleChallengeEvent],
+    clientSession *session.ClientSession,
+) (*CircleWalletWebhookResult, error) {
+
+    if circleWalletWebhook.NotificationType == "challenges.initialize" {
+
+        event := circleWalletWebhook.Notification
+        status := strings.ToUpper(event.Status)
+        eventType := strings.ToUpper(event.Type)
+    
+        if eventType == "INITIALIZE" && status == "COMPLETE" {
+
+            if len(event.CorrelationIds) <= 0 {
+                return nil, fmt.Errorf("no correlation ids")
+            }
+    
+            walletId, err := bringyour.ParseId(event.CorrelationIds[0])
+            if err != nil {
+                return nil, err
+            }
+
+            wallet, err := getCircleWallet(walletId)
+            if err != nil {
+                return nil, err
+            }
+    
+            userId, err := bringyour.ParseId(event.UserId)
+            if err != nil {
+                return nil, err
+            }
+    
+            userUC := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
+            if userUC == nil {
+                return nil, fmt.Errorf("no circle user control found")
+            }
+    
+            blockchain := strings.ToUpper(wallet.Blockchain)
+    
+            // check for an existing wallet
+            existingAccountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+            if existingAccountWallet != nil {
+                return nil, fmt.Errorf("account wallet already exists")
+            }
+    
+            // no account_wallet exists, create a new one
+            model.CreateAccountWallet(
+                clientSession.Ctx,
+                &model.AccountWallet{
+                    WalletId: walletId,
+                    NetworkId: userUC.NetworkId,
+                    WalletType: model.WalletTypeCircleUserControlled,
+                    Blockchain: blockchain,
+                    WalletAddress: wallet.Address,
+                    DefaultTokenType: "USDC",
+                },
+            )
+    
+            // fixme: check if a payout wallet is set for this network
+            // depends on feature/set-payout-wallet
+    
+        }
+
+    }
+
+    return &CircleWalletWebhookResult{}, nil
+
+}
+
+type CircleResult[T any] struct {
+    Data T `json:"data"`
+}
+
+type CircleWalletResult struct {
+    Wallet CircleWallet `json:"wallet"`
+}
+
+func getCircleWallet(walletId bringyour.Id) (*CircleWallet, error) {
+    return bringyour.HttpGetRequireStatusOk(
+        fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s", walletId),
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+        },
+        func(response *http.Response, responseBodyBytes []byte)(*CircleWallet, error) {
+			result := &CircleResult[CircleWalletResult]{}
+
+			err := json.Unmarshal(responseBodyBytes, result)
+			if err != nil {
+				return nil, err
+			}
+
+			return &result.Data.Wallet, nil
+        },
+    )
+}
 
 func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, error) {
     // list wallets for user. Choose most recent wallet

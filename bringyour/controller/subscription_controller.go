@@ -910,7 +910,6 @@ func verifyPlayAuth(auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-
 func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) bool {
 	startTime := bringyour.NowUtc()
 	endTime := startTime.Add(InitialTransferBalanceDuration)

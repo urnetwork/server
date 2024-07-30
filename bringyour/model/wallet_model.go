@@ -1,16 +1,47 @@
 package model
 
 import (
-    "context"
-    // "time"
-    // "fmt"
-    // "math"
-    // "crypto/rand"
-    // "encoding/hex"
+	"context"
 
-    "bringyour.com/bringyour"
-    // "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
 )
+
+type CircleUC struct {
+    NetworkId bringyour.Id `json:"network_id"`
+    UserId bringyour.Id `json:"user_id"`
+    CircleUCUserId bringyour.Id `json:"circle_uc_user_id"`
+}
+
+func GetCircleUCByCircleUCUserId(
+    ctx context.Context, 
+    circleUCUserId bringyour.Id,
+) *CircleUC {
+    var circleUC *CircleUC
+
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    network_id,
+                    user_id,
+                    circle_uc_user_id
+                FROM circle_uc
+                WHERE
+                    circle_uc_user_id = $1
+            `,
+            circleUCUserId,
+        )
+
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                circleUC = &CircleUC{}
+                bringyour.Raise(result.Scan(&circleUC.NetworkId, &circleUC.UserId, &circleUC.CircleUCUserId))
+            }
+        })
+    })
+    return circleUC
+}
 
 
 // this user id is what is used for the Circle api:
