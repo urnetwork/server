@@ -1782,6 +1782,7 @@ func GetOpenContractIds(
 // - 2 closes - one source and one checkpoint
 // TODO - 0 closes can be used if the contract has a max lived time
 // TODO   add this to the protocol 
+// TODO there may be some overlap with https://github.com/bringyour/bringyour/commit/4a8150083083161be04737f0cc4b087906d9b449
 func GetExpiredOpenContractIds(
     ctx context.Context,
     contractCloseTimeout time.Duration,
