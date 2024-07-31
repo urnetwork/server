@@ -138,11 +138,12 @@ func ProviderPayout(
 		}, nil
 	}
 
-	var tx *CircleTransaction
-	var txResponseBodyBytes []byte // STU_TODO: this is ResponseBodyBytes from fetching the transaction data?
-	var status string
-
+	// payment exists
 	if payment.PaymentRecord != nil {
+
+		var tx *CircleTransaction
+		var txResponseBodyBytes []byte
+		var status string
 
 		// get the status of the transaction
 		txResult, err := circleClient.GetTransaction(*payment.PaymentRecord)
@@ -153,124 +154,133 @@ func ProviderPayout(
 		tx = &txResult.Transaction
 		txResponseBodyBytes = txResult.ResponseBodyBytes
 		status = tx.State
-	}
 
-	// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
-	switch status {
-	case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
-		// check later	
-		return &ProviderPayoutResult{
-			Complete: false,
-		}, nil
+		// Check the Circle Status of the payment
+		// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
+		switch status {
+		case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
+			// check later	
+			return &ProviderPayoutResult{
+				Complete: false,
+			}, nil
 
-	case "DENIED", "FAILED", "CANCELLED":
+		case "DENIED", "FAILED", "CANCELLED":
 
-		// Cancel this payment in our DB
-		err := model.CancelPayment(clientSession.Ctx, payment.PaymentId)
-		if err != nil {
-			return nil, err
+			// Cancel this payment in our DB
+			err := model.CancelPayment(clientSession.Ctx, payment.PaymentId)
+			if err != nil {
+				return nil, err
+			}
+
+			// Returns complete, since we don't want to retry this payment
+			return &ProviderPayoutResult{
+				Complete: true,
+			}, nil
+
+		case "COMPLETE":
+
+			// mark the payment complete in our DB
+			model.CompletePayment(
+				clientSession.Ctx, 
+				payment.PaymentId, 
+				string(txResponseBodyBytes), // STU_TODO: check this
+			)
+
+			userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
+			if err != nil {
+				return nil, err
+			}
+
+			awsMessageSender := GetAWSMessageSender()
+			// TODO handler error
+
+			explorerBasePath := getExplorerTxPath(tx.Blockchain)
+
+			networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
+			
+			if networkReferralCode != nil {
+				awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
+					PaymentId: payment.PaymentId,
+					ExplorerBasePath: *explorerBasePath,
+					TxHash: tx.TxHash,
+					ReferralCode: networkReferralCode.ReferralCode.String(),
+					Blockchain: tx.Blockchain,
+					DestinationAddress: tx.DestinationAddress,
+					AmountUsd: tx.AmountInUSD,
+					PaymentCreatedAt: payment.CreateTime,
+				})
+			}
+
+			return &ProviderPayoutResult{
+				Complete: true,
+			}, nil
+
+		default:
+			return nil, fmt.Errorf(
+				"no case set for status %s; payment_id is: %s", 
+				status, 
+				payment.PaymentId.String(),
+			)
 		}
 
-		// Returns complete, since we don't want to retry this payment
-		return &ProviderPayoutResult{
-			Complete: true,
-		}, nil
+	} else {
+			// no transaction or error
+			// create and send a new payment via Circle
 
-	case "COMPLETE":
+			// get the user wallet to send the payment to
+			accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
 
-		// mark the payment complete in our DB
-		model.CompletePayment(
-			clientSession.Ctx, 
-			payment.PaymentId, 
-			string(txResponseBodyBytes), // STU_TODO: check this
-		)
+			payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
-		userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
-		if err != nil {
-			return nil, err
-		}
+			estimatedFees, err := circleClient.EstimateTransferFee(
+				payoutAmount,
+				accountWallet.WalletAddress,
+				accountWallet.Blockchain,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		awsMessageSender := GetAWSMessageSender()
-		// TODO handler error
+			fee, err := CalculateFee(*estimatedFees.Medium, accountWallet.Blockchain)
+			if err != nil {
+				return nil, err
+			}
 
-		explorerBasePath := getExplorerTxPath(tx.Blockchain)
+			feeInUSDC, err := ConvertFeeToUSDC(accountWallet.Blockchain, *fee)
+			if err != nil {
+				return nil, err
+			}
 
-		networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
-		
-		if networkReferralCode != nil {
-			awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
-				PaymentId: payment.PaymentId,
-				ExplorerBasePath: *explorerBasePath,
-				TxHash: tx.TxHash,
-				ReferralCode: networkReferralCode.ReferralCode.String(),
-				Blockchain: tx.Blockchain,
-				DestinationAddress: tx.DestinationAddress,
-				AmountUsd: tx.AmountInUSD,
-				PaymentCreatedAt: payment.CreateTime,
-			})
-		}
+			payoutAmount = payoutAmount - *feeInUSDC
 
-		return &ProviderPayoutResult{
-			Complete: true,
-		}, nil
+			// ensure paymout amount is greater than minimum payout threshold
+			if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
+				return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
+			}
 
-	default:
-		// no transaction or error
-		// send the payment
+			// send the payment
+			transferResult, err := circleClient.CreateTransferTransaction(
+				payoutAmount,
+				accountWallet.WalletAddress,
+				accountWallet.Blockchain,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		// get the user wallet to send the payment to
-		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
+			// set the payment record
+			model.SetPaymentRecord(
+				clientSession.Ctx,
+				payment.PaymentId,
+				"USDC", // For token type
+				payoutAmount,
+				transferResult.Id,
+			)
 
-		payoutAmount := model.NanoCentsToUsd(payment.Payout)
+			return &ProviderPayoutResult{
+				Complete: false,
+			}, nil
 
-		estimatedFees, err := circleClient.EstimateTransferFee(
-			payoutAmount, // TODO check this
-			accountWallet.WalletAddress,
-			accountWallet.Blockchain,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		fee, err := CalculateFee(*estimatedFees.Medium, accountWallet.Blockchain)
-		if err != nil {
-			return nil, err
-		}
-
-		feeInUSDC, err := ConvertFeeToUSDC(accountWallet.Blockchain, *fee)
-		if err != nil {
-			return nil, err
-		}
-
-		payoutAmount = payoutAmount - *feeInUSDC
-
-		// ensure paymout amount is greater than minimum payout threshold
-		if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
-			return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
-		}
-
-		// send the payment
-		transferResult, err := circleClient.CreateTransferTransaction(
-			payoutAmount,
-			accountWallet.WalletAddress,
-			accountWallet.Blockchain,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// set the payment record
-		model.SetPaymentRecord(
-			clientSession.Ctx,
-			payment.PaymentId,
-			"USDC", // For token type
-			payoutAmount,
-			transferResult.Id,
-		)
-
-		return &ProviderPayoutResult{
-			Complete: false,
-		}, nil
 	}
 }
 
