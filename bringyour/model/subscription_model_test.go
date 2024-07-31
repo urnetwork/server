@@ -1,19 +1,18 @@
 package model
 
-
 import (
-    "context"
-    "testing"
-    "slices"
-    "time"
+	"context"
+	"slices"
+	"testing"
+	"time"
 
-    "golang.org/x/exp/maps"
+	"golang.org/x/exp/maps"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
 
@@ -157,6 +156,7 @@ func TestEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 
     wallet := &AccountWallet{
+        WalletId: bringyour.NewId(),
         NetworkId: destinationNetworkId,
         WalletType: WalletTypeCircleUserControlled,
         Blockchain: "matic",
@@ -407,3 +407,198 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         assert.Equal(t, endTime, transferBalance.EndTime)
     }
 })}
+
+func TestPayouts(t *testing.T) { 
+    bringyour.DefaultTestEnv().Run(func() {
+        ctx := context.Background()
+
+        netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+        netRevenue := UsdToNanoCents(10.00)
+
+        sourceNetworkId := bringyour.NewId()
+        sourceId := bringyour.NewId()
+        destinationNetworkId := bringyour.NewId()
+        destinationId := bringyour.NewId()
+
+        sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+            NetworkId: sourceNetworkId,
+            ClientId: &sourceId,
+        })
+
+        // populate source balance
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "user_balance_a", "", "")
+        assert.Equal(t, err, nil)
+        RedeemBalanceCode(&RedeemBalanceCodeArgs{
+            Secret: balanceCode.Secret,
+        }, sourceSession)
+
+        usedTransferByteCount := ByteCount(1024)
+        paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+        paidByteCount := usedTransferByteCount
+
+        usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+
+        for paid < MinWalletPayoutThreshold {
+            transferEscrow, err := CreateTransferEscrow(
+                ctx, 
+                sourceNetworkId, 
+                sourceId, 
+                destinationNetworkId,
+                destinationId, 
+                usedTransferByteCount,
+            )
+            assert.Equal(t, err, nil)
+    
+            err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+            assert.Equal(t, err, nil)
+            err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+            assert.Equal(t, err, nil)
+
+            paidByteCount += usedTransferByteCount
+            paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+        }
+
+        wallet := &AccountWallet{
+            WalletId: bringyour.NewId(),
+            NetworkId: destinationNetworkId,
+            WalletType: WalletTypeCircleUserControlled,
+            Blockchain: "matic",
+            WalletAddress: "0x1234567890",
+            DefaultTokenType: "usdc",
+        }
+        CreateAccountWallet(ctx, wallet)
+
+        SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+        plan := PlanPayments(ctx)
+
+        paymentMap := make(map[bringyour.Id]map[bringyour.Id]bool)
+        planPaymentCount := make(map[bringyour.Id]int)
+
+        for _, payment := range plan.WalletPayments {
+            SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+
+            if _, exists := paymentMap[payment.PaymentPlanId]; !exists {
+                paymentMap[payment.PaymentPlanId] = make(map[bringyour.Id]bool)
+                planPaymentCount[payment.PaymentPlanId] = 0
+            }
+
+            paymentMap[payment.PaymentPlanId][payment.PaymentId] = true
+            planPaymentCount[payment.PaymentPlanId] += 1
+        }
+
+        pendingPayments := GetPendingPayments(ctx)
+
+        // this should match the planned payments we just created
+        assert.Equal(t, len(pendingPayments), len(plan.WalletPayments))
+
+        pendingPaymentsByPlan := GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+
+        assert.Equal(t, planPaymentCount[plan.PaymentPlanId], len(pendingPaymentsByPlan))
+
+        for _, pendingPayment := range pendingPaymentsByPlan {
+            if _, exists := paymentMap[pendingPayment.PaymentPlanId][pendingPayment.PaymentId]; !exists {
+                t.Errorf("Pending payment ID %v not found in planned payments", pendingPayment.PaymentId)
+                continue
+            }
+            CompletePayment(ctx, pendingPayment.PaymentId, "")
+        }
+
+        // since payments have been marked completed
+        // this should be empty
+        pendingPaymentsByPlan = GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+        
+        assert.Equal(t, len(pendingPaymentsByPlan), 0)
+
+        pendingPayments = GetPendingPayments(ctx)
+        assert.Equal(t, len(pendingPayments), 0)
+    })
+}
+
+func TestPayoutPlanAppyBonus(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+
+    ctx := context.Background()
+
+    bringyour.DefaultTestEnv().Run(func() {
+    netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+    netRevenue := UsdToNanoCents(10.00)
+
+    sourceNetworkId := bringyour.NewId()
+    sourceId := bringyour.NewId()
+    destinationNetworkId := bringyour.NewId()
+    destinationId := bringyour.NewId()
+
+    sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+        NetworkId: sourceNetworkId,
+        ClientId: &sourceId,
+    })
+
+    // populate source balance
+    balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "user_balance_a", "", "")
+    assert.Equal(t, err, nil)
+    RedeemBalanceCode(&RedeemBalanceCodeArgs{
+        Secret: balanceCode.Secret,
+    }, sourceSession)
+
+    usedTransferByteCount := ByteCount(1024)
+    paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+    paidByteCount := usedTransferByteCount
+
+    usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+
+    for paid < MinWalletPayoutThreshold {
+        transferEscrow, err := CreateTransferEscrow(
+            ctx, 
+            sourceNetworkId, 
+            sourceId, 
+            destinationNetworkId,
+            destinationId, 
+            usedTransferByteCount,
+        )
+        assert.Equal(t, err, nil)
+
+        err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+        assert.Equal(t, err, nil)
+        err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+        assert.Equal(t, err, nil)
+
+        paidByteCount += usedTransferByteCount
+        paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+    }
+
+    wallet := &AccountWallet{
+        WalletId: bringyour.NewId(),
+        NetworkId: destinationNetworkId,
+        WalletType: WalletTypeCircleUserControlled,
+        Blockchain: "matic",
+        WalletAddress: "0x1234567890",
+        DefaultTokenType: "usdc",
+    }
+    CreateAccountWallet(ctx, wallet)
+
+    SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+    plan := PlanPayments(ctx)
+
+    bonusAmountUsd := 5.00
+    bonusAmount := UsdToNanoCents(bonusAmountUsd)
+
+    paymentMap := make(map[bringyour.Id]NanoCents)
+
+    assert.NotEqual(t, len(plan.WalletPayments), 0)
+
+    for _, payment := range plan.WalletPayments {
+        paymentMap[payment.PaymentId] = payment.Payout
+    }
+
+    err = PayoutPlanAppyBonus(ctx, plan.PaymentPlanId, bonusAmount)
+    assert.Equal(t, err, nil)
+
+    payments := GetPendingPaymentsInPlan(ctx, plan.PaymentPlanId)
+    assert.Equal(t, len(payments), len(paymentMap))
+
+    for _, payment := range payments {
+        assert.Equal(t, payment.Payout, paymentMap[payment.PaymentId] + bonusAmount)
+    }
+
+})})}

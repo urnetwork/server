@@ -1,16 +1,22 @@
 package model
 
 import (
-    "context"
-    // "time"
-    // "fmt"
-    // "math"
-    // "crypto/rand"
-    // "encoding/hex"
+	"context"
+	// "time"
+	// "fmt"
+	// "math"
+	// "crypto/rand"
+	// "encoding/hex"
 
-    "bringyour.com/bringyour"
-    // "bringyour.com/bringyour/session"
+	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour/session"
 )
+
+type CircleUC struct {
+    NetworkId       bringyour.Id `json:"network_id"`
+    UserId          bringyour.Id `json:"user_id"`
+    CircleUCUserId  bringyour.Id `json:"circle_uc_user_id"`
+}
 
 
 // this user id is what is used for the Circle api:
@@ -98,3 +104,30 @@ func SetCircleUserId(
     })
 }
 
+func GetCircleUCUsers(ctx context.Context) (users []CircleUC) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, txErr := tx.Query(
+            ctx,
+            `
+                SELECT
+                    *
+                FROM circle_uc
+            `,
+        )
+
+        bringyour.WithPgResult(result, txErr, func() {
+
+            for result.Next() {
+                user := CircleUC{}
+                bringyour.Raise(result.Scan(
+                    &user.NetworkId,
+                    &user.UserId,
+                    &user.CircleUCUserId,
+                ))
+                users = append(users, user)
+            }
+        })
+    })
+
+    return users
+}

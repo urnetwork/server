@@ -1,25 +1,109 @@
+<div
+  style="
+    font-family: sans-serif;
+    font-size: 12pt;
+    font-weight: 100;
+    background-color: rgb(255, 255, 255);
+    color: rgb(0, 0, 0);
+    padding: 24px;
+  "
+>
+  <div style="margin-left: auto; margin-right: auto; max-width: 640px">
+    <div
+      style="
+        margin-top: 48px;
+        margin-bottom: 48px;
+        font-family: monospace;
+        font-size: 24pt;
+        color: rgb(189, 186, 162);
+        letter-spacing: 2px;
+        text-shadow: 1px 1px 1px rgb(64, 64, 64);
+        -webkit-background-clip: text;
+        -moz-background-clip: text;
+        user-select: all;
+        -moz-user-select: all;
+        -webkit-user-select: all;
+      "
+    >
+      You earned {{.AmountUsd}} USDC
+    </div>
 
-<div style="font-family: sans-serif; font-size: 12pt; font-weight: 100; background-color: rgb(255, 255, 255); color: rgb(0, 0, 0); padding: 24px;">
+    <div style="margin-top: 24px">
+      You just got paid {{.AmountUsd}} USDC for providing services up to
+      {{.CreatedAt}} UTC.
+    </div>
 
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px;">
+    <div style="margin-top: 24px">
+      All associated contracts will be automatically deleted in 7 days to
+      preseve anonymity of the network. If there appears to be an error, please
+      contact support@bringyour.com immediately.
+    </div>
 
-    <div style="margin-top: 48px; margin-bottom: 48px; font-family: monospace; font-size: 24pt; color: rgb(189, 186, 162); letter-spacing: 2px; text-shadow: 1px 1px 1px rgb(64, 64, 64); -webkit-background-clip: text; -moz-background-clip: text; user-select: all; -moz-user-select: all; -webkit-user-select: all;">You earned 0.12 USDC</div>
-
-    <div style="margin-top: 24px">You just got paid 0.1 USDC for providing services up to XX/XX 12:00 UTC.</div>
-
-    <div style="margin-top: 24px">All associated contracts will be automatically deleted in 7 days to preseve anonymity of the network. If there appears to be an error, please contact support@bringyour.com immediately. </div>
-
-
-    <div style="margin-top: 24px">Let's get more traffic! More traffic means bigger payouts. Let your friends know that BringYour is the best way to access local content and preserve privacy. Share referral link <a href="">https://bringyour.com/?bonus=ABCDEF</a> to give them 3 free months of Premium access, and you earn a percentage of all referred earnings. It's cheaper, better, and more private than the rest so why not switch? See our <a href="">economic model</a> for more details.</div>
+    <div style="margin-top: 24px">
+      Let's get more traffic! More traffic means bigger payouts. 
+      Let your friends know that BringYour is the best way to access local content and preserve privacy. 
+      Share referral link
+      <a href="https://bringyour.com/?join={{.ReferralCode}}" target="_blank"
+        >https://bringyour.com/?join={{.ReferralCode}}</a
+      >
+      to give them 3 free months of Premium access, and you earn a percentage of all referred earnings. 
+      It's cheaper, better, and more private than the rest so why not switch? 
+      See our <a href="">economic model</a> for more details.
+    </div>
 
     <div style="margin-top: 24px">Onward and upward!</div>
 
-    <div style="margin-top: 24px; border: 1px dotted; background: rgba(255, 253, 208, 0.5); padding: 24px; font-family: monospace; font-size: 10pt; font-weight: 100;">
-      <p>BringYour Payment ID XXXX<p>0.1 USDC sent on Polygon from XXXX to XXXXXX in transaction <a href="https://polygonscan.com/tx/0xc8e2a45453b2507bb391c30b4978c1d5decd4f46ed08e14ba2de218587595f31">0xc8e2a45453b2507bb391c30b4978c1d5decd4f46ed08e14ba2de218587595f31</a></div>
-
+    <div
+      style="
+        margin-top: 24px;
+        border: 1px dotted;
+        background: rgba(255, 253, 208, 0.5);
+        padding: 24px;
+        font-family: monospace;
+        font-size: 10pt;
+        font-weight: 100;
+      "
+    >
+      <p>BringYour Payment ID {{.PaymentId}}</p>
+      <p>
+        {{.AmountUsd}} sent on {{.Blockchain}} to {{.DestinationAddress}} in
+        transaction
+        <a href="{{.ExplorerBasePath}}/{{.TxHash}}" target="_blank"
+          >{{.TxHash}}</a
+        >
+      </p>
+    </div>
   </div>
 
-
-
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px; padding-top: 48px; padding-bottom: 48px;"><div style="display: inline-block; width: 120px; vertical-align: middle;"><a href="https://bringyour.com"><img alt="BringYour wordmark" style="width: 120px;" src="https://bringyour.com/res/emails/bringyour-wordmark-bg-240.jpg"></a></div><div style="display: inline-block; max-width: 504px; padding: 8px; font-size: 8pt; font-weight: 100; vertical-align: middle;">Copyright {{.CopyrightYear}} BringYour, Inc.<br>2261 Market Street #5245, San Francisco, CA 94114, United States</div></div>
+  <div
+    style="
+      margin-left: auto;
+      margin-right: auto;
+      max-width: 640px;
+      padding-top: 48px;
+      padding-bottom: 48px;
+    "
+  >
+    <div style="display: inline-block; width: 120px; vertical-align: middle">
+      <a href="https://bringyour.com"
+        ><img
+          alt="BringYour wordmark"
+          style="width: 120px"
+          src="https://bringyour.com/res/emails/bringyour-wordmark-bg-240.jpg"
+      /></a>
+    </div>
+    <div
+      style="
+        display: inline-block;
+        max-width: 504px;
+        padding: 8px;
+        font-size: 8pt;
+        font-weight: 100;
+        vertical-align: middle;
+      "
+    >
+      Copyright {{.CopyrightYear}} BringYour, Inc.<br />2261 Market Street
+      #5245, San Francisco, CA 94114, United States
+    </div>
+  </div>
 </div>

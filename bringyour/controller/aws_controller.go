@@ -1,29 +1,30 @@
 package controller
 
-
 import (
-    texttemplate "text/template"
-    htmltemplate "html/template"
-    // "net/url"
-    "fmt"
-    "embed"
-    "strings"
-    // "time"
+	htmltemplate "html/template"
+	texttemplate "text/template"
+	"time"
 
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/ses"
-    "github.com/aws/aws-sdk-go/service/sns"
-    // "github.com/aws/aws-sdk-go/aws/awserr"
+	// "net/url"
+	"embed"
+	"fmt"
+	"strings"
+
+	// "time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ses"
+	"github.com/aws/aws-sdk-go/service/sns"
+
+	// "github.com/aws/aws-sdk-go/aws/awserr"
 
 	"bringyour.com/bringyour"
-    "bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/model"
 )
-
 
 // IMPORTANT this controller is for account messages only
 // marketing messages are sent via a separate channel
-
 
 //go:embed email_templates/*
 var emailTemplates embed.FS
@@ -149,8 +150,52 @@ func (self *SubscriptionEndedTemplate) Name() string {
     return "subscription_ended"
 }
 
+type SendPaymentTemplate struct {
+    PaymentId bringyour.Id
+    TxHash string
+    ExplorerBasePath string
+    ReferralCode string
+    Blockchain string
+    DestinationAddress string
+    AmountUsd string
+    PaymentCreatedAt time.Time
+    BaseTemplate
+}
 
-func SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+func (self *SendPaymentTemplate) Name() string {
+    return "subscription_send_payment"
+}
+
+func (self *SendPaymentTemplate) CreatedAt() string {
+    return self.PaymentCreatedAt.Format("1/2 15:04")
+}
+
+func (self *SendPaymentTemplate) Funcs(funcs texttemplate.FuncMap) {
+    self.BaseTemplate.Funcs(funcs)
+    funcs["CreatedAt"] = self.CreatedAt
+}
+
+
+// fixme - we can clean this up so all public functions are in the interface
+type MessageSender interface {
+    SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error
+}
+
+var messageSenderInstance MessageSender = &AWSMessageSender{}
+
+func GetAWSMessageSender() MessageSender {
+    return messageSenderInstance
+}
+
+// Used for testing
+func SetMessageSender(messageSender MessageSender) {
+    messageSenderInstance = messageSender
+}
+
+type AWSMessageSender struct {}
+
+func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 
     switch userAuthType {
