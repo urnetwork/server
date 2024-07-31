@@ -2,12 +2,12 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
-	"strings"
-	"time"
+	"fmt"
 	"math"
 	"sort"
+	"strings"
+	"time"
 
 	"golang.org/x/exp/maps"
 
@@ -15,103 +15,99 @@ import (
 )
 
 type AuditEventType = string
+
 const (
-	AuditEventTypeProviderOffline AuditEventType = "provider_offline"
-	AuditEventTypeProviderOnlineSuperspeed AuditEventType = "provider_online_superspeed"
+	AuditEventTypeProviderOffline             AuditEventType = "provider_offline"
+	AuditEventTypeProviderOnlineSuperspeed    AuditEventType = "provider_online_superspeed"
 	AuditEventTypeProviderOnlineNotSuperspeed AuditEventType = "provider_online_not_superspeed"
-	AuditEventTypeExtenderOffline AuditEventType = "extender_offline"
-	AuditEventTypeExtenderOnlineSuperspeed AuditEventType = "extender_online_superspeed"
+	AuditEventTypeExtenderOffline             AuditEventType = "extender_offline"
+	AuditEventTypeExtenderOnlineSuperspeed    AuditEventType = "extender_online_superspeed"
 	AuditEventTypeExtenderOnlineNotSuperspeed AuditEventType = "extender_online_not_superspeed"
-	AuditEventTypeNetworkCreated AuditEventType = "network_created"
-	AuditEventTypeNetworkDeleted AuditEventType = "network_deleted"
-	AuditEventTypeDeviceAdded AuditEventType = "device_added"
-	AuditEventTypeDeviceRemoved AuditEventType = "device_removed"
-	AuditEventTypeContractClosedSuccess AuditEventType = "contract_closed_success"
+	AuditEventTypeNetworkCreated              AuditEventType = "network_created"
+	AuditEventTypeNetworkDeleted              AuditEventType = "network_deleted"
+	AuditEventTypeDeviceAdded                 AuditEventType = "device_added"
+	AuditEventTypeDeviceRemoved               AuditEventType = "device_removed"
+	AuditEventTypeContractClosedSuccess       AuditEventType = "contract_closed_success"
 )
 
-
 type Stats struct {
-	Lookback int `json:"lookback"`
+	Lookback    int   `json:"lookback"`
 	CreatedTime int64 `json:"created_time"`
 
-	AllTransferData map[string]int `json:"all_transfer_data"`
-    AllTransferSummary int `json:"all_transfer_summary"`
-    AllTransferSummaryRate int `json:"all_transfer_summary_rate"`
+	AllTransferData        map[string]int `json:"all_transfer_data"`
+	AllTransferSummary     int            `json:"all_transfer_summary"`
+	AllTransferSummaryRate int            `json:"all_transfer_summary_rate"`
 
-    AllPacketsData map[string]int `json:"all_packets_data"`
-    AllPacketsSummary int `json:"all_packets_summary"`
-    AllPacketsSummaryRate int `json:"all_packets_summary_rate"`
+	AllPacketsData        map[string]int `json:"all_packets_data"`
+	AllPacketsSummary     int            `json:"all_packets_summary"`
+	AllPacketsSummaryRate int            `json:"all_packets_summary_rate"`
 
-    ProvidersData map[string]int `json:"providers_data"`
-    ProvidersSuperspeedData map[string]int `json:"providers_superspeed_data"`
-    ProvidersSummary int `json:"providers_summary"`
-    ProvidersSummarySuperspeed int `json:"providers_summary_superspeed"`
+	ProvidersData              map[string]int `json:"providers_data"`
+	ProvidersSuperspeedData    map[string]int `json:"providers_superspeed_data"`
+	ProvidersSummary           int            `json:"providers_summary"`
+	ProvidersSummarySuperspeed int            `json:"providers_summary_superspeed"`
 
-    CountriesData map[string]int `json:"countries_data"`
-    CountriesSummary int `json:"countries_summary"`
+	CountriesData    map[string]int `json:"countries_data"`
+	CountriesSummary int            `json:"countries_summary"`
 
-    RegionsData map[string]int `json:"regions_data"`
-    RegionsSummary int `json:"regions_summary"`
+	RegionsData    map[string]int `json:"regions_data"`
+	RegionsSummary int            `json:"regions_summary"`
 
-    CitiesData map[string]int `json:"cities_data"`
-    CitiesSummary int `json:"cities_summary"`
+	CitiesData    map[string]int `json:"cities_data"`
+	CitiesSummary int            `json:"cities_summary"`
 
-    ExtenderTransferData map[string]int `json:"extender_transfer_data"`
-    ExtenderTransferSummary int `json:"extender_transfer_summary"`
-    ExtenderTransferSummaryRate int `json:"extender_transfer_summary_rate"`
+	ExtenderTransferData        map[string]int `json:"extender_transfer_data"`
+	ExtenderTransferSummary     int            `json:"extender_transfer_summary"`
+	ExtenderTransferSummaryRate int            `json:"extender_transfer_summary_rate"`
 
-    ExtendersData map[string]int `json:"extenders_data"`
-    ExtendersSuperspeedData map[string]int `json:"extenders_superspeed_data"`
-    ExtendersSummary int `json:"extenders_summary"`
-    ExtendersSummarySuperspeed int `json:"extenders_summary_superspeed"`
+	ExtendersData              map[string]int `json:"extenders_data"`
+	ExtendersSuperspeedData    map[string]int `json:"extenders_superspeed_data"`
+	ExtendersSummary           int            `json:"extenders_summary"`
+	ExtendersSummarySuperspeed int            `json:"extenders_summary_superspeed"`
 
-    NetworksData map[string]int `json:"networks_data"`
-    NetworksSummary int `json:"networks_summary"`
+	NetworksData    map[string]int `json:"networks_data"`
+	NetworksSummary int            `json:"networks_summary"`
 
-    DevicesData map[string]int `json:"devices_data"`
-    DevicesSummary int `json:"devices_summary"`
+	DevicesData    map[string]int `json:"devices_data"`
+	DevicesSummary int            `json:"devices_summary"`
 
-    // internal data that is not exported to json
+	// internal data that is not exported to json
 
-    // deviceId -> *ProviderState
-    activeProviders map[bringyour.Id]*ProviderState
-    // extenderId -> *ExtenderState
-    activeExtenders map[bringyour.Id]*ExtenderState
-    // networkId -> bool
-    activeNetworks map[bringyour.Id]bool
-    // deviceId -> bool
-    activeDevices map[bringyour.Id]bool
+	// deviceId -> *ProviderState
+	activeProviders map[bringyour.Id]*ProviderState
+	// extenderId -> *ExtenderState
+	activeExtenders map[bringyour.Id]*ExtenderState
+	// networkId -> bool
+	activeNetworks map[bringyour.Id]bool
+	// deviceId -> bool
+	activeDevices map[bringyour.Id]bool
 }
-
 
 type ProviderState struct {
-	networkId bringyour.Id
-	superspeed bool
+	networkId   bringyour.Id
+	superspeed  bool
 	countryName string
-	regionName string
-	cityName string
+	regionName  string
+	cityName    string
 }
-
 
 type ExtenderState struct {
-	networkId bringyour.Id
+	networkId  bringyour.Id
 	superspeed bool
 }
-
 
 // 90 is the standard lookback used in the api
 func ComputeStats90(ctx context.Context) *Stats {
 	return ComputeStats(ctx, 90)
 }
 
-
 func ComputeStats(ctx context.Context, lookback int) *Stats {
 	stats := &Stats{
-		Lookback: lookback,
+		Lookback:    lookback,
 		CreatedTime: bringyour.NowUtc().UnixMilli(),
 	}
 
-	bringyour.Db(ctx, func (conn bringyour.PgConn) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		bringyour.Logger().Printf("ComputeStats90 computeStatsProvider\n")
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
@@ -144,9 +140,8 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 	return stats
 }
 
-
 func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -193,10 +188,10 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
-			"eventTypeProviderOffline": AuditEventTypeProviderOffline,
-			"eventTypeProviderOnlineSuperspeed": AuditEventTypeProviderOnlineSuperspeed,
+			"startDay":                             startDay,
+			"lookback":                             stats.Lookback,
+			"eventTypeProviderOffline":             AuditEventTypeProviderOffline,
+			"eventTypeProviderOnlineSuperspeed":    AuditEventTypeProviderOnlineSuperspeed,
 			"eventTypeProviderOnlineNotSuperspeed": AuditEventTypeProviderOnlineNotSuperspeed,
 		},
 	)
@@ -259,20 +254,20 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 				delete(activeProviders, deviceId)
 			case AuditEventTypeProviderOnlineSuperspeed:
 				providerState := &ProviderState{
-					networkId: networkId,
-					superspeed: true,
+					networkId:   networkId,
+					superspeed:  true,
 					countryName: countryName,
-					regionName: regionName,
-					cityName: cityName,
+					regionName:  regionName,
+					cityName:    cityName,
 				}
 				activeProviders[deviceId] = providerState
 			case AuditEventTypeProviderOnlineNotSuperspeed:
 				providerState := &ProviderState{
-					networkId: networkId,
-					superspeed: false,
+					networkId:   networkId,
+					superspeed:  false,
 					countryName: countryName,
-					regionName: regionName,
-					cityName: cityName,
+					regionName:  regionName,
+					cityName:    cityName,
 				}
 				activeProviders[deviceId] = providerState
 			}
@@ -284,10 +279,10 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			exportActive()
 		}
 
-	    stats.ProvidersData = providersData
-	    stats.ProvidersSuperspeedData = providersSuperspeedData
-	    stats.ProvidersSummary = summary(providersData)
-	    stats.ProvidersSummarySuperspeed = summary(providersSuperspeedData)
+		stats.ProvidersData = providersData
+		stats.ProvidersSuperspeedData = providersSuperspeedData
+		stats.ProvidersSummary = summary(providersData)
+		stats.ProvidersSummarySuperspeed = summary(providersSuperspeedData)
 		stats.CountriesData = countriesData
 		stats.CountriesSummary = summary(countriesData)
 		stats.RegionsData = regionsData
@@ -299,9 +294,8 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 	})
 }
 
-
 func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -345,10 +339,10 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
-			"eventTypeExtenderOffline": AuditEventTypeExtenderOffline,
-			"eventTypeExtenderOnlineSuperspeed": AuditEventTypeExtenderOnlineSuperspeed,
+			"startDay":                             startDay,
+			"lookback":                             stats.Lookback,
+			"eventTypeExtenderOffline":             AuditEventTypeExtenderOffline,
+			"eventTypeExtenderOnlineSuperspeed":    AuditEventTypeExtenderOnlineSuperspeed,
 			"eventTypeExtenderOnlineNotSuperspeed": AuditEventTypeExtenderOnlineNotSuperspeed,
 		},
 	)
@@ -393,13 +387,13 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgCo
 				delete(activeExtenders, extenderId)
 			case AuditEventTypeExtenderOnlineSuperspeed:
 				providerState := &ExtenderState{
-					networkId: networkId,
+					networkId:  networkId,
 					superspeed: true,
 				}
 				activeExtenders[extenderId] = providerState
 			case AuditEventTypeProviderOnlineNotSuperspeed:
 				providerState := &ExtenderState{
-					networkId: networkId,
+					networkId:  networkId,
 					superspeed: false,
 				}
 				activeExtenders[extenderId] = providerState
@@ -411,18 +405,17 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			exportActive()
 		}
 
-	    stats.ExtendersData = extendersData
-	    stats.ExtendersSuperspeedData = extendersSuperspeedData
-	    stats.ExtendersSummary = summary(extendersData)
-	    stats.ExtendersSummarySuperspeed = summary(extendersSuperspeedData)
+		stats.ExtendersData = extendersData
+		stats.ExtendersSuperspeedData = extendersSuperspeedData
+		stats.ExtendersSummary = summary(extendersData)
+		stats.ExtendersSummarySuperspeed = summary(extendersSuperspeedData)
 
-	    stats.activeExtenders = activeExtenders
+		stats.activeExtenders = activeExtenders
 	})
 }
 
-
 func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -462,8 +455,8 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgCon
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
+			"startDay":                startDay,
+			"lookback":                stats.Lookback,
 			"eventTypeNetworkCreated": AuditEventTypeNetworkCreated,
 			"eventTypeNetworkDeleted": AuditEventTypeNetworkDeleted,
 		},
@@ -507,16 +500,15 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn bringyour.PgCon
 			exportActive()
 		}
 
-	    stats.NetworksData = networksData
-	    stats.NetworksSummary = summary(networksData)
+		stats.NetworksData = networksData
+		stats.NetworksSummary = summary(networksData)
 
-	    stats.activeNetworks = activeNetworks
+		stats.activeNetworks = activeNetworks
 	})
 }
 
-
 func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -557,9 +549,9 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
-			"eventTypeDeviceAdded": AuditEventTypeDeviceAdded,
+			"startDay":               startDay,
+			"lookback":               stats.Lookback,
+			"eventTypeDeviceAdded":   AuditEventTypeDeviceAdded,
 			"eventTypeDeviceRemoved": AuditEventTypeDeviceRemoved,
 		},
 	)
@@ -602,16 +594,15 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn bringyour.PgConn
 			exportActive()
 		}
 
-	    stats.DevicesData = devicesData
-	    stats.DevicesSummary = summary(devicesData)
+		stats.DevicesData = devicesData
+		stats.DevicesSummary = summary(devicesData)
 
-	    stats.activeDevices = activeDevices
+		stats.activeDevices = activeDevices
 	})
 }
 
-
 func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -638,8 +629,8 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
+			"startDay":                       startDay,
+			"lookback":                       stats.Lookback,
 			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
 		},
 	)
@@ -667,18 +658,17 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn bringyour.PgCo
 			allTransferData[activeDay] = 0
 		}
 
-    	allTransferSummary := summary(allTransferData)
-	    stats.AllTransferData = allTransferData
-	    // TiB
-	    stats.AllTransferSummary = int(math.Round(float64(allTransferSummary) / float64(1024 * 1024)))
-	    // bytes to average gbps
-	    stats.AllTransferSummaryRate = int(math.Round(float64(8 * allTransferSummary) / float64(1024 * 1024 * 60 * 60 * 24)))
+		allTransferSummary := summary(allTransferData)
+		stats.AllTransferData = allTransferData
+		// TiB
+		stats.AllTransferSummary = int(math.Round(float64(allTransferSummary) / float64(1024*1024)))
+		// bytes to average gbps
+		stats.AllTransferSummaryRate = int(math.Round(float64(8*allTransferSummary) / float64(1024*1024*60*60*24)))
 	})
 }
 
-
 func computeStatsPackets(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
-    startDay, endDay := dayRange(stats.Lookback)
+	startDay, endDay := dayRange(stats.Lookback)
 	result, err := conn.Query(
 		ctx,
 		`
@@ -705,8 +695,8 @@ func computeStatsPackets(ctx context.Context, stats *Stats, conn bringyour.PgCon
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
+			"startDay":                       startDay,
+			"lookback":                       stats.Lookback,
 			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
 		},
 	)
@@ -734,15 +724,14 @@ func computeStatsPackets(ctx context.Context, stats *Stats, conn bringyour.PgCon
 			allPacketsData[activeDay] = 0
 		}
 
-    	allPacketsSummary := summary(allPacketsData)
-	    stats.AllPacketsData = allPacketsData
-	    // GiB
-	    stats.AllPacketsSummary = allPacketsSummary
-	    // packets to average pps
-	    stats.AllTransferSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60 * 60 * 24)))
+		allPacketsSummary := summary(allPacketsData)
+		stats.AllPacketsData = allPacketsData
+		// GiB
+		stats.AllPacketsSummary = allPacketsSummary
+		// packets to average pps
+		stats.AllTransferSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60*60*24)))
 	})
 }
-
 
 func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringyour.PgConn) {
 	startDay, endDay := dayRange(stats.Lookback)
@@ -774,8 +763,8 @@ func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringy
 			ORDER BY day ASC
 		`,
 		bringyour.PgNamedArgs{
-			"startDay": startDay,
-			"lookback": stats.Lookback,
+			"startDay":                       startDay,
+			"lookback":                       stats.Lookback,
 			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
 		},
 	)
@@ -803,21 +792,20 @@ func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn bringy
 			extenderTransferData[activeDay] = 0
 		}
 
-    	extenderTransferSummary := summary(extenderTransferData)
-	    stats.ExtenderTransferData = extenderTransferData
-	    // GiB
-	    stats.ExtenderTransferSummary = int(math.Round(float64(extenderTransferSummary) / float64(1024 * 1024)))
-	    // bytes to average gbps
-	    stats.ExtenderTransferSummaryRate = int(math.Round(float64(8 * extenderTransferSummary) / float64(1024 * 1024 * 60 * 60 * 24)))
+		extenderTransferSummary := summary(extenderTransferData)
+		stats.ExtenderTransferData = extenderTransferData
+		// GiB
+		stats.ExtenderTransferSummary = int(math.Round(float64(extenderTransferSummary) / float64(1024*1024)))
+		// bytes to average gbps
+		stats.ExtenderTransferSummaryRate = int(math.Round(float64(8*extenderTransferSummary) / float64(1024*1024*60*60*24)))
 	})
 }
-
 
 func summary(data map[string]int) int {
 	k := 3
 	days := maps.Keys(data)
 	sort.Strings(days)
-	summaryDays := days[max(0, len(days) - k):]
+	summaryDays := days[max(0, len(days)-k):]
 	maxValue := 0
 	for i := 0; i < len(summaryDays); i += 1 {
 		day := summaryDays[i]
@@ -826,17 +814,15 @@ func summary(data map[string]int) int {
 	return maxValue
 }
 
-
 func dayRange(lookback int) (string, string) {
 	// this should be running in the same tz as postgres
 	end := bringyour.NowUtc().Local()
-	d, err := time.ParseDuration(fmt.Sprintf("-%dh", lookback * 24))
+	d, err := time.ParseDuration(fmt.Sprintf("-%dh", lookback*24))
 	bringyour.Raise(err)
 	start := end.Add(d)
 
 	return start.Format("2006-01-02"), end.Format("2006-01-02")
 }
-
 
 func nextDay(day string) string {
 	start, err := time.Parse("2006-01-02", day)
@@ -846,7 +832,6 @@ func nextDay(day string) string {
 	end := start.Add(d)
 	return end.Format("2006-01-02")
 }
-
 
 func ExportStats(ctx context.Context, stats *Stats) {
 	statsJson, err := json.Marshal(stats)
@@ -862,7 +847,6 @@ func ExportStats(ctx context.Context, stats *Stats) {
 		bringyour.Raise(err)
 	})
 }
-
 
 func GetExportedStatsJson(ctx context.Context, lookback int) *string {
 	var statsJson *string
@@ -880,7 +864,6 @@ func GetExportedStatsJson(ctx context.Context, lookback int) *string {
 	return statsJson
 }
 
-
 func GetExportedStats(ctx context.Context, lookback int) *Stats {
 	statsJson := GetExportedStatsJson(ctx, lookback)
 	if statsJson == nil {
@@ -889,30 +872,28 @@ func GetExportedStats(ctx context.Context, lookback int) *Stats {
 
 	var stats Stats
 	err := json.NewDecoder(strings.NewReader(*statsJson)).Decode(&stats)
-    if err != nil {
-    	// junk stats, ignore
-        return nil
-    }
-    return &stats
+	if err != nil {
+		// junk stats, ignore
+		return nil
+	}
+	return &stats
 }
-
 
 type AuditEvent struct {
-	EventId bringyour.Id
-	EventTime time.Time
-	EventType AuditEventType
+	EventId      bringyour.Id
+	EventTime    time.Time
+	EventType    AuditEventType
 	EventDetails *string
 }
-
 
 type AuditProviderEvent struct {
 	AuditEvent
 
-	NetworkId bringyour.Id
-	DeviceId bringyour.Id
+	NetworkId   bringyour.Id
+	DeviceId    bringyour.Id
 	CountryName string
-	RegionName string
-	CityName string
+	RegionName  string
+	CityName    string
 }
 
 func NewAuditProviderEvent(eventType AuditEventType) *AuditProviderEvent {
@@ -920,18 +901,17 @@ func NewAuditProviderEvent(eventType AuditEventType) *AuditProviderEvent {
 	eventTime := bringyour.NowUtc()
 	return &AuditProviderEvent{
 		AuditEvent: AuditEvent{
-			EventId: eventId,
+			EventId:   eventId,
 			EventTime: eventTime,
 			EventType: eventType,
 		},
 	}
 }
 
-
 type AuditExtenderEvent struct {
 	AuditEvent
 
-	NetworkId bringyour.Id
+	NetworkId  bringyour.Id
 	ExtenderId bringyour.Id
 }
 
@@ -940,13 +920,12 @@ func NewAuditExtenderEvent(eventType AuditEventType) *AuditExtenderEvent {
 	eventTime := bringyour.NowUtc()
 	return &AuditExtenderEvent{
 		AuditEvent: AuditEvent{
-			EventId: eventId,
+			EventId:   eventId,
 			EventTime: eventTime,
 			EventType: eventType,
 		},
 	}
 }
-
 
 type AuditNetworkEvent struct {
 	AuditEvent
@@ -959,19 +938,18 @@ func NewAuditNetworkEvent(eventType AuditEventType) *AuditNetworkEvent {
 	eventTime := bringyour.NowUtc()
 	return &AuditNetworkEvent{
 		AuditEvent: AuditEvent{
-			EventId: eventId,
+			EventId:   eventId,
 			EventTime: eventTime,
 			EventType: eventType,
 		},
 	}
 }
 
-
 type AuditDeviceEvent struct {
 	AuditEvent
 
 	NetworkId bringyour.Id
-	DeviceId bringyour.Id
+	DeviceId  bringyour.Id
 }
 
 func NewAuditDeviceEvent(eventType AuditEventType) *AuditDeviceEvent {
@@ -979,26 +957,25 @@ func NewAuditDeviceEvent(eventType AuditEventType) *AuditDeviceEvent {
 	eventTime := bringyour.NowUtc()
 	return &AuditDeviceEvent{
 		AuditEvent: AuditEvent{
-			EventId: eventId,
+			EventId:   eventId,
 			EventTime: eventTime,
 			EventType: eventType,
 		},
 	}
 }
 
-
 type AuditContractEvent struct {
 	AuditEvent
 
-	ContractId bringyour.Id
-	ClientNetworkId bringyour.Id
-	ClientDeviceId bringyour.Id
+	ContractId        bringyour.Id
+	ClientNetworkId   bringyour.Id
+	ClientDeviceId    bringyour.Id
 	ProviderNetworkId bringyour.Id
-	ProviderDeviceId bringyour.Id
+	ProviderDeviceId  bringyour.Id
 	ExtenderNetworkId *bringyour.Id
-	ExtenderId *bringyour.Id
-	TransferBytes int64
-	TransferPackets int64
+	ExtenderId        *bringyour.Id
+	TransferBytes     int64
+	TransferPackets   int64
 }
 
 func NewAuditContractEvent(eventType AuditEventType) *AuditContractEvent {
@@ -1006,15 +983,14 @@ func NewAuditContractEvent(eventType AuditEventType) *AuditContractEvent {
 	eventTime := bringyour.NowUtc()
 	return &AuditContractEvent{
 		AuditEvent: AuditEvent{
-			EventId: eventId,
+			EventId:   eventId,
 			EventTime: eventTime,
 			EventType: eventType,
 		},
-		TransferBytes: 0,
+		TransferBytes:   0,
 		TransferPackets: 0,
 	}
 }
-
 
 func AddAuditEvent(ctx context.Context, event interface{}) {
 	switch v := event.(type) {
@@ -1033,9 +1009,8 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 	}
 }
 
-
 func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1067,9 +1042,8 @@ func AddAuditProviderEvent(ctx context.Context, event *AuditProviderEvent) {
 	})
 }
 
-
 func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1095,9 +1069,8 @@ func AddAuditExtenderEvent(ctx context.Context, event *AuditExtenderEvent) {
 	})
 }
 
-
 func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1121,9 +1094,8 @@ func AddAuditNetworkEvent(ctx context.Context, event *AuditNetworkEvent) {
 	})
 }
 
-
 func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`
@@ -1149,9 +1121,8 @@ func AddAuditDeviceEvent(ctx context.Context, event *AuditDeviceEvent) {
 	})
 }
 
-
 func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
-	bringyour.Tx(ctx, func (tx bringyour.PgTx) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		_, err := tx.Exec(
 			ctx,
 			`

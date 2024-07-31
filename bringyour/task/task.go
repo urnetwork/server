@@ -8,28 +8,26 @@ import (
 	// "encoding/base64"
 	"encoding/json"
 	"errors"
-	"time"
-	"runtime"
-	"reflect"
 	"fmt"
 	mathrand "math/rand"
+	"reflect"
+	"runtime"
 	"slices"
+	"time"
 
 	"golang.org/x/exp/maps"
 
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour"
 )
-
-
 
 // the task system captures work that needs to be done to advance the platform
 // tasks have work and post-work that can atomically schedule new tasks
 // important properties:
 // - tasks are run as singletons, where a single worker will run a single task at a time.
 //   this simplifies writing tasks so they do not have to assume potentially miltiple executions,
-//   although in practice the implementation should still guard against 
+//   although in practice the implementation should still guard against
 //   unrecoverable outcomes of parallel execution.
 // - break work into small chunks so that code can be continuously deployed without
 //   system interruption.
@@ -37,37 +35,31 @@ import (
 // - post tasks are not lost
 // - errors are surfaced
 
-
 // pattern for repeating tasks. Define three functions,
 // ScheduleDo(schedule, ...)
 // Do
 // DoPost, calls ScheduleDo
 
-
-
 // IMPORTANT: this is hard coded into the `db_migrations`
 // IMPORTANT: if you change this number, you must also change the schema
 const BlockSizeSeconds = 300
-
 
 var DefaultMaxTime = 120 * time.Second
 var ReleaseTimeout = 30 * time.Second
 var RescheduleTimeout = 60 * time.Second
 
-
 type TaskPriority = int
+
 const (
 	TaskPriorityFastest TaskPriority = 0
 	TaskPrioritySlowest TaskPriority = 20
 )
 
+type TaskFunction[T any, R any] func(T, *session.ClientSession) (R, error)
 
+type TaskPostFunction[T any, R any] func(T, R, *session.ClientSession, bringyour.PgTx) error
 
-type TaskFunction[T any, R any] func(T, *session.ClientSession)(R, error)
-
-type TaskPostFunction[T any, R any] func(T, R, *session.ClientSession, bringyour.PgTx)(error)
-
-// type ScheduleTaskFunction[T any, R any] func(TaskFunction[T, R], T, *session.ClientSession, ...any)  
+// type ScheduleTaskFunction[T any, R any] func(TaskFunction[T, R], T, *session.ClientSession, ...any)
 
 type RunAtOption struct {
 	At time.Time
@@ -106,7 +98,6 @@ type RunMaxTimeOption struct {
 	MaxTime time.Duration
 }
 
-
 func ScheduleTask[T any, R any](
 	taskFunction TaskFunction[T, R],
 	args T,
@@ -117,7 +108,6 @@ func ScheduleTask[T any, R any](
 		ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
 	})
 }
-
 
 func ScheduleTaskInTx[T any, R any](
 	tx bringyour.PgTx,
@@ -217,16 +207,15 @@ func ScheduleTaskInTx[T any, R any](
 	))
 }
 
-
 func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Task {
 	if len(taskIds) == 0 {
 		return map[bringyour.Id]*Task{}
 	}
 
-    tasks := map[bringyour.Id]*Task{}
+	tasks := map[bringyour.Id]*Task{}
 
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	selectSql := `
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		selectSql := `
     		SELECT
 		    	pending_task.task_id,
 		        pending_task.function_name,
@@ -246,45 +235,45 @@ func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Ta
 		var result bringyour.PgResult
 		var err error
 
-    	if len(taskIds) < 32 {
-    		// `task_id IN (...)` is more efficient than a temp table for small lists
+		if len(taskIds) < 32 {
+			// `task_id IN (...)` is more efficient than a temp table for small lists
 
-	    	taskIdParams := []string{}
-	    	for i := 0; i < len(taskIds); i += 1 {
-	    		taskIdParams = append(taskIdParams, fmt.Sprintf("$%d", i + 1))
-	    	}
+			taskIdParams := []string{}
+			for i := 0; i < len(taskIds); i += 1 {
+				taskIdParams = append(taskIdParams, fmt.Sprintf("$%d", i+1))
+			}
 
-	    	taskIdValues := []any{}
-	    	for _, taskId := range taskIds {
-	    		taskIdValues = append(taskIdValues, taskId)
-	    	}
+			taskIdValues := []any{}
+			for _, taskId := range taskIds {
+				taskIdValues = append(taskIdValues, taskId)
+			}
 
-	    	result, err = tx.Query(
-	    		ctx,
-	    		selectSql + `
-				    WHERE task_id IN (` + strings.Join(taskIdParams, ",") + `)
+			result, err = tx.Query(
+				ctx,
+				selectSql+`
+				    WHERE task_id IN (`+strings.Join(taskIdParams, ",")+`)
 			    `,
-			    taskIdValues...,
-	    	)
-	    } else {
-	    	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
+				taskIdValues...,
+			)
+		} else {
+			bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
 
-	    	result, err = tx.Query(
-	    		ctx,
-	    		selectSql + `
+			result, err = tx.Query(
+				ctx,
+				selectSql+`
 				    INNER JOIN temp_task_ids ON temp_task_ids.task_id = pending_task.task_id
 			    `,
-	    	)
-	    }
+			)
+		}
 
-    	bringyour.WithPgResult(result, err, func() {
-    		for result.Next() {
-    			task := &Task{}
-    			var byJwtJson *string
-    			var runOnceKey *string
-    			var rescheduleError *string
-    			bringyour.Raise(result.Scan(
-    				&task.TaskId,
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				task := &Task{}
+				var byJwtJson *string
+				var runOnceKey *string
+				var rescheduleError *string
+				bringyour.Raise(result.Scan(
+					&task.TaskId,
 					&task.FunctionName,
 					&task.ArgsJson,
 					&task.ClientAddress,
@@ -296,33 +285,33 @@ func GetTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*Ta
 					&task.ClaimTime,
 					&task.ReleaseTime,
 					&rescheduleError,
-    			))
-    			if byJwtJson != nil {
-    				task.ClientByJwtJson = *byJwtJson
-    			}
-    			if runOnceKey != nil {
-    				task.RunOnceKey = *runOnceKey
-    			}
-    			if rescheduleError != nil {
-    				task.RescheduleError = *rescheduleError
-    			}
-    			tasks[task.TaskId] = task
-    		}
-    	})
-    })
+				))
+				if byJwtJson != nil {
+					task.ClientByJwtJson = *byJwtJson
+				}
+				if runOnceKey != nil {
+					task.RunOnceKey = *runOnceKey
+				}
+				if rescheduleError != nil {
+					task.RescheduleError = *rescheduleError
+				}
+				tasks[task.TaskId] = task
+			}
+		})
+	})
 
-    return tasks
+	return tasks
 }
 
 func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyour.Id]*FinishedTask {
 	finishedTasks := map[bringyour.Id]*FinishedTask{}
 
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.CreateTempTableInTx(ctx, tx, "temp_task_ids(task_id uuid)", taskIds...)
 
-    	result, err := tx.Query(
-    		ctx,
-    		`
+		result, err := tx.Query(
+			ctx,
+			`
 			    SELECT
 			    	finished_task.task_id,
 		            finished_task.function_name,
@@ -342,17 +331,17 @@ func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyou
 			    FROM finished_task
 			    INNER JOIN temp_task_ids ON temp_task_ids.task_id = finished_task.task_id
 		    `,
-    	)
+		)
 
-    	bringyour.WithPgResult(result, err, func() {
-    		for result.Next() {
-    			finishedTask := &FinishedTask{}
-    			var byJwtJson *string
-    			var runOnceKey *string
-    			var rescheduleError *string
-    			var postError *string
-    			bringyour.Raise(result.Scan(
-    				&finishedTask.TaskId,
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				finishedTask := &FinishedTask{}
+				var byJwtJson *string
+				var runOnceKey *string
+				var rescheduleError *string
+				var postError *string
+				bringyour.Raise(result.Scan(
+					&finishedTask.TaskId,
 					&finishedTask.FunctionName,
 					&finishedTask.ArgsJson,
 					&finishedTask.ClientAddress,
@@ -367,27 +356,26 @@ func GetFinishedTasks(ctx context.Context, taskIds ...bringyour.Id) map[bringyou
 					&finishedTask.ResultJson,
 					&postError,
 					&finishedTask.PostCompleted,
-    			))
-    			if byJwtJson != nil {
-    				finishedTask.ClientByJwtJson = *byJwtJson
-    			}
-    			if runOnceKey != nil {
-    				finishedTask.RunOnceKey = *runOnceKey
-    			}
-    			if rescheduleError != nil {
-    				finishedTask.RescheduleError = *rescheduleError
-    			}
-    			if postError != nil {
-    				finishedTask.PostError = *postError
-    			}
-    			finishedTasks[finishedTask.TaskId] = finishedTask
-    		}
-    	})
-    })
+				))
+				if byJwtJson != nil {
+					finishedTask.ClientByJwtJson = *byJwtJson
+				}
+				if runOnceKey != nil {
+					finishedTask.RunOnceKey = *runOnceKey
+				}
+				if rescheduleError != nil {
+					finishedTask.RescheduleError = *rescheduleError
+				}
+				if postError != nil {
+					finishedTask.PostError = *postError
+				}
+				finishedTasks[finishedTask.TaskId] = finishedTask
+			}
+		})
+	})
 
-    return finishedTasks
+	return finishedTasks
 }
-
 
 func ListPendingTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
@@ -414,7 +402,6 @@ func ListPendingTasks(ctx context.Context) []bringyour.Id {
 
 	return taskIds
 }
-
 
 // the task struct has the latest error attached to it
 func ListRescheduledTasks(ctx context.Context) []bringyour.Id {
@@ -443,7 +430,6 @@ func ListRescheduledTasks(ctx context.Context) []bringyour.Id {
 	return taskIds
 }
 
-
 func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
@@ -471,7 +457,6 @@ func ListClaimedTasks(ctx context.Context) []bringyour.Id {
 	return taskIds
 }
 
-
 func ListFinishedTasks(ctx context.Context) []bringyour.Id {
 	taskIds := []bringyour.Id{}
 
@@ -498,7 +483,6 @@ func ListFinishedTasks(ctx context.Context) []bringyour.Id {
 	return taskIds
 }
 
-
 // removed finished tasks older than `minTime` where the post was successfully run
 func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount int64) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
@@ -519,20 +503,19 @@ func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount in
 	return
 }
 
-
 type Task struct {
-	TaskId bringyour.Id
-	FunctionName string
-	ArgsJson string
-	ClientAddress string
-	ClientByJwtJson string
-	RunAt time.Time
-	RunOnceKey string
-	RunPriority int
+	TaskId            bringyour.Id
+	FunctionName      string
+	ArgsJson          string
+	ClientAddress     string
+	ClientByJwtJson   string
+	RunAt             time.Time
+	RunOnceKey        string
+	RunPriority       int
 	RunMaxTimeSeconds int
-	ClaimTime time.Time
-	ReleaseTime time.Time
-	RescheduleError string
+	ClaimTime         time.Time
+	ReleaseTime       time.Time
+	RescheduleError   string
 }
 
 func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, error) {
@@ -554,23 +537,22 @@ func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, er
 	return clientSession, nil
 }
 
-
 type FinishedTask struct {
-	TaskId bringyour.Id
-	FunctionName string
-	ArgsJson string
-	ClientAddress string
-	ClientByJwtJson string
-	RunAt time.Time
-	RunOnceKey string
-	RunPriority int
+	TaskId            bringyour.Id
+	FunctionName      string
+	ArgsJson          string
+	ClientAddress     string
+	ClientByJwtJson   string
+	RunAt             time.Time
+	RunOnceKey        string
+	RunPriority       int
 	RunMaxTimeSeconds int
-	RunStartTime time.Time
-	RunEndTime time.Time
-	RescheduleError string
-	ResultJson string
-	PostError string
-	PostCompleted bool
+	RunStartTime      time.Time
+	RunEndTime        time.Time
+	RescheduleError   string
+	ResultJson        string
+	PostError         string
+	PostCompleted     bool
 }
 
 func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSession, error) {
@@ -592,23 +574,19 @@ func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSes
 	return clientSession, nil
 }
 
-
-
-
 type Target interface {
 	TargetFunctionName() string
 	// TargetFunction() TaskFunction[T, R]
 	// PostFunction() TaskPostFunction[T, R]
 	AlternateFunctionNames() []string
-	Run(context.Context, *Task)(any, func(bringyour.PgTx)(error), error)
-	RunPost(context.Context, *FinishedTask, bringyour.PgTx)(error)
+	Run(context.Context, *Task) (any, func(bringyour.PgTx) error, error)
+	RunPost(context.Context, *FinishedTask, bringyour.PgTx) error
 }
 
-
 type TaskTarget[T any, R any] struct {
-	targetFunctionName string
-	targetFunction TaskFunction[T, R]
-	postFunction TaskPostFunction[T, R]
+	targetFunctionName     string
+	targetFunction         TaskFunction[T, R]
+	postFunction           TaskPostFunction[T, R]
 	alternateFunctionNames []string
 }
 
@@ -617,8 +595,8 @@ func NewTaskTarget[T any, R any](
 	alternateFunctionNames ...string,
 ) *TaskTarget[T, R] {
 	return &TaskTarget[T, R]{
-		targetFunctionName: functionName(targetFunction),
-		targetFunction: targetFunction,
+		targetFunctionName:     functionName(targetFunction),
+		targetFunction:         targetFunction,
 		alternateFunctionNames: alternateFunctionNames,
 	}
 }
@@ -629,9 +607,9 @@ func NewTaskTargetWithPost[T any, R any](
 	alternateFunctionNames ...string,
 ) *TaskTarget[T, R] {
 	return &TaskTarget[T, R]{
-		targetFunctionName: functionName(targetFunction),
-		targetFunction: targetFunction,
-		postFunction: postFunction,
+		targetFunctionName:     functionName(targetFunction),
+		targetFunction:         targetFunction,
+		postFunction:           postFunction,
 		alternateFunctionNames: alternateFunctionNames,
 	}
 }
@@ -644,19 +622,21 @@ func functionName[T any, R any](targetFunction TaskFunction[T, R]) string {
 func (self *TaskTarget[T, R]) TargetFunctionName() string {
 	return self.targetFunctionName
 }
-// func (self *TaskTarget[T, R]) TargetFunction() TaskFunction[T, R] {
-// 	return self.targetFunction
-// }
-// func (self *TaskTarget[T, R]) PostFunction() TaskPostFunction[T, R] {
-// 	return self.postFunction
-// }
+
+//	func (self *TaskTarget[T, R]) TargetFunction() TaskFunction[T, R] {
+//		return self.targetFunction
+//	}
+//
+//	func (self *TaskTarget[T, R]) PostFunction() TaskPostFunction[T, R] {
+//		return self.postFunction
+//	}
 func (self *TaskTarget[T, R]) AlternateFunctionNames() []string {
 	return self.alternateFunctionNames
 }
 
 func (self *TaskTarget[T, R]) Run(ctx context.Context, task *Task) (
 	result any,
-	runPost func(bringyour.PgTx)(error),
+	runPost func(bringyour.PgTx) error,
 	returnErr error,
 ) {
 	return self.RunSpecific(ctx, task)
@@ -664,7 +644,7 @@ func (self *TaskTarget[T, R]) Run(ctx context.Context, task *Task) (
 
 func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	result R,
-	runPost func(bringyour.PgTx)(error),
+	runPost func(bringyour.PgTx) error,
 	returnErr error,
 ) {
 	var args T
@@ -685,8 +665,8 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	go func() {
 		select {
-		case <- clientSession.Ctx.Done():
-		case <- time.After(time.Duration(task.RunMaxTimeSeconds) * time.Second):
+		case <-clientSession.Ctx.Done():
+		case <-time.After(time.Duration(task.RunMaxTimeSeconds) * time.Second):
 			timeout = true
 		}
 		clientSession.Cancel()
@@ -702,7 +682,6 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		}
 	}()
 
-
 	result, returnErr = self.targetFunction(args, clientSession)
 	if returnErr != nil {
 		return
@@ -712,7 +691,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		return
 	}
 
-	runPost = func(tx bringyour.PgTx)(error) {
+	runPost = func(tx bringyour.PgTx) error {
 		clientSession, err := task.ClientSession(ctx)
 		if err != nil {
 			return err
@@ -763,8 +742,8 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	go func() {
 		select {
-		case <- clientSession.Ctx.Done():
-		case <- time.After(time.Duration(finishedTask.RunMaxTimeSeconds) * time.Second):
+		case <-clientSession.Ctx.Done():
+		case <-time.After(time.Duration(finishedTask.RunMaxTimeSeconds) * time.Second):
 			timeout = true
 		}
 		clientSession.Cancel()
@@ -792,15 +771,14 @@ func (self *TaskTarget[T, R]) RunPost(
 	return
 }
 
-
 type TaskWorker struct {
-	ctx context.Context
+	ctx     context.Context
 	targets map[string]Target
 }
 
 func NewTaskWorker(ctx context.Context) *TaskWorker {
 	taskWorker := &TaskWorker{
-		ctx: ctx,
+		ctx:     ctx,
 		targets: map[string]Target{},
 	}
 
@@ -888,7 +866,6 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 		now := bringyour.NowUtc()
 		nowBlock := now.Unix() / BlockSizeSeconds
 
-
 		taskIdPriorities := map[bringyour.Id]int{}
 
 		result, err := tx.Query(
@@ -930,11 +907,10 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 				    FOR UPDATE SKIP LOCKED
 				) b
 		    `,
-		    now,
-		    nowBlock,
-		    n,
+			now,
+			nowBlock,
+			n,
 		)
-
 
 		bringyour.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -949,40 +925,40 @@ func (self *TaskWorker) takeTasks(n int) (map[bringyour.Id]*Task, error) {
 		})
 
 		taskIds = maps.Keys(taskIdPriorities)
-	    mathrand.Shuffle(len(taskIds), func(i int, j int) {
-	    	taskIds[i], taskIds[j] = taskIds[j], taskIds[i]
-	    })
-	    slices.SortStableFunc(taskIds, func(a bringyour.Id, b bringyour.Id)(int) {
-	    	aPriority := taskIdPriorities[a]
-	    	bPriority := taskIdPriorities[b]
-	    	return aPriority - bPriority
-	    })
+		mathrand.Shuffle(len(taskIds), func(i int, j int) {
+			taskIds[i], taskIds[j] = taskIds[j], taskIds[i]
+		})
+		slices.SortStableFunc(taskIds, func(a bringyour.Id, b bringyour.Id) int {
+			aPriority := taskIdPriorities[a]
+			bPriority := taskIdPriorities[b]
+			return aPriority - bPriority
+		})
 
-	    // keep up to n
-	    taskIds = taskIds[0:min(n, len(taskIds))]
+		// keep up to n
+		taskIds = taskIds[0:min(n, len(taskIds))]
 
-	    claimTime := bringyour.NowUtc()
-	    releaseTime := claimTime.Add(ReleaseTimeout)
+		claimTime := bringyour.NowUtc()
+		releaseTime := claimTime.Add(ReleaseTimeout)
 
-	    bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
-	    	for _, taskId := range taskIds {
-		    	batch.Queue(
-		    		`
+		bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
+			for _, taskId := range taskIds {
+				batch.Queue(
+					`
 					    UPDATE pending_task
 					    SET
 					    	claim_time = $2,
 					    	release_time = $3
 					    WHERE task_id = $1
 			    	`,
-			    	taskId,
-			    	claimTime,
-			    	releaseTime,
-			    )
+					taskId,
+					claimTime,
+					releaseTime,
+				)
 			}
-	    })
+		})
 	}, bringyour.TxReadCommitted)
 
-    return GetTasks(self.ctx, taskIds...), nil
+	return GetTasks(self.ctx, taskIds...), nil
 }
 
 // return taskIds of the finished tasks, rescheduled tasks
@@ -1002,14 +978,13 @@ func (self *TaskWorker) EvalTasks(n int) (
 		return
 	}
 
-
 	done := make(chan struct{})
 
 	type Finished struct {
 		runStartTime time.Time
-		runEndTime time.Time
-		resultJson string
-		runPost func(bringyour.PgTx)(error)
+		runEndTime   time.Time
+		resultJson   string
+		runPost      func(bringyour.PgTx) error
 	}
 
 	finishedTasks := map[bringyour.Id]*Finished{}
@@ -1026,9 +1001,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 					if resultJson, err := json.Marshal(result); err == nil {
 						finishedTasks[task.TaskId] = &Finished{
 							runStartTime: runStartTime,
-							runEndTime: runEndTime,
-							resultJson: string(resultJson),
-							runPost: runPost,
+							runEndTime:   runEndTime,
+							resultJson:   string(resultJson),
+							runPost:      runPost,
 						}
 					} else {
 						// error with converting result to json
@@ -1043,12 +1018,12 @@ func (self *TaskWorker) EvalTasks(n int) (
 		}
 	}()
 
-	Wait:
+Wait:
 	for {
 		select {
-		case <- done:
+		case <-done:
 			break Wait
-		case <- time.After(ReleaseTimeout / 3):
+		case <-time.After(ReleaseTimeout / 3):
 			bringyour.Tx(self.ctx, func(tx bringyour.PgTx) {
 				bringyour.BatchInTx(self.ctx, tx, func(batch bringyour.PgBatch) {
 					claimTime := bringyour.NowUtc()
@@ -1214,4 +1189,3 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 	return
 }
-

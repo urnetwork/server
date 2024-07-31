@@ -1,11 +1,11 @@
 package model
 
 import (
-	"errors"
 	"context"
+	"errors"
 	// "bytes"
-	"time"
 	"fmt"
+	"time"
 
 	"golang.org/x/exp/maps"
 
@@ -15,28 +15,25 @@ import (
 	// "bringyour.com/bringyour/jwt"
 )
 
-
 // const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
-
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
-const (
-	ProvideModeDefault ProvideMode = -1
-	ProvideModeNone ProvideMode = 0
-	ProvideModeNetwork ProvideMode = 1
-	ProvideModeFriendsAndFamily ProvideMode = 2
-	ProvideModePublic ProvideMode = 3
-	ProvideModeStream ProvideMode = 4
-)
 
+const (
+	ProvideModeDefault          ProvideMode = -1
+	ProvideModeNone             ProvideMode = 0
+	ProvideModeNetwork          ProvideMode = 1
+	ProvideModeFriendsAndFamily ProvideMode = 2
+	ProvideModePublic           ProvideMode = 3
+	ProvideModeStream           ProvideMode = 4
+)
 
 // client_ids are globally unique addressess tantamount to IPv6
 // they are never revoked once allocated, to preserve security and audit records
 // because they are a finite resource, the number created is rate limited per network
 // the total number active per network is also limited
-
 
 func FindClientNetwork(
 	ctx context.Context,
@@ -66,23 +63,22 @@ func FindClientNetwork(
 	return
 }
 
-
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
-	ClientId *bringyour.Id `json:"client_id,omitempty"`
-	Description string `json:"description"`
-	DeviceSpec string `json:"device_spec"`
+	ClientId    *bringyour.Id `json:"client_id,omitempty"`
+	Description string        `json:"description"`
+	DeviceSpec  string        `json:"device_spec"`
 }
 
 type AuthNetworkClientResult struct {
-	ByClientJwt *string `json:"by_client_jwt,omitempty"`
-	Error *AuthNetworkClientError `json:"error,omitempty"`
+	ByClientJwt *string                 `json:"by_client_jwt,omitempty"`
+	Error       *AuthNetworkClientError `json:"error,omitempty"`
 }
 
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
-	ClientLimitExceeded bool `json:"client_limit_exceeded"` 
-	Message string `json:"message"`
+	ClientLimitExceeded bool   `json:"client_limit_exceeded"`
+	Message             string `json:"message"`
 }
 
 func AuthNetworkClient(
@@ -93,58 +89,58 @@ func AuthNetworkClient(
 		// important: use serializable tx for rate limits
 		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			/*
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT COUNT(client_id) FROM network_client
-					WHERE network_id = $1 AND $2 <= create_time
-				`,
-				session.ByJwt.NetworkId,
-				bringyour.NowUtc().Add(-24 * time.Hour),
-			)
-			var last24HourCount int
-			bringyour.WithPgResult(result, err, func() {
-				if result.Next() {
-					bringyour.Raise(result.Scan(&last24HourCount))
-				}
-			})
+				result, err := tx.Query(
+					session.Ctx,
+					`
+						SELECT COUNT(client_id) FROM network_client
+						WHERE network_id = $1 AND $2 <= create_time
+					`,
+					session.ByJwt.NetworkId,
+					bringyour.NowUtc().Add(-24 * time.Hour),
+				)
+				var last24HourCount int
+				bringyour.WithPgResult(result, err, func() {
+					if result.Next() {
+						bringyour.Raise(result.Scan(&last24HourCount))
+					}
+				})
 
-			if LimitClientIdsPer24Hours <= last24HourCount {
-				authClientResult = &AuthNetworkClientResult{
-					Error: &AuthNetworkClientError{
-						ClientLimitExceeded: true,
-						Message: "Too many new clients in the last 24 hours.",
-					},
+				if LimitClientIdsPer24Hours <= last24HourCount {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							ClientLimitExceeded: true,
+							Message: "Too many new clients in the last 24 hours.",
+						},
+					}
+					return
 				}
-				return
-			}
 			*/
 
 			// FIXME
 			/*
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT COUNT(client_id) FROM network_client
-					WHERE network_id = $1 AND active = true
-				`,
-				session.ByJwt.NetworkId,
-			)
-			var activeCount int
-			bringyour.WithPgResult(result, err, func() {
-				result.Next()
-				bringyour.Raise(result.Scan(&activeCount))
-			})
+				result, err := tx.Query(
+					session.Ctx,
+					`
+						SELECT COUNT(client_id) FROM network_client
+						WHERE network_id = $1 AND active = true
+					`,
+					session.ByJwt.NetworkId,
+				)
+				var activeCount int
+				bringyour.WithPgResult(result, err, func() {
+					result.Next()
+					bringyour.Raise(result.Scan(&activeCount))
+				})
 
-			if LimitClientIdsPerNetwork <= activeCount {
-				authClientResult = &AuthNetworkClientResult{
-					Error: &AuthNetworkClientError{
-						ClientLimitExceeded: true,
-						Message: "Too many active clients.",
-					},
+				if LimitClientIdsPerNetwork <= activeCount {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							ClientLimitExceeded: true,
+							Message: "Too many active clients.",
+						},
+					}
+					return
 				}
-				return
-			}
 			*/
 
 			createTime := bringyour.NowUtc()
@@ -280,7 +276,6 @@ func AuthNetworkClient(
 	return
 }
 
-
 type RemoveNetworkClientArgs struct {
 	ClientId bringyour.Id `json:"client_id"`
 }
@@ -327,7 +322,6 @@ func RemoveNetworkClient(
 	return removeClientResult, removeClientErr
 }
 
-
 type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
 }
@@ -352,18 +346,18 @@ type NetworkClientInfo struct {
 
 	Resident *NetworkClientResident `json:"resident,omitempty"`
 
-	ProvideMode *ProvideMode `json:"provide_mode"`
+	ProvideMode *ProvideMode               `json:"provide_mode"`
 	Connections []*NetworkClientConnection `json:"connections"`
 }
 
 type NetworkClientConnection struct {
-	ClientId bringyour.Id `json:"client_id"`
-	ConnectionId bringyour.Id `json:"connection_id"`
-	ConnectTime time.Time `json:"connect_time"`
-	DisconnectTime *time.Time `json:"disconnect_time,omitempty"`
-	ConnectionHost string `json:"connection_host"`
-	ConnectionService string `json:"connection_service"`
-	ConnectionBlock string `json:"connection_block"`
+	ClientId          bringyour.Id `json:"client_id"`
+	ConnectionId      bringyour.Id `json:"connection_id"`
+	ConnectTime       time.Time    `json:"connect_time"`
+	DisconnectTime    *time.Time   `json:"disconnect_time,omitempty"`
+	ConnectionHost    string       `json:"connection_host"`
+	ConnectionService string       `json:"connection_service"`
+	ConnectionBlock   string       `json:"connection_block"`
 }
 
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
@@ -438,11 +432,11 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				}
 				if residentId_ != nil {
 					clientInfo.Resident = &NetworkClientResident{
-						ClientId: clientInfo.ClientId,
-						ResidentId: *residentId_,
-						ResidentHost: *residentHost_,
+						ClientId:        clientInfo.ClientId,
+						ResidentId:      *residentId_,
+						ResidentHost:    *residentHost_,
 						ResidentService: *residentService_,
-						ResidentBlock: *residentBlock_,
+						ResidentBlock:   *residentBlock_,
 					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
@@ -533,20 +527,17 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 	return clientsResult, clientsErr
 }
 
-
-
 type NetworkClient struct {
-	ClientId bringyour.Id `json:"client_id"`
-	DeviceId bringyour.Id `json:"device_id"`
-	NetworkId bringyour.Id `json:"network_id"`
-	Description string `json:"description"`
-	DeviceName string `json:"device_name"`
-	DeviceSpec string `json:"device_spec"`
+	ClientId    bringyour.Id `json:"client_id"`
+	DeviceId    bringyour.Id `json:"device_id"`
+	NetworkId   bringyour.Id `json:"network_id"`
+	Description string       `json:"description"`
+	DeviceName  string       `json:"device_name"`
+	DeviceSpec  string       `json:"device_spec"`
 
 	CreateTime time.Time `json:"create_time"`
-	AuthTime time.Time `json:"auth_time"`
+	AuthTime   time.Time `json:"auth_time"`
 }
-
 
 func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient {
 	var networkClient *NetworkClient
@@ -598,7 +589,6 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 	return networkClient
 }
 
-
 func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode ProvideMode, returnErr error) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
@@ -619,7 +609,6 @@ func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode Pro
 	})
 	return
 }
-
 
 func GetProvideSecretKey(
 	ctx context.Context,
@@ -650,7 +639,6 @@ func GetProvideSecretKey(
 	})
 	return
 }
-
 
 func SetProvide(
 	ctx context.Context,
@@ -717,14 +705,12 @@ func SetProvide(
 	})
 }
 
-
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
 // there is one resident transport
 // if connect to the resident transport fails,
 // attempt claim local resident and start resident locally
 // if attempt claim fails, connect to the next (repeat until a successful connection)
-
 
 // returns a connection_id
 func ConnectNetworkClient(
@@ -766,7 +752,6 @@ func ConnectNetworkClient(
 	return connectionId
 }
 
-
 func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) error {
 	var disconnectErr error
 
@@ -795,7 +780,6 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 	return disconnectErr
 }
 
-
 func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bool {
 	connected := false
 
@@ -818,21 +802,19 @@ func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bo
 	return connected
 }
 
-
 // the resident is a transport client that runs on the platform on behalf of a client
 // there is at most one resident per client, which is self-nominated by any endpoint
 // the nomination happens when the endpoint cannot communicate with the current resident
 
 type NetworkClientResident struct {
-	ClientId bringyour.Id `json:"client_id"`
-	InstanceId bringyour.Id `json:"instance_id"`
-	ResidentId bringyour.Id `json:"resident_id"`
-	ResidentHost string `json:"resident_host"`
-	ResidentService string `json:"resident_service"`
-	ResidentBlock string `json:"resident_block"`
-	ResidentInternalPorts []int `json:"resident_internal_ports"`
+	ClientId              bringyour.Id `json:"client_id"`
+	InstanceId            bringyour.Id `json:"instance_id"`
+	ResidentId            bringyour.Id `json:"resident_id"`
+	ResidentHost          string       `json:"resident_host"`
+	ResidentService       string       `json:"resident_service"`
+	ResidentBlock         string       `json:"resident_block"`
+	ResidentInternalPorts []int        `json:"resident_internal_ports"`
 }
-
 
 func dbGetResidentInTx(
 	ctx context.Context,
@@ -901,7 +883,6 @@ func dbGetResidentInTx(
 	return resident
 }
 
-
 func dbGetResidentWithInstanceInTx(
 	ctx context.Context,
 	tx bringyour.PgTx,
@@ -915,7 +896,6 @@ func dbGetResidentWithInstanceInTx(
 	return nil
 }
 
-
 func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
@@ -926,7 +906,6 @@ func GetResident(ctx context.Context, clientId bringyour.Id) *NetworkClientResid
 	return resident
 }
 
-
 func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
@@ -936,7 +915,6 @@ func GetResidentWithInstance(ctx context.Context, clientId bringyour.Id, instanc
 
 	return resident
 }
-
 
 func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bringyour.Id, returnErr error) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
@@ -961,7 +939,6 @@ func GetResidentId(ctx context.Context, clientId bringyour.Id) (residentId bring
 	})
 	return
 }
-
 
 func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, instanceId bringyour.Id) (residentId bringyour.Id, returnErr error) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
@@ -988,7 +965,6 @@ func GetResidentIdWithInstance(ctx context.Context, clientId bringyour.Id, insta
 	})
 	return
 }
-
 
 // replace an existing resident with the given, or if there was already a replacement, return it
 func NominateResident(
@@ -1137,7 +1113,6 @@ func NominateResident(
 	return
 }
 
-
 // if any of the ports overlap
 func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*NetworkClientResident {
 	residents := []*NetworkClientResident{}
@@ -1183,10 +1158,9 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 			residents = append(residents, resident)
 		}
 	})
-	
+
 	return residents
 }
-
 
 func RemoveResident(
 	ctx context.Context,
@@ -1222,10 +1196,9 @@ func RemoveResident(
 	})
 }
 
-
 type DeviceSetNameArgs struct {
-	DeviceId bringyour.Id `json:"client_id"`
-	DeviceName string `json:"device_name"`
+	DeviceId   bringyour.Id `json:"client_id"`
+	DeviceName string       `json:"device_name"`
 }
 
 type DeviceSetNameResult struct {
@@ -1265,15 +1238,14 @@ func DeviceSetName(
 	return
 }
 
-
 type DeviceSetProvideArgs struct {
-	ClientId bringyour.Id `json:"client_id"`
-	ProvideMode ProvideMode `json:"provide_mode"`
+	ClientId    bringyour.Id `json:"client_id"`
+	ProvideMode ProvideMode  `json:"provide_mode"`
 }
 
 type DeviceSetProvideResult struct {
-	ProvideMode ProvideMode `json:"provide_mode"`
-	Error *DeviceSetProvideError `json:"error,omitempty"`
+	ProvideMode ProvideMode            `json:"provide_mode"`
+	Error       *DeviceSetProvideError `json:"error,omitempty"`
 }
 
 type DeviceSetProvideError struct {
@@ -1284,7 +1256,6 @@ func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.C
 	// FIXME
 	return nil, nil
 }
-
 
 func Testing_CreateDevice(
 	ctx context.Context,
@@ -1337,4 +1308,3 @@ func Testing_CreateDevice(
 		))
 	})
 }
-

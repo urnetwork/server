@@ -1,15 +1,14 @@
 package model
 
-
 import (
-	"errors"
-	"context"
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	// "strconv"
-	"time"
 	"crypto/rand"
 	"encoding/base64"
+	"time"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -17,20 +16,17 @@ import (
 	"bringyour.com/bringyour/jwt"
 )
 
-
 // 4 hours
-const VerifyCodeTimeout =  4 * time.Hour
-
+const VerifyCodeTimeout = 4 * time.Hour
 
 type AuthType = string
 
 const (
-	AuthTypePassword AuthType = "password"
-	AuthTypeApple AuthType = "apple"
-	AuthTypeGoogle AuthType = "google"
+	AuthTypePassword  AuthType = "password"
+	AuthTypeApple     AuthType = "apple"
+	AuthTypeGoogle    AuthType = "google"
 	AuthTypeBringYour AuthType = "bringyour"
 )
-
 
 func UserAuthAttempt(
 	userAuth *string,
@@ -68,10 +64,10 @@ func UserAuthAttempt(
 
 	type UserAuthAttemptResult struct {
 		attemptTime time.Time
-		success bool
+		success     bool
 	}
 
-	parseAttempts := func(result bringyour.PgResult)([]UserAuthAttemptResult) {
+	parseAttempts := func(result bringyour.PgResult) []UserAuthAttemptResult {
 		attempts := []UserAuthAttemptResult{}
 		for result.Next() {
 			var attempt UserAuthAttemptResult
@@ -84,9 +80,9 @@ func UserAuthAttempt(
 		return attempts
 	}
 
-	passesThreshold := func(attempts []UserAuthAttemptResult)(bool) {
+	passesThreshold := func(attempts []UserAuthAttemptResult) bool {
 		failedCount := 0
-		for i := 0; i < len(attempts); i+= 1 {
+		for i := 0; i < len(attempts); i += 1 {
 			if !attempts[i].success {
 				failedCount += 1
 			}
@@ -150,7 +146,6 @@ func UserAuthAttempt(
 	return userAuthAttemptId, true
 }
 
-
 func SetUserAuthAttemptSuccess(
 	ctx context.Context,
 	userAuthAttemptId bringyour.Id,
@@ -170,29 +165,27 @@ func SetUserAuthAttemptSuccess(
 	})
 }
 
-
 func maxUserAuthAttemptsError() error {
 	return errors.New("User auth attempts exceeded limits.")
 }
 
-
 type AuthLoginArgs struct {
-	UserAuth *string `json:"user_auth,omitempty"`
+	UserAuth    *string `json:"user_auth,omitempty"`
 	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	AuthJwt *string `json:"auth_jwt,omitempty"`
+	AuthJwt     *string `json:"auth_jwt,omitempty"`
 }
 
 type AuthLoginResult struct {
-	UserName *string `json:"user_name,omitempty"`
-	UserAuth *string `json:"user_auth,omitempty"`
-	AuthAllowed *[]string `json:"auth_allowed,omitempty"`
-	Error *AuthLoginResultError `json:"error,omitempty"`
-	Network *AuthLoginResultNetwork `json:"network,omitempty"`
+	UserName    *string                 `json:"user_name,omitempty"`
+	UserAuth    *string                 `json:"user_auth,omitempty"`
+	AuthAllowed *[]string               `json:"auth_allowed,omitempty"`
+	Error       *AuthLoginResultError   `json:"error,omitempty"`
+	Network     *AuthLoginResultNetwork `json:"network,omitempty"`
 }
 
 type AuthLoginResultError struct {
 	SuggestedUserAuth *string `json:"suggested_user_auth,omitempty"`
-	Message string `json:"message"`
+	Message           string  `json:"message"`
 }
 
 type AuthLoginResultNetwork struct {
@@ -204,7 +197,7 @@ func AuthLogin(
 	session *session.ClientSession,
 ) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
-	
+
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
 		return nil, maxUserAuthAttemptsError()
@@ -244,7 +237,7 @@ func AuthLogin(
 		} else {
 			// existing user
 			result := &AuthLoginResult{
-				UserAuth: userAuth,
+				UserAuth:    userAuth,
 				AuthAllowed: &[]string{*authType},
 			}
 			return result, nil
@@ -309,7 +302,7 @@ func AuthLogin(
 			} else {
 				// existing user, different auth type
 				result := &AuthLoginResult{
-					UserAuth: &authJwt.UserAuth,
+					UserAuth:    &authJwt.UserAuth,
 					AuthAllowed: &[]string{authType},
 				}
 				return result, nil
@@ -320,7 +313,6 @@ func AuthLogin(
 	return nil, errors.New("Invalid login.")
 }
 
-
 type AuthLoginWithPasswordArgs struct {
 	UserAuth string `json:"user_auth"`
 	Password string `json:"password"`
@@ -328,8 +320,8 @@ type AuthLoginWithPasswordArgs struct {
 
 type AuthLoginWithPasswordResult struct {
 	VerificationRequired *AuthLoginWithPasswordResultVerification `json:"verification_required,omitempty"`
-	Network *AuthLoginWithPasswordResultNetwork `json:"network,omitempty"`
-	Error *AuthLoginWithPasswordResultError `json:"error,omitempty"`
+	Network              *AuthLoginWithPasswordResultNetwork      `json:"network,omitempty"`
+	Error                *AuthLoginWithPasswordResultError        `json:"error,omitempty"`
 }
 
 type AuthLoginWithPasswordResultVerification struct {
@@ -337,7 +329,7 @@ type AuthLoginWithPasswordResultVerification struct {
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
+	ByJwt       *string `json:"by_jwt,omitempty"`
 	NetworkName *string `json:"name,omitempty"`
 }
 
@@ -449,16 +441,14 @@ func AuthLoginWithPassword(
 	// return nil, errors.New("Invalid login.")
 }
 
-
-
 type AuthVerifyArgs struct {
-	UserAuth string `json:"user_auth"`
+	UserAuth   string `json:"user_auth"`
 	VerifyCode string `json:"verify_code"`
 }
 
 type AuthVerifyResult struct {
 	Network *AuthVerifyResultNetwork `json:"network,omitempty"`
-	Error *AuthVerifyResultError `json:"error,omitempty"`
+	Error   *AuthVerifyResultError   `json:"error,omitempty"`
 }
 
 type AuthVerifyResultNetwork struct {
@@ -515,7 +505,7 @@ func AuthVerify(
 				WHERE user_auth = $3
 			`,
 			normalVerifyCode,
-			int(VerifyCodeTimeout / time.Second),
+			int(VerifyCodeTimeout/time.Second),
 			userAuth,
 		)
 		bringyour.WithPgResult(result, err, func() {
@@ -577,16 +567,13 @@ func AuthVerify(
 	return result, nil
 }
 
-
-
-
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
 }
 
 type AuthVerifyCreateCodeResult struct {
-	VerifyCode *string `json:"verify_code,omitempty"`
-	Error *AuthVerifyCreateCodeError `json:"error,omitempty"`
+	VerifyCode *string                    `json:"verify_code,omitempty"`
+	Error      *AuthVerifyCreateCodeError `json:"error,omitempty"`
 }
 
 type AuthVerifyCreateCodeError struct {
@@ -632,7 +619,7 @@ func AuthVerifyCreateCode(
 		if userId == nil {
 			return
 		}
-		
+
 		// delete existing codes and create a new code
 		bringyour.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -670,14 +657,13 @@ func AuthVerifyCreateCode(
 	return nil, errors.New("Invalid login.")
 }
 
-
 type AuthPasswordResetCreateCodeArgs struct {
 	UserAuth string `json:"error"`
 }
 
 type AuthPasswordResetCreateCodeResult struct {
-	ResetCode *string `json:"reset_code,omitempty"`
-	Error *AuthPasswordResetCreateCodeError `json:"error,omitempty"`
+	ResetCode *string                           `json:"reset_code,omitempty"`
+	Error     *AuthPasswordResetCreateCodeError `json:"error,omitempty"`
 }
 
 type AuthPasswordResetCreateCodeError struct {
@@ -761,10 +747,9 @@ func AuthPasswordResetCreateCode(
 	return nil, errors.New("Invalid login.")
 }
 
-
 type AuthPasswordSetArgs struct {
 	ResetCode string `json:"reset_code"`
-	Password string `json:"password"`
+	Password  string `json:"password"`
 }
 
 // IMPORTANT do not return this to the client.
@@ -862,29 +847,27 @@ func AuthPasswordSet(
 	return result, nil
 }
 
-
 const ActiveAuthCodeLimitPerNetwork = 100
 const DefaultAuthCodeDuration = 1 * time.Minute
 const AuthCodeMaxDuration = 24 * time.Hour
 const DefaultAuthCodeUses = 1
 const AuthCodeMaxUses = 4
 
-
 type AuthCodeCreateArgs struct {
 	DurationMinutes float64 `json:"duration_minutes,omitempty"`
-	Uses int `json:"uses,omitempty"`
+	Uses            int     `json:"uses,omitempty"`
 }
 
 type AuthCodeCreateResult struct {
-	AuthCode string `json:"auth_code,omitempty"`
-	DurationMinutes float64 `json:"duration_minutes,omitempty"`
-	Uses int `json:"uses,omitempty"`
-	Error *AuthCodeCreateError `json:"error,omitempty"`
+	AuthCode        string               `json:"auth_code,omitempty"`
+	DurationMinutes float64              `json:"duration_minutes,omitempty"`
+	Uses            int                  `json:"uses,omitempty"`
+	Error           *AuthCodeCreateError `json:"error,omitempty"`
 }
 
 type AuthCodeCreateError struct {
-	AuthCodeLimitExceeded bool `json:"auth_code_limit_exceeded,omitempty"`
-	Message string `json:"message,omitempty"`
+	AuthCodeLimitExceeded bool   `json:"auth_code_limit_exceeded,omitempty"`
+	Message               string `json:"message,omitempty"`
 }
 
 func AuthCodeCreate(
@@ -897,7 +880,7 @@ func AuthCodeCreate(
 		codeCreateResult = &AuthCodeCreateResult{
 			Error: &AuthCodeCreateError{
 				AuthCodeLimitExceeded: true,
-				Message: "A client JWT cannot create an auth code.",
+				Message:               "A client JWT cannot create an auth code.",
 			},
 		}
 		return
@@ -917,7 +900,7 @@ func AuthCodeCreate(
 		)
 
 		authCodeCount := 0
-		
+
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
 				bringyour.Raise(result.Scan(&authCodeCount))
@@ -927,12 +910,11 @@ func AuthCodeCreate(
 			codeCreateResult = &AuthCodeCreateResult{
 				Error: &AuthCodeCreateError{
 					AuthCodeLimitExceeded: true,
-					Message: "Auth code limit exceeded.",
+					Message:               "Auth code limit exceeded.",
 				},
 			}
 			return
 		}
-
 
 		authCodeId := bringyour.NewId()
 
@@ -994,15 +976,14 @@ func AuthCodeCreate(
 		}
 
 		codeCreateResult = &AuthCodeCreateResult{
-			AuthCode: authCode,
+			AuthCode:        authCode,
 			DurationMinutes: float64(duration) / float64(time.Minute),
-			Uses: uses,
+			Uses:            uses,
 		}
 	})
 
 	return
 }
-
 
 func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCount int) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
@@ -1055,13 +1036,12 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 	return
 }
 
-
 type AuthCodeLoginArgs struct {
 	AuthCode string `json:"auth_code,omitempty"`
 }
 
 type AuthCodeLoginResult struct {
-	ByJwt string `json:"by_jwt,omitempty"`
+	ByJwt string              `json:"by_jwt,omitempty"`
 	Error *AuthCodeLoginError `json:"error,omitempty"`
 }
 
@@ -1107,7 +1087,7 @@ func AuthCodeLogin(
 		var createTime time.Time
 		var remainingUses int
 		var networkName string
-		
+
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
 				exists = true
@@ -1150,23 +1130,22 @@ func AuthCodeLogin(
 			}
 		})
 
-        authSessionId := bringyour.NewId()
-        authSessionIds = append(authSessionIds, authSessionId)
+		authSessionId := bringyour.NewId()
+		authSessionIds = append(authSessionIds, authSessionId)
 
-        bringyour.RaisePgResult(tx.Exec(
-            session.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
                 INSERT INTO auth_session (
                     auth_session_id,
                     network_id,
                     user_id
                 ) VALUES ($1, $2, $3)
             `,
-            authSessionId,
-            networkId,
-            userId,
-        ))
-
+			authSessionId,
+			networkId,
+			userId,
+		))
 
 		if 1 < remainingUses {
 			bringyour.RaisePgResult(tx.Exec(
@@ -1206,7 +1185,7 @@ func AuthCodeLogin(
 			userId,
 			networkName,
 			createTime,
-			authSessionIds...
+			authSessionIds...,
 		)
 
 		codeLoginResult = &AuthCodeLoginResult{
@@ -1216,7 +1195,6 @@ func AuthCodeLogin(
 
 	return
 }
-
 
 func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 	// sessions and auth codes
@@ -1238,7 +1216,6 @@ func ExpireAllAuth(ctx context.Context, networkId bringyour.Id) {
 		))
 	})
 }
-
 
 func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, returnErr error) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
@@ -1266,6 +1243,6 @@ func GetUserAuth(ctx context.Context, networkId bringyour.Id) (userAuth string, 
 			}
 		})
 	})
-	
+
 	return
 }

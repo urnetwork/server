@@ -1,72 +1,65 @@
 package client
 
-
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
-	"slices"
-	"fmt"
 
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
 )
 
-
 var cvcLog = logFn("connect_view_controller")
-
 
 type ConnectionListener interface {
 	ConnectionChanged(location *ConnectLocation)
 }
 
-
 type FilteredLocationsListener interface {
 	FilteredLocationsChanged(filteredLocations *ConnectLocationList)
 }
-
 
 type LocationListener interface {
 	LocationChanged(location *ConnectLocation)
 }
 
-
 type ConnectViewController struct {
 	glViewController
 
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 	device *BringYourDevice
 
 	stateLock sync.Mutex
 
-	activeLocation *ConnectLocation
-	usedDestinationIds map[Id]bool
-	activeDestinationIds map[Id]bool
-	nextFilterSequenceNumber int64
+	activeLocation               *ConnectLocation
+	usedDestinationIds           map[Id]bool
+	activeDestinationIds         map[Id]bool
+	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 
-	connectionListeners *connect.CallbackList[ConnectionListener]
+	connectionListeners       *connect.CallbackList[ConnectionListener]
 	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
 }
-
 
 func newConnectViewController(ctx context.Context, device *BringYourDevice) *ConnectViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ConnectViewController{
 		glViewController: *newGLViewController(),
-		ctx: cancelCtx,
-		cancel: cancel,
-		device: device,
+		ctx:              cancelCtx,
+		cancel:           cancel,
+		device:           device,
 
-		usedDestinationIds: map[Id]bool{},
-		activeDestinationIds: map[Id]bool{},
-		nextFilterSequenceNumber: 0,
+		usedDestinationIds:           map[Id]bool{},
+		activeDestinationIds:         map[Id]bool{},
+		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
 
-		connectionListeners: connect.NewCallbackList[ConnectionListener](),
+		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
 		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
 	}
 	vc.drawController = vc
@@ -85,7 +78,7 @@ func (self *ConnectViewController) Start() {
 }
 
 func (self *ConnectViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *ConnectViewController) GetActiveLocation() *ConnectLocation {
@@ -134,7 +127,6 @@ func (self *ConnectViewController) setDestinations(destinationIds []Id) {
 	}
 	fmt.Printf("Found client ids:\n%s", strings.Join(destinationIdStrs, "\n"))
 
-
 	self.stateLock.Lock()
 	for _, destinationId := range destinationIds {
 		self.usedDestinationIds[destinationId] = true
@@ -165,9 +157,7 @@ func (self *ConnectViewController) updateDestination(destinationId Id) {
 }
 */
 
-
 // FIXME ConnectWithSpecs(SpecList)
-
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// api call to get client ids, device.SETLOCATION
@@ -194,10 +184,10 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		exportedExcludeClientIds.Add(self.device.ClientId())
 
 		findProviders := &FindProvidersArgs{
-			LocationId: location.ConnectLocationId.LocationId,
+			LocationId:      location.ConnectLocationId.LocationId,
 			LocationGroupId: location.ConnectLocationId.LocationGroupId,
-			// FIXME 
-			Count: 1024,
+			// FIXME
+			Count:            1024,
 			ExcludeClientIds: exportedExcludeClientIds,
 		}
 		self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
@@ -235,9 +225,9 @@ func (self *ConnectViewController) Broaden() {
 					upLocation = self.activeLocation.ToRegion()
 				case LocationTypeRegion:
 					upLocation = self.activeLocation.ToCountry()
-				// TODO Mark each country with an upgroup
-				// case Country:
-				// 	upLocation = self.activeLocation.UpGroup()
+					// TODO Mark each country with an upgroup
+					// case Country:
+					// 	upLocation = self.activeLocation.UpGroup()
 				}
 			}
 		}
@@ -336,10 +326,10 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 			ConnectLocationId: &ConnectLocationId{
 				LocationGroupId: groupResult.LocationGroupId,
 			},
-			Name: groupResult.Name,
+			Name:          groupResult.Name,
 			ProviderCount: int32(groupResult.ProviderCount),
-		    Promoted: groupResult.Promoted,
-		    MatchDistance: int32(groupResult.MatchDistance),
+			Promoted:      groupResult.Promoted,
+			MatchDistance: int32(groupResult.MatchDistance),
 		}
 		locations = append(locations, location)
 	}
@@ -351,17 +341,17 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 			ConnectLocationId: &ConnectLocationId{
 				LocationId: locationResult.LocationId,
 			},
-			LocationType: locationResult.LocationType,
-		    Name: locationResult.Name,
-		    City: locationResult.City,
-		    Region: locationResult.Region,
-		    Country: locationResult.Country,
-		    CountryCode: locationResult.CountryCode,
-		    CityLocationId: locationResult.CityLocationId,
-		    RegionLocationId: locationResult.RegionLocationId,
-		    CountryLocationId: locationResult.CountryLocationId,
-		    ProviderCount: int32(locationResult.ProviderCount),
-		    MatchDistance: int32(locationResult.MatchDistance),
+			LocationType:      locationResult.LocationType,
+			Name:              locationResult.Name,
+			City:              locationResult.City,
+			Region:            locationResult.Region,
+			Country:           locationResult.Country,
+			CountryCode:       locationResult.CountryCode,
+			CityLocationId:    locationResult.CityLocationId,
+			RegionLocationId:  locationResult.RegionLocationId,
+			CountryLocationId: locationResult.CountryLocationId,
+			ProviderCount:     int32(locationResult.ProviderCount),
+			MatchDistance:     int32(locationResult.MatchDistance),
 		}
 		locations = append(locations, location)
 	}
@@ -373,7 +363,7 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 			ConnectLocationId: &ConnectLocationId{
 				ClientId: locationDeviceResult.ClientId,
 			},
-		    Name: locationDeviceResult.DeviceName,
+			Name: locationDeviceResult.DeviceName,
 		}
 		locations = append(locations, location)
 	}
@@ -384,7 +374,6 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 	exportedFilteredLocations.addAll(locations...)
 	self.filteredLocationsChanged(exportedFilteredLocations)
 }
-
 
 // GL
 
@@ -407,7 +396,6 @@ func (self *ConnectViewController) Close() {
 
 	self.cancel()
 }
-
 
 func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 	// sort locations
@@ -504,26 +492,25 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 	}
 }
 
-
 // merged location and location group
 type ConnectLocation struct {
 	ConnectLocationId *ConnectLocationId
-	Name string
+	Name              string
 
 	ProviderCount int32
-    Promoted bool
-    MatchDistance int32
+	Promoted      bool
+	MatchDistance int32
 
-    LocationType LocationType
+	LocationType LocationType
 
-	City string
-	Region string
-	Country string
+	City        string
+	Region      string
+	Country     string
 	CountryCode string
 
-	CityLocationId *Id
-    RegionLocationId *Id
-    CountryLocationId *Id
+	CityLocationId    *Id
+	RegionLocationId  *Id
+	CountryLocationId *Id
 }
 
 func (self *ConnectLocation) IsGroup() bool {
@@ -537,54 +524,53 @@ func (self *ConnectLocation) IsDevice() bool {
 func (self *ConnectLocation) ToRegion() *ConnectLocation {
 	return &ConnectLocation{
 		ConnectLocationId: self.ConnectLocationId,
-		Name: self.Region,
+		Name:              self.Region,
 
 		ProviderCount: self.ProviderCount,
-	    Promoted: false,
-	    MatchDistance: 0,
+		Promoted:      false,
+		MatchDistance: 0,
 
-	    LocationType: LocationTypeRegion,
+		LocationType: LocationTypeRegion,
 
-		City: "",
-		Region: self.Region,
-		Country: self.Country,
+		City:        "",
+		Region:      self.Region,
+		Country:     self.Country,
 		CountryCode: self.CountryCode,
 
-		CityLocationId: nil,
-	    RegionLocationId: self.RegionLocationId,
-	    CountryLocationId: self.CountryLocationId,
+		CityLocationId:    nil,
+		RegionLocationId:  self.RegionLocationId,
+		CountryLocationId: self.CountryLocationId,
 	}
 }
 
 func (self *ConnectLocation) ToCountry() *ConnectLocation {
 	return &ConnectLocation{
 		ConnectLocationId: self.ConnectLocationId,
-		Name: self.Country,
+		Name:              self.Country,
 
 		ProviderCount: self.ProviderCount,
-	    Promoted: false,
-	    MatchDistance: 0,
+		Promoted:      false,
+		MatchDistance: 0,
 
-	    LocationType: LocationTypeCountry,
+		LocationType: LocationTypeCountry,
 
-		City: "",
-		Region: "",
-		Country: self.Country,
+		City:        "",
+		Region:      "",
+		Country:     self.Country,
 		CountryCode: self.CountryCode,
 
-		CityLocationId: nil,
-	    RegionLocationId: nil,
-	    CountryLocationId: self.CountryLocationId,
+		CityLocationId:    nil,
+		RegionLocationId:  nil,
+		CountryLocationId: self.CountryLocationId,
 	}
 }
-
 
 // merged location and location group
 type ConnectLocationId struct {
 	// if set, the location is a direct connection to another device
-	ClientId *Id
-	LocationId *Id 
-	LocationGroupId *Id 
+	ClientId        *Id
+	LocationId      *Id
+	LocationGroupId *Id
 }
 
 func (self *ConnectLocationId) IsGroup() bool {
@@ -630,6 +616,3 @@ func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
 
 	return 0
 }
-
-
-

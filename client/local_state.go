@@ -4,30 +4,27 @@ import (
 	"context"
 	"fmt"
 	// "io"
+	"errors"
 	"os"
 	"path/filepath"
-	"errors"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"bringyour.com/connect"
 )
 
-
 const AsyncQueueSize = 32
 
 const LocalStorageFilePermissions = 0700
 
-
 type ByJwt struct {
-	UserId *Id
+	UserId      *Id
 	NetworkName string
-	NetworkId *Id
+	NetworkId   *Id
 }
 
-
 type LocalState struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	localStorageDir string
@@ -44,8 +41,8 @@ func newLocalState(ctx context.Context, localStorageHome string) *LocalState {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &LocalState{
-		ctx: cancelCtx,
-		cancel: cancel,
+		ctx:             cancelCtx,
+		cancel:          cancel,
 		localStorageDir: localStorageDir,
 	}
 }
@@ -189,16 +186,13 @@ func (self *LocalState) Close() {
 	self.cancel()
 }
 
-
 type CommitCallback interface {
 	Complete(success bool)
 }
 
-
 type singleResultCallback[R any] interface {
 	Result(result R, ok bool)
 }
-
 
 type GetByJwtCallback interface {
 	singleResultCallback[string]
@@ -208,19 +202,16 @@ type ParseByJwtCallback interface {
 	singleResultCallback[*ByJwt]
 }
 
-
 type GetByClientJwtCallback interface {
 	singleResultCallback[string]
 }
-
 
 type GetInstanceIdCallback interface {
 	singleResultCallback[*Id]
 }
 
-
 type AsyncLocalState struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	localState *LocalState
@@ -234,10 +225,10 @@ func NewAsyncLocalState(localStorageHome string) *AsyncLocalState {
 	localState := newLocalState(cancelCtx, localStorageHome)
 
 	asyncLocalState := &AsyncLocalState{
-		ctx: cancelCtx,
-		cancel: cancel,
+		ctx:        cancelCtx,
+		cancel:     cancel,
 		localState: localState,
-		jobs: make(chan *job, AsyncQueueSize),
+		jobs:       make(chan *job, AsyncQueueSize),
 	}
 	go asyncLocalState.run()
 
@@ -245,14 +236,14 @@ func NewAsyncLocalState(localStorageHome string) *AsyncLocalState {
 }
 
 func (self *AsyncLocalState) run() {
-	defer func(){
+	defer func() {
 		self.cancel()
 
 		// drain the jobs
 		func() {
 			for {
 				select {
-				case job, ok := <- self.jobs:
+				case job, ok := <-self.jobs:
 					if !ok {
 						return
 					}
@@ -265,9 +256,9 @@ func (self *AsyncLocalState) run() {
 	}()
 	for {
 		select {
-		case <- self.ctx.Done():
+		case <-self.ctx.Done():
 			return
-		case job, ok := <- self.jobs:
+		case job, ok := <-self.jobs:
 			if !ok {
 				return
 			}
@@ -289,13 +280,13 @@ func (self *AsyncLocalState) run() {
 	}
 }
 
-func (self *AsyncLocalState) serialAsync(work func()(error), callbacks ...CommitCallback) {
+func (self *AsyncLocalState) serialAsync(work func() error, callbacks ...CommitCallback) {
 	job := &job{
-		work: work,
+		work:      work,
 		callbacks: callbacks,
 	}
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 		for _, callback := range callbacks {
 			callback.Complete(false)
 		}
@@ -304,12 +295,12 @@ func (self *AsyncLocalState) serialAsync(work func()(error), callbacks ...Commit
 }
 
 // get the sync local state
-func  (self *AsyncLocalState) LocalState() *LocalState {
+func (self *AsyncLocalState) LocalState() *LocalState {
 	return self.localState
 }
 
 func (self *AsyncLocalState) GetByJwt(callback GetByJwtCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		byJwt, err := self.localState.GetByJwt()
 		if err == nil {
 			callback.Result(byJwt, true)
@@ -321,7 +312,7 @@ func (self *AsyncLocalState) GetByJwt(callback GetByJwtCallback) {
 }
 
 func (self *AsyncLocalState) ParseByJwt(callback ParseByJwtCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		byJwt, err := self.localState.ParseByJwt()
 		if err == nil {
 			callback.Result(byJwt, true)
@@ -334,13 +325,13 @@ func (self *AsyncLocalState) ParseByJwt(callback ParseByJwtCallback) {
 
 // clears the clientjwt and instanceid if differnet
 func (self *AsyncLocalState) SetByJwt(byJwt string, callback CommitCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		return self.localState.SetByJwt(byJwt)
 	}, callback)
 }
 
 func (self *AsyncLocalState) GetByClientJwt(callback GetByClientJwtCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		byClientJwt, err := self.localState.GetByClientJwt()
 		if err == nil {
 			callback.Result(byClientJwt, true)
@@ -352,13 +343,13 @@ func (self *AsyncLocalState) GetByClientJwt(callback GetByClientJwtCallback) {
 }
 
 func (self *AsyncLocalState) SetByClientJwt(byClientJwt string, callback CommitCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		return self.localState.SetByClientJwt(byClientJwt)
 	}, callback)
 }
 
 func (self *AsyncLocalState) GetInstanceId(callback GetInstanceIdCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		instanceId, err := self.localState.GetInstanceId()
 		if err == nil {
 			callback.Result(instanceId, true)
@@ -370,7 +361,7 @@ func (self *AsyncLocalState) GetInstanceId(callback GetInstanceIdCallback) {
 }
 
 func (self *AsyncLocalState) Logout(callback CommitCallback) {
-	self.serialAsync(func()(error) {
+	self.serialAsync(func() error {
 		return self.localState.Logout()
 	}, callback)
 }
@@ -380,9 +371,7 @@ func (self *AsyncLocalState) Close() {
 	close(self.jobs)
 }
 
-
 type job struct {
-	work func()(error)
+	work      func() error
 	callbacks []CommitCallback
 }
-

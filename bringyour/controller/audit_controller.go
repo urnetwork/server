@@ -7,7 +7,6 @@ import (
 	"bringyour.com/bringyour/model"
 )
 
-
 func AddSampleEvents(ctx context.Context, intervalSeconds int) {
 	// random events to have these rate targets
 
@@ -22,7 +21,6 @@ func AddSampleEvents(ctx context.Context, intervalSeconds int) {
 	auditProviderEvent.CityName = cityName
 	model.AddAuditEvent(ctx, auditProviderEvent)
 
-
 	auditContractEvent := model.NewAuditContractEvent(model.AuditEventTypeContractClosedSuccess)
 	auditContractEvent.ContractId = bringyour.NewId()
 	auditContractEvent.ClientNetworkId = bringyour.NewId()
@@ -36,4 +34,3 @@ func AddSampleEvents(ctx context.Context, intervalSeconds int) {
 	model.AddAuditEvent(ctx, auditContractEvent)
 
 }
-

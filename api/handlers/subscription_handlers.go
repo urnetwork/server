@@ -8,11 +8,9 @@ import (
 	"bringyour.com/bringyour/router"
 )
 
-
 func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.SubscriptionBalance, w, r)
 }
-
 
 func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
@@ -23,7 +21,6 @@ func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-
 func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyCoinbaseBody,
@@ -32,7 +29,6 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 		r,
 	)
 }
-
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
@@ -56,13 +52,10 @@ func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.CheckBalanceCode, w, r)
 }
 
-
 func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.RedeemBalanceCode, w, r)
 }
 
-
 func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.SubscriptionCreatePaymentId, w, r)
 }
-

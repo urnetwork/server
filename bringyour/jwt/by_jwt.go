@@ -2,29 +2,27 @@ package jwt
 
 import (
 	"context"
-	"errors"
 	"crypto/rsa"
 	"crypto/x509"
-    "encoding/pem"
-    "encoding/json"
-    "os"
-    "time"
-    "fmt"
-    "strings"
-    "sync"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"bringyour.com/bringyour"
 )
 
-
 // see https://github.com/golang-jwt/jwt
 // see https://golang-jwt.github.io/jwt/usage/create/
 
-
 // the first key (most recent version) is used to sign new JWTs
-var byPrivateKeys = sync.OnceValue(func()([]*rsa.PrivateKey) {
+var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
 	// `ResourcePaths` returns the version paths in descending order
 	// hence the `paths[0]` will be the most recent version
@@ -34,36 +32,36 @@ var byPrivateKeys = sync.OnceValue(func()([]*rsa.PrivateKey) {
 	}
 	for _, path := range paths {
 		bytes, err := os.ReadFile(path)
-	    if err != nil {
-	        panic(err)
-	    }
+		if err != nil {
+			panic(err)
+		}
 		block, _ := pem.Decode(bytes)
-	    parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
-	    keys = append(keys, parseResult.(*rsa.PrivateKey))
+		parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
+		keys = append(keys, parseResult.(*rsa.PrivateKey))
 	}
 	return keys
 })
-
 
 func bySigningKey() *rsa.PrivateKey {
 	return byPrivateKeys()[0]
 }
 
-
 // the bringyour authorization model is:
 // Network
-//   User
-//     Client
+//
+//	User
+//	  Client
+//
 // Trust verification happens at the user level.
 // A client is always tied to a user.
 type ByJwt struct {
-	NetworkId bringyour.Id `json:"network_id,omitempty"`
-	NetworkName string `json:"network_name,omitempty"`
-	UserId bringyour.Id `json:"user_id,omitempty"`
-	CreateTime time.Time `json:"create_time,omitempty"`
+	NetworkId      bringyour.Id   `json:"network_id,omitempty"`
+	NetworkName    string         `json:"network_name,omitempty"`
+	UserId         bringyour.Id   `json:"user_id,omitempty"`
+	CreateTime     time.Time      `json:"create_time,omitempty"`
 	AuthSessionIds []bringyour.Id `json:"auth_session_ids,omitempty"`
-	DeviceId *bringyour.Id `json:"device_id,omitempty"`
-	ClientId *bringyour.Id `json:"client_id,omitempty"`
+	DeviceId       *bringyour.Id  `json:"device_id,omitempty"`
+	ClientId       *bringyour.Id  `json:"client_id,omitempty"`
 }
 
 func NewByJwt(
@@ -89,11 +87,11 @@ func NewByJwtWithCreateTime(
 	authSessionIds ...bringyour.Id,
 ) *ByJwt {
 	return &ByJwt{
-		NetworkId: networkId,
-		UserId: userId,
+		NetworkId:   networkId,
+		UserId:      userId,
 		NetworkName: networkName,
 		// round here so that the string representation in the jwt does not lose information
-		CreateTime: bringyour.CodecTime(createTime),
+		CreateTime:     bringyour.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
 	}
 }
@@ -126,7 +124,7 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return byJwt, nil
 }
 
@@ -154,26 +152,25 @@ func (self *ByJwt) Sign() string {
 
 func (self *ByJwt) Client(deviceId bringyour.Id, clientId bringyour.Id) *ByJwt {
 	return &ByJwt{
-		NetworkId: self.NetworkId,
-		UserId: self.UserId,
-		NetworkName: self.NetworkName,
-		CreateTime: self.CreateTime,
+		NetworkId:      self.NetworkId,
+		UserId:         self.UserId,
+		NetworkName:    self.NetworkName,
+		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
-		DeviceId: &deviceId,
-		ClientId: &clientId,
+		DeviceId:       &deviceId,
+		ClientId:       &clientId,
 	}
 }
 
 func (self *ByJwt) User() *ByJwt {
 	return &ByJwt{
-		NetworkId: self.NetworkId,
-		UserId: self.UserId,
-		NetworkName: self.NetworkName,
-		CreateTime: self.CreateTime,
+		NetworkId:      self.NetworkId,
+		UserId:         self.UserId,
+		NetworkName:    self.NetworkName,
+		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
 	}
 }
-
 
 func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 	// test the create time and sessions
@@ -203,7 +200,7 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 			authSessionIdPlaceholders := []string{}
 			for i := 0; i < len(byJwt.AuthSessionIds); i += 1 {
 				// start at $3
-				authSessionIdPlaceholders = append(authSessionIdPlaceholders, fmt.Sprintf("$%d", 3 + i))
+				authSessionIdPlaceholders = append(authSessionIdPlaceholders, fmt.Sprintf("$%d", 3+i))
 			}
 			args := []any{
 				byJwt.NetworkId,
@@ -226,11 +223,11 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 					SELECT active
 					FROM auth_session
 					WHERE
-						auth_session_id IN (` + strings.Join(authSessionIdPlaceholders, ",") + `) AND
+						auth_session_id IN (`+strings.Join(authSessionIdPlaceholders, ",")+`) AND
 						active = false
 					LIMIT 1
 				`,
-				args...
+				args...,
 			)
 			bringyour.WithPgResult(result, err, func() {
 				hasInactiveSession = result.Next()
@@ -240,4 +237,3 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 
 	return !hasInactiveSession
 }
-
