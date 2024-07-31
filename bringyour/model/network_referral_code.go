@@ -13,12 +13,14 @@ type NetworkReferralCode struct {
 
 func CreateNetworkReferralCode(ctx context.Context, networkId bringyour.Id) (*NetworkReferralCode) {
 
-	networkReferralCode := &NetworkReferralCode{
-		NetworkId: networkId,
-		ReferralCode: bringyour.NewId(),
-	}
+	var networkReferralCode *NetworkReferralCode
 
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+		networkReferralCode = &NetworkReferralCode{
+			NetworkId: networkId,
+			ReferralCode: bringyour.NewId(),
+		}
 
 		bringyour.RaisePgResult(tx.Exec(
 				ctx,
