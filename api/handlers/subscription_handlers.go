@@ -2,14 +2,10 @@ package handlers
 
 import (
 	"net/http"
-	"io"
-	"encoding/json"
-	"bytes"
 
-	"bringyour.com/bringyour/router"
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/router"
 )
 
 
@@ -47,24 +43,14 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-
-// TODO this is not used currently
 func CircleWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-	}
-
-	out := &bytes.Buffer{}
-	json.Compact(out, []byte(body))
-
-	bringyour.Logger().Printf("Circle webhook body: %s\n", out.Bytes())
-
-	w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte("{}"))
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyCircleBody,
+		controller.CircleWalletWebhook,
+		w,
+		r,
+	)
 }
-
 
 func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.CheckBalanceCode, w, r)

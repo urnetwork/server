@@ -11,6 +11,7 @@ import (
     "time"
     "fmt"
     "strings"
+    "sync"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -23,7 +24,7 @@ import (
 
 
 // the first key (most recent version) is used to sign new JWTs
-var byPrivateKeys = func() []*rsa.PrivateKey {
+var byPrivateKeys = sync.OnceValue(func()([]*rsa.PrivateKey) {
 	keys := []*rsa.PrivateKey{}
 	// `ResourcePaths` returns the version paths in descending order
 	// hence the `paths[0]` will be the most recent version
@@ -41,11 +42,11 @@ var byPrivateKeys = func() []*rsa.PrivateKey {
 	    keys = append(keys, parseResult.(*rsa.PrivateKey))
 	}
 	return keys
-}()
+})
 
 
 func bySigningKey() *rsa.PrivateKey {
-	return byPrivateKeys[0]
+	return byPrivateKeys()[0]
 }
 
 
@@ -101,7 +102,7 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	var token *gojwt.Token
 	var err error
 	// attempt all signing keys
-	for _, byPrivateKey := range byPrivateKeys {
+	for _, byPrivateKey := range byPrivateKeys() {
 		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (interface{}, error) {
 			return byPrivateKey.Public(), nil
 		})

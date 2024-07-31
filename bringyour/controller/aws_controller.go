@@ -194,6 +194,16 @@ func SetMessageSender(messageSender MessageSender) {
 
 type AWSMessageSender struct {}
 
+
+type NetworkUserInterviewRequest1Template struct {
+    BaseTemplate
+}
+
+func (self *NetworkUserInterviewRequest1Template) Name() string {
+    return "network_user_interview_request_1"
+}
+
+
 func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 
     normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)

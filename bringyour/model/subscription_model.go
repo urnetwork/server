@@ -853,41 +853,44 @@ func createTransferEscrowInTx(
         return
     }
 
+    /*
     bringyour.CreateTempJoinTableInTx(
         ctx,
         tx,
         "escrow(balance_id uuid -> balance_byte_count bigint)",
         escrow,
     )
+    */
 
-    bringyour.RaisePgResult(tx.Exec(
-        ctx,
-        `
-            UPDATE transfer_balance
-            SET
-                balance_byte_count = transfer_balance.balance_byte_count - escrow.balance_byte_count
-            FROM escrow
-            WHERE
-                transfer_balance.balance_id = escrow.balance_id
-        `,
-    ))
-
-    bringyour.RaisePgResult(tx.Exec(
-        ctx,
-        `
-            INSERT INTO transfer_escrow (
-                contract_id,
-                balance_id,
-                balance_byte_count
+    bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+        for balanceId, balanceByteCount := range escrow {
+            batch.Queue(
+                `
+                    UPDATE transfer_balance
+                    SET
+                        balance_byte_count = transfer_balance.balance_byte_count - $2
+                    WHERE
+                        transfer_balance.balance_id = $1
+                `,
+                balanceId,
+                balanceByteCount,
             )
-            SELECT
-                $1 AS contract_id,
-                balance_id,
-                balance_byte_count
-            FROM escrow
-        `,
-        contractId,
-    ))
+
+            batch.Queue(
+                `
+                    INSERT INTO transfer_escrow (
+                        contract_id,
+                        balance_id,
+                        balance_byte_count
+                    )
+                    VALUES ($1, $2, $3)
+                `,
+                contractId,
+                balanceId,
+                balanceByteCount,
+            )
+        }
+    })
 
     bringyour.RaisePgResult(tx.Exec(
         ctx,
@@ -1064,6 +1067,7 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
                     transfer_escrow.contract_id = transfer_contract.contract_id
 
                 WHERE
+                    transfer_contract.open = true AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
                     transfer_contract.transfer_byte_count <= $3 AND
@@ -1367,7 +1371,64 @@ func CloseContract(
     return
 }
 
+type ExpiredContract struct {
+    ContractId bringyour.Id
+    SourceId bringyour.Id
+    DestinationId bringyour.Id
+    UsedTransferByteCount ByteCount
+    Party ContractParty
+}
 
+func GetExpiredTransferContracts(ctx context.Context) ([]ExpiredContract) {
+    expiredContracts := []ExpiredContract{}
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    transfer_contract.contract_id,
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    contract_close.used_transfer_byte_count,
+                    contract_close.party
+
+                FROM contract_close
+
+                INNER JOIN transfer_contract ON
+                    transfer_contract.contract_id = contract_close.contract_id
+                        AND (transfer_contract.outcome IS NULL AND NOT transfer_contract.dispute)
+
+                INNER JOIN (
+                    SELECT
+                        contract_id
+                    FROM contract_close
+                    GROUP BY contract_id
+                    HAVING COUNT(*) = 1
+                ) t ON
+                    t.contract_id = contract_close.contract_id
+
+                WHERE contract_close.close_time < now() - INTERVAL '24 hours';
+            `,
+        )
+
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                expiredContract := ExpiredContract{}
+                bringyour.Raise(result.Scan(
+                    &expiredContract.ContractId,
+                    &expiredContract.SourceId,
+                    &expiredContract.DestinationId,
+                    &expiredContract.UsedTransferByteCount,
+                    &expiredContract.Party,
+                ))
+
+                expiredContracts = append(expiredContracts, expiredContract)
+            }
+        })
+    })
+    return expiredContracts
+}
 
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
@@ -1376,7 +1437,6 @@ func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome Contract
 
     return
 }
-
 
 func settleEscrowInTx(
     ctx context.Context,

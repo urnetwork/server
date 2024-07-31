@@ -18,6 +18,9 @@ import (
 )
 
 
+// FIXME merge this into the connect package
+
+
 var apiLog = logFn("api")
 
 
@@ -32,6 +35,8 @@ func defaultClient() *http.Client {
     	Timeout: defaultHttpConnectTimeout,
   	}
 	transport := &http.Transport{
+	  	// DialTLSContext: NewResilientTlsDialContext(dialer),
+	  	// DialContext: connect.NewExtenderDialContext(connect.ExtenderConnectModeQuic, dialer, connect.TestExtenderConfig()),
 	  	DialContext: dialer.DialContext,
 	  	TLSHandshakeTimeout: defaultHttpTlsTimeout,
 	}

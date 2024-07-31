@@ -1418,14 +1418,34 @@ var migrations = []any{
     `),
 
     newSqlMigration(`
-        CREATE TABLE network_referral_code (
-            network_id uuid NOT NULL,
-            referral_code uuid NOT NULL,
-
-            PRIMARY KEY (network_id),
-            UNIQUE (referral_code)
-        )
+        CREATE INDEX network_client_connected_client_id ON network_client_connection (connected, client_id)
     `),
+
+    newSqlMigration(`
+        CREATE INDEX network_client_network_id_active_client_id ON network_client (network_id, active, client_id)
+    `),
+    newSqlMigration(`
+        CREATE INDEX network_client_network_id_create_time_client_id ON network_client (network_id, create_time, client_id)
+    `),
+    newSqlMigration(`
+        DROP INDEX network_client_network_id_active
+    `),
+    newSqlMigration(`
+        DROP INDEX network_client_network_id_create_time
+    `),
+
+
+    newSqlMigration(
+        `
+            CREATE TABLE network_referral_code (
+                network_id uuid NOT NULL,
+                referral_code uuid NOT NULL,
+
+                PRIMARY KEY (network_id),
+                UNIQUE (referral_code)
+            )
+        `,
+    ),
 
     newCodeMigration(migration_20240725_PopulateNetworkReferralCodes),
 

@@ -96,7 +96,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
-    for paid < model.MinWalletPayoutThreshold {
+    for paid < model.MinWalletPayoutThreshold * 2 {
         transferEscrow, err := model.CreateTransferEscrow(
 					ctx, 
 					sourceNetworkId, 

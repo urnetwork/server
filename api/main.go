@@ -1,16 +1,16 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
+	"context"
+	"fmt"
+	"net/http"
+	"os"
 
-    "github.com/docopt/docopt-go"
-    
-    "bringyour.com/service/api/handlers"
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/router"
+	"github.com/docopt/docopt-go"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/service/api/handlers"
 )
 
 
@@ -93,6 +93,7 @@ Options:
         router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
         router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
         router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
+        router.NewRoute("GET", "/hello", handlers.Hello),
     }
 
     // bringyour.Logger().Printf("%s\n", opts)

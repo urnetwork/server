@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
 	"strings"
 	"time"
 
@@ -43,12 +44,14 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
+    bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
     bringyourctl payout --account_payment_id=<account_payment_id>
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
     bringyourctl payouts plan
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
+    bringyourctl contracts close-expired
 
 Options:
     -h --help     Show this screen.
@@ -125,6 +128,8 @@ Options:
             sendSubscriptionTransferBalanceCode(opts)
         } else if payoutEmail, _ := opts.Bool("payout-email"); payoutEmail {
             sendPayoutEmail(opts)
+        } else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
+            sendNetworkUserInterviewRequest1(opts)
         }
     } else if payout, _ := opts.Bool("payout"); payout {
         payoutByPaymentId(opts)
@@ -144,6 +149,10 @@ Options:
         }
         if estimate, _ := opts.Bool("estimate-fee"); estimate {
             adminWalletEstimateFee(opts)
+        }
+    } else if contracts, _ := opts.Bool("contracts"); contracts {
+        if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
+            closeExpiredContracts()
         }
     }
 }
@@ -388,16 +397,49 @@ func sendAuthPasswordSet(opts docopt.Opts) {
     fmt.Printf("Sent\n")
 }
 
+// func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
+//     userAuth, _ := opts.String("--user_auth")
+
+//     awsMessageSender := controller.GetAWSMessageSender()
+
+//     err := awsMessageSender.SendAccountMessageTemplate(
+//         userAuth,
+//         &controller.SubscriptionTransferBalanceCodeTemplate{
+//             Secret: "hi there bar now",
+//         },
+//     )
+//     if err != nil {
+//         panic(err)
+//     }
+//     fmt.Printf("Sent\n")
+// }
+
 
 func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
+
+    ctx := context.Background()
+
     userAuth, _ := opts.String("--user_auth")
 
     awsMessageSender := controller.GetAWSMessageSender()
 
-    err := awsMessageSender.SendAccountMessageTemplate(
+    balanceByteCount := model.ByteCount(10 * 1024 * 1024 * 1024 * 1024)
+    netRevenue := model.UsdToNanoCents(100.0)
+
+    balanceCode, err := model.CreateBalanceCode(
+        ctx,
+        balanceByteCount,
+        netRevenue,
+        bringyour.NewId().String(),
+        bringyour.NewId().String(),
+        userAuth,
+    )
+
+    err = awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
-            Secret: "hi there bar now",
+            Secret: balanceCode.Secret,
+            BalanceByteCount: balanceByteCount,
         },
     )
     if err != nil {
@@ -405,6 +447,7 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
     }
     fmt.Printf("Sent\n")
 }
+
 
 func sendPayoutEmail(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
@@ -420,9 +463,26 @@ func sendPayoutEmail(opts docopt.Opts) {
             ReferralCode: bringyour.NewId().String(),
             Blockchain: "Solana",
             DestinationAddress: "0x1234567890",
-            AmountUsd: "100.00",
+            AmountUsd: "5.00",
             PaymentCreatedAt: time.Now().UTC(),
         },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
+func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
+        userAuth,
+        &controller.NetworkUserInterviewRequest1Template{},
+        controller.SenderEmail("brien@bringyour.com"),
     )
     if err != nil {
         panic(err)
@@ -604,4 +664,41 @@ func adminWalletTransfer(opts docopt.Opts) {
     fmt.Println("Transaction Successful")
     fmt.Println("Transaction ID: ", res.Id)
     fmt.Println("Transaction State: ", res.State)
+}
+
+func closeExpiredContracts() {
+    ctx := context.Background()
+    expiredContracts := model.GetExpiredTransferContracts(ctx)
+
+    fmt.Println("# of contracts to close: ", len(expiredContracts))
+
+    for _, expiredContract := range expiredContracts {
+        fmt.Println("Closing contract: ", expiredContract.ContractId.String())
+
+        var targetId *bringyour.Id
+        if expiredContract.Party == model.ContractPartySource {
+            targetId = &expiredContract.DestinationId
+        } else if expiredContract.Party == model.ContractPartyDestination {
+            targetId = &expiredContract.SourceId
+        }
+
+        if targetId == nil {
+            continue
+        }
+
+        // forcing the contract to be closed 
+        // due to lack of response from the counterparty
+        err := model.CloseContract(
+            ctx, 
+            expiredContract.ContractId, 
+            *targetId,
+            expiredContract.UsedTransferByteCount,
+            false,
+        )
+        if err != nil {
+            fmt.Println("Error closing contract: ", err)
+        }
+    }
+
+    fmt.Println("Contracts closed")
 }

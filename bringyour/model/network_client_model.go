@@ -16,7 +16,7 @@ import (
 )
 
 
-const LimitClientIdsPer24Hours = 1024
+// const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
 
@@ -92,6 +92,7 @@ func AuthNetworkClient(
 	if authClient.ClientId == nil {
 		// important: use serializable tx for rate limits
 		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+			/*
 			result, err := tx.Query(
 				session.Ctx,
 				`
@@ -99,7 +100,7 @@ func AuthNetworkClient(
 					WHERE network_id = $1 AND $2 <= create_time
 				`,
 				session.ByJwt.NetworkId,
-				bringyour.NowUtc(),
+				bringyour.NowUtc().Add(-24 * time.Hour),
 			)
 			var last24HourCount int
 			bringyour.WithPgResult(result, err, func() {
@@ -117,8 +118,11 @@ func AuthNetworkClient(
 				}
 				return
 			}
+			*/
 
-			result, err = tx.Query(
+			// FIXME
+			/*
+			result, err := tx.Query(
 				session.Ctx,
 				`
 					SELECT COUNT(client_id) FROM network_client
@@ -129,7 +133,7 @@ func AuthNetworkClient(
 			var activeCount int
 			bringyour.WithPgResult(result, err, func() {
 				result.Next()
-				bringyour.Raise(result.Scan(&last24HourCount))
+				bringyour.Raise(result.Scan(&activeCount))
 			})
 
 			if LimitClientIdsPerNetwork <= activeCount {
@@ -141,6 +145,7 @@ func AuthNetworkClient(
 				}
 				return
 			}
+			*/
 
 			createTime := bringyour.NowUtc()
 
