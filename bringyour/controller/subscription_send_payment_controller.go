@@ -229,24 +229,28 @@ func ProviderPayout(
 
 			// get the user wallet to send the payment to
 			accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
+			formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
+			if err != nil {
+				return nil, err
+			}
 
 			payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
 			estimatedFees, err := circleClient.EstimateTransferFee(
 				payoutAmount,
 				accountWallet.WalletAddress,
-				accountWallet.Blockchain,
+				formattedBlockchain,
 			)
 			if err != nil {
 				return nil, err
 			}
 
-			fee, err := CalculateFee(*estimatedFees.Medium, accountWallet.Blockchain)
+			fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
 			if err != nil {
 				return nil, err
 			}
 
-			feeInUSDC, err := ConvertFeeToUSDC(accountWallet.Blockchain, *fee)
+			feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
 			if err != nil {
 				return nil, err
 			}
@@ -262,7 +266,7 @@ func ProviderPayout(
 			transferResult, err := circleClient.CreateTransferTransaction(
 				payoutAmount,
 				accountWallet.WalletAddress,
-				accountWallet.Blockchain,
+				formattedBlockchain,
 			)
 			if err != nil {
 				return nil, err
@@ -292,7 +296,7 @@ func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
 	switch network {
 	case "SOL", "SOLANA":
 		return calculateFeeSolana(feeEstimate)
-	case "MATIC":
+	case "POLYGON", "MATIC":
 		return calculateFeePolygon(feeEstimate)
 	default:
 		return nil, fmt.Errorf("unsupported network: %s", network)
@@ -385,4 +389,18 @@ func getExplorerTxPath(network string) *string {
 	}
 
 	return nil
+}
+
+func formatBlockchain(network string) (string, error) {
+	network = strings.TrimSpace(network)
+	network = strings.ToUpper(network)
+
+	switch network {
+	case "POLYGON", "POLY", "MATIC":
+		return "MATIC", nil
+	case "SOL", "SOLANA":
+		return "SOL", nil
+	default:
+		return "", fmt.Errorf("unsupported chain: %s", network)
+	}
 }

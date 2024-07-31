@@ -2525,7 +2525,8 @@ func SetPaymentRecord(
                 SET
                     token_type = $2,
                     token_amount = $3,
-                    payment_record = $4
+                    payment_record = $4,
+                    payment_time = $5
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
@@ -2534,6 +2535,7 @@ func SetPaymentRecord(
             tokenType,
             tokenAmount,
             paymentRecord,
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
