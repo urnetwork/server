@@ -1422,7 +1422,8 @@ var migrations = []any{
             network_id uuid NOT NULL,
             referral_code uuid NOT NULL,
 
-            PRIMARY KEY (network_id)
+            PRIMARY KEY (network_id),
+            UNIQUE (referral_code)
         )
     `),
 
