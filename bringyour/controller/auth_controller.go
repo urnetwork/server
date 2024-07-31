@@ -68,8 +68,10 @@ func AuthVerifySend(
     if err != nil {
         return nil, err
     }
+
     if verifyCreateCodeResult.VerifyCode != nil {
-        SendAccountMessageTemplate(
+        awsMessageSender := GetAWSMessageSender()
+        awsMessageSender.SendAccountMessageTemplate(
             *userAuth,
             &AuthVerifyTemplate{
                 VerifyCode: *verifyCreateCodeResult.VerifyCode,
@@ -89,7 +91,8 @@ func Testing_SendAuthVerifyCode(userAuth string) {
 
     verifyCode := model.Testing_CreateVerifyCode()
 
-    SendAccountMessageTemplate(
+    awsMessageSender := GetAWSMessageSender()
+    awsMessageSender.SendAccountMessageTemplate(
         *normalUserAuth,
         &AuthVerifyTemplate{
             VerifyCode: verifyCode,
@@ -120,7 +123,8 @@ func AuthPasswordReset(
         return nil, err
     }
     if resetCreateCodeResult.ResetCode != nil {
-        SendAccountMessageTemplate(
+        awsMessageSender := GetAWSMessageSender()
+        awsMessageSender.SendAccountMessageTemplate(
             *userAuth,
             &AuthPasswordResetTemplate{
                 ResetCode: *resetCreateCodeResult.ResetCode,
@@ -148,7 +152,8 @@ func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.Cli
         return nil, err
     }
     normalUserAuth, _ := model.NormalUserAuthV1(&userAuth)
-    SendAccountMessageTemplate(
+    awsMessageSender := GetAWSMessageSender()
+    awsMessageSender.SendAccountMessageTemplate(
         *normalUserAuth,
         &AuthPasswordSetTemplate{},
     )
@@ -164,7 +169,8 @@ func AuthVerify(
 ) (*model.AuthVerifyResult, error) {
     result, err := model.AuthVerify(verify, session)
     if result.Network != nil {
-        SendAccountMessageTemplate(
+        awsMessageSender := GetAWSMessageSender()
+        awsMessageSender.SendAccountMessageTemplate(
             verify.UserAuth,
             &NetworkWelcomeTemplate{},
         )

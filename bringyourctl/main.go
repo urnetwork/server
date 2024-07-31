@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 
+	"strings"
+	"time"
+
 	"github.com/docopt/docopt-go"
 
 	"bringyour.com/bringyour"
@@ -40,7 +43,14 @@ Usage:
     bringyourctl send auth-password-reset --user_auth=<user_auth>
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
+    bringyourctl send payout-email --user_auth=<user_auth>
     bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
+    bringyourctl payout --account_payment_id=<account_payment_id>
+    bringyourctl payouts list-pending [--plan_id=<plan_id>]
+    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
+    bringyourctl payouts plan
+    bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
+    bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl contracts close-expired
 
 Options:
@@ -53,7 +63,10 @@ Options:
     --user_auth=<user_auth>
     --network_name=<network_name>
     --network_id=<network_id>
-    --secret=<secret>`
+    --secret=<secret>
+    --amount_usd=<amount_usd>   Amount in USD.
+    --destination_address=<destination_address>  Destination address.
+    --blockchain=<blockchain>  Blockchain.`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
     if err != nil {
@@ -113,8 +126,29 @@ Options:
             sendAuthPasswordSet(opts)
         } else if subscriptionTransferBalanceCode, _ := opts.Bool("subscription-transfer-balance-code"); subscriptionTransferBalanceCode {
             sendSubscriptionTransferBalanceCode(opts)
+        } else if payoutEmail, _ := opts.Bool("payout-email"); payoutEmail {
+            sendPayoutEmail(opts)
         } else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
             sendNetworkUserInterviewRequest1(opts)
+        }
+    } else if payout, _ := opts.Bool("payout"); payout {
+        payoutByPaymentId(opts)
+    } else if payouts, _ := opts.Bool("payouts"); payouts {
+        if listPending, _ := opts.Bool("list-pending"); listPending {
+            listPendingPayouts(opts)
+        }
+        if plan, _ := opts.Bool("plan"); plan {
+            planPayouts()
+        }
+        if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
+            payoutPlanAppyBonus(opts)
+        }
+    } else if wallet, _ := opts.Bool("wallet"); wallet {
+        if send, _ := opts.Bool("transfer"); send {
+            adminWalletTransfer(opts)
+        }
+        if estimate, _ := opts.Bool("estimate-fee"); estimate {
+            adminWalletEstimateFee(opts)
         }
     } else if contracts, _ := opts.Bool("contracts"); contracts {
         if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
@@ -122,7 +156,6 @@ Options:
         }
     }
 }
-
 
 func dbVersion(opts docopt.Opts) {
     version := bringyour.DbVersion(context.Background())
@@ -300,7 +333,9 @@ func balanceCodeCheck(opts docopt.Opts) {
 func sendNetworkWelcome(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.NetworkWelcomeTemplate{},
     )
@@ -314,7 +349,9 @@ func sendNetworkWelcome(opts docopt.Opts) {
 func sendAuthVerify(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthVerifyTemplate{
             VerifyCode: "abcdefghij",
@@ -330,7 +367,9 @@ func sendAuthVerify(opts docopt.Opts) {
 func sendAuthPasswordReset(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthPasswordResetTemplate{
             ResetCode: "abcdefghij",
@@ -346,7 +385,9 @@ func sendAuthPasswordReset(opts docopt.Opts) {
 func sendAuthPasswordSet(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.AuthPasswordSetTemplate{},
     )
@@ -356,11 +397,31 @@ func sendAuthPasswordSet(opts docopt.Opts) {
     fmt.Printf("Sent\n")
 }
 
+// func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
+//     userAuth, _ := opts.String("--user_auth")
+
+//     awsMessageSender := controller.GetAWSMessageSender()
+
+//     err := awsMessageSender.SendAccountMessageTemplate(
+//         userAuth,
+//         &controller.SubscriptionTransferBalanceCodeTemplate{
+//             Secret: "hi there bar now",
+//         },
+//     )
+//     if err != nil {
+//         panic(err)
+//     }
+//     fmt.Printf("Sent\n")
+// }
+
 
 func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
-    userAuth, _ := opts.String("--user_auth")
 
     ctx := context.Background()
+
+    userAuth, _ := opts.String("--user_auth")
+
+    awsMessageSender := controller.GetAWSMessageSender()
 
     balanceByteCount := model.ByteCount(10 * 1024 * 1024 * 1024 * 1024)
     netRevenue := model.UsdToNanoCents(100.0)
@@ -374,7 +435,7 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
         userAuth,
     )
 
-    err = controller.SendAccountMessageTemplate(
+    err = awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.SubscriptionTransferBalanceCodeTemplate{
             Secret: balanceCode.Secret,
@@ -388,10 +449,37 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
 }
 
 
+func sendPayoutEmail(opts docopt.Opts) {
+    userAuth, _ := opts.String("--user_auth")
+
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
+        userAuth,
+        &controller.SendPaymentTemplate{
+            PaymentId: bringyour.NewId(),
+            TxHash: "0x1234567890",
+            ExplorerBasePath: "https://explorer.solana.com/tx",
+            ReferralCode: bringyour.NewId().String(),
+            Blockchain: "Solana",
+            DestinationAddress: "0x1234567890",
+            AmountUsd: "5.00",
+            PaymentCreatedAt: time.Now().UTC(),
+        },
+    )
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Sent\n")
+}
+
+
 func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
     userAuth, _ := opts.String("--user_auth")
 
-    err := controller.SendAccountMessageTemplate(
+    awsMessageSender := controller.GetAWSMessageSender()
+
+    err := awsMessageSender.SendAccountMessageTemplate(
         userAuth,
         &controller.NetworkUserInterviewRequest1Template{},
         controller.SenderEmail("brien@bringyour.com"),
@@ -400,6 +488,182 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
         panic(err)
     }
     fmt.Printf("Sent\n")
+}
+
+func planPayouts() {
+    plan := model.PlanPayments(context.Background())
+    fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
+    fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
+    fmt.Println(strings.Repeat("-", 56))
+    for _, payment := range plan.WalletPayments {
+        payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
+        fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+    }
+}
+
+func listPendingPayouts(opts docopt.Opts) {
+    ctx := context.Background()
+
+    planIdStr, _ := opts.String("--plan_id")
+
+    var payouts []*model.AccountPayment
+
+    if planIdStr != "" {
+        planId, err := bringyour.ParseId(planIdStr)
+        if err != nil {
+            panic(err)
+        }
+        payouts = model.GetPendingPaymentsInPlan(ctx, planId)
+    } else {
+        payouts = model.GetPendingPayments(ctx)
+    }
+
+    if len(payouts) == 0 {
+        fmt.Println("No pending payouts")
+        return
+    }
+    fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
+    fmt.Println(strings.Repeat("-", 56))
+
+    for _, payout := range payouts {
+        payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payout.Payout))
+        fmt.Printf("%-40s %-16s\n", payout.WalletId, payoutUsd)
+    }   
+}
+
+func payoutByPaymentId(opts docopt.Opts) {
+    accountPaymentIdStr, err := opts.String("--account_payment_id")
+    if err != nil {
+        panic(err)
+    }
+
+    ctx := context.Background()
+
+    accountPaymentId, err := bringyour.ParseId(accountPaymentIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    accountPayment, err := model.GetPayment(ctx, accountPaymentId)
+    if err != nil {
+        panic(err)
+    }
+
+    if accountPayment.Completed {
+        fmt.Println("Payment already completed at ", accountPayment.CompleteTime.String())
+        return
+    }
+
+    if accountPayment.Canceled {
+        fmt.Println("Payment canceled at ", accountPayment.CancelTime.String())
+        return
+    }
+
+    clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+    res, err := controller.ProviderPayout(accountPayment, clientSession)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Payout to %s processing complete: \n", accountPaymentIdStr)
+    fmt.Println("Complete Status: ", res.Complete)
+}
+
+func payoutPlanAppyBonus(opts docopt.Opts) {
+    ctx := context.Background()
+
+    planIdStr, err := opts.String("--plan_id")
+    if err != nil {
+        panic(err)
+    }
+
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    amountNanoCents := model.UsdToNanoCents(amountUsd)
+
+    planId, err := bringyour.ParseId(planIdStr)
+    if err != nil {
+        panic(err)
+    }
+
+    model.PayoutPlanAppyBonus(ctx, planId, amountNanoCents)
+}
+
+func adminWalletEstimateFee(opts docopt.Opts) {
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    blockchain, err := opts.String("--blockchain")
+    if err != nil {
+        panic(err)
+    }
+
+    destinationAddress, err := opts.String("--destination_address")
+    if err != nil {
+        panic(err)
+    }
+
+    client := controller.NewCircleClient()
+
+    fees, err := client.EstimateTransferFee(amountUsd, destinationAddress, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println("Medium BaseFee: ", fees.Medium.BaseFee)
+    fmt.Println("Medium GasLimit: ", fees.Medium.GasLimit)
+    fmt.Println("Medium GasPrice: ", fees.Medium.GasPrice)
+    fmt.Println("Medium MaxFee: ", fees.Medium.MaxFee)
+    fmt.Println("Medium PriorityFee: ", fees.Medium.PriorityFee)
+
+    fee, err := controller.CalculateFee(*fees.Medium, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Total Fee: %f\n", *fee)
+
+    usdFee, err := controller.ConvertFeeToUSDC(blockchain, *fee)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Total Fee in USD: %f\n", *usdFee)
+}
+
+func adminWalletTransfer(opts docopt.Opts) {
+
+    amountUsd, err := opts.Float64("--amount_usd")
+    if err != nil {
+        panic(err)
+    }
+
+    destinationAddress, err := opts.String("--destination_address")
+    if err != nil {
+        panic(err)
+    }
+
+    blockchain, err := opts.String("--blockchain")
+    if err != nil {
+        panic(err)
+    }
+
+    client := controller.NewCircleClient()
+
+    res, err := client.CreateTransferTransaction(amountUsd, destinationAddress, blockchain)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println("Transaction Successful")
+    fmt.Println("Transaction ID: ", res.Id)
+    fmt.Println("Transaction State: ", res.State)
 }
 
 func closeExpiredContracts() {
@@ -437,5 +701,4 @@ func closeExpiredContracts() {
     }
 
     fmt.Println("Contracts closed")
-
 }

@@ -1838,6 +1838,79 @@ func GetOpenContractIds(
 }
 
 
+// expired contracts are open:
+// - 2 closes - one source and one checkpoint
+// TODO - 0 closes can be used if the contract has a max lived time
+// TODO   add this to the protocol 
+// TODO there may be some overlap with https://github.com/bringyour/bringyour/commit/4a8150083083161be04737f0cc4b087906d9b449
+func GetExpiredOpenContractIds(
+    ctx context.Context,
+    contractCloseTimeout time.Duration,
+) map[bringyour.Id]bool {
+    contractIdPartialCloseParties := map[bringyour.Id]map[ContractParty]bool{}
+
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    transfer_contract.contract_id,
+                    contract_close.party,
+                    contract_close.checkpoint
+                FROM transfer_contract
+
+                INNER JOIN contract_close ON
+                    contract_close.contract_id = transfer_contract.contract_id AND
+                    contract_close.close_time < $1
+
+                WHERE
+                    transfer_contract.open = true
+            `,
+            time.Now().Add(-contractCloseTimeout),
+        )
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                var contractId bringyour.Id
+                var party_ *ContractParty
+                var checkpoint_ *bool
+                bringyour.Raise(result.Scan(&contractId, &party_, &checkpoint_))
+                var party ContractParty
+                if party_ != nil {
+                    party = *party_
+                }
+                var checkpoint bool
+                if checkpoint_ != nil {
+                    checkpoint = *checkpoint_
+                }
+                // there can be up to two rows per contractId (one checkpoint)
+                // checkpoint takes precedence
+                if checkpoint {
+                    party = ContractPartyCheckpoint
+                }
+                partialCloseParties, ok := contractIdPartialCloseParties[contractId]
+                if !ok {
+                    partialCloseParties = map[ContractParty]bool{}
+                    contractIdPartialCloseParties[contractId] = partialCloseParties
+                }
+                partialCloseParties[party] = true
+            }
+        })
+    })
+
+    contractIdCloses := map[bringyour.Id]bool{}
+    for contractId, partialCloseParties := range contractIdPartialCloseParties {
+        hasSource := partialCloseParties[ContractPartySource]
+        hasCheckpoint := partialCloseParties[ContractPartyCheckpoint]
+        if hasSource && hasCheckpoint {
+            contractIdCloses[contractId] = true
+        }
+    }
+
+    return contractIdCloses
+}
+
+
+/*
 func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
     ctx context.Context,
     clientId bringyour.Id,
@@ -1858,8 +1931,9 @@ func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
     }
     return pairContractIds
 }
+*/
 
-
+/*
 // return key is unordered transfer pair
 func GetOpenContractIdsForSourceOrDestination(
     ctx context.Context,
@@ -1917,7 +1991,7 @@ func GetOpenContractIdsForSourceOrDestination(
 
     return pairContractIdPartialCloseParties
 }
-
+*/
 
 type WalletType = string
 const (
@@ -1987,7 +2061,7 @@ func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet
 
 func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
     bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        wallet.WalletId = bringyour.NewId()
+        // wallet.WalletId = bringyour.NewId()
         wallet.Active = true
         wallet.CreateTime = bringyour.NowUtc()
 
@@ -2130,59 +2204,77 @@ func GetActiveAccountWallets(ctx context.Context, session *session.ClientSession
 
 
 type AccountPayment struct {
-    PaymentId bringyour.Id
-    PaymentPlanId bringyour.Id
-    WalletId bringyour.Id
-    PayoutByteCount ByteCount
-    Payout NanoCents
-    MinSweepTime time.Time
-    CreateTime time.Time
+    PaymentId bringyour.Id `json:"payment_id"`
+    PaymentPlanId bringyour.Id `json:"payment_plan_id"`
+    WalletId bringyour.Id `json:"wallet_id"`
+    NetworkId bringyour.Id `json:"network_id"`
+    PayoutByteCount ByteCount `json:"payout_byte_count"`
+    Payout NanoCents `json:"payout_nano_cents"`
+    MinSweepTime time.Time `json:"min_sweep_time"`
+    CreateTime time.Time `json:"create_time"`
 
-    PaymentRecord string
-    TokenType string
-    TokenAmount float64
-    PaymentTime time.Time
-    PaymentReceipt string
+    PaymentRecord *string `json:"payment_record"`
+    TokenType *string `json:"token_type"`
+    TokenAmount *float64 `json:"token_amount"`
+    PaymentTime *time.Time `json:"payment_time"`
+    PaymentReceipt *string `json:"payment_receipt"`
 
-    Completed bool
-    CompleteTime time.Time
+    Completed bool `json:"completed"`
+    CompleteTime *time.Time `json:"complete_time"`
 
-    Canceled bool
-    CancelTime time.Time
+    Canceled bool `json:"canceled"`
+    CancelTime *time.Time `json:"cancel_time"`
 }
 
 
-func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyour.Id) *AccountPayment {
-    var payment *AccountPayment
+func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyour.Id) (payment *AccountPayment, returnErr error) {
     result, err := conn.Query(
         ctx,
         `
             SELECT
-                payment_plan_id,
-                wallet_id,
-                payout_byte_count,
-                payout_nano_cents,
-                min_sweep_time,
-                create_time,
-                payment_record,
-                token_type,
-                token_amount,
-                payment_time,
-                payment_receipt,
-                completed,
-                complete_time,
-                canceled,
-                cancel_time
+                account_payment.payment_plan_id,
+                account_payment.wallet_id,
+                account_payment.payout_byte_count,
+                account_payment.payout_nano_cents,
+                account_payment.min_sweep_time,
+                account_payment.create_time,
+                account_payment.payment_record,
+                account_payment.token_type,
+                account_payment.token_amount,
+                account_payment.payment_time,
+                account_payment.payment_receipt,
+                account_payment.completed,
+                account_payment.complete_time,
+                account_payment.canceled,
+                account_payment.cancel_time,
+                account_wallet.network_id
             FROM account_payment
+
+            INNER JOIN account_wallet ON
+                account_wallet.wallet_id = account_payment.wallet_id
+
             WHERE
                 payment_id = $1
         `,
         paymentId,
     )
+    if err != nil {
+        returnErr = err
+        return
+    }
+
     bringyour.WithPgResult(result, err, func() {
+
+        if err != nil {
+            returnErr = err
+        }
+
         if result.Next() {
-            payment = &AccountPayment{}
+            payment = &AccountPayment{
+                PaymentId: paymentId,
+            }
             bringyour.Raise(result.Scan(
+                // &payment.PaymentId, // this was returning an empty id
                 &payment.PaymentPlanId,
                 &payment.WalletId,
                 &payment.PayoutByteCount,
@@ -2198,21 +2290,21 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
                 &payment.CompleteTime,
                 &payment.Canceled,
                 &payment.CancelTime,
+                &payment.NetworkId,
             ))
         }
     })
-    return payment
+
+    return
 }
 
-
-func GetPayment(ctx context.Context, paymentId bringyour.Id) *AccountPayment {
-    var payment *AccountPayment
+// TODO - tests for this
+func GetPayment(ctx context.Context, paymentId bringyour.Id) (payment *AccountPayment, err error) {
     bringyour.Db(ctx, func(conn bringyour.PgConn) {
-        payment = dbGetPayment(ctx, conn, paymentId)
+        payment, err = dbGetPayment(ctx, conn, paymentId)
     })
-    return payment
+    return
 }
-
 
 func GetPendingPayments(ctx context.Context) []*AccountPayment {
     payments := []*AccountPayment{}
@@ -2230,13 +2322,15 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
         )
         paymentIds := []bringyour.Id{}
         bringyour.WithPgResult(result, err, func() {
-            var paymentId bringyour.Id
-            bringyour.Raise(result.Scan(&paymentId))
-            paymentIds = append(paymentIds, paymentId)
+            for result.Next() {
+                var paymentId bringyour.Id
+                bringyour.Raise(result.Scan(&paymentId))
+                paymentIds = append(paymentIds, paymentId)
+            }
         })
 
         for _, paymentId := range paymentIds {
-            payment := dbGetPayment(ctx, conn, paymentId)
+            payment, _ := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)
             }
@@ -2265,13 +2359,15 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) [
         )
         paymentIds := []bringyour.Id{}
         bringyour.WithPgResult(result, err, func() {
-            var paymentId bringyour.Id
-            bringyour.Raise(result.Scan(&paymentId))
-            paymentIds = append(paymentIds, paymentId)
+            for result.Next() {
+                var paymentId bringyour.Id
+                bringyour.Raise(result.Scan(&paymentId))
+                paymentIds = append(paymentIds, paymentId)
+            }
         })
 
         for _, paymentId := range paymentIds {
-            payment := dbGetPayment(ctx, conn, paymentId)
+            payment, _ := dbGetPayment(ctx, conn, paymentId)
             if payment != nil {
                 payments = append(payments, payment)
             }
@@ -2489,7 +2585,8 @@ func SetPaymentRecord(
                 SET
                     token_type = $2,
                     token_amount = $3,
-                    payment_record = $4
+                    payment_record = $4,
+                    payment_time = $5
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
@@ -2498,6 +2595,7 @@ func SetPaymentRecord(
             tokenType,
             tokenAmount,
             paymentRecord,
+            bringyour.NowUtc(),
         ))
         if tag.RowsAffected() != 1 {
             returnErr = fmt.Errorf("Invalid payment.")
@@ -2575,6 +2673,33 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
     return
 }
 
+// used in bringyourctl to apply a bonus to a payment plan
+func PayoutPlanAppyBonus(
+    ctx context.Context,
+    paymentPlanId bringyour.Id,
+    bonusNanoCents NanoCents,
+) (returnErr error) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        tag := bringyour.RaisePgResult(tx.Exec(
+            ctx,
+            `
+                UPDATE account_payment
+                SET
+                    payout_nano_cents = payout_nano_cents + $2
+                WHERE
+                    payment_plan_id = $1 AND
+                    NOT completed AND NOT canceled
+            `,
+            paymentPlanId,
+            bonusNanoCents,
+        ))
+        if tag.RowsAffected() == 0 {
+            returnErr = fmt.Errorf("invalid payment plan")
+            return
+        }
+    })
+    return
+}
 
 type AccountBalance struct {
     NetworkId bringyour.Id

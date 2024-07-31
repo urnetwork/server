@@ -7,9 +7,9 @@ import (
 )
 
 type CircleUC struct {
-    NetworkId bringyour.Id `json:"network_id"`
-    UserId bringyour.Id `json:"user_id"`
-    CircleUCUserId bringyour.Id `json:"circle_uc_user_id"`
+    NetworkId       bringyour.Id `json:"network_id"`
+    UserId          bringyour.Id `json:"user_id"`
+    CircleUCUserId  bringyour.Id `json:"circle_uc_user_id"`
 }
 
 func GetCircleUCByCircleUCUserId(
@@ -129,3 +129,30 @@ func SetCircleUserId(
     })
 }
 
+func GetCircleUCUsers(ctx context.Context) (users []CircleUC) {
+    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+        result, txErr := tx.Query(
+            ctx,
+            `
+                SELECT
+                    *
+                FROM circle_uc
+            `,
+        )
+
+        bringyour.WithPgResult(result, txErr, func() {
+
+            for result.Next() {
+                user := CircleUC{}
+                bringyour.Raise(result.Scan(
+                    &user.NetworkId,
+                    &user.UserId,
+                    &user.CircleUCUserId,
+                ))
+                users = append(users, user)
+            }
+        })
+    })
+
+    return users
+}

@@ -3,10 +3,13 @@ package controller
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -22,16 +25,20 @@ import (
 	// "strings"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
-
 
 var circleConfig = sync.OnceValue(func() map[string]any {
     c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
     return c["circle"].(map[string]any)
 })
 
+var walletSetId = sync.OnceValue(func() string {
+    c := bringyour.Vault.RequireSimpleResource("circle.yml").Parse()
+    return c["wallet_set_id"].(string)
+})
 
 type WalletCircleInitResult struct {
     UserToken *CircleUserToken `json:"user_token,omitempty"`
@@ -232,6 +239,76 @@ func WalletCircleTransferOut(
             }
         },
     )
+}
+
+
+
+type GetPublicKeyResult struct {
+    PublicKey string `json:"publicKey"`
+}
+
+func getPublicKey() (*string, error) {
+
+    circleApiToken := circleConfig()["api_token"]
+
+    url := "https://api.circle.com/v1/w3s/config/entity/publicKey"
+
+    publicKey, err := bringyour.HttpGetRequireStatusOk(
+        url,
+        func(header http.Header) {
+            header.Add("Accept", "application/json")
+            header.Add("Authorization", fmt.Sprintf("Bearer %s", circleApiToken))
+        },
+        func(response *http.Response, responseBodyBytes []byte)(*string, error) {
+            result := &CircleResponse[GetPublicKeyResult]{}
+
+            err := json.Unmarshal(responseBodyBytes, result)
+            if err != nil {
+                return nil, err
+            }
+
+            return &result.Data.PublicKey, nil
+        },
+    )
+
+    if err != nil {
+        return nil, err
+    }
+
+    if publicKey == nil || len(*publicKey) == 0 {
+        return nil, fmt.Errorf("no public key found")
+    }
+
+    return publicKey, nil
+}
+
+func parseRsaPublicKeyFromPem(pubPEM []byte) (*rsa.PublicKey, error) {
+    block, _ := pem.Decode(pubPEM)
+    if block == nil {
+        return nil, fmt.Errorf("failed to parse PEM block containing the key")
+    }
+
+    pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+    if err != nil {
+        return nil, err
+    }
+
+    switch pub := pub.(type) {
+    case *rsa.PublicKey:
+        return pub, nil
+    default:
+    }
+    return nil, fmt.Errorf("key type is not rsa")
+}
+
+// EncryptOAEP rsa encrypt oaep.
+func encryptOAEP(pubKey *rsa.PublicKey, message []byte) (ciphertext []byte, err error) {
+	random := rand.Reader
+	ciphertext, err = rsa.EncryptOAEP(sha256.New(), random, pubKey, message, nil)
+	if err != nil {
+		return nil, err
+	}
+	return
 }
 
 
@@ -841,3 +918,91 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
     return completeWalletInfos, nil
 }
 
+type PopulateAccountWalletsArgs struct {
+}
+
+type PopulateAccountWalletsResult struct {
+}
+
+func PopulateAccountWallets(
+	populateAccountWallet *PopulateAccountWalletsArgs,
+	clientSession *session.ClientSession,
+) (*PopulateAccountWalletsResult, error) {
+
+	circleUCUsers := model.GetCircleUCUsers(clientSession.Ctx)
+
+	if len(circleUCUsers) == 0 {
+			return nil, fmt.Errorf("no users found")
+	}
+
+    fmt.Printf("%d circle users found \n", len(circleUCUsers))
+
+    errUserIds := []bringyour.Id{}
+
+	for _, user := range circleUCUsers {
+        time.Sleep(500 * time.Millisecond)
+		err := handleUser(user, clientSession)
+		if err != nil {
+			fmt.Printf("Error for user %s: %v \n", user.UserId.String(), err)
+            errUserIds = append(errUserIds, user.CircleUCUserId)
+		}
+	}
+
+    // create a JSON file with the user ids that failed
+    if len(errUserIds) > 0 {
+        fmt.Println("Error creating account wallets for the following users:")
+        for _, userId := range errUserIds {
+            fmt.Println(userId.String())
+        }
+    }
+
+    fmt.Println("PopulateAccountWallets done")
+
+	return &PopulateAccountWalletsResult{}, nil
+
+}
+
+func handleUser(user model.CircleUC, clientSession *session.ClientSession) (error) {
+	userSession := session.NewLocalClientSession(clientSession.Ctx, "0.0.0.0:0", &jwt.ByJwt{
+        NetworkId: user.NetworkId,
+        UserId: user.UserId,
+	})
+
+	walletInfo, err := findCircleWallets(userSession)
+	if err != nil {
+		return err
+	}
+
+	for i, wallet := range walletInfo {
+		walletId, err := bringyour.ParseId(wallet.WalletId)
+		if err != nil {
+            fmt.Printf("Error for wallet id %s: %v \n", wallet.WalletId, err)
+            continue
+		}
+
+        // check if account wallet exists
+        accountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+        if accountWallet != nil {
+            fmt.Printf("Account wallet already exists for wallet id %s \n", wallet.WalletId)
+            continue
+        }
+
+		accountWallet = &model.AccountWallet{
+			WalletId: walletId,
+			NetworkId: user.NetworkId,
+			WalletType: model.WalletTypeCircleUserControlled,
+			Blockchain: wallet.Blockchain,
+			WalletAddress: wallet.Address,
+			DefaultTokenType: "USDC",
+			CreateTime: wallet.CreateDate,
+		}
+		model.CreateAccountWallet(clientSession.Ctx, accountWallet)
+	
+		// set the payout wallet
+		if i == 0 {
+			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, walletId)
+		}
+	}
+
+	return nil
+}

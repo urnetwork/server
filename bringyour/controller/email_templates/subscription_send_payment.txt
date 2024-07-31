@@ -1,0 +1,23 @@
+You earned {{.AmountUsd}} USDC
+
+You just got paid {{.AmountUsd}} USDC for providing services up to {{.CreatedAt}} UTC.
+
+All associated contracts will be automatically deleted in 7 days to
+preseve anonymity of the network. If there appears to be an error, please
+contact support@bringyour.com immediately.
+
+Let's get more traffic! More traffic means bigger payouts. Let your
+friends know that BringYour is the best way to access local content and
+preserve privacy. Share referral link https://bringyour.com/?join={{.ReferralCode}}
+to get 2x payouts for each new network that signs up for a subscription,
+up to 5 USDC per network.
+
+Onward and upward!
+
+BringYour Payment ID {{.PaymentId}}
+
+{{.AmountUsd}} sent on {{.Blockchain}} to {{.DestinationAddress}} in
+transaction {{.ExplorerBasePath}}/{{.TxHash}}.
+
+Copyright {{.CopyrightYear}} BringYour, Inc.<br />2261 Market Street
+#5245, San Francisco, CA 94114, United States

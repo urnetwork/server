@@ -1,8 +1,8 @@
 package bringyour
 
 import (
-    "context"
-    // "time"
+	"context"
+	// "time"
 )
 
 // create entries for `network_client.device_id`
@@ -76,6 +76,44 @@ func migration_20240124_PopulateDevice(ctx context.Context) {
                 `,
                 clientId,
                 device.deviceId,
+            ))
+        }
+    })
+}
+
+func migration_20240725_PopulateNetworkReferralCodes(ctx context.Context) {
+    Tx(ctx, func(tx PgTx) {
+        result, err := tx.Query(
+            ctx,
+            `
+                SELECT
+                    network_id
+                FROM network
+            `,
+        )
+        networkIds := []Id{}
+        WithPgResult(result, err, func() {
+            for result.Next() {
+                var networkId Id
+                Raise(result.Scan(
+                    &networkId,
+                ))
+                networkIds = append(networkIds, networkId)
+            }
+        })
+
+        for _, networkId := range networkIds {
+            code := NewId()
+            RaisePgResult(tx.Exec(
+                ctx,
+                `
+                INSERT INTO network_referral_code (
+                    network_id,
+                    referral_code
+                ) VALUES ($1, $2)
+                `,
+                networkId,
+                code,
             ))
         }
     })
