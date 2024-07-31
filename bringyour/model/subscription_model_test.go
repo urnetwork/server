@@ -407,3 +407,122 @@ func TestInitialBalance(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
         assert.Equal(t, endTime, transferBalance.EndTime)
     }
 })}
+
+
+func TestClosePartialContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    ctx := context.Background()
+
+    networkIdA := bringyour.NewId()
+    userIdA := bringyour.NewId()
+    clientIdA := bringyour.NewId()
+
+    networkIdB := bringyour.NewId()
+    userIdB := bringyour.NewId()
+    clientIdB := bringyour.NewId()
+
+    Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+    Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+    for _, networkId := range []bringyour.Id{networkIdA, networkIdB} {
+        initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+        initialTransferBalanceDuration := 30 * 24 * time.Hour
+
+        startTime := bringyour.NowUtc()
+        endTime := startTime.Add(initialTransferBalanceDuration)
+        success := AddBasicTransferBalance(
+            ctx,
+            networkId,
+            initialTransferBalance,
+            startTime,
+            endTime,
+        )
+        assert.Equal(t, true, success)
+    }
+
+    
+    for i := range 2 {
+        var sourceNetworkId bringyour.Id
+        var sourceId bringyour.Id
+        var destinationNetworkId bringyour.Id
+        var destinationId bringyour.Id
+        if i == 0 {
+            sourceNetworkId = networkIdA
+            sourceId = clientIdA
+            destinationNetworkId = networkIdB
+            destinationId = clientIdB
+        } else {
+            sourceNetworkId = networkIdB
+            sourceId = clientIdB
+            destinationNetworkId = networkIdA
+            destinationId = clientIdA
+        }
+        
+        for j := range 2 {
+            // create new contract with escrow
+            contractId, _, err := CreateContract(
+                ctx,
+                sourceNetworkId,
+                sourceId,
+                destinationNetworkId,
+                destinationId,
+                ByteCount(1024 * 1024),
+            )
+            assert.Equal(t, err, nil)
+
+            var close1Id bringyour.Id
+            var close2Id bringyour.Id
+            if j == 0 {
+                close1Id = sourceId
+                close2Id = destinationId
+            } else {
+                close1Id = destinationId
+                close2Id = sourceId
+            }
+
+            err = CloseContract(
+                ctx,
+                contractId,
+                close1Id,
+                512 * 1024,
+                false,
+            )
+            assert.Equal(t, err, nil)
+
+            contractClose, closed := GetContractClose(ctx, contractId)
+            assert.Equal(t, closed, false)
+
+            err = CloseContract(
+                ctx,
+                contractId,
+                close2Id,
+                512 * 1024,
+                false,
+            )
+
+            contractClose, closed = GetContractClose(ctx, contractId)
+            assert.Equal(t, closed, true)
+            assert.Equal(t, contractClose.Dispute, false)
+            assert.Equal(t, contractClose.Outcome, ContractOutcomeSettled)
+        }
+    }
+
+})}
+
+
+func TestClosePartialCompanionContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    
+    // create contract and companion contract
+
+})}
+
+
+func TestClosePartialContractNoEscrow(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+    
+    // create new contract without escrow
+    
+})}
+
+
+
+
+// FIXME test close companion contract and correct payee is 

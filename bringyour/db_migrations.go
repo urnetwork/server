@@ -1435,7 +1435,7 @@ var migrations = []any{
     `),
 
     newSqlMigration(`
-        ALTER TABLE transfer_contract ADD COLUMN payee_network_id uuid NULL
+        ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
     `),
 
 

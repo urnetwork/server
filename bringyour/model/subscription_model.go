@@ -800,7 +800,7 @@ func createTransferEscrowInTx(
     sourceId bringyour.Id,
     destinationNetworkId bringyour.Id,
     destinationId bringyour.Id,
-    payeeNetworkId bringyour.Id,
+    payerNetworkId bringyour.Id,
     contractTransferByteCount ByteCount,
     companionContractId *bringyour.Id,
 ) (transferEscrow *TransferEscrow, returnErr error) {
@@ -824,7 +824,7 @@ func createTransferEscrowInTx(
 
             FOR UPDATE
         `,
-        payeeNetworkId,
+        payerNetworkId,
         bringyour.NowUtc(),
     )
     // add up the balance_byte_count until >= contractTransferByteCount
@@ -892,7 +892,6 @@ func createTransferEscrowInTx(
         }
     })
 
-    // TODO add payee_network_id to transfer_contract
     bringyour.RaisePgResult(tx.Exec(
         ctx,
         `
@@ -904,7 +903,7 @@ func createTransferEscrowInTx(
                 destination_id,
                 transfer_byte_count,
                 companion_contract_id,
-                payee_network_id
+                payer_network_id
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
@@ -915,7 +914,7 @@ func createTransferEscrowInTx(
         destinationId,
         contractTransferByteCount,
         companionContractId,
-        payeeNetworkId,
+        payerNetworkId,
     ))
 
     balances := []*TransferEscrowBalance{}
@@ -932,6 +931,30 @@ func createTransferEscrowInTx(
         Balances: balances,
     }
 
+    return
+}
+
+
+// renaming of `CreateTransferEscrow` since contract is the top level concept
+func CreateContract(
+    ctx context.Context,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferByteCount ByteCount,
+) (contractId bringyour.Id, transferEscrow *TransferEscrow, returnErr error) {
+    transferEscrow, returnErr = CreateTransferEscrow(
+        ctx,
+        sourceNetworkId,
+        sourceId,
+        destinationNetworkId,
+        destinationId,
+        contractTransferByteCount,
+    )
+    if transferEscrow != nil {
+        contractId = transferEscrow.ContractId
+    }
     return
 }
 
@@ -961,6 +984,32 @@ func CreateTransferEscrow(
 
     }, bringyour.TxReadCommitted)
 
+    return
+}
+
+
+// renaming of `CreateCompanionTransferEscrow` since contract is the top level concept
+func CreateCompanionContract(
+    ctx context.Context,
+    sourceNetworkId bringyour.Id,
+    sourceId bringyour.Id,
+    destinationNetworkId bringyour.Id,
+    destinationId bringyour.Id,
+    contractTransferByteCount ByteCount,
+    originContractTimeout time.Duration,
+) (contractId bringyour.Id, transferEscrow *TransferEscrow, returnErr error) {
+    transferEscrow, returnErr = CreateCompanionTransferEscrow(
+        ctx,
+        sourceNetworkId,
+        sourceId,
+        destinationNetworkId,
+        destinationId,
+        contractTransferByteCount,
+        originContractTimeout,
+    )
+    if transferEscrow != nil {
+        contractId = transferEscrow.ContractId
+    }
     return
 }
 
@@ -1538,7 +1587,7 @@ func settleEscrowInTx(
             SELECT
                 source_network_id,
                 destination_network_id,
-                payee_network_id,
+                payer_network_id,
                 companion_contract_id
             FROM transfer_contract
             WHERE
@@ -1551,16 +1600,16 @@ func settleEscrowInTx(
         if result.Next() {
             var sourceNetworkId bringyour.Id
             var destinationNetworkId bringyour.Id
-            var payeeNetworkId *bringyour.Id
+            var payerNetworkId *bringyour.Id
             var companionContractId *bringyour.Id
             bringyour.Raise(result.Scan(
                 &sourceNetworkId,
                 &destinationNetworkId,
-                #&payeeNetworkId,
+                &payerNetworkId,
                 &companionContractId,
             ))
-            if payoutNetworkId != nil {
-                if payeeNetworkId == sourceNetworkId {
+            if payerNetworkId != nil {
+                if *payerNetworkId == sourceNetworkId {
                     payoutNetworkId = &destinationNetworkId
                 } else {
                     payoutNetworkId = &sourceNetworkId
@@ -1889,6 +1938,50 @@ func GetOpenContractIdsForSourceOrDestination(
     })
 
     return pairContractIdPartialCloseParties
+}
+
+
+type ContractClose struct {
+    CloseTime time.Time
+    Dispute bool
+    Outcome string
+}
+
+
+func GetContractClose(ctx context.Context, contractId bringyour.Id) (contractClose *ContractClose, closed bool) {
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    close_time,
+                    dispute,
+                    outcome
+                FROM transfer_contract
+                WHERE
+                    contract_id = $1
+            `,
+            contractId,
+        )
+        bringyour.WithPgResult(result, err, func() {
+            if result.Next() {
+                var closeTime *time.Time
+                var dispute bool
+                var outcome *string
+                bringyour.Raise(result.Scan(&closeTime, &dispute, &outcome))
+                if outcome != nil {
+                    closed = true
+                    contractClose = &ContractClose{
+                        CloseTime: *closeTime,
+                        Dispute: dispute,
+                        Outcome: *outcome,
+                    }
+                }
+            }
+        })
+    })
+
+    return
 }
 
 
