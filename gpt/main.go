@@ -1,23 +1,22 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
-    "time"
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
 
-    "github.com/docopt/docopt-go"
-    
-    "bringyour.com/service/gpt/handlers"
-    "bringyour.com/bringyour/router"
-    "bringyour.com/bringyour/controller"
-    "bringyour.com/bringyour"
+	"github.com/docopt/docopt-go"
+
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/service/gpt/handlers"
 )
 
-
 func main() {
-    usage := `BringYour GPT API server.
+	usage := `BringYour GPT API server.
 
 Usage:
   api [--port=<port>]
@@ -32,64 +31,64 @@ Options:
   -p --port=<port>  Listen port [default: 80].
   --url=<url>   Test url.`
 
-    opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
-    if err != nil {
-        panic(err)
-    }
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	if err != nil {
+		panic(err)
+	}
 
-    // FIXME signal cancel
-    cancelCtx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+	// FIXME signal cancel
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-    if test, _ := opts.Bool("innerhtml"); test {
-        url, _ := opts.String("--url")
-        html, err := controller.GetBodyHtml(cancelCtx, url, 15 * time.Second)
-        if err != nil {
-            panic(err)
-        }
-        fmt.Printf("%s\n", html)
-    } else if test, _ := opts.Bool("privacypolicy"); test {
-        url, _ := opts.String("--url")
+	if test, _ := opts.Bool("innerhtml"); test {
+		url, _ := opts.String("--url")
+		html, err := controller.GetBodyHtml(cancelCtx, url, 15*time.Second)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("%s\n", html)
+	} else if test, _ := opts.Bool("privacypolicy"); test {
+		url, _ := opts.String("--url")
 
-        collector := controller.NewPrivacyPolicyCollector(
-            cancelCtx,
-            "test",
-            []string{url},
-            30 * time.Second,
-            10 * time.Second,
-        )
-        privacyPolicyText, extractedUrls, err := collector.Run()
-        if err != nil {
-            panic(err)
-        }
-        for _, extractedUrl := range extractedUrls {
-            fmt.Printf("Extracted URL: %s\n", extractedUrl)
-        }
-        fmt.Printf("%s\n", privacyPolicyText)
-    } else {
-        routes := []*router.Route{
-            router.NewRoute("GET", "/privacy.txt", router.Txt),
-            router.NewRoute("GET", "/terms.txt", router.Txt),
-            router.NewRoute("GET", "/vdp.txt", router.Txt),
-            router.NewRoute("GET", "/status", router.WarpStatus),
-            router.NewRoute("POST", "/gpt/privacypolicy", handlers.GptPrivacyPolicy),
-            router.NewRoute("POST", "/gpt/bemyprivacyagent", handlers.GptBeMyPrivacyAgent),
-        }
+		collector := controller.NewPrivacyPolicyCollector(
+			cancelCtx,
+			"test",
+			[]string{url},
+			30*time.Second,
+			10*time.Second,
+		)
+		privacyPolicyText, extractedUrls, err := collector.Run()
+		if err != nil {
+			panic(err)
+		}
+		for _, extractedUrl := range extractedUrls {
+			fmt.Printf("Extracted URL: %s\n", extractedUrl)
+		}
+		fmt.Printf("%s\n", privacyPolicyText)
+	} else {
+		routes := []*router.Route{
+			router.NewRoute("GET", "/privacy.txt", router.Txt),
+			router.NewRoute("GET", "/terms.txt", router.Txt),
+			router.NewRoute("GET", "/vdp.txt", router.Txt),
+			router.NewRoute("GET", "/status", router.WarpStatus),
+			router.NewRoute("POST", "/gpt/privacypolicy", handlers.GptPrivacyPolicy),
+			router.NewRoute("POST", "/gpt/bemyprivacyagent", handlers.GptBeMyPrivacyAgent),
+		}
 
-        // bringyour.Logger().Printf("%s\n", opts)
+		// bringyour.Logger().Printf("%s\n", opts)
 
-        port, _ := opts.Int("--port")
+		port, _ := opts.Int("--port")
 
-        bringyour.Logger().Printf(
-            "Serving %s %s on *:%d\n",
-            bringyour.RequireEnv(),
-            bringyour.RequireVersion(),
-            port,
-        )
+		bringyour.Logger().Printf(
+			"Serving %s %s on *:%d\n",
+			bringyour.RequireEnv(),
+			bringyour.RequireVersion(),
+			port,
+		)
 
-        routerHandler := router.NewRouter(cancelCtx, routes)
-        err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
+		routerHandler := router.NewRouter(cancelCtx, routes)
+		err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
-        bringyour.Logger().Fatal(err)
-    }
+		bringyour.Logger().Fatal(err)
+	}
 }

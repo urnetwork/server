@@ -7,17 +7,14 @@ import (
 	"bringyour.com/connect"
 )
 
-
 var dvcLog = logFn("device_view_controller")
-
 
 type NetworkClientsListener interface {
 	NetworkClientsChanged(networkClients *NetworkClientInfoList)
 }
 
-
 type DevicesViewController struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	device *BringYourDevice
@@ -29,9 +26,9 @@ func newDevicesViewController(ctx context.Context, device *BringYourDevice) *Dev
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &DevicesViewController{
-		ctx: cancelCtx,
-		cancel: cancel,
-		device: device,
+		ctx:                     cancelCtx,
+		cancel:                  cancel,
+		device:                  device,
 		networkClientsListeners: connect.NewCallbackList[NetworkClientsListener](),
 	}
 	return vc
@@ -54,7 +51,7 @@ func (self *DevicesViewController) Start() {
 
 				for i := 0; i < result.Clients.Len(); i += 1 {
 					networkClient := result.Clients.Get(i)
-					networkClients = append(networkClients, networkClient)					
+					networkClients = append(networkClients, networkClient)
 				}
 
 				slices.SortStableFunc(networkClients, self.cmpNetworkClientLayout)
@@ -68,7 +65,7 @@ func (self *DevicesViewController) Start() {
 }
 
 func (self *DevicesViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *DevicesViewController) AddNetworkClientsListener(listener NetworkClientsListener) Sub {
@@ -92,7 +89,6 @@ func (self *DevicesViewController) Close() {
 
 	self.cancel()
 }
-
 
 func (self *DevicesViewController) cmpNetworkClientLayout(a *NetworkClientInfo, b *NetworkClientInfo) int {
 	if a == b {

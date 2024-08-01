@@ -1,26 +1,25 @@
 package bringyour
 
 import (
-	"sync"
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-	"errors"
-	"regexp"
-	"runtime/debug"
-	"runtime"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	// "github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/golang/glog"
 )
-
 
 /*
 `Db` runs in read-only mode
@@ -29,9 +28,7 @@ import (
 
 // note all times in the db should be `timestamp` UTC. Do not use `timestamp with time zone`. See `NowUtc`
 
-
 var DbContextDoneError = errors.New("Done")
-
 
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
@@ -42,10 +39,8 @@ type PgNamedArgs = pgx.NamedArgs
 type PgBatch = *pgx.Batch
 type PgBatchResults = pgx.BatchResults
 
-
 const TxSerializable = pgx.Serializable
 const TxReadCommitted = pgx.ReadCommitted
-
 
 var safePool = &safePgPool{
 	ctx: context.Background(),
@@ -61,11 +56,10 @@ func PgReset() {
 	safePool.reset()
 }
 
-
 type safePgPool struct {
-	ctx context.Context
+	ctx   context.Context
 	mutex sync.Mutex
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
 }
 
 func (self *safePgPool) open() *pgxpool.Pool {
@@ -79,13 +73,13 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
 		options := map[string]string{
-			"sslmode": "disable",
-			"pool_max_conns": strconv.Itoa(32),
-			"pool_min_conns": strconv.Itoa(4),
-			"pool_max_conn_lifetime": "8h",
+			"sslmode":                       "disable",
+			"pool_max_conns":                strconv.Itoa(32),
+			"pool_min_conns":                strconv.Itoa(4),
+			"pool_max_conn_lifetime":        "8h",
 			"pool_max_conn_lifetime_jitter": "1h",
-			"pool_max_conn_idle_time": "60s",
-			"pool_health_check_period": "1h",
+			"pool_max_conn_idle_time":       "60s",
+			"pool_health_check_period":      "1h",
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
 			"default_transaction_read_only": "on",
 		}
@@ -108,7 +102,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		if err != nil {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
-		config.AfterConnect = func(ctx context.Context, conn *pgx.Conn)(error) {
+		config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 			// use `Id` instead of the default UUID type
 			pgxRegisterIdType(conn.TypeMap())
 			return nil
@@ -136,39 +130,37 @@ func (self *safePgPool) reset() {
 	}
 }
 
-
 type DbRetryOptions struct {
 	// rerun the entire callback on commit error
-	rerunOnCommitError bool
+	rerunOnCommitError     bool
 	rerunOnConnectionError bool
 	// this only works if the conflict, e.g. an ID, is changed on each run
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
 	rerunOnTransientError bool
-	retryTimeout time.Duration
-	endRetryTimeout time.Duration
+	retryTimeout          time.Duration
+	endRetryTimeout       time.Duration
 	// debugRetryTimeout time.Duration
 }
 
 // this is the default for `Db` and `Tx`
 func OptRetryDefault() DbRetryOptions {
 	return DbRetryOptions{
-		rerunOnCommitError: true,
+		rerunOnCommitError:     true,
 		rerunOnConnectionError: true,
-		rerunOnTransientError: true,
-		retryTimeout: 200 * time.Millisecond,
-		endRetryTimeout: 60 * time.Second,
+		rerunOnTransientError:  true,
+		retryTimeout:           200 * time.Millisecond,
+		endRetryTimeout:        60 * time.Second,
 		// debugRetryTimeout: 90 * time.Second,
 	}
 }
 
 func OptNoRetry() DbRetryOptions {
 	return DbRetryOptions{
-		rerunOnCommitError: false,
+		rerunOnCommitError:     false,
 		rerunOnConnectionError: false,
-		rerunOnTransientError: false,
+		rerunOnTransientError:  false,
 	}
 }
-
 
 type DbReadWriteOptions struct {
 	readOnly bool
@@ -185,7 +177,6 @@ func OptReadWrite() DbReadWriteOptions {
 		readOnly: false,
 	}
 }
-
 
 /*
 type DbDebugOptions struct {
@@ -206,7 +197,6 @@ func OptDebugTx() DbDebugOptions {
 	}
 }
 */
-
 
 // transient errors can be resolved by either
 // - changing the parameters of the query to avoid constraint conflicts
@@ -277,8 +267,8 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 			retryOptions = v
 		case DbReadWriteOptions:
 			rwOptions = v
-		// case DbDebugOptions:
-		// 	debugOptions = v
+			// case DbDebugOptions:
+			// 	debugOptions = v
 		}
 	}
 
@@ -290,9 +280,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 			}
 			panic(connErr)
@@ -307,9 +297,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 
 			if retryOptions.rerunOnConnectionError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 			}
 			panic(connErr)
@@ -353,9 +343,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 		if pgErr != nil {
 			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -372,9 +362,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 				continue
 			}
@@ -407,8 +397,8 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
 	txOptions := pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
-		AccessMode: pgx.ReadWrite,
+		IsoLevel:       pgx.RepeatableRead,
+		AccessMode:     pgx.ReadWrite,
 		DeferrableMode: pgx.NotDeferrable,
 	}
 	// debugOptions := OptNoDebug()
@@ -424,8 +414,8 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 			txOptions.AccessMode = v
 		case pgx.TxDeferrableMode:
 			txOptions.DeferrableMode = v
-		// case DbDebugOptions:
-		// 	debugOptions = v
+			// case DbDebugOptions:
+			// 	debugOptions = v
 		}
 	}
 
@@ -434,7 +424,7 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 	for {
 		var pgErr error
 		var commitErr error
-		db(ctx, func (conn PgConn) {
+		db(ctx, func(conn PgConn) {
 			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
 				panic(err)
@@ -480,9 +470,9 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 		if pgErr != nil {
 			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -499,9 +489,9 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 		if commitErr != nil {
 			if retryOptions.rerunOnCommitError {
 				select {
-				case <- ctx.Done():
+				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <- time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)
@@ -586,14 +576,12 @@ func WithPgResult(r PgResult, err error, callback any) {
 	Raise(r.Err())
 }
 
-
 func RaisePgResult[T any](result T, err error) T {
 	Raise(err)
 	return result
 }
 
-
-func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch)) {
+func BatchInTx(ctx context.Context, tx PgTx, callback func(PgBatch)) {
 	batch := &pgx.Batch{}
 	callback(batch)
 	results := tx.SendBatch(ctx, batch)
@@ -603,13 +591,10 @@ func BatchInTx(ctx context.Context, tx PgTx, callback func (PgBatch)) {
 	}
 }
 
-
-
 type ComplexValue interface {
 	// unpack a complex value into individual values
 	Values() []any
 }
-
 
 // CreateTempTableInTxAllowDuplicates
 
@@ -643,7 +628,7 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.valueColumnNames, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func(batch PgBatch) {
 		for _, value := range values {
 			var pgValues = []any{}
 			pgValues = expandValue(value, pgValues)
@@ -665,7 +650,6 @@ func CreateTempTableInTx[T any](ctx context.Context, tx PgTx, spec string, value
 		}
 	})
 }
-
 
 func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spec string, values ...T) {
 	tableSpec := parseTempTableSpec(spec)
@@ -694,7 +678,7 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 		tableSpec.tableName,
 		strings.Join(pgParts, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func(batch PgBatch) {
 		for _, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(value, pgValues)
@@ -715,7 +699,6 @@ func CreateTempTableInTxAllowDuplicates[T any](ctx context.Context, tx PgTx, spe
 		}
 	})
 }
-
 
 // many to one join table
 // spec is `table_name(key_column_name type[, ...] -> value_column_name type[, ...])`
@@ -760,7 +743,7 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		strings.Join(pgParts, ", "),
 		strings.Join(tableSpec.keyColumnNames, ", "),
 	)))
-	BatchInTx(ctx, tx, func (batch PgBatch) {
+	BatchInTx(ctx, tx, func(batch PgBatch) {
 		for key, value := range values {
 			pgValues := []any{}
 			pgValues = expandValue(key, pgValues)
@@ -784,11 +767,10 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 	})
 }
 
-
 func expandValue[T any](value T, out []any) []any {
 	if v, ok := any(value).(ComplexValue); ok {
 		out = append(out, v.Values()...)
-	// value may be a struct, `&value` will convert it to an interface type
+		// value may be a struct, `&value` will convert it to an interface type
 	} else if v, ok := any(&value).(ComplexValue); ok {
 		out = append(out, v.Values()...)
 	} else {
@@ -797,11 +779,10 @@ func expandValue[T any](value T, out []any) []any {
 	return out
 }
 
-
 type TempTableSpec struct {
-	tableName string
+	tableName        string
 	valueColumnNames []string
-	valuePgTypes []string
+	valuePgTypes     []string
 }
 
 // spec is `table_name(value_column_name type)`
@@ -815,19 +796,18 @@ func parseTempTableSpec(spec string) *TempTableSpec {
 	valueColumnNames, valuePgTypes := parseSpec(groups[2])
 
 	return &TempTableSpec{
-		tableName: groups[1],
+		tableName:        groups[1],
 		valueColumnNames: valueColumnNames,
-		valuePgTypes: valuePgTypes,
+		valuePgTypes:     valuePgTypes,
 	}
 }
 
-
 type TempJoinTableSpec struct {
-	tableName string
-	keyColumnNames []string
-	keyPgTypes []string
+	tableName        string
+	keyColumnNames   []string
+	keyPgTypes       []string
 	valueColumnNames []string
-	valuePgTypes []string
+	valuePgTypes     []string
 }
 
 // spec is `table_name(key_column_name type[, ...] -> value_column_name type[, ...])`
@@ -842,14 +822,13 @@ func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
 	valueColumnNames, valuePgTypes := parseSpec(groups[3])
 
 	return &TempJoinTableSpec{
-		tableName: groups[1],
-		keyColumnNames: keyColumnNames,
-		keyPgTypes: keyPgTypes,
+		tableName:        groups[1],
+		keyColumnNames:   keyColumnNames,
+		keyPgTypes:       keyPgTypes,
 		valueColumnNames: valueColumnNames,
-		valuePgTypes: valuePgTypes,
+		valuePgTypes:     valuePgTypes,
 	}
 }
-
 
 func parseSpec(spec string) (columnNames []string, pgTypes []string) {
 	re := regexp.MustCompile("^\\s*(\\w+)\\s+([^,]+)\\s*,?")

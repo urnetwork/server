@@ -4,10 +4,9 @@ import (
 	// "time"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/session"
 )
-
 
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
@@ -21,6 +20,8 @@ func NetworkCreate(
 		return result, nil
 	}
 
+	model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
+
 	if success := AddInitialTransferBalance(session.Ctx, result.Network.NetworkId); !success {
 		bringyour.Logger().Printf("Could not add initial transfer balance to networkId=%s\n", result.Network.NetworkId)
 	}
@@ -32,12 +33,12 @@ func NetworkCreate(
 		}
 		AuthVerifySend(verifySend, session)
 	} else {
-        SendAccountMessageTemplate(
-            *result.UserAuth,
-            &NetworkWelcomeTemplate{},
-        )
+		awsMessageSender := GetAWSMessageSender()
+		awsMessageSender.SendAccountMessageTemplate(
+			*result.UserAuth,
+			&NetworkWelcomeTemplate{},
+		)
 	}
 
 	return result, nil
 }
-

@@ -2,28 +2,27 @@ package controller
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"time"
-	"crypto/hmac"
-	"crypto/sha256"
 
 	"google.golang.org/protobuf/proto"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/model"
-	"bringyour.com/protocol"
+	"bringyour.com/bringyour/session"
 	"bringyour.com/connect"
+	"bringyour.com/protocol"
 )
-
 
 var ControlId = bringyour.Id(connect.ControlId)
 
-var MinContractTransferByteCount = func()(model.ByteCount) {
+var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()
 	return max(
-		model.ByteCount(32 * 1024),
+		model.ByteCount(32*1024),
 		settings.SendBufferSettings.MinMessageByteCount,
 		settings.ReceiveBufferSettings.MinMessageByteCount,
 	)
@@ -32,20 +31,18 @@ var MinContractTransferByteCount = func()(model.ByteCount) {
 // allow the return contract to be created for up to this timeout after the source contract was closed
 var OriginContractTimeout = 15 * time.Second
 
-
 type ConnectControlArgs struct {
 	Pack string `json:"pack"`
 }
 
 type ConnectControlResult struct {
-	Pack string `json:"pack"`
+	Pack  string               `json:"pack"`
 	Error *ConnectControlError `json:"error"`
 }
 
 type ConnectControlError struct {
 	Message string `json:"message"`
 }
-
 
 // the message is verified from source `clientId`
 func ConnectControl(
@@ -68,7 +65,7 @@ func ConnectControl(
 		*clientSession.ByJwt.ClientId,
 		pack.Frames,
 	)
-	
+
 	resultPack := &protocol.Pack{
 		Frames: resultFrames,
 	}
@@ -88,7 +85,6 @@ func ConnectControl(
 	return result, nil
 }
 
-
 func ConnectControlFrames(
 	ctx context.Context,
 	clientId bringyour.Id,
@@ -104,7 +100,7 @@ func ConnectControlFrames(
 
 		var outFrames []*protocol.Frame
 		err = nil
-		
+
 		switch v := message.(type) {
 		case *protocol.CreateContract:
 			outFrames, err = CreateContract(ctx, clientId, v)
@@ -128,45 +124,42 @@ func ConnectControlFrames(
 	return netOutFrames, nil
 }
 
-
 func GetProvideMode(ctx context.Context, destinationId bringyour.Id) model.ProvideMode {
 
-    if destinationId == ControlId {
-        return model.ProvideModeNetwork
-    }
+	if destinationId == ControlId {
+		return model.ProvideModeNetwork
+	}
 
-    provideMode, err := model.GetProvideMode(ctx, destinationId)
-    if err != nil {
-        return model.ProvideModeNone
-    }
-    return provideMode
+	provideMode, err := model.GetProvideMode(ctx, destinationId)
+	if err != nil {
+		return model.ProvideModeNone
+	}
+	return provideMode
 }
-
 
 // this is the "min" or most specific relationship
 func GetProvideRelationship(ctx context.Context, sourceId bringyour.Id, destinationId bringyour.Id) model.ProvideMode {
-    if sourceId == ControlId || destinationId == ControlId {
-        return model.ProvideModeNetwork
-    }
+	if sourceId == ControlId || destinationId == ControlId {
+		return model.ProvideModeNetwork
+	}
 
-    if sourceId == destinationId {
-        return model.ProvideModeNetwork
-    }
+	if sourceId == destinationId {
+		return model.ProvideModeNetwork
+	}
 
-    if sourceClient := model.GetNetworkClient(ctx, sourceId); sourceClient != nil {
-        if destinationClient := model.GetNetworkClient(ctx, destinationId); destinationClient != nil {
-            if sourceClient.NetworkId == destinationClient.NetworkId {
-                return model.ProvideModeNetwork
-            }
-        }
-    }
+	if sourceClient := model.GetNetworkClient(ctx, sourceId); sourceClient != nil {
+		if destinationClient := model.GetNetworkClient(ctx, destinationId); destinationClient != nil {
+			if sourceClient.NetworkId == destinationClient.NetworkId {
+				return model.ProvideModeNetwork
+			}
+		}
+	}
 
-    // TODO network and friends-and-family not implemented yet
-    // FIXME these exist in the association model now, can be added
+	// TODO network and friends-and-family not implemented yet
+	// FIXME these exist in the association model now, can be added
 
-    return model.ProvideModePublic
+	return model.ProvideModePublic
 }
-
 
 func CreateContract(
 	ctx context.Context,
@@ -175,17 +168,15 @@ func CreateContract(
 ) ([]*protocol.Frame, error) {
 	bringyour.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
 
-
 	destinationId := bringyour.RequireIdFromBytes(createContract.DestinationId)
 	var provideMode model.ProvideMode
 
 	if createContract.Companion {
 
 		// companion contracts use `ProvideModeStream`
- 		provideMode = model.ProvideModeStream
+		provideMode = model.ProvideModeStream
 
 	} else {
-
 
 		minRelationship := GetProvideRelationship(ctx, clientId, destinationId)
 
@@ -230,23 +221,22 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
-
 	storedContract := &protocol.StoredContract{
-		ContractId: contractId.Bytes(),
+		ContractId:        contractId.Bytes(),
 		TransferByteCount: uint64(transferByteCount),
-		SourceId: clientId.Bytes(),
-		DestinationId: destinationId.Bytes(),
+		SourceId:          clientId.Bytes(),
+		DestinationId:     destinationId.Bytes(),
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
-	
+
 	mac := hmac.New(sha256.New, provideSecretKey)
 	storedContractHmac := mac.Sum(storedContractBytes)
 
 	result := &protocol.CreateContractResult{
 		Contract: &protocol.Contract{
 			StoredContractBytes: storedContractBytes,
-			StoredContractHmac: storedContractHmac,
-			ProvideMode: protocol.ProvideMode(provideMode),
+			StoredContractHmac:  storedContractHmac,
+			ProvideMode:         protocol.ProvideMode(provideMode),
 		},
 	}
 	frame := connect.RequireToFrame(result)
@@ -296,74 +286,73 @@ func nextContract(
 
 func newContract(
 	ctx context.Context,
-    sourceId bringyour.Id,
-    destinationId bringyour.Id,
-    companionContract bool,
-    transferByteCount model.ByteCount,
-    provideMode model.ProvideMode,
+	sourceId bringyour.Id,
+	destinationId bringyour.Id,
+	companionContract bool,
+	transferByteCount model.ByteCount,
+	provideMode model.ProvideMode,
 ) (contractId bringyour.Id, contractTransferByteCount model.ByteCount, returnErr error) {
-    sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
-    if err != nil {
-        // the source is not a real client
-        returnErr = err
-        return
-    }
-    destinationNetworkId, err := model.FindClientNetwork(ctx, destinationId)
-    if err != nil {
-        // the destination is not a real client
-        returnErr = err
-        return
-    }
-    
-    contractTransferByteCount = max(MinContractTransferByteCount, transferByteCount)
+	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
+	if err != nil {
+		// the source is not a real client
+		returnErr = err
+		return
+	}
+	destinationNetworkId, err := model.FindClientNetwork(ctx, destinationId)
+	if err != nil {
+		// the destination is not a real client
+		returnErr = err
+		return
+	}
 
-    if provideMode < model.ProvideModePublic {
-        contractId, err = model.CreateContractNoEscrow(
-            ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-    } else if companionContract {
-    	escrow, err := model.CreateCompanionTransferEscrow(
-            ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-            OriginContractTimeout,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-        contractId = escrow.ContractId
-    } else {
-        escrow, err := model.CreateTransferEscrow(
-            ctx,
-            sourceNetworkId,
-            sourceId,
-            destinationNetworkId,
-            destinationId,
-            contractTransferByteCount,
-        )
-        if err != nil {
-            returnErr = err
-            return
-        }
-        contractId = escrow.ContractId
-    }
+	contractTransferByteCount = max(MinContractTransferByteCount, transferByteCount)
 
-    return
+	if provideMode < model.ProvideModePublic {
+		contractId, err = model.CreateContractNoEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+	} else if companionContract {
+		escrow, err := model.CreateCompanionTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+			OriginContractTimeout,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		contractId = escrow.ContractId
+	} else {
+		escrow, err := model.CreateTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		contractId = escrow.ContractId
+	}
+
+	return
 }
-
 
 func Provide(
 	ctx context.Context,
@@ -381,7 +370,6 @@ func Provide(
 	return nil
 }
 
-
 func CloseContract(
 	ctx context.Context,
 	clientId bringyour.Id,
@@ -391,6 +379,6 @@ func CloseContract(
 	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
 	checkpoint := closeContract.Checkpoint
 
-    err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
-    return err
+	err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+	return err
 }

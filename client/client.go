@@ -1,19 +1,17 @@
 package client
 
-
 import (
-	"fmt"
 	"bytes"
 	"encoding/hex"
-	"hash/fnv"
-	"math"
+	"fmt"
+	// "hash/fnv"
 	"flag"
+	"math"
 	"os"
 
-	"bringyour.com/protocol"
 	"bringyour.com/connect"
+	"bringyour.com/protocol"
 )
-
 
 // note: publicly exported types must be fully contained in the `client` package tree
 // the `gomobile` native interface compiler won't be able to map types otherwise
@@ -30,32 +28,32 @@ import (
 // additionally, the entire bringyour.com/bringyour tree cannot be used because it pulls in the
 // `warp` environment expectations, which is not compatible with the client lib
 
-
 func init() {
 	initGlog()
 }
 
 func initGlog() {
 	flag.Set("logtostderr", "true")
-    flag.Set("stderrthreshold", "INFO")
-    flag.Set("v", "0")
-    // unlike unix, the android/ios standard is for diagnostics to go to stdout
-    os.Stderr = os.Stdout
+	flag.Set("stderrthreshold", "INFO")
+	flag.Set("v", "0")
+	// unlike unix, the android/ios standard is for diagnostics to go to stdout
+	os.Stderr = os.Stdout
 }
-
 
 // this value is set via the linker, e.g.
 // -ldflags "-X client.Version=$WARP_VERSION"
 var Version string
 
-
 type Id struct {
 	id [16]byte
+	// store this on the object to support gomobile "equals" and "hashCode"
+	IdStr string
 }
 
 func newId(id [16]byte) *Id {
 	return &Id{
-		id: id,
+		id:    id,
+		IdStr: encodeUuid(id),
 	}
 }
 
@@ -72,7 +70,7 @@ func (self *Id) Bytes() []byte {
 }
 
 func (self *Id) String() string {
-	return encodeUuid(self.id)
+	return self.IdStr
 }
 
 func (self *Id) Cmp(b *Id) int {
@@ -112,24 +110,24 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 		return err
 	}
 	self.id = buf
+	self.IdStr = encodeUuid(buf)
 	return nil
 }
 
 // Android support
 
-func (self *Id) IdEquals(b *Id) bool {
-	if b == nil {
-		return false
-	}
-	return self.id == b.id
-}
+// func (self *Id) IdEquals(b *Id) bool {
+// 	if b == nil {
+// 		return false
+// 	}
+// 	return self.id == b.id
+// }
 
-func (self *Id) IdHashCode() int32 {
-	h := fnv.New32()
-	h.Write(self.id[:])
-	return int32(h.Sum32())
-}
-
+// func (self *Id) IdHashCode() int32 {
+// 	h := fnv.New32()
+// 	h.Write(self.id[:])
+// 	return int32(h.Sum32())
+// }
 
 // parseUuid converts a string UUID in standard form to a byte array.
 func parseUuid(src string) (dst [16]byte, err error) {
@@ -152,11 +150,9 @@ func parseUuid(src string) (dst [16]byte, err error) {
 	return dst, err
 }
 
-
 func encodeUuid(src [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
-
 
 type Path struct {
 	ClientId *Id
@@ -188,32 +184,31 @@ func (self *Path) toConnectPath() connect.Path {
 	return path
 }
 
-
 type ProvideMode = int
-const (
-	ProvideModeNone ProvideMode = ProvideMode(protocol.ProvideMode_None)
-	ProvideModeNetwork ProvideMode = ProvideMode(protocol.ProvideMode_Network)
-	ProvideModeFriendsAndFamily ProvideMode = ProvideMode(protocol.ProvideMode_FriendsAndFamily)
-	ProvideModePublic ProvideMode = ProvideMode(protocol.ProvideMode_Public)
-)
 
+const (
+	ProvideModeNone             ProvideMode = ProvideMode(protocol.ProvideMode_None)
+	ProvideModeNetwork          ProvideMode = ProvideMode(protocol.ProvideMode_Network)
+	ProvideModeFriendsAndFamily ProvideMode = ProvideMode(protocol.ProvideMode_FriendsAndFamily)
+	ProvideModePublic           ProvideMode = ProvideMode(protocol.ProvideMode_Public)
+)
 
 type LocationType = string
+
 const (
 	LocationTypeCountry LocationType = "country"
-	LocationTypeRegion LocationType = "region"
-	LocationTypeCity LocationType = "city"
+	LocationTypeRegion  LocationType = "region"
+	LocationTypeCity    LocationType = "city"
 )
-
 
 type ByteCount = int64
 
 type NanoCents = int64
 
 func UsdToNanoCents(usd float64) NanoCents {
-    return NanoCents(math.Round(usd * float64(1000000000)))
+	return NanoCents(math.Round(usd * float64(1000000000)))
 }
 
 func NanoCentsToUsd(nanoCents NanoCents) float64 {
-    return float64(nanoCents) / float64(1000000000)
+	return float64(nanoCents) / float64(1000000000)
 }

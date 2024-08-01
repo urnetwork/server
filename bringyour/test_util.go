@@ -4,17 +4,14 @@ import (
 	"context"
 	"testing"
 	// "time"
-	"os"
-	"fmt"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"os"
 )
-
 
 // each test runs with its own postgres and redis db
 // the database is dropped at the end of the test
-
-
 
 type TestEnv struct {
 	ApplyDbMigrations bool
@@ -149,4 +146,3 @@ db: %d`,
 		}, OptReadWrite())
 	}
 }
-
