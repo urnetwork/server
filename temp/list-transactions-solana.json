@@ -1,0 +1,31 @@
+{
+  "data": [
+    {
+      "amount": { "amount": "1.745552522", "currency": "SOL" },
+      "buy": {
+        "fee": { "amount": "4.60", "currency": "USD" },
+        "id": "c49d1162-88be-4a21-a079-8c623a03cb41",
+        "payment_method_name": "CHOICE FINANCIAL GROUP ********2869",
+        "subtotal": { "amount": "245.40", "currency": "USD" },
+        "total": { "amount": "250.00", "currency": "USD" }
+      },
+      "created_at": "2024-07-08T23:42:41Z",
+      "id": "8487deb6-cf87-5193-95c2-6b1757e73b38",
+      "native_amount": { "amount": "250.00", "currency": "USD" },
+      "resource": "transaction",
+      "resource_path": "/v2/accounts/bec06785-c05d-5aff-8c7a-cb82fda8243f/transactions/8487deb6-cf87-5193-95c2-6b1757e73b38",
+      "status": "completed",
+      "type": "buy"
+    }
+  ],
+  "pagination": {
+    "ending_before": null,
+    "limit": 25,
+    "next_starting_after": null,
+    "next_uri": null,
+    "order": "desc",
+    "previous_ending_before": null,
+    "previous_uri": null,
+    "starting_after": null
+  }
+}

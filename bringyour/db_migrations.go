@@ -1429,6 +1429,20 @@ var migrations = []any{
         DROP INDEX network_client_network_id_create_time
     `),
 
+    newSqlMigration(
+        `
+            CREATE TABLE network_referral_code (
+                network_id uuid NOT NULL,
+                referral_code uuid NOT NULL,
+
+                PRIMARY KEY (network_id),
+                UNIQUE (referral_code)
+            )
+        `,
+    ),
+
+    newCodeMigration(migration_20240725_PopulateNetworkReferralCodes),
+
     newSqlMigration(`
         ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
     `),

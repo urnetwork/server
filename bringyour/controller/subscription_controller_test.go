@@ -11,8 +11,6 @@ package controller
 //     "bringyour.com/bringyour"
 // )
 
-
-
 /*
 func TestGooglePlayPubSub(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations: false}).Run(func() {
 	// https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
@@ -31,4 +29,3 @@ func TestGooglePlayPubSub(t *testing.T) { (&bringyour.TestEnv{ApplyDbMigrations:
 	assert.Equal(t, claims["email"], "338638865390-compute@developer.gserviceaccount.com")
 })}
 */
-

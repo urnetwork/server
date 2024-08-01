@@ -1,114 +1,112 @@
 package model
 
-
 import (
 	"context"
-    "testing"
-    // "time"
+	"testing"
+	// "time"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
+func TestGetUserAuth(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
-func TestGetUserAuth(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
+		networkId := bringyour.NewId()
+		userId := bringyour.NewId()
+		networkName := "test"
 
-	networkId := bringyour.NewId()
-	userId := bringyour.NewId()
-	networkName := "test"
+		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-	testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
+		userAuth, err := GetUserAuth(ctx, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, userAuth, testingUserAuth)
+	})
+}
 
-	userAuth, err := GetUserAuth(ctx, networkId)
-	assert.Equal(t, err, nil)
-	assert.Equal(t, userAuth, testingUserAuth)
-})}
+func TestResetPassword(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
+		networkId := bringyour.NewId()
+		userId := bringyour.NewId()
+		networkName := "test"
 
-func TestResetPassword(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
+		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-	networkId := bringyour.NewId()
-	userId := bringyour.NewId()
-	networkName := "test"
+		byJwt := jwt.NewByJwt(networkId, userId, networkName)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
-	testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
+		passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
+			AuthPasswordResetCreateCodeArgs{
+				UserAuth: testingUserAuth,
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
 
-	byJwt := jwt.NewByJwt(networkId, userId, networkName)
-	clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+		_, err = AuthPasswordSet(
+			AuthPasswordSetArgs{
+				ResetCode: *passwordResetCreateCodeResult.ResetCode,
+				Password:  "testagain",
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
 
-	passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
-		AuthPasswordResetCreateCodeArgs{
-			UserAuth: testingUserAuth,
-		},
-		clientSession,
-	)
-	assert.Equal(t, err, nil)
+	})
+}
 
-	_, err = AuthPasswordSet(
-		AuthPasswordSetArgs{
-			ResetCode: *passwordResetCreateCodeResult.ResetCode,
-			Password: "testagain",
-		},
-		clientSession,
-	)
-	assert.Equal(t, err, nil)
-	
-})}
+func TestAuthCode(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
+		networkId := bringyour.NewId()
+		userId := bringyour.NewId()
+		networkName := "test"
 
-func TestAuthCode(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	ctx := context.Background()
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-	networkId := bringyour.NewId()
-	userId := bringyour.NewId()
-	networkName := "test"
+		byJwt := jwt.NewByJwt(networkId, userId, networkName)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
-	Testing_CreateNetwork(ctx, networkId, networkName, userId)
+		authCodeCreate := &AuthCodeCreateArgs{}
 
-	byJwt := jwt.NewByJwt(networkId, userId, networkName)
-	clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+		authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
+		assert.Equal(t, err, nil)
 
-	authCodeCreate := &AuthCodeCreateArgs{}
+		assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
 
-	authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
-	assert.Equal(t, err, nil)
+		// now try to redeem the code
 
-	assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
+		authCodeLogin := &AuthCodeLoginArgs{
+			AuthCode: authCodeCreateResult.AuthCode,
+		}
 
+		authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
+		assert.Equal(t, err, nil)
 
-	// now try to redeem the code
+		assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
 
-	authCodeLogin := &AuthCodeLoginArgs{
-		AuthCode: authCodeCreateResult.AuthCode,
-	}
+		// the second redeem should fail
 
-	authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
-	assert.Equal(t, err, nil)
+		authCodeLogin2 := &AuthCodeLoginArgs{
+			AuthCode: authCodeCreateResult.AuthCode,
+		}
 
-	assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
+		authCodeLoginResult2, err := AuthCodeLogin(authCodeLogin2, clientSession)
+		assert.Equal(t, err, nil)
 
+		assert.Equal(t, authCodeLoginResult2.ByJwt, "")
+		assert.NotEqual(t, authCodeLoginResult2.Error, nil)
 
-	// the second redeem should fail
-
-	authCodeLogin2 := &AuthCodeLoginArgs{
-		AuthCode: authCodeCreateResult.AuthCode,
-	}
-
-	authCodeLoginResult2, err := AuthCodeLogin(authCodeLogin2, clientSession)
-	assert.Equal(t, err, nil)
-
-	assert.Equal(t, authCodeLoginResult2.ByJwt, "")
-	assert.NotEqual(t, authCodeLoginResult2.Error, nil)
-
-	RemoveExpiredAuthCodes(ctx, bringyour.NowUtc())
-})}
-
+		RemoveExpiredAuthCodes(ctx, bringyour.NowUtc())
+	})
+}
 
 // FIXME test concurrent redeem
 // FIXME test expire all auth
-

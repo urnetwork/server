@@ -1,61 +1,59 @@
 package model
 
 import (
-    "fmt"
-    "net/url"
-    // "strings"
-    "crypto/rand"
-    "encoding/hex"
-    "image/color"
-    "time"
-    // "errors"
+	"fmt"
+	"net/url"
+	// "strings"
+	"crypto/rand"
+	"encoding/hex"
+	"image/color"
+	"time"
+	// "errors"
 
-    qrcode "github.com/skip2/go-qrcode"
+	qrcode "github.com/skip2/go-qrcode"
 
-    "bringyour.com/bringyour/session"
-    "bringyour.com/bringyour/jwt"
-    "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
-
 
 type CodeType = string
-const (
-    CodeTypeAdopt CodeType = "adopt"
-    CodeTypeShare CodeType = "share"
-)
 
+const (
+	CodeTypeAdopt CodeType = "adopt"
+	CodeTypeShare CodeType = "share"
+)
 
 const NetworkAddLimitTimeout = 30 * time.Minute
 const NetworkAddLimit = 10
 const AdoptCodeExpireTimeout = 15 * time.Minute
 
-
 type DeviceAddArgs struct {
-    Code string `json:"code"`
+	Code string `json:"code"`
 }
 
 type DeviceAddResult struct {
-    CodeType CodeType `json:"code_type,omitempty"`
-    Code string `json:"code,omitempty"`
-    DeviceName string `json:"device_name,omitempty"`
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
-    ClientId bringyour.Id `json:"client_id,omitempty"`
-    DurationMinutes float64 `json:"duration_minutes,omitempty"`
-    Error *DeviceAddError `json:"error,omitempty"`
+	CodeType              CodeType        `json:"code_type,omitempty"`
+	Code                  string          `json:"code,omitempty"`
+	DeviceName            string          `json:"device_name,omitempty"`
+	AssociatedNetworkName string          `json:"associated_network_name,omitempty"`
+	ClientId              bringyour.Id    `json:"client_id,omitempty"`
+	DurationMinutes       float64         `json:"duration_minutes,omitempty"`
+	Error                 *DeviceAddError `json:"error,omitempty"`
 }
 
 type DeviceAddError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceAdd(
-    add *DeviceAddArgs,
-    clientSession *session.ClientSession,
+	add *DeviceAddArgs,
+	clientSession *session.ClientSession,
 ) (addResult *DeviceAddResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id,
                     code_type
@@ -63,26 +61,26 @@ func DeviceAdd(
                 WHERE
                     code = $1
             `,
-            add.Code,
-        )
+			add.Code,
+		)
 
-        var deviceAssociationId *bringyour.Id
-        var codeType CodeType
+		var deviceAssociationId *bringyour.Id
+		var codeType CodeType
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(
-                    &deviceAssociationId,
-                    &codeType,
-                ))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(
+					&deviceAssociationId,
+					&codeType,
+				))
+			}
+		})
 
-        addTime := bringyour.NowUtc()
+		addTime := bringyour.NowUtc()
 
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device_add_history (
                     network_id,
                     add_time,
@@ -91,16 +89,16 @@ func DeviceAdd(
                     device_association_id
                 ) VALUES ($1, $2, $3, $4, $5)
             `,
-            clientSession.ByJwt.NetworkId,
-            addTime,
-            bringyour.NewId(),
-            add.Code,
-            deviceAssociationId,
-        ))
+			clientSession.ByJwt.NetworkId,
+			addTime,
+			bringyour.NewId(),
+			add.Code,
+			deviceAssociationId,
+		))
 
-        result, err = tx.Query(
-            clientSession.Ctx,
-            `
+		result, err = tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     COUNT(*) AS add_count
                 FROM device_add_history
@@ -108,30 +106,29 @@ func DeviceAdd(
                     network_id = $1 AND
                     $2 <= add_time
             `,
-            clientSession.ByJwt.NetworkId,
-            addTime.Add(-NetworkAddLimitTimeout),
-        )
+			clientSession.ByJwt.NetworkId,
+			addTime.Add(-NetworkAddLimitTimeout),
+		)
 
-        var limitExceeded bool
+		var limitExceeded bool
 
-        bringyour.WithPgResult(result, err, func() {
-            result.Next()
-            var addCount int
-            bringyour.Raise(result.Scan(&addCount))
-            limitExceeded = (NetworkAddLimit <= addCount)
-        })
+		bringyour.WithPgResult(result, err, func() {
+			result.Next()
+			var addCount int
+			bringyour.Raise(result.Scan(&addCount))
+			limitExceeded = (NetworkAddLimit <= addCount)
+		})
 
-        if deviceAssociationId == nil || limitExceeded {
-            // returnErr = errors.New("TEST limit exceeded")
-            return
-        }
+		if deviceAssociationId == nil || limitExceeded {
+			// returnErr = errors.New("TEST limit exceeded")
+			return
+		}
 
-
-        switch codeType {
-        case CodeTypeAdopt:
-            tag := bringyour.RaisePgResult(tx.Exec(
-                clientSession.Ctx,
-                `
+		switch codeType {
+		case CodeTypeAdopt:
+			tag := bringyour.RaisePgResult(tx.Exec(
+				clientSession.Ctx,
+				`
                     UPDATE device_adopt
                     SET
                         owner_network_id = $2,
@@ -141,19 +138,19 @@ func DeviceAdd(
                         owner_network_id IS NULL AND
                         $4 < expire_time
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-                clientSession.ByJwt.UserId,
-                addTime,
-            ))
-            if tag.RowsAffected() == 0 {
-                // returnErr = errors.New("TEST adopt update")
-                return
-            }
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+				clientSession.ByJwt.UserId,
+				addTime,
+			))
+			if tag.RowsAffected() == 0 {
+				// returnErr = errors.New("TEST adopt update")
+				return
+			}
 
-            result, err := tx.Query(
-                clientSession.Ctx,
-                `
+			result, err := tx.Query(
+				clientSession.Ctx,
+				`
                     SELECT
 
                         COALESCE(device_association_name.device_name, device_adopt.device_name) AS device_name,
@@ -168,31 +165,31 @@ func DeviceAdd(
                         confirmed = false AND
                         $3 < device_adopt.expire_time
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-                addTime,
-            )
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+				addTime,
+			)
 
-            addResult = &DeviceAddResult{
-                Code: add.Code,
-                CodeType: codeType,
-            }
+			addResult = &DeviceAddResult{
+				Code:     add.Code,
+				CodeType: codeType,
+			}
 
-            bringyour.WithPgResult(result, err, func() {
-                result.Next()
-                var endTime time.Time
-                bringyour.Raise(result.Scan(
-                    &addResult.DeviceName,
-                    &endTime,
-                ))
-                addResult.DurationMinutes = float64(endTime.Sub(addTime)) / float64(time.Minute)
-            })
-            return
+			bringyour.WithPgResult(result, err, func() {
+				result.Next()
+				var endTime time.Time
+				bringyour.Raise(result.Scan(
+					&addResult.DeviceName,
+					&endTime,
+				))
+				addResult.DurationMinutes = float64(endTime.Sub(addTime)) / float64(time.Minute)
+			})
+			return
 
-        case CodeTypeShare:
-            tag := bringyour.RaisePgResult(tx.Exec(
-                clientSession.Ctx,
-                `
+		case CodeTypeShare:
+			tag := bringyour.RaisePgResult(tx.Exec(
+				clientSession.Ctx,
+				`
                     UPDATE device_share
                     SET
                         guest_network_id = $2
@@ -201,17 +198,17 @@ func DeviceAdd(
                         guest_network_id IS NULL AND
                         source_network_id != $2
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-            ))
-            if tag.RowsAffected() == 0 {
-                // returnErr = errors.New("TEST share update")
-                return
-            }
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+			))
+			if tag.RowsAffected() == 0 {
+				// returnErr = errors.New("TEST share update")
+				return
+			}
 
-            result, err := tx.Query(
-                clientSession.Ctx,
-                `
+			result, err := tx.Query(
+				clientSession.Ctx,
+				`
                     SELECT
 
                         COALESCE(device_association_name.device_name, device_share.device_name) AS device_name,
@@ -229,67 +226,66 @@ func DeviceAdd(
                     WHERE
                         device_share.device_association_id = $1
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-            )
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+			)
 
-            addResult = &DeviceAddResult{
-                Code: add.Code,
-                CodeType: codeType,
-            }
+			addResult = &DeviceAddResult{
+				Code:     add.Code,
+				CodeType: codeType,
+			}
 
-            bringyour.WithPgResult(result, err, func() {
-                result.Next()
-                bringyour.Raise(result.Scan(
-                    &addResult.DeviceName,
-                    &addResult.ClientId,
-                    &addResult.AssociatedNetworkName,
-                ))
-            })
-            return
+			bringyour.WithPgResult(result, err, func() {
+				result.Next()
+				bringyour.Raise(result.Scan(
+					&addResult.DeviceName,
+					&addResult.ClientId,
+					&addResult.AssociatedNetworkName,
+				))
+			})
+			return
 
-        default:
-            return
-        }
-    })
+		default:
+			return
+		}
+	})
 
-    if addResult == nil && returnErr == nil {
-        // returnErr = errors.New("TEST default")
-        addResult = &DeviceAddResult{
-            Error: &DeviceAddError{
-                Message: "Invalid code.",
-            },
-        }
-        return
-    }
+	if addResult == nil && returnErr == nil {
+		// returnErr = errors.New("TEST default")
+		addResult = &DeviceAddResult{
+			Error: &DeviceAddError{
+				Message: "Invalid code.",
+			},
+		}
+		return
+	}
 
-    return
+	return
 }
 
-
 type DeviceCreateShareCodeArgs struct {
-    ClientId bringyour.Id `json:"client_id"`
-    DeviceName string `json:"device_name,omitempty"`
+	ClientId   bringyour.Id `json:"client_id"`
+	DeviceName string       `json:"device_name,omitempty"`
 }
 
 type DeviceCreateShareCodeResult struct {
-    ShareCode string `json:"share_code,omitempty"`
-    Error *DeviceCreateShareCodeError `json:"error,omitempty"`
+	ShareCode string                      `json:"share_code,omitempty"`
+	Error     *DeviceCreateShareCodeError `json:"error,omitempty"`
 }
 
 type DeviceCreateShareCodeError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceCreateShareCode(
-    createShareCode *DeviceCreateShareCodeArgs,
-    clientSession *session.ClientSession,
+	createShareCode *DeviceCreateShareCodeArgs,
+	clientSession *session.ClientSession,
 ) (createShareCodeResult *DeviceCreateShareCodeResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        // verify that the client id is owned by this network
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		// verify that the client id is owned by this network
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     active
                 FROM network_client
@@ -297,55 +293,54 @@ func DeviceCreateShareCode(
                     network_id = $1 AND
                     client_id = $2
             `,
-            clientSession.ByJwt.NetworkId,
-            createShareCode.ClientId,
-        )
+			clientSession.ByJwt.NetworkId,
+			createShareCode.ClientId,
+		)
 
-        active := false
+		active := false
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&active))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&active))
+			}
+		})
 
-        if !active {
-            createShareCodeResult = &DeviceCreateShareCodeResult{
-                Error: &DeviceCreateShareCodeError{
-                    Message: "Invalid client.",
-                },
-            }
-            return
-        }
+		if !active {
+			createShareCodeResult = &DeviceCreateShareCodeResult{
+				Error: &DeviceCreateShareCodeError{
+					Message: "Invalid client.",
+				},
+			}
+			return
+		}
 
+		// TODO: use fewer words from a larger dictionary
+		// use 6 words from bip39 as the code (64 bits)
+		shareCode, err := newCode()
+		if err != nil {
+			returnErr = err
+			return
+		}
 
-        // TODO: use fewer words from a larger dictionary
-        // use 6 words from bip39 as the code (64 bits)
-        shareCode, err := newCode()
-        if err != nil {
-            returnErr = err
-            return
-        }
+		deviceAssociationId := bringyour.NewId()
 
-        deviceAssociationId := bringyour.NewId()
-
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device_association_code (
                     device_association_id,
                     code,
                     code_type
                 ) VALUES ($1, $2, $3)
             `,
-            deviceAssociationId,
-            shareCode,
-            CodeTypeShare,
-        ))
+			deviceAssociationId,
+			shareCode,
+			CodeTypeShare,
+		))
 
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device_share (
                     device_association_id,
                     device_name,
@@ -353,72 +348,70 @@ func DeviceCreateShareCode(
                     client_id
                 ) VALUES ($1, $2, $3, $4)
             `,
-            deviceAssociationId,
-            createShareCode.DeviceName,
-            clientSession.ByJwt.NetworkId,
-            createShareCode.ClientId,
-        ))
+			deviceAssociationId,
+			createShareCode.DeviceName,
+			clientSession.ByJwt.NetworkId,
+			createShareCode.ClientId,
+		))
 
-        createShareCodeResult = &DeviceCreateShareCodeResult{
-            ShareCode: shareCode,
-        }
-        return
-    })
+		createShareCodeResult = &DeviceCreateShareCodeResult{
+			ShareCode: shareCode,
+		}
+		return
+	})
 
-    return
+	return
 }
 
-
 type DeviceShareCodeQRArgs struct {
-    ShareCode string `json:"share_code"`
+	ShareCode string `json:"share_code"`
 }
 
 type DeviceShareCodeQRResult struct {
-    PngBytes []byte `json:"png_bytes"`
+	PngBytes []byte `json:"png_bytes"`
 }
 
 func DeviceShareCodeQR(
-    shareCodeQR *DeviceShareCodeQRArgs,
-    clientSession *session.ClientSession,
+	shareCodeQR *DeviceShareCodeQRArgs,
+	clientSession *session.ClientSession,
 ) (*DeviceShareCodeQRResult, error) {
-    addUrl := fmt.Sprintf(
-        "https://app.bringyour.com/?add=%s",
-        url.QueryEscape(shareCodeQR.ShareCode),
-    )
+	addUrl := fmt.Sprintf(
+		"https://app.bringyour.com/?add=%s",
+		url.QueryEscape(shareCodeQR.ShareCode),
+	)
 
-    pngBytes, err := qrPngBytes(addUrl)
-    if err != nil {
-        return nil, err
-    }
+	pngBytes, err := qrPngBytes(addUrl)
+	if err != nil {
+		return nil, err
+	}
 
-    return &DeviceShareCodeQRResult{
-        PngBytes: pngBytes,
-    }, err
+	return &DeviceShareCodeQRResult{
+		PngBytes: pngBytes,
+	}, err
 }
 
-
 type DeviceShareStatusArgs struct {
-    ShareCode string `json:"share_code"`
+	ShareCode string `json:"share_code"`
 }
 
 type DeviceShareStatusResult struct {
-    Pending bool `json:"pending,omitempty"`
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
-    Error *DeviceShareStatusError `json:"error,omitempty"`
+	Pending               bool                    `json:"pending,omitempty"`
+	AssociatedNetworkName string                  `json:"associated_network_name,omitempty"`
+	Error                 *DeviceShareStatusError `json:"error,omitempty"`
 }
 
 type DeviceShareStatusError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceShareStatus(
-    shareStatus *DeviceShareStatusArgs,
-    clientSession *session.ClientSession,
+	shareStatus *DeviceShareStatusArgs,
+	clientSession *session.ClientSession,
 ) (shareStatusResult *DeviceShareStatusResult, returnErr error) {
-    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
-        result, err := conn.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_share.confirmed,
                     network.network_name
@@ -430,58 +423,57 @@ func DeviceShareStatus(
                     device_association_code.code = $1 AND
                     device_association_code.code_type = $2
             `,
-            shareStatus.ShareCode,
-            CodeTypeShare,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                shareStatusResult = &DeviceShareStatusResult{}
-                var confirmed bool
-                var networkName *string
-                bringyour.Raise(result.Scan(
-                    &confirmed,
-                    &networkName,
-                ))
-                shareStatusResult.Pending = !confirmed
-                if networkName != nil {
-                    shareStatusResult.AssociatedNetworkName = *networkName
-                }
-            } else {
-                shareStatusResult = &DeviceShareStatusResult{
-                    Error: &DeviceShareStatusError{
-                        Message: "Invalid share code.",
-                    },
-                }
-            }
-        })
-    })
+			shareStatus.ShareCode,
+			CodeTypeShare,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				shareStatusResult = &DeviceShareStatusResult{}
+				var confirmed bool
+				var networkName *string
+				bringyour.Raise(result.Scan(
+					&confirmed,
+					&networkName,
+				))
+				shareStatusResult.Pending = !confirmed
+				if networkName != nil {
+					shareStatusResult.AssociatedNetworkName = *networkName
+				}
+			} else {
+				shareStatusResult = &DeviceShareStatusResult{
+					Error: &DeviceShareStatusError{
+						Message: "Invalid share code.",
+					},
+				}
+			}
+		})
+	})
 
-    return
+	return
 }
 
-
 type DeviceConfirmShareArgs struct {
-    ShareCode string `json:"share_code"`
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
+	ShareCode             string `json:"share_code"`
+	AssociatedNetworkName string `json:"associated_network_name,omitempty"`
 }
 
 type DeviceConfirmShareResult struct {
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
-    Error *DeviceConfirmShareError `json:"error,omitempty"`
+	AssociatedNetworkName string                   `json:"associated_network_name,omitempty"`
+	Error                 *DeviceConfirmShareError `json:"error,omitempty"`
 }
 
 type DeviceConfirmShareError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceConfirmShare(
-    confirmShare *DeviceConfirmShareArgs,
-    clientSession *session.ClientSession,
+	confirmShare *DeviceConfirmShareArgs,
+	clientSession *session.ClientSession,
 ) (confirmShareResult *DeviceConfirmShareResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id
                 FROM device_association_code
@@ -489,26 +481,25 @@ func DeviceConfirmShare(
                     code = $1 AND
                     code_type = $2
             `,
-            confirmShare.ShareCode,
-            CodeTypeShare,
-        )
+			confirmShare.ShareCode,
+			CodeTypeShare,
+		)
 
-        var deviceAssociationId *bringyour.Id
+		var deviceAssociationId *bringyour.Id
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&deviceAssociationId))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&deviceAssociationId))
+			}
+		})
 
-        if deviceAssociationId == nil {
-            return
-        }
+		if deviceAssociationId == nil {
+			return
+		}
 
-
-        tag := bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		tag := bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 UPDATE device_share
                 SET
                     confirmed = true
@@ -519,92 +510,90 @@ func DeviceConfirmShare(
                     device_share.guest_network_id = network.network_id AND
                     device_share.confirmed = false
             `,
-            deviceAssociationId,
-            confirmShare.AssociatedNetworkName,
-        ))
-        if tag.RowsAffected() == 0 {
-            return
-        }
+			deviceAssociationId,
+			confirmShare.AssociatedNetworkName,
+		))
+		if tag.RowsAffected() == 0 {
+			return
+		}
 
-        confirmShareResult = &DeviceConfirmShareResult{
-            AssociatedNetworkName: confirmShare.AssociatedNetworkName,
-        }
-        return
-    })
+		confirmShareResult = &DeviceConfirmShareResult{
+			AssociatedNetworkName: confirmShare.AssociatedNetworkName,
+		}
+		return
+	})
 
-    if confirmShareResult == nil && returnErr == nil {
-        confirmShareResult = &DeviceConfirmShareResult{
-            Error: &DeviceConfirmShareError{
-                Message: "Invalid code.",
-            },
-        }
-        return
-    }
+	if confirmShareResult == nil && returnErr == nil {
+		confirmShareResult = &DeviceConfirmShareResult{
+			Error: &DeviceConfirmShareError{
+				Message: "Invalid code.",
+			},
+		}
+		return
+	}
 
-    return
+	return
 }
 
-
 type DeviceCreateAdoptCodeArgs struct {
-    DeviceName string `json:"device_name"`
-    DeviceSpec string `json:"device_spec"`
+	DeviceName string `json:"device_name"`
+	DeviceSpec string `json:"device_spec"`
 }
 
 type DeviceCreateAdoptCodeResult struct {
-    AdoptCode string `json:"adopt_code,omitempty"`
-    AdoptSecret string `json:"share_code,omitempty"`
-    DurationMinutes float64 `json:"duration_minutes,omitempty"`
-    Error *DeviceCreateAdoptCodeResult `json:"error,omitempty"`
+	AdoptCode       string                       `json:"adopt_code,omitempty"`
+	AdoptSecret     string                       `json:"share_code,omitempty"`
+	DurationMinutes float64                      `json:"duration_minutes,omitempty"`
+	Error           *DeviceCreateAdoptCodeResult `json:"error,omitempty"`
 }
 
 type DeviceCreateAdoptCodeError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceCreateAdoptCode(
-    createAdoptCode *DeviceCreateAdoptCodeArgs,
-    clientSession *session.ClientSession,
+	createAdoptCode *DeviceCreateAdoptCodeArgs,
+	clientSession *session.ClientSession,
 ) (createAdoptCodeResult *DeviceCreateAdoptCodeResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        createTime := bringyour.NowUtc()
-        expireTime := createTime.Add(AdoptCodeExpireTimeout)
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		createTime := bringyour.NowUtc()
+		expireTime := createTime.Add(AdoptCodeExpireTimeout)
 
-        deviceAssociationId := bringyour.NewId()
+		deviceAssociationId := bringyour.NewId()
 
-        // TODO: use fewer words from a larger dictionary
-        // use 6 words from bip39 as the code (64 bits)
-        adoptCode, err := newCode()
-        if err != nil {
-            returnErr = err
-            return
-        }
+		// TODO: use fewer words from a larger dictionary
+		// use 6 words from bip39 as the code (64 bits)
+		adoptCode, err := newCode()
+		if err != nil {
+			returnErr = err
+			return
+		}
 
-        // 128 bits
-        adoptSecretBytes := make([]byte, 128)
-        if _, err := rand.Read(adoptSecretBytes); err != nil {
-            returnErr = err
-            return
-        }
-        adoptSecret := hex.EncodeToString(adoptSecretBytes)
+		// 128 bits
+		adoptSecretBytes := make([]byte, 128)
+		if _, err := rand.Read(adoptSecretBytes); err != nil {
+			returnErr = err
+			return
+		}
+		adoptSecret := hex.EncodeToString(adoptSecretBytes)
 
-
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device_association_code (
                     device_association_id,
                     code,
                     code_type
                 ) VALUES ($1, $2, $3)
             `,
-            deviceAssociationId,
-            adoptCode,
-            CodeTypeAdopt,
-        ))
+			deviceAssociationId,
+			adoptCode,
+			CodeTypeAdopt,
+		))
 
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device_adopt (
                     device_association_id,
                     adopt_secret,
@@ -614,75 +603,73 @@ func DeviceCreateAdoptCode(
                     expire_time
                 ) VALUES ($1, $2, $3, $4, $5, $6)
             `,
-            deviceAssociationId,
-            adoptSecret,
-            createAdoptCode.DeviceName,
-            createAdoptCode.DeviceSpec,
-            createTime,
-            expireTime,
-        ))
+			deviceAssociationId,
+			adoptSecret,
+			createAdoptCode.DeviceName,
+			createAdoptCode.DeviceSpec,
+			createTime,
+			expireTime,
+		))
 
-        createAdoptCodeResult = &DeviceCreateAdoptCodeResult{
-            AdoptCode: adoptCode,
-            AdoptSecret: adoptSecret,
-            DurationMinutes: float64(expireTime.Sub(createTime)) / float64(time.Minute),
-        }
-    })
+		createAdoptCodeResult = &DeviceCreateAdoptCodeResult{
+			AdoptCode:       adoptCode,
+			AdoptSecret:     adoptSecret,
+			DurationMinutes: float64(expireTime.Sub(createTime)) / float64(time.Minute),
+		}
+	})
 
-    return
+	return
 }
 
-
 type DeviceAdoptCodeQRArgs struct {
-    AdoptCode string `json:"share_code"`
+	AdoptCode string `json:"share_code"`
 }
 
 type DeviceAdoptCodeQRResult struct {
-    PngBytes []byte `json:"png_bytes"`
+	PngBytes []byte `json:"png_bytes"`
 }
 
 func DeviceAdoptCodeQR(
-    adoptCodeQR *DeviceAdoptCodeQRArgs,
-    clientSession *session.ClientSession,
+	adoptCodeQR *DeviceAdoptCodeQRArgs,
+	clientSession *session.ClientSession,
 ) (*DeviceAdoptCodeQRResult, error) {
-    addUrl := fmt.Sprintf(
-        "https://app.bringyour.com/?add=%s",
-        url.QueryEscape(adoptCodeQR.AdoptCode),
-    )
+	addUrl := fmt.Sprintf(
+		"https://app.bringyour.com/?add=%s",
+		url.QueryEscape(adoptCodeQR.AdoptCode),
+	)
 
-    pngBytes, err := qrPngBytes(addUrl)
-    if err != nil {
-        return nil, err
-    }
+	pngBytes, err := qrPngBytes(addUrl)
+	if err != nil {
+		return nil, err
+	}
 
-    return &DeviceAdoptCodeQRResult{
-        PngBytes: pngBytes,
-    }, err
+	return &DeviceAdoptCodeQRResult{
+		PngBytes: pngBytes,
+	}, err
 }
 
-
 type DeviceAdoptStatusArgs struct {
-    AdoptCode string `json:"adopt_code"`
+	AdoptCode string `json:"adopt_code"`
 }
 
 type DeviceAdoptStatusResult struct {
-    Pending bool `json:"pending,omitempty"`
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
-    Error *DeviceAdoptStatusError `json:"error,omitempty"`
+	Pending               bool                    `json:"pending,omitempty"`
+	AssociatedNetworkName string                  `json:"associated_network_name,omitempty"`
+	Error                 *DeviceAdoptStatusError `json:"error,omitempty"`
 }
 
 type DeviceAdoptStatusError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceAdoptStatus(
-    adoptStatus *DeviceAdoptStatusArgs,
-    clientSession *session.ClientSession,
+	adoptStatus *DeviceAdoptStatusArgs,
+	clientSession *session.ClientSession,
 ) (adoptStatusResult *DeviceAdoptStatusResult, returnErr error) {
-    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
-        result, err := conn.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_adopt.confirmed,
                     network.network_name
@@ -694,59 +681,58 @@ func DeviceAdoptStatus(
                     device_association_code.code = $1 AND
                     device_association_code.code_type = $2
             `,
-            adoptStatus.AdoptCode,
-            CodeTypeAdopt,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                var confirmed bool
-                var networkName *string
-                adoptStatusResult = &DeviceAdoptStatusResult{}
-                bringyour.Raise(result.Scan(
-                    &confirmed,
-                    &networkName,
-                ))
-                adoptStatusResult.Pending = !confirmed
-                if networkName != nil {
-                    adoptStatusResult.AssociatedNetworkName = *networkName
-                }
-            } else {
-                adoptStatusResult = &DeviceAdoptStatusResult{
-                    Error: &DeviceAdoptStatusError{
-                        Message: "Invalid adopt code.",
-                    },
-                }
-            }
-        })
-    })
-    
-    return
+			adoptStatus.AdoptCode,
+			CodeTypeAdopt,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				var confirmed bool
+				var networkName *string
+				adoptStatusResult = &DeviceAdoptStatusResult{}
+				bringyour.Raise(result.Scan(
+					&confirmed,
+					&networkName,
+				))
+				adoptStatusResult.Pending = !confirmed
+				if networkName != nil {
+					adoptStatusResult.AssociatedNetworkName = *networkName
+				}
+			} else {
+				adoptStatusResult = &DeviceAdoptStatusResult{
+					Error: &DeviceAdoptStatusError{
+						Message: "Invalid adopt code.",
+					},
+				}
+			}
+		})
+	})
+
+	return
 }
 
-
 type DeviceConfirmAdoptArgs struct {
-    AdoptCode string `json:"adopt_code"`
-    AdoptSecret string `json:"adopt_secret"`
-    AssociatedNetworkName string `json:"associated_network_name,omitempty"`
+	AdoptCode             string `json:"adopt_code"`
+	AdoptSecret           string `json:"adopt_secret"`
+	AssociatedNetworkName string `json:"associated_network_name,omitempty"`
 }
 
 type DeviceConfirmAdoptResult struct {
-    ByClientJwt string `json:"by_client_jwt,omitempty"`
-    Error *DeviceConfirmAdoptError `json:"error,omitempty"`
+	ByClientJwt string                   `json:"by_client_jwt,omitempty"`
+	Error       *DeviceConfirmAdoptError `json:"error,omitempty"`
 }
 
 type DeviceConfirmAdoptError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceConfirmAdopt(
-    confirmAdopt *DeviceConfirmAdoptArgs,
-    clientSession *session.ClientSession,
+	confirmAdopt *DeviceConfirmAdoptArgs,
+	clientSession *session.ClientSession,
 ) (confirmAdoptResult *DeviceConfirmAdoptResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id
                 FROM device_association_code
@@ -754,27 +740,27 @@ func DeviceConfirmAdopt(
                     code = $1 AND
                     code_type = $2
             `,
-            confirmAdopt.AdoptCode,
-            CodeTypeAdopt,
-        )
+			confirmAdopt.AdoptCode,
+			CodeTypeAdopt,
+		)
 
-        var deviceAssociationId *bringyour.Id
+		var deviceAssociationId *bringyour.Id
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&deviceAssociationId))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&deviceAssociationId))
+			}
+		})
 
-        if deviceAssociationId == nil {
-            return
-        }
+		if deviceAssociationId == nil {
+			return
+		}
 
-        adoptTime := bringyour.NowUtc()
+		adoptTime := bringyour.NowUtc()
 
-        tag := bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		tag := bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 UPDATE device_adopt
                 SET
                     confirmed = true
@@ -786,19 +772,18 @@ func DeviceConfirmAdopt(
                     device_adopt.confirmed = false AND
                     $3 < device_adopt.expire_time
             `,
-            deviceAssociationId,
-            confirmAdopt.AssociatedNetworkName,
-            adoptTime,
-        ))
+			deviceAssociationId,
+			confirmAdopt.AssociatedNetworkName,
+			adoptTime,
+		))
 
-        if tag.RowsAffected() == 0 {
-            return
-        }
+		if tag.RowsAffected() == 0 {
+			return
+		}
 
-
-        result, err = tx.Query(
-            clientSession.Ctx,
-            `
+		result, err = tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_adopt.device_name,
                     device_adopt.device_spec,
@@ -811,72 +796,70 @@ func DeviceConfirmAdopt(
                 WHERE
                     device_adopt.device_association_id = $1
             `,
-            deviceAssociationId,
-        )
+			deviceAssociationId,
+		)
 
-        var deviceName string
-        var deviceSpec string
-        var networkId bringyour.Id
-        var networkName string
-        var userId bringyour.Id
+		var deviceName string
+		var deviceSpec string
+		var networkId bringyour.Id
+		var networkName string
+		var userId bringyour.Id
 
-        bringyour.WithPgResult(result, err, func() {
-            result.Next()
-            bringyour.Raise(result.Scan(
-                &deviceName,
-                &deviceSpec,
-                &networkId,
-                &networkName,
-                &userId,
-            ))
-        })
+		bringyour.WithPgResult(result, err, func() {
+			result.Next()
+			bringyour.Raise(result.Scan(
+				&deviceName,
+				&deviceSpec,
+				&networkId,
+				&networkName,
+				&userId,
+			))
+		})
 
-
-        result, err = tx.Query(
-            clientSession.Ctx,
-            `
+		result, err = tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     auth_session_id
                 FROM device_adopt_auth_session
                 WHERE
                     device_association_id = $1
             `,
-            deviceAssociationId,
-        )
+			deviceAssociationId,
+		)
 
-        authSessionIds := []bringyour.Id{}
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var authSessionId bringyour.Id
-                bringyour.Raise(result.Scan(&authSessionId))
-                authSessionIds = append(authSessionIds, authSessionId)
-            }
-        })
+		authSessionIds := []bringyour.Id{}
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var authSessionId bringyour.Id
+				bringyour.Raise(result.Scan(&authSessionId))
+				authSessionIds = append(authSessionIds, authSessionId)
+			}
+		})
 
-        authSessionId := bringyour.NewId()
-        authSessionIds = append(authSessionIds, authSessionId)
+		authSessionId := bringyour.NewId()
+		authSessionIds = append(authSessionIds, authSessionId)
 
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO auth_session (
                     auth_session_id,
                     network_id,
                     user_id
                 ) VALUES ($1, $2, $3)
             `,
-            authSessionId,
-            networkId,
-            userId,
-        ))
+			authSessionId,
+			networkId,
+			userId,
+		))
 
+		deviceId := bringyour.NewId()
+		clientId := bringyour.NewId()
 
-        deviceId := bringyour.NewId()
-        clientId := bringyour.NewId()
-
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO device (
                     device_id,
                     network_id,
@@ -886,16 +869,16 @@ func DeviceConfirmAdopt(
                 )
                 VALUES ($1, $2, $3, $4, $5)
             `,
-            deviceId,
-            networkId,
-            deviceName,
-            deviceSpec,
-            adoptTime,
-        ))
+			deviceId,
+			networkId,
+			deviceName,
+			deviceSpec,
+			adoptTime,
+		))
 
-        bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 INSERT INTO network_client (
                     client_id,
                     network_id,
@@ -906,60 +889,58 @@ func DeviceConfirmAdopt(
                 )
                 VALUES ($1, $2, $3, $4, $5, $5)
             `,
-            clientId,
-            networkId,
-            deviceId,
-            deviceName,
-            adoptTime,
-        ))
+			clientId,
+			networkId,
+			deviceId,
+			deviceName,
+			adoptTime,
+		))
 
-        
-        byJwtWithClientId := jwt.NewByJwt(
-            networkId,
-            userId,
-            networkName,
-            authSessionIds...,
-        ).Client(deviceId, clientId).Sign()
+		byJwtWithClientId := jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			authSessionIds...,
+		).Client(deviceId, clientId).Sign()
 
-        confirmAdoptResult = &DeviceConfirmAdoptResult{
-            // AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
-            ByClientJwt: byJwtWithClientId,
-        }
-    })
+		confirmAdoptResult = &DeviceConfirmAdoptResult{
+			// AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
+			ByClientJwt: byJwtWithClientId,
+		}
+	})
 
-    if confirmAdoptResult == nil && returnErr == nil {
-        confirmAdoptResult = &DeviceConfirmAdoptResult{
-            Error: &DeviceConfirmAdoptError{
-                Message: "Invalid code.",
-            },
-        }
-        return
-    }
-    return
+	if confirmAdoptResult == nil && returnErr == nil {
+		confirmAdoptResult = &DeviceConfirmAdoptResult{
+			Error: &DeviceConfirmAdoptError{
+				Message: "Invalid code.",
+			},
+		}
+		return
+	}
+	return
 }
 
-
 type DeviceRemoveAdoptCodeArgs struct {
-    AdoptCode string `json:"adopt_code"`
-    AdoptSecret string `json:"adopt_secret"`
+	AdoptCode   string `json:"adopt_code"`
+	AdoptSecret string `json:"adopt_secret"`
 }
 
 type DeviceRemoveAdoptCodeResult struct {
-    Error *DeviceRemoveAdoptCodeError `json:"error,omitempty"`
+	Error *DeviceRemoveAdoptCodeError `json:"error,omitempty"`
 }
 
 type DeviceRemoveAdoptCodeError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceRemoveAdoptCode(
-    removeAdoptCode *DeviceRemoveAdoptCodeArgs,
-    clientSession *session.ClientSession,
+	removeAdoptCode *DeviceRemoveAdoptCodeArgs,
+	clientSession *session.ClientSession,
 ) (removeAdoptCodeResult *DeviceRemoveAdoptCodeResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id
                 FROM device_association_code
@@ -967,84 +948,83 @@ func DeviceRemoveAdoptCode(
                     code = $1 AND
                     code_type = $2
             `,
-            removeAdoptCode.AdoptCode,
-            CodeTypeAdopt,
-        )
+			removeAdoptCode.AdoptCode,
+			CodeTypeAdopt,
+		)
 
-        var deviceAssociationId *bringyour.Id
+		var deviceAssociationId *bringyour.Id
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(&deviceAssociationId))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&deviceAssociationId))
+			}
+		})
 
-        if deviceAssociationId == nil {
-            return
-        }
+		if deviceAssociationId == nil {
+			return
+		}
 
-        tag := bringyour.RaisePgResult(tx.Exec(
-            clientSession.Ctx,
-            `
+		tag := bringyour.RaisePgResult(tx.Exec(
+			clientSession.Ctx,
+			`
                 DELETE FROM device_adopt
                 WHERE
                     device_association_id = $1 AND
                     adopt_secret = $2 AND
                     confirmed = false
             `,
-            deviceAssociationId,
-            removeAdoptCode.AdoptSecret,
-        ))
-        if tag.RowsAffected() == 0 {
-            return
-        }
+			deviceAssociationId,
+			removeAdoptCode.AdoptSecret,
+		))
+		if tag.RowsAffected() == 0 {
+			return
+		}
 
-        removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{}
-        return
-    })
+		removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{}
+		return
+	})
 
-    if removeAdoptCodeResult == nil && returnErr == nil {
-        removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{
-            Error: &DeviceRemoveAdoptCodeError{
-                Message: "Invalid code.",
-            },
-        }
-        return
-    }
+	if removeAdoptCodeResult == nil && returnErr == nil {
+		removeAdoptCodeResult = &DeviceRemoveAdoptCodeResult{
+			Error: &DeviceRemoveAdoptCodeError{
+				Message: "Invalid code.",
+			},
+		}
+		return
+	}
 
-    return
+	return
 }
 
-
 type DeviceAssociationsResult struct {
-    PendingAdoptionDevices []*DeviceAssociation `json:"pending_adoption_devices"`
-    IncomingSharedDevices []*DeviceAssociation `json:"incoming_shared_devices"`
-    OutgoingSharedDevices []*DeviceAssociation `json:"outgoing_shared_devices"`
+	PendingAdoptionDevices []*DeviceAssociation `json:"pending_adoption_devices"`
+	IncomingSharedDevices  []*DeviceAssociation `json:"incoming_shared_devices"`
+	OutgoingSharedDevices  []*DeviceAssociation `json:"outgoing_shared_devices"`
 }
 
 type DeviceAssociation struct {
-    Pending bool `json:"pending,omitempty"`
-    Code string `json:"code,omitempty"`
-    DeviceName string `json:"device_name,omitempty"`
-    ClientId string `json:"client_id,omitempty"`
-    NetworkName string `json:"network_name,omitempty"`
-    DurationMinutes float64 `json:"duration_minutes,omitempty"`
+	Pending         bool    `json:"pending,omitempty"`
+	Code            string  `json:"code,omitempty"`
+	DeviceName      string  `json:"device_name,omitempty"`
+	ClientId        string  `json:"client_id,omitempty"`
+	NetworkName     string  `json:"network_name,omitempty"`
+	DurationMinutes float64 `json:"duration_minutes,omitempty"`
 }
 
 func DeviceAssociations(
-    clientSession *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (associationResult *DeviceAssociationsResult, returnErr error) {
-    bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
-        pendingAdoptionDevices := []*DeviceAssociation{}
-        incomingSharedDevices := []*DeviceAssociation{}
-        outgoingSharedDevices := []*DeviceAssociation{}
+	bringyour.Db(clientSession.Ctx, func(conn bringyour.PgConn) {
+		pendingAdoptionDevices := []*DeviceAssociation{}
+		incomingSharedDevices := []*DeviceAssociation{}
+		outgoingSharedDevices := []*DeviceAssociation{}
 
-        checkTime := bringyour.NowUtc()
+		checkTime := bringyour.NowUtc()
 
-        // pending adoption
-        result, err := conn.Query(
-            clientSession.Ctx,
-            `
+		// pending adoption
+		result, err := conn.Query(
+			clientSession.Ctx,
+			`
                 SELECT
 
                     device_association_code.code,
@@ -1062,29 +1042,29 @@ func DeviceAssociations(
                     confirmed = false AND
                     $2 < device_adopt.expire_time
             `,
-            clientSession.ByJwt.NetworkId,
-            checkTime,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var endTime time.Time
-                association := &DeviceAssociation{
-                    Pending: true,
-                }
-                bringyour.Raise(result.Scan(
-                    &association.Code,
-                    &association.DeviceName,
-                    &endTime,
-                ))
-                association.DurationMinutes = float64(endTime.Sub(checkTime)) / float64(time.Minute)
-                pendingAdoptionDevices = append(pendingAdoptionDevices, association)
-            }
-        })
+			clientSession.ByJwt.NetworkId,
+			checkTime,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var endTime time.Time
+				association := &DeviceAssociation{
+					Pending: true,
+				}
+				bringyour.Raise(result.Scan(
+					&association.Code,
+					&association.DeviceName,
+					&endTime,
+				))
+				association.DurationMinutes = float64(endTime.Sub(checkTime)) / float64(time.Minute)
+				pendingAdoptionDevices = append(pendingAdoptionDevices, association)
+			}
+		})
 
-        // incoming shared
-        result, err = conn.Query(
-            clientSession.Ctx,
-            `
+		// incoming shared
+		result, err = conn.Query(
+			clientSession.Ctx,
+			`
                 SELECT
 
                     device_share.confirmed,
@@ -1104,32 +1084,32 @@ func DeviceAssociations(
                 WHERE
                     device_share.guest_network_id = $1
             `,
-            clientSession.ByJwt.NetworkId,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var confirmed bool
-                var networkName *string
-                association := &DeviceAssociation{}
-                bringyour.Raise(result.Scan(
-                    &confirmed,
-                    &association.Code,
-                    &association.DeviceName,
-                    &association.ClientId,
-                    &networkName,
-                ))
-                association.Pending = !confirmed
-                if networkName != nil {
-                    association.NetworkName = *networkName
-                }
-                incomingSharedDevices = append(incomingSharedDevices, association)
-            }
-        })
+			clientSession.ByJwt.NetworkId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var confirmed bool
+				var networkName *string
+				association := &DeviceAssociation{}
+				bringyour.Raise(result.Scan(
+					&confirmed,
+					&association.Code,
+					&association.DeviceName,
+					&association.ClientId,
+					&networkName,
+				))
+				association.Pending = !confirmed
+				if networkName != nil {
+					association.NetworkName = *networkName
+				}
+				incomingSharedDevices = append(incomingSharedDevices, association)
+			}
+		})
 
-        // outgoing shared
-        result, err = conn.Query(
-            clientSession.Ctx,
-            `
+		// outgoing shared
+		result, err = conn.Query(
+			clientSession.Ctx,
+			`
                 SELECT
 
                     device_share.confirmed,
@@ -1149,60 +1129,59 @@ func DeviceAssociations(
                 WHERE
                     device_share.source_network_id = $1
             `,
-            clientSession.ByJwt.NetworkId,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var confirmed bool
-                var networkName *string
-                association := &DeviceAssociation{}
-                bringyour.Raise(result.Scan(
-                    &confirmed,
-                    &association.Code,
-                    &association.DeviceName,
-                    &association.ClientId,
-                    &networkName,
-                ))
-                association.Pending = !confirmed
-                if networkName != nil {
-                    association.NetworkName = *networkName
-                }
-                outgoingSharedDevices = append(outgoingSharedDevices, association)
-            }
-        })
+			clientSession.ByJwt.NetworkId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var confirmed bool
+				var networkName *string
+				association := &DeviceAssociation{}
+				bringyour.Raise(result.Scan(
+					&confirmed,
+					&association.Code,
+					&association.DeviceName,
+					&association.ClientId,
+					&networkName,
+				))
+				association.Pending = !confirmed
+				if networkName != nil {
+					association.NetworkName = *networkName
+				}
+				outgoingSharedDevices = append(outgoingSharedDevices, association)
+			}
+		})
 
-        associationResult = &DeviceAssociationsResult{
-            PendingAdoptionDevices: pendingAdoptionDevices,
-            IncomingSharedDevices: incomingSharedDevices,
-            OutgoingSharedDevices: outgoingSharedDevices,
-        }
-        return
-    })
+		associationResult = &DeviceAssociationsResult{
+			PendingAdoptionDevices: pendingAdoptionDevices,
+			IncomingSharedDevices:  incomingSharedDevices,
+			OutgoingSharedDevices:  outgoingSharedDevices,
+		}
+		return
+	})
 
-    return
+	return
 }
 
-
 type DeviceRemoveAssociationArgs struct {
-    Code string `json:"code"`
+	Code string `json:"code"`
 }
 
 type DeviceRemoveAssociationResult struct {
-    Error *DeviceRemoveAssociationError `json:"error,omitempty"`
+	Error *DeviceRemoveAssociationError `json:"error,omitempty"`
 }
 
 type DeviceRemoveAssociationError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceRemoveAssociation(
-    removeAssociation *DeviceRemoveAssociationArgs,
-    clientSession *session.ClientSession,
+	removeAssociation *DeviceRemoveAssociationArgs,
+	clientSession *session.ClientSession,
 ) (removeAssociationResult *DeviceRemoveAssociationResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id,
                     code_type
@@ -1210,102 +1189,100 @@ func DeviceRemoveAssociation(
                 WHERE
                     code = $1
             `,
-            removeAssociation.Code,
-        )
+			removeAssociation.Code,
+		)
 
-        var deviceAssociationId *bringyour.Id
-        var codeType CodeType
+		var deviceAssociationId *bringyour.Id
+		var codeType CodeType
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(
-                    &deviceAssociationId,
-                    &codeType,
-                ))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(
+					&deviceAssociationId,
+					&codeType,
+				))
+			}
+		})
 
-        if deviceAssociationId == nil {
-            return
-        }
+		if deviceAssociationId == nil {
+			return
+		}
 
-
-        switch codeType {
-        case CodeTypeAdopt:
-            tag := bringyour.RaisePgResult(tx.Exec(
-                clientSession.Ctx,
-                `
+		switch codeType {
+		case CodeTypeAdopt:
+			tag := bringyour.RaisePgResult(tx.Exec(
+				clientSession.Ctx,
+				`
                     DELETE FROM device_adopt
                     WHERE
                         device_association_id = $1 AND
                         owner_network_id = $2
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-            ))
-            if tag.RowsAffected() == 0 {
-                return
-            }
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+			))
+			if tag.RowsAffected() == 0 {
+				return
+			}
 
-            removeAssociationResult = &DeviceRemoveAssociationResult{}
-            return
-        case CodeTypeShare:
-            tag := bringyour.RaisePgResult(tx.Exec(
-                clientSession.Ctx,
-                `
+			removeAssociationResult = &DeviceRemoveAssociationResult{}
+			return
+		case CodeTypeShare:
+			tag := bringyour.RaisePgResult(tx.Exec(
+				clientSession.Ctx,
+				`
                     DELETE FROM device_share
                     WHERE
                         device_association_id = $1 AND
                         (source_network_id = $2 OR guest_network_id = $2)
                 `,
-                deviceAssociationId,
-                clientSession.ByJwt.NetworkId,
-            ))
-            if tag.RowsAffected() == 0 {
-                return
-            }
+				deviceAssociationId,
+				clientSession.ByJwt.NetworkId,
+			))
+			if tag.RowsAffected() == 0 {
+				return
+			}
 
-            removeAssociationResult = &DeviceRemoveAssociationResult{}
-            return
+			removeAssociationResult = &DeviceRemoveAssociationResult{}
+			return
 
-        default:
-            return
-        }
-    })
+		default:
+			return
+		}
+	})
 
-    if removeAssociationResult == nil && returnErr == nil {
-        removeAssociationResult = &DeviceRemoveAssociationResult{
-            Error: &DeviceRemoveAssociationError{
-                Message: "Invalid code.",
-            },
-        }
-    }
+	if removeAssociationResult == nil && returnErr == nil {
+		removeAssociationResult = &DeviceRemoveAssociationResult{
+			Error: &DeviceRemoveAssociationError{
+				Message: "Invalid code.",
+			},
+		}
+	}
 
-    return
+	return
 }
 
-
 type DeviceSetAssociationNameArgs struct {
-    Code string `json:"code"`
-    DeviceName string `json:"device_name"`
+	Code       string `json:"code"`
+	DeviceName string `json:"device_name"`
 }
 
 type DeviceSetAssociationNameResult struct {
-    Error *DeviceSetAssociationNameError `json:"error,omitempty"`
+	Error *DeviceSetAssociationNameError `json:"error,omitempty"`
 }
 
 type DeviceSetAssociationNameError struct {
-    Message string `json:"message"`
+	Message string `json:"message"`
 }
 
 func DeviceSetAssociationName(
-    setAssociationName *DeviceSetAssociationNameArgs,
-    clientSession *session.ClientSession,
+	setAssociationName *DeviceSetAssociationNameArgs,
+	clientSession *session.ClientSession,
 ) (setAssociationNameResult *DeviceSetAssociationNameResult, returnErr error) {
-    bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            clientSession.Ctx,
-            `
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			clientSession.Ctx,
+			`
                 SELECT
                     device_association_id,
                     code_type
@@ -1313,53 +1290,51 @@ func DeviceSetAssociationName(
                 WHERE
                     code = $1
             `,
-            setAssociationName.Code,
-        )
+			setAssociationName.Code,
+		)
 
-        var deviceAssociationId *bringyour.Id
-        var codeType CodeType
+		var deviceAssociationId *bringyour.Id
+		var codeType CodeType
 
-        bringyour.WithPgResult(result, err, func() {
-            if result.Next() {
-                bringyour.Raise(result.Scan(
-                    &deviceAssociationId,
-                    &codeType,
-                ))
-            }
-        })
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(
+					&deviceAssociationId,
+					&codeType,
+				))
+			}
+		})
 
+		if deviceAssociationId == nil {
+			return
+		}
 
-        if deviceAssociationId == nil {
-            return
-        }
-
-
-        switch codeType {
-        case CodeTypeAdopt:
-            result, err := tx.Query(
-                clientSession.Ctx,
-                `
+		switch codeType {
+		case CodeTypeAdopt:
+			result, err := tx.Query(
+				clientSession.Ctx,
+				`
                     SELECT
                         owner_network_id
                     FROM device_adopt
                     WHERE
                         device_association_id = $1
                 `,
-                deviceAssociationId,
-            )
+				deviceAssociationId,
+			)
 
-            var ownerNetworkId *bringyour.Id
+			var ownerNetworkId *bringyour.Id
 
-            bringyour.WithPgResult(result, err, func() {
-                if result.Next() {
-                    bringyour.Raise(result.Scan(&ownerNetworkId))
-                }
-            })
+			bringyour.WithPgResult(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(result.Scan(&ownerNetworkId))
+				}
+			})
 
-            if ownerNetworkId != nil && *ownerNetworkId == clientSession.ByJwt.NetworkId {
-                bringyour.RaisePgResult(tx.Exec(
-                    clientSession.Ctx,
-                    `
+			if ownerNetworkId != nil && *ownerNetworkId == clientSession.ByJwt.NetworkId {
+				bringyour.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`
                         INSERT INTO device_association_name (
                             device_association_id,
                             network_id,
@@ -1369,21 +1344,21 @@ func DeviceSetAssociationName(
                         SET
                             device_name = $3
                     `,
-                    deviceAssociationId,
-                    clientSession.ByJwt.NetworkId,
-                    setAssociationName.DeviceName,
-                ))
+					deviceAssociationId,
+					clientSession.ByJwt.NetworkId,
+					setAssociationName.DeviceName,
+				))
 
-                setAssociationNameResult = &DeviceSetAssociationNameResult{}
-                return
-            } else {
-                return
-            }
+				setAssociationNameResult = &DeviceSetAssociationNameResult{}
+				return
+			} else {
+				return
+			}
 
-        case CodeTypeShare:
-            result, err := tx.Query(
-                clientSession.Ctx,
-                `
+		case CodeTypeShare:
+			result, err := tx.Query(
+				clientSession.Ctx,
+				`
                     SELECT
                         source_network_id,
                         guest_network_id
@@ -1391,26 +1366,26 @@ func DeviceSetAssociationName(
                     WHERE
                         device_association_id = $1
                 `,
-                deviceAssociationId,
-            )
+				deviceAssociationId,
+			)
 
-            var sourceNetworkId *bringyour.Id
-            var guestNetworkId *bringyour.Id
+			var sourceNetworkId *bringyour.Id
+			var guestNetworkId *bringyour.Id
 
-            bringyour.WithPgResult(result, err, func() {
-                if result.Next() {
-                    bringyour.Raise(result.Scan(
-                        &sourceNetworkId,
-                        &guestNetworkId,
-                    ))
-                }
-            })
+			bringyour.WithPgResult(result, err, func() {
+				if result.Next() {
+					bringyour.Raise(result.Scan(
+						&sourceNetworkId,
+						&guestNetworkId,
+					))
+				}
+			})
 
-            if sourceNetworkId != nil && *sourceNetworkId == clientSession.ByJwt.NetworkId ||
-                    guestNetworkId != nil && *guestNetworkId == clientSession.ByJwt.NetworkId {
-                bringyour.RaisePgResult(tx.Exec(
-                    clientSession.Ctx,
-                    `
+			if sourceNetworkId != nil && *sourceNetworkId == clientSession.ByJwt.NetworkId ||
+				guestNetworkId != nil && *guestNetworkId == clientSession.ByJwt.NetworkId {
+				bringyour.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`
                         INSERT INTO device_association_name (
                             device_association_id,
                             network_id,
@@ -1420,58 +1395,57 @@ func DeviceSetAssociationName(
                         SET
                             device_name = $3
                     `,
-                    deviceAssociationId,
-                    clientSession.ByJwt.NetworkId,
-                    setAssociationName.DeviceName,
-                ))
+					deviceAssociationId,
+					clientSession.ByJwt.NetworkId,
+					setAssociationName.DeviceName,
+				))
 
-                setAssociationNameResult = &DeviceSetAssociationNameResult{}
-                return
-            } else {
-                return
-            }
+				setAssociationNameResult = &DeviceSetAssociationNameResult{}
+				return
+			} else {
+				return
+			}
 
-        default:
-            return
-        }
-    })
+		default:
+			return
+		}
+	})
 
-    if setAssociationNameResult == nil && returnErr == nil {
-        setAssociationNameResult = &DeviceSetAssociationNameResult{
-            Error: &DeviceSetAssociationNameError{
-                Message: "Invalid code.",
-            },
-        }
-    }
+	if setAssociationNameResult == nil && returnErr == nil {
+		setAssociationNameResult = &DeviceSetAssociationNameResult{
+			Error: &DeviceSetAssociationNameError{
+				Message: "Invalid code.",
+			},
+		}
+	}
 
-    return
+	return
 }
 
-
 func qrPngBytes(url string) ([]byte, error) {
-    q, err := qrcode.New(url, qrcode.Medium)
-    if err != nil {
-        return nil, err
-    }
-    q.ForegroundColor = color.RGBA{
-        R: 29,
-        G: 49,
-        B: 80,
-        A: 255,
-    }
-    q.BackgroundColor = color.RGBA{
-        R: 255,
-        G: 255,
-        B: 255,
-        A: 255,
-    }
+	q, err := qrcode.New(url, qrcode.Medium)
+	if err != nil {
+		return nil, err
+	}
+	q.ForegroundColor = color.RGBA{
+		R: 29,
+		G: 49,
+		B: 80,
+		A: 255,
+	}
+	q.BackgroundColor = color.RGBA{
+		R: 255,
+		G: 255,
+		B: 255,
+		A: 255,
+	}
 
-    pngBytes, err := q.PNG(256)
-    if err != nil {
-        return nil, err
-    }
+	pngBytes, err := q.PNG(256)
+	if err != nil {
+		return nil, err
+	}
 
-    // FIXME add bringyour logo to bottom right
+	// FIXME add bringyour logo to bottom right
 
-    return pngBytes, err
+	return pngBytes, err
 }

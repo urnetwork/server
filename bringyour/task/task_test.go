@@ -2,27 +2,25 @@ package task
 
 import (
 	"context"
-    "testing"
-    "fmt"
-    "sync"
-    "time"
-    mathrand "math/rand"
-    "errors"
+	"errors"
+	"fmt"
+	mathrand "math/rand"
+	"sync"
+	"testing"
+	"time"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 
-    // "bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/session"
+	// "bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
-
 
 type Work1Args struct {
 }
 
 type Work1Result struct {
 }
-
 
 func Work1(
 	work1 *Work1Args,
@@ -46,163 +44,156 @@ func Work1Post(
 	return nil
 }
 
+func TestTask(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		RescheduleTimeout = 1 * time.Second
 
-func TestTask(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
-	RescheduleTimeout = 1 * time.Second
+		ctx := context.Background()
 
-	ctx := context.Background()
+		n := 10
+		m := 10000
+		k := 100
 
-	n := 10
-	m := 10000
-	k := 100
+		targetRunCount := 2*m + k
 
+		stateLock := sync.Mutex{}
+		runCounts := map[bringyour.Id]int{}
+		postRescheduledRunCounts := map[bringyour.Id]int{}
+		workerCount := 0
 
-	targetRunCount := 2 * m + k
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
 
+		for i := 0; i < m; i += 1 {
+			ScheduleTask(
+				Work1,
+				&Work1Args{},
+				clientSession,
+				RunOnce("unique", i%k),
+			)
+		}
 
-	stateLock := sync.Mutex{}
-	runCounts := map[bringyour.Id]int{}
-	postRescheduledRunCounts := map[bringyour.Id]int{}
-	workerCount := 0
+		for i := 0; i < n; i += 1 {
+			taskWorker := NewTaskWorker(ctx)
+			taskWorker.AddTargets(NewTaskTargetWithPost(Work1, Work1Post))
 
-	clientSession := session.Testing_CreateClientSession(ctx, nil)
-	defer clientSession.Cancel()
-
-	for i := 0; i < m; i += 1 {
-		ScheduleTask(
-			Work1,
-			&Work1Args{},
-			clientSession,
-			RunOnce("unique", i % k),
-		)
-	}
-
-
-	for i := 0; i < n; i += 1 {
-		taskWorker := NewTaskWorker(ctx)
-		taskWorker.AddTargets(NewTaskTargetWithPost(Work1, Work1Post))
-
-		go func() {
-			stateLock.Lock()
-			workerCount += 1
-			stateLock.Unlock()
-			defer func() {
+			go func() {
 				stateLock.Lock()
-				workerCount -= 1
+				workerCount += 1
 				stateLock.Unlock()
-			}()
-			
-			for {
-				select {
-				case <- clientSession.Ctx.Done():
-					return
-				default:
-				}
+				defer func() {
+					stateLock.Lock()
+					workerCount -= 1
+					stateLock.Unlock()
+				}()
 
-				finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(10)
-				if err != nil {
-					panic(err)
-				}
-				stateLock.Lock()
-				for _, taskId := range finishedTaskIds {
-					runCounts[taskId] += 1
-				}
-				for _, taskId := range postRescheduledTaskIds {
-					postRescheduledRunCounts[taskId] += 1
-				}
-				stateLock.Unlock()
-				
-
-				if 0 == len(finishedTaskIds) + len(rescheduledTaskIds) + len(postRescheduledTaskIds) {
+				for {
 					select {
-					case <- clientSession.Ctx.Done():
+					case <-clientSession.Ctx.Done():
 						return
-					case <- time.After(1 * time.Second):
+					default:
+					}
+
+					finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(10)
+					if err != nil {
+						panic(err)
+					}
+					stateLock.Lock()
+					for _, taskId := range finishedTaskIds {
+						runCounts[taskId] += 1
+					}
+					for _, taskId := range postRescheduledTaskIds {
+						postRescheduledRunCounts[taskId] += 1
+					}
+					stateLock.Unlock()
+
+					if 0 == len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) {
+						select {
+						case <-clientSession.Ctx.Done():
+							return
+						case <-time.After(1 * time.Second):
+						}
 					}
 				}
-			}
-		}()
-	}
+			}()
+		}
 
-
-	for i := 0; i < m; i += 1 {
-		ScheduleTask(
-			Work1,
-			&Work1Args{},
-			clientSession,
-		)
-	}
-	for i := 0; i < m; i += 1 {
-		ScheduleTask(
-			Work1,
-			&Work1Args{},
-			clientSession,
-			RunOnce("task", i),
-		)
-	}
-
+		for i := 0; i < m; i += 1 {
+			ScheduleTask(
+				Work1,
+				&Work1Args{},
+				clientSession,
+			)
+		}
+		for i := 0; i < m; i += 1 {
+			ScheduleTask(
+				Work1,
+				&Work1Args{},
+				clientSession,
+				RunOnce("task", i),
+			)
+		}
 
 	WaitWork:
-	for {
-		stateLock.Lock()
+		for {
+			stateLock.Lock()
+			netRunCount := 0
+			for _, runCount := range runCounts {
+				netRunCount += runCount
+			}
+			pendingTaskIds := ListPendingTasks(ctx)
+			rescheduledTaskIds := ListRescheduledTasks(ctx)
+			claimedTaskIds := ListClaimedTasks(ctx)
+			finishedTaskIds := ListFinishedTasks(ctx)
+			fmt.Printf("Tasks pending=%d (rescheduled=%d, claimed=%d, finished=%d)\n", len(pendingTaskIds), len(rescheduledTaskIds), len(claimedTaskIds), len(finishedTaskIds))
+			finished := (len(pendingTaskIds) == 0)
+			stateLock.Unlock()
+
+			if finished {
+				clientSession.Cancel()
+				break
+			}
+
+			select {
+			case <-clientSession.Ctx.Done():
+				break WaitWork
+			case <-time.After(1 * time.Second):
+			}
+		}
+
+	WaitDrain:
+		for {
+			stateLock.Lock()
+			finished := (workerCount == 0)
+			stateLock.Unlock()
+
+			if finished {
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				break WaitDrain
+			case <-time.After(1 * time.Second):
+			}
+		}
+
 		netRunCount := 0
 		for _, runCount := range runCounts {
 			netRunCount += runCount
 		}
-		pendingTaskIds := ListPendingTasks(ctx)
-		rescheduledTaskIds := ListRescheduledTasks(ctx)
-		claimedTaskIds := ListClaimedTasks(ctx)
-		finishedTaskIds := ListFinishedTasks(ctx)
-		fmt.Printf("Tasks pending=%d (rescheduled=%d, claimed=%d, finished=%d)\n", len(pendingTaskIds), len(rescheduledTaskIds), len(claimedTaskIds), len(finishedTaskIds))
-		finished := (len(pendingTaskIds) == 0)
-		stateLock.Unlock()
+		assert.Equal(t, netRunCount, targetRunCount)
 
-		if finished {
-			clientSession.Cancel()
-			break
+		netTaskCount := 0
+		for _, runCount := range runCounts {
+			netTaskCount += runCount
+		}
+		for _, runCount := range postRescheduledRunCounts {
+			netTaskCount += runCount
 		}
 
-		select {
-		case <- clientSession.Ctx.Done():
-			break WaitWork
-		case <- time.After(1 * time.Second):
-		}
-	}
-
-	WaitDrain:
-	for {
-		stateLock.Lock()
-		finished := (workerCount == 0)
-		stateLock.Unlock()
-
-		if finished {
-			break
-		}
-
-		select {
-		case <- ctx.Done():
-			break WaitDrain
-		case <- time.After(1 * time.Second):
-		}
-	}
-
-
-	netRunCount := 0
-	for _, runCount := range runCounts {
-		netRunCount += runCount
-	}
-	assert.Equal(t, netRunCount, targetRunCount)
-
-
-	netTaskCount := 0
-	for _, runCount := range runCounts {
-		netTaskCount += runCount
-	}
-	for _, runCount := range postRescheduledRunCounts {
-		netTaskCount += runCount
-	}
-
-	removedCount := RemoveFinishedTasks(ctx, bringyour.NowUtc())
-	assert.Equal(t, int(removedCount), netTaskCount)
-	assert.Equal(t, 0, len(ListFinishedTasks(ctx)))
-})}
+		removedCount := RemoveFinishedTasks(ctx, bringyour.NowUtc())
+		assert.Equal(t, int(removedCount), netTaskCount)
+		assert.Equal(t, 0, len(ListFinishedTasks(ctx)))
+	})
+}

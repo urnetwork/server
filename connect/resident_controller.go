@@ -19,30 +19,29 @@ import (
 	// "bringyour.com/protocol"
 )
 
-
 type residentController struct {
-	ctx context.Context
-    cancel context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 
-    clientId bringyour.Id
+	clientId bringyour.Id
 
 	residentContractManager *residentContractManager
-	settings *ExchangeSettings
+	settings                *ExchangeSettings
 }
 
 func newResidentController(
 	ctx context.Context,
-    cancel context.CancelFunc,
-    clientId bringyour.Id,
-    residentContractManager *residentContractManager,
-    settings *ExchangeSettings,
+	cancel context.CancelFunc,
+	clientId bringyour.Id,
+	residentContractManager *residentContractManager,
+	settings *ExchangeSettings,
 ) *residentController {
 	return &residentController{
-		ctx: ctx,
-		cancel: cancel,
-		clientId: clientId,
+		ctx:                     ctx,
+		cancel:                  cancel,
+		clientId:                clientId,
 		residentContractManager: residentContractManager,
-		settings: settings,
+		settings:                settings,
 	}
 }
 

@@ -1,18 +1,15 @@
 package client
 
-
 import (
-	"runtime"
-	"time"
-	"sync"
 	"context"
+	"runtime"
+	"sync"
+	"time"
 
 	"golang.org/x/mobile/gl"
 )
 
-
 var glvcLog = logFn("gl_view_controller")
-
 
 type GLViewCallback interface {
 	Update()
@@ -28,22 +25,20 @@ type GLViewController interface {
 	StopGl()
 }
 
-
 type glViewDrawController interface {
 	draw(g gl.Context)
 	drawLoopOpen()
 	drawLoopClose()
 }
 
-
 // fixme set the clear color
 type glViewController struct {
 	glContext gl.Context
-	glWorker gl.Worker
+	glWorker  gl.Worker
 
 	drawMutex sync.Mutex
 
-	loopStop *context.CancelFunc
+	loopStop       *context.CancelFunc
 	drawController glViewDrawController
 
 	// unix millis
@@ -52,21 +47,19 @@ type glViewController struct {
 	updateNotice chan bool
 
 	// draw state. Change this using `drawUpdate`
-	bgRed float32
-	bgBlue float32
-	bgGreen float32
-	width int32
-	height int32
+	bgRed     float32
+	bgBlue    float32
+	bgGreen   float32
+	width     int32
+	height    int32
 	frameRate float32
-	
-	
 }
 
 func newGLViewController() *glViewController {
 	return &glViewController{
-		width: 0,
-		height: 0,
-		frameRate: 0,
+		width:        0,
+		height:       0,
+		frameRate:    0,
 		updateNotice: make(chan bool, 1),
 	}
 }
@@ -107,7 +100,7 @@ func (self *glViewController) DrawFrame() {
 	}
 
 	workAvailable := self.glWorker.WorkAvailable()
-	drainLoop:
+drainLoop:
 	for {
 		select {
 		case <-workAvailable:
@@ -150,40 +143,39 @@ func (self *glViewController) drawUpdate(change func()) {
 	}
 }
 
-
 func (self *glViewController) drawLoop(ctx context.Context, callback GLViewCallback) {
 	loop := func() {
-		loop:
+	loop:
 		for {
 			self.drawStartTime = time.Now().UnixMilli()
 			if callback != nil {
-		  		callback.Update()
-		  	}
+				callback.Update()
+			}
 
-		  	wait:
+		wait:
 			for {
 				if 0 < self.frameRate {
 					now := time.Now().UnixMilli()
-					nextDrawTime := self.drawStartTime + int64(1000 / self.frameRate)
+					nextDrawTime := self.drawStartTime + int64(1000/self.frameRate)
 					if nextDrawTime < now {
-				  		break
-				  	}
+						break
+					}
 
 					timeout := nextDrawTime - now
 					select {
 					case <-ctx.Done():
-				  		break loop
-				  	case <-self.updateNotice:
-				  		continue wait
-				  	case <-time.After(time.Duration(timeout) * time.Millisecond):
-				  		continue wait
+						break loop
+					case <-self.updateNotice:
+						continue wait
+					case <-time.After(time.Duration(timeout) * time.Millisecond):
+						continue wait
 					}
 				} else {
 					select {
 					case <-ctx.Done():
-				  		break loop
-				  	case <-self.updateNotice:
-				  		continue wait
+						break loop
+					case <-self.updateNotice:
+						continue wait
 					}
 				}
 			}
@@ -220,4 +212,3 @@ func (self *glViewController) StopGl() {
 		self.loopStop = nil
 	}
 }
-

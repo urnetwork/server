@@ -1,44 +1,35 @@
 package client
 
-
 import (
 	"context"
-	"time"
 	"fmt"
 	"sync"
-	
+	"time"
+
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
 )
 
-
 var deviceLog = logFn("device")
 
-
 const DebugUseSingleClientConnect = false
-
-
 
 type ProvideChangeListener interface {
 	ProvideChanged(provideEnabled bool)
 }
 
-
 type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
 
-
 // receive a packet into the local raw socket
 type ReceivePacket interface {
-    ReceivePacket(packet []byte)
+	ReceivePacket(packet []byte)
 }
 
-
 // TODO methods to manage extenders
-
 
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
@@ -53,24 +44,22 @@ func defaultDeviceSettings() *deviceSettings {
 	}
 }
 
-
 type BringYourDevice struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
-	byJwt string
+	byJwt       string
 	platformUrl string
-	apiUrl string
+	apiUrl      string
 
 	deviceDescription string
-	deviceSpec string
-	appVersion string
+	deviceSpec        string
+	appVersion        string
 
 	settings *deviceSettings
 
-	clientId connect.Id
+	clientId   connect.Id
 	instanceId connect.Id
-
 
 	client *connect.Client
 
@@ -87,7 +76,7 @@ type BringYourDevice struct {
 	remoteUserNatClient connect.UserNatClient
 
 	remoteUserNatProviderLocalUserNat *connect.LocalUserNat
-	remoteUserNatProvider *connect.RemoteUserNatProvider
+	remoteUserNatProvider             *connect.RemoteUserNatProvider
 
 	openedViewControllers map[ViewController]bool
 
@@ -140,66 +129,66 @@ func newBringYourDevice(
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	clientOob := connect.NewApiOutOfBandControl(cancelCtx, byJwt, apiUrl)
 	client := connect.NewClient(
-        cancelCtx,
-        clientId,
-        clientOob,
-        // connect.DefaultClientSettingsNoNetworkEvents(),
-        connect.DefaultClientSettings(),
-    )
+		cancelCtx,
+		clientId,
+		clientOob,
+		// connect.DefaultClientSettingsNoNetworkEvents(),
+		connect.DefaultClientSettings(),
+	)
 
-    // routeManager := connect.NewRouteManager(connectClient)
-    // contractManager := connect.NewContractManagerWithDefaults(connectClient)
-    // connectClient.Setup(routeManager, contractManager)
-    // go connectClient.Run()
+	// routeManager := connect.NewRouteManager(connectClient)
+	// contractManager := connect.NewContractManagerWithDefaults(connectClient)
+	// connectClient.Setup(routeManager, contractManager)
+	// go connectClient.Run()
 
-    auth := &connect.ClientAuth{
-    	ByJwt: byJwt,
-    	InstanceId: instanceId.toConnectId(),
-    	AppVersion: Version,
-    }
-    platformTransport := connect.NewPlatformTransportWithDefaults(
-    	client.Ctx(),
-    	platformUrl,
-    	auth,
-    	client.RouteManager(),
-    )
+	auth := &connect.ClientAuth{
+		ByJwt:      byJwt,
+		InstanceId: instanceId.toConnectId(),
+		AppVersion: Version,
+	}
+	platformTransport := connect.NewPlatformTransportWithDefaults(
+		client.Ctx(),
+		platformUrl,
+		auth,
+		client.RouteManager(),
+	)
 
-    // go platformTransport.Run(connectClient.RouteManager())
+	// go platformTransport.Run(connectClient.RouteManager())
 
-    localUserNatSettings := connect.DefaultLocalUserNatSettings()
-    // no ulimit for local traffic
-    localUserNatSettings.UdpBufferSettings.UserLimit = 0
-    localUserNatSettings.TcpBufferSettings.UserLimit = 0
-    localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
+	localUserNatSettings := connect.DefaultLocalUserNatSettings()
+	// no ulimit for local traffic
+	localUserNatSettings.UdpBufferSettings.UserLimit = 0
+	localUserNatSettings.TcpBufferSettings.UserLimit = 0
+	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
-    api := newBringYourApiWithContext(cancelCtx, apiUrl)
-    api.SetByJwt(byJwt)
+	api := newBringYourApiWithContext(cancelCtx, apiUrl)
+	api.SetByJwt(byJwt)
 
 	byDevice := &BringYourDevice{
-		ctx: cancelCtx,
-		cancel: cancel,
-		byJwt: byJwt,
-		platformUrl: platformUrl,
-		apiUrl: apiUrl,
+		ctx:               cancelCtx,
+		cancel:            cancel,
+		byJwt:             byJwt,
+		platformUrl:       platformUrl,
+		apiUrl:            apiUrl,
 		deviceDescription: deviceDescription,
-		deviceSpec: deviceSpec,
-		appVersion: appVersion,
-		settings: settings,
-		clientId: clientId,
-		instanceId: instanceId.toConnectId(),
-		client: client,
+		deviceSpec:        deviceSpec,
+		appVersion:        appVersion,
+		settings:          settings,
+		clientId:          clientId,
+		instanceId:        instanceId.toConnectId(),
+		client:            client,
 		// contractManager: contractManager,
 		// routeManager: routeManager,
-		platformTransport: platformTransport,
-		localUserNat: localUserNat,
-		remoteUserNatClient: nil,
+		platformTransport:                 platformTransport,
+		localUserNat:                      localUserNat,
+		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
-		remoteUserNatProvider: nil,
-		openedViewControllers: map[ViewController]bool{},
-		receiveCallbacks: connect.NewCallbackList[connect.ReceivePacketFunction](),
-		provideChangeListeners: connect.NewCallbackList[ProvideChangeListener](),
-		connectChangeListeners: connect.NewCallbackList[ConnectChangeListener](),
-		api: api,
+		remoteUserNatProvider:             nil,
+		openedViewControllers:             map[ViewController]bool{},
+		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
+		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
+		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
+		api:                               api,
 	}
 
 	// set up with nil destination
@@ -264,9 +253,9 @@ func (self *BringYourDevice) connectChanged(connectEnabled bool) {
 // `ReceivePacketFunction`
 func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
 	// deviceLog("GOT A PACKET %d", len(packet))
-    for _, receiveCallback := range self.receiveCallbacks.Get() {
-        receiveCallback(source, ipProtocol, packet)
-    }
+	for _, receiveCallback := range self.receiveCallbacks.Get() {
+		receiveCallback(source, ipProtocol, packet)
+	}
 }
 
 func (self *BringYourDevice) IsProvideEnabled() bool {
@@ -282,7 +271,6 @@ func (self *BringYourDevice) IsConnectEnabled() bool {
 
 	return self.remoteUserNatClient != nil
 }
-
 
 func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 	func() {
@@ -314,8 +302,8 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 		}
 
 		if ProvideModeNone < provideMode {
-		    self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
-		    self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)	
+			self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
+			self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
 		}
 	}()
 	self.provideChanged(self.IsProvideEnabled())
@@ -536,7 +524,6 @@ func (self *BringYourDevice) Close() {
 		self.remoteUserNatProvider = nil
 	}
 
-
 	self.localUserNat.Close()
 
 	for vc, _ := range self.openedViewControllers {
@@ -545,27 +532,25 @@ func (self *BringYourDevice) Close() {
 	clear(self.openedViewControllers)
 }
 
-
 func parseByJwtClientId(byJwt string) (connect.Id, error) {
 	claims := gojwt.MapClaims{}
-    gojwt.NewParser().ParseUnverified(byJwt, claims)
+	gojwt.NewParser().ParseUnverified(byJwt, claims)
 
-    jwtClientId, ok := claims["client_id"]
-    if !ok {
-        return connect.Id{}, fmt.Errorf("byJwt does not contain claim client_id")
-    }
-    switch v := jwtClientId.(type) {
-    case string:
-        return connect.ParseId(v)
-    default:
-    	return connect.Id{}, fmt.Errorf("byJwt hav invalid type for client_id: %T", v)
-    }
+	jwtClientId, ok := claims["client_id"]
+	if !ok {
+		return connect.Id{}, fmt.Errorf("byJwt does not contain claim client_id")
+	}
+	switch v := jwtClientId.(type) {
+	case string:
+		return connect.ParseId(v)
+	default:
+		return connect.Id{}, fmt.Errorf("byJwt hav invalid type for client_id: %T", v)
+	}
 }
-
 
 type WindowEvents struct {
 	windowExpandEvent *connect.WindowExpandEvent
-	providerEvents map[connect.Id]*connect.ProviderEvent
+	providerEvents    map[connect.Id]*connect.ProviderEvent
 }
 
 func newWindowEvents(
@@ -574,7 +559,7 @@ func newWindowEvents(
 ) *WindowEvents {
 	return &WindowEvents{
 		windowExpandEvent: windowExpandEvent,
-		providerEvents: providerEvents,
+		providerEvents:    providerEvents,
 	}
 }
 
