@@ -8,17 +8,6 @@ import (
 	"bringyour.com/bringyour/session"
 )
 
-type CreateAccountWalletArgs struct {
-	WalletId         *bringyour.Id
-	NetworkId        bringyour.Id
-	WalletType       WalletType
-	Blockchain       string
-	WalletAddress    string
-	Active           bool
-	DefaultTokenType string
-	CreateTime       time.Time
-}
-
 type AccountWallet struct {
 	WalletId         bringyour.Id
 	NetworkId        bringyour.Id
@@ -36,16 +25,11 @@ type CreateAccountWalletResult struct {
 
 func CreateAccountWallet(
 	ctx context.Context,
-	wallet *CreateAccountWalletArgs,
+	wallet *AccountWallet,
 	networkId bringyour.Id,
 ) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-
-		if wallet.WalletId == nil {
-			id := bringyour.NewId()
-			wallet.WalletId = &id
-		}
-
+		wallet.WalletId = bringyour.NewId()
 		wallet.Active = true
 		wallet.CreateTime = bringyour.NowUtc()
 
