@@ -23,13 +23,12 @@ func TestAccountWallet(t *testing.T) {
 			WalletAddress:    "0x0",
 			DefaultTokenType: "USDC",
 		}
-		walletId := bringyour.NewId()
 
-		CreateAccountWallet(ctx, walletId, wallet, sourceNetworkId)
+		CreateAccountWallet(ctx, wallet, sourceNetworkId)
 
-		fetchWallet := GetAccountWallet(ctx, walletId)
+		fetchWallet := GetAccountWallet(ctx, *wallet.WalletId)
 
-		assert.Equal(t, walletId, fetchWallet.WalletId)
+		assert.Equal(t, wallet.WalletId, fetchWallet.WalletId)
 		assert.Equal(t, wallet.NetworkId, fetchWallet.NetworkId)
 		assert.Equal(t, wallet.WalletType, fetchWallet.WalletType)
 		assert.Equal(t, wallet.Blockchain, fetchWallet.Blockchain)

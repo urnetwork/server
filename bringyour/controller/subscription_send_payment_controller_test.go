@@ -77,7 +77,6 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		destinationWalletAddress := "0x1234567890"
 
-		walletId := bringyour.NewId()
 		wallet := &model.CreateAccountWalletArgs{
 			NetworkId:        destinationNetworkId,
 			WalletType:       model.WalletTypeCircleUserControlled,
@@ -85,13 +84,13 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			WalletAddress:    destinationWalletAddress,
 			DefaultTokenType: "USDC",
 		}
-		model.CreateAccountWallet(ctx, walletId, wallet, destinationNetworkId)
+		model.CreateAccountWallet(ctx, wallet, destinationNetworkId)
 
-		model.SetPayoutWallet(ctx, destinationNetworkId, walletId)
+		model.SetPayoutWallet(ctx, destinationNetworkId, *wallet.WalletId)
 
 		paymentPlan := model.PlanPayments(ctx)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{walletId})
+		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{*wallet.WalletId})
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
@@ -118,7 +117,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		assert.Equal(t, len(contractIds), 0)
 
 		paymentPlan = model.PlanPayments(ctx)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{walletId})
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{*wallet.WalletId})
 
 		// these should hit -> default
 		// payment.PaymentRecord should all be empty

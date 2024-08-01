@@ -8,17 +8,44 @@ import (
 	"bringyour.com/bringyour/session"
 )
 
+type CreateAccountWalletArgs struct {
+	WalletId         *bringyour.Id
+	NetworkId        bringyour.Id
+	WalletType       WalletType
+	Blockchain       string
+	WalletAddress    string
+	Active           bool
+	DefaultTokenType string
+	CreateTime       time.Time
+}
+
+type AccountWallet struct {
+	WalletId         bringyour.Id
+	NetworkId        bringyour.Id
+	WalletType       WalletType
+	Blockchain       string
+	WalletAddress    string
+	Active           bool
+	DefaultTokenType string
+	CreateTime       time.Time
+}
+
 type CreateAccountWalletResult struct {
-	WalletId bringyour.Id `json:"wallet_id"`
+	WalletId *bringyour.Id `json:"wallet_id"`
 }
 
 func CreateAccountWallet(
 	ctx context.Context,
-	walletId bringyour.Id, // this can be generated for external wallets, or the associated Circle wallet_id
 	wallet *CreateAccountWalletArgs,
 	networkId bringyour.Id,
 ) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+
+		if wallet.WalletId == nil {
+			id := bringyour.NewId()
+			wallet.WalletId = &id
+		}
+
 		wallet.Active = true
 		wallet.CreateTime = bringyour.NowUtc()
 
@@ -37,7 +64,7 @@ func CreateAccountWallet(
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			`,
-			walletId,
+			wallet.WalletId,
 			wallet.NetworkId,
 			wallet.WalletType,
 			wallet.Blockchain,
@@ -64,27 +91,6 @@ const (
 	WalletTypeXch                  = "xch"
 	WalletTypeSol                  = "sol"
 )
-
-type CreateAccountWalletArgs struct {
-	NetworkId        bringyour.Id
-	WalletType       WalletType
-	Blockchain       string
-	WalletAddress    string
-	Active           bool
-	DefaultTokenType string
-	CreateTime       time.Time
-}
-
-type AccountWallet struct {
-	WalletId         bringyour.Id
-	NetworkId        bringyour.Id
-	WalletType       WalletType
-	Blockchain       string
-	WalletAddress    string
-	Active           bool
-	DefaultTokenType string
-	CreateTime       time.Time
-}
 
 func dbGetAccountWallet(ctx context.Context, conn bringyour.PgConn, walletId bringyour.Id) *AccountWallet {
 	var wallet *AccountWallet

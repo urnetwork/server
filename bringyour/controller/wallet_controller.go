@@ -662,8 +662,8 @@ func CircleWalletWebhook(
 			// no account_wallet exists, create a new one
 			model.CreateAccountWallet(
 				clientSession.Ctx,
-				walletId,
 				&model.CreateAccountWalletArgs{
+					WalletId:         &walletId,
 					NetworkId:        userUC.NetworkId,
 					WalletType:       model.WalletTypeCircleUserControlled,
 					Blockchain:       blockchain,
@@ -972,6 +972,7 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 		}
 
 		createAccountWallet := &model.CreateAccountWalletArgs{
+			WalletId:         &walletId,
 			NetworkId:        user.NetworkId,
 			WalletType:       model.WalletTypeCircleUserControlled,
 			Blockchain:       wallet.Blockchain,
@@ -979,7 +980,7 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 			DefaultTokenType: "USDC",
 			CreateTime:       wallet.CreateDate,
 		}
-		model.CreateAccountWallet(clientSession.Ctx, walletId, createAccountWallet, user.NetworkId)
+		model.CreateAccountWallet(clientSession.Ctx, createAccountWallet, user.NetworkId)
 
 		// set the payout wallet
 		if i == 0 {

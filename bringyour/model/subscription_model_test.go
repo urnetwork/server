@@ -152,7 +152,6 @@ func TestEscrow(t *testing.T) {
 		}
 		assert.Equal(t, netBalanceByteCount, netTransferByteCount-paidByteCount)
 
-		walletId := bringyour.NewId()
 		wallet := &CreateAccountWalletArgs{
 			NetworkId:        destinationNetworkId,
 			WalletType:       WalletTypeCircleUserControlled,
@@ -160,14 +159,14 @@ func TestEscrow(t *testing.T) {
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		}
-		CreateAccountWallet(ctx, walletId, wallet, destinationNetworkId)
-		SetPayoutWallet(ctx, destinationNetworkId, walletId)
+		CreateAccountWallet(ctx, wallet, destinationNetworkId)
+		SetPayoutWallet(ctx, destinationNetworkId, *wallet.WalletId)
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
 		paymentPlan := PlanPayments(ctx)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{walletId})
+		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{*wallet.WalletId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		for paid < MinWalletPayoutThreshold {
@@ -192,7 +191,7 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 		paymentPlan = PlanPayments(ctx)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{walletId})
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{*wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
@@ -239,7 +238,7 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, transferBalances, []*TransferBalance{})
 
 		paymentPlan = PlanPayments(ctx)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{walletId})
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{*wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
@@ -451,7 +450,6 @@ func TestPayouts(t *testing.T) {
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
-		walletId := bringyour.NewId()
 		wallet := &CreateAccountWalletArgs{
 			NetworkId:        destinationNetworkId,
 			WalletType:       WalletTypeCircleUserControlled,
@@ -459,10 +457,10 @@ func TestPayouts(t *testing.T) {
 			WalletAddress:    "0x1234567890",
 			DefaultTokenType: "usdc",
 		}
-		CreateAccountWallet(ctx, walletId, wallet, destinationNetworkId)
-		assert.NotEqual(t, walletId, nil)
+		CreateAccountWallet(ctx, wallet, destinationNetworkId)
+		assert.NotEqual(t, wallet.WalletId, nil)
 
-		SetPayoutWallet(ctx, destinationNetworkId, walletId)
+		SetPayoutWallet(ctx, destinationNetworkId, *wallet.WalletId)
 
 		plan := PlanPayments(ctx)
 
@@ -561,7 +559,6 @@ func TestPayoutPlanAppyBonus(t *testing.T) {
 				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 			}
 
-			walletId := bringyour.NewId()
 			wallet := &CreateAccountWalletArgs{
 				NetworkId:        destinationNetworkId,
 				WalletType:       WalletTypeCircleUserControlled,
@@ -569,9 +566,9 @@ func TestPayoutPlanAppyBonus(t *testing.T) {
 				WalletAddress:    "0x1234567890",
 				DefaultTokenType: "usdc",
 			}
-			CreateAccountWallet(ctx, walletId, wallet, destinationNetworkId)
+			CreateAccountWallet(ctx, wallet, destinationNetworkId)
 
-			SetPayoutWallet(ctx, destinationNetworkId, walletId)
+			SetPayoutWallet(ctx, destinationNetworkId, *wallet.WalletId)
 
 			plan := PlanPayments(ctx)
 

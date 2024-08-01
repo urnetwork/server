@@ -3,7 +3,6 @@ package controller
 import (
 	"errors"
 
-	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -31,9 +30,7 @@ func CreateAccountWallet(
 		return nil, errors.New("invalid wallet address")
 	}
 
-	walletId := bringyour.NewId()
+	model.CreateAccountWallet(session.Ctx, wallet, session.ByJwt.NetworkId)
 
-	model.CreateAccountWallet(session.Ctx, walletId, wallet, session.ByJwt.NetworkId)
-
-	return &model.CreateAccountWalletResult{WalletId: walletId}, nil
+	return &model.CreateAccountWalletResult{WalletId: wallet.WalletId}, nil
 }
