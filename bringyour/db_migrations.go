@@ -1,10 +1,9 @@
 package bringyour
 
 import (
-    "fmt"
     "context"
+    "fmt"
 )
-
 
 /*
 Use manual editing to fix or backport changes.
@@ -19,28 +18,26 @@ WHERE schemaname NOT IN  ('pg_catalog', 'information_schema')
 
 */
 
-
-
 type SqlMigration struct {
     sql string
 }
+
 func newSqlMigration(sql string) *SqlMigration {
     return &SqlMigration{
         sql: sql,
     }
 }
 
-
 // important these migration functions must be idempotent
 type CodeMigration struct {
     callback func(context.Context)
 }
+
 func newCodeMigration(callback func(context.Context)) *CodeMigration {
     return &CodeMigration{
         callback: callback,
     }
 }
-
 
 func DbVersion(ctx context.Context) int {
     Tx(ctx, func(tx PgTx) {
@@ -77,7 +74,6 @@ func DbVersion(ctx context.Context) int {
     return endVersionNumber
 }
 
-
 func ApplyDbMigrations(ctx context.Context) {
     for i := DbVersion(ctx); i < len(migrations); i += 1 {
         Tx(ctx, func(tx PgTx) {
@@ -88,33 +84,32 @@ func ApplyDbMigrations(ctx context.Context) {
             ))
         })
         switch v := migrations[i].(type) {
-            case *SqlMigration:
-                Tx(ctx, func(tx PgTx) {
-                	defer func() {
-	            		if err := recover(); err != nil {
-	            			// print the sql for debugging
-	            			Logger().Printf("%s\n", v.sql)
-	            			panic(err)
-	            		}
-	            	}()
-                    RaisePgResult(tx.Exec(ctx, v.sql))
-                })
-            case *CodeMigration:
-                v.callback(ctx)
-            default:
-                panic(fmt.Errorf("Unknown migration type %T", v))
+        case *SqlMigration:
+            Tx(ctx, func(tx PgTx) {
+                defer func() {
+                    if err := recover(); err != nil {
+                        // print the sql for debugging
+                        Logger().Printf("%s\n", v.sql)
+                        panic(err)
+                    }
+                }()
+                RaisePgResult(tx.Exec(ctx, v.sql))
+            })
+        case *CodeMigration:
+            v.callback(ctx)
+        default:
+            panic(fmt.Errorf("Unknown migration type %T", v))
         }
         Tx(ctx, func(tx PgTx) {
             RaisePgResult(tx.Exec(
                 ctx,
                 `INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
                 i,
-                i + 1,
+                i+1,
             ))
         })
     }
 }
-
 
 // style: use varchar not ENUM
 // style: in queries with two+ tables, use fully qualified column names
@@ -410,7 +405,7 @@ var migrations = []any{
     newSqlMigration(`
         DROP TABLE user_auth_validate
     `),
-    // verify_code: 4-byte hex 
+    // verify_code: 4-byte hex
     newSqlMigration(`
         CREATE TABLE user_auth_verify (
             user_auth_verify_id uuid NOT NULL,
@@ -642,7 +637,7 @@ var migrations = []any{
     //  CREATE TYPE contract_outcome AS ENUM (
     //      'settled',
     //      'dispute_resolved_to_source',
-    //      'dispute_resolved_to_destination' 
+    //      'dispute_resolved_to_destination'
     //  )
     // `),
 
@@ -689,7 +684,7 @@ var migrations = []any{
             PRIMARY KEY (contract_id, party)
         )
     `),
-    
+
     // creating an escrow must deduct the balances in the same transaction
     // settling an escrow must put `payout_byte_count` into the target account_balances, and `balance_byte_count - payout_byte_count` back into the origin balance
     // primary key is (contract_id, balance_id) because there can be multiple balances used per contract_id
@@ -782,12 +777,12 @@ var migrations = []any{
     //  `circle_uc_user_id` is the user_id for the circle user-controlled platform
     // DROPPED and recreated
     newSqlMigration(`
-	    CREATE TABLE circle_uc (
-	    	network_id uuid NOT NULL,
-	    	circle_uc_user_id uuid NOT NULL,
+        CREATE TABLE circle_uc (
+            network_id uuid NOT NULL,
+            circle_uc_user_id uuid NOT NULL,
 
-	    	PRIMARY KEY (network_id)
-	    )
+            PRIMARY KEY (network_id)
+        )
     `),
 
     // this is the preferred wallet for payout
@@ -834,7 +829,7 @@ var migrations = []any{
     // column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
     // index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
     newSqlMigration(`
-    	ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
+        ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
     `),
     newSqlMigration(`
         ALTER TABLE user_auth_attempt ADD COLUMN client_ip varchar(64) NULL
@@ -1315,7 +1310,7 @@ var migrations = []any{
     newSqlMigration(`
         CREATE INDEX finished_task_run_end_time ON finished_task (run_end_time, task_id)
     `),
-    
+
     newSqlMigration(`
         CREATE INDEX auth_code_end_time ON auth_code (end_time, auth_code_id)
     `),
@@ -1438,15 +1433,11 @@ var migrations = []any{
         ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
     `),
 
-
-
     // results of actively pinging providers
     // task to actively ping providers
     // check active connection for returning active providers
 
-    // payout task using coinbase api 
+    // payout task using coinbase api
     // payout email
 
-
 }
-
