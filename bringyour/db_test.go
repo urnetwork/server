@@ -440,11 +440,10 @@ func TestSerializableTx(t *testing.T) { (&TestEnv{ApplyDbMigrations:false}).Run(
 					ctx,
 					`
 						UPDATE test SET
-						b = $2
+						b = b + 1
 						WHERE a = $1
 					`,
 					id,
-					b + 1,
 				))
 				assert.Equal(t, 1, int(tag.RowsAffected()))
 			}
