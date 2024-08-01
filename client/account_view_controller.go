@@ -64,6 +64,7 @@ type walletValidateAddress struct {
 
 	updateCount int
 	address     string
+	chain       string
 	callback    WalletValidateAddressCallback
 }
 
@@ -91,6 +92,7 @@ func (self *walletValidateAddress) run() {
 		self.stateLock.Lock()
 		notify := self.monitor.NotifyChannel()
 		address := self.address
+		chain := self.chain
 		updateCount := self.updateCount
 		callback := self.callback
 		self.stateLock.Unlock()
@@ -101,6 +103,7 @@ func (self *walletValidateAddress) run() {
 			self.api.WalletValidateAddress(
 				&WalletValidateAddressArgs{
 					Address: address,
+					Chain:   chain,
 				},
 				newApiCallback[*WalletValidateAddressResult](func(result *WalletValidateAddressResult, err error) {
 					self.stateLock.Lock()
