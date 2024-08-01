@@ -1,30 +1,27 @@
 package model
 
 import (
-	"strings"
 	"crypto/rand"
 	"encoding/hex"
 	"net/mail"
+	"strings"
 
-	"golang.org/x/crypto/argon2"
 	"github.com/nyaruka/phonenumbers"
+	"golang.org/x/crypto/argon2"
 
 	"bringyour.com/bringyour"
 )
 
-
 type UserAuthType string
 
 const (
-	UserAuthTypeNone UserAuthType = "none"
+	UserAuthTypeNone  UserAuthType = "none"
 	UserAuthTypeEmail UserAuthType = "email"
 	UserAuthTypePhone UserAuthType = "phone"
 )
 
-
 // BE CAREFUL do not change without a backwards-compatible migration
 var passwordPepper = []byte("t1me4atoporita")
-
 
 // FIXME change this to not use *string
 // func NormalUserAuthV1(userAuth string) (string, UserAuthType, error) {
@@ -116,5 +113,3 @@ func createResetCode() string {
 	}
 	return hex.EncodeToString(resetCode)
 }
-
-

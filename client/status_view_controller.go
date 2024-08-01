@@ -1,6 +1,5 @@
 package client
 
-
 import (
 	"context"
 
@@ -9,12 +8,10 @@ import (
 	"bringyour.com/connect"
 )
 
-
 var svcLog = logFn("status_view_controller")
 
-
 type StatusViewController struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	client *connect.Client
@@ -28,7 +25,7 @@ func newStatusViewController(ctx context.Context, client *connect.Client) *Statu
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &StatusViewController{
-		ctx: cancelCtx,
+		ctx:    cancelCtx,
 		cancel: cancel,
 		client: client,
 		// glInitialized: false,
@@ -43,7 +40,7 @@ func (self *StatusViewController) Start() {
 }
 
 func (self *StatusViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *StatusViewController) draw(g gl.Context) {
@@ -52,7 +49,6 @@ func (self *StatusViewController) draw(g gl.Context) {
 	// 	self.frameBuffer := g.CreateFramebuffer()
 	// 	self.glInitialized = true
 	// }
-
 
 	// g.BindFramebuffer(gl.DRAW_FRAMEBUFFER, self.frameBuffer)
 
@@ -65,15 +61,15 @@ func (self *StatusViewController) draw(g gl.Context) {
 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 
 	// g.glBegin(gl.GL_QUADS);
-    //     g.glColor3d(1,0,0);
-    //     glVertex3f(-1,-1,-10);
-    //     glColor3d(1,1,0);
-    //     glVertex3f(1,-1,-10);
-    //     glColor3d(1,1,1);
-    //     glVertex3f(1,1,-10);
-    //     glColor3d(0,1,1);
-    //     glVertex3f(-1,1,-10);
-    // glEnd();
+	//     g.glColor3d(1,0,0);
+	//     glVertex3f(-1,-1,-10);
+	//     glColor3d(1,1,0);
+	//     glVertex3f(1,-1,-10);
+	//     glColor3d(1,1,1);
+	//     glVertex3f(1,1,-10);
+	//     glColor3d(0,1,1);
+	//     glVertex3f(-1,1,-10);
+	// glEnd();
 }
 
 func (self *StatusViewController) drawLoopOpen() {

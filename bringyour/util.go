@@ -1,21 +1,19 @@
 package bringyour
 
 import (
-    "time"
-    "regexp"
-    "fmt"
-    "strconv"
-    // "runtime/debug"
-    // "strings"
-    "encoding/json"
-    "bytes"
+	"fmt"
+	"regexp"
+	"strconv"
+	"time"
+	// "runtime/debug"
+	// "strings"
+	"bytes"
+	"encoding/json"
 )
-
 
 // func Ptr[T any](value T) *T {
 //  return &value
 // }
-
 
 // this is just max in go 1.21
 // func MaxInt(values... int) int {
@@ -45,92 +43,76 @@ import (
 //  return min
 // }
 
-
 func NowUtc() time.Time {
-    // data stores use utc time without time zone
-    // use the same time format locally to keep the local time in sync with the data store time
-    return time.Now().UTC()
+	// data stores use utc time without time zone
+	// use the same time format locally to keep the local time in sync with the data store time
+	return time.Now().UTC()
 }
-
-
 
 func CodecTime(t time.Time) time.Time {
-    // nanosecond resolution can be serialized and unserialized in most codecs:
-    // - json
-    // - postgres
-    return t.Round(time.Nanosecond)
+	// nanosecond resolution can be serialized and unserialized in most codecs:
+	// - json
+	// - postgres
+	return t.Round(time.Nanosecond)
 }
-
-
 
 func MinTime(a time.Time, b time.Time) time.Time {
-    if a.Before(b) {
-        return a
-    } else {
-        return b
-    }
+	if a.Before(b) {
+		return a
+	} else {
+		return b
+	}
 }
-
-
-
-
-
 
 func Raise(err error) {
-    if err != nil {
-        panic(err)
-    }
+	if err != nil {
+		panic(err)
+	}
 }
-
-
-
-
 
 func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
-    // ipv4:port
-    // [ipv6]:port
-    // ipv6:port
+	// ipv4:port
+	// [ipv6]:port
+	// ipv6:port
 
-    ipv4 := regexp.MustCompile("^([0-9\\.]+):(\\d+)$")
-    ipv6 := regexp.MustCompile("^\\[([0-9a-f:]+)\\]:(\\d+)$")
-    // ip not properly escaped with [...]
-    badIpv6 := regexp.MustCompile("^([0-9a-f:]+):(\\d+)$")
-    
-    groups := ipv4.FindStringSubmatch(clientAddress)
-    if groups != nil {
-        ip = groups[1]
-        port, _ = strconv.Atoi(groups[2])
-        return
-    }
+	ipv4 := regexp.MustCompile("^([0-9\\.]+):(\\d+)$")
+	ipv6 := regexp.MustCompile("^\\[([0-9a-f:]+)\\]:(\\d+)$")
+	// ip not properly escaped with [...]
+	badIpv6 := regexp.MustCompile("^([0-9a-f:]+):(\\d+)$")
 
-    groups = ipv6.FindStringSubmatch(clientAddress)
-    if groups != nil {
-        ip = groups[1]
-        port, _ = strconv.Atoi(groups[2])
-        return
-    }
+	groups := ipv4.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
 
-    groups = badIpv6.FindStringSubmatch(clientAddress)
-    if groups != nil {
-        ip = groups[1]
-        port, _ = strconv.Atoi(groups[2])
-        return
-    }
+	groups = ipv6.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
 
-    err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
-    return
+	groups = badIpv6.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
+
+	err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
+	return
 }
-
 
 // returns source if cannot compact
 func AttemptCompactJson(jsonBytes []byte) []byte {
-    b := &bytes.Buffer{}
-    if err := json.Compact(b, jsonBytes); err == nil {
-        return b.Bytes()
-    } else {
-        // there was an error compacting the json
-        // return the original
-        return jsonBytes
-    }
+	b := &bytes.Buffer{}
+	if err := json.Compact(b, jsonBytes); err == nil {
+		return b.Bytes()
+	} else {
+		// there was an error compacting the json
+		// return the original
+		return jsonBytes
+	}
 }
-

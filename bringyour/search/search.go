@@ -1,8 +1,8 @@
 package search
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"strings"
 
 	"golang.org/x/exp/maps"
@@ -10,12 +10,11 @@ import (
 	"bringyour.com/bringyour"
 )
 
-
 type SearchType string
 
 const (
-	SearchTypeFull SearchType = "full"
-	SearchTypePrefix SearchType = "prefix"
+	SearchTypeFull      SearchType = "full"
+	SearchTypePrefix    SearchType = "prefix"
 	SearchTypeSubstring SearchType = "substring"
 	// todo
 	// tokenize the value as words and match the query as a single word
@@ -23,16 +22,14 @@ const (
 	// SearchTypeSubstringWords SearchType = "substring-words"
 )
 
-
 type SearchResult struct {
-	Value string
-	ValueVariant int
-	Alias int
-	AliasValue string
-	ValueId bringyour.Id
+	Value         string
+	ValueVariant  int
+	Alias         int
+	AliasValue    string
+	ValueId       bringyour.Id
 	ValueDistance int
 }
-
 
 type SearchProjection struct {
 	dims map[rune]int
@@ -41,20 +38,19 @@ type SearchProjection struct {
 }
 
 func computeProjection(value string) *SearchProjection {
-    dims := map[rune]int{}
-    for _, dim := range value {
-    	dims[dim] += 1
-    }
-    dord := len(dims)
-    vlen := len(value)
+	dims := map[rune]int{}
+	for _, dim := range value {
+		dims[dim] += 1
+	}
+	dord := len(dims)
+	vlen := len(value)
 
-    return &SearchProjection{
-    	dims: dims,
-    	dord: dord,
-    	vlen: vlen,
-    }
+	return &SearchProjection{
+		dims: dims,
+		dord: dord,
+		vlen: vlen,
+	}
 }
-
 
 type SearchStats struct {
 	CandidateCount int
@@ -64,10 +60,9 @@ func OptStats() *SearchStats {
 	return &SearchStats{}
 }
 
-
 type Search struct {
-	realm string
-	searchType SearchType
+	realm          string
+	searchType     SearchType
 	minAliasLength int
 }
 
@@ -77,8 +72,8 @@ func NewSearch(realm string, searchType SearchType) *Search {
 
 func NewSearchWithMinAliasLength(realm string, searchType SearchType, minAliasLength int) *Search {
 	return &Search{
-		realm: realm,
-		searchType: searchType,
+		realm:          realm,
+		searchType:     searchType,
 		minAliasLength: minAliasLength,
 	}
 }
@@ -108,10 +103,10 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 	sqlParts := []string{}
 	// https://github.com/jackc/pgx/issues/387
 	sqlArgs := bringyour.PgNamedArgs{}
-	
+
 	maps.Copy(sqlArgs, map[string]any{
-    	"realm": self.realm,
-    	"vlen": len(query),
+		"realm":    self.realm,
+		"vlen":     len(query),
 		"distance": distance,
 	})
 
@@ -149,11 +144,11 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 
 		projection := computeProjection(query)
 
-		simMin := max(0, projection.vlen - distance)
+		simMin := max(0, projection.vlen-distance)
 		simMax := projection.vlen + distance
 
-	    maps.Copy(sqlArgs, map[string]any{
-	    	"simMin": simMin,
+		maps.Copy(sqlArgs, map[string]any{
+			"simMin": simMin,
 			"simMax": simMax,
 		})
 
@@ -184,13 +179,13 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 				return fmt.Sprintf("dim_%d_%s", dim, name)
 			}
 
-			elenMin := max(0, projection.vlen + projection.dord + dlen - 2 * distance)
-			elenMax := projection.vlen + projection.dord + dlen + 2 * distance
-			dordMin := max(0, projection.dord - distance)
+			elenMin := max(0, projection.vlen+projection.dord+dlen-2*distance)
+			elenMax := projection.vlen + projection.dord + dlen + 2*distance
+			dordMin := max(0, projection.dord-distance)
 			dordMax := projection.dord + distance
-			vlenMin := max(0, projection.vlen - distance)
+			vlenMin := max(0, projection.vlen-distance)
 			vlenMax := projection.vlen + distance
-			dlenMin := max(0, dlen - distance)
+			dlenMin := max(0, dlen-distance)
 			dlenMax := dlen + distance
 
 			if 0 < i {
@@ -203,19 +198,19 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 						value_id,
 						value_variant,
 						alias,
-						LEAST(dlen, @` + id("dlen") + `) AS sim
+						LEAST(dlen, @`+id("dlen")+`) AS sim
 					FROM search_projection
 					WHERE
 						realm = @realm AND
-						dim = @` + id("dim") + ` AND
-						elen BETWEEN @` + id("elenMin") + ` AND @` + id("elenMax") + ` AND
-						dord BETWEEN @` + id("dordMin") + ` AND @` + id("dordMax") + ` AND
-						vlen BETWEEN @` + id("vlenMin") + ` AND @` + id("vlenMax") + ` AND 
-						dlen BETWEEN @` + id("dlenMin") + ` AND @` + id("dlenMax"),
+						dim = @`+id("dim")+` AND
+						elen BETWEEN @`+id("elenMin")+` AND @`+id("elenMax")+` AND
+						dord BETWEEN @`+id("dordMin")+` AND @`+id("dordMax")+` AND
+						vlen BETWEEN @`+id("vlenMin")+` AND @`+id("vlenMax")+` AND 
+						dlen BETWEEN @`+id("dlenMin")+` AND @`+id("dlenMax"),
 			)
 			maps.Copy(sqlArgs, map[string]any{
-				id("dlen"): dlen,
-				id("dim"): dim,
+				id("dlen"):    dlen,
+				id("dim"):     dim,
 				id("elenMin"): elenMin,
 				id("elenMax"): elenMax,
 				id("dordMin"): dordMin,
@@ -228,9 +223,9 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 			i += 1
 		}
 
-	    sqlParts = append(
-	    	sqlParts,
-	        `
+		sqlParts = append(
+			sqlParts,
+			`
 		    		) search_sim
 		    		GROUP BY value_id, value_variant, alias
 		    		HAVING SUM(sim) BETWEEN @simMin AND @simMax
@@ -247,7 +242,7 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 		        	search_value_original.value_variant = search_sim_possible.value_variant AND
 		        	search_value_original.alias = 0
 	        `,
-	    )   
+		)
 	}
 
 	matches := map[bringyour.Id]*SearchResult{}
@@ -257,46 +252,46 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 
 		candidateCount := 0
 
-    	result, err := conn.Query(ctx, sql, sqlArgs)
-    	bringyour.WithPgResult(result, err, func() {
-    		for result.Next() {
-    			searchResult := &SearchResult{}
+		result, err := conn.Query(ctx, sql, sqlArgs)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				searchResult := &SearchResult{}
 
-    			bringyour.Raise(result.Scan(
-    				&searchResult.ValueId,
-    				&searchResult.ValueVariant,
-    				&searchResult.Alias,
-    				&searchResult.AliasValue,
-    				&searchResult.Value,
-    			))
+				bringyour.Raise(result.Scan(
+					&searchResult.ValueId,
+					&searchResult.ValueVariant,
+					&searchResult.Alias,
+					&searchResult.AliasValue,
+					&searchResult.Value,
+				))
 
-    			minSearchResult, ok := matches[searchResult.ValueId]
-    			if ok && minSearchResult.ValueDistance == 0 {
-    				// already have a perfect match, no need to compute any more
-    				continue
-    			}
+				minSearchResult, ok := matches[searchResult.ValueId]
+				if ok && minSearchResult.ValueDistance == 0 {
+					// already have a perfect match, no need to compute any more
+					continue
+				}
 
-    			candidateCount += 1
+				candidateCount += 1
 
-    			searchResult.ValueDistance = EditDistance(query, searchResult.AliasValue)
-    			if searchResult.ValueDistance <= distance {    				
-	    			if !ok || searchResult.ValueDistance < minSearchResult.ValueDistance {
-	    				matches[searchResult.ValueId] = searchResult
-	    			}
-	    		}
-    		}
-    	})
+				searchResult.ValueDistance = EditDistance(query, searchResult.AliasValue)
+				if searchResult.ValueDistance <= distance {
+					if !ok || searchResult.ValueDistance < minSearchResult.ValueDistance {
+						matches[searchResult.ValueId] = searchResult
+					}
+				}
+			}
+		})
 
-    	stats.CandidateCount = candidateCount
-    })
+		stats.CandidateCount = candidateCount
+	})
 
 	return maps.Values(matches)
 }
 
 func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id, valueVariant int) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	self.AddInTx(ctx, value, valueId, valueVariant, tx)
-    })
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		self.AddInTx(ctx, value, valueId, valueVariant, tx)
+	})
 }
 
 func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
@@ -331,40 +326,40 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 	bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 		insertOne := func(value string, alias int) {
 			batch.Queue(
-	    		`
+				`
 		    		INSERT INTO search_value
 		    		(realm, value_id, value_variant, value, alias)
 		    		VALUES
 		    		($1, $2, $3, $4, $5)
 	    		`,
-	    		self.realm,
-	    		valueId,
-	    		valueVariant,
-	    		value,
-	    		alias,
-	    	)
+				self.realm,
+				valueId,
+				valueVariant,
+				value,
+				alias,
+			)
 
-	    	projection := computeProjection(value)
-	    	for dim, dlen := range projection.dims {
-	    		elen := projection.vlen + projection.dord + dlen
-		    	batch.Queue(
-		    		`
+			projection := computeProjection(value)
+			for dim, dlen := range projection.dims {
+				elen := projection.vlen + projection.dord + dlen
+				batch.Queue(
+					`
 			    		INSERT INTO search_projection
 			    		(realm, dim, elen, dord, dlen, vlen, value_id, value_variant, alias)
 			    		VALUES
 			    		($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		    		`,
-		    		self.realm,
-		    		dim,
-		    		elen,
-		    		projection.dord,
-		    		dlen,
-		    		projection.vlen,
-		    		valueId,
-		    		valueVariant,
-		    		alias,
-		    	)
-		    }
+					self.realm,
+					dim,
+					elen,
+					projection.dord,
+					dlen,
+					projection.vlen,
+					valueId,
+					valueVariant,
+					alias,
+				)
+			}
 		}
 
 		switch self.searchType {
@@ -411,9 +406,9 @@ func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour
 }
 
 func (self *Search) Remove(ctx context.Context, valueId bringyour.Id) {
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-    	self.RemoveInTx(ctx, valueId, tx)
-    })
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		self.RemoveInTx(ctx, valueId, tx)
+	})
 }
 
 func (self *Search) RemoveInTx(ctx context.Context, valueId bringyour.Id, tx bringyour.PgTx) {
@@ -441,4 +436,3 @@ func (self *Search) RemoveInTx(ctx context.Context, valueId bringyour.Id, tx bri
 		valueId,
 	))
 }
-

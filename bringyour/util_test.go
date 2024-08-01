@@ -3,9 +3,8 @@ package bringyour
 import (
 	"testing"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 )
-
 
 func TestParseClientAddress(t *testing.T) {
 	ip, port, err := ParseClientAddress("[2001:470:99:57:e643:4bff:fe23:a343]:443")
@@ -22,7 +21,7 @@ func TestParseClientAddress(t *testing.T) {
 	assert.Equal(t, ip, "fd00:6a4f:a007:15da::1")
 	assert.Equal(t, port, 40704)
 	assert.Equal(t, err, nil)
-	
+
 	ip, port, err = ParseClientAddress(":443")
 	assert.NotEqual(t, err, nil)
 }

@@ -10,7 +10,6 @@ import (
 	// "bringyour.com/bringyour/ulid"
 )
 
-
 type PreferencesSetArgs struct {
 	ProductUpdates bool `json:"product_updates"`
 }
@@ -40,9 +39,8 @@ func PreferencesSet(
 	return result, nil
 }
 
-
 type FeedbackSendArgs struct {
-	Uses FeedbackSendUses `json:"uses"`
+	Uses  FeedbackSendUses  `json:"uses"`
 	Needs FeedbackSendNeeds `json:"needs"`
 }
 type FeedbackSendUses struct {
@@ -50,26 +48,25 @@ type FeedbackSendUses struct {
 	Business bool `json:"business"`
 }
 type FeedbackSendNeeds struct {
-	Private bool `json:"private"`
-	Safe bool `json:"safe"`
-	Global bool `json:"global"`
-	Collaborate bool `json:"collaborate"`
-	AppControl bool `json:"app_control"`
-	BlockDataBrokers bool `json:"block_data_brokers"`
-	BlockAds bool `json:"block_ads"`
-	Focus bool `json:"focus"`
-	ConnectServers bool `json:"connect_servers"`
-	RunServers bool `json:"run_servers"`
-	PreventCyber bool `json:"prevent_cyber"`
-	Audit bool `json:"audit"`
-	ZeroTrust bool `json:"zero_trust"`
-	Visualize bool `json:"visualize"`
-	Other *string `json:"other"`
+	Private          bool    `json:"private"`
+	Safe             bool    `json:"safe"`
+	Global           bool    `json:"global"`
+	Collaborate      bool    `json:"collaborate"`
+	AppControl       bool    `json:"app_control"`
+	BlockDataBrokers bool    `json:"block_data_brokers"`
+	BlockAds         bool    `json:"block_ads"`
+	Focus            bool    `json:"focus"`
+	ConnectServers   bool    `json:"connect_servers"`
+	RunServers       bool    `json:"run_servers"`
+	PreventCyber     bool    `json:"prevent_cyber"`
+	Audit            bool    `json:"audit"`
+	ZeroTrust        bool    `json:"zero_trust"`
+	Visualize        bool    `json:"visualize"`
+	Other            *string `json:"other"`
 }
 
 type FeedbackSendResult struct {
 }
-
 
 func FeedbackSend(
 	feedbackSend FeedbackSendArgs,
@@ -133,13 +130,11 @@ func FeedbackSend(
 	return result, nil
 }
 
-
 type FindNetworkResult struct {
-	NetworkId bringyour.Id
+	NetworkId   bringyour.Id
 	NetworkName string
-	UserAuths []string
+	UserAuths   []string
 }
-
 
 func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetworkResult, error) {
 	findNetworkResults := []*FindNetworkResult{}
@@ -155,7 +150,7 @@ func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetwork
 		networkIdPlaceholders := []string{}
 		for i, searchResult := range searchResults {
 			args = append(args, searchResult.ValueId)
-			networkIdPlaceholders = append(networkIdPlaceholders, fmt.Sprintf("$%d", i + 1))
+			networkIdPlaceholders = append(networkIdPlaceholders, fmt.Sprintf("$%d", i+1))
 		}
 
 		result, err := conn.Query(
@@ -167,7 +162,7 @@ func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetwork
 					network_user.user_auth
 				FROM network
 				INNER JOIN network_user ON network_user.user_id = network.admin_user_id
-				WHERE network.network_id IN (` + strings.Join(networkIdPlaceholders, ",") + `)
+				WHERE network.network_id IN (`+strings.Join(networkIdPlaceholders, ",")+`)
 			`,
 			args...,
 		)
@@ -188,7 +183,6 @@ func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetwork
 
 	return findNetworkResults, nil
 }
-
 
 func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetworkResult, error) {
 	findNetworkResults := []*FindNetworkResult{}
@@ -228,7 +222,6 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 	return findNetworkResults, nil
 }
 
-
 func RemoveNetwork(ctx context.Context, networkId bringyour.Id) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
@@ -251,6 +244,5 @@ func RemoveNetwork(ctx context.Context, networkId bringyour.Id) {
 		))
 
 		networkNameSearch.RemoveInTx(ctx, networkId, tx)
-    })
+	})
 }
-

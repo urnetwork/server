@@ -1,8 +1,5 @@
 package main
 
-
-
-
 /*
 
 func TestHandleContract() {
@@ -82,7 +79,7 @@ func TestHandleContract() {
 
 
 	// check balance is 4 contracts less
-	
+
 
 	// create check insufficient balance error
 
@@ -113,7 +110,7 @@ func TestHandleContractCompanion() {
 	}
 	frames := residentController.handleCreateContract(createContract)
 
-	// error no origin 
+	// error no origin
 
 	// create origin contract
 
@@ -131,9 +128,8 @@ func TestHandleContractCompanion() {
 	// check source is at original balance
 
 
-	
+
 
 }
 
 */
-
