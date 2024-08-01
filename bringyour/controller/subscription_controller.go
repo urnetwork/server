@@ -216,10 +216,8 @@ func SetPayoutWallet(
 	session *session.ClientSession,
 ) (*model.SetPayoutWalletResult, error) {
 
-	model.SetPayoutWallet(
-		setWalletPayout,
-		session,
-	)
+	networkId := session.ByJwt.NetworkId
+	model.SetPayoutWallet(session.Ctx, networkId, setWalletPayout.WalletId)
 
 	return &model.SetPayoutWalletResult{}, nil
 

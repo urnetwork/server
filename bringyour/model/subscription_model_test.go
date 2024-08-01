@@ -160,12 +160,7 @@ func TestEscrow(t *testing.T) {
 			DefaultTokenType: "usdc",
 		}
 		CreateAccountWallet(wallet, destinationSession)
-
-		payoutArgs := &SetPayoutWalletArgs{
-			WalletId: wallet.WalletId,
-		}
-
-		SetPayoutWallet(*payoutArgs, destinationSession)
+		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
@@ -436,22 +431,14 @@ func TestPayoutWallet(t *testing.T) {
 		CreateAccountWallet(wallet1, sourceSession)
 		CreateAccountWallet(wallet2, sourceSession)
 
-		setPayoutWalletArgs := &SetPayoutWalletArgs{
-			WalletId: wallet1.WalletId,
-		}
-
-		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
+		SetPayoutWallet(ctx, sourceNetworkId, wallet1.WalletId)
 
 		payoutWalletId := GetPayoutWallet(ctx, sourceNetworkId)
 		payoutAccountWallet := GetAccountWallet(ctx, *payoutWalletId)
 
 		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
 
-		setPayoutWalletArgs = &SetPayoutWalletArgs{
-			WalletId: wallet2.WalletId,
-		}
-
-		SetPayoutWallet(*setPayoutWalletArgs, sourceSession)
+		SetPayoutWallet(ctx, sourceNetworkId, wallet2.WalletId)
 
 		payoutWalletId = GetPayoutWallet(ctx, sourceNetworkId)
 		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)

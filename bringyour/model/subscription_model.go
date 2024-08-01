@@ -1977,16 +1977,10 @@ type SetPayoutWalletArgs struct {
 
 type SetPayoutWalletResult struct{}
 
-func SetPayoutWallet(
-	setPayoutWallet SetPayoutWalletArgs,
-	session *session.ClientSession,
-) {
-
-	networkId := session.ByJwt.NetworkId
-
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
-			session.Ctx,
+			ctx,
 			`
                 INSERT INTO payout_wallet (
                     network_id,
@@ -1998,7 +1992,7 @@ func SetPayoutWallet(
                     wallet_id = $2
             `,
 			networkId,
-			setPayoutWallet.WalletId,
+			walletId,
 		))
 	})
 }
