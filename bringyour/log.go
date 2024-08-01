@@ -1,30 +1,26 @@
 package bringyour
 
 import (
-	"os"
-	"log"
 	"fmt"
+	"log"
+	"os"
 )
-
 
 const LogLevelUrgent = 0
 const LogLevelInfo = 50
 const LogLevelDebug = 100
 
-
 var GlobalLogLevel = LogLevelInfo
 
-
-var logger = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
+var logger = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
 
 func Logger() *log.Logger {
 	return logger
 }
 
-
 type Log struct {
 	level int
-} 
+}
 
 func LogFn(level int, tag string) LogFunction {
 	return func(format string, a ...any) {
@@ -49,4 +45,3 @@ type LogFunction func(string, ...any)
 func (self *LogFunction) Set() {
 
 }
-

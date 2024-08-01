@@ -2,15 +2,14 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
-	"strings"
-	"fmt"
 	"runtime/debug"
+	"strings"
 
 	"bringyour.com/bringyour"
 )
-
 
 // regex table approach inspired by https://benhoyt.com/writings/go-routing/
 
@@ -22,8 +21,8 @@ type Route struct {
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {
 	return &Route{
-		method: method,
-		regex: regexp.MustCompile("^" + pattern + "$"),
+		method:  method,
+		regex:   regexp.MustCompile("^" + pattern + "$"),
 		handler: handler,
 	}
 }
@@ -32,17 +31,16 @@ func (self *Route) String() string {
 	return fmt.Sprintf("%s %s", self.method, self.regex)
 }
 
-
-type pathValuesKey struct {}
-
+type pathValuesKey struct{}
 
 type Router struct {
-	ctx context.Context
+	ctx    context.Context
 	routes []*Route
 }
+
 func NewRouter(ctx context.Context, routes []*Route) *Router {
 	return &Router{
-		ctx: ctx,
+		ctx:    ctx,
 		routes: routes,
 	}
 }
@@ -87,9 +85,6 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-
 func GetPathValues(r *http.Request) []string {
 	return r.Context().Value(pathValuesKey{}).([]string)
 }
-
-

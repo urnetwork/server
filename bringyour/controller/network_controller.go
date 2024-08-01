@@ -8,7 +8,6 @@ import (
 	"bringyour.com/bringyour/session"
 )
 
-
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
 	session *session.ClientSession,
@@ -34,13 +33,12 @@ func NetworkCreate(
 		}
 		AuthVerifySend(verifySend, session)
 	} else {
-				awsMessageSender := GetAWSMessageSender()
-        awsMessageSender.SendAccountMessageTemplate(
-            *result.UserAuth,
-            &NetworkWelcomeTemplate{},
-        )
+		awsMessageSender := GetAWSMessageSender()
+		awsMessageSender.SendAccountMessageTemplate(
+			*result.UserAuth,
+			&NetworkWelcomeTemplate{},
+		)
 	}
 
 	return result, nil
 }
-

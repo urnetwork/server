@@ -1,18 +1,17 @@
 package bringyour
 
 import (
-	"sync"
 	"context"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-
 // type aliases to simplify user code
 type RedisClient = *redis.Client
-const RedisNil = redis.Nil
 
+const RedisNil = redis.Nil
 
 // resets the connection pool
 // call this after changes to the env
@@ -21,11 +20,11 @@ func RedisReset() {
 	safeClient = &safeRedisClient{}
 }
 
-
 type safeRedisClient struct {
-	mutex sync.Mutex
+	mutex  sync.Mutex
 	client *redis.Client
 }
+
 func (self *safeRedisClient) open() *redis.Client {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -35,21 +34,21 @@ func (self *safeRedisClient) open() *redis.Client {
 
 		// see https://github.com/redis/go-redis/blob/master/options.go#L31
 		options := &redis.Options{
-			Addr: redisKeys.RequireString("authority"),
-	        Password: redisKeys.RequireString("password"),
-	        DB: redisKeys.RequireInt("db"),
-	        // Addr: "192.168.208.135:6379",
-	        // Password: "",
-	        // DB: 0,
-	        MaxRetries: 32,
-	        MinIdleConns: 4,
-			MaxIdleConns: 32,
+			Addr:     redisKeys.RequireString("authority"),
+			Password: redisKeys.RequireString("password"),
+			DB:       redisKeys.RequireInt("db"),
+			// Addr: "192.168.208.135:6379",
+			// Password: "",
+			// DB: 0,
+			MaxRetries:      32,
+			MinIdleConns:    4,
+			MaxIdleConns:    32,
 			ConnMaxLifetime: 0,
 			ConnMaxIdleTime: 60 * time.Second,
-	        // see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
-	        // see https://uptrace.dev/blog/golang-context-timeout.html
-	        ContextTimeoutEnabled: false,
-	    }
+			// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
+			// see https://uptrace.dev/blog/golang-context-timeout.html
+			ContextTimeoutEnabled: false,
+		}
 		self.client = redis.NewClient(options)
 	}
 	return self.client
@@ -64,14 +63,11 @@ func (self *safeRedisClient) close() {
 	}
 }
 
-
 var safeClient = &safeRedisClient{}
 
 func client() *redis.Client {
 	return safeClient.open()
 }
-
-
 
 func Redis(ctx context.Context, callback func(RedisClient)) {
 	// From the go-redis code:
@@ -79,5 +75,5 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 	// >> It's safe for concurrent use by multiple goroutines.
 	// context := context.Background()
 	client := client()
-    callback(client)
+	callback(client)
 }

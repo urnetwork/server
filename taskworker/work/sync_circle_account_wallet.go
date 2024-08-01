@@ -16,7 +16,7 @@ func SchedulePopulateAccountWallets(clientSession *session.ClientSession, tx bri
 		&controller.PopulateAccountWalletsArgs{},
 		clientSession,
 		task.RunOnce("export_stats"),
-		task.RunAt(time.Now().Add(30 * time.Second)),
+		task.RunAt(time.Now().Add(30*time.Second)),
 	)
 }
 

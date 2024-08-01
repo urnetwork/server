@@ -22,12 +22,12 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx brin
 		&CloseExpiredContractsArgs{},
 		clientSession,
 		task.RunOnce("close_expired_contracts"),
-		task.RunAt(time.Now().Add(1 * time.Hour)),
-  )
+		task.RunAt(time.Now().Add(1*time.Hour)),
+	)
 }
 
 func CloseExpiredContracts(
-	closeExpiredContracts *CloseExpiredContractsArgs, 
+	closeExpiredContracts *CloseExpiredContractsArgs,
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
 	expiredContracts := model.GetExpiredTransferContracts(clientSession.Ctx)
@@ -36,20 +36,20 @@ func CloseExpiredContracts(
 
 		var targetId *bringyour.Id
 		if expiredContract.Party == model.ContractPartySource {
-				targetId = &expiredContract.DestinationId
+			targetId = &expiredContract.DestinationId
 		} else if expiredContract.Party == model.ContractPartyDestination {
-				targetId = &expiredContract.SourceId
+			targetId = &expiredContract.SourceId
 		}
 
 		if targetId == nil {
-				continue
+			continue
 		}
 
-		// forcing the contract to be closed 
+		// forcing the contract to be closed
 		// due to lack of response from the counterparty
 		err := model.CloseContract(
-			clientSession.Ctx, 
-			expiredContract.ContractId, 
+			clientSession.Ctx,
+			expiredContract.ContractId,
 			*targetId,
 			expiredContract.UsedTransferByteCount,
 			false,

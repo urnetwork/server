@@ -1,42 +1,38 @@
 package bringyour
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"time"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"encoding/json"
-	"bytes"
 	"strings"
-	"io"
+	"time"
 )
-
 
 const DefaultHttpTimeout = 10 * time.Second
 const DefaultHttpConnectTimeout = 5 * time.Second
 const DefaultHttpTlsTimeout = 5 * time.Second
 
-
 func DefaultHttpClient() *http.Client {
 	// see https://medium.com/@nate510/don-t-use-go-s-default-http-client-4804cb19f779
 	dialer := &net.Dialer{
-    	Timeout: DefaultHttpConnectTimeout,
-  	}
+		Timeout: DefaultHttpConnectTimeout,
+	}
 	transport := &http.Transport{
-	  	DialContext: dialer.DialContext,
-	  	TLSHandshakeTimeout: DefaultHttpTlsTimeout,
+		DialContext:         dialer.DialContext,
+		TLSHandshakeTimeout: DefaultHttpTlsTimeout,
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout: DefaultHttpTimeout,
+		Timeout:   DefaultHttpTimeout,
 	}
 }
 
-
 type HeaderCallback func(header http.Header)
-type ResponseCallback[R any] func(response *http.Response, responseBodyBytes []byte)(R, error)
-
+type ResponseCallback[R any] func(response *http.Response, responseBodyBytes []byte) (R, error)
 
 func HttpPostRequireStatusOk[R any](
 	url string,
@@ -67,14 +63,12 @@ func HttpPostRawRequireStatusOk(
 	)
 }
 
-
 func HttpPostBasic[R any](
 	url string,
 	requestBody any,
 ) (R, error) {
 	return HttpPost(url, requestBody, NoCustomHeaders, ResponseJsonObject[R])
 }
-
 
 func HttpPost[R any](
 	url string,
@@ -84,40 +78,39 @@ func HttpPost[R any](
 ) (R, error) {
 	var empty R
 
-    requestBodyBytes, err := json.Marshal(requestBody)
-    if err != nil {
-        return empty, err
-    }
+	requestBodyBytes, err := json.Marshal(requestBody)
+	if err != nil {
+		return empty, err
+	}
 
-    request, err := http.NewRequest(
-        "POST",
-        url,
-        bytes.NewReader(requestBodyBytes),
-    )
-    if err != nil {
-    	return empty, err
-    }
+	request, err := http.NewRequest(
+		"POST",
+		url,
+		bytes.NewReader(requestBodyBytes),
+	)
+	if err != nil {
+		return empty, err
+	}
 
-    header := request.Header
-    header.Add("Content-Type", "application/json")
-    headerCallback(header)
+	header := request.Header
+	header.Add("Content-Type", "application/json")
+	headerCallback(header)
 
-    client := DefaultHttpClient()
+	client := DefaultHttpClient()
 
-    response, err := client.Do(request)
-    if err != nil {
-        return empty, err
-    }
-    defer response.Body.Close()
+	response, err := client.Do(request)
+	if err != nil {
+		return empty, err
+	}
+	defer response.Body.Close()
 
-    responseBodyBytes, err := io.ReadAll(response.Body)
-    if err != nil {
-        return empty, err
-    }
+	responseBodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return empty, err
+	}
 
-    return responseCallback(response, responseBodyBytes)
+	return responseCallback(response, responseBodyBytes)
 }
-
 
 func HttpPostForm[R any](
 	url string,
@@ -127,35 +120,34 @@ func HttpPostForm[R any](
 ) (R, error) {
 	var empty R
 
-    request, err := http.NewRequest(
-        "POST",
-        url,
-        strings.NewReader(form.Encode()),
-    )
-    if err != nil {
-    	return empty, err
-    }
+	request, err := http.NewRequest(
+		"POST",
+		url,
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return empty, err
+	}
 
-    header := request.Header
-    header.Add("Content-Type", "application/x-www-form-urlencoded")
-    headerCallback(header)
+	header := request.Header
+	header.Add("Content-Type", "application/x-www-form-urlencoded")
+	headerCallback(header)
 
-    client := DefaultHttpClient()
+	client := DefaultHttpClient()
 
-    response, err := client.Do(request)
-    if err != nil {
-        return empty, err
-    }
-    defer response.Body.Close()
+	response, err := client.Do(request)
+	if err != nil {
+		return empty, err
+	}
+	defer response.Body.Close()
 
-    responseBodyBytes, err := io.ReadAll(response.Body)
-    if err != nil {
-        return empty, err
-    }
+	responseBodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return empty, err
+	}
 
-    return responseCallback(response, responseBodyBytes)
+	return responseCallback(response, responseBodyBytes)
 }
-
 
 func HttpGetRequireStatusOk[R any](
 	url string,
@@ -168,7 +160,6 @@ func HttpGetRequireStatusOk[R any](
 		HttpResponseRequireStatusOk[R](responseCallback),
 	)
 }
-
 
 func HttpGetRawRequireStatusOk(
 	url string,
@@ -183,13 +174,11 @@ func HttpGetRawRequireStatusOk(
 	)
 }
 
-
 func HttpGetBasic[R any](
 	url string,
 ) (R, error) {
 	return HttpGet(url, NoCustomHeaders, ResponseJsonObject[R])
 }
-
 
 func HttpGet[R any](
 	url string,
@@ -198,35 +187,33 @@ func HttpGet[R any](
 ) (R, error) {
 	var empty R
 
-    request, err := http.NewRequest("GET", url, nil)
-    if err != nil {
-    	return empty, err
-    }
+	request, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return empty, err
+	}
 
-    header := request.Header
-    headerCallback(header)
+	header := request.Header
+	headerCallback(header)
 
-    client := DefaultHttpClient()
+	client := DefaultHttpClient()
 
-    response, err := client.Do(request)
-    if err != nil {
-        return empty, err
-    }
-    defer response.Body.Close()
+	response, err := client.Do(request)
+	if err != nil {
+		return empty, err
+	}
+	defer response.Body.Close()
 
-    responseBodyBytes, err := io.ReadAll(response.Body)
-    if err != nil {
-        return empty, err
-    }
+	responseBodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return empty, err
+	}
 
-    return responseCallback(response, responseBodyBytes)
+	return responseCallback(response, responseBodyBytes)
 }
-
 
 func NoCustomHeaders(header http.Header) {
 	// no nothing
 }
-
 
 func ResponseJsonObject[R any](response *http.Response, responseBodyBytes []byte) (R, error) {
 	var result R
@@ -237,14 +224,13 @@ func ResponseJsonObject[R any](response *http.Response, responseBodyBytes []byte
 	return result, nil
 }
 
-
 func HttpResponseRequireStatusOk[R any](responseCallback ResponseCallback[R]) ResponseCallback[R] {
-	return func(response *http.Response, responseBodyBytes []byte)(R, error) {
+	return func(response *http.Response, responseBodyBytes []byte) (R, error) {
 		// 2xx
 		if 200 <= response.StatusCode && response.StatusCode < 300 {
 			return responseCallback(response, responseBodyBytes)
-	    }
+		}
 		var empty R
-        return empty, fmt.Errorf("Bad status: %s %s", response.Status, string(responseBodyBytes))
+		return empty, fmt.Errorf("Bad status: %s %s", response.Status, string(responseBodyBytes))
 	}
 }

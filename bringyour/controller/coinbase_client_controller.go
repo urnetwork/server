@@ -13,7 +13,7 @@ type CoinbaseClient interface {
 	FetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error)
 }
 
-type CoreCoinbaseClient struct {}
+type CoreCoinbaseClient struct{}
 
 var coinbaseClientInstance CoinbaseClient = &CoreCoinbaseClient{}
 
@@ -26,15 +26,14 @@ func SetCoinbaseClient(client CoinbaseClient) {
 }
 
 type CoinbaseExchangeRatesResults struct {
-	Currency string `json:"currency"`
-	Rates map[string]string `json:"rates"`
+	Currency string            `json:"currency"`
+	Rates    map[string]string `json:"rates"`
 }
 
-var coinbaseApiHost = sync.OnceValue(func()(string) {
+var coinbaseApiHost = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
 	return c["api"].(map[string]any)["host"].(string)
 })
-
 
 type CoinbaseResponse[T any] struct {
 	Data T `json:"data"`

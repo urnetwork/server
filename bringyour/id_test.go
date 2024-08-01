@@ -5,13 +5,12 @@ import (
 
 	"encoding/json"
 
-    "github.com/go-playground/assert/v2"
+	"github.com/go-playground/assert/v2"
 )
-
 
 func TestJsonCodec(t *testing.T) {
 	type Test struct {
-		A Id `json:"a,omitempty"`
+		A Id  `json:"a,omitempty"`
 		B *Id `json:"b,omitempty"`
 	}
 
@@ -29,7 +28,7 @@ func TestJsonCodec(t *testing.T) {
 
 	assert.Equal(t, test1.A, test2.A)
 	assert.Equal(t, test1.B, test2.B)
-	
+
 	test3 := &Test{}
 	test3.A = NewId()
 

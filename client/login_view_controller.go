@@ -1,27 +1,23 @@
 package client
 
-
 import (
 	"context"
-	"time"
 	"sync"
+	"time"
 
 	"golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
 )
 
-
 var lvcLog = logFn("login_view_controller")
-
 
 const defaultNetworkCheckTimeout = 5 * time.Second
 
-
 type LoginViewController struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
-	
+
 	api *BringYourApi
 
 	networkCheck *networkCheck
@@ -37,10 +33,10 @@ func newLoginViewControllerWithContext(ctx context.Context, api *BringYourApi) *
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &LoginViewController{
-		ctx: cancelCtx,
-		cancel: cancel,
-		api: api,
-		networkCheck: newNetworkCheck(cancelCtx, api, defaultNetworkCheckTimeout),
+		ctx:              cancelCtx,
+		cancel:           cancel,
+		api:              api,
+		networkCheck:     newNetworkCheck(cancelCtx, api, defaultNetworkCheckTimeout),
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc
@@ -52,7 +48,7 @@ func (self *LoginViewController) Start() {
 }
 
 func (self *LoginViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *LoginViewController) draw(g gl.Context) {
@@ -79,10 +75,8 @@ func (self *LoginViewController) NetworkCheck(networkName string, callback Netwo
 	self.networkCheck.Queue(networkName, callback)
 }
 
-
-
 type networkCheck struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	api *BringYourApi
@@ -95,7 +89,7 @@ type networkCheck struct {
 
 	updateCount int
 	networkName string
-	callback NetworkCheckCallback
+	callback    NetworkCheckCallback
 }
 
 func newNetworkCheck(
@@ -105,12 +99,12 @@ func newNetworkCheck(
 ) *networkCheck {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	networkCheck := &networkCheck{
-		ctx: cancelCtx,
-		cancel: cancel,
-		api: api,
-		timeout: timeout,
-		stateLock: sync.Mutex{},
-		monitor: connect.NewMonitor(),
+		ctx:         cancelCtx,
+		cancel:      cancel,
+		api:         api,
+		timeout:     timeout,
+		stateLock:   sync.Mutex{},
+		monitor:     connect.NewMonitor(),
 		updateCount: 0,
 	}
 	go networkCheck.run()
@@ -145,19 +139,19 @@ func (self *networkCheck) run() {
 			)
 
 			select {
-			case <- self.ctx.Done():
+			case <-self.ctx.Done():
 				return
-			case <- done:
+			case <-done:
 				// continue
-			case <- time.After(self.timeout):
+			case <-time.After(self.timeout):
 				// continue
 			}
 		}
 
 		select {
-		case <- self.ctx.Done():
+		case <-self.ctx.Done():
 			return
-		case <- notify:
+		case <-notify:
 		}
 	}
 }
@@ -174,9 +168,3 @@ func (self *networkCheck) Queue(networkName string, callback NetworkCheckCallbac
 func (self *networkCheck) Close() {
 	self.cancel()
 }
-
-
-
-
-
-

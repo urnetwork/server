@@ -1,29 +1,26 @@
 package model
 
-
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	// "bringyour.com/bringyour/ulid"
-	"bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/search"
 )
-
 
 var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
 
-
 type NetworkCheckArgs struct {
-	NetworkName string  `json:"network_name"`
+	NetworkName string `json:"network_name"`
 }
 
 type NetworkCheckResult struct {
-	Available bool  `json:"available"`
+	Available bool `json:"available"`
 }
 
 func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
@@ -35,28 +32,27 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 	return result, nil
 }
 
-
 type NetworkCreateArgs struct {
-	UserName string `json:"user_name"`
-	UserAuth *string `json:"user_auth,omitempty"`
-	AuthJwt *string `json:"auth_jwt,omitempty"`
+	UserName    string  `json:"user_name"`
+	UserAuth    *string `json:"user_auth,omitempty"`
+	AuthJwt     *string `json:"auth_jwt,omitempty"`
 	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	Password *string `json:"password,omitempty"`
-	NetworkName string `json:"network_name"`
-	Terms bool `json:"terms"`
+	Password    *string `json:"password,omitempty"`
+	NetworkName string  `json:"network_name"`
+	Terms       bool    `json:"terms"`
 }
 
 type NetworkCreateResult struct {
-	Network *NetworkCreateResultNetwork `json:"network,omitempty"`
-	UserAuth *string `json:"user_auth,omitempty"`
+	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
+	UserAuth             *string                          `json:"user_auth,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
-	Error *NetworkCreateResultError `json:"error,omitempty"`
+	Error                *NetworkCreateResultError        `json:"error,omitempty"`
 }
 
 type NetworkCreateResultNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
-	NetworkId bringyour.Id `json:"network_id,omitempty"`
-	NetworkName string `json:"network_name,omitempty"`
+	ByJwt       *string      `json:"by_jwt,omitempty"`
+	NetworkId   bringyour.Id `json:"network_id,omitempty"`
+	NetworkName string       `json:"network_name,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -112,7 +108,7 @@ func NetworkCreate(
 
 		created := false
 		var createdNetworkId bringyour.Id
-		
+
 		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 			var result bringyour.PgResult
 			var err error
@@ -136,7 +132,6 @@ func NetworkCreate(
 				return
 			}
 
-
 			var existingNetworkId *bringyour.Id
 
 			result, err = tx.Query(
@@ -155,7 +150,6 @@ func NetworkCreate(
 			if existingNetworkId != nil {
 				return
 			}
-
 
 			created = true
 			createdUserId := bringyour.NewId()
@@ -204,7 +198,7 @@ func NetworkCreate(
 				},
 				Network: &NetworkCreateResultNetwork{
 					NetworkName: networkCreate.NetworkName,
-					NetworkId: createdNetworkId,
+					NetworkId:   createdNetworkId,
 				},
 			}
 			return result, nil
@@ -306,9 +300,9 @@ func NetworkCreate(
 				byJwtSigned := byJwt.Sign()
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
-						ByJwt: &byJwtSigned,
+						ByJwt:       &byJwtSigned,
 						NetworkName: networkCreate.NetworkName,
-						NetworkId: createdNetworkId,
+						NetworkId:   createdNetworkId,
 					},
 					UserAuth: &authJwt.UserAuth,
 				}
@@ -323,10 +317,9 @@ func NetworkCreate(
 			}
 		}
 	}
-	
+
 	return nil, errors.New("Invalid login.")
 }
-
 
 func auditNetworkCreate(
 	networkCreate NetworkCreateArgs,
@@ -335,7 +328,7 @@ func auditNetworkCreate(
 ) {
 	type Details struct {
 		NetworkCreate NetworkCreateArgs `json:"network_create"`
-		ClientAddress string `json:"client_address"`
+		ClientAddress string            `json:"client_address"`
 	}
 
 	details := Details{
@@ -344,17 +337,16 @@ func auditNetworkCreate(
 	}
 
 	detailsJson, err := json.Marshal(details)
-    if err != nil {
-        panic(err)
-    }
-    detailsJsonString := string(detailsJson)
+	if err != nil {
+		panic(err)
+	}
+	detailsJsonString := string(detailsJson)
 
 	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
 	auditNetworkEvent.NetworkId = networkId
 	auditNetworkEvent.EventDetails = &detailsJsonString
 	AddAuditEvent(session.Ctx, auditNetworkEvent)
 }
-
 
 func Testing_CreateNetwork(
 	ctx context.Context,
