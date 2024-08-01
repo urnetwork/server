@@ -129,7 +129,7 @@ var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 // hold onto unpaid amounts for up to this time
 const WalletPayoutTimeout = 15 * 24 * time.Hour
 
-const ProviderRevenueShare = 0.5
+const ProviderRevenueShare float64 = 0.5
 
 const MaxSubscriptionPaymentIdsPerHour = 5
 
@@ -903,9 +903,10 @@ func createTransferEscrowInTx(
                 destination_id,
                 transfer_byte_count,
                 companion_contract_id,
-                payer_network_id
+                payer_network_id,
+                create_time
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         `,
         contractId,
         sourceNetworkId,
@@ -915,6 +916,7 @@ func createTransferEscrowInTx(
         contractTransferByteCount,
         companionContractId,
         payerNetworkId,
+        bringyour.NowUtc(),
     ))
 
     balances := []*TransferEscrowBalance{}
@@ -1210,9 +1212,10 @@ func CreateContractNoEscrow(
                     source_id,
                     destination_network_id,
                     destination_id,
-                    transfer_byte_count
+                    transfer_byte_count,
+                    create_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
             `,
             contractId,
             sourceNetworkId,
@@ -1220,6 +1223,7 @@ func CreateContractNoEscrow(
             destinationNetworkId,
             destinationId,
             contractTransferByteCount,
+            bringyour.NowUtc(),
         ))
     })
     return
@@ -1298,22 +1302,24 @@ func CloseContract(
                         contract_id,
                         party,
                         used_transfer_byte_count,
+                        close_time,
                         checkpoint
                     )
-                    VALUES ($1, $2, $3, true)
+                    VALUES ($1, $2, $3, $4, true)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        close_time = $4
                     WHERE
                         contract_close.checkpoint = true
                 `,
                 contractId,
                 party,
                 usedTransferByteCount,
+                bringyour.NowUtc(),
             ))
 
         } else {
-
             bringyour.RaisePgResult(tx.Exec(
                 ctx,
                 `
@@ -1321,12 +1327,14 @@ func CloseContract(
                         contract_id,
                         party,
                         used_transfer_byte_count,
+                        close_time,
                         checkpoint
                     )
-                    VALUES ($1, $2, $3, false)
+                    VALUES ($1, $2, $3, $4, false)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
                         used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        close_time = $4,
                         checkpoint = false
                     WHERE
                         contract_close.checkpoint = true
@@ -1334,6 +1342,7 @@ func CloseContract(
                 contractId,
                 party,
                 usedTransferByteCount,
+                bringyour.NowUtc(),
             ))
 
             // party -> used transfer byte count
@@ -1449,7 +1458,8 @@ func settleEscrowInTx(
             `
                 SELECT
                     used_transfer_byte_count,
-                    party
+                    party,
+                    checkpoint
                 FROM contract_close
                 WHERE
                     contract_id = $1
@@ -1463,7 +1473,16 @@ func settleEscrowInTx(
             for result.Next() {
                 var usedTransferByteCountForParty ByteCount
                 var party ContractParty
-                bringyour.Raise(result.Scan(&usedTransferByteCountForParty, &party))
+                var checkpoint bool
+                bringyour.Raise(result.Scan(
+                    &usedTransferByteCountForParty,
+                    &party,
+                    &checkpoint,
+                ))
+                if checkpoint {
+                    returnErr = fmt.Errorf("Cannot settle party %s with a checkpoint.", party)
+                    return
+                }
                 netUsedTransferByteCount += usedTransferByteCountForParty
                 partyCount += 1
                 fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
@@ -1845,11 +1864,12 @@ func GetOpenContractIds(
                     checkpoint = *checkpoint_
                 }
                 // there can be up to two rows per contractId (one checkpoint)
-                // checkpoint takes precedence
+                // non-checkpoint takes precedence
                 if checkpoint {
-                    party = ContractPartyCheckpoint
-                }
-                if contractIdPartialCloseParties[contractId] != ContractPartyCheckpoint {
+                    if contractIdPartialCloseParties[contractId] == "" {
+                        contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
+                    }
+                } else {
                     contractIdPartialCloseParties[contractId] = party
                 }
             }
@@ -1897,10 +1917,12 @@ func GetOpenContractIdsForSourceOrDestination(
                     transfer_contract.source_id,
                     transfer_contract.destination_id,
                     transfer_contract.contract_id,
-                    contract_close.party
+                    contract_close.party,
+                    contract_close.checkpoint
                 FROM transfer_contract
 
-                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+                LEFT JOIN contract_close ON 
+                    contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
                     transfer_contract.open = true AND (
@@ -1916,11 +1938,13 @@ func GetOpenContractIdsForSourceOrDestination(
                 var destinationId bringyour.Id
                 var contractId bringyour.Id
                 var party_ *ContractParty
+                var checkpoint_ *bool
                 bringyour.Raise(result.Scan(
                     &sourceId,
                     &destinationId,
                     &contractId,
                     &party_,
+                    &checkpoint_,
                 ))
                 transferPair := NewUnorderedTransferPair(sourceId, destinationId)
                 contractIdPartialCloseParties, ok := pairContractIdPartialCloseParties[transferPair]
@@ -1932,12 +1956,198 @@ func GetOpenContractIdsForSourceOrDestination(
                     contractIdPartialCloseParties = map[bringyour.Id]ContractParty{}
                     pairContractIdPartialCloseParties[transferPair] = contractIdPartialCloseParties
                 }
-                contractIdPartialCloseParties[contractId] = party
+                var checkpoint bool
+                if checkpoint_ != nil {
+                    checkpoint = *checkpoint_
+                }
+                // there can be up to two rows per contractId (one checkpoint)
+                // non-checkpoint takes precedence
+                if checkpoint {
+                    if contractIdPartialCloseParties[contractId] == "" {
+                        contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
+                    }
+                } else {
+                    contractIdPartialCloseParties[contractId] = party
+                }
             }
         })
     })
 
     return pairContractIdPartialCloseParties
+}
+
+
+// closes all open contracts with no update in the last `timeout`
+// cases handled:
+// - no closes
+// - single close
+// - one or more checkpoints
+func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error {
+    type OpenContract struct {
+        contractId bringyour.Id
+        sourceId bringyour.Id
+        destinationId bringyour.Id
+
+        sourceCloseTime *time.Time
+        sourceUsedTransferByteCount *ByteCount
+        sourceCheckpoint *bool
+
+        destinationCloseTime *time.Time
+        destinationUsedTransferByteCount *ByteCount
+        destinationCheckpoint *bool
+    }
+
+    openContracts := []*OpenContract{}
+
+    bringyour.Db(ctx, func(conn bringyour.PgConn) {
+        result, err := conn.Query(
+            ctx,
+            `
+                SELECT
+                    transfer_contract.contract_id,
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    
+                    source_contract_close.close_time AS source_close_time,
+                    source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
+                    source_contract_close.checkpoint AS source_checkpoint,
+
+                    destination_contract_close.close_time AS destination_close_time,
+                    destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
+                    destination_contract_close.checkpoint AS destination_checkpoint
+                    
+                FROM transfer_contract
+                    
+                LEFT JOIN contract_close source_contract_close ON
+                    source_contract_close.contract_id = transfer_contract.contract_id AND
+                    source_contract_close.party = $1
+
+                LEFT JOIN contract_close destination_contract_close ON
+                    destination_contract_close.contract_id = transfer_contract.contract_id AND
+                    destination_contract_close.party = $2
+
+                WHERE
+                    transfer_contract.open AND
+                    transfer_contract.create_time <= $3 AND
+                    (source_contract_close.close_time IS NULL OR source_contract_close.close_time <= $3) AND
+                    (destination_contract_close.close_time IS NULL OR destination_contract_close.close_time <= $3)
+
+            `,
+            ContractPartySource,
+            ContractPartyDestination,
+            bringyour.NowUtc().Add(-timeout),
+        )
+        bringyour.WithPgResult(result, err, func() {
+            for result.Next() {
+                openContract := &OpenContract{}
+
+                bringyour.Raise(result.Scan(
+                    &openContract.contractId,
+                    &openContract.sourceId,
+                    &openContract.destinationId,
+                    &openContract.sourceCloseTime,
+                    &openContract.sourceUsedTransferByteCount,
+                    &openContract.sourceCheckpoint,
+                    &openContract.destinationCloseTime,
+                    &openContract.destinationUsedTransferByteCount,
+                    &openContract.destinationCheckpoint,
+                ))
+
+                openContracts = append(openContracts, openContract)
+            }
+        })
+    })
+
+    for _, openContract := range openContracts {
+
+        fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
+
+        if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
+            // close with both sides 0
+
+            err := CloseContract(
+                ctx,
+                openContract.contractId,
+                openContract.sourceId,
+                ByteCount(0),
+                false,
+            )
+            if err != nil {
+                return err
+            }
+
+            err = CloseContract(
+                ctx,
+                openContract.contractId,
+                openContract.destinationId,
+                ByteCount(0),
+                false,
+            )
+            if err != nil {
+                return err
+            }
+
+        } else if openContract.sourceCloseTime == nil {
+            // source accepts destination
+
+            err := CloseContract(
+                ctx,
+                openContract.contractId,
+                openContract.sourceId,
+                *openContract.destinationUsedTransferByteCount,
+                false,
+            )
+            if err != nil {
+                return err
+            }
+
+        } else if openContract.destinationCloseTime == nil {
+            // destination accepts source
+
+            err := CloseContract(
+                ctx,
+                openContract.contractId,
+                openContract.destinationId,
+                *openContract.sourceUsedTransferByteCount,
+                false,
+            )
+            if err != nil {
+                return err
+            }
+
+        } else {
+            // finalize one or more checkpoints
+
+            if *openContract.sourceCheckpoint {
+                err := CloseContract(
+                    ctx,
+                    openContract.contractId,
+                    openContract.sourceId,
+                    ByteCount(0),
+                    false,
+                )
+                if err != nil {
+                    return err
+                }
+            }
+
+            if *openContract.destinationCheckpoint {
+                err := CloseContract(
+                    ctx,
+                    openContract.contractId,
+                    openContract.destinationId,
+                    ByteCount(0),
+                    false,
+                )
+                if err != nil {
+                    return err
+                }
+            }
+
+        }
+    }
+
+    return nil
 }
 
 
