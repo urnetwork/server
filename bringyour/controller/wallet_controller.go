@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	mathrand "math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -178,56 +179,73 @@ type WalletCircleTransferOutError struct {
 func WalletCircleTransferOut(
 	walletCircleTransferOut *WalletCircleTransferOutArgs,
 	session *session.ClientSession,
-) (*WalletCircleTransferOutResult, error) {
+) (result *WalletCircleTransferOutResult, returnErr error) {
 	if !walletCircleTransferOut.Terms {
-		return nil, fmt.Errorf("You must accept the terms of transfer.")
+		returnErr = fmt.Errorf("You must accept the terms of transfer.")
+		return
 	}
 
 	walletInfo, err := findMostRecentCircleWallet(session)
 	if err != nil {
-		return nil, err
+		returnErr = err
+		return
 	}
 
 	circleUserToken, err := createCircleUserToken(session)
 	if err != nil {
-		return nil, err
+		returnErr = err
+		return
 	}
 
-	return bringyour.HttpPostRequireStatusOk(
-		"https://api.circle.com/v1/w3s/user/transactions/transfer",
-		map[string]any{
-			"userId":             circleUserToken.circleUserId,
-			"destinationAddress": walletCircleTransferOut.ToAddress,
-			"amounts": []string{
-				fmt.Sprintf("%f", model.NanoCentsToUsd(walletCircleTransferOut.AmountUsdcNanoCents)),
-			},
-			"idempotencyKey": bringyour.NewId(),
-			"tokenId":        walletInfo.TokenId,
-			"walletId":       walletInfo.WalletId,
-			"feeLevel":       "LOW",
-		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-			header.Add("X-User-Token", circleUserToken.UserToken)
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*WalletCircleTransferOutResult, error) {
-			challengeId, err := parseCircleChallengeId(responseBodyBytes)
+	// retry with timeout
+	for i := range 4 {
+		select {
+		case <- session.Ctx.Done():
+			returnErr = fmt.Errorf("Done.")
+			return
+		case <- time.After(500 * time.Millisecond + time.Duration(mathrand.Int63n(int64(i + 1) * int64(time.Second)))):
+		}
 
-			if err == nil {
-				return &WalletCircleTransferOutResult{
-					UserToken:   circleUserToken,
-					ChallengeId: challengeId,
-				}, nil
-			} else {
-				return &WalletCircleTransferOutResult{
-					Error: &WalletCircleTransferOutError{
-						Message: "Bad challenge response.",
-					},
-				}, nil
-			}
-		},
-	)
+		result, returnErr = bringyour.HttpPostRequireStatusOk(
+			"https://api.circle.com/v1/w3s/user/transactions/transfer",
+			map[string]any{
+				"userId":             circleUserToken.circleUserId,
+				"destinationAddress": walletCircleTransferOut.ToAddress,
+				"amounts": []string{
+					fmt.Sprintf("%f", model.NanoCentsToUsd(walletCircleTransferOut.AmountUsdcNanoCents)),
+				},
+				"idempotencyKey": bringyour.NewId(),
+				"tokenId":        walletInfo.TokenId,
+				"walletId":       walletInfo.WalletId,
+				"feeLevel":       "LOW",
+			},
+			func(header http.Header) {
+				header.Add("Accept", "application/json")
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+				header.Add("X-User-Token", circleUserToken.UserToken)
+			},
+			func(response *http.Response, responseBodyBytes []byte) (*WalletCircleTransferOutResult, error) {
+				challengeId, err := parseCircleChallengeId(responseBodyBytes)
+
+				if err == nil {
+					return &WalletCircleTransferOutResult{
+						UserToken:   circleUserToken,
+						ChallengeId: challengeId,
+					}, nil
+				} else {
+					return &WalletCircleTransferOutResult{
+						Error: &WalletCircleTransferOutError{
+							Message: "Bad challenge response.",
+						},
+					}, nil
+				}
+			},
+		)
+		if returnErr == nil {
+			return
+		}
+	}
+	return
 }
 
 type GetPublicKeyResult struct {
