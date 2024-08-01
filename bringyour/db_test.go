@@ -414,8 +414,8 @@ func TestSerializableTx(t *testing.T) {
 		for i := 0; i < k; i += 1 {
 			for _, id := range ids {
 				go func() {
-						Tx(ctx, func(tx PgTx) {
-						
+					Tx(ctx, func(tx PgTx) {
+
 						result, err := tx.Query(
 							ctx,
 							`
@@ -456,7 +456,7 @@ func TestSerializableTx(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < k * len(ids); i += 1 {
+		for i := 0; i < k*len(ids); i += 1 {
 			select {
 			case err := <-end:
 				assert.Equal(t, err, nil)
@@ -464,7 +464,6 @@ func TestSerializableTx(t *testing.T) {
 				t.FailNow()
 			}
 		}
-
 
 		Db(ctx, func(conn PgConn) {
 			result, err := conn.Query(
@@ -489,7 +488,6 @@ func TestSerializableTx(t *testing.T) {
 		})
 	})
 }
-
 
 func TestUpdateTx(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
@@ -573,7 +571,7 @@ func TestUpdateTx(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < k * len(ids); i += 1 {
+		for i := 0; i < k*len(ids); i += 1 {
 			select {
 			case err := <-end:
 				assert.Equal(t, err, nil)

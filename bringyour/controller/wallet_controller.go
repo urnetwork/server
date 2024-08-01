@@ -200,10 +200,10 @@ func WalletCircleTransferOut(
 	// retry with timeout
 	for i := range 4 {
 		select {
-		case <- session.Ctx.Done():
+		case <-session.Ctx.Done():
 			returnErr = fmt.Errorf("Done.")
 			return
-		case <- time.After(500 * time.Millisecond + time.Duration(mathrand.Int63n(int64(i + 1) * int64(time.Second)))):
+		case <-time.After(500*time.Millisecond + time.Duration(mathrand.Int63n(int64(i+1)*int64(time.Second)))):
 		}
 
 		result, returnErr = bringyour.HttpPostRequireStatusOk(
