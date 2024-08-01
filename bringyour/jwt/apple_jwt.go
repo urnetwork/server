@@ -1,20 +1,17 @@
 package jwt
 
-
 import (
 	"context"
-	"sync"
 	"errors"
+	"sync"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 )
-
 
 type AppleJwt struct {
 	UserAuth string
 	UserName string
 }
-
 
 func NewAppleJwkValidator(ctx context.Context) *JwkValidator {
 	return NewJwkValidator(
@@ -24,11 +21,9 @@ func NewAppleJwkValidator(ctx context.Context) *JwkValidator {
 	)
 }
 
-
-var appleJwkValidator = sync.OnceValue(func()(*JwkValidator) {
+var appleJwkValidator = sync.OnceValue(func() *JwkValidator {
 	return NewAppleJwkValidator(context.Background())
 })
-
 
 // fixme use cache-control header in the response to know when to refresh the list
 
@@ -52,21 +47,21 @@ func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
 			claims := token.Claims.(gojwt.MapClaims)
 
 			/*
-			example:
+				example:
 
-			{
-			  "iss": "https://appleid.apple.com",
-			  "aud": "com.bringyour.service",
-			  "exp": 1681336265,
-			  "iat": 1681249865,
-			  "sub": "000452.afe9f7e27713494cb914a9fd8f812718.1847",
-			  "nonce": "424cfe3e-56d2-4098-ae12-1688c9fa451a",
-			  "c_hash": "HseBmSllAiRDd2lmEbXl_Q",
-			  "email": "xcolwell@gmail.com",
-			  "email_verified": "true",
-			  "auth_time": 1681249865,
-			  "nonce_supported": true
-			}
+				{
+				  "iss": "https://appleid.apple.com",
+				  "aud": "com.bringyour.service",
+				  "exp": 1681336265,
+				  "iat": 1681249865,
+				  "sub": "000452.afe9f7e27713494cb914a9fd8f812718.1847",
+				  "nonce": "424cfe3e-56d2-4098-ae12-1688c9fa451a",
+				  "c_hash": "HseBmSllAiRDd2lmEbXl_Q",
+				  "email": "xcolwell@gmail.com",
+				  "email_verified": "true",
+				  "auth_time": 1681249865,
+				  "nonce_supported": true
+				}
 			*/
 
 			userAuthString, ok = claims["email"].(string)

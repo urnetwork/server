@@ -7,32 +7,32 @@ import (
 )
 
 type NetworkReferralCode struct {
-	NetworkId bringyour.Id
+	NetworkId    bringyour.Id
 	ReferralCode bringyour.Id
 }
 
-func CreateNetworkReferralCode(ctx context.Context, networkId bringyour.Id) (*NetworkReferralCode) {
+func CreateNetworkReferralCode(ctx context.Context, networkId bringyour.Id) *NetworkReferralCode {
 
 	var networkReferralCode *NetworkReferralCode
 
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 
 		networkReferralCode = &NetworkReferralCode{
-			NetworkId: networkId,
+			NetworkId:    networkId,
 			ReferralCode: bringyour.NewId(),
 		}
 
 		bringyour.RaisePgResult(tx.Exec(
-				ctx,
-				`
+			ctx,
+			`
 						INSERT INTO network_referral_code (
 								network_id,
 								referral_code
 						)
 						VALUES ($1, $2)
 				`,
-				networkReferralCode.NetworkId,
-				networkReferralCode.ReferralCode,
+			networkReferralCode.NetworkId,
+			networkReferralCode.ReferralCode,
 		))
 	})
 
@@ -40,14 +40,14 @@ func CreateNetworkReferralCode(ctx context.Context, networkId bringyour.Id) (*Ne
 
 }
 
-func GetNetworkReferralCode(ctx context.Context, networkId bringyour.Id) (*NetworkReferralCode) {
+func GetNetworkReferralCode(ctx context.Context, networkId bringyour.Id) *NetworkReferralCode {
 
 	var networkReferralCode *NetworkReferralCode
 
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
-				ctx,
-				`
+			ctx,
+			`
 						SELECT
 								network_id,
 								referral_code
@@ -55,15 +55,15 @@ func GetNetworkReferralCode(ctx context.Context, networkId bringyour.Id) (*Netwo
 						WHERE
 								network_id = $1
 				`,
-				networkId,
+			networkId,
 		)
 
 		bringyour.WithPgResult(result, err, func() {
 			if result.Next() {
 				networkReferralCode = &NetworkReferralCode{}
 				bringyour.Raise(result.Scan(
-						&networkReferralCode.NetworkId,
-						&networkReferralCode.ReferralCode,
+					&networkReferralCode.NetworkId,
+					&networkReferralCode.ReferralCode,
 				))
 			}
 		})

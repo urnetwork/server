@@ -9,22 +9,20 @@ import (
 	"bringyour.com/bringyour/session"
 )
 
-
 type StatsProvidersOverviewArgs struct {
 	Lookback int `json:"lookback"`
 }
 
 type StatsProvidersOverviewResult struct {
-	Lookback int `json:"lookback"`
-	CreatedTime time.Time `json:"created_time"`
-	Uptime map[string]float64 `json:"uptime"`
-	TransferData map[string]float64 `json:"transfer_data"`
-	Payout map[string]float64 `json:"payout"`
-	SearchInterest map[string]int `json:"search_interest"`
-	Contracts map[string]int `json:"contracts"`
-	Clients map[string]int `json:"clients"`
+	Lookback       int                `json:"lookback"`
+	CreatedTime    time.Time          `json:"created_time"`
+	Uptime         map[string]float64 `json:"uptime"`
+	TransferData   map[string]float64 `json:"transfer_data"`
+	Payout         map[string]float64 `json:"payout"`
+	SearchInterest map[string]int     `json:"search_interest"`
+	Contracts      map[string]int     `json:"contracts"`
+	Clients        map[string]int     `json:"clients"`
 }
-
 
 func StatsProvidersOverviewLast90(
 	clientSession *session.ClientSession,
@@ -37,14 +35,12 @@ func StatsProvidersOverviewLast90(
 	)
 }
 
-
 func StatsProvidersOverview(
 	providersOverview *StatsProvidersOverviewArgs,
 	clientSession *session.ClientSession,
 ) (*StatsProvidersOverviewResult, error) {
 	// TODO
 	// create random statistics for the last `lookback` days
-
 
 	days := lookbackDays(providersOverview.Lookback)
 
@@ -79,43 +75,41 @@ func StatsProvidersOverview(
 	}
 
 	result := &StatsProvidersOverviewResult{
-		Lookback: providersOverview.Lookback,
-		CreatedTime: bringyour.NowUtc(),
-		Uptime: uptime,
-		TransferData: transferData,
-		Payout: payout,
+		Lookback:       providersOverview.Lookback,
+		CreatedTime:    bringyour.NowUtc(),
+		Uptime:         uptime,
+		TransferData:   transferData,
+		Payout:         payout,
 		SearchInterest: searchInterest,
-		Contracts: contracts,
-		Clients: clients,
+		Contracts:      contracts,
+		Clients:        clients,
 	}
 
 	return result, nil
 }
 
-
 type StatsProvidersResult struct {
-	CreatedTime time.Time `json:"created_time"`
-	Providers []*ProviderStats `json:"providers"`
+	CreatedTime time.Time        `json:"created_time"`
+	Providers   []*ProviderStats `json:"providers"`
 }
 
 type ProviderStats struct {
-	ClientId bringyour.Id `json:"client_id"`
-	Connected bool `json:"connected"`
+	ClientId               bringyour.Id      `json:"client_id"`
+	Connected              bool              `json:"connected"`
 	ConnectedEventsLast24h []*ConnectedEvent `json:"connected_events_last_24h"`
-	UptimeLast24h float64 `json:"uptime_last_24h"`
-	TransferDataLast24h float64 `json:"transfer_data_last_24h"`
-	PayoutLast24h float64 `json:"payout_last_24h"`
-	SearchInterestLast24h int `json:"search_interest_last_24h"`
-	ContractsLast24h int `json:"contracts_last_24h"`
-	ClientsLast24h int `json:"clients_last_24h"`
-	ProvideMode int `json:"provide_mode"`
+	UptimeLast24h          float64           `json:"uptime_last_24h"`
+	TransferDataLast24h    float64           `json:"transfer_data_last_24h"`
+	PayoutLast24h          float64           `json:"payout_last_24h"`
+	SearchInterestLast24h  int               `json:"search_interest_last_24h"`
+	ContractsLast24h       int               `json:"contracts_last_24h"`
+	ClientsLast24h         int               `json:"clients_last_24h"`
+	ProvideMode            int               `json:"provide_mode"`
 }
 
 type ConnectedEvent struct {
 	EventTime time.Time `json:"event_time"`
-	Connected bool `json:"connected"`
+	Connected bool      `json:"connected"`
 }
-
 
 func StatsProviders(
 	clientSession *session.ClientSession,
@@ -127,13 +121,12 @@ func StatsProviders(
 
 	for i := 0; i < 16; i += 1 {
 		clientId := bringyour.NewId()
-		
 
 		connectedEvents := []*ConnectedEvent{}
 		endTime := bringyour.NowUtc()
 		t := endTime.Add(-24 * time.Hour)
 		for t.Before(endTime) {
-			connected := (len(connectedEvents) % 2 == 1)
+			connected := (len(connectedEvents)%2 == 1)
 			connectedEvents = append(connectedEvents, &ConnectedEvent{
 				EventTime: t,
 				Connected: connected,
@@ -141,53 +134,50 @@ func StatsProviders(
 			t = t.Add(time.Duration(mathrand.Intn(120)) * time.Minute)
 		}
 
-
 		provider := &ProviderStats{
-			ClientId: clientId,
-			Connected: true,
+			ClientId:               clientId,
+			Connected:              true,
 			ConnectedEventsLast24h: connectedEvents,
-			UptimeLast24h: 24 * mathrand.Float64(),
-			TransferDataLast24h: 1024 * mathrand.Float64(),
-			PayoutLast24h: 5 * mathrand.Float64(),
-			SearchInterestLast24h: mathrand.Intn(300),
-			ContractsLast24h: mathrand.Intn(5000),
-			ClientsLast24h: mathrand.Intn(100),
-			ProvideMode: ProvideModePublic,
+			UptimeLast24h:          24 * mathrand.Float64(),
+			TransferDataLast24h:    1024 * mathrand.Float64(),
+			PayoutLast24h:          5 * mathrand.Float64(),
+			SearchInterestLast24h:  mathrand.Intn(300),
+			ContractsLast24h:       mathrand.Intn(5000),
+			ClientsLast24h:         mathrand.Intn(100),
+			ProvideMode:            ProvideModePublic,
 		}
 		providers = append(providers, provider)
 	}
 
 	result := &StatsProvidersResult{
 		CreatedTime: bringyour.NowUtc(),
-		Providers: providers,
+		Providers:   providers,
 	}
 
 	return result, nil
 }
 
-
 type StatsProviderArgs struct {
-    ClientId bringyour.Id `json:"client_id"`
-    Lookback int `json:"lookback,omitempty"`
+	ClientId bringyour.Id `json:"client_id"`
+	Lookback int          `json:"lookback,omitempty"`
 }
 
 type StatsProviderResult struct {
-	Lookback int `json:"lookback"`
-	CreatedTime time.Time `json:"created_time"`
-	Uptime map[string]float64 `json:"uptime"`
-	TransferData map[string]float64 `json:"transfer_data"`
-	Payout map[string]float64 `json:"payout"`
-	SearchInterest map[string]int `json:"search_interest"`
-	Contracts map[string]int `json:"contracts"`
-	Clients map[string]int `json:"clients"`
-	ClientDetails []*ClientDetail `json:"client_details"`
+	Lookback       int                `json:"lookback"`
+	CreatedTime    time.Time          `json:"created_time"`
+	Uptime         map[string]float64 `json:"uptime"`
+	TransferData   map[string]float64 `json:"transfer_data"`
+	Payout         map[string]float64 `json:"payout"`
+	SearchInterest map[string]int     `json:"search_interest"`
+	Contracts      map[string]int     `json:"contracts"`
+	Clients        map[string]int     `json:"clients"`
+	ClientDetails  []*ClientDetail    `json:"client_details"`
 }
 
 type ClientDetail struct {
-	ClientId bringyour.Id `json:"client_id"`
+	ClientId     bringyour.Id       `json:"client_id"`
 	TransferData map[string]float64 `json:"transfer_data"`
 }
-
 
 func StatsProviderLast90(
 	provider *StatsProviderArgs,
@@ -201,7 +191,6 @@ func StatsProviderLast90(
 		clientSession,
 	)
 }
-
 
 func StatsProvider(
 	provider *StatsProviderArgs,
@@ -251,27 +240,26 @@ func StatsProvider(
 			clientTransferData[day] = 64 * mathrand.Float64()
 		}
 		clientDetail := &ClientDetail{
-			ClientId: clientId,
+			ClientId:     clientId,
 			TransferData: clientTransferData,
 		}
 		clientDetails = append(clientDetails, clientDetail)
 	}
 
 	result := &StatsProviderResult{
-		Lookback: provider.Lookback,
-		CreatedTime: bringyour.NowUtc(),
-		Uptime: uptime,
-		TransferData: transferData,
-		Payout: payout,
+		Lookback:       provider.Lookback,
+		CreatedTime:    bringyour.NowUtc(),
+		Uptime:         uptime,
+		TransferData:   transferData,
+		Payout:         payout,
 		SearchInterest: searchInterest,
-		Contracts: contracts,
-		Clients: clients,
-		ClientDetails: clientDetails,
+		Contracts:      contracts,
+		Clients:        clients,
+		ClientDetails:  clientDetails,
 	}
 
 	return result, nil
 }
-
 
 // yyyy-mm-dd
 func lookbackDays(lookback int) []string {
@@ -283,4 +271,3 @@ func lookbackDays(lookback int) []string {
 	}
 	return days
 }
-

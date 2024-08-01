@@ -6,20 +6,18 @@ import (
 	// "strings"
 	"time"
 
-	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
-
-
 type CompletePrivacyPolicy struct {
-	PrivacyPolicyId bringyour.Id
-	ServiceName string
-	ServiceUrls []string
-	CreateTime time.Time
-	Pending bool
+	PrivacyPolicyId   bringyour.Id
+	ServiceName       string
+	ServiceUrls       []string
+	CreateTime        time.Time
+	Pending           bool
 	PrivacyPolicyText string
-	ExtractedUrls []string
+	ExtractedUrls     []string
 }
 
 func NewCompletePrivacyPolicyPending(
@@ -29,8 +27,8 @@ func NewCompletePrivacyPolicyPending(
 	return &CompletePrivacyPolicy{
 		ServiceName: serviceName,
 		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
-		Pending: true,
+		CreateTime:  bringyour.CodecTime(bringyour.NowUtc()),
+		Pending:     true,
 	}
 }
 
@@ -41,15 +39,14 @@ func NewCompletePrivacyPolicy(
 	extractedUrls []string,
 ) *CompletePrivacyPolicy {
 	return &CompletePrivacyPolicy{
-		ServiceName: serviceName,
-		ServiceUrls: serviceUrls,
-		CreateTime: bringyour.CodecTime(bringyour.NowUtc()),
-		Pending: false,
+		ServiceName:       serviceName,
+		ServiceUrls:       serviceUrls,
+		CreateTime:        bringyour.CodecTime(bringyour.NowUtc()),
+		Pending:           false,
 		PrivacyPolicyText: privacyPolicyText,
-		ExtractedUrls: extractedUrls,
+		ExtractedUrls:     extractedUrls,
 	}
 }
-
 
 func GetCompletePrivacyPolicy(
 	ctx context.Context,
@@ -82,9 +79,8 @@ func GetCompletePrivacyPolicy(
 
 		completePrivacyPolicy = &CompletePrivacyPolicy{
 			PrivacyPolicyId: privacyPolicyId,
-			ServiceName: serviceName,
+			ServiceName:     serviceName,
 		}
-
 
 		result, err = conn.Query(
 			ctx,
@@ -152,7 +148,6 @@ func GetCompletePrivacyPolicy(
 	return
 }
 
-
 func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *CompletePrivacyPolicy) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		completePrivacyPolicy.PrivacyPolicyId = bringyour.NewId()
@@ -187,7 +182,7 @@ func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *Comple
 				completePrivacyPolicy.PrivacyPolicyId,
 				serviceUrl,
 			))
-			
+
 		}
 
 		for _, extractedUrl := range completePrivacyPolicy.ExtractedUrls {
@@ -203,7 +198,7 @@ func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *Comple
 				extractedUrl,
 			))
 		}
-		
+
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -220,21 +215,20 @@ func SetCompletePrivacyPolicy(ctx context.Context, completePrivacyPolicy *Comple
 	})
 }
 
-
 type GptBeMyPrivacyAgentArgs struct {
-	CountryOfResidence string `json:"country_of_residence"`
-	RegionOfResidence string `json:"region_of_residence"`
-	CorrespondenceEmail string `json:"correspondence_email"`
-	Consent bool `json:"consent"`
-	EmailText *GptBeMyPrivacyAgentEmail `json:"email_text"`
-	ServiceName string `json:"service_name"`
-	ServiceUser string `json:"service_user"`
+	CountryOfResidence  string                    `json:"country_of_residence"`
+	RegionOfResidence   string                    `json:"region_of_residence"`
+	CorrespondenceEmail string                    `json:"correspondence_email"`
+	Consent             bool                      `json:"consent"`
+	EmailText           *GptBeMyPrivacyAgentEmail `json:"email_text"`
+	ServiceName         string                    `json:"service_name"`
+	ServiceUser         string                    `json:"service_user"`
 }
 
 type GptBeMyPrivacyAgentEmail struct {
-	To string `json:"to"`
+	To      string `json:"to"`
 	Subject string `json:"subject"`
-	Body string `json:"body"`
+	Body    string `json:"body"`
 }
 
 type GptBeMyPrivacyAgentResult struct {

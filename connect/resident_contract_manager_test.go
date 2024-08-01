@@ -1,14 +1,14 @@
 package main
 
 import (
-    // "context"
-    // "testing"
-    // "time"
+// "context"
+// "testing"
+// "time"
 
-    // "github.com/go-playground/assert/v2"
+// "github.com/go-playground/assert/v2"
 
-    // "bringyour.com/bringyour"
-    // "bringyour.com/bringyour/model"
+// "bringyour.com/bringyour"
+// "bringyour.com/bringyour/model"
 )
 
 /*
@@ -118,7 +118,7 @@ func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 
 	activeTransferBalance = model.GetActiveTransferBalanceByteCount(ctx, networkIdA)
 	assert.Equal(t, initialTransferBalance - contractTransferByteCount, activeTransferBalance)
-	
+
 	active = residentContractManagerB.HasActiveContract(clientIdB, clientIdA)
 	assert.Equal(t, true, active)
 
@@ -143,6 +143,6 @@ func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	residentContractManagerA.CloseContract(contractId3, clientIdA, contractTransferByteCount)
 	active = residentContractManagerA.HasActiveContract(clientIdA, clientIdB)
 	assert.Equal(t, false, active)
-	
+
 })}
 */

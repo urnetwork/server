@@ -1,15 +1,14 @@
 package work
 
 import (
-    "time"
-    
-    "bringyour.com/bringyour"
-    "bringyour.com/bringyour/task"
-    "bringyour.com/bringyour/model"
-    // "bringyour.com/bringyour/controller"
-    "bringyour.com/bringyour/session"
-)
+	"time"
 
+	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/task"
+	// "bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/session"
+)
 
 type RemoveExpiredAuthCodesArgs struct {
 }
@@ -18,14 +17,14 @@ type RemoveExpiredAuthCodesResult struct {
 }
 
 func ScheduleRemoveExpiredAuthCodes(clientSession *session.ClientSession, tx bringyour.PgTx) {
-    task.ScheduleTaskInTx(
-        tx,
-        RemoveExpiredAuthCodes,
-        &RemoveExpiredAuthCodesArgs{},
-        clientSession,
-        task.RunOnce("remove_expired_auth_codes"),
-        task.RunAt(time.Now().Add(1 * time.Hour)),
-    )
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveExpiredAuthCodes,
+		&RemoveExpiredAuthCodesArgs{},
+		clientSession,
+		task.RunOnce("remove_expired_auth_codes"),
+		task.RunAt(time.Now().Add(1*time.Hour)),
+	)
 }
 
 func RemoveExpiredAuthCodes(
@@ -38,12 +37,11 @@ func RemoveExpiredAuthCodes(
 }
 
 func RemoveExpiredAuthCodesPost(
-    removeExpiredAuthCodes *RemoveExpiredAuthCodesArgs,
-    removeExpiredAuthCodesResult *RemoveExpiredAuthCodesResult,
-    clientSession *session.ClientSession,
-    tx bringyour.PgTx,
+	removeExpiredAuthCodes *RemoveExpiredAuthCodesArgs,
+	removeExpiredAuthCodesResult *RemoveExpiredAuthCodesResult,
+	clientSession *session.ClientSession,
+	tx bringyour.PgTx,
 ) error {
-    ScheduleRemoveExpiredAuthCodes(clientSession, tx)
-    return nil
+	ScheduleRemoveExpiredAuthCodes(clientSession, tx)
+	return nil
 }
-

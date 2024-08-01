@@ -6,13 +6,10 @@ import (
 	"time"
 )
 
-
 // use a exported lists since arrays of structs are not exportable
 // (see notes in `client.go`)
 
-
 var gmLog = logFn("gomobile")
-
 
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type exportedList[T any] struct {
@@ -56,7 +53,6 @@ func (self *exportedList[T]) MarshalJSON() ([]byte, error) {
 	return json.Marshal(self.values)
 }
 
-
 type StringList struct {
 	exportedList[string]
 }
@@ -66,7 +62,6 @@ func NewStringList() *StringList {
 		exportedList: *newExportedList[string](),
 	}
 }
-
 
 type IdList struct {
 	exportedList[*Id]
@@ -78,7 +73,6 @@ func NewIdList() *IdList {
 	}
 }
 
-
 type IntList struct {
 	exportedList[int]
 }
@@ -88,7 +82,6 @@ func NewIntList() *IntList {
 		exportedList: *newExportedList[int](),
 	}
 }
-
 
 type PathList struct {
 	exportedList[*Path]
@@ -100,7 +93,6 @@ func NewPathList() *PathList {
 	}
 }
 
-
 type ProviderSpecList struct {
 	exportedList[*ProviderSpec]
 }
@@ -110,7 +102,6 @@ func NewProviderSpecList() *ProviderSpecList {
 		exportedList: *newExportedList[*ProviderSpec](),
 	}
 }
-
 
 type FindProvidersProviderList struct {
 	exportedList[*FindProvidersProvider]
@@ -122,7 +113,6 @@ func NewFindProvidersProviderList() *FindProvidersProviderList {
 	}
 }
 
-
 type LocationResultList struct {
 	exportedList[*LocationResult]
 }
@@ -132,7 +122,6 @@ func NewLocationResultList() *LocationResultList {
 		exportedList: *newExportedList[*LocationResult](),
 	}
 }
-
 
 type LocationGroupResultList struct {
 	exportedList[*LocationGroupResult]
@@ -144,7 +133,6 @@ func NewLocationGroupResultList() *LocationGroupResultList {
 	}
 }
 
-
 type LocationDeviceResultList struct {
 	exportedList[*LocationDeviceResult]
 }
@@ -154,7 +142,6 @@ func NewLocationDeviceResultList() *LocationDeviceResultList {
 		exportedList: *newExportedList[*LocationDeviceResult](),
 	}
 }
-
 
 type ConnectLocationList struct {
 	exportedList[*ConnectLocation]
@@ -166,7 +153,6 @@ func NewConnectLocationList() *ConnectLocationList {
 	}
 }
 
-
 type NetworkClientInfoList struct {
 	exportedList[*NetworkClientInfo]
 }
@@ -176,7 +162,6 @@ func NewNetworkClientInfoList() *NetworkClientInfoList {
 		exportedList: *newExportedList[*NetworkClientInfo](),
 	}
 }
-
 
 type NetworkClientConnectionList struct {
 	exportedList[*NetworkClientConnection]
@@ -188,7 +173,6 @@ func NewNetworkClientConnectionList() *NetworkClientConnectionList {
 	}
 }
 
-
 type TransferBalanceList struct {
 	exportedList[*TransferBalance]
 }
@@ -198,7 +182,6 @@ func NewTransferBalanceList() *TransferBalanceList {
 		exportedList: *newExportedList[*TransferBalance](),
 	}
 }
-
 
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type Time struct {
@@ -228,4 +211,3 @@ func (self *Time) UnmarshalJSON(b []byte) error {
 func (self *Time) MarshalJSON() ([]byte, error) {
 	return json.Marshal(self.impl)
 }
-

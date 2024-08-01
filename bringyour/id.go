@@ -1,18 +1,16 @@
 package bringyour
 
 import (
-	"fmt"
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"database/sql/driver"
 
-	"github.com/oklog/ulid/v2"
 	"github.com/jackc/pgx/v5/pgtype"
-	
+	"github.com/oklog/ulid/v2"
 )
-
 
 type Id [16]byte
 
@@ -118,7 +116,6 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 	return nil
 }
 
-
 // parseUuid converts a string UUID in standard form to a byte array.
 func parseUuid(src string) (dst [16]byte, err error) {
 	switch len(src) {
@@ -140,22 +137,19 @@ func parseUuid(src string) (dst [16]byte, err error) {
 	return dst, err
 }
 
-
 func encodeUuid(src [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
 
-
 func pgxRegisterIdType(typeMap *pgtype.Map) {
 	// for bringyour, `uuid` pgtype maps to `Id`
-	// in code, `*Id` is used for nullable values 
+	// in code, `*Id` is used for nullable values
 	typeMap.RegisterType(&pgtype.Type{
-		Name: "uuid",
-		OID: pgtype.UUIDOID,
+		Name:  "uuid",
+		OID:   pgtype.UUIDOID,
 		Codec: &PgIdCodec{},
 	})
 }
-
 
 type PgIdCodec struct{}
 
@@ -235,7 +229,6 @@ func (self *PgIdCodec) DecodeValue(m *pgtype.Map, oid uint32, format int16, src 
 	return [16]byte(id), nil
 }
 
-
 type encodePlanUUIDCodecBinaryIdValuer struct{}
 
 func (encodePlanUUIDCodecBinaryIdValuer) Encode(value any, buf []byte) ([]byte, error) {
@@ -252,7 +245,6 @@ func (encodePlanUUIDCodecBinaryIdValuer) Encode(value any, buf []byte) ([]byte, 
 	}
 }
 
-
 type encodePlanUUIDCodecTextIdValuer struct{}
 
 func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, error) {
@@ -268,7 +260,6 @@ func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, er
 		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
 	}
 }
-
 
 type scanPlanBinaryUUIDToIdScanner struct{}
 
@@ -302,7 +293,6 @@ func (scanPlanBinaryUUIDToIdScanner) Scan(src []byte, dst any) error {
 	}
 }
 
-
 type scanPlanBinaryUUIDToTextScanner struct{}
 
 func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
@@ -321,7 +311,6 @@ func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
 
 	return scanner.ScanText(pgtype.Text{String: encodeUuid(buf), Valid: true})
 }
-
 
 type scanPlanTextAnyToIdScanner struct{}
 
@@ -355,7 +344,6 @@ func (scanPlanTextAnyToIdScanner) Scan(src []byte, dst any) error {
 	}
 }
 
-
 // copied from `pgtype.codecScan`
 func codecScan(codec pgtype.Codec, m *pgtype.Map, oid uint32, format int16, src []byte, dst any) error {
 	scanPlan := codec.PlanScan(m, oid, format, dst)
@@ -364,5 +352,3 @@ func codecScan(codec pgtype.Codec, m *pgtype.Map, oid uint32, format int16, src 
 	}
 	return scanPlan.Scan(src, dst)
 }
-
-

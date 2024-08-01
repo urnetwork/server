@@ -1,22 +1,18 @@
 package client
 
-
 import (
 	"context"
 
 	"golang.org/x/mobile/gl"
-
 	// "bringyour.com/connect"
 )
 
-
 var pvcLog = logFn("provide_view_controller")
 
-
 type ProvideViewController struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
-	
+
 	device *BringYourDevice
 
 	glViewController
@@ -26,9 +22,9 @@ func newProvideViewController(ctx context.Context, device *BringYourDevice) *Pro
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ProvideViewController{
-		ctx: cancelCtx,
-		cancel: cancel,
-		device: device,
+		ctx:              cancelCtx,
+		cancel:           cancel,
+		device:           device,
 		glViewController: *newGLViewController(),
 	}
 	vc.drawController = vc
@@ -40,7 +36,7 @@ func (self *ProvideViewController) Start() {
 }
 
 func (self *ProvideViewController) Stop() {
-	// FIXME	
+	// FIXME
 }
 
 func (self *ProvideViewController) draw(g gl.Context) {

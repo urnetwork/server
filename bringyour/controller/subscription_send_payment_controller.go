@@ -16,7 +16,7 @@ import (
 
 var (
 	processedPayments = make(map[bringyour.Id]struct{})
-	mu sync.Mutex
+	mu                sync.Mutex
 )
 
 func isBeingProcessed(paymentId bringyour.Id) bool {
@@ -34,7 +34,6 @@ func markAsProcessed(paymentId bringyour.Id) {
 	processedPayments[paymentId] = struct{}{}
 }
 
-
 // run once on startup
 func SchedulePendingPayments(session *session.ClientSession) {
 
@@ -43,7 +42,7 @@ func SchedulePendingPayments(session *session.ClientSession) {
 	// schedule a task for CoinbasePayment for each paymentId
 	// (use balk because the payment id might already be worked on)
 	for _, payment := range pendingPayments {
-		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled  {
+		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
 			continue
 		}
 
@@ -85,9 +84,8 @@ func SendPayments(session *session.ClientSession) {
 		)
 
 	}
-	
-}
 
+}
 
 // TODO start a task to retry a payment until it completes
 // payment_id
@@ -159,7 +157,7 @@ func ProviderPayout(
 		// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
 		switch status {
 		case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
-			// check later	
+			// check later
 			return &ProviderPayoutResult{
 				Complete: false,
 			}, nil
@@ -181,8 +179,8 @@ func ProviderPayout(
 
 			// mark the payment complete in our DB
 			model.CompletePayment(
-				clientSession.Ctx, 
-				payment.PaymentId, 
+				clientSession.Ctx,
+				payment.PaymentId,
 				string(txResponseBodyBytes), // STU_TODO: check this
 			)
 
@@ -197,17 +195,17 @@ func ProviderPayout(
 			explorerBasePath := getExplorerTxPath(tx.Blockchain)
 
 			networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
-			
+
 			if networkReferralCode != nil {
 				awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
-					PaymentId: payment.PaymentId,
-					ExplorerBasePath: *explorerBasePath,
-					TxHash: tx.TxHash,
-					ReferralCode: networkReferralCode.ReferralCode.String(),
-					Blockchain: tx.Blockchain,
+					PaymentId:          payment.PaymentId,
+					ExplorerBasePath:   *explorerBasePath,
+					TxHash:             tx.TxHash,
+					ReferralCode:       networkReferralCode.ReferralCode.String(),
+					Blockchain:         tx.Blockchain,
 					DestinationAddress: tx.DestinationAddress,
-					AmountUsd: tx.AmountInUSD,
-					PaymentCreatedAt: payment.CreateTime,
+					AmountUsd:          tx.AmountInUSD,
+					PaymentCreatedAt:   payment.CreateTime,
 				})
 			}
 
@@ -217,82 +215,81 @@ func ProviderPayout(
 
 		default:
 			return nil, fmt.Errorf(
-				"no case set for status %s; payment_id is: %s", 
-				status, 
+				"no case set for status %s; payment_id is: %s",
+				status,
 				payment.PaymentId.String(),
 			)
 		}
 
 	} else {
-			// no transaction or error
-			// create and send a new payment via Circle
+		// no transaction or error
+		// create and send a new payment via Circle
 
-			// get the user wallet to send the payment to
-			accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
-			formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
-			if err != nil {
-				return nil, err
-			}
+		// get the user wallet to send the payment to
+		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
+		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
+		if err != nil {
+			return nil, err
+		}
 
-			payoutAmount := model.NanoCentsToUsd(payment.Payout)
+		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
-			estimatedFees, err := circleClient.EstimateTransferFee(
-				payoutAmount,
-				accountWallet.WalletAddress,
-				formattedBlockchain,
-			)
-			if err != nil {
-				return nil, err
-			}
+		estimatedFees, err := circleClient.EstimateTransferFee(
+			payoutAmount,
+			accountWallet.WalletAddress,
+			formattedBlockchain,
+		)
+		if err != nil {
+			return nil, err
+		}
 
-			fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
-			if err != nil {
-				return nil, err
-			}
+		fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
+		if err != nil {
+			return nil, err
+		}
 
-			feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
-			if err != nil {
-				return nil, err
-			}
+		feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
+		if err != nil {
+			return nil, err
+		}
 
-			payoutAmount = payoutAmount - *feeInUSDC
+		payoutAmount = payoutAmount - *feeInUSDC
 
-			// ensure paymout amount is greater than minimum payout threshold
-			if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
-				return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
-			}
+		// ensure paymout amount is greater than minimum payout threshold
+		if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
+			return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
+		}
 
-			// send the payment
-			transferResult, err := circleClient.CreateTransferTransaction(
-				payoutAmount,
-				accountWallet.WalletAddress,
-				formattedBlockchain,
-			)
-			if err != nil {
-				return nil, err
-			}
+		// send the payment
+		transferResult, err := circleClient.CreateTransferTransaction(
+			payoutAmount,
+			accountWallet.WalletAddress,
+			formattedBlockchain,
+		)
+		if err != nil {
+			return nil, err
+		}
 
-			// set the payment record
-			model.SetPaymentRecord(
-				clientSession.Ctx,
-				payment.PaymentId,
-				"USDC", // For token type
-				payoutAmount,
-				transferResult.Id,
-			)
+		// set the payment record
+		model.SetPaymentRecord(
+			clientSession.Ctx,
+			payment.PaymentId,
+			"USDC", // For token type
+			payoutAmount,
+			transferResult.Id,
+		)
 
-			return &ProviderPayoutResult{
-				Complete: false,
-			}, nil
+		return &ProviderPayoutResult{
+			Complete: false,
+		}, nil
 
 	}
 }
 
-
 func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {
 
 	network = strings.ToUpper(network)
-	
+
 	switch network {
 	case "SOL", "SOLANA":
 		return calculateFeeSolana(feeEstimate)
@@ -308,17 +305,17 @@ func calculateFeePolygon(feeEstimate FeeEstimate) (*float64, error) {
 
 	gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	priorityFee, err := strconv.ParseFloat(feeEstimate.PriorityFee, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	totalFeeGwei := gasLimit * (baseFee + priorityFee)
@@ -332,17 +329,17 @@ func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
 
 	gasLimit, err := strconv.ParseFloat(feeEstimate.GasLimit, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	priorityFee, err := strconv.ParseFloat(feeEstimate.PriorityFee, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	baseFee, err := strconv.ParseFloat(feeEstimate.BaseFee, 64)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	fee := baseFee + (gasLimit * priorityFee * math.Pow(10, -15))
@@ -358,17 +355,17 @@ func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
 
 	ratesResult, err := coinbaseClient.FetchExchangeRates(currencyTicker)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 
 	rateStr, exists := ratesResult.Rates["USDC"]
 	if !exists {
-			return nil, fmt.Errorf("currency ticker not found for %s", currencyTicker)
+		return nil, fmt.Errorf("currency ticker not found for %s", currencyTicker)
 	}
 
 	rate, err := strconv.ParseFloat(rateStr, 64)
 	if err != nil {
-			return nil, fmt.Errorf("failed to parse rate: %v", err)
+		return nil, fmt.Errorf("failed to parse rate: %v", err)
 	}
 
 	feeUsdc := fee * rate
@@ -381,11 +378,11 @@ func getExplorerTxPath(network string) *string {
 
 	switch network {
 	case "SOL", "SOLANA":
-			explorerPath := "https://explorer.solana.com/tx"
-			return &explorerPath
+		explorerPath := "https://explorer.solana.com/tx"
+		return &explorerPath
 	case "MATIC", "POLY", "POLYGON":
-			explorerPath := "https://polygonscan.com/tx"
-			return &explorerPath
+		explorerPath := "https://polygonscan.com/tx"
+		return &explorerPath
 	}
 
 	return nil

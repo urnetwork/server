@@ -424,6 +424,7 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
 		bringyour.NewId().String(),
 		userAuth,
 	)
+
 	if err != nil {
 		panic(err)
 	}
@@ -520,6 +521,7 @@ func listPendingPayouts(opts docopt.Opts) {
 		payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payout.Payout))
 		fmt.Printf("%-40s %-16s\n", payout.WalletId, payoutUsd)
 	}
+
 }
 
 func payoutPending() {
