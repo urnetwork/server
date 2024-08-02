@@ -140,7 +140,7 @@ Options:
 			planPayouts()
 		}
 		if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
-			payoutPlanAppyBonus(opts)
+			payoutPlanApplyBonus(opts)
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {
@@ -553,7 +553,7 @@ func payoutByPaymentId(opts docopt.Opts) {
 	fmt.Println("Complete Status: ", res.Complete)
 }
 
-func payoutPlanAppyBonus(opts docopt.Opts) {
+func payoutPlanApplyBonus(opts docopt.Opts) {
 	ctx := context.Background()
 
 	planIdStr, err := opts.String("--plan_id")
@@ -573,7 +573,7 @@ func payoutPlanAppyBonus(opts docopt.Opts) {
 		panic(err)
 	}
 
-	model.PayoutPlanAppyBonus(ctx, planId, amountNanoCents)
+	model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents)
 }
 
 func adminWalletEstimateFee(opts docopt.Opts) {
@@ -651,36 +651,10 @@ func adminWalletTransfer(opts docopt.Opts) {
 
 func closeExpiredContracts() {
 	ctx := context.Background()
-	expiredContracts := model.GetExpiredTransferContracts(ctx)
 
-	fmt.Println("# of contracts to close: ", len(expiredContracts))
-
-	for _, expiredContract := range expiredContracts {
-		fmt.Println("Closing contract: ", expiredContract.ContractId.String())
-
-		var targetId *bringyour.Id
-		if expiredContract.Party == model.ContractPartySource {
-			targetId = &expiredContract.DestinationId
-		} else if expiredContract.Party == model.ContractPartyDestination {
-			targetId = &expiredContract.SourceId
-		}
-
-		if targetId == nil {
-			continue
-		}
-
-		// forcing the contract to be closed
-		// due to lack of response from the counterparty
-		err := model.CloseContract(
-			ctx,
-			expiredContract.ContractId,
-			*targetId,
-			expiredContract.UsedTransferByteCount,
-			false,
-		)
-		if err != nil {
-			fmt.Println("Error closing contract: ", err)
-		}
+	err := model.ForceCloseOpenContractIds(ctx, 1*time.Hour)
+	if err != nil {
+		panic(err)
 	}
 
 	fmt.Println("Contracts closed")

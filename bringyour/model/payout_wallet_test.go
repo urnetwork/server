@@ -14,7 +14,7 @@ func TestPayoutWallet(t *testing.T) {
 		ctx := context.Background()
 		sourceNetworkId := bringyour.NewId()
 
-		wallet1 := &CreateAccountWalletArgs{
+		wallet1 := &AccountWallet{
 			NetworkId:        sourceNetworkId,
 			WalletType:       WalletTypeCircleUserControlled,
 			Blockchain:       "matic",
@@ -22,7 +22,7 @@ func TestPayoutWallet(t *testing.T) {
 			DefaultTokenType: "usdc",
 		}
 
-		wallet2 := &CreateAccountWalletArgs{
+		wallet2 := &AccountWallet{
 			NetworkId:        sourceNetworkId,
 			WalletType:       WalletTypeCircleUserControlled,
 			Blockchain:       "matic",
@@ -30,17 +30,17 @@ func TestPayoutWallet(t *testing.T) {
 			DefaultTokenType: "usdc",
 		}
 
-		CreateAccountWallet(ctx, wallet1, sourceNetworkId)
-		CreateAccountWallet(ctx, wallet2, sourceNetworkId)
+		CreateAccountWallet(ctx, wallet1)
+		CreateAccountWallet(ctx, wallet2)
 
-		SetPayoutWallet(ctx, sourceNetworkId, *wallet1.WalletId)
+		SetPayoutWallet(ctx, sourceNetworkId, wallet1.WalletId)
 
 		payoutWalletId := GetPayoutWallet(ctx, sourceNetworkId)
 		payoutAccountWallet := GetAccountWallet(ctx, *payoutWalletId)
 
 		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
 
-		SetPayoutWallet(ctx, sourceNetworkId, *wallet2.WalletId)
+		SetPayoutWallet(ctx, sourceNetworkId, wallet2.WalletId)
 
 		payoutWalletId = GetPayoutWallet(ctx, sourceNetworkId)
 		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)

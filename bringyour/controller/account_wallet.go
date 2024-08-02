@@ -7,14 +7,21 @@ import (
 	"bringyour.com/bringyour/session"
 )
 
+type AccountErrorMessage string
+
+var (
+	ErrInvalidBlockchain    = errors.New("invalid blockchain, use SOL or MATIC")
+	ErrInvalidWalletAddress = errors.New("invalid wallet address")
+)
+
 // used for creating external wallets
 func CreateAccountWallet(
-	wallet *model.CreateAccountWalletArgs,
+	wallet *model.AccountWallet,
 	session *session.ClientSession,
 ) (*model.CreateAccountWalletResult, error) {
 
 	if wallet.Blockchain != "SOL" && wallet.Blockchain != "MATIC" {
-		return nil, errors.New("invalid blockchain, use SOL or MATIC")
+		return nil, ErrInvalidBlockchain
 	}
 
 	walletValidateAddressArgs := WalletValidateAddressArgs{
@@ -27,10 +34,12 @@ func CreateAccountWallet(
 	}
 
 	if !validationResult.Valid {
-		return nil, errors.New("invalid wallet address")
+		return nil, ErrInvalidWalletAddress
 	}
 
-	model.CreateAccountWallet(session.Ctx, wallet, session.ByJwt.NetworkId)
+	wallet.NetworkId = session.ByJwt.NetworkId
+
+	model.CreateAccountWallet(session.Ctx, wallet)
 
 	return &model.CreateAccountWalletResult{WalletId: wallet.WalletId}, nil
 }

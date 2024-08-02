@@ -93,7 +93,6 @@ func ApplyDbMigrations(ctx context.Context) {
 						panic(err)
 					}
 				}()
-				fmt.Println(v.sql)
 				RaisePgResult(tx.Exec(ctx, v.sql))
 			})
 		case *CodeMigration:
@@ -778,12 +777,12 @@ var migrations = []any{
 	//  `circle_uc_user_id` is the user_id for the circle user-controlled platform
 	// DROPPED and recreated
 	newSqlMigration(`
-	    CREATE TABLE circle_uc (
-	    	network_id uuid NOT NULL,
-	    	circle_uc_user_id uuid NOT NULL,
+        CREATE TABLE circle_uc (
+            network_id uuid NOT NULL,
+            circle_uc_user_id uuid NOT NULL,
 
-	    	PRIMARY KEY (network_id)
-	    )
+            PRIMARY KEY (network_id)
+        )
     `),
 
 	// this is the preferred wallet for payout
@@ -830,7 +829,7 @@ var migrations = []any{
 	// column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
 	// index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
 	newSqlMigration(`
-    	ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
+        ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
     `),
 	newSqlMigration(`
         ALTER TABLE user_auth_attempt ADD COLUMN client_ip varchar(64) NULL
@@ -1430,19 +1429,26 @@ var migrations = []any{
         DROP INDEX network_client_network_id_create_time
     `),
 
-	newSqlMigration(
-		`
-            CREATE TABLE network_referral_code (
-                network_id uuid NOT NULL,
-                referral_code uuid NOT NULL,
+	newSqlMigration(`
+        CREATE TABLE network_referral_code (
+            network_id uuid NOT NULL,
+            referral_code uuid NOT NULL,
 
-                PRIMARY KEY (network_id),
-                UNIQUE (referral_code)
-            )
-        `,
-	),
-
+            PRIMARY KEY (network_id),
+            UNIQUE (referral_code)
+        )
+    `),
 	newCodeMigration(migration_20240725_PopulateNetworkReferralCodes),
+
+	newSqlMigration(`
+        ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
+    `),
+
+	// adds circle_wallet_id and populates values with existing ids
+	newSqlMigration(`
+        ALTER TABLE account_wallet ADD COLUMN circle_wallet_id uuid NULL
+    `),
+	newCodeMigration(migration_20240802_AccountPaymentPopulateCircleWalletId),
 
 	// results of actively pinging providers
 	// task to actively ping providers

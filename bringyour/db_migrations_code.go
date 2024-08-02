@@ -107,14 +107,26 @@ func migration_20240725_PopulateNetworkReferralCodes(ctx context.Context) {
 			RaisePgResult(tx.Exec(
 				ctx,
 				`
-                INSERT INTO network_referral_code (
-                    network_id,
-                    referral_code
-                ) VALUES ($1, $2)
-                `,
+					INSERT INTO network_referral_code (
+							network_id,
+							referral_code
+					) VALUES ($1, $2)
+				`,
 				networkId,
 				code,
 			))
 		}
+	})
+}
+
+func migration_20240802_AccountPaymentPopulateCircleWalletId(ctx context.Context) {
+	Tx(ctx, func(tx PgTx) {
+		RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE account_wallet
+				SET circle_wallet_id = wallet_id
+			`,
+		))
 	})
 }
