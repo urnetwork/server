@@ -124,7 +124,7 @@ var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
 // hold onto unpaid amounts for up to this time
 const WalletPayoutTimeout = 15 * 24 * time.Hour
 
-const ProviderRevenueShare = 0.5
+const ProviderRevenueShare float64 = 0.5
 
 const MaxSubscriptionPaymentIdsPerHour = 5
 
@@ -775,7 +775,7 @@ func createTransferEscrowInTx(
 	sourceId bringyour.Id,
 	destinationNetworkId bringyour.Id,
 	destinationId bringyour.Id,
-	payeeNetworkId bringyour.Id,
+	payerNetworkId bringyour.Id,
 	contractTransferByteCount ByteCount,
 	companionContractId *bringyour.Id,
 ) (transferEscrow *TransferEscrow, returnErr error) {
@@ -799,7 +799,7 @@ func createTransferEscrowInTx(
 
             FOR UPDATE
         `,
-		payeeNetworkId,
+		payerNetworkId,
 		bringyour.NowUtc(),
 	)
 	// add up the balance_byte_count until >= contractTransferByteCount
@@ -877,9 +877,11 @@ func createTransferEscrowInTx(
                 destination_network_id,
                 destination_id,
                 transfer_byte_count,
-                companion_contract_id
+                companion_contract_id,
+                payer_network_id,
+                create_time
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         `,
 		contractId,
 		sourceNetworkId,
@@ -888,6 +890,8 @@ func createTransferEscrowInTx(
 		destinationId,
 		contractTransferByteCount,
 		companionContractId,
+		payerNetworkId,
+		bringyour.NowUtc(),
 	))
 
 	balances := []*TransferEscrowBalance{}
@@ -904,6 +908,29 @@ func createTransferEscrowInTx(
 		Balances:   balances,
 	}
 
+	return
+}
+
+// renaming of `CreateTransferEscrow` since contract is the top level concept
+func CreateContract(
+	ctx context.Context,
+	sourceNetworkId bringyour.Id,
+	sourceId bringyour.Id,
+	destinationNetworkId bringyour.Id,
+	destinationId bringyour.Id,
+	contractTransferByteCount ByteCount,
+) (contractId bringyour.Id, transferEscrow *TransferEscrow, returnErr error) {
+	transferEscrow, returnErr = CreateTransferEscrow(
+		ctx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferByteCount,
+	)
+	if transferEscrow != nil {
+		contractId = transferEscrow.ContractId
+	}
 	return
 }
 
@@ -932,6 +959,31 @@ func CreateTransferEscrow(
 
 	}, bringyour.TxReadCommitted)
 
+	return
+}
+
+// renaming of `CreateCompanionTransferEscrow` since contract is the top level concept
+func CreateCompanionContract(
+	ctx context.Context,
+	sourceNetworkId bringyour.Id,
+	sourceId bringyour.Id,
+	destinationNetworkId bringyour.Id,
+	destinationId bringyour.Id,
+	contractTransferByteCount ByteCount,
+	originContractTimeout time.Duration,
+) (contractId bringyour.Id, transferEscrow *TransferEscrow, returnErr error) {
+	transferEscrow, returnErr = CreateCompanionTransferEscrow(
+		ctx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferByteCount,
+		originContractTimeout,
+	)
+	if transferEscrow != nil {
+		contractId = transferEscrow.ContractId
+	}
 	return
 }
 
@@ -1128,9 +1180,10 @@ func CreateContractNoEscrow(
                     source_id,
                     destination_network_id,
                     destination_id,
-                    transfer_byte_count
+                    transfer_byte_count,
+                    create_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
             `,
 			contractId,
 			sourceNetworkId,
@@ -1138,6 +1191,7 @@ func CreateContractNoEscrow(
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
+			bringyour.NowUtc(),
 		))
 	})
 	return
@@ -1215,22 +1269,24 @@ func CloseContract(
                         contract_id,
                         party,
                         used_transfer_byte_count,
+                        close_time,
                         checkpoint
                     )
-                    VALUES ($1, $2, $3, true)
+                    VALUES ($1, $2, $3, $4, true)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
-                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3
+                        used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        close_time = $4
                     WHERE
                         contract_close.checkpoint = true
                 `,
 				contractId,
 				party,
 				usedTransferByteCount,
+				bringyour.NowUtc(),
 			))
 
 		} else {
-
 			bringyour.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -1238,12 +1294,14 @@ func CloseContract(
                         contract_id,
                         party,
                         used_transfer_byte_count,
+                        close_time,
                         checkpoint
                     )
-                    VALUES ($1, $2, $3, false)
+                    VALUES ($1, $2, $3, $4, false)
                     ON CONFLICT (contract_id, party) DO UPDATE
                     SET
                         used_transfer_byte_count = contract_close.used_transfer_byte_count + $3,
+                        close_time = $4,
                         checkpoint = false
                     WHERE
                         contract_close.checkpoint = true
@@ -1251,6 +1309,7 @@ func CloseContract(
 				contractId,
 				party,
 				usedTransferByteCount,
+				bringyour.NowUtc(),
 			))
 
 			// party -> used transfer byte count
@@ -1292,10 +1351,10 @@ func CloseContract(
 				result, err := tx.Query(
 					ctx,
 					`
-            			SELECT balance_id FROM transfer_escrow
-            			WHERE contract_id = $1
-            			LIMIT 1
-            		`,
+                        SELECT balance_id FROM transfer_escrow
+                        WHERE contract_id = $1
+                        LIMIT 1
+                    `,
 					contractId,
 				)
 				bringyour.WithPgResult(result, err, func() {
@@ -1321,13 +1380,13 @@ func CloseContract(
 					bringyour.RaisePgResult(tx.Exec(
 						ctx,
 						`
-    		                UPDATE transfer_contract
-    		                SET
-    		                    outcome = $2,
+                            UPDATE transfer_contract
+                            SET
+                                outcome = $2,
                                 close_time = $3
-    		                WHERE
-    		                    contract_id = $1
-    		            `,
+                            WHERE
+                                contract_id = $1
+                        `,
 						contractId,
 						ContractOutcomeSettled,
 						bringyour.NowUtc(),
@@ -1338,65 +1397,6 @@ func CloseContract(
 	}, bringyour.TxReadCommitted)
 
 	return
-}
-
-type ExpiredContract struct {
-	ContractId            bringyour.Id
-	SourceId              bringyour.Id
-	DestinationId         bringyour.Id
-	UsedTransferByteCount ByteCount
-	Party                 ContractParty
-}
-
-func GetExpiredTransferContracts(ctx context.Context) []ExpiredContract {
-	expiredContracts := []ExpiredContract{}
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-
-		result, err := tx.Query(
-			ctx,
-			`
-                SELECT
-                    transfer_contract.contract_id,
-                    transfer_contract.source_id,
-                    transfer_contract.destination_id,
-                    contract_close.used_transfer_byte_count,
-                    contract_close.party
-
-                FROM contract_close
-
-                INNER JOIN transfer_contract ON
-                    transfer_contract.contract_id = contract_close.contract_id
-                        AND (transfer_contract.outcome IS NULL AND NOT transfer_contract.dispute)
-
-                INNER JOIN (
-                    SELECT
-                        contract_id
-                    FROM contract_close
-                    GROUP BY contract_id
-                    HAVING COUNT(*) = 1
-                ) t ON
-                    t.contract_id = contract_close.contract_id
-
-                WHERE contract_close.close_time < now() - INTERVAL '24 hours';
-            `,
-		)
-
-		bringyour.WithPgResult(result, err, func() {
-			for result.Next() {
-				expiredContract := ExpiredContract{}
-				bringyour.Raise(result.Scan(
-					&expiredContract.ContractId,
-					&expiredContract.SourceId,
-					&expiredContract.DestinationId,
-					&expiredContract.UsedTransferByteCount,
-					&expiredContract.Party,
-				))
-
-				expiredContracts = append(expiredContracts, expiredContract)
-			}
-		})
-	})
-	return expiredContracts
 }
 
 func SettleEscrow(ctx context.Context, contractId bringyour.Id, outcome ContractOutcome) (returnErr error) {
@@ -1422,7 +1422,8 @@ func settleEscrowInTx(
 			`
                 SELECT
                     used_transfer_byte_count,
-                    party
+                    party,
+                    checkpoint
                 FROM contract_close
                 WHERE
                     contract_id = $1
@@ -1436,7 +1437,16 @@ func settleEscrowInTx(
 			for result.Next() {
 				var usedTransferByteCountForParty ByteCount
 				var party ContractParty
-				bringyour.Raise(result.Scan(&usedTransferByteCountForParty, &party))
+				var checkpoint bool
+				bringyour.Raise(result.Scan(
+					&usedTransferByteCountForParty,
+					&party,
+					&checkpoint,
+				))
+				if checkpoint {
+					returnErr = fmt.Errorf("Cannot settle party %s with a checkpoint.", party)
+					return
+				}
 				netUsedTransferByteCount += usedTransferByteCountForParty
 				partyCount += 1
 				fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
@@ -1557,7 +1567,10 @@ func settleEscrowInTx(
 		ctx,
 		`
             SELECT
-                destination_network_id
+                source_network_id,
+                destination_network_id,
+                payer_network_id,
+                companion_contract_id
             FROM transfer_contract
             WHERE
                 contract_id = $1
@@ -1567,7 +1580,30 @@ func settleEscrowInTx(
 	)
 	bringyour.WithPgResult(result, err, func() {
 		if result.Next() {
-			bringyour.Raise(result.Scan(&payoutNetworkId))
+			var sourceNetworkId bringyour.Id
+			var destinationNetworkId bringyour.Id
+			var payerNetworkId *bringyour.Id
+			var companionContractId *bringyour.Id
+			bringyour.Raise(result.Scan(
+				&sourceNetworkId,
+				&destinationNetworkId,
+				&payerNetworkId,
+				&companionContractId,
+			))
+			if payerNetworkId != nil {
+				if *payerNetworkId == sourceNetworkId {
+					payoutNetworkId = &destinationNetworkId
+				} else {
+					payoutNetworkId = &sourceNetworkId
+				}
+			} else {
+				// migration, infer for older contracts
+				if companionContractId == nil {
+					payoutNetworkId = &destinationNetworkId
+				} else {
+					payoutNetworkId = &sourceNetworkId
+				}
+			}
 		}
 	})
 
@@ -1656,7 +1692,7 @@ func settleEscrowInTx(
 		ctx,
 		`
         INSERT INTO account_balance (
-        	network_id,
+            network_id,
             provided_byte_count,
             provided_net_revenue_nano_cents
         )
@@ -1785,11 +1821,12 @@ func GetOpenContractIds(
 					checkpoint = *checkpoint_
 				}
 				// there can be up to two rows per contractId (one checkpoint)
-				// checkpoint takes precedence
+				// non-checkpoint takes precedence
 				if checkpoint {
-					party = ContractPartyCheckpoint
-				}
-				if contractIdPartialCloseParties[contractId] != ContractPartyCheckpoint {
+					if contractIdPartialCloseParties[contractId] == "" {
+						contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
+					}
+				} else {
 					contractIdPartialCloseParties[contractId] = party
 				}
 			}
@@ -1893,26 +1930,27 @@ func GetOpenContractIdsForSourceOrDestinationWithNoPartialClose(
 }
 */
 
-/*
 // return key is unordered transfer pair
 func GetOpenContractIdsForSourceOrDestination(
-    ctx context.Context,
-    clientId bringyour.Id,
+	ctx context.Context,
+	clientId bringyour.Id,
 ) map[TransferPair]map[bringyour.Id]ContractParty {
-    pairContractIdPartialCloseParties := map[TransferPair]map[bringyour.Id]ContractParty{}
+	pairContractIdPartialCloseParties := map[TransferPair]map[bringyour.Id]ContractParty{}
 
-    bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-        result, err := tx.Query(
-            ctx,
-            `
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
                 SELECT
                     transfer_contract.source_id,
                     transfer_contract.destination_id,
                     transfer_contract.contract_id,
-                    contract_close.party
+                    contract_close.party,
+                    contract_close.checkpoint
                 FROM transfer_contract
 
-                LEFT JOIN contract_close ON contract_close.contract_id = transfer_contract.contract_id
+                LEFT JOIN contract_close ON 
+                    contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
                     transfer_contract.open = true AND (
@@ -1920,38 +1958,266 @@ func GetOpenContractIdsForSourceOrDestination(
                         transfer_contract.destination_id = $1
                     )
             `,
-            clientId,
-        )
-        bringyour.WithPgResult(result, err, func() {
-            for result.Next() {
-                var sourceId bringyour.Id
-                var destinationId bringyour.Id
-                var contractId bringyour.Id
-                var party_ *ContractParty
-                bringyour.Raise(result.Scan(
-                    &sourceId,
-                    &destinationId,
-                    &contractId,
-                    &party_,
-                ))
-                transferPair := NewUnorderedTransferPair(sourceId, destinationId)
-                contractIdPartialCloseParties, ok := pairContractIdPartialCloseParties[transferPair]
-                var party ContractParty
-                if party_ != nil {
-                    party = *party_
-                }
-                if !ok {
-                    contractIdPartialCloseParties = map[bringyour.Id]ContractParty{}
-                    pairContractIdPartialCloseParties[transferPair] = contractIdPartialCloseParties
-                }
-                contractIdPartialCloseParties[contractId] = party
-            }
-        })
-    })
+			clientId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var sourceId bringyour.Id
+				var destinationId bringyour.Id
+				var contractId bringyour.Id
+				var party_ *ContractParty
+				var checkpoint_ *bool
+				bringyour.Raise(result.Scan(
+					&sourceId,
+					&destinationId,
+					&contractId,
+					&party_,
+					&checkpoint_,
+				))
+				transferPair := NewUnorderedTransferPair(sourceId, destinationId)
+				contractIdPartialCloseParties, ok := pairContractIdPartialCloseParties[transferPair]
+				var party ContractParty
+				if party_ != nil {
+					party = *party_
+				}
+				if !ok {
+					contractIdPartialCloseParties = map[bringyour.Id]ContractParty{}
+					pairContractIdPartialCloseParties[transferPair] = contractIdPartialCloseParties
+				}
+				var checkpoint bool
+				if checkpoint_ != nil {
+					checkpoint = *checkpoint_
+				}
+				// there can be up to two rows per contractId (one checkpoint)
+				// non-checkpoint takes precedence
+				if checkpoint {
+					if contractIdPartialCloseParties[contractId] == "" {
+						contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
+					}
+				} else {
+					contractIdPartialCloseParties[contractId] = party
+				}
+			}
+		})
+	})
 
-    return pairContractIdPartialCloseParties
+	return pairContractIdPartialCloseParties
 }
-*/
+
+// closes all open contracts with no update in the last `timeout`
+// cases handled:
+// - no closes
+// - single close
+// - one or more checkpoints
+func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error {
+	type OpenContract struct {
+		contractId    bringyour.Id
+		sourceId      bringyour.Id
+		destinationId bringyour.Id
+
+		sourceCloseTime             *time.Time
+		sourceUsedTransferByteCount *ByteCount
+		sourceCheckpoint            *bool
+
+		destinationCloseTime             *time.Time
+		destinationUsedTransferByteCount *ByteCount
+		destinationCheckpoint            *bool
+	}
+
+	openContracts := []*OpenContract{}
+
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    transfer_contract.contract_id,
+                    transfer_contract.source_id,
+                    transfer_contract.destination_id,
+                    
+                    source_contract_close.close_time AS source_close_time,
+                    source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
+                    source_contract_close.checkpoint AS source_checkpoint,
+
+                    destination_contract_close.close_time AS destination_close_time,
+                    destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
+                    destination_contract_close.checkpoint AS destination_checkpoint
+                    
+                FROM transfer_contract
+                    
+                LEFT JOIN contract_close source_contract_close ON
+                    source_contract_close.contract_id = transfer_contract.contract_id AND
+                    source_contract_close.party = $1
+
+                LEFT JOIN contract_close destination_contract_close ON
+                    destination_contract_close.contract_id = transfer_contract.contract_id AND
+                    destination_contract_close.party = $2
+
+                WHERE
+                    transfer_contract.open AND
+                    transfer_contract.create_time <= $3 AND
+                    (source_contract_close.close_time IS NULL OR source_contract_close.close_time <= $3) AND
+                    (destination_contract_close.close_time IS NULL OR destination_contract_close.close_time <= $3)
+
+            `,
+			ContractPartySource,
+			ContractPartyDestination,
+			bringyour.NowUtc().Add(-timeout),
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				openContract := &OpenContract{}
+
+				bringyour.Raise(result.Scan(
+					&openContract.contractId,
+					&openContract.sourceId,
+					&openContract.destinationId,
+					&openContract.sourceCloseTime,
+					&openContract.sourceUsedTransferByteCount,
+					&openContract.sourceCheckpoint,
+					&openContract.destinationCloseTime,
+					&openContract.destinationUsedTransferByteCount,
+					&openContract.destinationCheckpoint,
+				))
+
+				openContracts = append(openContracts, openContract)
+			}
+		})
+	})
+
+	for _, openContract := range openContracts {
+
+		fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
+
+		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
+			// close with both sides 0
+
+			err := CloseContract(
+				ctx,
+				openContract.contractId,
+				openContract.sourceId,
+				ByteCount(0),
+				false,
+			)
+			if err != nil {
+				return err
+			}
+
+			err = CloseContract(
+				ctx,
+				openContract.contractId,
+				openContract.destinationId,
+				ByteCount(0),
+				false,
+			)
+			if err != nil {
+				return err
+			}
+
+		} else if openContract.sourceCloseTime == nil {
+			// source accepts destination
+
+			err := CloseContract(
+				ctx,
+				openContract.contractId,
+				openContract.sourceId,
+				*openContract.destinationUsedTransferByteCount,
+				false,
+			)
+			if err != nil {
+				return err
+			}
+
+		} else if openContract.destinationCloseTime == nil {
+			// destination accepts source
+
+			err := CloseContract(
+				ctx,
+				openContract.contractId,
+				openContract.destinationId,
+				*openContract.sourceUsedTransferByteCount,
+				false,
+			)
+			if err != nil {
+				return err
+			}
+
+		} else {
+			// finalize one or more checkpoints
+
+			if *openContract.sourceCheckpoint {
+				err := CloseContract(
+					ctx,
+					openContract.contractId,
+					openContract.sourceId,
+					ByteCount(0),
+					false,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			if *openContract.destinationCheckpoint {
+				err := CloseContract(
+					ctx,
+					openContract.contractId,
+					openContract.destinationId,
+					ByteCount(0),
+					false,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+		}
+	}
+
+	return nil
+}
+
+type ContractClose struct {
+	CloseTime time.Time
+	Dispute   bool
+	Outcome   string
+}
+
+func GetContractClose(ctx context.Context, contractId bringyour.Id) (contractClose *ContractClose, closed bool) {
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    close_time,
+                    dispute,
+                    outcome
+                FROM transfer_contract
+                WHERE
+                    contract_id = $1
+            `,
+			contractId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				var closeTime *time.Time
+				var dispute bool
+				var outcome *string
+				bringyour.Raise(result.Scan(&closeTime, &dispute, &outcome))
+				if outcome != nil {
+					closed = true
+					contractClose = &ContractClose{
+						CloseTime: *closeTime,
+						Dispute:   dispute,
+						Outcome:   *outcome,
+					}
+				}
+			}
+		})
+	})
+
+	return
+}
 
 type WalletType = string
 
@@ -2018,7 +2284,7 @@ func GetAccountWallet(ctx context.Context, walletId bringyour.Id) *AccountWallet
 
 func CreateAccountWallet(ctx context.Context, wallet *AccountWallet) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		// wallet.WalletId = bringyour.NewId()
+		wallet.WalletId = bringyour.NewId()
 		wallet.Active = true
 		wallet.CreateTime = bringyour.NowUtc()
 
@@ -2386,8 +2652,8 @@ func PlanPayments(ctx context.Context) *PaymentPlan {
                 payout_wallet.network_id = transfer_escrow_sweep.network_id
 
             INNER JOIN account_wallet ON
-            	account_wallet.wallet_id = payout_wallet.wallet_id AND
-            	account_wallet.active = true
+                account_wallet.wallet_id = payout_wallet.wallet_id AND
+                account_wallet.active = true
 
             FOR UPDATE
             `,
@@ -2621,7 +2887,7 @@ func CancelPayment(ctx context.Context, paymentId bringyour.Id) (returnErr error
 }
 
 // used in bringyourctl to apply a bonus to a payment plan
-func PayoutPlanAppyBonus(
+func PayoutPlanApplyBonus(
 	ctx context.Context,
 	paymentPlanId bringyour.Id,
 	bonusNanoCents NanoCents,

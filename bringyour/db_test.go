@@ -412,48 +412,166 @@ func TestSerializableTx(t *testing.T) {
 		// now insert ids to trigger conflict
 		// conflicting transactions should retry until all are updated
 		for i := 0; i < k; i += 1 {
-			go Tx(ctx, func(tx PgTx) {
-				for _, id := range ids {
-					result, err := tx.Query(
-						ctx,
-						`
-						SELECT b FROM test
-						WHERE a = $1
-					`,
-						id,
-					)
-					var b int
-					WithPgResult(result, err, func() {
-						ok := result.Next()
-						assert.Equal(t, true, ok)
-						Raise(result.Scan(&b))
-					})
+			for _, id := range ids {
+				go func() {
+					Tx(ctx, func(tx PgTx) {
 
-					timeout := time.Duration(mathrand.Intn(1000)) * time.Millisecond
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(timeout):
-					}
+						result, err := tx.Query(
+							ctx,
+							`
+							SELECT b FROM test
+							WHERE a = $1
+						`,
+							id,
+						)
+						var b int
+						WithPgResult(result, err, func() {
+							ok := result.Next()
+							assert.Equal(t, true, ok)
+							Raise(result.Scan(&b))
+						})
 
-					tag := RaisePgResult(tx.Exec(
-						ctx,
-						`
-						UPDATE test SET
-						b = $2
-						WHERE a = $1
-					`,
-						id,
-						b+1,
-					))
-					assert.Equal(t, 1, int(tag.RowsAffected()))
-				}
+						timeout := time.Duration(mathrand.Intn(1000)) * time.Millisecond
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(timeout):
+						}
 
-				end <- nil
-			}, TxSerializable)
+						tag := RaisePgResult(tx.Exec(
+							ctx,
+							`
+							UPDATE test SET
+							b = $2 + 1
+							WHERE a = $1
+						`,
+							id,
+							b,
+						))
+						assert.Equal(t, 1, int(tag.RowsAffected()))
+					}, TxSerializable)
+
+					end <- nil
+				}()
+			}
 		}
 
+		for i := 0; i < k*len(ids); i += 1 {
+			select {
+			case err := <-end:
+				assert.Equal(t, err, nil)
+			case <-time.After(60 * time.Second):
+				t.FailNow()
+			}
+		}
+
+		Db(ctx, func(conn PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT a, b FROM test
+			`,
+			)
+			out := map[Id]int{}
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var a Id
+					var b int
+					Raise(result.Scan(&a, &b))
+					out[a] = b
+				}
+			})
+			assert.Equal(t, n, len(out))
+			for _, b := range out {
+				assert.Equal(t, b, k)
+			}
+		})
+	})
+}
+
+func TestUpdateTx(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+		ctx := context.Background()
+
+		k := 5
+		n := 10
+		ids := []Id{}
+		for i := 0; i < n; i += 1 {
+			ids = append(ids, NewId())
+		}
+
+		Db(ctx, func(conn PgConn) {
+			_, err := conn.Exec(
+				ctx,
+				`
+				CREATE TABLE test(a uuid NOT NULL, b int NOT NULL, PRIMARY KEY (a))
+			`,
+			)
+			Raise(err)
+
+			for _, id := range ids {
+				_, err := conn.Exec(
+					ctx,
+					`
+					INSERT INTO test(a, b) VALUES ($1, $2)
+				`,
+					id,
+					0,
+				)
+				Raise(err)
+			}
+		}, OptReadWrite())
+
+		end := make(chan error, k)
+
+		// now insert ids to trigger conflict
+		// conflicting transactions will order due to `FOR UPDATE`
 		for i := 0; i < k; i += 1 {
+			for _, id := range ids {
+				go func() {
+					Tx(ctx, func(tx PgTx) {
+						result, err := tx.Query(
+							ctx,
+							`
+							SELECT b FROM test
+							WHERE a = $1
+							FOR UPDATE
+						`,
+							id,
+						)
+						var b int
+						WithPgResult(result, err, func() {
+							ok := result.Next()
+							assert.Equal(t, true, ok)
+							Raise(result.Scan(&b))
+						})
+
+						timeout := time.Duration(mathrand.Intn(1000)) * time.Millisecond
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(timeout):
+						}
+
+						tag := RaisePgResult(tx.Exec(
+							ctx,
+							`
+							UPDATE test SET
+							b = $2 + 1
+							WHERE a = $1 AND b = $2
+						`,
+							id,
+							b,
+						))
+						assert.Equal(t, 1, int(tag.RowsAffected()))
+					}, TxReadCommitted)
+
+					end <- nil
+				}()
+			}
+		}
+
+		for i := 0; i < k*len(ids); i += 1 {
 			select {
 			case err := <-end:
 				assert.Equal(t, err, nil)
