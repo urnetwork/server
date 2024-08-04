@@ -25,6 +25,13 @@ func NewEventWithContext(ctx context.Context) *Event {
 	}
 }
 
+func NewEventWithCancelContext(cancelCtx context.Context, cancel context.CancelFunc) *Event {
+	return &Event{
+		Ctx:    cancelCtx,
+		Cancel: cancel,
+	}
+}
+
 func (self *Event) Set() {
 	self.Cancel()
 }

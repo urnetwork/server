@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	// "time"
 	"fmt"
 	"net/http"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/router"
-	// "bringyour.com/bringyour/model"
 )
 
 func main() {
@@ -35,18 +35,33 @@ Options:
 
 	// bringyour.Logger().Printf("%s\n", opts)
 
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	quitEvent := bringyour.NewEventWithContext(cancelCtx)
+	quitEvent := bringyour.NewEventWithContext(context.Background())
+	defer quitEvent.Set()
 
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
-	exchange := NewExchangeFromEnvWithDefaults(cancelCtx)
+	exchange := NewExchangeFromEnvWithDefaults(quitEvent.Ctx)
 	defer exchange.Close()
 
-	connectHandler := NewConnectHandlerWithDefaults(cancelCtx, exchange)
+	handlerId := model.CreateNetworkClientHandler(quitEvent.Ctx)
+
+	connectHandler := NewConnectHandlerWithDefaults(quitEvent.Ctx, handlerId, exchange)
+	// update the heartbeat
+	go func() {
+		for {
+			select {
+			case <-quitEvent.Ctx.Done():
+				return
+			case <-time.After(model.NetworkClientHandlerHeartbeatTimeout):
+			}
+			err := model.HeartbeatNetworkClientHandler(quitEvent.Ctx, handlerId)
+			if err != nil {
+				// shut down
+				quitEvent.Set()
+			}
+		}
+	}()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
@@ -62,7 +77,7 @@ Options:
 		port,
 	)
 
-	routerHandler := router.NewRouter(cancelCtx, routes)
+	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler); err != nil {
 		bringyour.Logger().Fatal(err)
 	}

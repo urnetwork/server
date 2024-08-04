@@ -15,6 +15,8 @@ import (
 	// "bringyour.com/bringyour/jwt"
 )
 
+const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
+
 // const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
 
@@ -717,12 +719,17 @@ func ConnectNetworkClient(
 	ctx context.Context,
 	clientId bringyour.Id,
 	clientAddress string,
+	handlerId bringyour.Id,
 ) bringyour.Id {
 	var connectionId bringyour.Id
 
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		connectionId = bringyour.NewId()
 		connectTime := bringyour.NowUtc()
+
+		host, _ := bringyour.Host()
+		service, _ := bringyour.Service()
+		block, _ := bringyour.Block()
 
 		_, err := tx.Exec(
 			ctx,
@@ -734,17 +741,19 @@ func ConnectNetworkClient(
 					connection_host,
 					connection_service,
 					connection_block,
-					client_address
+					client_address,
+					handler_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			`,
 			clientId,
 			connectionId,
 			connectTime,
-			bringyour.RequireHost(),
-			bringyour.RequireService(),
-			bringyour.RequireBlock(),
+			host,
+			service,
+			block,
 			clientAddress,
+			handlerId,
 		)
 		bringyour.Raise(err)
 	})
@@ -778,6 +787,116 @@ func DisconnectNetworkClient(ctx context.Context, connectionId bringyour.Id) err
 	})
 
 	return disconnectErr
+}
+
+func DeleteDisconnectedNetworkClients(ctx context.Context, timeout time.Duration) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_client_connection
+				WHERE
+					disconnect_time < $1
+			`,
+			bringyour.NowUtc().Add(-timeout),
+		))
+	})
+}
+
+func CreateNetworkClientHandler(ctx context.Context) (handlerId bringyour.Id) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		handlerId = bringyour.NewId()
+		host, _ := bringyour.Host()
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client_handler (
+					handler_id,
+					heartbeat_time,
+					handler_host
+				)
+				VALUES ($1, $2, $3)
+			`,
+			handlerId,
+			bringyour.NowUtc(),
+			host,
+		))
+	})
+	return
+}
+
+func HeartbeatNetworkClientHandler(ctx context.Context, handlerId bringyour.Id) (returnErr error) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		tag := bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client_handler
+				SET
+					heartbeat_time = $2
+				WHERE
+					handler_id = $1
+			`,
+			handlerId,
+			bringyour.NowUtc(),
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = errors.New("Handler does not exist.")
+			return
+		}
+	})
+	return
+}
+
+func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duration) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		handlerIds := []bringyour.Id{}
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					handler_id
+				FROM network_client_handler
+				WHERE 
+					heartbeat_time < $1
+			`,
+			bringyour.NowUtc().Add(-timeout),
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var handlerId bringyour.Id
+				bringyour.Raise(result.Scan(&handlerId))
+				handlerIds = append(handlerIds, handlerId)
+			}
+		})
+
+		bringyour.CreateTempTableInTx(ctx, tx, "temp_handler_ids(handler_id uuid)", handlerIds...)
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client_connection
+				SET
+					connected = false,
+					disconnect_time = $1
+				FROM temp_handler_ids
+				WHERE
+					temp_handler_ids.handler_id = network_client_connection.handler_id
+
+			`,
+			bringyour.NowUtc(),
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_client_handler
+				USING temp_handler_ids
+				WHERE
+					temp_handler_ids.handler_id = network_client_handler.handler_id
+			`,
+		))
+	})
 }
 
 func IsNetworkClientConnected(ctx context.Context, connectionId bringyour.Id) bool {
