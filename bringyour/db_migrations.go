@@ -1470,6 +1470,10 @@ var migrations = []any{
         CREATE INDEX network_client_connection_disconnect_time ON network_client_connection (disconnect_time, connection_id)
     `),
 
+	newSqlMigration(`
+        DELETE FROM network_client_connection WHERE handler_id IS NULL
+    `),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers
