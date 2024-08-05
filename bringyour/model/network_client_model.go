@@ -647,12 +647,17 @@ func SetProvide(
 	clientId bringyour.Id,
 	secretKeys map[ProvideMode][]byte,
 ) {
-	var maxProvideMode ProvideMode
-	for provideMode, _ := range secretKeys {
-		if maxProvideMode < provideMode {
-			maxProvideMode = provideMode
-		}
+	// FIXME we want to break these into separate provide columns:
+	// - ff
+	// - public
+	// - stream
+	matchProvideMode := ProvideModeNone
+	if _, ok := secretKeys[ProvideModePublic]; ok {
+		matchProvideMode = ProvideModePublic
+	} else if _, ok := secretKeys[ProvideModeFriendsAndFamily]; ok {
+		matchProvideMode = ProvideModeFriendsAndFamily
 	}
+
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
@@ -675,7 +680,7 @@ func SetProvide(
 					provide_mode = $2
 			`,
 			clientId,
-			maxProvideMode,
+			matchProvideMode,
 		))
 
 		bringyour.RaisePgResult(tx.Exec(
