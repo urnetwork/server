@@ -1445,15 +1445,45 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-    CREATE TABLE audit_account_payment (
-        event_id uuid NOT NULL,
-        event_time timestamp NOT NULL DEFAULT now(),
-        payment_id uuid NOT NULL,
-        event_type varchar(64) NOT NULL,
-        event_details text NULL,
+        CREATE TABLE network_client_handler (
+            handler_id uuid NOT NULL,
+            heartbeat_time timestamp NOT NULL,
+            handler_host varchar(128),
 
-        PRIMARY KEY (event_id)
-    )
+            PRIMARY KEY (handler_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection ADD COLUMN handler_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_handler_id ON network_client_connection (handler_id, connection_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_disconnect_time ON network_client_connection (disconnect_time, connection_id)
+    `),
+
+	newSqlMigration(`
+        DELETE FROM network_client_connection WHERE handler_id IS NULL
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE audit_account_payment (
+            event_id uuid NOT NULL,
+            event_time timestamp NOT NULL DEFAULT now(),
+            payment_id uuid NOT NULL,
+            event_type varchar(64) NOT NULL,
+            event_details text NULL,
+    
+            PRIMARY KEY (event_id)
+        )
     `),
 
 	// results of actively pinging providers

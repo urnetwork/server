@@ -98,6 +98,8 @@ func initTasks(ctx context.Context) {
 		work.SchedulePayout(clientSession, tx)
 		work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleCloseExpiredContracts(clientSession, tx)
+		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
+		work.ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
 		ScheduleTaskCleanup(clientSession, tx)
 		controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 	})
@@ -117,6 +119,8 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(controller.BackfillInitialTransferBalance, controller.BackfillInitialTransferBalancePost),
 		task.NewTaskTargetWithPost(controller.PopulateAccountWallets, work.PopulateAccountWalletsPost),
 		task.NewTaskTargetWithPost(work.CloseExpiredContracts, work.CloseExpiredContractsPost),
+		task.NewTaskTargetWithPost(work.CloseExpiredNetworkClientHandlers, work.CloseExpiredNetworkClientHandlersPost),
+		task.NewTaskTargetWithPost(work.DeleteDisconnectedNetworkClients, work.DeleteDisconnectedNetworkClientsPost),
 	)
 
 	return taskWorker
