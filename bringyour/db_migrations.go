@@ -456,7 +456,7 @@ var migrations = []any{
 	//  )
 	// `),
 
-	// DROPPED
+	// DROPPED use `provide_key`
 	newSqlMigration(`
         CREATE TABLE client_provide (
             client_id uuid NOT NULL,
@@ -1475,9 +1475,9 @@ var migrations = []any{
         DELETE FROM network_client_connection WHERE handler_id IS NULL
     `),
 
-	// newSqlMigration(`
-	//     DROP TABLE client_provide
-	// `),
+	newSqlMigration(`
+	    DROP TABLE client_provide
+	`),
 
 	// results of actively pinging providers
 	// task to actively ping providers
