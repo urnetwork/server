@@ -1216,7 +1216,7 @@ func FindProviderLocations(
 
                 INNER JOIN client_provide ON
                     client_provide.client_id = network_client_location.client_id AND
-                    client_provide.provide_mode = $1
+                    client_provide.provide_mode >= $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id AND
@@ -1379,7 +1379,7 @@ func GetProviderLocations(
 
                 INNER JOIN client_provide ON
                     client_provide.client_id = network_client_location.client_id AND
-                    client_provide.provide_mode = $1
+                    client_provide.provide_mode >= $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id AND
@@ -1793,7 +1793,7 @@ func FindProviders2(
 
                 INNER JOIN client_provide ON
                     client_provide.client_id = network_client_location.client_id AND
-                    client_provide.provide_mode = $1
+                    client_provide.provide_mode >= $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id
@@ -1837,7 +1837,7 @@ func FindProviders2(
 
                     INNER JOIN client_provide ON
                         client_provide.client_id = network_client_location.client_id AND
-                        client_provide.provide_mode = $1
+                        client_provide.provide_mode >= $1
 
                     INNER JOIN network_client_connection ON
                         network_client_connection.connection_id = network_client_location.connection_id
@@ -1936,7 +1936,7 @@ func GetProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bri
 
             INNER JOIN client_provide ON
                 client_provide.client_id = network_client_location.client_id AND
-                client_provide.provide_mode = $1
+                client_provide.provide_mode >= $1
 
             INNER JOIN network_client_connection ON
                 network_client_connection.connection_id = network_client_location.connection_id
@@ -1979,7 +1979,7 @@ func GetProvidersForLocationGroup(
 
                 INNER JOIN client_provide ON
                     client_provide.client_id = network_client_location.client_id AND
-                    client_provide.provide_mode = $1
+                    client_provide.provide_mode >= $1
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connection_id = network_client_location.connection_id
