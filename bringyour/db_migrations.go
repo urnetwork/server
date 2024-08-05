@@ -1444,10 +1444,41 @@ var migrations = []any{
         ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
     `),
 
+	newSqlMigration(`
+        CREATE TABLE network_client_handler (
+            handler_id uuid NOT NULL,
+            heartbeat_time timestamp NOT NULL,
+            handler_host varchar(128),
+
+            PRIMARY KEY (handler_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection ADD COLUMN handler_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_handler_id ON network_client_connection (handler_id, connection_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_disconnect_time ON network_client_connection (disconnect_time, connection_id)
+    `),
+
+	newSqlMigration(`
+        DELETE FROM network_client_connection WHERE handler_id IS NULL
+    `),
+
 	// adds circle_wallet_id and populates values with existing ids
 	newSqlMigration(`
         ALTER TABLE account_wallet ADD COLUMN circle_wallet_id uuid NULL
     `),
+
 	newCodeMigration(migration_20240802_AccountPaymentPopulateCircleWalletId),
 
 	// results of actively pinging providers

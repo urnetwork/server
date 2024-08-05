@@ -48,20 +48,22 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandler struct {
-	ctx      context.Context
-	exchange *Exchange
-	settings *ConnectHandlerSettings
+	ctx       context.Context
+	handlerId bringyour.Id
+	exchange  *Exchange
+	settings  *ConnectHandlerSettings
 }
 
-func NewConnectHandlerWithDefaults(ctx context.Context, exchange *Exchange) *ConnectHandler {
-	return NewConnectHandler(ctx, exchange, DefaultConnectHandlerSettings())
+func NewConnectHandlerWithDefaults(ctx context.Context, handlerId bringyour.Id, exchange *Exchange) *ConnectHandler {
+	return NewConnectHandler(ctx, handlerId, exchange, DefaultConnectHandlerSettings())
 }
 
-func NewConnectHandler(ctx context.Context, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
+func NewConnectHandler(ctx context.Context, handlerId bringyour.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	return &ConnectHandler{
-		ctx:      ctx,
-		exchange: exchange,
-		settings: settings,
+		ctx:       ctx,
+		handlerId: handlerId,
+		exchange:  exchange,
+		settings:  settings,
 	}
 }
 
@@ -143,7 +145,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := func() {
-		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress)
+		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
 		defer model.DisconnectNetworkClient(self.ctx, connectionId)
 
 		go bringyour.HandleError(func() {
