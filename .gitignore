@@ -12,3 +12,4 @@ connect/connect
 connect/connect.test
 
 .vscode/*
+.direnv
