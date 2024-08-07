@@ -456,6 +456,7 @@ var migrations = []any{
 	//  )
 	// `),
 
+	// DROPPED use `provide_key`
 	newSqlMigration(`
         CREATE TABLE client_provide (
             client_id uuid NOT NULL,
@@ -1473,6 +1474,10 @@ var migrations = []any{
 	newSqlMigration(`
         DELETE FROM network_client_connection WHERE handler_id IS NULL
     `),
+
+	newSqlMigration(`
+	    DROP TABLE client_provide
+	`),
 
 	newSqlMigration(`
         CREATE TABLE audit_account_payment (

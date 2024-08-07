@@ -142,7 +142,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	}
 
 	createServer := func(exchange *Exchange, port int) *http.Server {
-		connectHandler := NewConnectHandlerWithDefaults(ctx, exchange)
+		connectHandler := NewConnectHandlerWithDefaults(ctx, bringyour.NewId(), exchange)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),

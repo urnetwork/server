@@ -44,13 +44,15 @@ Usage:
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
     bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
-    bringyourctl payout --account_payment_id=<account_payment_id>
+    bringyourctl payout single --account_payment_id=<account_payment_id>
+    bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
     bringyourctl payouts plan
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl contracts close-expired
+    bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
 
 Options:
     -h --help     Show this screen.
@@ -63,6 +65,10 @@ Options:
     --network_name=<network_name>
     --network_id=<network_id>
     --secret=<secret>
+
+    --contract_id=<contract_id> The contract to close
+    --target_id=<target_id>     The contract_close.party (either "destination" or "source")
+    --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
     --amount_usd=<amount_usd>   Amount in USD.
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.`
@@ -131,7 +137,11 @@ Options:
 			sendNetworkUserInterviewRequest1(opts)
 		}
 	} else if payout, _ := opts.Bool("payout"); payout {
-		payoutByPaymentId(opts)
+		if single, _ := opts.Bool("single"); single {
+			payoutByPaymentId(opts)
+		} else if pending, _ := opts.Bool("pending"); pending {
+			payoutPending()
+		}
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
 			listPendingPayouts(opts)
@@ -152,6 +162,9 @@ Options:
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
 			closeExpiredContracts()
+		}
+		if close, _ := opts.Bool("close"); close {
+			closeContract(opts)
 		}
 	}
 }
@@ -420,6 +433,10 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
 		userAuth,
 	)
 
+	if err != nil {
+		panic(err)
+	}
+
 	err = awsMessageSender.SendAccountMessageTemplate(
 		userAuth,
 		&controller.SubscriptionTransferBalanceCodeTemplate{
@@ -512,6 +529,13 @@ func listPendingPayouts(opts docopt.Opts) {
 		payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payout.Payout))
 		fmt.Printf("%-40s %-16s\n", payout.WalletId, payoutUsd)
 	}
+
+}
+
+func payoutPending() {
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	controller.SchedulePendingPayments(clientSession)
 }
 
 func payoutByPaymentId(opts docopt.Opts) {
@@ -656,6 +680,47 @@ func closeExpiredContracts() {
 	if err != nil {
 		panic(err)
 	}
+}
 
-	fmt.Println("Contracts closed")
+func closeContract(opts docopt.Opts) {
+
+	ctx := context.Background()
+
+	contractIdStr, err := opts.String("--contract_id")
+	if err != nil {
+		panic(err)
+	}
+	contractId, err := bringyour.ParseId(contractIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	// this is either destinationId or sourceId from the transfer_contract table
+	targetIdStr, err := opts.String("--target_id")
+	if err != nil {
+		panic(err)
+	}
+	targetId, err := bringyour.ParseId(targetIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	usedTransferByteCount, err := opts.Int("--used_transfer_byte_count")
+	if err != nil {
+		panic(err)
+	}
+
+	err = model.CloseContract(
+		ctx,
+		contractId,
+		targetId,
+		int64(usedTransferByteCount),
+		false,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Contract closed %s \n", contractIdStr)
+
 }
