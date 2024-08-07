@@ -382,12 +382,13 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client_resident.resident_host,
 					network_client_resident.resident_service,
 					network_client_resident.resident_block,
-					client_provide.provide_mode
+					provide_key.provide_mode
 				FROM network_client
 				LEFT JOIN network_client_resident ON
 					network_client_resident.client_id = network_client.client_id
-				LEFT JOIN client_provide ON
-					client_provide.client_id = network_client.client_id
+				LEFT JOIN provide_key ON
+					provide_key.client_id = network_client.client_id AND
+					provide_key.provide_mode = $2
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
 				WHERE
@@ -395,6 +396,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client.active = true
 			`,
 			session.ByJwt.NetworkId,
+			ProvideModePublic,
 		)
 		clientInfos := map[bringyour.Id]*NetworkClientInfo{}
 		bringyour.WithPgResult(result, err, func() {
@@ -591,21 +593,22 @@ func GetNetworkClient(ctx context.Context, clientId bringyour.Id) *NetworkClient
 	return networkClient
 }
 
-func GetProvideMode(ctx context.Context, clientId bringyour.Id) (provideMode ProvideMode, returnErr error) {
+func GetProvideModes(ctx context.Context, clientId bringyour.Id) (provideModes map[ProvideMode]bool, returnErr error) {
+	provideModes = map[ProvideMode]bool{}
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT provide_mode FROM client_provide
+				SELECT provide_mode FROM provide_key
 				WHERE client_id = $1
 			`,
 			clientId,
 		)
 		bringyour.WithPgResult(result, err, func() {
-			if result.Next() {
+			for result.Next() {
+				var provideMode ProvideMode
 				bringyour.Raise(result.Scan(&provideMode))
-			} else {
-				returnErr = fmt.Errorf("Client provide mode not set.")
+				provideModes[provideMode] = true
 			}
 		})
 	})
@@ -647,37 +650,7 @@ func SetProvide(
 	clientId bringyour.Id,
 	secretKeys map[ProvideMode][]byte,
 ) {
-	var maxProvideMode ProvideMode
-	for provideMode, _ := range secretKeys {
-		if maxProvideMode < provideMode {
-			maxProvideMode = provideMode
-		}
-	}
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		bringyour.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM client_provide
-				WHERE client_id = $1
-			`,
-			clientId,
-		))
-
-		bringyour.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO client_provide (
-					client_id,
-					provide_mode
-				) VALUES ($1, $2)
-				ON CONFLICT (client_id) DO UPDATE
-				SET
-					provide_mode = $2
-			`,
-			clientId,
-			maxProvideMode,
-		))
-
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`

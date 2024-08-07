@@ -124,17 +124,19 @@ func ConnectControlFrames(
 	return netOutFrames, nil
 }
 
-func GetProvideMode(ctx context.Context, destinationId bringyour.Id) model.ProvideMode {
+func GetProvideModes(ctx context.Context, destinationId bringyour.Id) map[model.ProvideMode]bool {
 
 	if destinationId == ControlId {
-		return model.ProvideModeNetwork
+		return map[model.ProvideMode]bool{
+			model.ProvideModeNetwork: true,
+		}
 	}
 
-	provideMode, err := model.GetProvideMode(ctx, destinationId)
+	provideModes, err := model.GetProvideModes(ctx, destinationId)
 	if err != nil {
-		return model.ProvideModeNone
+		return map[model.ProvideMode]bool{}
 	}
-	return provideMode
+	return provideModes
 }
 
 // this is the "min" or most specific relationship
@@ -177,11 +179,9 @@ func CreateContract(
 		provideMode = model.ProvideModeStream
 
 	} else {
+		provideRelationship := GetProvideRelationship(ctx, clientId, destinationId)
 
-		minRelationship := GetProvideRelationship(ctx, clientId, destinationId)
-
-		maxProvideMode := GetProvideMode(ctx, destinationId)
-		if maxProvideMode < minRelationship {
+		if provideModes := GetProvideModes(ctx, destinationId); !provideModes[provideRelationship] {
 			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION (%s->%s)\n", clientId.String(), destinationId.String())
 			contractError := protocol.ContractError_NoPermission
 			result := &protocol.CreateContractResult{
@@ -192,7 +192,7 @@ func CreateContract(
 			return []*protocol.Frame{frame}, nil
 		}
 
-		provideMode = minRelationship
+		provideMode = provideRelationship
 	}
 
 	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
