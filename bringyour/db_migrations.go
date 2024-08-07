@@ -1479,6 +1479,18 @@ var migrations = []any{
 	    DROP TABLE client_provide
 	`),
 
+	newSqlMigration(`
+        CREATE TABLE audit_account_payment (
+            event_id uuid NOT NULL,
+            event_time timestamp NOT NULL DEFAULT now(),
+            payment_id uuid NOT NULL,
+            event_type varchar(64) NOT NULL,
+            event_details text NULL,
+    
+            PRIMARY KEY (event_id)
+        )
+    `),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers

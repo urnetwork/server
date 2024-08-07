@@ -28,6 +28,7 @@ const (
 	AuditEventTypeDeviceAdded                 AuditEventType = "device_added"
 	AuditEventTypeDeviceRemoved               AuditEventType = "device_removed"
 	AuditEventTypeContractClosedSuccess       AuditEventType = "contract_closed_success"
+	AuditEventTypeCirclePayoutFailed          AuditEventType = "circle_payout_failed"
 )
 
 type Stats struct {
@@ -1157,6 +1158,49 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 			event.EventDetails,
 			event.TransferBytes,
 			event.TransferPackets,
+		)
+		bringyour.Raise(err)
+	})
+}
+
+type AuditAccountPaymentEvent struct {
+	AuditEvent
+
+	AccountPaymentId bringyour.Id
+}
+
+func NewAuditAccountPaymentEvent(eventType AuditEventType) *AuditAccountPaymentEvent {
+	eventId := bringyour.NewId()
+	eventTime := bringyour.NowUtc()
+	return &AuditAccountPaymentEvent{
+		AuditEvent: AuditEvent{
+			EventId:   eventId,
+			EventTime: eventTime,
+			EventType: eventType,
+		},
+	}
+}
+
+func AddAuditAccountPaymentEvent(ctx context.Context, event *AuditAccountPaymentEvent) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		_, err := tx.Exec(
+			ctx,
+			`
+			INSERT INTO audit_account_payment
+			(
+				event_id,
+				event_time,
+				payment_id,
+				event_type,
+				event_details
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			`,
+			event.EventId,
+			event.EventTime,
+			event.AccountPaymentId,
+			event.EventType,
+			event.EventDetails,
 		)
 		bringyour.Raise(err)
 	})

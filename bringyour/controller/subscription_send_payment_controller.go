@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -266,6 +267,7 @@ func ProviderPayout(
 			formattedBlockchain,
 		)
 		if err != nil {
+			auditAccountPayment(clientSession, payment.PaymentId, err)
 			return nil, err
 		}
 
@@ -399,4 +401,29 @@ func formatBlockchain(network string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported chain: %s", network)
 	}
+}
+
+func auditAccountPayment(
+	session *session.ClientSession,
+	paymentId bringyour.Id,
+	err error,
+) {
+	type Details struct {
+		ErrorMsg string `json:"error"`
+	}
+
+	details := Details{
+		ErrorMsg: err.Error(),
+	}
+
+	detailsJson, err := json.Marshal(details)
+	if err != nil {
+		panic(err)
+	}
+	detailsJsonString := string(detailsJson)
+
+	auditNetworkEvent := model.NewAuditAccountPaymentEvent(model.AuditEventTypeCirclePayoutFailed)
+	auditNetworkEvent.AccountPaymentId = paymentId
+	auditNetworkEvent.EventDetails = &detailsJsonString
+	model.AddAuditEvent(session.Ctx, auditNetworkEvent)
 }
