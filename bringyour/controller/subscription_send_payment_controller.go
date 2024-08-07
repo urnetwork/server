@@ -11,27 +11,33 @@ import (
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/task"
 )
 
 var (
-	processedPayments = make(map[bringyour.Id]struct{})
-	mu                sync.Mutex
+	processingPayments = make(map[bringyour.Id]struct{})
+	mu                 sync.Mutex
 )
 
-func isBeingProcessed(paymentId bringyour.Id) bool {
+func isProcessing(paymentId bringyour.Id) bool {
 	mu.Lock()
 	defer mu.Unlock()
 
-	_, exists := processedPayments[paymentId]
+	_, exists := processingPayments[paymentId]
 	return exists
 }
 
-func markAsProcessed(paymentId bringyour.Id) {
+func markAsProcessing(paymentId bringyour.Id) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	processedPayments[paymentId] = struct{}{}
+	processingPayments[paymentId] = struct{}{}
+}
+
+func removeProcessing(paymentId bringyour.Id) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	delete(processingPayments, paymentId)
 }
 
 // run once on startup
@@ -42,20 +48,18 @@ func SchedulePendingPayments(session *session.ClientSession) {
 	// schedule a task for CoinbasePayment for each paymentId
 	// (use balk because the payment id might already be worked on)
 	for _, payment := range pendingPayments {
-		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
+		if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
 			continue
 		}
 
 		// avoid circl rate limiting
 		time.Sleep(500 * time.Millisecond)
 
-		markAsProcessed(payment.PaymentId)
+		markAsProcessing(payment.PaymentId)
 
-		task.ScheduleTask(
-			ProviderPayout,
-			payment,
-			session,
-		)
+		ProviderPayout(payment, session)
+
+		removeProcessing(payment.PaymentId)
 	}
 }
 
@@ -68,20 +72,18 @@ func SendPayments(session *session.ClientSession) {
 	// schedule a task for CoinbasePayment for each paymentId
 	// (use balk because the payment id might already be worked on)
 	for _, payment := range plan.WalletPayments {
-		if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
+		if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
 			continue
 		}
 
 		// avoid circl rate limiting
 		time.Sleep(500 * time.Millisecond)
 
-		markAsProcessed(payment.PaymentId)
+		markAsProcessing(payment.PaymentId)
 
-		task.ScheduleTask(
-			ProviderPayout,
-			payment,
-			session,
-		)
+		ProviderPayout(payment, session)
+
+		removeProcessing(payment.PaymentId)
 
 	}
 
@@ -99,17 +101,14 @@ func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {
 		return
 	}
 
-	if isBeingProcessed(payment.PaymentId) || payment.Completed || payment.Canceled {
+	if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
 		return
 	}
 
-	markAsProcessed(payment.PaymentId)
+	markAsProcessing(payment.PaymentId)
 
-	task.ScheduleTask(
-		ProviderPayout,
-		payment,
-		&session,
-	)
+	ProviderPayout(payment, &session)
+	removeProcessing(payment.PaymentId)
 }
 
 type ProviderPayoutResult struct {
