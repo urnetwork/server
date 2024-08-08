@@ -199,7 +199,7 @@ func ScheduleTaskInTx[T any, R any](
 		argsJson,
 		clientSession.ClientAddress,
 		byJwtJson,
-		runAt.At,
+		runAt.At.UTC(),
 		runOnceKey,
 		runPriority.Priority,
 		maxTimeSeconds,
