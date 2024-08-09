@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+
 	// "encoding/base64"
 	"bytes"
 	"errors"
@@ -578,6 +579,7 @@ type WalletValidateAddressCallback apiCallback[*WalletValidateAddressResult]
 
 type WalletValidateAddressArgs struct {
 	Address string `json:"address,omitempty"`
+	Chain   string `json:"chain,omitempty"`
 }
 
 type WalletValidateAddressResult struct {

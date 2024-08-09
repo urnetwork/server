@@ -1491,6 +1491,13 @@ var migrations = []any{
         )
     `),
 
+	// adds circle_wallet_id and populates values with existing ids
+	newSqlMigration(`
+        ALTER TABLE account_wallet ADD COLUMN circle_wallet_id uuid NULL
+    `),
+
+	newCodeMigration(migration_20240802_AccountPaymentPopulateCircleWalletId),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers

@@ -225,11 +225,6 @@ func AutoPayout() {
 	// FIXME use circle
 }
 
-// call from api
-func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bringyour.Id) {
-
-}
-
 // notification_count
 // next_notify_time
 func BalanceCodeNotify() {

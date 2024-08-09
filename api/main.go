@@ -93,6 +93,8 @@ Options:
 		router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
 		router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
 		router.NewRoute("GET", "/hello", handlers.Hello),
+		router.NewRoute("POST", "/payout-wallet", handlers.SetPayoutWallet),
+		router.NewRoute("POST", "/account-wallet", handlers.CreateAccountWallet),
 	}
 
 	// bringyour.Logger().Printf("%s\n", opts)

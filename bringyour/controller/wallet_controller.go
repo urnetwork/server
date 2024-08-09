@@ -97,33 +97,32 @@ func WalletCircleInit(
 	)
 }
 
-type WalletValidateAddressArgs struct {
-	Address string `json:"address,omitempty"`
-}
-
 type WalletValidateAddressResult struct {
 	Valid bool `json:"valid,omitempty"`
+}
+
+type WalletValidateAddressArgs struct {
+	Address string `json:"address,omitempty"`
+	Chain   string `json:"chain,omitempty"` // https://developers.circle.com/w3s/reference/createvalidateaddress for valid blockchain params
 }
 
 func WalletValidateAddress(
 	walletValidateAddress *WalletValidateAddressArgs,
 	session *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
-	circleUserToken, err := createCircleUserToken(session)
-	if err != nil {
-		return nil, err
-	}
+
+	chain := strings.ToUpper(walletValidateAddress.Chain)
+	chain = strings.TrimSpace(chain)
 
 	return bringyour.HttpPostRequireStatusOk(
 		"https://api.circle.com/v1/w3s/transactions/validateAddress",
 		map[string]any{
-			"blockchain": circleConfig()["blockchain"],
+			"blockchain": chain,
 			"address":    walletValidateAddress.Address,
 		},
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-			header.Add("X-User-Token", circleUserToken.UserToken)
 		},
 		func(response *http.Response, responseBodyBytes []byte) (*WalletValidateAddressResult, error) {
 			_, data, err := parseCircleResponseData(responseBodyBytes)
@@ -650,12 +649,9 @@ func CircleWalletWebhook(
 				return nil, fmt.Errorf("no correlation ids")
 			}
 
-			walletId, err := bringyour.ParseId(event.CorrelationIds[0])
-			if err != nil {
-				return nil, err
-			}
+			circleWalletId := event.CorrelationIds[0]
 
-			wallet, err := getCircleWallet(walletId)
+			circleWallet, err := getCircleWallet(circleWalletId)
 			if err != nil {
 				return nil, err
 			}
@@ -670,29 +666,37 @@ func CircleWalletWebhook(
 				return nil, fmt.Errorf("no circle user control found")
 			}
 
-			blockchain := strings.ToUpper(wallet.Blockchain)
+			blockchain := strings.ToUpper(circleWallet.Blockchain)
 
 			// check for an existing wallet
-			existingAccountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+			existingAccountWallet := model.GetAccountWalletByCircleId(clientSession.Ctx, circleWalletId)
 			if existingAccountWallet != nil {
 				return nil, fmt.Errorf("account wallet already exists")
+			}
+
+			wallet := &model.AccountWallet{
+				CircleWalletId:   &circleWallet.ID,
+				NetworkId:        userUC.NetworkId,
+				WalletType:       model.WalletTypeCircleUserControlled,
+				Blockchain:       blockchain,
+				WalletAddress:    circleWallet.Address,
+				DefaultTokenType: "USDC",
 			}
 
 			// no account_wallet exists, create a new one
 			model.CreateAccountWallet(
 				clientSession.Ctx,
-				&model.AccountWallet{
-					WalletId:         walletId,
-					NetworkId:        userUC.NetworkId,
-					WalletType:       model.WalletTypeCircleUserControlled,
-					Blockchain:       blockchain,
-					WalletAddress:    wallet.Address,
-					DefaultTokenType: "USDC",
-				},
+				wallet,
 			)
 
-			// fixme: check if a payout wallet is set for this network
-			// depends on feature/set-payout-wallet
+			// check if a payout wallet is set for this network
+			payoutWallet := model.GetPayoutWallet(clientSession.Ctx, userUC.NetworkId)
+
+			// if a payout wallet doesn't exist for the network
+			// set payout wallet
+			if payoutWallet == nil {
+				model.SetPayoutWallet(clientSession.Ctx, userUC.NetworkId, wallet.WalletId)
+			}
 
 		}
 
@@ -710,9 +714,9 @@ type CircleWalletResult struct {
 	Wallet CircleWallet `json:"wallet"`
 }
 
-func getCircleWallet(walletId bringyour.Id) (*CircleWallet, error) {
+func getCircleWallet(circleWalletId string) (*CircleWallet, error) {
 	return bringyour.HttpGetRequireStatusOk(
-		fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s", walletId),
+		fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s", circleWalletId),
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
@@ -969,34 +973,29 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 		return err
 	}
 
-	for i, wallet := range walletInfo {
-		walletId, err := bringyour.ParseId(wallet.WalletId)
-		if err != nil {
-			fmt.Printf("Error for wallet id %s: %v \n", wallet.WalletId, err)
-			continue
-		}
+	for i, circleWallet := range walletInfo {
 
 		// check if account wallet exists
-		accountWallet := model.GetAccountWallet(clientSession.Ctx, walletId)
+		accountWallet := model.GetAccountWalletByCircleId(clientSession.Ctx, circleWallet.WalletId)
 		if accountWallet != nil {
-			fmt.Printf("Account wallet already exists for wallet id %s \n", wallet.WalletId)
+			fmt.Printf("Account wallet already exists for wallet id %s \n", circleWallet.WalletId)
 			continue
 		}
 
-		accountWallet = &model.AccountWallet{
-			WalletId:         walletId,
+		createAccountWallet := &model.AccountWallet{
+			CircleWalletId:   &circleWallet.WalletId,
 			NetworkId:        user.NetworkId,
 			WalletType:       model.WalletTypeCircleUserControlled,
-			Blockchain:       wallet.Blockchain,
-			WalletAddress:    wallet.Address,
+			Blockchain:       circleWallet.Blockchain,
+			WalletAddress:    circleWallet.Address,
 			DefaultTokenType: "USDC",
-			CreateTime:       wallet.CreateDate,
+			CreateTime:       circleWallet.CreateDate,
 		}
-		model.CreateAccountWallet(clientSession.Ctx, accountWallet)
+		model.CreateAccountWallet(clientSession.Ctx, createAccountWallet)
 
 		// set the payout wallet
 		if i == 0 {
-			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, walletId)
+			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, createAccountWallet.WalletId)
 		}
 	}
 
