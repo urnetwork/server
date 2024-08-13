@@ -18,6 +18,8 @@ import (
 
 const DefaultMaxDistanceFraction = float32(0.2)
 
+// FIXME reindex these as search.SearchTypePrefix
+// FIXME e.g. 1. change the realm 2. point the old realm to reindex into a new realm 3. run that as a task
 var locationSearch = search.NewSearch("location", search.SearchTypeSubstring)
 var locationGroupSearch = search.NewSearch("location_group", search.SearchTypeSubstring)
 
@@ -1099,6 +1101,7 @@ type FindLocationsResult struct {
 // args have query and count
 // args have location types, which would typically be all (city, region, country, group)
 // args have min search threshold
+// FIXME (brien) I think there is a bug in this function. Needs more testing
 func FindProviderLocations(
 	findLocations *FindLocationsArgs,
 	session *session.ClientSession,
@@ -1735,6 +1738,7 @@ type ProviderSpec struct {
 	LocationId      *bringyour.Id `json:"location_id,omitempty"`
 	LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
 	ClientId        *bringyour.Id `json:"client_id,omitempty"`
+	BestAvailable   boolean       `json:"best_available,omitempty`
 }
 
 type FindProviders2Args struct {
@@ -1771,6 +1775,11 @@ func FindProviders2(
 			}
 			if spec.ClientId != nil {
 				clientIds[*spec.ClientId] = true
+			}
+			if spec.BestAvailable {
+				// FIXME find the actual id for "Strong Privacy Laws and Internet Freedom"
+				strongPrivacyLawsAndInternetFreedonGroupId := NewId()
+				locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId] = true
 			}
 		}
 
