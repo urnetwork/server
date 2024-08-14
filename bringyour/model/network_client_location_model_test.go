@@ -7,6 +7,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
 func TestAddDefaultLocations(t *testing.T) {
@@ -118,6 +120,83 @@ func TestCanonicalLocationsParallel(t *testing.T) {
 		}
 
 		assert.Equal(t, 1, len(locationIds))
+	})
+}
+
+func TestBestAvailableProviders(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkIdA := bringyour.NewId()
+
+		userIdA := bringyour.NewId()
+
+		clientSessionA := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkIdA, userIdA, "a"),
+		)
+
+		clientId := bringyour.NewId()
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId := ConnectNetworkClient(
+			ctx,
+			clientId,
+			"0.0.0.0:0",
+			handlerId,
+		)
+
+		country := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, country)
+
+		state := &Location{
+			LocationType: LocationTypeRegion,
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, state)
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		SetConnectionLocation(ctx, connectionId, city.LocationId)
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []bringyour.Id{
+				country.LocationId,
+				city.LocationId,
+				state.LocationId,
+			},
+		}
+
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		bestAvailable := true
+		findProviders2Args := &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					BestAvailable: &bestAvailable,
+				},
+			},
+		}
+
+		res, err := FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), 1)
 	})
 }
 

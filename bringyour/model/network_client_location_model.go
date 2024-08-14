@@ -1741,7 +1741,7 @@ type ProviderSpec struct {
 	LocationId      *bringyour.Id `json:"location_id,omitempty"`
 	LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
 	ClientId        *bringyour.Id `json:"client_id,omitempty"`
-	BestAvailable   bool          `json:"best_available,omitempty`
+	BestAvailable   *bool         `json:"best_available,omitempty"`
 }
 
 type FindProviders2Args struct {
@@ -1820,7 +1820,7 @@ func FindProviders2(
 			if spec.ClientId != nil {
 				clientIds[*spec.ClientId] = true
 			}
-			if spec.BestAvailable {
+			if spec.BestAvailable != nil && *spec.BestAvailable {
 				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByName(StrongPrivacyLaws, session.Ctx)
 				if strongPrivacyLawsAndInternetFreedonGroupId != nil {
 					locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId.LocationGroupId] = true
