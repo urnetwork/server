@@ -25,7 +25,7 @@ type ConnectionListener interface {
 }
 
 type ConnectionStatusListener interface {
-	ConnectionStatusChanged(status *string)
+	ConnectionStatusChanged(status string)
 }
 
 type FilteredLocationsListener interface {
@@ -131,7 +131,7 @@ func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *C
 	}
 }
 
-func (self *ConnectViewController) connectionStatusChanged(status *string) {
+func (self *ConnectViewController) connectionStatusChanged(status string) {
 	for _, listener := range self.connectionStatusListeners.Get() {
 		connect.HandleError(func() {
 			listener.ConnectionStatusChanged(status)
@@ -197,9 +197,8 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	self.activeLocation = location
 	clear(self.usedDestinationIds)
 	clear(self.activeDestinationIds)
-	status := Connecting
 	self.stateLock.Unlock()
-	self.connectionStatusChanged(&status)
+	self.connectionStatusChanged(Connecting)
 
 	if location.IsDevice() {
 		clientIds := []Id{
@@ -207,10 +206,7 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		}
 		self.setDestinations(clientIds)
 		self.connectionChanged(location)
-		self.stateLock.Lock()
-		status := Connected
-		self.stateLock.Unlock()
-		self.connectionStatusChanged(&status)
+		self.connectionStatusChanged(Connected)
 	} else {
 		exportedExcludeClientIds := NewIdList()
 		// exclude self
@@ -234,10 +230,7 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 					self.setDestinations(clientIds)
 					self.connectionChanged(location)
 
-					self.stateLock.Lock()
-					status := Connected
-					self.stateLock.Unlock()
-					self.connectionStatusChanged(&status)
+					self.connectionStatusChanged(Connected)
 
 				}
 			},
@@ -290,11 +283,10 @@ func (self *ConnectViewController) Disconnect() {
 	self.activeLocation = nil
 	clear(self.usedDestinationIds)
 	clear(self.activeDestinationIds)
-	status := Disconnected
 	self.stateLock.Unlock()
 
 	self.connectionChanged(nil)
-	self.connectionStatusChanged(&status)
+	self.connectionStatusChanged(Disconnected)
 }
 
 func (self *ConnectViewController) FilterLocations(filter string) {
