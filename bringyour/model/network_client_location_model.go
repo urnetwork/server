@@ -1935,6 +1935,11 @@ func FindProviders2(
 
 	outClientIds := maps.Keys(clientIds)
 
+	// set a default count
+	if findProviders2.Count <= 0 {
+		findProviders2.Count = 10
+	}
+
 	if findProviders2.Count < len(clientIds) {
 		// sample
 		mathrand.Shuffle(len(outClientIds), func(i int, j int) {
