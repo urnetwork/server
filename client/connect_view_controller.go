@@ -14,8 +14,18 @@ import (
 
 var cvcLog = logFn("connect_view_controller")
 
+const (
+	Disconnected string = "DISCONNECTED"
+	Connecting   string = "CONNECTING"
+	Connected    string = "CONNECTED"
+)
+
 type ConnectionListener interface {
 	ConnectionChanged(location *ConnectLocation)
+}
+
+type ConnectionStatusListener interface {
+	ConnectionStatusChanged(status *string)
 }
 
 type FilteredLocationsListener interface {
@@ -42,6 +52,7 @@ type ConnectViewController struct {
 	previousFilterSequenceNumber int64
 
 	connectionListeners       *connect.CallbackList[ConnectionListener]
+	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
 	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
 }
 
@@ -60,6 +71,7 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		previousFilterSequenceNumber: 0,
 
 		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
+		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
 		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
 	}
 	vc.drawController = vc
@@ -119,6 +131,21 @@ func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *C
 	}
 }
 
+func (self *ConnectViewController) connectionStatusChanged(status *string) {
+	for _, listener := range self.connectionStatusListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectionStatusChanged(status)
+		})
+	}
+}
+
+func (self *ConnectViewController) AddConnectionStatusListener(listener ConnectionStatusListener) Sub {
+	callbackId := self.connectionStatusListeners.Add(listener)
+	return newSub(func() {
+		self.connectionStatusListeners.Remove(callbackId)
+	})
+}
+
 func (self *ConnectViewController) setDestinations(destinationIds []Id) {
 
 	destinationIdStrs := []string{}
@@ -170,7 +197,9 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	self.activeLocation = location
 	clear(self.usedDestinationIds)
 	clear(self.activeDestinationIds)
+	status := Connecting
 	self.stateLock.Unlock()
+	self.connectionStatusChanged(&status)
 
 	if location.IsDevice() {
 		clientIds := []Id{
@@ -178,6 +207,10 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		}
 		self.setDestinations(clientIds)
 		self.connectionChanged(location)
+		self.stateLock.Lock()
+		status := Connected
+		self.stateLock.Unlock()
+		self.connectionStatusChanged(&status)
 	} else {
 		exportedExcludeClientIds := NewIdList()
 		// exclude self
@@ -200,6 +233,12 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 					}
 					self.setDestinations(clientIds)
 					self.connectionChanged(location)
+
+					self.stateLock.Lock()
+					status := Connected
+					self.stateLock.Unlock()
+					self.connectionStatusChanged(&status)
+
 				}
 			},
 		)))
@@ -251,9 +290,11 @@ func (self *ConnectViewController) Disconnect() {
 	self.activeLocation = nil
 	clear(self.usedDestinationIds)
 	clear(self.activeDestinationIds)
+	status := Disconnected
 	self.stateLock.Unlock()
 
 	self.connectionChanged(nil)
+	self.connectionStatusChanged(&status)
 }
 
 func (self *ConnectViewController) FilterLocations(filter string) {
