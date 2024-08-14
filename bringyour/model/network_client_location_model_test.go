@@ -147,6 +147,12 @@ func TestBestAvailableProviders(t *testing.T) {
 			handlerId,
 		)
 
+		secretKeys := map[ProvideMode][]byte{
+			ProvideModePublic: make([]byte, 32),
+		}
+
+		SetProvide(ctx, clientId, secretKeys)
+
 		country := &Location{
 			LocationType: LocationTypeCountry,
 			Country:      "United States",
