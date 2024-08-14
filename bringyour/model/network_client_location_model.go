@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"time"
+
 	// "errors"
 	"fmt"
 	"math"
@@ -22,6 +23,8 @@ const DefaultMaxDistanceFraction = float32(0.2)
 // FIXME e.g. 1. change the realm 2. point the old realm to reindex into a new realm 3. run that as a task
 var locationSearch = search.NewSearch("location", search.SearchTypeSubstring)
 var locationGroupSearch = search.NewSearch("location_group", search.SearchTypeSubstring)
+
+const StrongPrivacyLaws = "Strong Privacy Laws and Internet Freedom"
 
 // called from db_migrations to add default locations and groups
 func AddDefaultLocations(ctx context.Context, cityLimit int) {
@@ -176,7 +179,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		// https://www.gov.uk/eu-eea
 		"European Union (EU)": eu,
 		"Nordic":              nordic,
-		"Strong Privacy Laws and Internet Freedom": []any{
+		StrongPrivacyLaws: []any{
 			eu,
 			nordic,
 			"jp",
@@ -1738,7 +1741,7 @@ type ProviderSpec struct {
 	LocationId      *bringyour.Id `json:"location_id,omitempty"`
 	LocationGroupId *bringyour.Id `json:"location_group_id,omitempty"`
 	ClientId        *bringyour.Id `json:"client_id,omitempty"`
-	BestAvailable   boolean       `json:"best_available,omitempty`
+	BestAvailable   bool          `json:"best_available,omitempty`
 }
 
 type FindProviders2Args struct {
@@ -1754,6 +1757,47 @@ type FindProviders2Result struct {
 type FindProvidersProvider struct {
 	ClientId                bringyour.Id `json:"client_id"`
 	EstimatedBytesPerSecond int          `json:"estimated_bytes_per_second"`
+}
+
+func findLocationGroupByName(
+	name string,
+	ctx context.Context,
+) *LocationGroup {
+
+	var locationGroup *LocationGroup
+
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+						location_group_id,
+						location_group_name,
+						promoted
+
+				FROM location_group
+
+				WHERE
+						LOWER(location_group_name) = LOWER($1)
+
+				LIMIT 1
+			`,
+			name,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				locationGroup = &LocationGroup{}
+
+				bringyour.Raise(result.Scan(
+					&locationGroup.LocationGroupId,
+					&locationGroup.Name,
+					&locationGroup.Promoted,
+				))
+			}
+		})
+	})
+
+	return locationGroup
 }
 
 func FindProviders2(
@@ -1777,9 +1821,10 @@ func FindProviders2(
 				clientIds[*spec.ClientId] = true
 			}
 			if spec.BestAvailable {
-				// FIXME find the actual id for "Strong Privacy Laws and Internet Freedom"
-				strongPrivacyLawsAndInternetFreedonGroupId := NewId()
-				locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId] = true
+				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByName(StrongPrivacyLaws, session.Ctx)
+				if strongPrivacyLawsAndInternetFreedonGroupId != nil {
+					locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId.LocationGroupId] = true
+				}
 			}
 		}
 

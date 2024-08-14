@@ -120,3 +120,34 @@ func TestCanonicalLocationsParallel(t *testing.T) {
 		assert.Equal(t, 1, len(locationIds))
 	})
 }
+
+func TestFindLocationGroupByName(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+		}
+
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		// query existing
+		locationGroup := findLocationGroupByName(StrongPrivacyLaws, ctx)
+		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+		assert.Equal(t, locationGroup.Promoted, true)
+
+		locationGroupId := locationGroup.LocationGroupId
+
+		// query with incorrect case should still return
+		locationGroup = findLocationGroupByName("strong privacy Laws And internet freedom", ctx)
+		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+		assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
+		assert.Equal(t, locationGroup.Promoted, true)
+
+		// query should return nil if no match
+		locationGroup = findLocationGroupByName("invalid", ctx)
+		assert.Equal(t, locationGroup, nil)
+	})
+}
