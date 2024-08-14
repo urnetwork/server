@@ -232,6 +232,8 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 
 					self.connectionStatusChanged(Connected)
 
+				} else {
+					self.connectionStatusChanged(Disconnected)
 				}
 			},
 		)))
