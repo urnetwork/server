@@ -18,6 +18,7 @@ const (
 	Disconnected string = "DISCONNECTED"
 	Connecting   string = "CONNECTING"
 	Connected    string = "CONNECTED"
+	Canceling    string = "CANCELING"
 )
 
 type ConnectionListener interface {
@@ -50,6 +51,7 @@ type ConnectViewController struct {
 	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
+	isCancelingConnection        bool
 
 	connectionListeners       *connect.CallbackList[ConnectionListener]
 	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
@@ -69,6 +71,7 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		activeDestinationIds:         map[Id]bool{},
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
+		isCancelingConnection:        false,
 
 		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
 		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
@@ -201,12 +204,21 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	self.connectionStatusChanged(Connecting)
 
 	if location.IsDevice() {
-		clientIds := []Id{
-			*location.ConnectLocationId.ClientId,
+
+		self.stateLock.Lock()
+		isCanceling := self.isCancelingConnection
+		self.stateLock.Unlock()
+
+		if isCanceling {
+			self.connectionStatusChanged(Disconnected)
+		} else {
+			clientIds := []Id{
+				*location.ConnectLocationId.ClientId,
+			}
+			self.setDestinations(clientIds)
+			self.connectionChanged(location)
+			self.connectionStatusChanged(Connected)
 		}
-		self.setDestinations(clientIds)
-		self.connectionChanged(location)
-		self.connectionStatusChanged(Connected)
 	} else {
 		exportedExcludeClientIds := NewIdList()
 		// exclude self
@@ -222,15 +234,25 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
 			func(result *FindProvidersResult, err error) {
 				if err == nil && result.ClientIds != nil {
-					clientIds := []Id{}
-					for i := 0; i < result.ClientIds.Len(); i += 1 {
-						clientId := result.ClientIds.Get(i)
-						clientIds = append(clientIds, *clientId)
-					}
-					self.setDestinations(clientIds)
-					self.connectionChanged(location)
 
-					self.connectionStatusChanged(Connected)
+					self.stateLock.Lock()
+					isCanceling := self.isCancelingConnection
+					self.stateLock.Unlock()
+
+					if isCanceling {
+						self.connectionStatusChanged(Disconnected)
+					} else {
+
+						clientIds := []Id{}
+						for i := 0; i < result.ClientIds.Len(); i += 1 {
+							clientId := result.ClientIds.Get(i)
+							clientIds = append(clientIds, *clientId)
+						}
+						self.setDestinations(clientIds)
+						self.connectionChanged(location)
+
+						self.connectionStatusChanged(Connected)
+					}
 
 				} else {
 					self.connectionStatusChanged(Disconnected)
@@ -238,6 +260,13 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 			},
 		)))
 	}
+}
+
+func (self *ConnectViewController) CancelConnection() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.isCancelingConnection = true
+	self.connectionStatusChanged(Canceling)
 }
 
 func (self *ConnectViewController) Shuffle() {
