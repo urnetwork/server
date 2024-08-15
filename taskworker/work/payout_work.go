@@ -14,9 +14,21 @@ type SchedulePayoutArgs struct {
 
 type SchedulePayoutResult struct{}
 
-func SchedulePayout(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func getNextPayoutDate() time.Time {
+	now := time.Now().UTC()
+	year, month, day := now.Year(), now.Month(), now.Day()
 
-	twoWeeks := 14 * 24 * time.Hour
+	if day < 15 {
+		return time.Date(year, month, 15, 0, 0, 0, 0, time.UTC)
+	}
+
+	if month == time.December {
+		return time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+}
+
+func SchedulePayout(clientSession *session.ClientSession, tx bringyour.PgTx) {
 
 	task.ScheduleTaskInTx(
 		tx,
@@ -24,7 +36,7 @@ func SchedulePayout(clientSession *session.ClientSession, tx bringyour.PgTx) {
 		&SchedulePayoutArgs{},
 		clientSession,
 		task.RunOnce("payout"),
-		task.RunAt(time.Now().Add(twoWeeks)),
+		task.RunAt(getNextPayoutDate()),
 	)
 }
 
