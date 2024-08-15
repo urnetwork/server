@@ -30,7 +30,7 @@ type ConnectionStatusListener interface {
 }
 
 type FilteredLocationsListener interface {
-	FilteredLocationsChanged(filteredLocations *ConnectLocationList)
+	FilteredLocationsChanged()
 }
 
 type LocationListener interface {
@@ -47,6 +47,7 @@ type ConnectViewController struct {
 	stateLock sync.Mutex
 
 	activeLocation               *ConnectLocation
+	locations                    *ConnectLocationList
 	usedDestinationIds           map[Id]bool
 	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
@@ -72,6 +73,7 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
 		isCancelingConnection:        false,
+		locations:                    NewConnectLocationList(),
 
 		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
 		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
@@ -90,6 +92,8 @@ func (self *ConnectViewController) Start() {
 	// self.connectionChanged(activeLocation, activeLocation != nil)
 
 	// TODO filtered results
+
+	self.FilterLocations("")
 }
 
 func (self *ConnectViewController) Stop() {
@@ -100,6 +104,12 @@ func (self *ConnectViewController) GetActiveLocation() *ConnectLocation {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.activeLocation
+}
+
+func (self *ConnectViewController) GetLocations() *ConnectLocationList {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.locations
 }
 
 func (self *ConnectViewController) AddConnectionListener(listener ConnectionListener) Sub {
@@ -126,10 +136,10 @@ func (self *ConnectViewController) AddFilteredLocationsListener(listener Filtere
 }
 
 // `FilteredLocationsListener`
-func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *ConnectLocationList) {
+func (self *ConnectViewController) filteredLocationsChanged() {
 	for _, listener := range self.filteredLocationListeners.Get() {
 		connect.HandleError(func() {
-			listener.FilteredLocationsChanged(filteredLocations)
+			listener.FilteredLocationsChanged()
 		})
 	}
 }
@@ -436,7 +446,8 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
-	self.filteredLocationsChanged(exportedFilteredLocations)
+	self.locations = exportedFilteredLocations
+	self.filteredLocationsChanged()
 }
 
 // GL
