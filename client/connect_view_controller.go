@@ -33,10 +33,9 @@ type FilteredLocationsListener interface {
 	FilteredLocationsChanged()
 }
 
-// type LocationListener interface {
-// 	LocationChanged(location *ConnectLocation)
-// }
-
+type ConnectedProviderCountListener interface {
+	ConnectedProviderCountChanged(count int32)
+}
 type ConnectViewController struct {
 	glViewController
 
@@ -53,10 +52,12 @@ type ConnectViewController struct {
 	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
+	connectedProviderCount       int32
 
-	selectedLocationListeners *connect.CallbackList[SelectedLocationListener]
-	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
-	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
+	selectedLocationListeners       *connect.CallbackList[SelectedLocationListener]
+	connectionStatusListeners       *connect.CallbackList[ConnectionStatusListener]
+	filteredLocationListeners       *connect.CallbackList[FilteredLocationsListener]
+	connectedProviderCountListeners *connect.CallbackList[ConnectedProviderCountListener]
 }
 
 func newConnectViewController(ctx context.Context, device *BringYourDevice) *ConnectViewController {
@@ -75,10 +76,12 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		locations:                    NewConnectLocationList(),
 		connectionStatus:             Disconnected,
 		selectedLocation:             nil,
+		connectedProviderCount:       0,
 
-		selectedLocationListeners: connect.NewCallbackList[SelectedLocationListener](),
-		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
-		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
+		selectedLocationListeners:       connect.NewCallbackList[SelectedLocationListener](),
+		connectionStatusListeners:       connect.NewCallbackList[ConnectionStatusListener](),
+		filteredLocationListeners:       connect.NewCallbackList[FilteredLocationsListener](),
+		connectedProviderCountListeners: connect.NewCallbackList[ConnectedProviderCountListener](),
 	}
 	vc.drawController = vc
 	return vc
@@ -177,6 +180,35 @@ func (self *ConnectViewController) selectedLocationChanged(location *ConnectLoca
 			listener.SelectedLocationChanged(location)
 		})
 	}
+}
+
+func (self *ConnectViewController) AddConnectedProviderCountListener(listener ConnectedProviderCountListener) Sub {
+	callbackId := self.connectedProviderCountListeners.Add(listener)
+	return newSub(func() {
+		self.connectedProviderCountListeners.Remove(callbackId)
+	})
+}
+
+// `FilteredLocationsListener`
+func (self *ConnectViewController) connectedProviderCountChanged(count int32) {
+	for _, listener := range self.connectedProviderCountListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectedProviderCountChanged(count)
+		})
+	}
+}
+
+func (self *ConnectViewController) setConnectedProviderCount(count int32) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.connectedProviderCount = count
+	self.connectedProviderCountChanged(count)
+}
+
+func (self *ConnectViewController) GetConnectedProviderCount() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connectedProviderCount
 }
 
 func (self *ConnectViewController) setDestinations(destinationIds []Id) {
@@ -285,6 +317,7 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 							clientIds = append(clientIds, *clientId)
 						}
 						self.setDestinations(clientIds)
+						self.setConnectedProviderCount(int32(len(clientIds)))
 						self.setConnectionStatus(Connected)
 					}
 
@@ -294,6 +327,50 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 			},
 		)))
 	}
+}
+
+func (self *ConnectViewController) ConnectBestAvailable() {
+
+	self.setConnectionStatus(Connecting)
+
+	specs := &ProviderSpecList{}
+	specs.Add(&ProviderSpec{
+		BestAvailable: true,
+	})
+
+	args := &FindProviders2Args{
+		Specs: specs,
+		Count: 1024,
+	}
+
+	self.device.Api().FindProviders2(args, FindProviders2Callback(newApiCallback[*FindProviders2Result](
+		func(result *FindProviders2Result, err error) {
+
+			isCanceling := self.isCanceling()
+			if isCanceling {
+				self.setConnectionStatus(Disconnected)
+			} else {
+
+				if err != nil && result.ProviderStats != nil {
+
+					clientIds := []Id{}
+					for _, provider := range result.ProviderStats.exportedList.values {
+						clientId := provider.ClientId
+						clientIds = append(clientIds, *clientId)
+					}
+					self.setDestinations(clientIds)
+					self.setConnectedProviderCount(int32(len(clientIds)))
+					self.setConnectionStatus(Connected)
+				} else {
+					self.setConnectionStatus(Disconnected)
+				}
+			}
+		},
+	)))
+}
+
+func (self *ConnectViewController) handleConnectResult(clientIdList *IdList, err error) {
+
 }
 
 func (self *ConnectViewController) CancelConnection() {
