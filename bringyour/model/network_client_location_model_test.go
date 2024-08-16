@@ -7,6 +7,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 )
 
 func TestAddDefaultLocations(t *testing.T) {
@@ -118,5 +120,119 @@ func TestCanonicalLocationsParallel(t *testing.T) {
 		}
 
 		assert.Equal(t, 1, len(locationIds))
+	})
+}
+
+func TestBestAvailableProviders(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkIdA := bringyour.NewId()
+
+		userIdA := bringyour.NewId()
+
+		clientSessionA := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkIdA, userIdA, "a"),
+		)
+
+		clientId := bringyour.NewId()
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId := ConnectNetworkClient(
+			ctx,
+			clientId,
+			"0.0.0.0:0",
+			handlerId,
+		)
+
+		secretKeys := map[ProvideMode][]byte{
+			ProvideModePublic: make([]byte, 32),
+		}
+
+		SetProvide(ctx, clientId, secretKeys)
+
+		country := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, country)
+
+		state := &Location{
+			LocationType: LocationTypeRegion,
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, state)
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		SetConnectionLocation(ctx, connectionId, city.LocationId)
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []bringyour.Id{
+				country.LocationId,
+				city.LocationId,
+				state.LocationId,
+			},
+		}
+
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		bestAvailable := true
+		findProviders2Args := &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					BestAvailable: &bestAvailable,
+				},
+			},
+		}
+
+		res, err := FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), 1)
+	})
+}
+
+func TestFindLocationGroupByName(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+		}
+
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		// query existing
+		locationGroup := findLocationGroupByName(StrongPrivacyLaws, ctx)
+		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+		assert.Equal(t, locationGroup.Promoted, true)
+
+		locationGroupId := locationGroup.LocationGroupId
+
+		// query with incorrect case should still return
+		locationGroup = findLocationGroupByName("strong privacy Laws And internet freedom", ctx)
+		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+		assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
+		assert.Equal(t, locationGroup.Promoted, true)
+
+		// query should return nil if no match
+		locationGroup = findLocationGroupByName("invalid", ctx)
+		assert.Equal(t, locationGroup, nil)
 	})
 }
