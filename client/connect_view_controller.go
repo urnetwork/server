@@ -469,11 +469,10 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
+	exportedFilteredLocations.SortByProviderCountDesc()
 	self.locations = exportedFilteredLocations
 	self.filteredLocationsChanged()
 }
-
-// GL
 
 func (self *ConnectViewController) draw(g gl.Context) {
 	// cvcLog("draw")

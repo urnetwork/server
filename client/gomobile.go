@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"reflect"
+	"sort"
 	"time"
 )
 
@@ -146,6 +147,16 @@ func NewLocationDeviceResultList() *LocationDeviceResultList {
 type ConnectLocationList struct {
 	exportedList[*ConnectLocation]
 }
+
+func (cl *ConnectLocationList) SortByProviderCountDesc() {
+	sort.Sort(SortByProviderCountDesc(cl.values))
+}
+
+type SortByProviderCountDesc []*ConnectLocation
+
+func (a SortByProviderCountDesc) Len() int           { return len(a) }
+func (a SortByProviderCountDesc) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a SortByProviderCountDesc) Less(i, j int) bool { return a[i].ProviderCount > a[j].ProviderCount }
 
 func NewConnectLocationList() *ConnectLocationList {
 	return &ConnectLocationList{
