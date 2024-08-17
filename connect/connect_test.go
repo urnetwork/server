@@ -333,19 +333,19 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	// 	}
 	// }
 
-	clientA.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("a", frames)
 		receiveA <- &Message{
-			sourceId:    sourceId,
+			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}
 	})
 
-	clientB.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("b", frames)
 		receiveB <- &Message{
-			sourceId:    sourceId,
+			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}
@@ -539,34 +539,35 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 							}
 						}
 						for j := 0; j < nackM; j += 1 {
-							success := clientA.SendWithTimeout(
+							success, err := clientA.SendWithTimeoutDetailed(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
 								}),
-								connect.Id(clientIdB),
+								connect.DestinationId(connect.Id(clientIdB)),
 								nil,
 								-1,
 								connect.NoAck(),
 							)
-							if !success {
-								panic(errors.New("Could not send."))
+							if !success || err != nil {
+								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
-						success := clientA.Send(
+						success, err := clientA.SendWithTimeoutDetailed(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
 							}),
-							connect.Id(clientIdB),
+							connect.DestinationId(connect.Id(clientIdB)),
 							func(err error) {
 								ackA <- err
 							},
+							-1,
 						)
-						if !success {
-							panic(errors.New("Could not send."))
+						if !success || err != nil {
+							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
 				}()
@@ -699,40 +700,40 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								opts = append(opts, connect.CompanionContract())
 							}
 
-							success := clientB.SendWithTimeout(
+							success, err := clientB.SendWithTimeoutDetailed(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
 								}),
-								connect.Id(clientIdA),
+								connect.DestinationId(connect.Id(clientIdA)),
 								nil,
 								-1,
 								opts...,
 							)
-							if !success {
-								panic(errors.New("Could not send."))
+							if !success || err != nil {
+								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
 						opts := []any{}
 						if contractTest == contractTestAsymmetric {
 							opts = append(opts, connect.CompanionContract())
 						}
-						success := clientB.SendWithTimeout(
+						success, err := clientB.SendWithTimeoutDetailed(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
 							}),
-							connect.Id(clientIdA),
+							connect.DestinationId(connect.Id(clientIdA)),
 							func(err error) {
 								ackB <- err
 							},
 							-1,
 							opts...,
 						)
-						if !success {
-							panic(errors.New("Could not send."))
+						if !success || err != nil {
+							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
 				}()
@@ -816,19 +817,19 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 				// 	}
 				// }
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.Id(clientIdB), false)
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.Id(clientIdA), false)
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.Id(clientIdB), sequenceIdB)
+				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
 				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.Id(clientIdA), sequenceIdA)
+				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
 				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
