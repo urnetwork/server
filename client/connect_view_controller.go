@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -739,17 +741,58 @@ func (self *ConnectLocation) ToCountry() *ConnectLocation {
 	}
 }
 
-type ColorHexMap struct {
-	code string
-	hex  string
-}
+func (self *ConnectViewController) GetColorHex(id string) string {
 
-func (self *ConnectViewController) GetCountryColorHex(code string) string {
-
-	if color, exists := countryCodeColorHexes[code]; exists {
+	if color, exists := countryCodeColorHexes[id]; exists {
 		return color
 	}
-	return ""
+
+	/**
+	 * Fallback if color hex isn't found, generate a new one by mixing two colors together
+	 */
+	keys := make([]string, 0, len(countryCodeColorHexes))
+	for k := range countryCodeColorHexes {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	index1 := getHashIndex(id, len(keys))
+	index2 := getHashIndex(id+"salt", len(keys))
+
+	color1 := countryCodeColorHexes[keys[index1]]
+	color2 := countryCodeColorHexes[keys[index2]]
+
+	return mixColors(color1, color2)
+
+}
+
+// to get a consistent index from the id
+func getHashIndex(id string, mod int) int {
+	hash := md5.Sum([]byte(id))
+	return int(hash[0]) % mod
+}
+
+func mixColors(color1, color2 string) string {
+	r1, g1, b1 := hexToRGB(color1)
+	r2, g2, b2 := hexToRGB(color2)
+
+	// Mix the colors by averaging their RGB components
+	r := (r1 + r2) / 2
+	g := (g1 + g2) / 2
+	b := (b1 + b2) / 2
+
+	return rgbToHex(r, g, b)
+}
+
+func hexToRGB(hex string) (int, int, int) {
+	var r, g, b int
+	fmt.Sscanf(hex, "%02x%02x%02x", &r, &g, &b)
+	return r, g, b
+}
+
+func rgbToHex(r, g, b int) string {
+	return fmt.Sprintf("%02x%02x%02x", r, g, b)
 }
 
 var countryCodeColorHexes = map[string]string{
