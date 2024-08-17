@@ -739,6 +739,89 @@ func (self *ConnectLocation) ToCountry() *ConnectLocation {
 	}
 }
 
+type ColorHexMap struct {
+	code string
+	hex  string
+}
+
+func (self *ConnectViewController) GetCountryColorHex(code string) string {
+
+	if color, exists := countryCodeColorHexes[code]; exists {
+		return color
+	}
+	return ""
+}
+
+var countryCodeColorHexes = map[string]string{
+	"is": "639A88",
+	"ee": "78C0E0",
+	"ca": "449DD1",
+	"de": "663F46",
+	"au": "F29E4C",
+	"us": "BAC5B3",
+	"gb": "F1789B",
+	"jp": "CC3363",
+	"ie": "7EE081",
+	"fi": "F56E48",
+	"nl": "F56E48",
+	"se": "A4C4F4",
+	"fr": "A864DC",
+	"it": "F9F871",
+	"dk": "D6E6F4",
+	"no": "BCE5DC",
+	"be": "9B4A91",
+	"at": "FFCB68",
+	"ch": "FFABA0",
+	"nz": "008A64",
+	"pt": "248C89",
+	"es": "B41F43",
+	"lv": "EEE8A9",
+	"lt": "8179E0",
+	"cz": "99E8CE",
+	"si": "FF6C58",
+	"sk": "87FB67",
+	"pl": "D38B5D",
+	"hu": "FF8484",
+	"hr": "99B2DD",
+	"ro": "C6362F",
+	"bg": "A1CDF4",
+	"gr": "C874D9",
+	"cy": "E1BBC9",
+	"mt": "FFC43D",
+	"il": "A9E4EF",
+	"za": "F2B79F",
+	"ar": "8E8DBE",
+	"br": "DCD6F7",
+	"cl": "FA824C",
+	"cr": "E07A5F",
+	"uy": "7FDEFF",
+	"jm": "7B886F",
+	"tt": "0072BB",
+	"gh": "1098F7",
+	"ke": "F2EDEB",
+	"ng": "64113F",
+	"tn": "6B4D57",
+	"sn": "596869",
+	"na": "813405",
+	"bw": "D45113",
+	"mu": "60E1E0",
+	"mg": "F25D72",
+	"in": "F2E2D2",
+	"kr": "C320D9",
+	"tw": "E6EA23",
+	"my": "3A1772",
+	"ph": "B4CEB3",
+	"id": "586189",
+	"mn": "A6A57A",
+	"ge": "679436",
+	"am": "F2B5D4",
+	"ua": "00F28D",
+	"md": "7F675B",
+	"me": "E5FFDE",
+	"rs": "FF495C",
+	"al": "E4B363",
+}
+
 // merged location and location group
 type ConnectLocationId struct {
 	// if set, the location is a direct connection to another device
