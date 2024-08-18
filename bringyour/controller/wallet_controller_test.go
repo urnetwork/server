@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"log"
 	"testing"
 	"time"
 
@@ -144,7 +143,6 @@ func TestWalletBalance(t *testing.T) {
 		assert.NotEqual(t, result.WalletInfo, nil)
 		assert.NotEqual(t, result.WalletInfo.WalletId, "")
 		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
-		log.Println("result.WalletInfo.Blockchain", result.WalletInfo.Blockchain)
 		assert.Equal(t, result.WalletInfo.Blockchain, "MATIC")
 		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "USDC")
 		assert.NotEqual(t, result.WalletInfo.TokenId, "")

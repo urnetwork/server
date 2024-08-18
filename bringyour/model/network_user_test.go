@@ -15,16 +15,9 @@ func TestNetworkUser(t *testing.T) {
 		ctx := context.Background()
 
 		networkId := bringyour.NewId()
-		// clientId := bringyour.NewId()
 		userId := bringyour.NewId()
 
 		Testing_CreateNetwork(ctx, networkId, "a", userId)
-
-		// userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		// 	NetworkId: networkId,
-		// 	ClientId:  &clientId,
-		// 	UserId:    userId,
-		// })
 
 		networkUser := GetNetworkUser(ctx, userId)
 
