@@ -63,6 +63,7 @@ Options:
 		router.NewRoute("POST", "/network/find-providers", handlers.NetworkFindProviders),
 		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2),
 		router.NewRoute("POST", "/network/create-provider-spec", handlers.NetworkCreateProviderSpec),
+		router.NewRoute("POST", "/network/user", handlers.GetNetworkUser),
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
 		router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
