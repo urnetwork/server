@@ -30,8 +30,9 @@ func TestGetNetworkUser(t *testing.T) {
 		})
 
 		// it should fetch the network_user associated with the session userId
-		networkUser, err := GetNetworkUser(userSession)
+		networkUserResult, err := GetNetworkUser(userSession)
 		assert.Equal(t, err, nil)
+		networkUser := networkUserResult.NetworkUser
 		assert.Equal(t, networkUser.UserId, userId)
 		assert.Equal(t, networkUser.UserName, "test")
 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))

@@ -1,21 +1,34 @@
 package controller
 
 import (
-	"fmt"
-
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
 
+type GetNetworkUserResult struct {
+	NetworkUser *model.NetworkUser         `json:"networkUser,omitempty"`
+	Error       *GetNetworkUserResultError `json:"error,omitempty"`
+}
+
+type GetNetworkUserResultError struct {
+	Message string `json:"message"`
+}
+
 func GetNetworkUser(
 	clientSession *session.ClientSession,
-) (*model.NetworkUser, error) {
+) (*GetNetworkUserResult, error) {
 
 	networkUser := model.GetNetworkUser(clientSession.Ctx, clientSession.ByJwt.UserId)
 	if networkUser == nil {
-		return nil, fmt.Errorf("no user found")
+		return &GetNetworkUserResult{
+			Error: &GetNetworkUserResultError{
+				Message: "No user found",
+			},
+		}, nil
 	}
 
-	return networkUser, nil
+	return &GetNetworkUserResult{
+		NetworkUser: networkUser,
+	}, nil
 
 }
