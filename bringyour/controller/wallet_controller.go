@@ -189,6 +189,10 @@ func WalletCircleTransferOut(
 		returnErr = err
 		return
 	}
+	if walletInfo == nil {
+		returnErr = fmt.Errorf("No circle wallet.")
+		return
+	}
 
 	circleUserToken, err := createCircleUserToken(session)
 	if err != nil {
