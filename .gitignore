@@ -1,6 +1,7 @@
 **/bin
 **/build
 **/.DS_Store
+**/test.out
 
 # binaries
 client/build

@@ -21,7 +21,7 @@ import (
 func IsDoneError(r any) bool {
 	isDoneMessage := func(message string) bool {
 		switch message {
-		case "Done":
+		case "Done", "Done.":
 			return true
 		// pgx
 		case "context canceled", "timeout: context already done: context canceled":
