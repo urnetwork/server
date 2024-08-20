@@ -2,7 +2,7 @@ package client
 
 import (
 	"context"
-	"fmt"
+	// "fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -36,8 +36,6 @@ type ConnectViewController struct {
 	stateLock sync.Mutex
 
 	activeLocation               *ConnectLocation
-	usedDestinationIds           map[Id]bool
-	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 
@@ -54,8 +52,6 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		cancel:           cancel,
 		device:           device,
 
-		usedDestinationIds:           map[Id]bool{},
-		activeDestinationIds:         map[Id]bool{},
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
 
@@ -119,44 +115,6 @@ func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *C
 	}
 }
 
-func (self *ConnectViewController) setDestinations(destinationIds []Id) {
-
-	destinationIdStrs := []string{}
-	for _, destinationId := range destinationIds {
-		destinationIdStrs = append(destinationIdStrs, destinationId.String())
-	}
-	fmt.Printf("Found client ids:\n%s", strings.Join(destinationIdStrs, "\n"))
-
-	self.stateLock.Lock()
-	for _, destinationId := range destinationIds {
-		self.usedDestinationIds[destinationId] = true
-	}
-	clear(self.activeDestinationIds)
-	for _, destinationId := range destinationIds {
-		self.activeDestinationIds[destinationId] = true
-	}
-	self.stateLock.Unlock()
-
-	clientIds := NewIdList()
-	for _, destinationId := range destinationIds {
-		clientIds.Add(&destinationId)
-	}
-
-	self.device.SetDestinationPublicClientIds(clientIds)
-}
-
-/*
-func (self *ConnectViewController) updateDestination(destinationId Id) {
-	self.stateLock.Lock()
-	self.usedDestinationIds[destinationId] = true
-	clear(self.activeDestinationIds)
-	self.activeDestinationIds[destinationId] = true
-	self.stateLock.Unlock()
-
-	self.device.SetDestinationPublicClientId(&destinationId)
-}
-*/
-
 // FIXME ConnectWithSpecs(SpecList)
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
@@ -166,43 +124,34 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// TODO store the connected locationId
 	// TODO reset clientIds
 
-	self.stateLock.Lock()
-	self.activeLocation = location
-	clear(self.usedDestinationIds)
-	clear(self.activeDestinationIds)
-	self.stateLock.Unlock()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.activeLocation = location
+	}()
 
 	if location.IsDevice() {
-		clientIds := []Id{
+		destinationIds := []Id{
 			*location.ConnectLocationId.ClientId,
 		}
-		self.setDestinations(clientIds)
+
+		specs := NewProviderSpecList()
+		for _, destinationId := range destinationIds {
+			specs.Add(&ProviderSpec{
+				ClientId: &destinationId,
+			})
+		}
+		self.device.SetDestination(specs, ProvideModePublic)
 		self.connectionChanged(location)
 	} else {
-		exportedExcludeClientIds := NewIdList()
-		// exclude self
-		exportedExcludeClientIds.Add(self.device.ClientId())
-
-		findProviders := &FindProvidersArgs{
+		specs := NewProviderSpecList()
+		specs.Add(&ProviderSpec{
 			LocationId:      location.ConnectLocationId.LocationId,
 			LocationGroupId: location.ConnectLocationId.LocationGroupId,
-			// FIXME
-			Count:            1024,
-			ExcludeClientIds: exportedExcludeClientIds,
-		}
-		self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
-			func(result *FindProvidersResult, err error) {
-				if err == nil && result.ClientIds != nil {
-					clientIds := []Id{}
-					for i := 0; i < result.ClientIds.Len(); i += 1 {
-						clientId := result.ClientIds.Get(i)
-						clientIds = append(clientIds, *clientId)
-					}
-					self.setDestinations(clientIds)
-					self.connectionChanged(location)
-				}
-			},
-		)))
+		})
+
+		self.device.SetDestination(specs, ProvideModePublic)
+		self.connectionChanged(location)
 	}
 }
 
@@ -247,11 +196,11 @@ func (self *ConnectViewController) Reset() {
 func (self *ConnectViewController) Disconnect() {
 	self.device.RemoveDestination()
 
-	self.stateLock.Lock()
-	self.activeLocation = nil
-	clear(self.usedDestinationIds)
-	clear(self.activeDestinationIds)
-	self.stateLock.Unlock()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.activeLocation = nil
+	}()
 
 	self.connectionChanged(nil)
 }
