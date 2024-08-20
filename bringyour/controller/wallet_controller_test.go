@@ -67,7 +67,7 @@ func TestWalletValidateAddress(t *testing.T) {
 			&WalletValidateAddressArgs{
 				// BringYour USDC Polygon
 				Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
-				Chain:   "MATIC",
+				Chain:   model.MATIC.String(),
 			},
 			session,
 		)
@@ -79,7 +79,7 @@ func TestWalletValidateAddress(t *testing.T) {
 		validateResult, err = WalletValidateAddress(
 			&WalletValidateAddressArgs{
 				Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
-				Chain:   "SOL",
+				Chain:   model.SOL.String(),
 			},
 			session,
 		)
@@ -92,7 +92,7 @@ func TestWalletValidateAddress(t *testing.T) {
 			&WalletValidateAddressArgs{
 				// BringYour USDC Polygon
 				Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
-				Chain:   "SOL",
+				Chain:   model.SOL.String(),
 			},
 			session,
 		)
@@ -126,7 +126,7 @@ func TestWalletBalance(t *testing.T) {
 		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 		// the wallet is empty so these are the defaults
 		assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
-		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "MATIC")
+		assert.Equal(t, result.WalletInfo.BlockchainSymbol, model.MATIC.String())
 		assert.Equal(t, result.WalletInfo.TokenId, "")
 		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
 
@@ -143,7 +143,7 @@ func TestWalletBalance(t *testing.T) {
 		assert.NotEqual(t, result.WalletInfo, nil)
 		assert.NotEqual(t, result.WalletInfo.WalletId, "")
 		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
-		assert.Equal(t, result.WalletInfo.Blockchain, "MATIC")
+		assert.Equal(t, result.WalletInfo.Blockchain, model.MATIC.String())
 		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "USDC")
 		assert.NotEqual(t, result.WalletInfo.TokenId, "")
 		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
