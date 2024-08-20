@@ -321,26 +321,6 @@ func (self *BringYourDevice) RemoveDestination() error {
 	return self.SetDestination(nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestinationPublicClientIds(clientIds *IdList) error {
-	specs := NewProviderSpecList()
-	for i := 0; i < clientIds.Len(); i += 1 {
-		specs.Add(&ProviderSpec{
-			ClientId: clientIds.Get(i),
-		})
-	}
-	return self.SetDestination(specs, ProvideModePublic)
-}
-
-/*
-func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
-	specs := NewProviderSpecList()
-	specs.Add(&ProviderSpec{
-		ClientId: clientId,
-	})
-	return self.SetDestination(specs, ProvideModePublic)
-}
-*/
-
 func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
 	func() {
 		self.stateLock.Lock()
@@ -379,6 +359,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			} else {
 				generator := connect.NewApiMultiClientGenerator(
 					connectSpecs,
+					[]connect.Id{self.clientId},
 					self.apiUrl,
 					self.byJwt,
 					self.platformUrl,
