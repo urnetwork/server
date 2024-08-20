@@ -16,11 +16,13 @@ import (
 
 var cvcLog = logFn("connect_view_controller")
 
+type ConnectionStatus = string
+
 const (
-	Disconnected string = "DISCONNECTED"
-	Connecting   string = "CONNECTING"
-	Connected    string = "CONNECTED"
-	Canceling    string = "CANCELING"
+	Disconnected ConnectionStatus = "DISCONNECTED"
+	Connecting   ConnectionStatus = "CONNECTING"
+	Connected    ConnectionStatus = "CONNECTED"
+	Canceling    ConnectionStatus = "CANCELING"
 )
 
 type SelectedLocationListener interface {
@@ -28,7 +30,7 @@ type SelectedLocationListener interface {
 }
 
 type ConnectionStatusListener interface {
-	ConnectionStatusChanged(status string)
+	ConnectionStatusChanged(status ConnectionStatus)
 }
 
 type FilteredLocationsListener interface {
@@ -49,7 +51,7 @@ type ConnectViewController struct {
 
 	selectedLocation             *ConnectLocation
 	locations                    *ConnectLocationList
-	connectionStatus             string
+	connectionStatus             ConnectionStatus
 	usedDestinationIds           map[Id]bool
 	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
@@ -112,13 +114,13 @@ func (self *ConnectViewController) GetLocations() *ConnectLocationList {
 	return self.locations
 }
 
-func (self *ConnectViewController) GetConnectionStatus() string {
+func (self *ConnectViewController) GetConnectionStatus() ConnectionStatus {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.connectionStatus
 }
 
-func (self *ConnectViewController) setConnectionStatus(status string) {
+func (self *ConnectViewController) setConnectionStatus(status ConnectionStatus) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.connectionStatus = status
@@ -141,7 +143,7 @@ func (self *ConnectViewController) filteredLocationsChanged() {
 	}
 }
 
-func (self *ConnectViewController) connectionStatusChanged(status string) {
+func (self *ConnectViewController) connectionStatusChanged(status ConnectionStatus) {
 	for _, listener := range self.connectionStatusListeners.Get() {
 		connect.HandleError(func() {
 			listener.ConnectionStatusChanged(status)
@@ -548,7 +550,6 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
-	exportedFilteredLocations.SortByProviderCountDesc()
 	self.locations = exportedFilteredLocations
 	self.filteredLocationsChanged()
 }
@@ -575,97 +576,32 @@ func (self *ConnectViewController) Close() {
 
 func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 	// sort locations
-	// - devices
-	// - groups
-	// - promoted
 	// - provider count descending
-	// - country
-	// - region, location
 	// - name
 
 	if a == b {
 		return 0
 	}
 
-	if a.IsDevice() != b.IsDevice() {
-		if a.IsDevice() {
+	// provider count descending
+	if a.ProviderCount != b.ProviderCount {
+		if a.ProviderCount < b.ProviderCount {
+			return 1
+		} else {
+			return -1
+		}
+	}
+
+	if a.Name != b.Name {
+		if a.Name < b.Name {
 			return -1
 		} else {
 			return 1
 		}
 	}
 
-	if a.IsGroup() != b.IsGroup() {
-		if a.IsGroup() {
-			return -1
-		} else {
-			return 1
-		}
-	}
+	return a.ConnectLocationId.Cmp(b.ConnectLocationId)
 
-	if a.IsGroup() {
-		if a.Promoted != b.Promoted {
-			if a.Promoted {
-				return -1
-			} else {
-				return 1
-			}
-		}
-
-		// provider count descending
-		if a.ProviderCount != b.ProviderCount {
-			if a.ProviderCount < b.ProviderCount {
-				return 1
-			} else {
-				return -1
-			}
-		}
-
-		return a.ConnectLocationId.LocationGroupId.Cmp(b.ConnectLocationId.LocationGroupId)
-	} else {
-		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
-			if a.LocationType == LocationTypeCountry {
-				return -1
-			} else {
-				return 1
-			}
-		}
-
-		// provider count descending
-		if a.ProviderCount != b.ProviderCount {
-			if a.ProviderCount < b.ProviderCount {
-				return 1
-			} else {
-				return -1
-			}
-		}
-
-		if (a.LocationType == LocationTypeRegion) != (b.LocationType == LocationTypeRegion) {
-			if a.LocationType == LocationTypeRegion {
-				return -1
-			} else {
-				return 1
-			}
-		}
-
-		if (a.LocationType == LocationTypeCity) != (b.LocationType == LocationTypeCity) {
-			if a.LocationType == LocationTypeCity {
-				return -1
-			} else {
-				return 1
-			}
-		}
-
-		if a.Name != b.Name {
-			if a.Name < b.Name {
-				return -1
-			} else {
-				return 1
-			}
-		}
-
-		return a.ConnectLocationId.Cmp(b.ConnectLocationId)
-	}
 }
 
 // merged location and location group
@@ -741,9 +677,14 @@ func (self *ConnectLocation) ToCountry() *ConnectLocation {
 	}
 }
 
-func (self *ConnectViewController) GetColorHex(id string) string {
+/**
+ * Code is usually the country code which maps to a color hex.
+ * If the location is not a country, we just need a unique string that represents the location
+ * ie locationId.toString()
+ */
+func (self *ConnectViewController) GetColorHex(code string) string {
 
-	if color, exists := countryCodeColorHexes[id]; exists {
+	if color, exists := countryCodeColorHexes[code]; exists {
 		return color
 	}
 
@@ -757,14 +698,13 @@ func (self *ConnectViewController) GetColorHex(id string) string {
 
 	sort.Strings(keys)
 
-	index1 := getHashIndex(id, len(keys))
-	index2 := getHashIndex(id+"salt", len(keys))
+	index1 := getHashIndex(code, len(keys))
+	index2 := getHashIndex(code+"salt", len(keys))
 
 	color1 := countryCodeColorHexes[keys[index1]]
 	color2 := countryCodeColorHexes[keys[index2]]
 
 	return mixColors(color1, color2)
-
 }
 
 // to get a consistent index from the id
