@@ -190,6 +190,11 @@ func WalletCircleTransferOut(
 		return
 	}
 
+	if walletInfo == nil {
+		returnErr = fmt.Errorf("no wallet info found")
+		return
+	}
+
 	circleUserToken, err := createCircleUserToken(session)
 	if err != nil {
 		returnErr = err
@@ -882,6 +887,8 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
 										parsedTokenId := false
 										parsedBalance := false
+										parsedBlockchain := false
+										parsedSymbol := false
 
 										if tokenIdAny, ok := v["id"]; ok {
 											if tokenId, ok := tokenIdAny.(string); ok {
@@ -899,7 +906,21 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 											}
 										}
 
-										parsedUsdc = parsedTokenId && parsedBalance
+										if blockchainAny, ok := v["blockchain"]; ok {
+											if blockchain, ok := blockchainAny.(string); ok {
+												walletInfo.Blockchain = blockchain
+												parsedBlockchain = true
+											}
+										}
+
+										if symbolAny, ok := v["symbol"]; ok {
+											if symbol, ok := symbolAny.(string); ok {
+												walletInfo.BlockchainSymbol = symbol
+												parsedSymbol = true
+											}
+										}
+
+										parsedUsdc = parsedTokenId && parsedBalance && parsedBlockchain && parsedSymbol
 									}
 								}
 							}
@@ -909,7 +930,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 			}
 		}
 
-		if parsedNative && parsedUsdc {
+		if parsedNative || parsedUsdc {
 			// fully parsed
 			completeWalletInfos = append(completeWalletInfos, walletInfo)
 		}

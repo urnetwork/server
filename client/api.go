@@ -730,6 +730,35 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
 	)
 }
 
+type NetworkUser struct {
+	UserId   *Id    `json:"userId"`
+	UserName string `json:"userName"`
+	UserAuth string `json:"userAuth"`
+	Verified bool   `json:"verified"`
+	AuthType string `json:"authType"`
+}
+
+type GetNetworkUserError struct {
+	Message string `json:"message"`
+}
+
+type GetNetworkUserResult struct {
+	NetworkUser *NetworkUser         `json:"networkUser,omitempty"`
+	Error       *GetNetworkUserError `json:"error,omitempty"`
+}
+
+type GetNetworkUserCallback apiCallback[*GetNetworkUserResult]
+
+func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetNetworkUserResult, error) {
+	return get(
+		self.ctx,
+		fmt.Sprintf("%s/network/user", self.apiUrl),
+		self.byJwt,
+		&GetNetworkUserResult{},
+		callback,
+	)
+}
+
 func post[R any](ctx context.Context, url string, args any, byJwt string, result R, callback apiCallback[R]) (R, error) {
 	var requestBodyBytes []byte
 	if args == nil {
