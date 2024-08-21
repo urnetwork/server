@@ -271,13 +271,14 @@ func (self *BringYourApi) NetworkCheck(networkCheck *NetworkCheckArgs, callback 
 type NetworkCreateCallback apiCallback[*NetworkCreateResult]
 
 type NetworkCreateArgs struct {
-	UserName    string `json:"user_name"`
+	UserName    string `json:"user_name,omitempty"`
 	UserAuth    string `json:"user_auth,omitempty"`
 	AuthJwt     string `json:"auth_jwt,omitempty"`
 	AuthJwtType string `json:"auth_jwt_type,omitempty"`
 	Password    string `json:"password,omitempty"`
-	NetworkName string `json:"network_name"`
+	NetworkName string `json:"network_name,omitempty"`
 	Terms       bool   `json:"terms"`
+	GuestMode   bool   `json:"guest_mode"`
 }
 
 type NetworkCreateResult struct {

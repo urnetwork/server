@@ -8,6 +8,7 @@ import (
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
+
 	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/search"
@@ -23,8 +24,14 @@ type NetworkCheckResult struct {
 	Available bool `json:"available"`
 }
 
+type NetworkCreateError = string
+
+const (
+	AgreeToTerms NetworkCreateError = "The terms of service and privacy policy must be accepted."
+)
+
 func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
-	taken := networkNameSearch.AnyAround(session.Ctx, check.NetworkName, 3)
+	taken := networkNameSearch.AnyAround(session.Ctx, check.NetworkName, 1)
 
 	result := &NetworkCheckResult{
 		Available: !taken,
@@ -40,6 +47,7 @@ type NetworkCreateArgs struct {
 	Password    *string `json:"password,omitempty"`
 	NetworkName string  `json:"network_name"`
 	Terms       bool    `json:"terms"`
+	GuestMode   bool    `json:"guest_mode"`
 }
 
 type NetworkCreateResult struct {
@@ -74,7 +82,103 @@ func NetworkCreate(
 		return nil, maxUserAuthAttemptsError()
 	}
 
-	taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 3)
+	if !networkCreate.Terms {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: AgreeToTerms,
+			},
+		}
+		return result, nil
+	}
+
+	// create a guest network
+	if networkCreate.GuestMode {
+
+		created := false
+		var createdNetworkId bringyour.Id
+		var networkName string
+		var createdUserId bringyour.Id
+
+		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+			var err error
+
+			created = true
+			createdUserId = bringyour.NewId()
+			createdNetworkId = bringyour.NewId()
+
+			// generate a random password?
+			password := bringyour.NewId().String()
+
+			passwordSalt := createPasswordSalt()
+			passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+			// generate a random string as network name?
+			networkName = fmt.Sprintf("guest_%s", bringyour.NewId().String())
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network_user
+					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+					VALUES ($1, $2, $3, $4, $5, $6)
+				`,
+				createdUserId,
+				"", // generate some random username, or empty string?
+				AuthTypeGuest,
+				nil,
+				passwordHash,
+				passwordSalt,
+			)
+			bringyour.Raise(err)
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network
+					(network_id, network_name, admin_user_id)
+					VALUES ($1, $2, $3)
+				`,
+				createdNetworkId,
+				networkName,
+				createdUserId,
+			)
+			bringyour.Raise(err)
+		})
+		if created {
+			auditNetworkCreate(networkCreate, createdNetworkId, session)
+
+			// we should disable adding the guest network to name search?
+			// networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+
+			byJwt := jwt.NewByJwt(
+				createdNetworkId,
+				createdUserId,
+				networkCreate.NetworkName,
+				true,
+			)
+			byJwtSigned := byJwt.Sign()
+			result := &NetworkCreateResult{
+				Network: &NetworkCreateResultNetwork{
+					ByJwt:       &byJwtSigned,
+					NetworkName: networkName,
+					NetworkId:   createdNetworkId,
+				},
+			}
+
+			return result, nil
+		} else {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "An error occurred creating a guest network",
+				},
+			}
+			return result, nil
+		}
+	}
+
+	// user is create an authenticated network
+	// check if the network name is already taken
+	taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 1)
 
 	if taken {
 		result := &NetworkCreateResult{
@@ -85,16 +189,8 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	if !networkCreate.Terms {
-		result := &NetworkCreateResult{
-			Error: &NetworkCreateResultError{
-				Message: "The terms of service and privacy policy must be accepted.",
-			},
-		}
-		return result, nil
-	}
-
 	if networkCreate.UserAuth != nil {
+		// user is creating a network via email/phone + pass
 		// validate the user does not exist
 
 		if userAuth == nil {
@@ -211,6 +307,8 @@ func NetworkCreate(
 			return result, nil
 		}
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
+		// user is creating a network via social login
+
 		bringyour.Logger().Printf("Parsing JWT\n")
 		authJwt, err := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
 		bringyour.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
@@ -296,6 +394,7 @@ func NetworkCreate(
 					createdNetworkId,
 					createdUserId,
 					networkCreate.NetworkName,
+					false,
 				)
 				byJwtSigned := byJwt.Sign()
 				result := &NetworkCreateResult{

@@ -43,11 +43,13 @@ func TestGptBeMyPrivacyAgent(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
+		guestMode := false
 
 		byJwt := jwt.NewByJwt(
 			networkId,
 			userId,
 			networkName,
+			guestMode,
 		)
 
 		clientSession := session.Testing_CreateClientSession(

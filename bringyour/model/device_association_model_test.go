@@ -23,10 +23,11 @@ func TestDeviceAdopt(t *testing.T) {
 
 		deviceIdA := bringyour.NewId()
 		clientIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -131,10 +132,11 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 
 		deviceIdA := bringyour.NewId()
 		clientIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -218,10 +220,11 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 
 		deviceIdA := bringyour.NewId()
 		clientIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		clientSessionNoAuth := session.Testing_CreateClientSession(
@@ -306,15 +309,16 @@ func TestDeviceShare(t *testing.T) {
 
 		deviceIdB := bringyour.NewId()
 		clientIdB := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		clientSessionB := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdB, userIdB, "b"),
+			jwt.NewByJwt(networkIdB, userIdB, "b", guestMode),
 		)
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)

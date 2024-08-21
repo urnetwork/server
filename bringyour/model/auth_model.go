@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+
 	// "strconv"
 	"crypto/rand"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
+
 	// "bringyour.com/bringyour/ulid"
 	"bringyour.com/bringyour/jwt"
 )
@@ -26,6 +28,7 @@ const (
 	AuthTypeApple     AuthType = "apple"
 	AuthTypeGoogle    AuthType = "google"
 	AuthTypeBringYour AuthType = "bringyour"
+	AuthTypeGuest     AuthType = "guest"
 )
 
 func UserAuthAttempt(
@@ -287,11 +290,14 @@ func AuthLogin(
 			} else if AuthType(authType) == authJwt.AuthType {
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+				isGuestMode := false
+
 				// successful login
 				byJwt := jwt.NewByJwt(
 					networkId,
 					*userId,
 					networkName,
+					isGuestMode,
 				)
 				result := &AuthLoginResult{
 					Network: &AuthLoginResultNetwork{
@@ -405,11 +411,14 @@ func AuthLoginWithPassword(
 		if userVerified {
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+			isGuestMode := false
+
 			// success
 			byJwt := jwt.NewByJwt(
 				networkId,
 				*userId,
 				networkName,
+				isGuestMode,
 			)
 			signedByJwt := byJwt.Sign()
 			result := &AuthLoginWithPasswordResult{
@@ -554,10 +563,13 @@ func AuthVerify(
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+	isGuestMode := false
+
 	byJwt := jwt.NewByJwt(
 		networkId,
 		userId,
 		networkName,
+		isGuestMode,
 	)
 	result := &AuthVerifyResult{
 		Network: &AuthVerifyResultNetwork{
@@ -1180,11 +1192,14 @@ func AuthCodeLogin(
 			))
 		}
 
+		isGuestMode := false
+
 		byJwt := jwt.NewByJwtWithCreateTime(
 			networkId,
 			userId,
 			networkName,
 			createTime,
+			isGuestMode,
 			authSessionIds...,
 		)
 

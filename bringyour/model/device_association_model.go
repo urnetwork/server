@@ -3,11 +3,13 @@ package model
 import (
 	"fmt"
 	"net/url"
+
 	// "strings"
 	"crypto/rand"
 	"encoding/hex"
 	"image/color"
 	"time"
+
 	// "errors"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -896,10 +898,14 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
+		// can a guest hit DeviceConfirmAdopt?
+		isGuestMode := false
+
 		byJwtWithClientId := jwt.NewByJwt(
 			networkId,
 			userId,
 			networkName,
+			isGuestMode,
 			authSessionIds...,
 		).Client(deviceId, clientId).Sign()
 
