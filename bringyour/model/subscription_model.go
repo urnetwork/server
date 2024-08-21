@@ -113,8 +113,8 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
 
-// 31 days
-const BalanceCodeDuration = 31 * 24 * time.Hour
+// 12 months
+const BalanceCodeDuration = 365 * 24 * time.Hour
 
 // up to 4MiB
 const AcceptableTransfersByteDifference = 4 * 1024 * 1024
