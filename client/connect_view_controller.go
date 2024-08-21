@@ -282,28 +282,6 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 			self.setConnectedProviderCount(location.ProviderCount)
 			self.setConnectionStatus(Connected)
 		}
-
-		// self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
-		// 	func(result *FindProvidersResult, err error) {
-		// 		if err == nil {
-
-		// 			isCanceling := self.isCanceling()
-
-		// 			if isCanceling {
-		// 				self.setConnectionStatus(Disconnected)
-		// 			} else {
-		// 				self.device.SetDestination(specs, ProvideModePublic)
-		// 				// self.connectionChanged(location)
-		// 				self.setSelectedLocation(location)
-		// 				self.setConnectedProviderCount(int32(result.ClientIds.Len()))
-		// 				self.setConnectionStatus(Connected)
-		// 			}
-
-		// 		} else {
-		// 			self.setConnectionStatus(Disconnected)
-		// 		}
-		// 	},
-		// )))
 	}
 }
 
