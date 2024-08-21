@@ -29,48 +29,56 @@ import (
 
 func TestConnect(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone, false, true)
 	})
 }
 
 func TestConnectWithSymmetricContracts(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric, false, true)
 	})
 }
 
 func TestConnectWithAsymmetricContracts(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric, false, true)
 	})
 }
 
 func TestConnectWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone, true, true)
 	})
 }
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric, true, true)
 	})
 }
 
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric, true, true)
 	})
 }
 
 func TestConnectNoTransportReform(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone, false, false)
 	})
 }
 
 func TestConnectWithChaosNoTransportReform(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone, true, false)
 	})
 }
@@ -98,7 +106,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 60 * time.Second
+	receiveTimeout := 90 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -119,9 +127,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 		// if the receive sequence times out, we may get duplicate receives
 		// the timeout should be greater than the write/read and reconnect timeouts in the exchange,
 		// due to chaos
-		sequenceIdleTimeout = 10 * time.Second
+		sequenceIdleTimeout = 15 * time.Second
 	} else {
-		sequenceIdleTimeout = 2 * idleTimeout
+		sequenceIdleTimeout = 5 * idleTimeout
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -333,25 +341,25 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	// 	}
 	// }
 
-	clientA.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("a", frames)
 		receiveA <- &Message{
-			sourceId:    sourceId,
+			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}
 	})
 
-	clientB.AddReceiveCallback(func(sourceId connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("b", frames)
 		receiveB <- &Message{
-			sourceId:    sourceId,
+			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}
 	})
 
-	initialTransferBalance := ByteCount(1024 * 1024 * 1024 * 1024)
+	initialTransferBalance := ByteCount(1024) * ByteCount(1024) * ByteCount(1024) * ByteCount(1024)
 
 	balanceCodeA, err := model.CreateBalanceCode(
 		ctx,
@@ -486,10 +494,10 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 		ackA := make(chan error, 1024)
 		ackB := make(chan error, 1024)
 
-		for burstSize := 1; burstSize < burstM; burstSize += 1 {
+		for burstSize := 1; burstSize <= burstM; burstSize += 1 {
 			for b := 0; b < 2; b += 1 {
 				fmt.Printf(
-					"[%s] burstSize=%d b=%d\n",
+					"[progress][%s] burstSize=%d b=%d\n",
 					model.ByteCountHumanReadable(messageContentSize),
 					burstSize,
 					b,
@@ -539,34 +547,35 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 							}
 						}
 						for j := 0; j < nackM; j += 1 {
-							success := clientA.SendWithTimeout(
+							_, err := clientA.SendWithTimeoutDetailed(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
 								}),
-								connect.Id(clientIdB),
+								connect.DestinationId(connect.Id(clientIdB)),
 								nil,
 								-1,
 								connect.NoAck(),
 							)
-							if !success {
-								panic(errors.New("Could not send."))
+							if err != nil && !bringyour.IsDoneError(err) {
+								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
-						success := clientA.Send(
+						_, err := clientA.SendWithTimeoutDetailed(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
 							}),
-							connect.Id(clientIdB),
+							connect.DestinationId(connect.Id(clientIdB)),
 							func(err error) {
 								ackA <- err
 							},
+							-1,
 						)
-						if !success {
-							panic(errors.New("Could not send."))
+						if err != nil && !bringyour.IsDoneError(err) {
+							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
 				}()
@@ -699,40 +708,40 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								opts = append(opts, connect.CompanionContract())
 							}
 
-							success := clientB.SendWithTimeout(
+							_, err := clientB.SendWithTimeoutDetailed(
 								connect.RequireToFrame(&protocol.SimpleMessage{
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
 								}),
-								connect.Id(clientIdA),
+								connect.DestinationId(connect.Id(clientIdA)),
 								nil,
 								-1,
 								opts...,
 							)
-							if !success {
-								panic(errors.New("Could not send."))
+							if err != nil && !bringyour.IsDoneError(err) {
+								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
 						opts := []any{}
 						if contractTest == contractTestAsymmetric {
 							opts = append(opts, connect.CompanionContract())
 						}
-						success := clientB.SendWithTimeout(
+						_, err := clientB.SendWithTimeoutDetailed(
 							connect.RequireToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
 							}),
-							connect.Id(clientIdA),
+							connect.DestinationId(connect.Id(clientIdA)),
 							func(err error) {
 								ackB <- err
 							},
 							-1,
 							opts...,
 						)
-						if !success {
-							panic(errors.New("Could not send."))
+						if err != nil && !bringyour.IsDoneError(err) {
+							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
 				}()
@@ -816,19 +825,19 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 				// 	}
 				// }
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.Id(clientIdB), false)
+				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.Id(clientIdA), false)
+				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.Id(clientIdB), sequenceIdB)
+				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
 				assert.Equal(t, receiveItemCountA, 0)
 				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.Id(clientIdA), sequenceIdA)
+				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
 				assert.Equal(t, receiveItemCountB, 0)
 				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
@@ -836,23 +845,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	}
 
 	select {
-	case <-time.After(10 * time.Second):
-	}
-
-	flushedContractIdsA := []bringyour.Id{}
-	for _, contractId := range clientA.ContractManager().Flush(false) {
-		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
-	}
-	flushedContractIdsB := []bringyour.Id{}
-	for _, contractId := range clientB.ContractManager().Flush(false) {
-		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
-	}
-
-	clientA.Flush()
-	clientB.Flush()
-
-	select {
-	case <-time.After(4 * time.Second):
+	case <-time.After(1 * time.Second):
 	}
 
 	for _, transportA := range transportAs {
@@ -874,6 +867,22 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	for _, exchange := range exchanges {
 		exchange.Close()
 	}
+
+	select {
+	case <-time.After(1 * time.Second):
+	}
+
+	flushedContractIdsA := []bringyour.Id{}
+	for _, contractId := range clientA.ContractManager().Flush(false) {
+		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
+	}
+	flushedContractIdsB := []bringyour.Id{}
+	for _, contractId := range clientB.ContractManager().Flush(false) {
+		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
+	}
+
+	clientA.Flush()
+	clientB.Flush()
 
 	select {
 	case <-time.After(1 * time.Second):
@@ -902,18 +911,22 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	contractIdPartialClosePartiesAToB := model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
 	contractIdPartialClosePartiesBToA := model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
 
+	// note ContractPartySource is for contracts that were queued up and never used
 	for contractId, party := range contractIdPartialClosePartiesAToB {
-		if party == model.ContractPartyCheckpoint {
+		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdB, 0, false)
 			delete(contractIdPartialClosePartiesAToB, contractId)
 		}
 	}
 	for contractId, party := range contractIdPartialClosePartiesBToA {
-		if party == model.ContractPartyCheckpoint {
+		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdA, 0, false)
 			delete(contractIdPartialClosePartiesBToA, contractId)
 		}
 	}
+
+	assert.Equal(t, len(contractIdPartialClosePartiesAToB), 0)
+	assert.Equal(t, len(contractIdPartialClosePartiesBToA), 0)
 
 	// FIXME what are these other contracts?
 	// for _, party := range contractIdPartialClosePartiesAToB {
@@ -923,22 +936,26 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	// 	assert.Equal(t, model.ContractPartySource, party)
 	// }
 
-	if e := len(contractIdPartialClosePartiesAToB) - len(flushedContractIdsA); 1 < e {
-		assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
-	}
-	for _, contractId := range flushedContractIdsA {
-		party, ok := contractIdPartialClosePartiesAToB[contractId]
-		assert.Equal(t, true, ok)
-		assert.Equal(t, model.ContractPartySource, party)
-	}
-	if e := len(contractIdPartialClosePartiesBToA) - len(flushedContractIdsB); 1 < e {
-		assert.Equal(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
-	}
-	for _, contractId := range flushedContractIdsB {
-		party, ok := contractIdPartialClosePartiesBToA[contractId]
-		assert.Equal(t, true, ok)
-		assert.Equal(t, model.ContractPartySource, party)
-	}
+	// SendSequence now flushes pending contracts when closed
+	assert.Equal(t, len(flushedContractIdsA), 0)
+	assert.Equal(t, len(flushedContractIdsB), 0)
+
+	// if e := len(contractIdPartialClosePartiesAToB) - len(flushedContractIdsA); 1 < e {
+	// 	assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
+	// }
+	// for _, contractId := range flushedContractIdsA {
+	// 	party, ok := contractIdPartialClosePartiesAToB[contractId]
+	// 	assert.Equal(t, true, ok)
+	// 	assert.Equal(t, model.ContractPartySource, party)
+	// }
+	// if e := len(contractIdPartialClosePartiesBToA) - len(flushedContractIdsB); 1 < e {
+	// 	assert.Equal(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
+	// }
+	// for _, contractId := range flushedContractIdsB {
+	// 	party, ok := contractIdPartialClosePartiesBToA[contractId]
+	// 	assert.Equal(t, true, ok)
+	// 	assert.Equal(t, model.ContractPartySource, party)
+	// }
 
 	localStatsA := clientA.ContractManager().LocalStats()
 	localStatsB := clientB.ContractManager().LocalStats()

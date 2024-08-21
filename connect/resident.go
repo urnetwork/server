@@ -559,7 +559,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 						glog.Warning("[ecrr] %s/%s done\n", resident.clientId, resident.residentId)
 					}
 
-					multiRouteReader := resident.client.RouteManager().OpenMultiRouteReader(resident.client.ClientId())
+					multiRouteReader := resident.client.RouteManager().OpenMultiRouteReader(connect.DestinationId(resident.client.ClientId()))
 					if !slices.Contains(multiRouteReader.GetActiveRoutes(), receive) {
 						glog.Warning("[ecrr] %s/%s missing receive route\n", resident.clientId, resident.residentId)
 					}
@@ -1520,9 +1520,9 @@ func (self *Resident) clientForward() {
 */
 
 // `connect.ForwardFunction`
-func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ connect.Id, transferFrameBytes []byte) {
-	sourceId := bringyour.Id(sourceId_)
-	destinationId := bringyour.Id(destinationId_)
+func (self *Resident) handleClientForward(path connect.TransferPath, transferFrameBytes []byte) {
+	sourceId := bringyour.Id(path.SourceId)
+	destinationId := bringyour.Id(path.DestinationId)
 
 	self.UpdateActivity()
 
@@ -1640,8 +1640,8 @@ func (self *Resident) handleClientForward(sourceId_ connect.Id, destinationId_ c
 }
 
 // `connect.ReceiveFunction`
-func (self *Resident) handleClientReceive(sourceId_ connect.Id, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
-	sourceId := bringyour.Id(sourceId_)
+func (self *Resident) handleClientReceive(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	sourceId := bringyour.Id(source.SourceId)
 
 	if sourceId != self.clientId {
 		glog.Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
@@ -1675,7 +1675,7 @@ func (self *Resident) AddTransport() (
 	// in `connect` the transport is bidirectional
 	// in the resident, each transport is a single direction
 	transport := &clientTransport{
-		sendTransport:    connect.NewSendClientTransport(connect.Id(self.clientId)),
+		sendTransport:    connect.NewSendClientTransport(connect.DestinationId(connect.Id(self.clientId))),
 		receiveTransport: connect.NewReceiveGatewayTransport(),
 	}
 

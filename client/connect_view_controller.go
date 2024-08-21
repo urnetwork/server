@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+
 	"crypto/md5"
 	"fmt"
+
 	"slices"
 	"sort"
 	"strings"
@@ -52,8 +54,6 @@ type ConnectViewController struct {
 	selectedLocation             *ConnectLocation
 	locations                    *ConnectLocationList
 	connectionStatus             ConnectionStatus
-	usedDestinationIds           map[Id]bool
-	activeDestinationIds         map[Id]bool
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 	connectedProviderCount       int32
@@ -73,8 +73,6 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		cancel:           cancel,
 		device:           device,
 
-		usedDestinationIds:           map[Id]bool{},
-		activeDestinationIds:         map[Id]bool{},
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
 		locations:                    NewConnectLocationList(),
@@ -166,9 +164,11 @@ func (self *ConnectViewController) AddSelectedLocationListener(listener Selected
 }
 
 func (self *ConnectViewController) setSelectedLocation(location *ConnectLocation) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.selectedLocation = location
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.selectedLocation = location
+	}()
 	self.selectedLocationChanged(location)
 }
 
@@ -215,44 +215,6 @@ func (self *ConnectViewController) GetConnectedProviderCount() int32 {
 	return self.connectedProviderCount
 }
 
-func (self *ConnectViewController) setDestinations(destinationIds []Id) {
-
-	destinationIdStrs := []string{}
-	for _, destinationId := range destinationIds {
-		destinationIdStrs = append(destinationIdStrs, destinationId.String())
-	}
-	fmt.Printf("Found client ids:\n%s", strings.Join(destinationIdStrs, "\n"))
-
-	self.stateLock.Lock()
-	for _, destinationId := range destinationIds {
-		self.usedDestinationIds[destinationId] = true
-	}
-	clear(self.activeDestinationIds)
-	for _, destinationId := range destinationIds {
-		self.activeDestinationIds[destinationId] = true
-	}
-	self.stateLock.Unlock()
-
-	clientIds := NewIdList()
-	for _, destinationId := range destinationIds {
-		clientIds.Add(&destinationId)
-	}
-
-	self.device.SetDestinationPublicClientIds(clientIds)
-}
-
-/*
-func (self *ConnectViewController) updateDestination(destinationId Id) {
-	self.stateLock.Lock()
-	self.usedDestinationIds[destinationId] = true
-	clear(self.activeDestinationIds)
-	self.activeDestinationIds[destinationId] = true
-	self.stateLock.Unlock()
-
-	self.device.SetDestinationPublicClientId(&destinationId)
-}
-*/
-
 // FIXME ConnectWithSpecs(SpecList)
 
 func (self *ConnectViewController) isCanceling() bool {
@@ -272,12 +234,13 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// TODO store the connected locationId
 	// TODO reset clientIds
 
-	self.stateLock.Lock()
-	clear(self.usedDestinationIds)
-	clear(self.activeDestinationIds)
-	self.stateLock.Unlock()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.selectedLocation = location
+	}()
 
-	self.setSelectedLocation(location)
+	// self.setSelectedLocation(location)
 	self.setConnectionStatus(Connecting)
 
 	if location.IsDevice() {
@@ -287,49 +250,60 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		if isCanceling {
 			self.setConnectionStatus(Disconnected)
 		} else {
-			clientIds := []Id{
+			destinationIds := []Id{
 				*location.ConnectLocationId.ClientId,
 			}
-			self.setDestinations(clientIds)
-			self.setConnectionStatus(Connected)
-		}
-	} else {
-		exportedExcludeClientIds := NewIdList()
-		// exclude self
-		exportedExcludeClientIds.Add(self.device.ClientId())
 
-		findProviders := &FindProvidersArgs{
+			specs := NewProviderSpecList()
+			for _, destinationId := range destinationIds {
+				specs.Add(&ProviderSpec{
+					ClientId: &destinationId,
+				})
+			}
+			self.device.SetDestination(specs, ProvideModePublic)
+			// self.selectedLocationChanged(location)
+			self.setSelectedLocation(location)
+		}
+
+	} else {
+		specs := NewProviderSpecList()
+		specs.Add(&ProviderSpec{
 			LocationId:      location.ConnectLocationId.LocationId,
 			LocationGroupId: location.ConnectLocationId.LocationGroupId,
-			// FIXME
-			Count:            1024,
-			ExcludeClientIds: exportedExcludeClientIds,
+		})
+
+		isCanceling := self.isCanceling()
+
+		if isCanceling {
+			self.setConnectionStatus(Disconnected)
+		} else {
+			self.device.SetDestination(specs, ProvideModePublic)
+			self.setSelectedLocation(location)
+			self.setConnectedProviderCount(location.ProviderCount)
+			self.setConnectionStatus(Connected)
 		}
-		self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
-			func(result *FindProvidersResult, err error) {
-				if err == nil && result.ClientIds != nil {
 
-					isCanceling := self.isCanceling()
+		// self.device.Api().FindProviders(findProviders, FindProvidersCallback(newApiCallback[*FindProvidersResult](
+		// 	func(result *FindProvidersResult, err error) {
+		// 		if err == nil {
 
-					if isCanceling {
-						self.setConnectionStatus(Disconnected)
-					} else {
+		// 			isCanceling := self.isCanceling()
 
-						clientIds := []Id{}
-						for i := 0; i < result.ClientIds.Len(); i += 1 {
-							clientId := result.ClientIds.Get(i)
-							clientIds = append(clientIds, *clientId)
-						}
-						self.setDestinations(clientIds)
-						self.setConnectedProviderCount(int32(len(clientIds)))
-						self.setConnectionStatus(Connected)
-					}
+		// 			if isCanceling {
+		// 				self.setConnectionStatus(Disconnected)
+		// 			} else {
+		// 				self.device.SetDestination(specs, ProvideModePublic)
+		// 				// self.connectionChanged(location)
+		// 				self.setSelectedLocation(location)
+		// 				self.setConnectedProviderCount(int32(result.ClientIds.Len()))
+		// 				self.setConnectionStatus(Connected)
+		// 			}
 
-				} else {
-					self.setConnectionStatus(Disconnected)
-				}
-			},
-		)))
+		// 		} else {
+		// 			self.setConnectionStatus(Disconnected)
+		// 		}
+		// 	},
+		// )))
 	}
 }
 
@@ -362,7 +336,6 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 						clientId := provider.ClientId
 						clientIds = append(clientIds, *clientId)
 					}
-					self.setDestinations(clientIds)
 					self.setConnectedProviderCount(int32(len(clientIds)))
 					self.setConnectionStatus(Connected)
 				} else {
@@ -425,12 +398,6 @@ func (self *ConnectViewController) Reset() {
 
 func (self *ConnectViewController) Disconnect() {
 	self.device.RemoveDestination()
-
-	self.stateLock.Lock()
-	clear(self.usedDestinationIds)
-	clear(self.activeDestinationIds)
-	self.stateLock.Unlock()
-
 	self.connectionStatusChanged(Disconnected)
 }
 

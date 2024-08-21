@@ -251,7 +251,7 @@ func (self *BringYourDevice) connectChanged(connectEnabled bool) {
 }
 
 // `ReceivePacketFunction`
-func (self *BringYourDevice) receive(source connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
+func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 	// deviceLog("GOT A PACKET %d", len(packet))
 	for _, receiveCallback := range self.receiveCallbacks.Get() {
 		receiveCallback(source, ipProtocol, packet)
@@ -321,26 +321,6 @@ func (self *BringYourDevice) RemoveDestination() error {
 	return self.SetDestination(nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestinationPublicClientIds(clientIds *IdList) error {
-	specs := NewProviderSpecList()
-	for i := 0; i < clientIds.Len(); i += 1 {
-		specs.Add(&ProviderSpec{
-			ClientId: clientIds.Get(i),
-		})
-	}
-	return self.SetDestination(specs, ProvideModePublic)
-}
-
-/*
-func (self *BringYourDevice) SetDestinationPublicClientId(clientId *Id) error {
-	specs := NewProviderSpecList()
-	specs.Add(&ProviderSpec{
-		ClientId: clientId,
-	})
-	return self.SetDestination(specs, ProvideModePublic)
-}
-*/
-
 func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
 	func() {
 		self.stateLock.Lock()
@@ -357,20 +337,20 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				connectSpecs = append(connectSpecs, specs.Get(i).toConnectProviderSpec())
 			}
 
-			paths := []connect.Path{}
+			destinations := []connect.MultiHopId{}
 			for _, connectSpec := range connectSpecs {
 				if connectSpec.ClientId != nil {
-					paths = append(paths, connect.Path{ClientId: *connectSpec.ClientId})
+					destinations = append(destinations, connect.RequireMultiHopId(*connectSpec.ClientId))
 				}
 			}
 
 			// connect to a single client
 			// no need to optimize this case, use the simplest user nat client
-			if DebugUseSingleClientConnect && len(connectSpecs) == len(paths) && len(paths) == 1 {
+			if DebugUseSingleClientConnect && len(connectSpecs) == len(destinations) && len(destinations) == 1 {
 				self.remoteUserNatClient, returnErr = connect.NewRemoteUserNatClient(
 					self.client,
 					self.receive,
-					paths,
+					destinations,
 					protocol.ProvideMode_Network,
 				)
 				if returnErr != nil {
@@ -379,6 +359,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			} else {
 				generator := connect.NewApiMultiClientGenerator(
 					connectSpecs,
+					[]connect.Id{self.clientId},
 					self.apiUrl,
 					self.byJwt,
 					self.platformUrl,
@@ -419,7 +400,7 @@ func (self *BringYourDevice) Shuffle() {
 func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 	packetCopy := make([]byte, n)
 	copy(packetCopy, packet[0:n])
-	source := connect.Path{ClientId: self.clientId}
+	source := connect.SourceId(self.clientId)
 
 	self.stateLock.Lock()
 	remoteUserNatClient := self.remoteUserNatClient
@@ -445,7 +426,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 }
 
 func (self *BringYourDevice) AddReceivePacket(receivePacket ReceivePacket) Sub {
-	receive := func(destination connect.Path, ipProtocol connect.IpProtocol, packet []byte) {
+	receive := func(destination connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 		receivePacket.ReceivePacket(packet)
 	}
 	callbackId := self.receiveCallbacks.Add(receive)

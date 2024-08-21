@@ -83,13 +83,13 @@ func NewIntList() *IntList {
 	}
 }
 
-type PathList struct {
-	exportedList[*Path]
+type TransferPathList struct {
+	exportedList[*TransferPath]
 }
 
-func NewPathList() *PathList {
-	return &PathList{
-		exportedList: *newExportedList[*Path](),
+func NewTransferPathList() *TransferPathList {
+	return &TransferPathList{
+		exportedList: *newExportedList[*TransferPath](),
 	}
 }
 

@@ -155,29 +155,35 @@ func encodeUuid(src [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
 
-type Path struct {
-	ClientId *Id
-	StreamId *Id
+type TransferPath struct {
+	SourceId      *Id
+	DestinationId *Id
+	StreamId      *Id
 }
 
-func NewPath(clientId *Id, streamId *Id) *Path {
-	return &Path{
-		ClientId: clientId,
-		StreamId: streamId,
+func NewTransferPath(sourceId *Id, destinationId *Id, streamId *Id) *TransferPath {
+	return &TransferPath{
+		SourceId:      sourceId,
+		DestinationId: destinationId,
+		StreamId:      streamId,
 	}
 }
 
-func fromConnectPath(path connect.Path) *Path {
-	return &Path{
-		ClientId: newId(path.ClientId),
-		StreamId: newId(path.StreamId),
+func fromConnect(path connect.TransferPath) *TransferPath {
+	return &TransferPath{
+		SourceId:      newId(path.SourceId),
+		DestinationId: newId(path.DestinationId),
+		StreamId:      newId(path.StreamId),
 	}
 }
 
-func (self *Path) toConnectPath() connect.Path {
-	path := connect.Path{}
-	if self.ClientId != nil {
-		path.ClientId = connect.Id(self.ClientId.id)
+func (self *TransferPath) toConnect() connect.TransferPath {
+	path := connect.TransferPath{}
+	if self.SourceId != nil {
+		path.SourceId = connect.Id(self.SourceId.id)
+	}
+	if self.DestinationId != nil {
+		path.DestinationId = connect.Id(self.DestinationId.id)
 	}
 	if self.StreamId != nil {
 		path.StreamId = connect.Id(self.StreamId.id)
