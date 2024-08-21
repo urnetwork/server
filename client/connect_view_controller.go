@@ -261,8 +261,8 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 				})
 			}
 			self.device.SetDestination(specs, ProvideModePublic)
-			// self.selectedLocationChanged(location)
 			self.setSelectedLocation(location)
+			self.setConnectionStatus(Connected)
 		}
 
 	} else {
