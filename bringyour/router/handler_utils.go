@@ -76,7 +76,7 @@ func wrap[R any](
 
 // guarantees NetworkId+UserId
 // denies guest mode requests
-func WrapRequireAuth[R any](
+func WrapRequireAuthNoGuest[R any](
 	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
@@ -101,7 +101,7 @@ func WrapRequireAuth[R any](
 }
 
 // allow guest mode, or authenticated requests
-func WrapRequireGuestAuth[R any](
+func WrapRequireAuth[R any](
 	impl ImplFunction[R],
 	w http.ResponseWriter,
 	req *http.Request,
@@ -223,13 +223,13 @@ func wrapWithInput[T any, R any](
 
 // guarantees NetworkId+UserId
 // denies guest mode requests
-func WrapWithInputRequireAuth[T any, R any](
+func WrapWithInputRequireAuthNoGuest[T any, R any](
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
-	WrapWithInputBodyFormatterRequireAuth(
+	WrapWithInputBodyFormatterRequireAuthNoGuest(
 		RequestBodyFormatter,
 		impl,
 		w,
@@ -238,7 +238,7 @@ func WrapWithInputRequireAuth[T any, R any](
 	)
 }
 
-func WrapWithInputBodyFormatterRequireAuth[T any, R any](
+func WrapWithInputBodyFormatterRequireAuthNoGuest[T any, R any](
 	bodyFormatter BodyFormatFunction,
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
@@ -267,14 +267,13 @@ func WrapWithInputBodyFormatterRequireAuth[T any, R any](
 }
 
 // guarantees NetworkId+UserId
-// denies guest mode requests
-func WrapWithInputRequireGuestAuth[T any, R any](
+func WrapWithInputRequireAuth[T any, R any](
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
 	req *http.Request,
 	formatters ...FormatFunction[R],
 ) {
-	WrapWithInputBodyFormatterRequireGuestAuth(
+	WrapWithInputBodyFormatterRequireAuth(
 		RequestBodyFormatter,
 		impl,
 		w,
@@ -283,7 +282,7 @@ func WrapWithInputRequireGuestAuth[T any, R any](
 	)
 }
 
-func WrapWithInputBodyFormatterRequireGuestAuth[T any, R any](
+func WrapWithInputBodyFormatterRequireAuth[T any, R any](
 	bodyFormatter BodyFormatFunction,
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,

@@ -45,7 +45,7 @@ func TestRouterBasic(t *testing.T) {
 			WrapRequireAuth(impl, w, r)
 		}
 
-		Guest := func(w http.ResponseWriter, r *http.Request) {
+		AuthNoGuest := func(w http.ResponseWriter, r *http.Request) {
 			impl := func(clientSession *session.ClientSession) (map[string]any, error) {
 				if clientSession.ByJwt == nil {
 					return nil, errors.New("Missing auth.")
@@ -53,7 +53,7 @@ func TestRouterBasic(t *testing.T) {
 
 				return map[string]any{}, nil
 			}
-			WrapRequireGuestAuth(impl, w, r)
+			WrapRequireAuthNoGuest(impl, w, r)
 		}
 
 		Client := func(w http.ResponseWriter, r *http.Request) {
@@ -89,14 +89,14 @@ func TestRouterBasic(t *testing.T) {
 			WrapWithInputRequireAuth(impl, w, r)
 		}
 
-		InputGuestAuth := func(w http.ResponseWriter, r *http.Request) {
+		InputAuthNoGuest := func(w http.ResponseWriter, r *http.Request) {
 			impl := func(input map[string]any, clientSession *session.ClientSession) (map[string]any, error) {
 				if clientSession.ByJwt == nil {
 					return nil, errors.New("Missing auth.")
 				}
 				return map[string]any{}, nil
 			}
-			WrapWithInputRequireGuestAuth(impl, w, r)
+			WrapWithInputRequireAuthNoGuest(impl, w, r)
 		}
 
 		InputClient := func(w http.ResponseWriter, r *http.Request) {
@@ -115,11 +115,11 @@ func TestRouterBasic(t *testing.T) {
 		routes := []*Route{
 			NewRoute("GET", "/noauth", NoAuth),
 			NewRoute("GET", "/auth", Auth),
-			NewRoute("GET", "/guest", Guest),
+			NewRoute("GET", "/noguest", AuthNoGuest),
 			NewRoute("GET", "/client", Client),
 			NewRoute("POST", "/inputnoauth", InputNoAuth),
 			NewRoute("POST", "/inputauth", InputAuth),
-			NewRoute("POST", "/inputguestauth", InputGuestAuth),
+			NewRoute("POST", "/inputauth-no-guest", InputAuthNoGuest),
 			NewRoute("POST", "/inputclient", InputClient),
 		}
 
@@ -207,22 +207,22 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = bringyour.HttpGet(
-			fmt.Sprintf("http://127.0.0.1:%d/guest", port),
+			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			authGuestMode,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		assert.NotEqual(t, err, nil)
 
 		// authenticated users should be able to access guest level routes
 		_, err = bringyour.HttpGet(
-			fmt.Sprintf("http://127.0.0.1:%d/guest", port),
+			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			auth,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
 		)
 		assert.Equal(t, err, nil)
 
 		_, err = bringyour.HttpGet(
-			fmt.Sprintf("http://127.0.0.1:%d/guest", port),
+			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			bringyour.NoCustomHeaders,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
 		)
@@ -266,14 +266,14 @@ func TestRouterBasic(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 
-		// should deny guest requests
+		// should allow guest requests
 		_, err = bringyour.HttpPost(
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
 			map[string]any{},
 			authGuestMode,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		assert.Equal(t, err, nil)
 
 		_, err = bringyour.HttpPost(
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
@@ -284,16 +284,16 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = bringyour.HttpPost(
-			fmt.Sprintf("http://127.0.0.1:%d/inputguestauth", port),
+			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			authGuestMode,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		assert.NotEqual(t, err, nil)
 
 		// should deny guest requests
 		_, err = bringyour.HttpPost(
-			fmt.Sprintf("http://127.0.0.1:%d/inputguestauth", port),
+			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			auth,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
@@ -301,7 +301,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = bringyour.HttpPost(
-			fmt.Sprintf("http://127.0.0.1:%d/inputguestauth", port),
+			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			bringyour.NoCustomHeaders,
 			bringyour.HttpResponseRequireStatusOk(bringyour.ResponseJsonObject[map[string]any]),
