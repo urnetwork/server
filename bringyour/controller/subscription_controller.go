@@ -74,7 +74,7 @@ func parseVaultSkus(skusInterface []interface{}) []VaultSku {
 }
 
 var vaultStripeSkus = sync.OnceValue(func() []VaultSku {
-	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
+	c := bringyour.Config.RequireSimpleResource("stripe.yml").Parse()
 
 	return parseVaultSkus(c["skus"].([]interface{}))
 })
@@ -107,7 +107,7 @@ var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
 })
 
 var vaultCoinbaseSkus = sync.OnceValue(func() []VaultSku {
-	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	c := bringyour.Config.RequireSimpleResource("coinbase.yml").Parse()
 
 	return parseVaultSkus(c["skus"].([]interface{}))
 })
