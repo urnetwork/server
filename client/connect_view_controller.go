@@ -307,7 +307,7 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 				self.setConnectionStatus(Disconnected)
 			} else {
 
-				if err != nil && result.ProviderStats != nil {
+				if err == nil && result.ProviderStats != nil {
 
 					clientIds := []Id{}
 					for _, provider := range result.ProviderStats.exportedList.values {

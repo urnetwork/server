@@ -483,6 +483,12 @@ func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController 
 	return vc
 }
 
+func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
+	vc := newWalletViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)

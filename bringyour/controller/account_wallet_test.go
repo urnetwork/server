@@ -15,38 +15,62 @@ func TestAccountWallet(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 
 		ctx := context.Background()
-		sourceNetworkId := bringyour.NewId()
-		sourceId := bringyour.NewId()
+		networkId := bringyour.NewId()
+		clientId := bringyour.NewId()
 
 		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId: sourceNetworkId,
-			ClientId:  &sourceId,
+			NetworkId: networkId,
+			ClientId:  &clientId,
 		})
 
 		// invalid chain
-		result, err := CreateAccountWallet(&model.AccountWallet{
+		result, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
 			Blockchain: "ETH",
 		}, session)
 		assert.Equal(t, result, nil)
 		assert.Equal(t, err, ErrInvalidBlockchain)
 
 		// invalid address
-		result, err = CreateAccountWallet(&model.AccountWallet{
+		result, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",
 			WalletAddress: "1234",
 		}, session)
 		assert.Equal(t, result, nil)
 		assert.Equal(t, err, ErrInvalidWalletAddress)
 
+		// should have 0 wallets associated with this session
+		walletResults, err := GetAccountWallets(session)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(walletResults.Wallets), 0)
+
 		// success
-		wallet := &model.AccountWallet{
+		wallet := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",
 			WalletAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
 		}
 
-		result, err = CreateAccountWallet(wallet, session)
+		_, err = CreateAccountWalletExternal(wallet, session)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, result.WalletId, wallet.WalletId)
+
+		// should have 1 wallets associated with this session
+		walletResults, err = GetAccountWallets(session)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(walletResults.Wallets), 1)
+
+		wallet2 := &model.CreateAccountWalletExternalArgs{
+			Blockchain:    "MATIC",
+			WalletAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+		}
+
+		_, err = CreateAccountWalletExternal(wallet2, session)
+		assert.Equal(t, err, nil)
+
+		walletResults, err = GetAccountWallets(session)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(walletResults.Wallets), 2)
 
 	})
 }

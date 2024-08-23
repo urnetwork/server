@@ -598,6 +598,95 @@ func (self *BringYourApi) WalletValidateAddress(walletValidateAddress *WalletVal
 	)
 }
 
+type WalletType = string
+
+const (
+	WalletTypeCircleUserControlled WalletType = "circle_uc"
+	WalletTypeXch                  WalletType = "xch"
+	WalletTypeSol                  WalletType = "sol"
+)
+
+type Blockchain = string
+
+const (
+	SOL   Blockchain = "SOL"
+	MATIC Blockchain = "MATIC"
+)
+
+type CreateAccountWalletArgs struct {
+	Blockchain       Blockchain `json:"blockchain"`
+	WalletAddress    string     `json:"wallet_address"`
+	DefaultTokenType string     `json:"default_token_type"`
+}
+
+type CreateAccountWalletResult struct {
+	WalletId *Id `json:"wallet_id"`
+}
+
+type CreateAccountWalletCallback apiCallback[*CreateAccountWalletResult]
+
+func (self *BringYourApi) CreateAccountWallet(createAccountWallet *CreateAccountWalletArgs, callback CreateAccountWalletCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/account/wallet", self.apiUrl),
+		createAccountWallet,
+		self.byJwt,
+		&CreateAccountWalletResult{},
+		callback,
+	)
+}
+
+type SetPayoutWalletArgs struct {
+	WalletId *Id `json:"wallet_id"`
+}
+
+type SetPayoutWalletResult struct{}
+
+type SetPayoutWalletCallback apiCallback[*SetPayoutWalletResult]
+
+func (self *BringYourApi) SetPayoutWallet(payoutWallet *SetPayoutWalletArgs, callback SetPayoutWalletCallback) {
+	go post(
+		self.ctx,
+		fmt.Sprintf("%s/account/payout-wallet", self.apiUrl),
+		payoutWallet,
+		self.byJwt,
+		&SetPayoutWalletResult{},
+		callback,
+	)
+}
+
+type GetAccountWalletsResult struct {
+	Wallets []*AccountWallet
+}
+
+type GetAccountWalletsCallback apiCallback[*GetAccountWalletsResult]
+
+func (self *BringYourApi) GetAccountWallets(callback GetAccountWalletsCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/account/wallets", self.apiUrl),
+		self.byJwt,
+		&GetAccountWalletsResult{},
+		callback,
+	)
+}
+
+type GetPayoutWalletIdResult struct {
+	Id *Id `json:"id"`
+}
+
+type GetPayoutWalletCallback apiCallback[*GetPayoutWalletIdResult]
+
+func (self *BringYourApi) GetPayoutWallet(callback GetPayoutWalletCallback) {
+	go get(
+		self.ctx,
+		fmt.Sprintf("%s/account/payout-wallet", self.apiUrl),
+		self.byJwt,
+		&GetPayoutWalletIdResult{},
+		callback,
+	)
+}
+
 type CircleUserToken struct {
 	UserToken     string `json:"user_token"`
 	EncryptionKey string `json:"encryption_key"`
