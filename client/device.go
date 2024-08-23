@@ -62,6 +62,8 @@ type BringYourDevice struct {
 	instanceId connect.Id
 
 	client *connect.Client
+	// this is the dynamic connection stategy to the server
+	clientStrategy *connect.ClientStrategy
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -209,6 +211,15 @@ func (self *BringYourDevice) ClientId() *Id {
 
 func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
+}
+
+func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
+	// FIXME
+	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+}
+
+func (self *BringYourDevice) CustomExtender() *Extender {
+	// FIXME
 }
 
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
