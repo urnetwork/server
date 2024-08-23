@@ -14,22 +14,20 @@ type OverlayModeListener interface {
 type OverlayViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	device *BringYourDevice
 
 	stateLock sync.Mutex
 
 	overlayModeListeners *connect.CallbackList[OverlayModeListener]
 }
 
-func NewOverlayViewController() *OverlayViewController {
-	return newOverlayViewController(context.Background())
-}
-
-func newOverlayViewController(ctx context.Context) *OverlayViewController {
+func newOverlayViewController(ctx context.Context, device *BringYourDevice) *OverlayViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &OverlayViewController{
 		ctx:    cancelCtx,
 		cancel: cancel,
+		device: device,
 
 		overlayModeListeners: connect.NewCallbackList[OverlayModeListener](),
 	}
