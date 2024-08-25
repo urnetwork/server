@@ -465,8 +465,8 @@ func (self *BringYourDevice) OpenConnectViewControllerV0() *ConnectViewControlle
 	return vm
 }
 
-func (self *BringYourDevice) OpenWalletViewModel() *WalletViewModel {
-	vm := newWalletViewModel(self.ctx, self)
+func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
+	vm := newWalletViewController(self.ctx, self)
 	self.openViewController(vm)
 	return vm
 }

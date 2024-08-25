@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-var wvmLog = logFn("wallet_view_model")
+var wvcLog = logFn("wallet_view_model")
 
-type WalletViewModel struct {
+type WalletViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	device *BringYourDevice
@@ -16,10 +16,10 @@ type WalletViewModel struct {
 	stateLock sync.Mutex
 }
 
-func newWalletViewModel(ctx context.Context, device *BringYourDevice) *WalletViewModel {
+func newWalletViewController(ctx context.Context, device *BringYourDevice) *WalletViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	vm := &WalletViewModel{
+	vm := &WalletViewController{
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
@@ -27,20 +27,20 @@ func newWalletViewModel(ctx context.Context, device *BringYourDevice) *WalletVie
 	return vm
 }
 
-func (vm *WalletViewModel) Start() {
+func (vc *WalletViewController) Start() {
 }
 
-func (vm *WalletViewModel) Stop() {
+func (vc *WalletViewController) Stop() {
 	// FIXME
 }
 
-func (vm *WalletViewModel) Close() {
-	wvmLog("close")
+func (vc *WalletViewController) Close() {
+	wvcLog("close")
 
-	vm.cancel()
+	vc.cancel()
 }
 
-func (vm *WalletViewModel) GetNextPayoutDate() string {
+func (vc *WalletViewController) GetNextPayoutDate() string {
 	now := time.Now().UTC()
 	year := now.Year()
 	month := now.Month()
