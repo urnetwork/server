@@ -8,7 +8,7 @@ import (
 	"bringyour.com/connect"
 )
 
-var cvmLog = logFn("connect_view_model")
+var connectVcLog = logFn("connect_view_controller_v0")
 
 type ConnectionStatus = string
 
@@ -35,7 +35,7 @@ type ConnectedProviderCountListener interface {
 	ConnectedProviderCountChanged(count int32)
 }
 
-type ConnectViewModel struct {
+type ConnectViewControllerV0 struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	device *BringYourDevice
@@ -51,10 +51,10 @@ type ConnectViewModel struct {
 	connectedProviderCountListeners *connect.CallbackList[ConnectedProviderCountListener]
 }
 
-func newConnectViewModel(ctx context.Context, device *BringYourDevice) *ConnectViewModel {
+func newConnectViewControllerV0(ctx context.Context, device *BringYourDevice) *ConnectViewControllerV0 {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	vm := &ConnectViewModel{
+	vm := &ConnectViewControllerV0{
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
@@ -70,7 +70,7 @@ func newConnectViewModel(ctx context.Context, device *BringYourDevice) *ConnectV
 	return vm
 }
 
-func (vm *ConnectViewModel) Start() {
+func (vc *ConnectViewControllerV0) Start() {
 	// var activeLocation *ConnectLocation
 	// self.stateLock.Lock()
 	// activeLocation = self.activeLocation
@@ -83,120 +83,118 @@ func (vm *ConnectViewModel) Start() {
 	// self.FilterLocations("")
 }
 
-func (vm *ConnectViewModel) Stop() {
+func (vc *ConnectViewControllerV0) Stop() {
 	// FIXME
 }
 
-func (vm *ConnectViewModel) Close() {
-	cvmLog("close")
+func (vc *ConnectViewControllerV0) Close() {
+	connectVcLog("close")
 
-	vm.cancel()
+	vc.cancel()
 }
 
-func (vm *ConnectViewModel) GetConnectionStatus() ConnectionStatus {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
-	return vm.connectionStatus
+func (vc *ConnectViewControllerV0) GetConnectionStatus() ConnectionStatus {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
+	return vc.connectionStatus
 }
 
-func (vm *ConnectViewModel) setConnectionStatus(status ConnectionStatus) {
+func (vc *ConnectViewControllerV0) setConnectionStatus(status ConnectionStatus) {
 	func() {
-		vm.stateLock.Lock()
-		defer vm.stateLock.Unlock()
-		vm.connectionStatus = status
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.connectionStatus = status
 	}()
-	vm.connectionStatusChanged()
+	vc.connectionStatusChanged()
 }
 
-func (vm *ConnectViewModel) connectionStatusChanged() {
-	for _, listener := range vm.connectionStatusListeners.Get() {
+func (vc *ConnectViewControllerV0) connectionStatusChanged() {
+	for _, listener := range vc.connectionStatusListeners.Get() {
 		connect.HandleError(func() {
 			listener.ConnectionStatusChanged()
 		})
 	}
 }
 
-func (vm *ConnectViewModel) AddConnectionStatusListener(listener ConnectionStatusListener) Sub {
-	callbackId := vm.connectionStatusListeners.Add(listener)
+func (vc *ConnectViewControllerV0) AddConnectionStatusListener(listener ConnectionStatusListener) Sub {
+	callbackId := vc.connectionStatusListeners.Add(listener)
 	return newSub(func() {
-		vm.connectionStatusListeners.Remove(callbackId)
+		vc.connectionStatusListeners.Remove(callbackId)
 	})
 }
 
-func (vm *ConnectViewModel) AddSelectedLocationListener(listener SelectedLocationListener) Sub {
-	callbackId := vm.selectedLocationListeners.Add(listener)
+func (vc *ConnectViewControllerV0) AddSelectedLocationListener(listener SelectedLocationListener) Sub {
+	callbackId := vc.selectedLocationListeners.Add(listener)
 	return newSub(func() {
-		vm.selectedLocationListeners.Remove(callbackId)
+		vc.selectedLocationListeners.Remove(callbackId)
 	})
 }
 
-func (vm *ConnectViewModel) setSelectedLocation(location *ConnectLocation) {
+func (vc *ConnectViewControllerV0) setSelectedLocation(location *ConnectLocation) {
 	func() {
-		vm.stateLock.Lock()
-		defer vm.stateLock.Unlock()
-		vm.selectedLocation = location
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.selectedLocation = location
 	}()
-	vm.selectedLocationChanged(location)
+	vc.selectedLocationChanged(location)
 }
 
-func (vm *ConnectViewModel) GetSelectedLocation() *ConnectLocation {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
-	return vm.selectedLocation
+func (vc *ConnectViewControllerV0) GetSelectedLocation() *ConnectLocation {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
+	return vc.selectedLocation
 }
 
-func (vm *ConnectViewModel) selectedLocationChanged(location *ConnectLocation) {
-	for _, listener := range vm.selectedLocationListeners.Get() {
+func (vc *ConnectViewControllerV0) selectedLocationChanged(location *ConnectLocation) {
+	for _, listener := range vc.selectedLocationListeners.Get() {
 		connect.HandleError(func() {
 			listener.SelectedLocationChanged(location)
 		})
 	}
 }
 
-func (vm *ConnectViewModel) AddConnectedProviderCountListener(listener ConnectedProviderCountListener) Sub {
-	callbackId := vm.connectedProviderCountListeners.Add(listener)
+func (vc *ConnectViewControllerV0) AddConnectedProviderCountListener(listener ConnectedProviderCountListener) Sub {
+	callbackId := vc.connectedProviderCountListeners.Add(listener)
 	return newSub(func() {
-		vm.connectedProviderCountListeners.Remove(callbackId)
+		vc.connectedProviderCountListeners.Remove(callbackId)
 	})
 }
 
 // `FilteredLocationsListener`
-func (vm *ConnectViewModel) connectedProviderCountChanged(count int32) {
-	for _, listener := range vm.connectedProviderCountListeners.Get() {
+func (vc *ConnectViewControllerV0) connectedProviderCountChanged(count int32) {
+	for _, listener := range vc.connectedProviderCountListeners.Get() {
 		connect.HandleError(func() {
 			listener.ConnectedProviderCountChanged(count)
 		})
 	}
 }
 
-func (vm *ConnectViewModel) setConnectedProviderCount(count int32) {
+func (vc *ConnectViewControllerV0) setConnectedProviderCount(count int32) {
 	func() {
-		vm.stateLock.Lock()
-		defer vm.stateLock.Unlock()
-		vm.connectedProviderCount = count
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.connectedProviderCount = count
 	}()
-	vm.connectedProviderCountChanged(count)
+	vc.connectedProviderCountChanged(count)
 }
 
-func (vm *ConnectViewModel) GetConnectedProviderCount() int32 {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
-	return vm.connectedProviderCount
+func (vc *ConnectViewControllerV0) GetConnectedProviderCount() int32 {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
+	return vc.connectedProviderCount
 }
 
-// FIXME ConnectWithSpecs(SpecList)
-
-func (vm *ConnectViewModel) isCanceling() bool {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
+func (vc *ConnectViewControllerV0) isCanceling() bool {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
 	isCanceling := false
-	if vm.connectionStatus == Canceling {
+	if vc.connectionStatus == Canceling {
 		isCanceling = true
 	}
 	return isCanceling
 }
 
-func (vm *ConnectViewModel) Connect(location *ConnectLocation) {
+func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 	// api call to get client ids, device.SETLOCATION
 	// call callback
 
@@ -204,20 +202,20 @@ func (vm *ConnectViewModel) Connect(location *ConnectLocation) {
 	// TODO reset clientIds
 
 	func() {
-		vm.stateLock.Lock()
-		defer vm.stateLock.Unlock()
-		vm.selectedLocation = location
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.selectedLocation = location
 	}()
 
 	// self.setSelectedLocation(location)
-	vm.setConnectionStatus(Connecting)
+	vc.setConnectionStatus(Connecting)
 
 	if location.IsDevice() {
 
-		isCanceling := vm.isCanceling()
+		isCanceling := vc.isCanceling()
 
 		if isCanceling {
-			vm.setConnectionStatus(Disconnected)
+			vc.setConnectionStatus(Disconnected)
 		} else {
 			destinationIds := []Id{
 				*location.ConnectLocationId.ClientId,
@@ -229,9 +227,9 @@ func (vm *ConnectViewModel) Connect(location *ConnectLocation) {
 					ClientId: &destinationId,
 				})
 			}
-			vm.device.SetDestination(specs, ProvideModePublic)
-			vm.setSelectedLocation(location)
-			vm.setConnectionStatus(Connected)
+			vc.device.SetDestination(specs, ProvideModePublic)
+			vc.setSelectedLocation(location)
+			vc.setConnectionStatus(Connected)
 		}
 
 	} else {
@@ -241,22 +239,22 @@ func (vm *ConnectViewModel) Connect(location *ConnectLocation) {
 			LocationGroupId: location.ConnectLocationId.LocationGroupId,
 		})
 
-		isCanceling := vm.isCanceling()
+		isCanceling := vc.isCanceling()
 
 		if isCanceling {
-			vm.setConnectionStatus(Disconnected)
+			vc.setConnectionStatus(Disconnected)
 		} else {
-			vm.device.SetDestination(specs, ProvideModePublic)
-			vm.setSelectedLocation(location)
-			vm.setConnectedProviderCount(location.ProviderCount)
-			vm.setConnectionStatus(Connected)
+			vc.device.SetDestination(specs, ProvideModePublic)
+			vc.setSelectedLocation(location)
+			vc.setConnectedProviderCount(location.ProviderCount)
+			vc.setConnectionStatus(Connected)
 		}
 	}
 }
 
-func (vm *ConnectViewModel) ConnectBestAvailable() {
+func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 
-	vm.setConnectionStatus(Connecting)
+	vc.setConnectionStatus(Connecting)
 
 	specs := &ProviderSpecList{}
 	specs.Add(&ProviderSpec{
@@ -268,37 +266,37 @@ func (vm *ConnectViewModel) ConnectBestAvailable() {
 		Count: 1024,
 	}
 
-	vm.device.Api().FindProviders2(args, FindProviders2Callback(newApiCallback[*FindProviders2Result](
+	vc.device.Api().FindProviders2(args, FindProviders2Callback(newApiCallback[*FindProviders2Result](
 		func(result *FindProviders2Result, err error) {
 
-			isCanceling := vm.isCanceling()
+			isCanceling := vc.isCanceling()
 			if isCanceling {
-				vm.setConnectionStatus(Disconnected)
+				vc.setConnectionStatus(Disconnected)
 			} else {
 
-				if err != nil && result.ProviderStats != nil {
+				if err == nil && result.ProviderStats != nil {
 
 					clientIds := []Id{}
 					for _, provider := range result.ProviderStats.exportedList.values {
 						clientId := provider.ClientId
 						clientIds = append(clientIds, *clientId)
 					}
-					vm.setConnectedProviderCount(int32(len(clientIds)))
-					vm.setConnectionStatus(Connected)
+					vc.setConnectedProviderCount(int32(len(clientIds)))
+					vc.setConnectionStatus(Connected)
 				} else {
-					vm.setConnectionStatus(Disconnected)
+					vc.setConnectionStatus(Disconnected)
 				}
 			}
 		},
 	)))
 }
 
-func (vm *ConnectViewModel) CancelConnection() {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
+func (vc *ConnectViewControllerV0) CancelConnection() {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
 	status := Canceling
-	vm.connectionStatus = status
-	vm.connectionStatusChanged()
+	vc.connectionStatus = status
+	vc.connectionStatusChanged()
 }
 
 // func (self *ConnectViewController) Shuffle() {
@@ -339,10 +337,10 @@ func (vm *ConnectViewModel) CancelConnection() {
 // 	// todo how to reset?
 // }
 
-func (vm *ConnectViewModel) Disconnect() {
-	vm.device.RemoveDestination()
-	vm.connectionStatus = Disconnected
-	vm.connectionStatusChanged()
+func (vc *ConnectViewControllerV0) Disconnect() {
+	vc.device.RemoveDestination()
+	vc.connectionStatus = Disconnected
+	vc.connectionStatusChanged()
 }
 
 // merged location and location group
