@@ -453,6 +453,18 @@ func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController 
 	return vc
 }
 
+func (self *BringYourDevice) OpenLocationsViewModel() *LocationsViewModel {
+	vm := newLocationsViewModel(self.ctx, self)
+	self.openViewController(vm)
+	return vm
+}
+
+func (self *BringYourDevice) OpenConnectViewModel() *ConnectViewModel {
+	vm := newConnectViewModel(self.ctx, self)
+	self.openViewController(vm)
+	return vm
+}
+
 func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {
 	vc := newProvideViewController(self.ctx, self)
 	self.openViewController(vc)
