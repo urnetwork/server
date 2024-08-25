@@ -12,13 +12,13 @@ import (
 	"bringyour.com/connect"
 )
 
-var lvmLog = logFn("locations_view_model")
+var locationsVcLog = logFn("locations_view_controller")
 
 type FilteredLocationsListener interface {
 	FilteredLocationsChanged()
 }
 
-type LocationsViewModel struct {
+type LocationsViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	device *BringYourDevice
@@ -32,10 +32,10 @@ type LocationsViewModel struct {
 	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
 }
 
-func newLocationsViewModel(ctx context.Context, device *BringYourDevice) *LocationsViewModel {
+func newLocationsViewController(ctx context.Context, device *BringYourDevice) *LocationsViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	vm := &LocationsViewModel{
+	vm := &LocationsViewController{
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
@@ -49,68 +49,68 @@ func newLocationsViewModel(ctx context.Context, device *BringYourDevice) *Locati
 	return vm
 }
 
-func (vm *LocationsViewModel) Start() {
-	vm.FilterLocations("")
+func (vc *LocationsViewController) Start() {
+	vc.FilterLocations("")
 }
 
-func (vm *LocationsViewModel) Stop() {}
+func (vc *LocationsViewController) Stop() {}
 
-func (vm *LocationsViewModel) Close() {
-	lvmLog("close")
+func (vc *LocationsViewController) Close() {
+	locationsVcLog("close")
 
-	vm.cancel()
+	vc.cancel()
 }
 
-func (vm *LocationsViewModel) GetLocations() *ConnectLocationList {
-	vm.stateLock.Lock()
-	defer vm.stateLock.Unlock()
-	return vm.locations
+func (vc *LocationsViewController) GetLocations() *ConnectLocationList {
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
+	return vc.locations
 }
 
-func (vm *LocationsViewModel) filteredLocationsChanged() {
-	for _, listener := range vm.filteredLocationListeners.Get() {
+func (vc *LocationsViewController) filteredLocationsChanged() {
+	for _, listener := range vc.filteredLocationListeners.Get() {
 		connect.HandleError(func() {
 			listener.FilteredLocationsChanged()
 		})
 	}
 }
 
-func (vm *LocationsViewModel) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
-	callbackId := vm.filteredLocationListeners.Add(listener)
+func (vc *LocationsViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
+	callbackId := vc.filteredLocationListeners.Add(listener)
 	return newSub(func() {
-		vm.filteredLocationListeners.Remove(callbackId)
+		vc.filteredLocationListeners.Remove(callbackId)
 	})
 }
 
-func (vm *LocationsViewModel) FilterLocations(filter string) {
+func (vc *LocationsViewController) FilterLocations(filter string) {
 	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
-	lvmLog("FILTER LOCATIONS %s", filter)
+	locationsVcLog("FILTER LOCATIONS %s", filter)
 
 	var filterSequenceNumber int64
-	vm.stateLock.Lock()
-	vm.nextFilterSequenceNumber += 1
-	filterSequenceNumber = vm.nextFilterSequenceNumber
-	vm.stateLock.Unlock()
+	vc.stateLock.Lock()
+	vc.nextFilterSequenceNumber += 1
+	filterSequenceNumber = vc.nextFilterSequenceNumber
+	vc.stateLock.Unlock()
 
-	lvmLog("POST FILTER LOCATIONS %s", filter)
+	locationsVcLog("POST FILTER LOCATIONS %s", filter)
 
 	if filter == "" {
-		vm.device.Api().GetProviderLocations(FindLocationsCallback(newApiCallback[*FindLocationsResult](
+		vc.device.Api().GetProviderLocations(FindLocationsCallback(newApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
-				lvmLog("FIND LOCATIONS RESULT %s %s", result, err)
+				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {
 					var update bool
-					vm.stateLock.Lock()
-					if vm.previousFilterSequenceNumber < filterSequenceNumber {
-						vm.previousFilterSequenceNumber = filterSequenceNumber
+					vc.stateLock.Lock()
+					if vc.previousFilterSequenceNumber < filterSequenceNumber {
+						vc.previousFilterSequenceNumber = filterSequenceNumber
 						update = true
 					}
-					vm.stateLock.Unlock()
+					vc.stateLock.Unlock()
 
 					if update {
-						vm.setFilteredLocationsFromResult(result)
+						vc.setFilteredLocationsFromResult(result)
 					}
 				}
 			},
@@ -119,20 +119,20 @@ func (vm *LocationsViewModel) FilterLocations(filter string) {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
 		}
-		vm.device.Api().FindProviderLocations(findLocations, FindLocationsCallback(newApiCallback[*FindLocationsResult](
+		vc.device.Api().FindProviderLocations(findLocations, FindLocationsCallback(newApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
-				lvmLog("FIND LOCATIONS RESULT %s %s", result, err)
+				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {
 					var update bool
-					vm.stateLock.Lock()
-					if vm.previousFilterSequenceNumber < filterSequenceNumber {
-						vm.previousFilterSequenceNumber = filterSequenceNumber
+					vc.stateLock.Lock()
+					if vc.previousFilterSequenceNumber < filterSequenceNumber {
+						vc.previousFilterSequenceNumber = filterSequenceNumber
 						update = true
 					}
-					vm.stateLock.Unlock()
+					vc.stateLock.Unlock()
 
 					if update {
-						vm.setFilteredLocationsFromResult(result)
+						vc.setFilteredLocationsFromResult(result)
 					}
 				}
 			},
@@ -140,8 +140,8 @@ func (vm *LocationsViewModel) FilterLocations(filter string) {
 	}
 }
 
-func (vm *LocationsViewModel) setFilteredLocationsFromResult(result *FindLocationsResult) {
-	lvmLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
+func (vc *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult) {
+	locationsVcLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
 
 	locations := []*ConnectLocation{}
 
@@ -198,8 +198,8 @@ func (vm *LocationsViewModel) setFilteredLocationsFromResult(result *FindLocatio
 
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
-	vm.locations = exportedFilteredLocations
-	vm.filteredLocationsChanged()
+	vc.locations = exportedFilteredLocations
+	vc.filteredLocationsChanged()
 }
 
 func cmpConnectLocations(a *ConnectLocation, b *ConnectLocation) int {
@@ -237,7 +237,7 @@ func cmpConnectLocations(a *ConnectLocation, b *ConnectLocation) int {
  * If the location is not a country, we just need a unique string that represents the location
  * ie locationId.toString()
  */
-func (vm *LocationsViewModel) GetColorHex(code string) string {
+func (vc *LocationsViewController) GetColorHex(code string) string {
 
 	if color, exists := countryCodeColorHexes[code]; exists {
 		return color
