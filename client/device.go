@@ -465,6 +465,12 @@ func (self *BringYourDevice) OpenConnectViewModel() *ConnectViewModel {
 	return vm
 }
 
+func (self *BringYourDevice) OpenWalletViewModel() *WalletViewModel {
+	vm := newWalletViewModel(self.ctx, self)
+	self.openViewController(vm)
+	return vm
+}
+
 func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {
 	vc := newProvideViewController(self.ctx, self)
 	self.openViewController(vc)
