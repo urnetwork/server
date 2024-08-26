@@ -213,6 +213,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	standardContractTransferByteCount := 4 * maxMessageContentSize
 	standardContractFillFraction := float32(0.5)
 
+	clientStrategyA := connect.DefaultClientStrategy(ctx)
+	clientStrategyB := connect.DefaultClientStrategy(ctx)
+
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
@@ -306,7 +309,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
+		transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
 		transportAs = append(transportAs, transportA)
 		// go transportA.Run(clientA.RouteManager())
 	}
@@ -322,7 +325,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
+		transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
 		transportBs = append(transportBs, transportB)
 		// go transportB.Run(clientB.RouteManager())
 	}
@@ -525,7 +528,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport a\n")
-						transportA := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authA, clientA.RouteManager())
+						transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
 						transportAs = append(transportAs, transportA)
 						// go transportA.Run(clientA.RouteManager())
 					}
@@ -679,7 +682,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport b\n")
-						transportB := connect.NewPlatformTransportWithDefaults(ctx, randServer(), authB, clientB.RouteManager())
+						transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
 						transportBs = append(transportBs, transportB)
 						// go transportB.Run(clientB.RouteManager())
 					}
