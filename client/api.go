@@ -502,10 +502,9 @@ func (self *BringYourApi) FindProviders(findProviders *FindProvidersArgs, callba
 }
 
 type ProviderSpec struct {
-	LocationId      *Id  `json:"location_id,omitempty"`
-	LocationGroupId *Id  `json:"location_group_id,omitempty"`
-	ClientId        *Id  `json:"client_id,omitempty"`
-	BestAvailable   bool `json:"best_available,omitempty"`
+	LocationId      *Id `json:"location_id,omitempty"`
+	LocationGroupId *Id `json:"location_group_id,omitempty"`
+	ClientId        *Id `json:"client_id,omitempty"`
 }
 
 func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
@@ -542,13 +541,13 @@ type FindProvidersProvider struct {
 	EstimatedBytesPerSecond int `json:"estimated_bytes_per_second"`
 }
 
-func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, callback FindProviders2Callback) {
+func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, callback FindProvidersCallback) {
 	go post(
 		self.ctx,
 		fmt.Sprintf("%s/network/find-providers2", self.apiUrl),
 		findProviders2,
 		self.byJwt,
-		&FindProviders2Result{},
+		&FindProvidersResult{},
 		callback,
 	)
 }
