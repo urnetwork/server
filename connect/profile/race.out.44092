@@ -1,0 +1,72 @@
+==================
+WARNING: DATA RACE
+Read at 0x00c000c79780 by goroutine 258:
+  reflect.typedmemmove()
+      /usr/local/go/src/runtime/mbarrier.go:203 +0x0
+  reflect.packEface()
+      /usr/local/go/src/reflect/value.go:135 +0xa4
+  reflect.valueInterface()
+      /usr/local/go/src/reflect/value.go:1526 +0x148
+  reflect.Value.Interface()
+      /usr/local/go/src/reflect/value.go:1496 +0x74
+  fmt.(*pp).printValue()
+      /usr/local/go/src/fmt/print.go:769 +0x80
+  fmt.(*pp).printValue()
+      /usr/local/go/src/fmt/print.go:921 +0xf88
+  fmt.(*pp).printArg()
+      /usr/local/go/src/fmt/print.go:759 +0x8a0
+  fmt.(*pp).doPrintf()
+      /usr/local/go/src/fmt/print.go:1075 +0x414
+  fmt.Fprintf()
+      /usr/local/go/src/fmt/print.go:224 +0x58
+  github.com/golang/glog/internal/logsink.textPrintf()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/internal/logsink/logsink.go:248 +0x5e4
+  github.com/golang/glog/internal/logsink.Printf()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/internal/logsink/logsink.go:313 +0xb4
+  github.com/golang/glog.sinkf()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/glog.go:243 +0x84
+  github.com/golang/glog.ctxlogf()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/glog.go:234 +0x3b0
+  github.com/golang/glog.logf()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/glog.go:206 +0x174
+  github.com/golang/glog.Infof()
+      /Users/brien/go/pkg/mod/github.com/golang/glog@v1.2.1/glog.go:508 +0x144
+  bringyour.com/connect.(*ClientStrategy).parallelEval.func2()
+      /Users/brien/bringyour/connect/connect/net_http.go:326 +0xf4
+  bringyour.com/connect.(*ClientStrategy).parallelEval.gowrap1()
+      /Users/brien/bringyour/connect/connect/net_http.go:362 +0x44
+
+Previous write at 0x00c000c79780 by goroutine 269:
+  bringyour.com/connect.(*ClientStrategy).updateDialer()
+      /Users/brien/bringyour/connect/connect/net_http.go:270 +0x17c
+  bringyour.com/connect.(*ClientStrategy).WsDialContext.func1()
+      /Users/brien/bringyour/connect/connect/net_http.go:555 +0x184
+  bringyour.com/connect.(*ClientStrategy).parallelEval.func2()
+      /Users/brien/bringyour/connect/connect/net_http.go:322 +0x70
+  bringyour.com/connect.(*ClientStrategy).parallelEval.gowrap1()
+      /Users/brien/bringyour/connect/connect/net_http.go:362 +0x44
+
+Goroutine 258 (running) created at:
+  bringyour.com/connect.(*ClientStrategy).parallelEval()
+      /Users/brien/bringyour/connect/connect/net_http.go:362 +0x718
+  bringyour.com/connect.(*ClientStrategy).WsDialContext()
+      /Users/brien/bringyour/connect/connect/net_http.go:564 +0x120
+  bringyour.com/connect.(*PlatformTransport).run.func1()
+      /Users/brien/bringyour/connect/connect/transport.go:150 +0x98
+  bringyour.com/connect.(*PlatformTransport).run()
+      /Users/brien/bringyour/connect/connect/transport.go:183 +0x30c
+  bringyour.com/connect.NewPlatformTransport.gowrap1()
+      /Users/brien/bringyour/connect/connect/transport.go:128 +0x34
+
+Goroutine 269 (running) created at:
+  bringyour.com/connect.(*ClientStrategy).parallelEval()
+      /Users/brien/bringyour/connect/connect/net_http.go:362 +0x718
+  bringyour.com/connect.(*ClientStrategy).WsDialContext()
+      /Users/brien/bringyour/connect/connect/net_http.go:564 +0x120
+  bringyour.com/connect.(*PlatformTransport).run.func1()
+      /Users/brien/bringyour/connect/connect/transport.go:150 +0x98
+  bringyour.com/connect.(*PlatformTransport).run()
+      /Users/brien/bringyour/connect/connect/transport.go:183 +0x30c
+  bringyour.com/connect.NewPlatformTransport.gowrap1()
+      /Users/brien/bringyour/connect/connect/transport.go:128 +0x34
+==================
