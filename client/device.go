@@ -517,12 +517,6 @@ func (self *BringYourDevice) OpenAccountViewController() *AccountViewController 
 	return vc
 }
 
-func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController {
-	vc := newOverlayViewController(self.ctx, self)
-	self.openViewController(vc)
-	return vc
-}
-
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)
