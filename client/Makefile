@@ -9,7 +9,7 @@ build_android:
 # 	gomobile bind -target=android -androidapi 19 -javapkg com.bringyour.network -o build/android/client.aar
 	WARP_VERSION=`warpctl ls version`; \
 	gomobile bind \
-		-target=android/arm64,android/amd64 -androidapi 24 \
+		-target=android/arm64 -androidapi 24 \
 		-javapkg com.bringyour \
 		-trimpath \
 		-gcflags="-dwarf=true" \
