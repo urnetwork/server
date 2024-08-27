@@ -8,14 +8,15 @@ build_android:
 	mkdir -p build/android
 # 	gomobile bind -target=android -androidapi 19 -javapkg com.bringyour.network -o build/android/client.aar
 	WARP_VERSION=`warpctl ls version`; \
-	# -target=android/arm
 	gomobile bind \
-		-ldflags "-X client.Version=$$WARP_VERSION" \
-		-target=android -androidapi 19 \
+		-target=android/arm64 -androidapi 24 \
 		-javapkg com.bringyour \
 		-trimpath \
+		-gcflags="-dwarf=true" \
+		-ldflags="-X client.Version=$$WARP_VERSION -compressdwarf=false -B gobuildid" \
 		-o build/android/BringYourClient.aar \
 	bringyour.com/client
+
 	# validate that all types could be exported
 	cd build/android; \
 	    if [[ -e validate ]]; then mv validate validate.$$(date +%s); fi; \
