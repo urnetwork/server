@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -29,7 +30,10 @@ type ReceivePacket interface {
 	ReceivePacket(packet []byte)
 }
 
-// TODO methods to manage extenders
+type Extender struct {
+	Ip     string
+	Secret string
+}
 
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
@@ -61,7 +65,8 @@ type BringYourDevice struct {
 	clientId   connect.Id
 	instanceId connect.Id
 
-	client *connect.Client
+	clientStrategy *connect.ClientStrategy
+	client         *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -127,7 +132,13 @@ func newBringYourDevice(
 	}
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
-	clientOob := connect.NewApiOutOfBandControl(cancelCtx, byJwt, apiUrl)
+
+	clientStrategy := connect.NewClientStrategy(
+		cancelCtx,
+		connect.DefaultClientStrategySettings(),
+	)
+
+	clientOob := connect.NewApiOutOfBandControl(cancelCtx, clientStrategy, byJwt, apiUrl)
 	client := connect.NewClient(
 		cancelCtx,
 		clientId,
@@ -148,9 +159,10 @@ func newBringYourDevice(
 	}
 	platformTransport := connect.NewPlatformTransportWithDefaults(
 		client.Ctx(),
+		clientStrategy,
+		client.RouteManager(),
 		platformUrl,
 		auth,
-		client.RouteManager(),
 	)
 
 	// go platformTransport.Run(connectClient.RouteManager())
@@ -176,6 +188,7 @@ func newBringYourDevice(
 		settings:          settings,
 		clientId:          clientId,
 		instanceId:        instanceId.toConnectId(),
+		clientStrategy:    clientStrategy,
 		client:            client,
 		// contractManager: contractManager,
 		// routeManager: routeManager,
@@ -209,6 +222,32 @@ func (self *BringYourDevice) ClientId() *Id {
 
 func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
+}
+
+func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
+	extenderIpSecrets := map[netip.Addr]string{}
+	if extender != nil {
+		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
+			extenderIpSecrets[ip] = extender.Secret
+		}
+	}
+	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+}
+
+func (self *BringYourDevice) CustomExtender() *Extender {
+	extenderIpSecrets := self.clientStrategy.CustomExtenders()
+	extenders := []*Extender{}
+	for ip, secret := range extenderIpSecrets {
+		extender := &Extender{
+			Ip:     ip.String(),
+			Secret: secret,
+		}
+		extenders = append(extenders, extender)
+	}
+	if 0 < len(extenders) {
+		return extenders[0]
+	}
+	return nil
 }
 
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
@@ -359,6 +398,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			} else {
 				generator := connect.NewApiMultiClientGenerator(
 					connectSpecs,
+					self.clientStrategy,
+					// exclude self
 					[]connect.Id{self.clientId},
 					self.apiUrl,
 					self.byJwt,
@@ -465,6 +506,12 @@ func (self *BringYourDevice) OpenConnectViewControllerV0() *ConnectViewControlle
 	return vm
 }
 
+func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController {
+	vc := newOverlayViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
 	vm := newWalletViewController(self.ctx, self)
 	self.openViewController(vm)
@@ -491,12 +538,6 @@ func (self *BringYourDevice) OpenDevicesViewController() *DevicesViewController 
 
 func (self *BringYourDevice) OpenAccountViewController() *AccountViewController {
 	vc := newAccountViewController(self.ctx, self)
-	self.openViewController(vc)
-	return vc
-}
-
-func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController {
-	vc := newOverlayViewController(self.ctx, self)
 	self.openViewController(vc)
 	return vc
 }
