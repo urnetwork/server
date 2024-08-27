@@ -13,10 +13,11 @@ var connectVcLog = logFn("connect_view_controller_v0")
 type ConnectionStatus = string
 
 const (
-	Disconnected ConnectionStatus = "DISCONNECTED"
-	Connecting   ConnectionStatus = "CONNECTING"
-	Connected    ConnectionStatus = "CONNECTED"
-	Canceling    ConnectionStatus = "CANCELING"
+	Disconnected   ConnectionStatus = "DISCONNECTED"
+	Connecting     ConnectionStatus = "CONNECTING"
+	DestinationSet ConnectionStatus = "DESTINATION_SET"
+	Connected      ConnectionStatus = "CONNECTED"
+	Canceling      ConnectionStatus = "CANCELING"
 )
 
 type SelectedLocationListener interface {
@@ -99,7 +100,7 @@ func (vc *ConnectViewControllerV0) GetConnectionStatus() ConnectionStatus {
 	return vc.connectionStatus
 }
 
-func (vc *ConnectViewControllerV0) setConnectionStatus(status ConnectionStatus) {
+func (vc *ConnectViewControllerV0) SetConnectionStatus(status ConnectionStatus) {
 	func() {
 		vc.stateLock.Lock()
 		defer vc.stateLock.Unlock()
@@ -208,14 +209,14 @@ func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 	}()
 
 	// self.setSelectedLocation(location)
-	vc.setConnectionStatus(Connecting)
+	vc.SetConnectionStatus(Connecting)
 
 	if location.IsDevice() {
 
 		isCanceling := vc.isCanceling()
 
 		if isCanceling {
-			vc.setConnectionStatus(Disconnected)
+			vc.SetConnectionStatus(Disconnected)
 		} else {
 			destinationIds := []Id{
 				*location.ConnectLocationId.ClientId,
@@ -229,7 +230,7 @@ func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 			}
 			vc.device.SetDestination(specs, ProvideModePublic)
 			vc.setSelectedLocation(location)
-			vc.setConnectionStatus(Connected)
+			vc.SetConnectionStatus(DestinationSet)
 		}
 
 	} else {
@@ -242,19 +243,20 @@ func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 		isCanceling := vc.isCanceling()
 
 		if isCanceling {
-			vc.setConnectionStatus(Disconnected)
+			vc.SetConnectionStatus(Disconnected)
 		} else {
 			vc.device.SetDestination(specs, ProvideModePublic)
 			vc.setSelectedLocation(location)
 			vc.setConnectedProviderCount(location.ProviderCount)
-			vc.setConnectionStatus(Connected)
+			// vc.setConnectionStatus(Connected)
+			vc.SetConnectionStatus(DestinationSet)
 		}
 	}
 }
 
 func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 
-	vc.setConnectionStatus(Connecting)
+	vc.SetConnectionStatus(Connecting)
 
 	specs := &ProviderSpecList{}
 	specs.Add(&ProviderSpec{
@@ -271,7 +273,7 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 
 			isCanceling := vc.isCanceling()
 			if isCanceling {
-				vc.setConnectionStatus(Disconnected)
+				vc.SetConnectionStatus(Disconnected)
 			} else {
 
 				if err == nil && result.ProviderStats != nil {
@@ -282,9 +284,9 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 						clientIds = append(clientIds, *clientId)
 					}
 					vc.setConnectedProviderCount(int32(len(clientIds)))
-					vc.setConnectionStatus(Connected)
+					// vc.setConnectionStatus(Connected)
 				} else {
-					vc.setConnectionStatus(Disconnected)
+					vc.SetConnectionStatus(Disconnected)
 				}
 			}
 		},
