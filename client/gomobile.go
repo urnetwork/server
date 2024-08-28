@@ -113,6 +113,16 @@ func NewFindProvidersProviderList() *FindProvidersProviderList {
 	}
 }
 
+type GridPointList struct {
+	exportedList[*GridPoint]
+}
+
+func NewGridPointList() *GridPointList {
+	return &GridPointList{
+		exportedList: *newExportedList[*GridPoint](),
+	}
+}
+
 type LocationResultList struct {
 	exportedList[*LocationResult]
 }
