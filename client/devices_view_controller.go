@@ -42,7 +42,7 @@ func (self *DevicesViewController) Start() {
 	// FIXME
 
 	// request clients
-	self.device.Api().GetNetworkClients(GetNetworkClientsCallback(newApiCallback[*NetworkClientsResult](
+	self.device.Api().GetNetworkClients(GetNetworkClientsCallback(connect.NewApiCallback[*NetworkClientsResult](
 		func(result *NetworkClientsResult, err error) {
 			if err == nil {
 				// FIXME sort

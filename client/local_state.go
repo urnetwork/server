@@ -230,7 +230,7 @@ func NewAsyncLocalState(localStorageHome string) *AsyncLocalState {
 		localState: localState,
 		jobs:       make(chan *job, AsyncQueueSize),
 	}
-	go asyncLocalState.run()
+	go connect.HandleError(asyncLocalState.run)
 
 	return asyncLocalState
 }

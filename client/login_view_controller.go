@@ -107,7 +107,7 @@ func newNetworkCheck(
 		monitor:     connect.NewMonitor(),
 		updateCount: 0,
 	}
-	go networkCheck.run()
+	go connect.HandleError(networkCheck.run)
 	return networkCheck
 }
 
@@ -127,7 +127,7 @@ func (self *networkCheck) run() {
 				&NetworkCheckArgs{
 					NetworkName: networkName,
 				},
-				newApiCallback[*NetworkCheckResult](func(result *NetworkCheckResult, err error) {
+				connect.NewApiCallback[*NetworkCheckResult](func(result *NetworkCheckResult, err error) {
 					self.stateLock.Lock()
 					head := (updateCount == self.updateCount)
 					self.stateLock.Unlock()
