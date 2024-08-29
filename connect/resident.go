@@ -1078,8 +1078,8 @@ func (self *ResidentTransport) Run() {
 	}
 
 	for {
+		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := model.GetResidentWithInstance(self.ctx, self.clientId, self.instanceId)
-		retryDelay := false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1095,7 +1095,6 @@ func (self *ResidentTransport) Run() {
 
 			if err != nil {
 				glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
-				retryDelay = true
 			}
 
 			if err == nil {
@@ -1120,18 +1119,10 @@ func (self *ResidentTransport) Run() {
 			}
 		}
 
-		if retryDelay {
-			select {
-			case <-self.ctx.Done():
-				return
-			case <-time.After(self.exchange.settings.ExchangeReconnectAfterErrorTimeout):
-			}
-		} else {
-			select {
-			case <-self.ctx.Done():
-				return
-			default:
-			}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-reconnect.After():
 		}
 
 		var residentIdToReplace *bringyour.Id
@@ -1259,8 +1250,8 @@ func (self *ResidentForward) Run() {
 	}
 
 	for {
+		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := model.GetResident(self.ctx, self.clientId)
-		retryDelay := true
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1286,7 +1277,6 @@ func (self *ResidentForward) Run() {
 						}
 						return resident.ResidentId == currentResidentId
 					})
-					retryDelay = false
 				}
 				if glog.V(2) {
 					bringyour.Trace(
@@ -1298,18 +1288,10 @@ func (self *ResidentForward) Run() {
 				}
 			}
 		}
-		if retryDelay {
-			select {
-			case <-self.ctx.Done():
-				return
-			case <-time.After(self.exchange.settings.ExchangeReconnectAfterErrorTimeout):
-			}
-		} else {
-			select {
-			case <-self.ctx.Done():
-				return
-			default:
-			}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-reconnect.After():
 		}
 	}
 }
