@@ -29,9 +29,8 @@ type ConnectViewController struct {
 	previousFilterSequenceNumber int64
 	connectedProviderCount       int32
 
-	selectedLocationListeners       *connect.CallbackList[SelectedLocationListener]
-	connectionStatusListeners       *connect.CallbackList[ConnectionStatusListener]
-	connectedProviderCountListeners *connect.CallbackList[ConnectedProviderCountListener]
+	selectedLocationListeners *connect.CallbackList[SelectedLocationListener]
+	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
 }
 
 func newConnectViewController(ctx context.Context, device *BringYourDevice) *ConnectViewController {
@@ -49,9 +48,8 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		selectedLocation:             nil,
 		connectedProviderCount:       0,
 
-		selectedLocationListeners:       connect.NewCallbackList[SelectedLocationListener](),
-		connectionStatusListeners:       connect.NewCallbackList[ConnectionStatusListener](),
-		connectedProviderCountListeners: connect.NewCallbackList[ConnectedProviderCountListener](),
+		selectedLocationListeners: connect.NewCallbackList[SelectedLocationListener](),
+		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
 	}
 	vc.drawController = vc
 	return vc
@@ -122,35 +120,6 @@ func (self *ConnectViewController) selectedLocationChanged(location *ConnectLoca
 	}
 }
 
-func (self *ConnectViewController) AddConnectedProviderCountListener(listener ConnectedProviderCountListener) Sub {
-	callbackId := self.connectedProviderCountListeners.Add(listener)
-	return newSub(func() {
-		self.connectedProviderCountListeners.Remove(callbackId)
-	})
-}
-
-// `FilteredLocationsListener`
-func (self *ConnectViewController) connectedProviderCountChanged(count int32) {
-	for _, listener := range self.connectedProviderCountListeners.Get() {
-		connect.HandleError(func() {
-			listener.ConnectedProviderCountChanged(count)
-		})
-	}
-}
-
-func (self *ConnectViewController) setConnectedProviderCount(count int32) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.connectedProviderCount = count
-	self.connectedProviderCountChanged(count)
-}
-
-func (self *ConnectViewController) GetConnectedProviderCount() int32 {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.connectedProviderCount
-}
-
 // FIXME ConnectWithSpecs(SpecList)
 
 func (self *ConnectViewController) isCanceling() bool {
@@ -214,7 +183,6 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 		} else {
 			self.device.SetDestination(specs, ProvideModePublic)
 			self.setSelectedLocation(location)
-			self.setConnectedProviderCount(location.ProviderCount)
 			self.setConnectionStatus(Connected)
 		}
 	}
@@ -249,7 +217,6 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 						clientId := provider.ClientId
 						clientIds = append(clientIds, *clientId)
 					}
-					self.setConnectedProviderCount(int32(len(clientIds)))
 					self.setConnectionStatus(Connected)
 				} else {
 					self.setConnectionStatus(Disconnected)
