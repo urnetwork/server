@@ -422,7 +422,7 @@ func (vc *ConnectViewControllerV0) monitorWindowEvents() {
 							vc.setConnectionStatus(Connected)
 						}
 
-						if vc.connectionStatus == Connected && (vc.windowCurrentSize < vc.windowTargetSize) {
+						if vc.connectionStatus == Connected && (vc.windowCurrentSize < vc.windowTargetSize && vc.windowCurrentSize < 2) {
 							vc.setConnectionStatus(Connecting)
 						}
 					}()
