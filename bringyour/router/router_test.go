@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,8 +16,6 @@ import (
 
 func TestRouterBasic(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
-		cancelCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 
 		NoAuth := func(w http.ResponseWriter, r *http.Request) {
 			impl := func(clientSession *session.ClientSession) (map[string]any, error) {
@@ -125,7 +122,7 @@ func TestRouterBasic(t *testing.T) {
 
 		port := 8080
 
-		routerHandler := NewRouter(cancelCtx, routes)
+		routerHandler := NewRouter(routes)
 		go http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
 		select {

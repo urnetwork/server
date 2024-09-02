@@ -34,13 +34,11 @@ func (self *Route) String() string {
 type pathValuesKey struct{}
 
 type Router struct {
-	ctx    context.Context
 	routes []*Route
 }
 
-func NewRouter(ctx context.Context, routes []*Route) *Router {
+func NewRouter(routes []*Route) *Router {
 	return &Router{
-		ctx:    ctx,
 		routes: routes,
 	}
 }
@@ -55,7 +53,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				allow = append(allow, route.method)
 				continue
 			}
-			ctx := context.WithValue(self.ctx, pathValuesKey{}, matches[1:])
+			ctx := context.WithValue(r.Context(), pathValuesKey{}, matches[1:])
 			func() {
 				defer func() {
 					if r := recover(); r != nil {

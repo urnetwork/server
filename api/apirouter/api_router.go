@@ -1,38 +1,11 @@
-package main
+package apirouter
 
 import (
-	"fmt"
-	"net/http"
-	"os"
-
-	"github.com/docopt/docopt-go"
-
-	"bringyour.com/bringyour"
-	"bringyour.com/service/api/apirouter"
+	"bringyour.com/bringyour/router"
+	"bringyour.com/service/api/handlers"
 )
 
-func main() {
-	usage := `BringYour API server.
-
-Usage:
-  api [--port=<port>]
-  api -h | --help
-  api --version
-
-Options:
-  -h --help     Show this screen.
-  --version     Show version.
-  -p --port=<port>  Listen port [default: 80].`
-
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
-	if err != nil {
-		panic(err)
-	}
-
-<<<<<<< HEAD
-	// FIXME signal cancel
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func NewAPIRouter() *router.Router {
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
@@ -98,22 +71,17 @@ Options:
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
+
+		router.NewRoute("PUT", "/peer-to-peer/handshake/([^/]+)/offer/sdp", handlers.PeerToPeerHandshakeOfferSetSDP),
+		router.NewRoute("GET", "/peer-to-peer/handshake/([^/]+)/offer/sdp", handlers.PeerToPeerHandshakeLongPollOfferSDP),
+		router.NewRoute("POST", "/peer-to-peer/handshake/([^/]+)/offer/peer_candidates", handlers.PeerToPeerHandshakeOfferAddPeerCandidate),
+		router.NewRoute("GET", "/peer-to-peer/handshake/([^/]+)/offer/peer_candidates", handlers.PeerToPeerHandshakeOfferLongPollNewPeerCandidates),
+		router.NewRoute("PUT", "/peer-to-peer/handshake/([^/]+)/answer/sdp", handlers.PeerToPeerHandshakeAnswerSetSDP),
+		router.NewRoute("GET", "/peer-to-peer/handshake/([^/]+)/answer/sdp", handlers.PeerToPeerHandshakeLongPollAnswerSDP),
+		router.NewRoute("POST", "/peer-to-peer/handshake/([^/]+)/answer/peer_candidates", handlers.PeerToPeerHandshakeAnswerAddPeerCandidate),
+		router.NewRoute("GET", "/peer-to-peer/handshake/([^/]+)/answer/peer_candidates", handlers.PeerToPeerHandshakeAnswerLongPollNewPeerCandidates),
 	}
 
-=======
->>>>>>> 71a9e24 (api: endpoints for WebRTC handshake)
-	// bringyour.Logger().Printf("%s\n", opts)
+	return router.NewRouter(routes)
 
-	port, _ := opts.Int("--port")
-
-	bringyour.Logger().Printf(
-		"Serving %s %s on *:%d\n",
-		bringyour.RequireEnv(),
-		bringyour.RequireVersion(),
-		port,
-	)
-
-	err = http.ListenAndServe(fmt.Sprintf(":%d", port), apirouter.NewAPIRouter())
-
-	bringyour.Logger().Fatal(err)
 }
