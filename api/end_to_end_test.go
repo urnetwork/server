@@ -467,6 +467,12 @@ func TestEndToEnd(t *testing.T) {
 			}
 			defer conn.Close()
 
+			// There is a race condition in this test: `Offer` side of the WebRTC will close the data channel
+			// This sleep makes sure that the data channel is kept open long enough for the `Answer` side to read
+			// the sent data.
+
+			defer time.Sleep(200 * time.Millisecond)
+
 			_, err = conn.Write([]byte("test offer body"))
 			if err != nil {
 				return fmt.Errorf("offer write: %w", err)
