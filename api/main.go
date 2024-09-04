@@ -97,7 +97,7 @@ Options:
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
-		router.NewRoute("GET", "/account/wallets", handlers.CreateAccountWallet),
+		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
 	}
 
 	// bringyour.Logger().Printf("%s\n", opts)

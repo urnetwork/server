@@ -668,7 +668,7 @@ func (self *BringYourApi) SetPayoutWallet(payoutWallet *SetPayoutWalletArgs, cal
 }
 
 type GetAccountWalletsResult struct {
-	Wallets []*AccountWallet
+	Wallets *AccountWalletsList `json:"wallets"`
 }
 
 type GetAccountWalletsCallback connect.ApiCallback[*GetAccountWalletsResult]

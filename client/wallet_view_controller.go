@@ -5,21 +5,20 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"bringyour.com/connect"
 )
 
 type AccountWallet struct {
-	WalletId         Id         `json:"wallet_id"`
+	WalletId         *Id        `json:"wallet_id"`
 	CircleWalletId   string     `json:"circle_wallet_id,omitempty"`
-	NetworkId        Id         `json:"network_id"`
+	NetworkId        *Id        `json:"network_id"`
 	WalletType       WalletType `json:"wallet_type"`
 	Blockchain       string     `json:"blockchain"`
 	WalletAddress    string     `json:"wallet_address"`
 	Active           bool       `json:"active"`
 	DefaultTokenType string     `json:"default_token_type"`
-	CreateTime       time.Time  `json:"create_time"`
+	CreateTime       *Time      `json:"create_time"`
 }
 
 type WalletViewController struct {
@@ -133,7 +132,10 @@ func (vc *WalletViewController) GetAccountWallets() (accountWallets *AccountWall
 			}
 
 			list := NewAccountWalletsList()
-			list.addAll(results.Wallets...)
+
+			for i := 0; i < results.Wallets.Len(); i++ {
+				list.Add(results.Wallets.Get(i))
+			}
 
 			accountWallets = list
 

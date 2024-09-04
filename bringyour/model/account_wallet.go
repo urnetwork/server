@@ -279,7 +279,7 @@ func FindActiveAccountWallets(
 }
 
 type GetAccountWalletsResult struct {
-	Wallets []*AccountWallet
+	Wallets []*AccountWallet `json:"wallets"`
 }
 
 func GetActiveAccountWallets(session *session.ClientSession) *GetAccountWalletsResult {
