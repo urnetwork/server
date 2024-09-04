@@ -3,11 +3,13 @@ package model
 import (
 	"fmt"
 	"net/url"
+
 	// "strings"
 	"crypto/rand"
 	"encoding/hex"
 	"image/color"
 	"time"
+
 	// "errors"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -789,10 +791,13 @@ func DeviceConfirmAdopt(
                     device_adopt.device_spec,
                     network.network_id,
                     network.network_name,
+										network_user.auth_type as admin_auth_type,
                     device_adopt.owner_user_id
                 FROM device_adopt
                 INNER JOIN network ON
                     network.network_id = device_adopt.owner_network_id
+								LEFT JOIN network_user ON
+                    network_user.user_id = network.admin_user_id
                 WHERE
                     device_adopt.device_association_id = $1
             `,
@@ -804,6 +809,7 @@ func DeviceConfirmAdopt(
 		var networkId bringyour.Id
 		var networkName string
 		var userId bringyour.Id
+		var authType AuthType
 
 		bringyour.WithPgResult(result, err, func() {
 			result.Next()
@@ -812,6 +818,7 @@ func DeviceConfirmAdopt(
 				&deviceSpec,
 				&networkId,
 				&networkName,
+				&authType,
 				&userId,
 			))
 		})
@@ -896,10 +903,13 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
+		isGuestMode := (authType == AuthTypeGuest)
+
 		byJwtWithClientId := jwt.NewByJwt(
 			networkId,
 			userId,
 			networkName,
+			isGuestMode,
 			authSessionIds...,
 		).Client(deviceId, clientId).Sign()
 

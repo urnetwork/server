@@ -62,12 +62,14 @@ type ByJwt struct {
 	AuthSessionIds []bringyour.Id `json:"auth_session_ids,omitempty"`
 	DeviceId       *bringyour.Id  `json:"device_id,omitempty"`
 	ClientId       *bringyour.Id  `json:"client_id,omitempty"`
+	GuestMode      bool           `json:"guest_mode,omitempty"`
 }
 
 func NewByJwt(
 	networkId bringyour.Id,
 	userId bringyour.Id,
 	networkName string,
+	guestMode bool,
 	authSessionIds ...bringyour.Id,
 ) *ByJwt {
 	return NewByJwtWithCreateTime(
@@ -75,6 +77,7 @@ func NewByJwt(
 		userId,
 		networkName,
 		bringyour.NowUtc(),
+		guestMode,
 		authSessionIds...,
 	)
 }
@@ -84,12 +87,14 @@ func NewByJwtWithCreateTime(
 	userId bringyour.Id,
 	networkName string,
 	createTime time.Time,
+	guestMode bool,
 	authSessionIds ...bringyour.Id,
 ) *ByJwt {
 	return &ByJwt{
 		NetworkId:   networkId,
 		UserId:      userId,
 		NetworkName: networkName,
+		GuestMode:   guestMode,
 		// round here so that the string representation in the jwt does not lose information
 		CreateTime:     bringyour.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
@@ -157,6 +162,7 @@ func (self *ByJwt) Client(deviceId bringyour.Id, clientId bringyour.Id) *ByJwt {
 		NetworkName:    self.NetworkName,
 		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
+		GuestMode:      self.GuestMode,
 		DeviceId:       &deviceId,
 		ClientId:       &clientId,
 	}
@@ -169,6 +175,7 @@ func (self *ByJwt) User() *ByJwt {
 		NetworkName:    self.NetworkName,
 		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
+		GuestMode:      self.GuestMode,
 	}
 }
 
