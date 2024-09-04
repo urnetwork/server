@@ -106,28 +106,18 @@ func NetworkCreate(
 			createdUserId = bringyour.NewId()
 			createdNetworkId = bringyour.NewId()
 
-			// generate a random password?
-			password := bringyour.NewId().String()
-
-			passwordSalt := createPasswordSalt()
-			passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
-
-			// generate a random string as network name?
 			networkName = fmt.Sprintf("guest_%s", bringyour.NewId().String())
 
 			_, err = tx.Exec(
 				session.Ctx,
 				`
 					INSERT INTO network_user
-					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
-					VALUES ($1, $2, $3, $4, $5, $6)
+					(user_id, user_name, auth_type)
+					VALUES ($1, $2, $3)
 				`,
 				createdUserId,
-				"", // generate some random username, or empty string?
+				"guest",
 				AuthTypeGuest,
-				nil,
-				passwordHash,
-				passwordSalt,
 			)
 			bringyour.Raise(err)
 

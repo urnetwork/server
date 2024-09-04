@@ -105,6 +105,7 @@ func TestDeviceAdopt(t *testing.T) {
 		assert.Equal(t, byJwt.NetworkId, networkIdA)
 		assert.Equal(t, byJwt.NetworkName, "a")
 		assert.Equal(t, byJwt.UserId, userIdA)
+		assert.Equal(t, byJwt.GuestMode, false)
 
 		// at this point there should be no adopt association
 		associationResult1, err := DeviceAssociations(clientSessionA)
