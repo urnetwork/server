@@ -880,3 +880,25 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 		callback,
 	)
 }
+
+type GetNetworkReferralCodeResult struct {
+	ReferralCode string                       `json:"referralCode,omitempty"`
+	Error        *GetNetworkReferralCodeError `json:"error,omitempty"`
+}
+
+type GetNetworkReferralCodeError struct {
+	Message string `json:"message"`
+}
+
+type GetNetworkReferralCodeCallback connect.ApiCallback[*GetNetworkReferralCodeResult]
+
+func (self *BringYourApi) GetNetworkReferralCode(callback GetNetworkReferralCodeCallback) (*GetNetworkReferralCodeResult, error) {
+	return connect.HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/account/referral-code", self.apiUrl),
+		self.byJwt,
+		&GetNetworkReferralCodeResult{},
+		callback,
+	)
+}
