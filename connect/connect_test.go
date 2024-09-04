@@ -106,7 +106,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 90 * time.Second
+	receiveTimeout := 60 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -127,7 +127,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 		// if the receive sequence times out, we may get duplicate receives
 		// the timeout should be greater than the write/read and reconnect timeouts in the exchange,
 		// due to chaos
-		sequenceIdleTimeout = 15 * time.Second
+		sequenceIdleTimeout = 30 * time.Second
 	} else {
 		sequenceIdleTimeout = 5 * idleTimeout
 	}
@@ -598,8 +598,12 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
-										assert.Equal(t, uint32(i), v.MessageIndex)
-										break ReceiveAckB
+										if uint32(i) <= v.MessageIndex {
+											assert.Equal(t, uint32(i), v.MessageIndex)
+											break ReceiveAckB
+										}
+										// else this is a retransmit that was picked up as the start of a sequence
+										// due to the receive sequence timing out
 									} else {
 										nackBCount += 1
 									}
@@ -766,8 +770,12 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
-										assert.Equal(t, uint32(i), v.MessageIndex)
-										break ReceiveAckA
+										if uint32(i) <= v.MessageIndex {
+											assert.Equal(t, uint32(i), v.MessageIndex)
+											break ReceiveAckA
+										}
+										// else this is a retransmit that was picked up as the start of a sequence
+										// due to the receive sequence timing out
 									} else {
 										nackACount += 1
 									}

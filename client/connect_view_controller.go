@@ -188,56 +188,6 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	}
 }
 
-func (self *ConnectViewController) ConnectBestAvailable() {
-
-	self.setConnectionStatus(Connecting)
-
-	specs := &ProviderSpecList{}
-	specs.Add(&ProviderSpec{
-		BestAvailable: true,
-	})
-
-	args := &FindProviders2Args{
-		Specs: specs,
-		Count: 1024,
-	}
-
-	self.device.Api().FindProviders2(args, FindProviders2Callback(newApiCallback[*FindProviders2Result](
-		func(result *FindProviders2Result, err error) {
-
-			isCanceling := self.isCanceling()
-			if isCanceling {
-				self.setConnectionStatus(Disconnected)
-			} else {
-
-				if err != nil && result.ProviderStats != nil {
-
-					clientIds := []Id{}
-					for _, provider := range result.ProviderStats.exportedList.values {
-						clientId := provider.ClientId
-						clientIds = append(clientIds, *clientId)
-					}
-					self.setConnectionStatus(Connected)
-				} else {
-					self.setConnectionStatus(Disconnected)
-				}
-			}
-		},
-	)))
-}
-
-func (self *ConnectViewController) handleConnectResult(clientIdList *IdList, err error) {
-
-}
-
-func (self *ConnectViewController) CancelConnection() {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	status := Canceling
-	self.connectionStatus = status
-	self.connectionStatusChanged(status)
-}
-
 func (self *ConnectViewController) Shuffle() {
 	self.device.Shuffle()
 }

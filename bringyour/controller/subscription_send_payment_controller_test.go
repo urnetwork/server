@@ -77,14 +77,15 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		destinationWalletAddress := "0x1234567890"
 
-		wallet := &model.AccountWallet{
-			NetworkId:        destinationNetworkId,
-			WalletType:       model.WalletTypeCircleUserControlled,
+		args := &model.CreateAccountWalletExternalArgs{
 			Blockchain:       "MATIC",
 			WalletAddress:    destinationWalletAddress,
 			DefaultTokenType: "USDC",
 		}
-		model.CreateAccountWallet(ctx, wallet)
+		walletId := model.CreateAccountWalletExternal(destinationSession, args)
+		assert.NotEqual(t, walletId, nil)
+
+		wallet := model.GetAccountWallet(ctx, *walletId)
 
 		model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 

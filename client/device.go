@@ -13,6 +13,9 @@ import (
 	"bringyour.com/protocol"
 )
 
+// the device upgrades the api, including setting the client jwt
+// closing the device does not close the api
+
 var deviceLog = logFn("device")
 
 const DebugUseSingleClientConnect = false
@@ -49,6 +52,8 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 type BringYourDevice struct {
+	api *BringYourApi
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -90,36 +95,38 @@ type BringYourDevice struct {
 	provideChangeListeners *connect.CallbackList[ProvideChangeListener]
 	connectChangeListeners *connect.CallbackList[ConnectChangeListener]
 
-	api *BringYourApi
-
 	localUserNatUnsub func()
 }
 
 func NewBringYourDeviceWithDefaults(
+	api *BringYourApi,
 	byJwt string,
 	platformUrl string,
-	apiUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
 	instanceId *Id,
 ) (*BringYourDevice, error) {
-	return newBringYourDevice(
-		byJwt,
-		platformUrl,
-		apiUrl,
-		deviceDescription,
-		deviceSpec,
-		appVersion,
-		instanceId,
-		defaultDeviceSettings(),
+	return traceWithReturnError(
+		func() (*BringYourDevice, error) {
+			return newBringYourDevice(
+				api,
+				byJwt,
+				platformUrl,
+				deviceDescription,
+				deviceSpec,
+				appVersion,
+				instanceId,
+				defaultDeviceSettings(),
+			)
+		},
 	)
 }
 
 func newBringYourDevice(
+	api *BringYourApi,
 	byJwt string,
 	platformUrl string,
-	apiUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -131,16 +138,14 @@ func newBringYourDevice(
 		return nil, err
 	}
 
-	cancelCtx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	// ctx, cancel := api.ctx, api.cancel
+	apiUrl := api.apiUrl
+	clientStrategy := api.clientStrategy
 
-	clientStrategy := connect.NewClientStrategy(
-		cancelCtx,
-		connect.DefaultClientStrategySettings(),
-	)
-
-	clientOob := connect.NewApiOutOfBandControl(cancelCtx, clientStrategy, byJwt, apiUrl)
+	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byJwt, apiUrl)
 	client := connect.NewClient(
-		cancelCtx,
+		ctx,
 		clientId,
 		clientOob,
 		// connect.DefaultClientSettingsNoNetworkEvents(),
@@ -173,11 +178,12 @@ func newBringYourDevice(
 	localUserNatSettings.TcpBufferSettings.UserLimit = 0
 	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
-	api := newBringYourApiWithContext(cancelCtx, apiUrl)
+	// api := newBringYourApiWithContext(cancelCtx, clientStrategy, apiUrl)
 	api.SetByJwt(byJwt)
 
 	byDevice := &BringYourDevice{
-		ctx:               cancelCtx,
+		api:               api,
+		ctx:               ctx,
 		cancel:            cancel,
 		byJwt:             byJwt,
 		platformUrl:       platformUrl,
@@ -201,7 +207,6 @@ func newBringYourDevice(
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
-		api:                               api,
 	}
 
 	// set up with nil destination
@@ -513,9 +518,9 @@ func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController 
 }
 
 func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
-	vm := newWalletViewController(self.ctx, self)
-	self.openViewController(vm)
-	return vm
+	vc := newWalletViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
 }
 
 func (self *BringYourDevice) OpenProvideViewController() *ProvideViewController {

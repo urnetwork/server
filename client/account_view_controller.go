@@ -83,7 +83,7 @@ func newWalletValidateAddress(
 		monitor:     connect.NewMonitor(),
 		updateCount: 0,
 	}
-	go walletValidateAddress.run()
+	go connect.HandleError(walletValidateAddress.run)
 	return walletValidateAddress
 }
 
@@ -105,7 +105,7 @@ func (self *walletValidateAddress) run() {
 					Address: address,
 					Chain:   chain,
 				},
-				newApiCallback[*WalletValidateAddressResult](func(result *WalletValidateAddressResult, err error) {
+				connect.NewApiCallback[*WalletValidateAddressResult](func(result *WalletValidateAddressResult, err error) {
 					self.stateLock.Lock()
 					head := (updateCount == self.updateCount)
 					self.stateLock.Unlock()

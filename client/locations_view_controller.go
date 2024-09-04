@@ -97,7 +97,7 @@ func (vc *LocationsViewController) FilterLocations(filter string) {
 	locationsVcLog("POST FILTER LOCATIONS %s", filter)
 
 	if filter == "" {
-		vc.device.Api().GetProviderLocations(FindLocationsCallback(newApiCallback[*FindLocationsResult](
+		vc.device.Api().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {
@@ -119,7 +119,7 @@ func (vc *LocationsViewController) FilterLocations(filter string) {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
 		}
-		vc.device.Api().FindProviderLocations(findLocations, FindLocationsCallback(newApiCallback[*FindLocationsResult](
+		vc.device.Api().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {

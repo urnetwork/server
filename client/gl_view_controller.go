@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"golang.org/x/mobile/gl"
+
+	"bringyour.com/connect"
 )
 
 var glvcLog = logFn("gl_view_controller")
@@ -196,11 +198,11 @@ func (self *glViewController) StartGl(callback GLViewCallback) {
 		ctx, stop := context.WithCancel(context.Background())
 		self.loopStop = &stop
 
-		go func() {
+		go connect.HandleError(func() {
 			// see https://github.com/golang/go/wiki/LockOSThread
 			runtime.LockOSThread()
 			self.drawLoop(ctx, callback)
-		}()
+		})
 	}
 }
 func (self *glViewController) StopGl() {

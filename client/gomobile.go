@@ -173,6 +173,16 @@ func NewConnectLocationList() *ConnectLocationList {
 	}
 }
 
+type AccountWalletsList struct {
+	exportedList[*AccountWallet]
+}
+
+func NewAccountWalletsList() *AccountWalletsList {
+	return &AccountWalletsList{
+		exportedList: *newExportedList[*AccountWallet](),
+	}
+}
+
 type NetworkClientInfoList struct {
 	exportedList[*NetworkClientInfo]
 }
