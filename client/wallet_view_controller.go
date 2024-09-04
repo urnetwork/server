@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"bringyour.com/connect"
 )
 
 type AccountWallet struct {
@@ -65,7 +67,7 @@ func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blo
 		DefaultTokenType: "USDC",
 	}
 
-	vc.device.Api().CreateAccountWallet(args, CreateAccountWalletCallback(newApiCallback[*CreateAccountWalletResult](
+	vc.device.Api().CreateAccountWallet(args, CreateAccountWalletCallback(connect.NewApiCallback[*CreateAccountWalletResult](
 		func(result *CreateAccountWalletResult, createErr error) {
 
 			if createErr != nil {
@@ -92,7 +94,7 @@ func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
 		WalletId: walletId,
 	}
 
-	vc.device.Api().SetPayoutWallet(args, SetPayoutWalletCallback(newApiCallback[*SetPayoutWalletResult](
+	vc.device.Api().SetPayoutWallet(args, SetPayoutWalletCallback(connect.NewApiCallback[*SetPayoutWalletResult](
 		func(result *SetPayoutWalletResult, setWalletErr error) {
 
 			if setWalletErr != nil {
@@ -106,7 +108,7 @@ func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
 
 func (vc *WalletViewController) GetPayoutWallet() (id *Id, err error) {
 
-	vc.device.Api().GetPayoutWallet(GetPayoutWalletCallback(newApiCallback[*GetPayoutWalletIdResult](
+	vc.device.Api().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
 		func(result *GetPayoutWalletIdResult, getWalletErr error) {
 
 			if getWalletErr != nil {
@@ -122,7 +124,7 @@ func (vc *WalletViewController) GetPayoutWallet() (id *Id, err error) {
 
 func (vc *WalletViewController) GetAccountWallets() (accountWallets *AccountWalletsList, err error) {
 
-	vc.device.Api().GetAccountWallets(newApiCallback[*GetAccountWalletsResult](
+	vc.device.Api().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
 		func(results *GetAccountWalletsResult, walletsErr error) {
 
 			if err != nil {

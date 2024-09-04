@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
 )
+
+// the device upgrades the api, including setting the client jwt
+// closing the device does not close the api
 
 var deviceLog = logFn("device")
 
@@ -29,7 +33,10 @@ type ReceivePacket interface {
 	ReceivePacket(packet []byte)
 }
 
-// TODO methods to manage extenders
+type Extender struct {
+	Ip     string
+	Secret string
+}
 
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
@@ -45,6 +52,8 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 type BringYourDevice struct {
+	api *BringYourApi
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -61,7 +70,8 @@ type BringYourDevice struct {
 	clientId   connect.Id
 	instanceId connect.Id
 
-	client *connect.Client
+	clientStrategy *connect.ClientStrategy
+	client         *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -85,36 +95,38 @@ type BringYourDevice struct {
 	provideChangeListeners *connect.CallbackList[ProvideChangeListener]
 	connectChangeListeners *connect.CallbackList[ConnectChangeListener]
 
-	api *BringYourApi
-
 	localUserNatUnsub func()
 }
 
 func NewBringYourDeviceWithDefaults(
+	api *BringYourApi,
 	byJwt string,
 	platformUrl string,
-	apiUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
 	instanceId *Id,
 ) (*BringYourDevice, error) {
-	return newBringYourDevice(
-		byJwt,
-		platformUrl,
-		apiUrl,
-		deviceDescription,
-		deviceSpec,
-		appVersion,
-		instanceId,
-		defaultDeviceSettings(),
+	return traceWithReturnError(
+		func() (*BringYourDevice, error) {
+			return newBringYourDevice(
+				api,
+				byJwt,
+				platformUrl,
+				deviceDescription,
+				deviceSpec,
+				appVersion,
+				instanceId,
+				defaultDeviceSettings(),
+			)
+		},
 	)
 }
 
 func newBringYourDevice(
+	api *BringYourApi,
 	byJwt string,
 	platformUrl string,
-	apiUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -126,10 +138,14 @@ func newBringYourDevice(
 		return nil, err
 	}
 
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	clientOob := connect.NewApiOutOfBandControl(cancelCtx, byJwt, apiUrl)
+	ctx, cancel := context.WithCancel(context.Background())
+	// ctx, cancel := api.ctx, api.cancel
+	apiUrl := api.apiUrl
+	clientStrategy := api.clientStrategy
+
+	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byJwt, apiUrl)
 	client := connect.NewClient(
-		cancelCtx,
+		ctx,
 		clientId,
 		clientOob,
 		// connect.DefaultClientSettingsNoNetworkEvents(),
@@ -148,9 +164,10 @@ func newBringYourDevice(
 	}
 	platformTransport := connect.NewPlatformTransportWithDefaults(
 		client.Ctx(),
+		clientStrategy,
+		client.RouteManager(),
 		platformUrl,
 		auth,
-		client.RouteManager(),
 	)
 
 	// go platformTransport.Run(connectClient.RouteManager())
@@ -161,11 +178,12 @@ func newBringYourDevice(
 	localUserNatSettings.TcpBufferSettings.UserLimit = 0
 	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
-	api := newBringYourApiWithContext(cancelCtx, apiUrl)
+	// api := newBringYourApiWithContext(cancelCtx, clientStrategy, apiUrl)
 	api.SetByJwt(byJwt)
 
 	byDevice := &BringYourDevice{
-		ctx:               cancelCtx,
+		api:               api,
+		ctx:               ctx,
 		cancel:            cancel,
 		byJwt:             byJwt,
 		platformUrl:       platformUrl,
@@ -176,6 +194,7 @@ func newBringYourDevice(
 		settings:          settings,
 		clientId:          clientId,
 		instanceId:        instanceId.toConnectId(),
+		clientStrategy:    clientStrategy,
 		client:            client,
 		// contractManager: contractManager,
 		// routeManager: routeManager,
@@ -188,7 +207,6 @@ func newBringYourDevice(
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
-		api:                               api,
 	}
 
 	// set up with nil destination
@@ -209,6 +227,32 @@ func (self *BringYourDevice) ClientId() *Id {
 
 func (self *BringYourDevice) Api() *BringYourApi {
 	return self.api
+}
+
+func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
+	extenderIpSecrets := map[netip.Addr]string{}
+	if extender != nil {
+		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
+			extenderIpSecrets[ip] = extender.Secret
+		}
+	}
+	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+}
+
+func (self *BringYourDevice) CustomExtender() *Extender {
+	extenderIpSecrets := self.clientStrategy.CustomExtenders()
+	extenders := []*Extender{}
+	for ip, secret := range extenderIpSecrets {
+		extender := &Extender{
+			Ip:     ip.String(),
+			Secret: secret,
+		}
+		extenders = append(extenders, extender)
+	}
+	if 0 < len(extenders) {
+		return extenders[0]
+	}
+	return nil
 }
 
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
@@ -359,6 +403,8 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			} else {
 				generator := connect.NewApiMultiClientGenerator(
 					connectSpecs,
+					self.clientStrategy,
+					// exclude self
 					[]connect.Id{self.clientId},
 					self.apiUrl,
 					self.byJwt,
@@ -473,12 +519,6 @@ func (self *BringYourDevice) OpenDevicesViewController() *DevicesViewController 
 
 func (self *BringYourDevice) OpenAccountViewController() *AccountViewController {
 	vc := newAccountViewController(self.ctx, self)
-	self.openViewController(vc)
-	return vc
-}
-
-func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController {
-	vc := newOverlayViewController(self.ctx, self)
 	self.openViewController(vc)
 	return vc
 }

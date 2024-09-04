@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-
 	// "hash/fnv"
 	"flag"
 	"math"

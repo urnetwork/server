@@ -11,6 +11,10 @@ taskworker/taskworker
 gpt/gpt
 connect/connect
 connect/connect.test
+connect/profile/memory
+connect/profile/cpu
+
+temp/*
 
 .vscode/*
 .direnv
