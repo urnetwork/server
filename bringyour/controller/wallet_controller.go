@@ -679,28 +679,31 @@ func CircleWalletWebhook(
 				return nil, fmt.Errorf("account wallet already exists")
 			}
 
-			wallet := &model.AccountWallet{
-				CircleWalletId:   &circleWallet.ID,
+			wallet := &model.CreateAccountWalletCircleArgs{
+				CircleWalletId:   circleWallet.ID,
 				NetworkId:        userUC.NetworkId,
-				WalletType:       model.WalletTypeCircleUserControlled,
 				Blockchain:       blockchain,
 				WalletAddress:    circleWallet.Address,
 				DefaultTokenType: "USDC",
 			}
 
 			// no account_wallet exists, create a new one
-			model.CreateAccountWallet(
+			walletId := model.CreateAccountWalletCircle(
 				clientSession.Ctx,
 				wallet,
 			)
 
+			if walletId == nil {
+				return nil, fmt.Errorf("error creating account wallet")
+			}
+
 			// check if a payout wallet is set for this network
-			payoutWallet := model.GetPayoutWallet(clientSession.Ctx, userUC.NetworkId)
+			payoutWallet := model.GetPayoutWalletId(clientSession.Ctx, userUC.NetworkId)
 
 			// if a payout wallet doesn't exist for the network
 			// set payout wallet
 			if payoutWallet == nil {
-				model.SetPayoutWallet(clientSession.Ctx, userUC.NetworkId, wallet.WalletId)
+				model.SetPayoutWallet(clientSession.Ctx, userUC.NetworkId, *walletId)
 			}
 
 		}
@@ -1003,20 +1006,22 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 			continue
 		}
 
-		createAccountWallet := &model.AccountWallet{
-			CircleWalletId:   &circleWallet.WalletId,
+		createAccountWallet := &model.CreateAccountWalletCircleArgs{
+			CircleWalletId:   circleWallet.WalletId,
 			NetworkId:        user.NetworkId,
-			WalletType:       model.WalletTypeCircleUserControlled,
 			Blockchain:       circleWallet.Blockchain,
 			WalletAddress:    circleWallet.Address,
 			DefaultTokenType: "USDC",
-			CreateTime:       circleWallet.CreateDate,
 		}
-		model.CreateAccountWallet(clientSession.Ctx, createAccountWallet)
+		walletId := model.CreateAccountWalletCircle(clientSession.Ctx, createAccountWallet)
+
+		if walletId == nil {
+			return fmt.Errorf("Error creating Circle account wallet")
+		}
 
 		// set the payout wallet
 		if i == 0 {
-			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, createAccountWallet.WalletId)
+			model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, *walletId)
 		}
 	}
 

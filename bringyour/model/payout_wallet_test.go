@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
+	"bringyour.com/bringyour/session"
 	"github.com/go-playground/assert/v2"
 )
 
@@ -12,37 +14,42 @@ func TestPayoutWallet(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 
 		ctx := context.Background()
-		sourceNetworkId := bringyour.NewId()
 
-		wallet1 := &AccountWallet{
-			NetworkId:        sourceNetworkId,
-			WalletType:       WalletTypeCircleUserControlled,
+		networkId := bringyour.NewId()
+		clientId := bringyour.NewId()
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+		})
+
+		wallet1 := &CreateAccountWalletExternalArgs{
 			Blockchain:       "matic",
 			WalletAddress:    "0x0",
 			DefaultTokenType: "usdc",
 		}
 
-		wallet2 := &AccountWallet{
-			NetworkId:        sourceNetworkId,
-			WalletType:       WalletTypeCircleUserControlled,
+		wallet2 := &CreateAccountWalletExternalArgs{
 			Blockchain:       "matic",
 			WalletAddress:    "0x1",
 			DefaultTokenType: "usdc",
 		}
 
-		CreateAccountWallet(ctx, wallet1)
-		CreateAccountWallet(ctx, wallet2)
+		walletId1 := CreateAccountWalletExternal(session, wallet1)
+		walletId2 := CreateAccountWalletExternal(session, wallet2)
+		assert.NotEqual(t, walletId1, nil)
+		assert.NotEqual(t, walletId2, nil)
 
-		SetPayoutWallet(ctx, sourceNetworkId, wallet1.WalletId)
+		SetPayoutWallet(ctx, networkId, *walletId1)
 
-		payoutWalletId := GetPayoutWallet(ctx, sourceNetworkId)
+		payoutWalletId := GetPayoutWalletId(ctx, networkId)
 		payoutAccountWallet := GetAccountWallet(ctx, *payoutWalletId)
 
 		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
 
-		SetPayoutWallet(ctx, sourceNetworkId, wallet2.WalletId)
+		SetPayoutWallet(ctx, networkId, *walletId2)
 
-		payoutWalletId = GetPayoutWallet(ctx, sourceNetworkId)
+		payoutWalletId = GetPayoutWalletId(ctx, networkId)
 		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)
 
 		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
