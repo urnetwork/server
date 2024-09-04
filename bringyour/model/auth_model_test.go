@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"testing"
+
 	// "time"
 
 	"github.com/go-playground/assert/v2"
@@ -35,10 +36,11 @@ func TestResetPassword(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
+		guestMode := false
 
 		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(networkId, userId, networkName)
+		byJwt := jwt.NewByJwt(networkId, userId, networkName, guestMode)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
@@ -68,10 +70,11 @@ func TestAuthCode(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
+		guestMode := false
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(networkId, userId, networkName)
+		byJwt := jwt.NewByJwt(networkId, userId, networkName, guestMode)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		authCodeCreate := &AuthCodeCreateArgs{}

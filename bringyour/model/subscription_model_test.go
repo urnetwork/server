@@ -549,10 +549,11 @@ func TestBalanceCode(t *testing.T) {
 		networkIdA := bringyour.NewId()
 
 		userIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		checkResult0, err := CheckBalanceCode(
@@ -614,10 +615,11 @@ func TestSubscriptionPaymentId(t *testing.T) {
 		networkIdA := bringyour.NewId()
 
 		userIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)

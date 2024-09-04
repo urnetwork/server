@@ -131,10 +131,11 @@ func TestBestAvailableProviders(t *testing.T) {
 		networkIdA := bringyour.NewId()
 
 		userIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		clientId := bringyour.NewId()

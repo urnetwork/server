@@ -16,7 +16,8 @@ func TestLegacyByJwt(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
-		byJwt := NewByJwt(networkId, userId, networkName)
+		guestMode := false
+		byJwt := NewByJwt(networkId, userId, networkName, guestMode)
 		jwtSigned := byJwt.Sign()
 
 		parsedByJwt, err := ParseByJwt(jwtSigned)
@@ -39,12 +40,13 @@ func TestFullByJwt(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
+		guestMode := false
 		sessionIds := []bringyour.Id{
 			bringyour.NewId(),
 			bringyour.NewId(),
 			bringyour.NewId(),
 		}
-		byJwt := NewByJwt(networkId, userId, networkName, sessionIds...)
+		byJwt := NewByJwt(networkId, userId, networkName, guestMode, sessionIds...)
 		jwtSigned := byJwt.Sign()
 
 		parsedByJwt, err := ParseByJwt(jwtSigned)
@@ -69,12 +71,13 @@ func TestFullByJwtWithClientId(t *testing.T) {
 		networkId := bringyour.NewId()
 		userId := bringyour.NewId()
 		networkName := "test"
+		guestMode := false
 		sessionIds := []bringyour.Id{
 			bringyour.NewId(),
 			bringyour.NewId(),
 			bringyour.NewId(),
 		}
-		byJwt := NewByJwt(networkId, userId, networkName, sessionIds...)
+		byJwt := NewByJwt(networkId, userId, networkName, guestMode, sessionIds...)
 
 		deviceId := bringyour.NewId()
 		clientId := bringyour.NewId()
