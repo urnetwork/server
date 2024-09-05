@@ -1498,6 +1498,26 @@ var migrations = []any{
 
 	newCodeMigration(migration_20240802_AccountPaymentPopulateCircleWalletId),
 
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_vpn smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_proxy smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_tor smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_relay smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_hosting smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_score smallint GENERATED ALWAYS AS (
+                net_type_vpn + 
+                net_type_proxy +
+                net_type_tor + 
+                net_type_relay +
+                net_type_hosting
+            ) STORED
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE ip_location_lookup ADD COLUMN valid bool NOT NULL DEFAULT true
+    `),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers

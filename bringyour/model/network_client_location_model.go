@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	mathrand "math/rand"
+	"slices"
 
 	"golang.org/x/exp/maps"
 
@@ -971,10 +972,19 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 	return success
 }
 
+type ConnectionLocationScores struct {
+	NetTypeVpn     int
+	NetTypeProxy   int
+	NetTypeTor     int
+	NetTypeRelay   int
+	NetTypeHosting int
+}
+
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId bringyour.Id,
 	locationId bringyour.Id,
+	connectionLocationScores *ConnectionLocationScores,
 ) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		result, err := tx.Query(
@@ -1031,21 +1041,36 @@ func SetConnectionLocation(
                     client_id,
                     city_location_id,
                     region_location_id,
-                    country_location_id
+                    country_location_id,
+                    net_type_vpn,
+		            net_type_proxy,
+		            net_type_tor,
+		            net_type_relay,
+		            net_type_hosting
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
                     city_location_id = $3,
                     region_location_id = $4,
-                    country_location_id = $5
+                    country_location_id = $5,
+                    net_type_vpn = $6,
+                    net_type_proxy = $7,
+                    net_type_tor = $8,
+                    net_type_relay = $9,
+                    net_type_hosting = $10
             `,
 			connectionId,
 			clientId,
 			cityLocationId,
 			regionLocationId,
 			countryLocationId,
+			connectionLocationScores.NetTypeVpn,
+			connectionLocationScores.NetTypeProxy,
+			connectionLocationScores.NetTypeTor,
+			connectionLocationScores.NetTypeRelay,
+			connectionLocationScores.NetTypeHosting,
 		))
 	})
 }
@@ -1804,7 +1829,18 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
-	clientIds := map[bringyour.Id]bool{}
+	// set a reasonable default count
+	if findProviders2.Count <= 0 {
+		findProviders2.Count = 10
+	}
+
+	type clientScore struct {
+		netTypeScore int
+		priority     int
+	}
+
+	// score 0 is best
+	clientScores := map[bringyour.Id]clientScore{}
 
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		locationIds := map[bringyour.Id]bool{}
@@ -1818,7 +1854,7 @@ func FindProviders2(
 				locationGroupIds[*spec.LocationGroupId] = true
 			}
 			if spec.ClientId != nil {
-				clientIds[*spec.ClientId] = true
+				clientScores[*spec.ClientId] = clientScore{}
 			}
 			if spec.BestAvailable != nil && *spec.BestAvailable {
 				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByName(StrongPrivacyLaws, session.Ctx)
@@ -1841,7 +1877,8 @@ func FindProviders2(
 				`
                 SELECT
 
-                    DISTINCT network_client_location.client_id
+                    network_client_location.client_id,
+                    network_client_location.net_type_score
 
                 FROM network_client_location
 
@@ -1866,8 +1903,12 @@ func FindProviders2(
 			bringyour.WithPgResult(result, err, func() {
 				for result.Next() {
 					var clientId bringyour.Id
-					bringyour.Raise(result.Scan(&clientId))
-					clientIds[clientId] = true
+					var netTypeScore int
+					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
+					clientScores[clientId] = clientScore{
+						netTypeScore: netTypeScore,
+						priority:     mathrand.Int(),
+					}
 				}
 			})
 		}
@@ -1885,7 +1926,8 @@ func FindProviders2(
 				`
                     SELECT
 
-                        DISTINCT network_client_location.client_id
+                        network_client_location.client_id,
+                        network_client_location.net_type_score
 
                     FROM network_client_location
 
@@ -1922,34 +1964,42 @@ func FindProviders2(
 			bringyour.WithPgResult(result, err, func() {
 				for result.Next() {
 					var clientId bringyour.Id
-					bringyour.Raise(result.Scan(&clientId))
-					clientIds[clientId] = true
+					var netTypeScore int
+					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
+					clientScores[clientId] = clientScore{
+						netTypeScore: netTypeScore,
+						priority:     mathrand.Int(),
+					}
 				}
 			})
 		}
 	})
 
 	for _, clientId := range findProviders2.ExcludeClientIds {
-		delete(clientIds, clientId)
+		delete(clientScores, clientId)
 	}
 
-	outClientIds := maps.Keys(clientIds)
+	clientIds := maps.Keys(clientScores)
+	slices.SortFunc(clientIds, func(a bringyour.Id, b bringyour.Id) int {
+		clientScoreA := clientScores[a]
+		clientScoreB := clientScores[b]
 
-	// set a default count
-	if findProviders2.Count <= 0 {
-		findProviders2.Count = 10
-	}
+		if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
+			return c
+		}
+		if c := clientScoreA.priority - clientScoreB.priority; c != 0 {
+			return c
+		}
+		return 0
+	})
 
 	if findProviders2.Count < len(clientIds) {
-		// sample
-		mathrand.Shuffle(len(outClientIds), func(i int, j int) {
-			outClientIds[i], outClientIds[j] = outClientIds[j], outClientIds[i]
-		})
-		outClientIds = outClientIds[:findProviders2.Count]
+		// keep the highest (score, priority)
+		clientIds = clientIds[:findProviders2.Count]
 	}
 
 	providers := []*FindProvidersProvider{}
-	for _, clientId := range outClientIds {
+	for _, clientId := range clientIds {
 		provider := &FindProvidersProvider{
 			ClientId: clientId,
 			// TODO
@@ -2112,7 +2162,10 @@ func GetLatestIpLocationLookupResult(
                 FROM ip_location_lookup
                 WHERE
                     ip_address = $1 AND
-                    $2 <= lookup_time
+                    $2 <= lookup_time AND
+                    valid
+                ORDER BY lookup_time DESC
+                LIMIT 1
             `,
 			ipStr,
 			earliestResultTime,
