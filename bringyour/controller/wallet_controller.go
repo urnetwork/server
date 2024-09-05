@@ -715,6 +715,7 @@ func CircleWalletWebhook(
 			)
 
 			if walletId == nil {
+				bringyour.Logger().Println("CircleWalletWebhook: no wallet id found")
 				return nil, fmt.Errorf("error creating account wallet")
 			}
 
