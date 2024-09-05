@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 	"time"
+
 	// "sync"
 	"encoding/hex"
 	mathrand "math/rand"
@@ -297,8 +298,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	)
 
 	// attach transports
+	guestMode := false
 
-	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA).Client(deviceIdA, clientIdA)
+	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA, guestMode).Client(deviceIdA, clientIdA)
 
 	authA := &connect.ClientAuth{
 		ByJwt: byJwtA.Sign(),
@@ -314,7 +316,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 		// go transportA.Run(clientA.RouteManager())
 	}
 
-	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB).Client(deviceIdB, clientIdB)
+	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB, guestMode).Client(deviceIdB, clientIdB)
 
 	authB := &connect.ClientAuth{
 		ByJwt: byJwtB.Sign(),

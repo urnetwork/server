@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -17,5 +18,21 @@ func SetPayoutWallet(
 	model.SetPayoutWallet(session.Ctx, networkId, setWalletPayout.WalletId)
 
 	return &model.SetPayoutWalletResult{}, nil
+
+}
+
+type GetPayoutWalletResult struct {
+	WalletId *bringyour.Id `json:"wallet_id"`
+}
+
+func GetPayoutWallet(
+	session *session.ClientSession,
+) (*GetPayoutWalletResult, error) {
+	networkId := session.ByJwt.NetworkId
+	walletId := model.GetPayoutWalletId(session.Ctx, networkId)
+
+	return &GetPayoutWalletResult{
+		WalletId: walletId,
+	}, nil
 
 }

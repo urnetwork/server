@@ -155,14 +155,17 @@ func TestEscrow(t *testing.T) {
 		}
 		assert.Equal(t, netBalanceByteCount, netTransferByteCount-paidByteCount)
 
-		wallet := &AccountWallet{
-			NetworkId:        destinationNetworkId,
-			WalletType:       WalletTypeCircleUserControlled,
+		args := &CreateAccountWalletExternalArgs{
 			Blockchain:       "matic",
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		}
-		CreateAccountWallet(ctx, wallet)
+		walletId := CreateAccountWalletExternal(destinationSession, args)
+		assert.NotEqual(t, walletId, nil)
+
+		wallet := GetAccountWallet(ctx, *walletId)
+		assert.NotEqual(t, wallet, nil)
+
 		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 
 		// plan a payment and complete the payment
@@ -394,14 +397,16 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		assert.Equal(t, netBalanceByteCount, 2*netTransferByteCount-paidByteCount)
 
-		wallet := &AccountWallet{
-			NetworkId:        sourceNetworkId,
-			WalletType:       WalletTypeCircleUserControlled,
+		args := &CreateAccountWalletExternalArgs{
 			Blockchain:       "matic",
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		}
-		CreateAccountWallet(ctx, wallet)
+		walletId := CreateAccountWalletExternal(sourceSession, args)
+		assert.NotEqual(t, walletId, nil)
+
+		wallet := GetAccountWallet(ctx, *walletId)
+
 		SetPayoutWallet(ctx, sourceNetworkId, wallet.WalletId)
 
 		// plan a payment and complete the payment
@@ -544,10 +549,11 @@ func TestBalanceCode(t *testing.T) {
 		networkIdA := bringyour.NewId()
 
 		userIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		checkResult0, err := CheckBalanceCode(
@@ -609,10 +615,11 @@ func TestSubscriptionPaymentId(t *testing.T) {
 		networkIdA := bringyour.NewId()
 
 		userIdA := bringyour.NewId()
+		guestMode := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a"),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
 		)
 
 		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)

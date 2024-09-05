@@ -32,7 +32,7 @@ func SetPayoutWallet(ctx context.Context, networkId bringyour.Id, walletId bring
 	})
 }
 
-func GetPayoutWallet(ctx context.Context, networkId bringyour.Id) *bringyour.Id {
+func GetPayoutWalletId(ctx context.Context, networkId bringyour.Id) *bringyour.Id {
 	var walletId *bringyour.Id
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(

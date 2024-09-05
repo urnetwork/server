@@ -3,6 +3,7 @@ package router
 import (
 	"encoding/json"
 	"net/http"
+
 	// "reflect"
 	"bytes"
 	"fmt"
@@ -74,6 +75,32 @@ func wrap[R any](
 }
 
 // guarantees NetworkId+UserId
+// denies guest mode requests
+func WrapRequireAuthNoGuest[R any](
+	impl ImplFunction[R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	wrap(
+		func(session *session.ClientSession) (R, error) {
+			if err := session.Auth(req); err != nil {
+				var empty R
+				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+			}
+			if session.ByJwt.GuestMode {
+				var empty R
+				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+			}
+			return impl(session)
+		},
+		w,
+		req,
+		formatters...,
+	)
+}
+
+// allow guest mode, or authenticated requests
 func WrapRequireAuth[R any](
 	impl ImplFunction[R],
 	w http.ResponseWriter,
@@ -195,6 +222,51 @@ func wrapWithInput[T any, R any](
 }
 
 // guarantees NetworkId+UserId
+// denies guest mode requests
+func WrapWithInputRequireAuthNoGuest[T any, R any](
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	WrapWithInputBodyFormatterRequireAuthNoGuest(
+		RequestBodyFormatter,
+		impl,
+		w,
+		req,
+		formatters...,
+	)
+}
+
+func WrapWithInputBodyFormatterRequireAuthNoGuest[T any, R any](
+	bodyFormatter BodyFormatFunction,
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	wrapWithInput(
+		bodyFormatter,
+		func(arg T, session *session.ClientSession) (R, error) {
+			if err := session.Auth(req); err != nil {
+				var empty R
+				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+			}
+
+			if session.ByJwt.GuestMode {
+				var empty R
+				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+			}
+
+			return impl(arg, session)
+		},
+		w,
+		req,
+		formatters...,
+	)
+}
+
+// guarantees NetworkId+UserId
 func WrapWithInputRequireAuth[T any, R any](
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,
@@ -248,6 +320,7 @@ func WrapWithInputRequireClient[T any, R any](
 }
 
 // guarantees NetworkId+UserId+ClientId
+// denies requests from guest mode
 func WrapWithInputBodyFormatterRequireClient[T any, R any](
 	bodyFormatter BodyFormatFunction,
 	impl ImplWithInputFunction[T, R],

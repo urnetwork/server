@@ -2,6 +2,8 @@ package controller
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
@@ -15,14 +17,17 @@ var (
 )
 
 // used for creating external wallets
-func CreateAccountWallet(
-	wallet *model.AccountWallet,
+func CreateAccountWalletExternal(
+	wallet *model.CreateAccountWalletExternalArgs,
 	session *session.ClientSession,
 ) (*model.CreateAccountWalletResult, error) {
 
-	if wallet.Blockchain != "SOL" && wallet.Blockchain != "MATIC" {
+	blockchain, err := model.ParseBlockchain(strings.ToUpper(wallet.Blockchain))
+	if err != nil {
 		return nil, ErrInvalidBlockchain
 	}
+
+	wallet.Blockchain = blockchain.String()
 
 	walletValidateAddressArgs := WalletValidateAddressArgs{
 		Address: wallet.WalletAddress,
@@ -37,9 +42,16 @@ func CreateAccountWallet(
 		return nil, ErrInvalidWalletAddress
 	}
 
-	wallet.NetworkId = session.ByJwt.NetworkId
+	walletId := model.CreateAccountWalletExternal(session, wallet)
 
-	model.CreateAccountWallet(session.Ctx, wallet)
+	if walletId == nil {
+		return nil, fmt.Errorf("error creating new wallet")
+	}
 
-	return &model.CreateAccountWalletResult{WalletId: wallet.WalletId}, nil
+	return &model.CreateAccountWalletResult{WalletId: *walletId}, nil
+}
+
+func GetAccountWallets(session *session.ClientSession) (*model.GetAccountWalletsResult, error) {
+	walletsResult := model.GetActiveAccountWallets(session)
+	return walletsResult, nil
 }
