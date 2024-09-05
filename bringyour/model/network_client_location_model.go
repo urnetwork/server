@@ -2162,7 +2162,10 @@ func GetLatestIpLocationLookupResult(
                 FROM ip_location_lookup
                 WHERE
                     ip_address = $1 AND
-                    $2 <= lookup_time
+                    $2 <= lookup_time AND
+                    valid
+                ORDER BY lookup_time DESC
+                LIMIT 1
             `,
 			ipStr,
 			earliestResultTime,
