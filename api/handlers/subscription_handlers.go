@@ -39,15 +39,6 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func CircleWebhook(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputBodyFormatterNoAuth(
-		controller.VerifyCircleBody,
-		controller.CircleWalletWebhook,
-		w,
-		r,
-	)
-}
-
 func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.CheckBalanceCode, w, r)
 }
