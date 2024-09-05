@@ -21,7 +21,7 @@ var ipInfoConfig = sync.OnceValue(func() map[string]any {
 
 const LocationLookupResultExpiration = 24 * time.Hour
 
-func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error) {
+func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *model.ConnectionLocationScores, error) {
 	earliestResultTime := bringyour.NowUtc().Add(-LocationLookupResultExpiration)
 
 	var resultJson []byte
@@ -35,7 +35,7 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 			nil,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		token := ipInfoConfig()["access_token"].(string)
@@ -52,13 +52,13 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 
 		res, err := client.Do(req)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer res.Body.Close()
 
 		resultJson, err = io.ReadAll(res.Body)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		resultJson = bringyour.AttemptCompactJson(resultJson)
 
@@ -83,15 +83,11 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 		  "timezone": "America/Los_Angeles"
 		}
 	*/
-	type IpInfoResult struct {
-		City        string `json:"city,omitempty"`
-		Region      string `json:"region,omitempty"`
-		CountryCode string `json:"country,omitempty"`
-	}
+
 	var ipInfoResult IpInfoResult
 	err := json.Unmarshal(resultJson, &ipInfoResult)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	location := &model.Location{
@@ -101,8 +97,42 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, error
 	}
 	location.LocationType, err = location.GuessLocationType()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return location, nil
+	connectionLocationScores := &model.ConnectionLocationScores{}
+	if ipInfoResult.Privacy != nil {
+		if ipInfoResult.Privacy.Vpn {
+			connectionLocationScores.NetTypeVpn = 1
+		}
+		if ipInfoResult.Privacy.Proxy {
+			connectionLocationScores.NetTypeProxy = 1
+		}
+		if ipInfoResult.Privacy.Tor {
+			connectionLocationScores.NetTypeTor = 1
+		}
+		if ipInfoResult.Privacy.Relay {
+			connectionLocationScores.NetTypeRelay = 1
+		}
+		if ipInfoResult.Privacy.Hosting {
+			connectionLocationScores.NetTypeHosting = 1
+		}
+	}
+
+	return location, connectionLocationScores, nil
+}
+
+type IpInfoResult struct {
+	City        string         `json:"city,omitempty"`
+	Region      string         `json:"region,omitempty"`
+	CountryCode string         `json:"country,omitempty"`
+	Privacy     *IpInfoPrivacy `json:"privacy,omitempty"`
+}
+
+type IpInfoPrivacy struct {
+	Vpn     bool `json:"vpn,omitempty"`
+	Proxy   bool `json:"proxy,omitempty"`
+	Tor     bool `json:"tor,omitempty"`
+	Relay   bool `json:"relay,omitempty"`
+	Hosting bool `json:"hosting,omitempty"`
 }

@@ -30,12 +30,12 @@ func setConnectionLocation(
 	connectionId bringyour.Id,
 	ipStr string,
 ) {
-	location, err := GetLocationForIp(ctx, ipStr)
+	location, connectionLocationScores, err := GetLocationForIp(ctx, ipStr)
 	if err != nil {
 		bringyour.Logger().Printf("Get ip for location error: %s", err)
 		return
 	}
 
 	model.CreateLocation(ctx, location)
-	model.SetConnectionLocation(ctx, connectionId, location.LocationId)
+	model.SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
 }
