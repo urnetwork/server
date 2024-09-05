@@ -1514,6 +1514,10 @@ var migrations = []any{
             ) STORED
     `),
 
+	newSqlMigration(`
+        ALTER TABLE ip_location_lookup ADD COLUMN valid bool NOT NULL DEFAULT true
+    `),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers
