@@ -47,18 +47,18 @@ func newLocalState(ctx context.Context, localStorageHome string) *LocalState {
 	}
 }
 
-func (self *LocalState) GetByJwt() (string, error) {
+func (self *LocalState) GetByJwt() string {
 	path := filepath.Join(self.localStorageDir, ".by_jwt")
 	if byJwtBytes, err := os.ReadFile(path); err == nil {
-		return string(byJwtBytes), nil
+		return string(byJwtBytes)
 	}
-	return "", fmt.Errorf("Not found.")
+	return ""
 }
 
 func (self *LocalState) ParseByJwt() (*ByJwt, error) {
-	byJwtStr, err := self.GetByJwt()
-	if err != nil {
-		return nil, err
+	byJwtStr := self.GetByJwt()
+	if byJwtStr == "" {
+		return nil, errors.New("Not found.")
 	}
 
 	parser := gojwt.NewParser()
@@ -109,12 +109,12 @@ func (self *LocalState) SetByJwt(byJwt string) error {
 	}
 }
 
-func (self *LocalState) GetByClientJwt() (string, error) {
+func (self *LocalState) GetByClientJwt() string {
 	path := filepath.Join(self.localStorageDir, ".by_client_jwt")
 	if byClientJwtBytes, err := os.ReadFile(path); err == nil {
-		return string(byClientJwtBytes), nil
+		return string(byClientJwtBytes)
 	}
-	return "", fmt.Errorf("Not found.")
+	return ""
 }
 
 // if `byClientJwt` is set, sets a new `instanceId`; othewwise, clears `instanceId`
@@ -129,26 +129,27 @@ func (self *LocalState) SetByClientJwt(byClientJwt string) error {
 	}
 
 	if byClientJwt == "" {
-		self.setInstanceId(nil)
+		self.SetInstanceId(nil)
 		os.Remove(path)
 		return nil
 	} else {
 		instanceId := connect.NewId()
-		self.setInstanceId(newId(instanceId))
+		self.SetInstanceId(newId(instanceId))
 		return os.WriteFile(path, []byte(byClientJwt), LocalStorageFilePermissions)
 	}
 }
 
-func (self *LocalState) GetInstanceId() (*Id, error) {
+func (self *LocalState) GetInstanceId() *Id {
 	path := filepath.Join(self.localStorageDir, ".instance_id")
 	if instanceIdBytes, err := os.ReadFile(path); err == nil {
-		instanceId, err := connect.IdFromBytes(instanceIdBytes)
-		return newId(instanceId), err
+		if instanceId, err := connect.IdFromBytes(instanceIdBytes); err == nil {
+			return newId(instanceId)
+		}
 	}
-	return nil, fmt.Errorf("Not found.")
+	return nil
 }
 
-func (self *LocalState) setInstanceId(instanceId *Id) error {
+func (self *LocalState) SetInstanceId(instanceId *Id) error {
 	path := filepath.Join(self.localStorageDir, ".instance_id")
 	if instanceId == nil {
 		os.Remove(path)
@@ -164,14 +165,32 @@ func (self *LocalState) SetProvideMode(provideMode ProvideMode) error {
 	return os.WriteFile(path, provideModeBytes, LocalStorageFilePermissions)
 }
 
-func (self *LocalState) GetProvideMode() (ProvideMode, error) {
-	var provideMode ProvideMode
+func (self *LocalState) GetProvideMode() ProvideMode {
 	path := filepath.Join(self.localStorageDir, ".provide_mode")
 	if provideModeBytes, err := os.ReadFile(path); err == nil {
-		_, err := fmt.Sscanf(string(provideModeBytes), "%d", &provideMode)
-		return provideMode, err
+		var provideMode ProvideMode
+		if _, err := fmt.Sscanf(string(provideModeBytes), "%d", &provideMode); err == nil {
+			return provideMode
+		}
 	}
-	return provideMode, fmt.Errorf("Not found.")
+	return ProvideModeNone
+}
+
+func (self *LocalState) SetRouteLocal(routeLocal bool) error {
+	path := filepath.Join(self.localStorageDir, ".route_local")
+	routeLocalBytes := []byte(fmt.Sprintf("%t", routeLocal))
+	return os.WriteFile(path, routeLocalBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetRouteLocal() bool {
+	path := filepath.Join(self.localStorageDir, ".route_local")
+	if routeLocalBytes, err := os.ReadFile(path); err == nil {
+		var routeLocal bool
+		if _, err := fmt.Sscanf(string(routeLocalBytes), "%t", &routeLocal); err == nil {
+			return routeLocal
+		}
+	}
+	return true
 }
 
 // clears all auth tokens
@@ -301,12 +320,8 @@ func (self *AsyncLocalState) LocalState() *LocalState {
 
 func (self *AsyncLocalState) GetByJwt(callback GetByJwtCallback) {
 	self.serialAsync(func() error {
-		byJwt, err := self.localState.GetByJwt()
-		if err == nil {
-			callback.Result(byJwt, true)
-		} else {
-			callback.Result("", false)
-		}
+		byJwt := self.localState.GetByJwt()
+		callback.Result(byJwt, byJwt != "")
 		return nil
 	})
 }
@@ -332,12 +347,8 @@ func (self *AsyncLocalState) SetByJwt(byJwt string, callback CommitCallback) {
 
 func (self *AsyncLocalState) GetByClientJwt(callback GetByClientJwtCallback) {
 	self.serialAsync(func() error {
-		byClientJwt, err := self.localState.GetByClientJwt()
-		if err == nil {
-			callback.Result(byClientJwt, true)
-		} else {
-			callback.Result("", false)
-		}
+		byClientJwt := self.localState.GetByClientJwt()
+		callback.Result(byClientJwt, byClientJwt != "")
 		return nil
 	})
 }
@@ -350,12 +361,8 @@ func (self *AsyncLocalState) SetByClientJwt(byClientJwt string, callback CommitC
 
 func (self *AsyncLocalState) GetInstanceId(callback GetInstanceIdCallback) {
 	self.serialAsync(func() error {
-		instanceId, err := self.localState.GetInstanceId()
-		if err == nil {
-			callback.Result(instanceId, true)
-		} else {
-			callback.Result(nil, false)
-		}
+		instanceId := self.localState.GetInstanceId()
+		callback.Result(instanceId, instanceId != nil)
 		return nil
 	})
 }
