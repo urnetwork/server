@@ -12,6 +12,10 @@ import (
 
 var wvcLog = logFn("wallet_view_controller")
 
+type AccountWalletsListener interface {
+	AccountWalletsChanged()
+}
+
 type AccountWallet struct {
 	WalletId         *Id        `json:"wallet_id"`
 	CircleWalletId   string     `json:"circle_wallet_id,omitempty"`
@@ -29,7 +33,11 @@ type WalletViewController struct {
 	cancel context.CancelFunc
 	device *BringYourDevice
 
+	wallets *AccountWalletsList
+
 	stateLock sync.Mutex
+
+	accountWalletsListeners *connect.CallbackList[AccountWalletsListener]
 }
 
 func newWalletViewController(ctx context.Context, device *BringYourDevice) *WalletViewController {
@@ -39,11 +47,16 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
+
+		wallets: NewAccountWalletsList(),
+
+		accountWalletsListeners: connect.NewCallbackList[AccountWalletsListener](),
 	}
 	return vc
 }
 
 func (vc *WalletViewController) Start() {
+	vc.fetchAccountWallets()
 }
 
 func (vc *WalletViewController) Stop() {
@@ -143,25 +156,64 @@ func (vc *WalletViewController) GetPayoutWallet() (id *Id, err error) {
 	return
 }
 
-func (vc *WalletViewController) GetAccountWallets() (accountWallets *AccountWalletsList, err error) {
+func (vc *WalletViewController) GetWallets() *AccountWalletsList {
+	return vc.wallets
+}
+
+func (vc *WalletViewController) AddAccountWalletsListener(listener AccountWalletsListener) Sub {
+	callbackId := vc.accountWalletsListeners.Add(listener)
+	return newSub(func() {
+		vc.accountWalletsListeners.Remove(callbackId)
+	})
+}
+
+func (vc *WalletViewController) accountWalletsChanged() {
+	for _, listener := range vc.accountWalletsListeners.Get() {
+		connect.HandleError(func() {
+			listener.AccountWalletsChanged()
+		})
+	}
+}
+
+func (vc *WalletViewController) fetchAccountWallets() {
 
 	vc.device.Api().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
-		func(results *GetAccountWalletsResult, walletsErr error) {
+		func(results *GetAccountWalletsResult, err error) {
 
 			if err != nil {
-				err = walletsErr
+				wvcLog("Error fetching account wallets: ", err.Error())
 				return
 			}
 
-			list := NewAccountWalletsList()
+			newWalletsList := NewAccountWalletsList()
+			var wallets []*AccountWallet
 
 			for i := 0; i < results.Wallets.Len(); i++ {
-				list.Add(results.Wallets.Get(i))
+
+				walletResult := results.Wallets.Get(i)
+
+				wallet := &AccountWallet{
+					WalletId:         walletResult.WalletId,
+					CircleWalletId:   walletResult.CircleWalletId,
+					NetworkId:        walletResult.NetworkId,
+					WalletType:       walletResult.WalletType,
+					Blockchain:       walletResult.Blockchain,
+					WalletAddress:    walletResult.WalletAddress,
+					Active:           walletResult.Active,
+					DefaultTokenType: walletResult.DefaultTokenType,
+					CreateTime:       walletResult.CreateTime,
+				}
+
+				wallets = append(wallets, wallet)
+
 			}
 
-			accountWallets = list
+			newWalletsList.addAll(wallets...)
+
+			vc.wallets = newWalletsList
+
+			vc.accountWalletsChanged()
 
 		}))
 
-	return
 }
