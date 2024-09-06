@@ -28,6 +28,13 @@ type AccountWallet struct {
 	CreateTime       *Time      `json:"create_time"`
 }
 
+type Payout struct {
+	WalletId        *Id     `json:"wallet_id"`
+	WalletAddress   string  `json:"wallet_address"`
+	CompleteTimeFmt string  `json:"complete_time"` // formatted to "Jan 2"
+	AmountUsd       float32 `json:"amount_usd"`
+}
+
 type WalletViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
