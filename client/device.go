@@ -36,6 +36,10 @@ type Extender struct {
 	Secret string
 }
 
+type ExtenderResolver struct {
+	DnsIp string
+}
+
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
 	SendTimeout time.Duration
@@ -85,6 +89,8 @@ type BringYourDevice struct {
 
 	remoteUserNatProviderLocalUserNat *connect.LocalUserNat
 	remoteUserNatProvider             *connect.RemoteUserNatProvider
+
+	routeLocal bool
 
 	openedViewControllers map[ViewController]bool
 
@@ -201,6 +207,7 @@ func newBringYourDevice(
 		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
+		routeLocal:                        true,
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
@@ -251,6 +258,29 @@ func (self *BringYourDevice) CustomExtender() *Extender {
 		return extenders[0]
 	}
 	return nil
+}
+
+func (self *BringYourDevice) SetCustomExtenderResolver(extenderResolver *ExtenderResolver) {
+	// FIXME
+}
+
+func (self *BringYourDevice) CustomExtenderResolver() *ExtenderResolver {
+	// FIXME
+	return nil
+}
+
+func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	self.routeLocal = routeLocal
+}
+
+func (self *BringYourDevice) GetRouteLocal() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.routeLocal
 }
 
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
@@ -398,6 +428,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				self.ctx,
 				generator,
 				self.receive,
+				protocol.ProvideMode_Network,
 			)
 		}
 		// else no specs, not an error
@@ -411,9 +442,12 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 }
 
 func (self *BringYourDevice) Shuffle() {
-	self.stateLock.Lock()
-	remoteUserNatClient := self.remoteUserNatClient
-	self.stateLock.Unlock()
+	var remoteUserNatClient connect.UserNatClient
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		remoteUserNatClient = self.remoteUserNatClient
+	}()
 
 	if remoteUserNatClient != nil {
 		remoteUserNatClient.Shuffle()
@@ -425,10 +459,16 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 	copy(packetCopy, packet[0:n])
 	source := connect.SourceId(self.clientId)
 
-	self.stateLock.Lock()
-	remoteUserNatClient := self.remoteUserNatClient
-	localUserNat := self.localUserNat
-	self.stateLock.Unlock()
+	var remoteUserNatClient connect.UserNatClient
+	var localUserNat *connect.LocalUserNat
+	var routeLocal bool
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		remoteUserNatClient = self.remoteUserNatClient
+		localUserNat = self.localUserNat
+		routeLocal = self.routeLocal
+	}()
 
 	if remoteUserNatClient != nil {
 		return remoteUserNatClient.SendPacket(
@@ -437,7 +477,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 			packetCopy,
 			self.settings.SendTimeout,
 		)
-	} else {
+	} else if routeLocal {
 		// route locally
 		return localUserNat.SendPacket(
 			source,
@@ -445,6 +485,8 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 			packetCopy,
 			self.settings.SendTimeout,
 		)
+	} else {
+		return false
 	}
 }
 
