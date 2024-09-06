@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+
 	// "io"
 	"errors"
 	"os"
@@ -21,6 +22,7 @@ type ByJwt struct {
 	UserId      *Id
 	NetworkName string
 	NetworkId   *Id
+	GuestMode   bool
 }
 
 type LocalState struct {
@@ -83,6 +85,9 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 		if networkId, err := ParseId(networkIdStr.(string)); err == nil {
 			byJwt.NetworkId = networkId
 		}
+	}
+	if guestMode, ok := claims["guest_mode"]; ok {
+		byJwt.GuestMode = guestMode.(bool)
 	}
 
 	return byJwt, nil
