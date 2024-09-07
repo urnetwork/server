@@ -167,6 +167,27 @@ func (vc *WalletViewController) GetWallets() *AccountWalletsList {
 	return vc.wallets
 }
 
+func (vc *WalletViewController) FilterWalletsById(idStr string) *AccountWallet {
+
+	id, err := ParseId(idStr)
+	if err != nil {
+		return nil
+	}
+
+	for i := 0; i < vc.wallets.Len(); i++ {
+
+		wallet := vc.wallets.Get(i)
+
+		if wallet.WalletId.Cmp(id) == 0 {
+			return wallet
+		}
+
+	}
+
+	return nil
+
+}
+
 func (vc *WalletViewController) AddAccountWalletsListener(listener AccountWalletsListener) Sub {
 	callbackId := vc.accountWalletsListeners.Add(listener)
 	return newSub(func() {
