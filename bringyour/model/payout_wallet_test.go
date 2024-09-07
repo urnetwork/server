@@ -53,5 +53,10 @@ func TestPayoutWallet(t *testing.T) {
 		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)
 
 		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
+
+		deletePayoutWallet(*payoutWalletId, session)
+		payoutWalletId = GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, payoutWalletId, nil)
+
 	})
 }

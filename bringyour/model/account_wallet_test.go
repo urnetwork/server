@@ -67,5 +67,17 @@ func TestAccountWallet(t *testing.T) {
 		fakeId := bringyour.NewId()
 		fetchWallet = GetAccountWallet(ctx, fakeId)
 		assert.Equal(t, fetchWallet, nil)
+
+		// remove wallet (set account wallet as active = false)
+		// we also clear the payout wallet if it matches
+		SetPayoutWallet(ctx, networkId, *walletId)
+
+		result := RemoveWallet(*walletId, session)
+		assert.Equal(t, result.Success, true)
+		assert.Equal(t, result.Error, nil)
+
+		payoutWalletId := GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, payoutWalletId, nil)
+
 	})
 }

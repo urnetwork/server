@@ -98,6 +98,7 @@ Options:
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
+		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
 	}
 

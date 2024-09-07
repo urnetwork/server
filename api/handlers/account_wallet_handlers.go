@@ -14,3 +14,7 @@ func CreateAccountWallet(w http.ResponseWriter, r *http.Request) {
 func GetAccountWallets(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetAccountWallets, w, r)
 }
+
+func RemoveWallet(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.RemoveWallet, w, r)
+}
