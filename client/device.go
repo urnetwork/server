@@ -9,6 +9,8 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
 )
@@ -387,6 +389,22 @@ func (self *BringYourDevice) GetProvideMode() ProvideMode {
 		maxProvideMode = max(maxProvideMode, provideMode)
 	}
 	return ProvideMode(maxProvideMode)
+}
+
+func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	glog.Infof("[device]provide paused = %t\n", providePaused)
+
+	self.client.ContractManager().SetProvidePaused(providePaused)
+}
+
+func (self *BringYourDevice) GetProvidePaused() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.client.ContractManager().IsProvidePaused()
 }
 
 func (self *BringYourDevice) RemoveDestination() error {

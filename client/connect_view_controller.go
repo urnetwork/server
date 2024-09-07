@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/mobile/gl"
+	// "golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
 )
@@ -27,7 +27,7 @@ type LocationListener interface {
 }
 
 type ConnectViewController struct {
-	glViewController
+	// glViewController
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -47,10 +47,10 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ConnectViewController{
-		glViewController: *newGLViewController(),
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		device:           device,
+		// glViewController: *newGLViewController(),
+		ctx:    cancelCtx,
+		cancel: cancel,
+		device: device,
 
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
@@ -58,7 +58,7 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
 		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
 	}
-	vc.drawController = vc
+	// vc.drawController = vc
 	return vc
 }
 
@@ -326,19 +326,19 @@ func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLo
 
 // GL
 
-func (self *ConnectViewController) draw(g gl.Context) {
-	// cvcLog("draw")
+// func (self *ConnectViewController) draw(g gl.Context) {
+// 	// cvcLog("draw")
 
-	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
-	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-}
+// 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
+// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+// }
 
-func (self *ConnectViewController) drawLoopOpen() {
-	self.frameRate = 24
-}
+// func (self *ConnectViewController) drawLoopOpen() {
+// 	self.frameRate = 24
+// }
 
-func (self *ConnectViewController) drawLoopClose() {
-}
+// func (self *ConnectViewController) drawLoopClose() {
+// }
 
 func (self *ConnectViewController) Close() {
 	cvcLog("close")
@@ -443,23 +443,23 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 
 // merged location and location group
 type ConnectLocation struct {
-	ConnectLocationId *ConnectLocationId
-	Name              string
+	ConnectLocationId *ConnectLocationId `json:"connect_location_id,omitempty"`
+	Name              string             `json:"name,omitempty"`
 
-	ProviderCount int32
-	Promoted      bool
-	MatchDistance int32
+	ProviderCount int32 `json:"provider_count,omitempty"`
+	Promoted      bool  `json:"promoted,omitempty"`
+	MatchDistance int32 `json:"match_distance,omitempty"`
 
-	LocationType LocationType
+	LocationType LocationType `json:"location_type,omitempty"`
 
-	City        string
-	Region      string
-	Country     string
-	CountryCode string
+	City        string `json:"city,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Country     string `json:"country,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
 
-	CityLocationId    *Id
-	RegionLocationId  *Id
-	CountryLocationId *Id
+	CityLocationId    *Id `json:"city_location_id,omitempty"`
+	RegionLocationId  *Id `json:"region_location_id,omitempty"`
+	CountryLocationId *Id `json:"country_location_id,omitempty"`
 }
 
 func (self *ConnectLocation) IsGroup() bool {
@@ -517,9 +517,9 @@ func (self *ConnectLocation) ToCountry() *ConnectLocation {
 // merged location and location group
 type ConnectLocationId struct {
 	// if set, the location is a direct connection to another device
-	ClientId        *Id
-	LocationId      *Id
-	LocationGroupId *Id
+	ClientId        *Id `json:"client_id,omitempty"`
+	LocationId      *Id `json:"location_id,omitempty"`
+	LocationGroupId *Id `json:"location_group_id,omitempty"`
 }
 
 func (self *ConnectLocationId) IsGroup() bool {
