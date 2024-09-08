@@ -28,6 +28,10 @@ type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
 
+type RouteLocalChangeListener interface {
+	RouteLocalChanged(routeLocal bool)
+}
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
 	ReceivePacket(packet []byte)
@@ -38,8 +42,9 @@ type Extender struct {
 	Secret string
 }
 
-type ExtenderResolver struct {
-	DnsIp string
+type ExtenderAutoConfigure struct {
+	DnsIp            string
+	ExtenderHostname string
 }
 
 type deviceSettings struct {
@@ -98,8 +103,9 @@ type BringYourDevice struct {
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
-	provideChangeListeners *connect.CallbackList[ProvideChangeListener]
-	connectChangeListeners *connect.CallbackList[ConnectChangeListener]
+	provideChangeListeners    *connect.CallbackList[ProvideChangeListener]
+	connectChangeListeners    *connect.CallbackList[ConnectChangeListener]
+	routeLocalChangeListeners *connect.CallbackList[RouteLocalChangeListener]
 
 	localUserNatUnsub func()
 }
@@ -214,6 +220,7 @@ func newBringYourDevice(
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
+		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
 	}
 
 	// set up with nil destination
@@ -246,7 +253,7 @@ func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
 }
 
-func (self *BringYourDevice) CustomExtender() *Extender {
+func (self *BringYourDevice) GetCustomExtender() *Extender {
 	extenderIpSecrets := self.clientStrategy.CustomExtenders()
 	extenders := []*Extender{}
 	for ip, secret := range extenderIpSecrets {
@@ -262,20 +269,29 @@ func (self *BringYourDevice) CustomExtender() *Extender {
 	return nil
 }
 
-func (self *BringYourDevice) SetCustomExtenderResolver(extenderResolver *ExtenderResolver) {
+func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
 	// FIXME
 }
 
-func (self *BringYourDevice) CustomExtenderResolver() *ExtenderResolver {
+func (self *BringYourDevice) GetCustomExtenderAutoConfigure() *ExtenderAutoConfigure {
 	// FIXME
 	return nil
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	set := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
-	self.routeLocal = routeLocal
+		if self.routeLocal != routeLocal {
+			self.routeLocal = routeLocal
+			set = true
+		}
+	}()
+	if set {
+		self.routeLocalChanged(routeLocal)
+	}
 }
 
 func (self *BringYourDevice) GetRouteLocal() bool {
@@ -308,6 +324,13 @@ func (self *BringYourDevice) AddConnectChangeListener(listener ConnectChangeList
 	})
 }
 
+func (self *BringYourDevice) AddRouteLocalChangeListener(listener RouteLocalChangeListener) Sub {
+	callbackId := self.routeLocalChangeListeners.Add(listener)
+	return newSub(func() {
+		self.routeLocalChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) provideChanged(provideEnabled bool) {
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
@@ -324,6 +347,14 @@ func (self *BringYourDevice) connectChanged(connectEnabled bool) {
 	}
 }
 
+func (self *BringYourDevice) routeLocalChanged(routeLocal bool) {
+	for _, listener := range self.routeLocalChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.RouteLocalChanged(routeLocal)
+		})
+	}
+}
+
 // `ReceivePacketFunction`
 func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 	// deviceLog("GOT A PACKET %d", len(packet))
@@ -332,14 +363,14 @@ func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol con
 	}
 }
 
-func (self *BringYourDevice) IsProvideEnabled() bool {
+func (self *BringYourDevice) GetProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	return self.remoteUserNatProvider != nil
 }
 
-func (self *BringYourDevice) IsConnectEnabled() bool {
+func (self *BringYourDevice) GetConnectEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -380,7 +411,7 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 			self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
 		}
 	}()
-	self.provideChanged(self.IsProvideEnabled())
+	self.provideChanged(self.GetProvideEnabled())
 }
 
 func (self *BringYourDevice) GetProvideMode() ProvideMode {
@@ -454,8 +485,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	if returnErr != nil {
 		return
 	}
-
-	self.connectChanged(self.IsConnectEnabled())
+	self.connectChanged(self.GetConnectEnabled())
 	return
 }
 

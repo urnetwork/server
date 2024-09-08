@@ -37,9 +37,11 @@ func NewBringYourApi(apiUrl string) *BringYourApi {
 func newBringYourApiWithContext(ctx context.Context, apiUrl string) *BringYourApi {
 	ctx, cancel := context.WithCancel(ctx)
 
+	clientStrategySettings := connect.DefaultClientStrategySettings()
+	// clientStrategySettings.RequireEch = requireEch
 	clientStrategy := connect.NewClientStrategy(
 		ctx,
-		connect.DefaultClientStrategySettings(),
+		clientStrategySettings,
 	)
 
 	return &BringYourApi{
