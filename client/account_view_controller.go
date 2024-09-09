@@ -27,7 +27,7 @@ func newAccountViewController(ctx context.Context, device *BringYourDevice) *Acc
 		ctx:                   cancelCtx,
 		cancel:                cancel,
 		device:                device,
-		walletValidateAddress: newWalletValidateAddress(cancelCtx, device.Api(), defaultAccountCheckTimeout),
+		walletValidateAddress: newWalletValidateAddress(cancelCtx, device.GetApi(), defaultAccountCheckTimeout),
 	}
 	return vc
 }

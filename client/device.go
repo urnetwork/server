@@ -3,7 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
-	"net/netip"
+	// "net/netip"
 	"sync"
 	"time"
 
@@ -37,16 +37,6 @@ type ReceivePacket interface {
 	ReceivePacket(packet []byte)
 }
 
-type Extender struct {
-	Ip     string
-	Secret string
-}
-
-type ExtenderAutoConfigure struct {
-	DnsIp            string
-	ExtenderHostname string
-}
-
 type deviceSettings struct {
 	// time to give up (drop) sending a packet to a destination
 	SendTimeout time.Duration
@@ -61,14 +51,14 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 type BringYourDevice struct {
-	api *BringYourApi
+	networkSpace *NetworkSpace
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	byJwt       string
-	platformUrl string
-	apiUrl      string
+	byJwt string
+	// platformUrl string
+	// apiUrl      string
 
 	deviceDescription string
 	deviceSpec        string
@@ -110,10 +100,10 @@ type BringYourDevice struct {
 	localUserNatUnsub func()
 }
 
+// FIXME pass NetworkSpace here instead of API
 func NewBringYourDeviceWithDefaults(
-	api *BringYourApi,
+	networkSpace *NetworkSpace,
 	byJwt string,
-	platformUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -122,9 +112,8 @@ func NewBringYourDeviceWithDefaults(
 	return traceWithReturnError(
 		func() (*BringYourDevice, error) {
 			return newBringYourDevice(
-				api,
+				networkSpace,
 				byJwt,
-				platformUrl,
 				deviceDescription,
 				deviceSpec,
 				appVersion,
@@ -136,9 +125,8 @@ func NewBringYourDeviceWithDefaults(
 }
 
 func newBringYourDevice(
-	api *BringYourApi,
+	networkSpace *NetworkSpace,
 	byJwt string,
-	platformUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -152,8 +140,8 @@ func newBringYourDevice(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// ctx, cancel := api.ctx, api.cancel
-	apiUrl := api.apiUrl
-	clientStrategy := api.clientStrategy
+	apiUrl := networkSpace.apiUrl
+	clientStrategy := networkSpace.clientStrategy
 
 	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byJwt, apiUrl)
 	client := connect.NewClient(
@@ -178,7 +166,7 @@ func newBringYourDevice(
 		client.Ctx(),
 		clientStrategy,
 		client.RouteManager(),
-		platformUrl,
+		networkSpace.platformUrl,
 		auth,
 	)
 
@@ -191,15 +179,14 @@ func newBringYourDevice(
 	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
 	// api := newBringYourApiWithContext(cancelCtx, clientStrategy, apiUrl)
-	api.SetByJwt(byJwt)
+	networkSpace.api.SetByJwt(byJwt)
 
 	byDevice := &BringYourDevice{
-		api:               api,
-		ctx:               ctx,
-		cancel:            cancel,
-		byJwt:             byJwt,
-		platformUrl:       platformUrl,
-		apiUrl:            apiUrl,
+		networkSpace: networkSpace,
+		ctx:          ctx,
+		cancel:       cancel,
+		byJwt:        byJwt,
+		// apiUrl:            apiUrl,
 		deviceDescription: deviceDescription,
 		deviceSpec:        deviceSpec,
 		appVersion:        appVersion,
@@ -239,44 +226,44 @@ func (self *BringYourDevice) ClientId() *Id {
 // 	return self.client
 // }
 
-func (self *BringYourDevice) Api() *BringYourApi {
-	return self.api
+func (self *BringYourDevice) GetApi() *BringYourApi {
+	return self.networkSpace.GetApi()
 }
 
-func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
-	extenderIpSecrets := map[netip.Addr]string{}
-	if extender != nil {
-		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
-			extenderIpSecrets[ip] = extender.Secret
-		}
-	}
-	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
-}
+// func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
+// 	extenderIpSecrets := map[netip.Addr]string{}
+// 	if extender != nil {
+// 		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
+// 			extenderIpSecrets[ip] = extender.Secret
+// 		}
+// 	}
+// 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+// }
 
-func (self *BringYourDevice) GetCustomExtender() *Extender {
-	extenderIpSecrets := self.clientStrategy.CustomExtenders()
-	extenders := []*Extender{}
-	for ip, secret := range extenderIpSecrets {
-		extender := &Extender{
-			Ip:     ip.String(),
-			Secret: secret,
-		}
-		extenders = append(extenders, extender)
-	}
-	if 0 < len(extenders) {
-		return extenders[0]
-	}
-	return nil
-}
+// func (self *BringYourDevice) GetCustomExtender() *Extender {
+// 	extenderIpSecrets := self.clientStrategy.CustomExtenders()
+// 	extenders := []*Extender{}
+// 	for ip, secret := range extenderIpSecrets {
+// 		extender := &Extender{
+// 			Ip:     ip.String(),
+// 			Secret: secret,
+// 		}
+// 		extenders = append(extenders, extender)
+// 	}
+// 	if 0 < len(extenders) {
+// 		return extenders[0]
+// 	}
+// 	return nil
+// }
 
-func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
-	// FIXME
-}
+// func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
+// 	// FIXME
+// }
 
-func (self *BringYourDevice) GetCustomExtenderAutoConfigure() *ExtenderAutoConfigure {
-	// FIXME
-	return nil
-}
+// func (self *BringYourDevice) GetCustomExtenderAutoConfigure() *ExtenderAutoConfigure {
+// 	// FIXME
+// 	return nil
+// }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
 	set := false
@@ -459,13 +446,14 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			}
 
 			generator := connect.NewApiMultiClientGenerator(
+				self.ctx,
 				connectSpecs,
 				self.clientStrategy,
 				// exclude self
 				[]connect.Id{self.clientId},
-				self.apiUrl,
+				self.networkSpace.apiUrl,
 				self.byJwt,
-				self.platformUrl,
+				self.networkSpace.platformUrl,
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,

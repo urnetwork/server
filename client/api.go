@@ -13,12 +13,14 @@ import (
 	// "net/http"
 	// "strings"
 	// "time"
+	"sync"
 
 	"bringyour.com/connect"
 )
 
 var apiLog = logFn("api")
 
+// FIXME rename to Api
 type BringYourApi struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -27,25 +29,15 @@ type BringYourApi struct {
 
 	apiUrl string
 
+	mutex sync.Mutex
 	byJwt string
 }
 
-func NewBringYourApi(apiUrl string) *BringYourApi {
-	return newBringYourApiWithContext(context.Background(), apiUrl)
-}
-
-func newBringYourApiWithContext(ctx context.Context, apiUrl string) *BringYourApi {
-	ctx, cancel := context.WithCancel(ctx)
-
-	clientStrategySettings := connect.DefaultClientStrategySettings()
-	// clientStrategySettings.RequireEch = requireEch
-	clientStrategy := connect.NewClientStrategy(
-		ctx,
-		clientStrategySettings,
-	)
+func newBringYourApi(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string) *BringYourApi {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &BringYourApi{
-		ctx:            ctx,
+		ctx:            cancelCtx,
 		cancel:         cancel,
 		clientStrategy: clientStrategy,
 		apiUrl:         apiUrl,
@@ -54,7 +46,21 @@ func newBringYourApiWithContext(ctx context.Context, apiUrl string) *BringYourAp
 
 // this gets attached to api calls that need it
 func (self *BringYourApi) SetByJwt(byJwt string) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
 	self.byJwt = byJwt
+}
+
+func (self *BringYourApi) GetByJwt() string {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	return self.byJwt
+}
+
+func (self *BringYourApi) Close() {
+	self.cancel()
 }
 
 type AuthLoginCallback connect.ApiCallback[*AuthLoginResult]
@@ -93,7 +99,7 @@ func (self *BringYourApi) AuthLogin(authLogin *AuthLoginArgs, callback AuthLogin
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/login", self.apiUrl),
 			authLogin,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthLoginResult{},
 			callback,
 		)
@@ -133,7 +139,7 @@ func (self *BringYourApi) AuthLoginWithPassword(authLoginWithPassword *AuthLogin
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/login-with-password", self.apiUrl),
 			authLoginWithPassword,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthLoginWithPasswordResult{},
 			callback,
 		)
@@ -167,7 +173,7 @@ func (self *BringYourApi) AuthVerify(authVerify *AuthVerifyArgs, callback AuthVe
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/verify", self.apiUrl),
 			authVerify,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthVerifyResult{},
 			callback,
 		)
@@ -191,7 +197,7 @@ func (self *BringYourApi) AuthPasswordReset(authPasswordReset *AuthPasswordReset
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/password-reset", self.apiUrl),
 			authPasswordReset,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthPasswordResetResult{},
 			callback,
 		)
@@ -215,7 +221,7 @@ func (self *BringYourApi) AuthVerifySend(authVerifySend *AuthVerifySendArgs, cal
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/verify-send", self.apiUrl),
 			authVerifySend,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthVerifySendResult{},
 			callback,
 		)
@@ -239,7 +245,7 @@ func (self *BringYourApi) NetworkCheck(networkCheck *NetworkCheckArgs, callback 
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/network-check", self.apiUrl),
 			networkCheck,
-			self.byJwt,
+			self.GetByJwt(),
 			&NetworkCheckResult{},
 			callback,
 		)
@@ -285,7 +291,7 @@ func (self *BringYourApi) NetworkCreate(networkCreate *NetworkCreateArgs, callba
 			self.clientStrategy,
 			fmt.Sprintf("%s/auth/network-create", self.apiUrl),
 			networkCreate,
-			self.byJwt,
+			self.GetByJwt(),
 			&NetworkCreateResult{},
 			callback,
 		)
@@ -320,7 +326,7 @@ func (self *BringYourApi) AuthNetworkClient(authNetworkClient *AuthNetworkClient
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/auth-client", self.apiUrl),
 			authNetworkClient,
-			self.byJwt,
+			self.GetByJwt(),
 			&AuthNetworkClientResult{},
 			callback,
 		)
@@ -373,7 +379,7 @@ func (self *BringYourApi) GetNetworkClients(callback GetNetworkClientsCallback) 
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/clients", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&NetworkClientsResult{},
 			callback,
 		)
@@ -439,7 +445,7 @@ func (self *BringYourApi) GetProviderLocations(callback FindLocationsCallback) {
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/provider-locations", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&FindLocationsResult{},
 			callback,
 		)
@@ -453,7 +459,7 @@ func (self *BringYourApi) FindProviderLocations(findLocations *FindLocationsArgs
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/find-provider-locations", self.apiUrl),
 			findLocations,
-			self.byJwt,
+			self.GetByJwt(),
 			&FindLocationsResult{},
 			callback,
 		)
@@ -467,7 +473,7 @@ func (self *BringYourApi) FindLocations(findLocations *FindLocationsArgs, callba
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/find-locations", self.apiUrl),
 			findLocations,
-			self.byJwt,
+			self.GetByJwt(),
 			&FindLocationsResult{},
 			callback,
 		)
@@ -494,7 +500,7 @@ func (self *BringYourApi) FindProviders(findProviders *FindProvidersArgs, callba
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/find-providers", self.apiUrl),
 			findProviders,
-			self.byJwt,
+			self.GetByJwt(),
 			&FindProvidersResult{},
 			callback,
 		)
@@ -548,7 +554,7 @@ func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, cal
 			self.clientStrategy,
 			fmt.Sprintf("%s/network/find-providers2", self.apiUrl),
 			findProviders2,
-			self.byJwt,
+			self.GetByJwt(),
 			&FindProvidersResult{},
 			callback,
 		)
@@ -574,7 +580,7 @@ func (self *BringYourApi) WalletCircleInit(callback WalletCircleInitCallback) {
 			self.clientStrategy,
 			fmt.Sprintf("%s/wallet/circle-init", self.apiUrl),
 			nil,
-			self.byJwt,
+			self.GetByJwt(),
 			&WalletCircleInitResult{},
 			callback,
 		)
@@ -599,7 +605,7 @@ func (self *BringYourApi) WalletValidateAddress(walletValidateAddress *WalletVal
 			self.clientStrategy,
 			fmt.Sprintf("%s/wallet/validate-address", self.apiUrl),
 			walletValidateAddress,
-			self.byJwt,
+			self.GetByJwt(),
 			&WalletValidateAddressResult{},
 			callback,
 		)
@@ -641,7 +647,7 @@ func (self *BringYourApi) CreateAccountWallet(createAccountWallet *CreateAccount
 			self.clientStrategy,
 			fmt.Sprintf("%s/account/wallet", self.apiUrl),
 			createAccountWallet,
-			self.byJwt,
+			self.GetByJwt(),
 			&CreateAccountWalletResult{},
 			callback,
 		)
@@ -663,7 +669,7 @@ func (self *BringYourApi) SetPayoutWallet(payoutWallet *SetPayoutWalletArgs, cal
 			self.clientStrategy,
 			fmt.Sprintf("%s/account/payout-wallet", self.apiUrl),
 			payoutWallet,
-			self.byJwt,
+			self.GetByJwt(),
 			&SetPayoutWalletResult{},
 			callback,
 		)
@@ -682,7 +688,7 @@ func (self *BringYourApi) GetAccountWallets(callback GetAccountWalletsCallback) 
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/account/wallets", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&GetAccountWalletsResult{},
 			callback,
 		)
@@ -701,7 +707,7 @@ func (self *BringYourApi) GetPayoutWallet(callback GetPayoutWalletCallback) {
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/account/payout-wallet", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&GetPayoutWalletIdResult{},
 			callback,
 		)
@@ -734,7 +740,7 @@ func (self *BringYourApi) WalletBalance(callback WalletBalanceCallback) {
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/wallet/balance", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&WalletBalanceResult{},
 			callback,
 		)
@@ -766,7 +772,7 @@ func (self *BringYourApi) WalletCircleTransferOut(walletCircleTransferOut *Walle
 			self.clientStrategy,
 			fmt.Sprintf("%s/wallet/circle-transfer-out", self.apiUrl),
 			walletCircleTransferOut,
-			self.byJwt,
+			self.GetByJwt(),
 			&WalletCircleTransferOutResult{},
 			callback,
 		)
@@ -807,7 +813,7 @@ func (self *BringYourApi) SubscriptionBalance(callback SubscriptionBalanceCallba
 			self.ctx,
 			self.clientStrategy,
 			fmt.Sprintf("%s/subscription/balance", self.apiUrl),
-			self.byJwt,
+			self.GetByJwt(),
 			&SubscriptionBalanceResult{},
 			callback,
 		)
@@ -835,7 +841,7 @@ func (self *BringYourApi) SubscriptionCreatePaymentId(createPaymentId *Subscript
 			self.clientStrategy,
 			fmt.Sprintf("%s/subscription/create-payment-id", self.apiUrl),
 			createPaymentId,
-			self.byJwt,
+			self.GetByJwt(),
 			&SubscriptionCreatePaymentIdResult{},
 			callback,
 		)
@@ -848,7 +854,7 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
 		self.clientStrategy,
 		fmt.Sprintf("%s/subscription/create-payment-id", self.apiUrl),
 		createPaymentId,
-		self.byJwt,
+		self.GetByJwt(),
 		&SubscriptionCreatePaymentIdResult{},
 		connect.NewNoopApiCallback[*SubscriptionCreatePaymentIdResult](),
 	)
@@ -878,7 +884,7 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 		self.ctx,
 		self.clientStrategy,
 		fmt.Sprintf("%s/network/user", self.apiUrl),
-		self.byJwt,
+		self.GetByJwt(),
 		&GetNetworkUserResult{},
 		callback,
 	)
@@ -900,7 +906,7 @@ func (self *BringYourApi) GetNetworkReferralCode(callback GetNetworkReferralCode
 		self.ctx,
 		self.clientStrategy,
 		fmt.Sprintf("%s/account/referral-code", self.apiUrl),
-		self.byJwt,
+		self.GetByJwt(),
 		&GetNetworkReferralCodeResult{},
 		callback,
 	)
