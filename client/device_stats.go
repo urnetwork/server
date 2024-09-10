@@ -28,6 +28,12 @@ func newDeviceStats() *DeviceStats {
 	}
 }
 
+func (self *DeviceStats) GetConnectCount() int {
+}
+
+func (self *DeviceStats) GetNetConnectDurationSeconds() float32 {
+}
+
 func (self *DeviceStats) GetUserSuccess() bool {
 	// consider the user successful when all of
 	// - max connect time is longer than 30m

@@ -234,6 +234,10 @@ type NetworkSpaceUpdate interface {
 	Update(values *NetworkSpaceValues)
 }
 
+type NetworkSpacesChangeListener interface {
+	NetworkSpacesChanged()
+}
+
 type ActiveNetworkSpaceChangeListener interface {
 	ActiveNetworkSpaceChanged(networkSpace *NetworkSpace)
 }
@@ -258,6 +262,7 @@ type NetworkSpaceManager struct {
 	networkSpaces      map[NetworkSpaceKey]*NetworkSpace
 	activeNetworkSpace *NetworkSpace
 
+	networkSpacesChangeListeners      *connect.CallbackList[NetworkSpacesChangeListener]
 	activeNetworkSpaceChangeListeners *connect.CallbackList[ActiveNetworkSpaceChangeListener]
 }
 
@@ -276,6 +281,7 @@ func newNetworkSpaceManagerWithContext(ctx context.Context, storagePath string) 
 		storagePath:                       storagePath,
 		networkSpaces:                     map[NetworkSpaceKey]*NetworkSpace{},
 		activeNetworkSpace:                nil,
+		networkSpacesChangeListeners:      connect.NewCallbackList[NetworkSpacesChangeListener](),
 		activeNetworkSpaceChangeListeners: connect.NewCallbackList[ActiveNetworkSpaceChangeListener](),
 	}
 	networkSpaceManager.load()
@@ -366,6 +372,21 @@ func (self *NetworkSpaceManager) envStoragePath(key *NetworkSpaceKey) string {
 	return envStoragePath
 }
 
+func (self *NetworkSpaceManager) AddNetworkSpacesChangeListener(listener NetworkSpacesChangeListener) Sub {
+	callbackId := self.networkSpacesChangeListeners.Add(listener)
+	return newSub(func() {
+		self.networkSpacesChangeListeners.Remove(callbackId)
+	})
+}
+
+func (self *NetworkSpaceManager) networkSpacesChanged() {
+	for _, listener := range self.networkSpacesChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.NetworkSpacesChanged()
+		})
+	}
+}
+
 func (self *NetworkSpaceManager) AddActiveNetworkSpaceChangeListener(listener ActiveNetworkSpaceChangeListener) Sub {
 	callbackId := self.activeNetworkSpaceChangeListeners.Add(listener)
 	return newSub(func() {
@@ -412,6 +433,17 @@ func (self *NetworkSpaceManager) SetActiveNetworkSpace(networkSpace *NetworkSpac
 	}
 }
 
+func (self *NetworkSpaceManager) GetNetworkSpaces() *NetworkSpaceList {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	networkSpaceList := NewNetworkSpaceList()
+	for _, networkSpace := range self.networkSpaces {
+		networkSpaceList.Add(networkSpace)
+	}
+	return networkSpaceList
+}
+
 func (self *NetworkSpaceManager) GetNetworkSpace(key *NetworkSpaceKey) *NetworkSpace {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -449,6 +481,7 @@ func (self *NetworkSpaceManager) UpdateNetworkSpace(key *NetworkSpaceKey, callba
 		self.networkSpaces[*key] = copyNetworkSpace
 	}()
 	self.store()
+	self.networkSpacesChanged()
 	if activeSet {
 		self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
 	}
@@ -456,21 +489,29 @@ func (self *NetworkSpaceManager) UpdateNetworkSpace(key *NetworkSpaceKey, callba
 }
 
 func (self *NetworkSpaceManager) RemoveNetworkSpace(networkSpace *NetworkSpace) bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
-	// cannot remove active or bundled
-	if self.activeNetworkSpace == networkSpace || networkSpace.values.Bundled {
-		return false
+		// cannot remove active or bundled
+		if self.activeNetworkSpace == networkSpace || networkSpace.values.Bundled {
+			return
+		}
+
+		if _, ok := self.networkSpaces[networkSpace.key]; !ok {
+			return
+		}
+
+		delete(self.networkSpaces, networkSpace.key)
+		changed = true
+	}()
+
+	if changed {
+		self.store()
+		self.networkSpacesChanged()
 	}
-
-	if _, ok := self.networkSpaces[networkSpace.key]; !ok {
-		return false
-	}
-
-	delete(self.networkSpaces, networkSpace.key)
-	self.store()
-	return true
+	return changed
 }
 
 func (self *NetworkSpaceManager) Close() {
