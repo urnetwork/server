@@ -178,7 +178,7 @@ func TestBestAvailableProviders(t *testing.T) {
 		}
 		CreateLocation(ctx, city)
 
-		SetConnectionLocation(ctx, connectionId, city.LocationId)
+		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
 
 		createLocationGroup := &LocationGroup{
 			Name:     StrongPrivacyLaws,
