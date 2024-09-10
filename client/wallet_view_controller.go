@@ -95,11 +95,54 @@ func (vc *WalletViewController) GetNextPayoutDate() string {
 
 	return nextPayoutDate.Format("Jan 2")
 }
-func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blockchain) (walletId *Id, err error) {
+
+type ValidateAddressCallback interface {
+	SendResult(valid bool)
+}
+
+type validateAddressCallbackImpl struct {
+	sendResult func(bool)
+}
+
+func (v *validateAddressCallbackImpl) SendResult(valid bool) {
+	v.sendResult(valid)
+}
+
+// Return the concrete type instead of the interface pointer
+func NewValidateAddressCallback(sendResult func(bool)) *validateAddressCallbackImpl {
+	return &validateAddressCallbackImpl{sendResult: sendResult}
+}
+
+func (vc *WalletViewController) ValidateAddress(
+	address string,
+	blockchain Blockchain,
+	callback ValidateAddressCallback,
+) {
+
+	vc.device.Api().WalletValidateAddress(
+		&WalletValidateAddressArgs{
+			Address: address,
+			Chain:   blockchain,
+		},
+		connect.NewApiCallback[*WalletValidateAddressResult](
+			func(result *WalletValidateAddressResult, err error) {
+
+				if err != nil {
+					wvcLog("error validating address %s on %s: %s", address, blockchain, err.Error())
+					callback.SendResult(false)
+				}
+
+				callback.SendResult(result.Valid)
+			}),
+	)
+
+}
+
+func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blockchain) error {
 
 	blockchainUpper := strings.ToUpper(blockchain)
 	if blockchainUpper != "SOL" && blockchainUpper != "MATIC" {
-		return nil, fmt.Errorf("unsupported blockchain")
+		return fmt.Errorf("unsupported blockchain")
 	}
 
 	args := &CreateAccountWalletArgs{
@@ -112,15 +155,17 @@ func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blo
 		func(result *CreateAccountWalletResult, createErr error) {
 
 			if createErr != nil {
-				err = createErr
+				// err = createErr
 				return
 			}
 
-			walletId = result.WalletId
+			// walletId = result.WalletId
+
+			vc.accountWalletsChanged()
 
 		})))
 
-	return
+	return nil
 
 }
 
