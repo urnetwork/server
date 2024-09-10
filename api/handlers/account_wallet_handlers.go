@@ -14,3 +14,12 @@ func CreateAccountWallet(w http.ResponseWriter, r *http.Request) {
 func GetAccountWallets(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetAccountWallets, w, r)
 }
+
+func CircleWebhook(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyCircleBody,
+		controller.CircleWalletWebhook,
+		w,
+		r,
+	)
+}
