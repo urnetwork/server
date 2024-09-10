@@ -2,42 +2,93 @@ package client
 
 import (
 	"context"
-	// "sync"
+	"encoding/json"
+	"fmt"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"sync"
 
 	"bringyour.com/connect"
 )
 
 // a network space is a set of server and app configurations
+// sequence of setting up a device:
+// 1. network space creates api
+// 2. api creates device
+// use `UpdateNetworkSpace` to create a new network space
 
-type Extender struct {
-	Ip     string
-	Secret string
+type NetExtender struct {
+	Ip     string `json:"ip"`
+	Secret string `json:"secret"`
 }
 
-type ExtenderAutoConfigure struct {
-	DnsIp            string
-	ExtenderHostname string
+type NetExtenderAutoConfigure struct {
+	DnsIp            string `json:"dns_ip,omitempty"`
+	ExtenderHostname string `json:"extender_hostname,omitempty"`
 }
 
 type NetworkSpaceKey struct {
-	HostName string
-	EnvName  string
+	HostName string `json:"host_name,omitempty"`
+	EnvName  string `json:"env_name,omitempty"`
+}
+
+func NewNetworkSpaceKey(hostName string, envName string) *NetworkSpaceKey {
+	return &NetworkSpaceKey{
+		HostName: hostName,
+		EnvName:  envName,
+	}
 }
 
 type NetworkSpaceValues struct {
-	EnvSecret                string
-	Bundled                  bool
-	NetExposeServerIps       bool
-	NetExposeServerHostNames bool
-	LinkHostName             string
-	MigrationHostName        string
-	Store                    string
-	Wallet                   string
+	EnvSecret                string `json:"env_secret,omitempty"`
+	Bundled                  bool   `json:"bundled,omitempty"`
+	NetExposeServerIps       bool   `json:"net_expose_server_ips,omitempty"`
+	NetExposeServerHostNames bool   `json:"net_expose_server_host_names,omitempty"`
+	LinkHostName             string `json:"link_host_name,omitempty"`
+	MigrationHostName        string `json:"migration_host_name,omitempty"`
+	Store                    string `json:"store,omitempty"`
+	Wallet                   string `json:"wallet,omitempty"`
 
 	// custom extender
 	// this overrides any auto discovered extenders
-	Extender              *Extender
-	ExtenderAutoConfigure *ExtenderAutoConfigure
+	NetExtender              *NetExtender              `json:"net_extender,omitempty"`
+	NetExtenderAutoConfigure *NetExtenderAutoConfigure `json:"net_extender_auto_configure,omitempty"`
+}
+
+func ServiceUrl(key *NetworkSpaceKey, values *NetworkSpaceValues, scheme string, service string) string {
+	var hostName string
+	if values.MigrationHostName != "" {
+		hostName = values.MigrationHostName
+	} else {
+		hostName = key.HostName
+	}
+
+	var serviceHostName string
+	switch key.EnvName {
+	case "main", "":
+		serviceHostName = fmt.Sprintf("%s.%s", service, hostName)
+	default:
+		serviceHostName = fmt.Sprintf("%s-%s.%s", key.EnvName, service, hostName)
+	}
+
+	serviceUrl := fmt.Sprintf("%s://%s", scheme, serviceHostName)
+	if values.EnvSecret != "" {
+		serviceUrl = fmt.Sprintf("%s/%s", serviceUrl, values.EnvSecret)
+	}
+
+	return serviceUrl
+}
+
+func ConnectLinkUrl(key *NetworkSpaceKey, values *NetworkSpaceValues, target string) string {
+	var linkHostName string
+	if values.LinkHostName != "" {
+		linkHostName = values.LinkHostName
+	} else {
+		linkHostName = key.HostName
+	}
+
+	return fmt.Sprintf("%s://%s/c?%s", "https", linkHostName, target)
 }
 
 type NetworkSpace struct {
@@ -54,42 +105,61 @@ type NetworkSpace struct {
 	clientStrategy  *connect.ClientStrategy
 	asyncLocalState *AsyncLocalState
 	api             *BringYourApi
-
-	// ProfileKey
-	//     all urls are derived from the host name and env name
-	// bundled
-	// require ech
-	// custom extender
-	// custom extender autoconfigure
-	// link prefix
-	// migrationn host name
-	// store
-	// wallet
-
-	// local settings
-
-	// create api from networkspace
-	// create device from api that has networkspace
 }
 
-func newNetworkSpace(ctx context.Context, key NetworkSpaceKey, values NetworkSpaceValues, storagePath string) {
+func newNetworkSpace(ctx context.Context, key NetworkSpaceKey, values NetworkSpaceValues, storagePath string) *NetworkSpace {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
-	// clientStrategySettings := connect.DefaultClientStrategySettings()
-	// clientStrategySettings.ExposeServerIps = networkSpace.GetExposeServerIps()
-	// clientStrategySettings.ExposeServerHostNames = networkSpace.GetExposeServerHostNames()
+	apiUrl := ServiceUrl(&key, &values, "https", "api")
+	platformUrl := ServiceUrl(&key, &values, "wss", "connect")
 
-	// clientStrategy := connect.NewClientStrategy(
-	// 	cancelCtx,
-	// 	clientStrategySettings,
-	// )
+	clientStrategySettings := connect.DefaultClientStrategySettings()
+	clientStrategySettings.ExposeServerIps = values.NetExposeServerIps
+	clientStrategySettings.ExposeServerHostNames = values.NetExposeServerHostNames
 
-	// extenderIpSecrets := map[netip.Addr]string{}
-	// if extender != nil {
-	// 	if ip, err := netip.ParseAddr(extender.Ip); err == nil {
-	// 		extenderIpSecrets[ip] = extender.Secret
-	// 	}
-	// }
-	// self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+	clientStrategy := connect.NewClientStrategy(cancelCtx, clientStrategySettings)
+
+	if values.NetExtender != nil {
+		extenderIpSecrets := map[netip.Addr]string{}
+		if ip, err := netip.ParseAddr(values.NetExtender.Ip); err == nil {
+			extenderIpSecrets[ip] = values.NetExtender.Secret
+		}
+		clientStrategy.SetCustomExtenders(extenderIpSecrets)
+	}
+
+	asyncLocalState := NewAsyncLocalState(storagePath)
+
+	api := newBringYourApi(cancelCtx, clientStrategy, apiUrl)
+
+	return &NetworkSpace{
+		ctx:    cancelCtx,
+		cancel: cancel,
+
+		key:         key,
+		values:      values,
+		storagePath: storagePath,
+
+		apiUrl:      apiUrl,
+		platformUrl: platformUrl,
+
+		clientStrategy:  clientStrategy,
+		asyncLocalState: asyncLocalState,
+		api:             api,
+	}
+}
+
+func (self *NetworkSpace) GetKey() *NetworkSpaceKey {
+	// make a copy
+	key := self.key
+	return &key
+}
+
+func (self *NetworkSpace) ServiceUrl(scheme string, service string) string {
+	return ServiceUrl(&self.key, &self.values, scheme, service)
+}
+
+func (self *NetworkSpace) ConnectLinkUrl(target string) string {
+	return ConnectLinkUrl(&self.key, &self.values, target)
 }
 
 func (self *NetworkSpace) GetHostName() string {
@@ -132,12 +202,12 @@ func (self *NetworkSpace) GetWallet() string {
 	return self.values.Wallet
 }
 
-func (self *NetworkSpace) GetExtender() *Extender {
-	return self.values.Extender
+func (self *NetworkSpace) GetNetExtender() *NetExtender {
+	return self.values.NetExtender
 }
 
-func (self *NetworkSpace) GetExtenderAutoConfigure() *ExtenderAutoConfigure {
-	return self.values.ExtenderAutoConfigure
+func (self *NetworkSpace) GetNetExtenderAutoConfigure() *NetExtenderAutoConfigure {
+	return self.values.NetExtenderAutoConfigure
 }
 
 func (self *NetworkSpace) GetAsyncLocalState() *AsyncLocalState {
@@ -164,37 +234,245 @@ type NetworkSpaceUpdate interface {
 	Update(values *NetworkSpaceValues)
 }
 
-type NetworkSpaceListener interface {
+type ActiveNetworkSpaceChangeListener interface {
 	ActiveNetworkSpaceChanged(networkSpace *NetworkSpace)
 }
 
+type networkSpaceManagerState struct {
+	NetworkSpaces []*networkSpaceState `json:"network_spaces"`
+	Active        *NetworkSpaceKey     `json:"active,omitempty"`
+}
+
+type networkSpaceState struct {
+	Key    NetworkSpaceKey    `json:"key"`
+	Values NetworkSpaceValues `json:"values"`
+}
+
 type NetworkSpaceManager struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	storagePath string
+
+	stateLock          sync.Mutex
+	networkSpaces      map[NetworkSpaceKey]*NetworkSpace
+	activeNetworkSpace *NetworkSpace
+
+	activeNetworkSpaceChangeListeners *connect.CallbackList[ActiveNetworkSpaceChangeListener]
 }
 
 func NewNetworkSpaceManager(storagePath string) *NetworkSpaceManager {
-	return &NetworkSpaceManager{}
+	ctx := context.Background()
+
+	return newNetworkSpaceManagerWithContext(ctx, storagePath)
+}
+
+func newNetworkSpaceManagerWithContext(ctx context.Context, storagePath string) *NetworkSpaceManager {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	networkSpaceManager := &NetworkSpaceManager{
+		ctx:                               cancelCtx,
+		cancel:                            cancel,
+		storagePath:                       storagePath,
+		networkSpaces:                     map[NetworkSpaceKey]*NetworkSpace{},
+		activeNetworkSpace:                nil,
+		activeNetworkSpaceChangeListeners: connect.NewCallbackList[ActiveNetworkSpaceChangeListener](),
+	}
+	networkSpaceManager.load()
+	return networkSpaceManager
+}
+
+func (self *NetworkSpaceManager) store() error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	networkSpaceStates := []*networkSpaceState{}
+	for key, networkSpace := range self.networkSpaces {
+		networkSpaceState := &networkSpaceState{
+			Key:    key,
+			Values: networkSpace.values,
+		}
+		networkSpaceStates = append(networkSpaceStates, networkSpaceState)
+	}
+
+	var activeKey *NetworkSpaceKey
+	if self.activeNetworkSpace != nil {
+		activeKey = &self.activeNetworkSpace.key
+	}
+
+	networkSpaceManagerState := &networkSpaceManagerState{
+		NetworkSpaces: networkSpaceStates,
+		Active:        activeKey,
+	}
+
+	networkSpaceManagerStateBytes, err := json.Marshal(networkSpaceManagerState)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(self.storagePath, ".network_spaces"), networkSpaceManagerStateBytes, LocalStorageFilePermissions)
+}
+
+func (self *NetworkSpaceManager) load() (returnErr error) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		networkSpaceManagerStateBytes, err := os.ReadFile(filepath.Join(self.storagePath, ".network_spaces"))
+		if err != nil {
+			returnErr = err
+			return
+		}
+
+		var networkSpaceManagerState networkSpaceManagerState
+		err = json.Unmarshal(networkSpaceManagerStateBytes, &networkSpaceManagerState)
+		if err != nil {
+			returnErr = err
+			return
+		}
+
+		for _, networkSpace := range self.networkSpaces {
+			networkSpace.close()
+		}
+		self.networkSpaces = map[NetworkSpaceKey]*NetworkSpace{}
+
+		for _, networkSpaceState := range networkSpaceManagerState.NetworkSpaces {
+			self.networkSpaces[networkSpaceState.Key] = newNetworkSpace(
+				self.ctx,
+				networkSpaceState.Key,
+				networkSpaceState.Values,
+				self.envStoragePath(&networkSpaceState.Key),
+			)
+		}
+		if networkSpaceManagerState.Active != nil {
+			if networkSpace, ok := self.networkSpaces[*networkSpaceManagerState.Active]; ok {
+				self.activeNetworkSpace = networkSpace
+			}
+			// else active key not found
+		}
+	}()
+	if returnErr != nil {
+		return
+	}
+
+	self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
+	return
+}
+
+func (self *NetworkSpaceManager) envStoragePath(key *NetworkSpaceKey) string {
+	envStoragePath := filepath.Join(self.storagePath, "network_spaces", key.EnvName)
+	if err := os.MkdirAll(envStoragePath, LocalStorageFilePermissions); err != nil {
+		panic(err)
+	}
+	return envStoragePath
+}
+
+func (self *NetworkSpaceManager) AddActiveNetworkSpaceChangeListener(listener ActiveNetworkSpaceChangeListener) Sub {
+	callbackId := self.activeNetworkSpaceChangeListeners.Add(listener)
+	return newSub(func() {
+		self.activeNetworkSpaceChangeListeners.Remove(callbackId)
+	})
+}
+
+func (self *NetworkSpaceManager) activeNetworkSpaceChanged(networkSpace *NetworkSpace) {
+	for _, listener := range self.activeNetworkSpaceChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ActiveNetworkSpaceChanged(networkSpace)
+		})
+	}
 }
 
 func (self *NetworkSpaceManager) GetActiveNetworkSpace() *NetworkSpace {
-	return nil
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.activeNetworkSpace
 }
 
 func (self *NetworkSpaceManager) SetActiveNetworkSpace(networkSpace *NetworkSpace) {
+	set := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
+		if self.activeNetworkSpace == networkSpace {
+			return
+		}
+
+		if _, ok := self.networkSpaces[networkSpace.key]; !ok {
+			// does not exist
+			return
+		}
+
+		self.activeNetworkSpace = networkSpace
+		set = true
+	}()
+	if set {
+		self.store()
+		self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
+	}
 }
 
-func (self *NetworkSpaceManager) AddNetworkSpaceListener(listener NetworkSpaceListener) Sub {
-	return nil
+func (self *NetworkSpaceManager) GetNetworkSpace(key *NetworkSpaceKey) *NetworkSpace {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.networkSpaces[*key]
 }
 
-func (self *NetworkSpaceManager) GetNetworkSpace(hostName string, envName string) *NetworkSpace {
-	return nil
+func (self *NetworkSpaceManager) UpdateNetworkSpace(key *NetworkSpaceKey, callback NetworkSpaceUpdate) *NetworkSpace {
+	var copyValues NetworkSpaceValues
+
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if networkSpace, ok := self.networkSpaces[*key]; ok {
+			copyValues = networkSpace.values
+		}
+	}()
+
+	callback.Update(&copyValues)
+
+	activeSet := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		copyNetworkSpace := newNetworkSpace(self.ctx, *key, copyValues, self.envStoragePath(key))
+		if networkSpace, ok := self.networkSpaces[*key]; ok {
+			if self.activeNetworkSpace == networkSpace {
+				self.activeNetworkSpace = copyNetworkSpace
+				activeSet = true
+			}
+			networkSpace.close()
+		}
+		self.networkSpaces[*key] = copyNetworkSpace
+	}()
+	self.store()
+	if activeSet {
+		self.activeNetworkSpaceChanged(self.GetActiveNetworkSpace())
+	}
+	return self.GetNetworkSpace(key)
 }
 
-func (self *NetworkSpaceManager) UpdateNetworkSpace(hostName string, envName string, callback NetworkSpaceUpdate) *NetworkSpace {
-	return nil
+func (self *NetworkSpaceManager) RemoveNetworkSpace(networkSpace *NetworkSpace) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	// cannot remove active or bundled
+	if self.activeNetworkSpace == networkSpace || networkSpace.values.Bundled {
+		return false
+	}
+
+	if _, ok := self.networkSpaces[networkSpace.key]; !ok {
+		return false
+	}
+
+	delete(self.networkSpaces, networkSpace.key)
+	self.store()
+	return true
 }
 
-func (self *NetworkSpaceManager) RemoveNetworkSpace(networkSpace *NetworkSpace) {
-
+func (self *NetworkSpaceManager) Close() {
+	self.cancel()
 }

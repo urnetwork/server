@@ -70,7 +70,8 @@ type BringYourDevice struct {
 	instanceId connect.Id
 
 	clientStrategy *connect.ClientStrategy
-	client         *connect.Client
+	// this is the client for provide
+	client *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -78,6 +79,8 @@ type BringYourDevice struct {
 	platformTransport *connect.PlatformTransport
 
 	localUserNat *connect.LocalUserNat
+
+	stats *DeviceStats
 
 	stateLock sync.Mutex
 
@@ -199,6 +202,7 @@ func newBringYourDevice(
 		// routeManager: routeManager,
 		platformTransport:                 platformTransport,
 		localUserNat:                      localUserNat,
+		stats:                             newDeviceStats(),
 		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
@@ -264,6 +268,10 @@ func (self *BringYourDevice) GetApi() *BringYourApi {
 // 	// FIXME
 // 	return nil
 // }
+
+func (self *BringYourDevice) GetStats() *DeviceStats {
+	return self.stats
+}
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
 	set := false
@@ -461,10 +469,14 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				connect.DefaultClientSettings,
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
+			remoteReceive := func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
+				self.stats.UpdateRemoteReceive(ByteCount(len(packet)))
+				self.receive(source, ipProtocol, packet)
+			}
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
 				generator,
-				self.receive,
+				remoteReceive,
 				protocol.ProvideMode_Network,
 			)
 		}
@@ -473,7 +485,9 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	if returnErr != nil {
 		return
 	}
-	self.connectChanged(self.GetConnectEnabled())
+	connectEnabled := self.GetConnectEnabled()
+	self.stats.UpdateConnect(connectEnabled)
+	self.connectChanged(connectEnabled)
 	return
 }
 
@@ -507,6 +521,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 	}()
 
 	if remoteUserNatClient != nil {
+		self.stats.UpdateRemoteSend(ByteCount(n))
 		return remoteUserNatClient.SendPacket(
 			source,
 			protocol.ProvideMode_Network,
