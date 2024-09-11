@@ -214,8 +214,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	standardContractTransferByteCount := 4 * maxMessageContentSize
 	standardContractFillFraction := float32(0.5)
 
-	clientStrategyA := connect.DefaultClientStrategy(ctx)
-	clientStrategyB := connect.DefaultClientStrategy(ctx)
+	clientStrategyA := connect.NewClientStrategyWithDefaults(ctx)
+	clientStrategyB := connect.NewClientStrategyWithDefaults(ctx)
 
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
