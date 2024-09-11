@@ -16,6 +16,14 @@ type AccountWalletsListener interface {
 	AccountWalletsChanged()
 }
 
+type IsCreatingExternalWalletListener interface {
+	StateChanged(bool)
+}
+
+type PayoutWalletListener interface {
+	PayoutWalletChanged(*Id)
+}
+
 type AccountWallet struct {
 	WalletId         *Id        `json:"wallet_id"`
 	CircleWalletId   string     `json:"circle_wallet_id,omitempty"`
@@ -40,11 +48,15 @@ type WalletViewController struct {
 	cancel context.CancelFunc
 	device *BringYourDevice
 
-	wallets *AccountWalletsList
+	wallets                *AccountWalletsList
+	isAddingExternalWallet bool
+	payoutWalletId         *Id
 
 	stateLock sync.Mutex
 
-	accountWalletsListeners *connect.CallbackList[AccountWalletsListener]
+	accountWalletsListeners           *connect.CallbackList[AccountWalletsListener]
+	payoutWalletListeners             *connect.CallbackList[PayoutWalletListener]
+	isCreatingExternalWalletListeners *connect.CallbackList[IsCreatingExternalWalletListener]
 }
 
 func newWalletViewController(ctx context.Context, device *BringYourDevice) *WalletViewController {
@@ -55,15 +67,20 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		cancel: cancel,
 		device: device,
 
-		wallets: NewAccountWalletsList(),
+		wallets:                NewAccountWalletsList(),
+		isAddingExternalWallet: false,
+		payoutWalletId:         nil,
 
-		accountWalletsListeners: connect.NewCallbackList[AccountWalletsListener](),
+		accountWalletsListeners:           connect.NewCallbackList[AccountWalletsListener](),
+		payoutWalletListeners:             connect.NewCallbackList[PayoutWalletListener](),
+		isCreatingExternalWalletListeners: connect.NewCallbackList[IsCreatingExternalWalletListener](),
 	}
 	return vc
 }
 
 func (vc *WalletViewController) Start() {
 	vc.fetchAccountWallets()
+	vc.FetchPayoutWallet()
 }
 
 func (vc *WalletViewController) Stop() {
@@ -138,35 +155,81 @@ func (vc *WalletViewController) ValidateAddress(
 
 }
 
-func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blockchain) error {
+func (vc *WalletViewController) AddIsCreatingExternalWalletListener(listener IsCreatingExternalWalletListener) Sub {
+	callbackId := vc.isCreatingExternalWalletListeners.Add(listener)
+	return newSub(func() {
+		vc.accountWalletsListeners.Remove(callbackId)
+	})
+}
 
-	blockchainUpper := strings.ToUpper(blockchain)
-	if blockchainUpper != "SOL" && blockchainUpper != "MATIC" {
-		return fmt.Errorf("unsupported blockchain")
+func (vc *WalletViewController) isCreatingExternalWalletChanged(isProcessing bool) {
+	for _, listener := range vc.isCreatingExternalWalletListeners.Get() {
+		connect.HandleError(func() {
+			listener.StateChanged(isProcessing)
+		})
+	}
+}
+
+func (vc *WalletViewController) setIsCreatingExternalWallet(state bool) {
+
+	vc.stateLock.Lock()
+	defer vc.stateLock.Unlock()
+
+	vc.isAddingExternalWallet = state
+
+	vc.isCreatingExternalWalletChanged(vc.isAddingExternalWallet)
+
+}
+
+func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blockchain) {
+
+	if !vc.isAddingExternalWallet {
+
+		blockchainUpper := strings.ToUpper(blockchain)
+		if blockchainUpper != "SOL" && blockchainUpper != "MATIC" {
+			wvcLog("invalid blockchain passed: %s", blockchainUpper)
+			return
+		}
+
+		vc.setIsCreatingExternalWallet(true)
+
+		args := &CreateAccountWalletArgs{
+			Blockchain:       blockchainUpper,
+			WalletAddress:    address,
+			DefaultTokenType: "USDC",
+		}
+
+		vc.device.Api().CreateAccountWallet(args, CreateAccountWalletCallback(connect.NewApiCallback[*CreateAccountWalletResult](
+			func(result *CreateAccountWalletResult, err error) {
+
+				if err != nil {
+					wvcLog("error creating an external wallet: %s", err.Error())
+					// err = createErr
+					return
+				}
+
+				vc.setIsCreatingExternalWallet(false)
+				vc.fetchAccountWallets()
+
+			})))
+
 	}
 
-	args := &CreateAccountWalletArgs{
-		Blockchain:       blockchainUpper,
-		WalletAddress:    address,
-		DefaultTokenType: "USDC",
+}
+
+func (vc *WalletViewController) AddPayoutWalletListener(listener PayoutWalletListener) Sub {
+	callbackId := vc.payoutWalletListeners.Add(listener)
+	return newSub(func() {
+		vc.payoutWalletListeners.Remove(callbackId)
+	})
+}
+
+func (vc *WalletViewController) payoutWalletIdChanged(id *Id) {
+	for _, listener := range vc.payoutWalletListeners.Get() {
+		connect.HandleError(func() {
+			listener.PayoutWalletChanged(id)
+		})
 	}
-
-	vc.device.Api().CreateAccountWallet(args, CreateAccountWalletCallback(connect.NewApiCallback[*CreateAccountWalletResult](
-		func(result *CreateAccountWalletResult, createErr error) {
-
-			if createErr != nil {
-				// err = createErr
-				return
-			}
-
-			// walletId = result.WalletId
-
-			vc.accountWalletsChanged()
-
-		})))
-
-	return nil
-
 }
 
 func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
@@ -184,28 +247,37 @@ func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
 		func(result *SetPayoutWalletResult, setWalletErr error) {
 
 			if setWalletErr != nil {
-				err = setWalletErr
+				wvcLog("Error setting payout wallet: %s", err.Error())
+				return
 			}
+
+			vc.stateLock.Lock()
+			vc.payoutWalletId = args.WalletId
+			vc.stateLock.Unlock()
+			vc.payoutWalletIdChanged(vc.payoutWalletId)
 
 		})))
 
 	return
 }
 
-func (vc *WalletViewController) GetPayoutWallet() (id *Id, err error) {
+func (vc *WalletViewController) GetPayoutWalletId() (id *Id) {
+	return vc.payoutWalletId
+}
+
+func (vc *WalletViewController) FetchPayoutWallet() {
 
 	vc.device.Api().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
-		func(result *GetPayoutWalletIdResult, getWalletErr error) {
+		func(result *GetPayoutWalletIdResult, err error) {
 
-			if getWalletErr != nil {
-				err = getWalletErr
+			if err != nil {
+				wvcLog("error fetching payout wallet: %s", err.Error())
+				return
 			}
 
-			id = result.Id
+			vc.payoutWalletIdChanged(result.Id)
 
 		})))
-
-	return
 }
 
 func (vc *WalletViewController) GetWallets() *AccountWalletsList {
