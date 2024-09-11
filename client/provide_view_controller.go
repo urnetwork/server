@@ -2,8 +2,7 @@ package client
 
 import (
 	"context"
-
-	"golang.org/x/mobile/gl"
+	// "golang.org/x/mobile/gl"
 	// "bringyour.com/connect"
 )
 
@@ -15,19 +14,19 @@ type ProvideViewController struct {
 
 	device *BringYourDevice
 
-	glViewController
+	// glViewController
 }
 
 func newProvideViewController(ctx context.Context, device *BringYourDevice) *ProvideViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ProvideViewController{
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		device:           device,
-		glViewController: *newGLViewController(),
+		ctx:    cancelCtx,
+		cancel: cancel,
+		device: device,
+		// glViewController: *newGLViewController(),
 	}
-	vc.drawController = vc
+	// vc.drawController = vc
 	return vc
 }
 
@@ -39,19 +38,19 @@ func (self *ProvideViewController) Stop() {
 	// FIXME
 }
 
-func (self *ProvideViewController) draw(g gl.Context) {
-	// pvcLog("draw")
+// func (self *ProvideViewController) draw(g gl.Context) {
+// 	// pvcLog("draw")
 
-	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
-	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-}
+// 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
+// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+// }
 
-func (self *ProvideViewController) drawLoopOpen() {
-	self.frameRate = 24
-}
+// func (self *ProvideViewController) drawLoopOpen() {
+// 	self.frameRate = 24
+// }
 
-func (self *ProvideViewController) drawLoopClose() {
-}
+// func (self *ProvideViewController) drawLoopClose() {
+// }
 
 func (self *ProvideViewController) Close() {
 	pvcLog("close")

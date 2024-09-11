@@ -3,11 +3,13 @@ package client
 import (
 	"context"
 	"fmt"
-	"net/netip"
+	// "net/netip"
 	"sync"
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
@@ -26,18 +28,13 @@ type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
 
+type RouteLocalChangeListener interface {
+	RouteLocalChanged(routeLocal bool)
+}
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
 	ReceivePacket(packet []byte)
-}
-
-type Extender struct {
-	Ip     string
-	Secret string
-}
-
-type ExtenderResolver struct {
-	DnsIp string
 }
 
 type deviceSettings struct {
@@ -54,14 +51,14 @@ func defaultDeviceSettings() *deviceSettings {
 }
 
 type BringYourDevice struct {
-	api *BringYourApi
+	networkSpace *NetworkSpace
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	byJwt       string
-	platformUrl string
-	apiUrl      string
+	byJwt string
+	// platformUrl string
+	// apiUrl      string
 
 	deviceDescription string
 	deviceSpec        string
@@ -73,7 +70,8 @@ type BringYourDevice struct {
 	instanceId connect.Id
 
 	clientStrategy *connect.ClientStrategy
-	client         *connect.Client
+	// this is the client for provide
+	client *connect.Client
 
 	// contractManager *connect.ContractManager
 	// routeManager *connect.RouteManager
@@ -81,6 +79,8 @@ type BringYourDevice struct {
 	platformTransport *connect.PlatformTransport
 
 	localUserNat *connect.LocalUserNat
+
+	stats *DeviceStats
 
 	stateLock sync.Mutex
 
@@ -96,16 +96,17 @@ type BringYourDevice struct {
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
-	provideChangeListeners *connect.CallbackList[ProvideChangeListener]
-	connectChangeListeners *connect.CallbackList[ConnectChangeListener]
+	provideChangeListeners    *connect.CallbackList[ProvideChangeListener]
+	connectChangeListeners    *connect.CallbackList[ConnectChangeListener]
+	routeLocalChangeListeners *connect.CallbackList[RouteLocalChangeListener]
 
 	localUserNatUnsub func()
 }
 
+// FIXME pass NetworkSpace here instead of API
 func NewBringYourDeviceWithDefaults(
-	api *BringYourApi,
+	networkSpace *NetworkSpace,
 	byJwt string,
-	platformUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -114,9 +115,8 @@ func NewBringYourDeviceWithDefaults(
 	return traceWithReturnError(
 		func() (*BringYourDevice, error) {
 			return newBringYourDevice(
-				api,
+				networkSpace,
 				byJwt,
-				platformUrl,
 				deviceDescription,
 				deviceSpec,
 				appVersion,
@@ -128,9 +128,8 @@ func NewBringYourDeviceWithDefaults(
 }
 
 func newBringYourDevice(
-	api *BringYourApi,
+	networkSpace *NetworkSpace,
 	byJwt string,
-	platformUrl string,
 	deviceDescription string,
 	deviceSpec string,
 	appVersion string,
@@ -144,8 +143,8 @@ func newBringYourDevice(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// ctx, cancel := api.ctx, api.cancel
-	apiUrl := api.apiUrl
-	clientStrategy := api.clientStrategy
+	apiUrl := networkSpace.apiUrl
+	clientStrategy := networkSpace.clientStrategy
 
 	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byJwt, apiUrl)
 	client := connect.NewClient(
@@ -170,7 +169,7 @@ func newBringYourDevice(
 		client.Ctx(),
 		clientStrategy,
 		client.RouteManager(),
-		platformUrl,
+		networkSpace.platformUrl,
 		auth,
 	)
 
@@ -183,15 +182,14 @@ func newBringYourDevice(
 	localUserNat := connect.NewLocalUserNat(client.Ctx(), clientId.String(), localUserNatSettings)
 
 	// api := newBringYourApiWithContext(cancelCtx, clientStrategy, apiUrl)
-	api.SetByJwt(byJwt)
+	networkSpace.api.SetByJwt(byJwt)
 
 	byDevice := &BringYourDevice{
-		api:               api,
-		ctx:               ctx,
-		cancel:            cancel,
-		byJwt:             byJwt,
-		platformUrl:       platformUrl,
-		apiUrl:            apiUrl,
+		networkSpace: networkSpace,
+		ctx:          ctx,
+		cancel:       cancel,
+		byJwt:        byJwt,
+		// apiUrl:            apiUrl,
 		deviceDescription: deviceDescription,
 		deviceSpec:        deviceSpec,
 		appVersion:        appVersion,
@@ -204,6 +202,7 @@ func newBringYourDevice(
 		// routeManager: routeManager,
 		platformTransport:                 platformTransport,
 		localUserNat:                      localUserNat,
+		stats:                             newDeviceStats(),
 		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
@@ -212,6 +211,7 @@ func newBringYourDevice(
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
+		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
 	}
 
 	// set up with nil destination
@@ -230,50 +230,63 @@ func (self *BringYourDevice) ClientId() *Id {
 // 	return self.client
 // }
 
-func (self *BringYourDevice) Api() *BringYourApi {
-	return self.api
+func (self *BringYourDevice) GetApi() *BringYourApi {
+	return self.networkSpace.GetApi()
 }
 
-func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
-	extenderIpSecrets := map[netip.Addr]string{}
-	if extender != nil {
-		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
-			extenderIpSecrets[ip] = extender.Secret
-		}
-	}
-	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
-}
+// func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
+// 	extenderIpSecrets := map[netip.Addr]string{}
+// 	if extender != nil {
+// 		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
+// 			extenderIpSecrets[ip] = extender.Secret
+// 		}
+// 	}
+// 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
+// }
 
-func (self *BringYourDevice) CustomExtender() *Extender {
-	extenderIpSecrets := self.clientStrategy.CustomExtenders()
-	extenders := []*Extender{}
-	for ip, secret := range extenderIpSecrets {
-		extender := &Extender{
-			Ip:     ip.String(),
-			Secret: secret,
-		}
-		extenders = append(extenders, extender)
-	}
-	if 0 < len(extenders) {
-		return extenders[0]
-	}
-	return nil
-}
+// func (self *BringYourDevice) GetCustomExtender() *Extender {
+// 	extenderIpSecrets := self.clientStrategy.CustomExtenders()
+// 	extenders := []*Extender{}
+// 	for ip, secret := range extenderIpSecrets {
+// 		extender := &Extender{
+// 			Ip:     ip.String(),
+// 			Secret: secret,
+// 		}
+// 		extenders = append(extenders, extender)
+// 	}
+// 	if 0 < len(extenders) {
+// 		return extenders[0]
+// 	}
+// 	return nil
+// }
 
-func (self *BringYourDevice) SetCustomExtenderResolver(extenderResolver *ExtenderResolver) {
-	// FIXME
-}
+// func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
+// 	// FIXME
+// }
 
-func (self *BringYourDevice) CustomExtenderResolver() *ExtenderResolver {
-	// FIXME
-	return nil
+// func (self *BringYourDevice) GetCustomExtenderAutoConfigure() *ExtenderAutoConfigure {
+// 	// FIXME
+// 	return nil
+// }
+
+func (self *BringYourDevice) GetStats() *DeviceStats {
+	return self.stats
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	set := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
-	self.routeLocal = routeLocal
+		if self.routeLocal != routeLocal {
+			self.routeLocal = routeLocal
+			set = true
+		}
+	}()
+	if set {
+		self.routeLocalChanged(routeLocal)
+	}
 }
 
 func (self *BringYourDevice) GetRouteLocal() bool {
@@ -306,6 +319,13 @@ func (self *BringYourDevice) AddConnectChangeListener(listener ConnectChangeList
 	})
 }
 
+func (self *BringYourDevice) AddRouteLocalChangeListener(listener RouteLocalChangeListener) Sub {
+	callbackId := self.routeLocalChangeListeners.Add(listener)
+	return newSub(func() {
+		self.routeLocalChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) provideChanged(provideEnabled bool) {
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
@@ -322,6 +342,14 @@ func (self *BringYourDevice) connectChanged(connectEnabled bool) {
 	}
 }
 
+func (self *BringYourDevice) routeLocalChanged(routeLocal bool) {
+	for _, listener := range self.routeLocalChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.RouteLocalChanged(routeLocal)
+		})
+	}
+}
+
 // `ReceivePacketFunction`
 func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 	// deviceLog("GOT A PACKET %d", len(packet))
@@ -330,14 +358,14 @@ func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol con
 	}
 }
 
-func (self *BringYourDevice) IsProvideEnabled() bool {
+func (self *BringYourDevice) GetProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	return self.remoteUserNatProvider != nil
 }
 
-func (self *BringYourDevice) IsConnectEnabled() bool {
+func (self *BringYourDevice) GetConnectEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -378,7 +406,7 @@ func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
 			self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
 		}
 	}()
-	self.provideChanged(self.IsProvideEnabled())
+	self.provideChanged(self.GetProvideEnabled())
 }
 
 func (self *BringYourDevice) GetProvideMode() ProvideMode {
@@ -387,6 +415,22 @@ func (self *BringYourDevice) GetProvideMode() ProvideMode {
 		maxProvideMode = max(maxProvideMode, provideMode)
 	}
 	return ProvideMode(maxProvideMode)
+}
+
+func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	glog.Infof("[device]provide paused = %t\n", providePaused)
+
+	self.client.ContractManager().SetProvidePaused(providePaused)
+}
+
+func (self *BringYourDevice) GetProvidePaused() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.client.ContractManager().IsProvidePaused()
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
@@ -410,13 +454,14 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 			}
 
 			generator := connect.NewApiMultiClientGenerator(
+				self.ctx,
 				connectSpecs,
 				self.clientStrategy,
 				// exclude self
 				[]connect.Id{self.clientId},
-				self.apiUrl,
+				self.networkSpace.apiUrl,
 				self.byJwt,
-				self.platformUrl,
+				self.networkSpace.platformUrl,
 				self.deviceDescription,
 				self.deviceSpec,
 				self.appVersion,
@@ -424,10 +469,14 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 				connect.DefaultClientSettings,
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
+			remoteReceive := func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
+				self.stats.UpdateRemoteReceive(ByteCount(len(packet)))
+				self.receive(source, ipProtocol, packet)
+			}
 			self.remoteUserNatClient = connect.NewRemoteUserNatMultiClientWithDefaults(
 				self.ctx,
 				generator,
-				self.receive,
+				remoteReceive,
 				protocol.ProvideMode_Network,
 			)
 		}
@@ -436,8 +485,9 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	if returnErr != nil {
 		return
 	}
-
-	self.connectChanged(self.IsConnectEnabled())
+	connectEnabled := self.GetConnectEnabled()
+	self.stats.UpdateConnect(connectEnabled)
+	self.connectChanged(connectEnabled)
 	return
 }
 
@@ -471,6 +521,7 @@ func (self *BringYourDevice) SendPacket(packet []byte, n int32) bool {
 	}()
 
 	if remoteUserNatClient != nil {
+		self.stats.UpdateRemoteSend(ByteCount(n))
 		return remoteUserNatClient.SendPacket(
 			source,
 			protocol.ProvideMode_Network,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	// "io"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -191,6 +192,31 @@ func (self *LocalState) GetRouteLocal() bool {
 		}
 	}
 	return true
+}
+
+func (self *LocalState) SetConnectLocation(connectLocation *ConnectLocation) error {
+	path := filepath.Join(self.localStorageDir, ".connect_location")
+	if connectLocation == nil {
+		os.Remove(path)
+		return nil
+	} else {
+		connectLocationBytes, err := json.Marshal(connectLocation)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, connectLocationBytes, LocalStorageFilePermissions)
+	}
+}
+
+func (self *LocalState) GetConnectLocation() *ConnectLocation {
+	path := filepath.Join(self.localStorageDir, ".connect_location")
+	if connectLocationBytes, err := os.ReadFile(path); err == nil {
+		var connectLocation ConnectLocation
+		if err := json.Unmarshal(connectLocationBytes, &connectLocation); err == nil {
+			return &connectLocation
+		}
+	}
+	return nil
 }
 
 // clears all auth tokens
