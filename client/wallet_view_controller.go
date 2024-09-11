@@ -275,7 +275,7 @@ func (vc *WalletViewController) FetchPayoutWallet() {
 				return
 			}
 
-			vc.payoutWalletIdChanged(result.Id)
+			vc.payoutWalletIdChanged(result.WalletId)
 
 		})))
 }

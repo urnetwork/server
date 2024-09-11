@@ -689,7 +689,7 @@ func (self *BringYourApi) GetAccountWallets(callback GetAccountWalletsCallback) 
 }
 
 type GetPayoutWalletIdResult struct {
-	Id *Id `json:"id"`
+	WalletId *Id `json:"wallet_id"`
 }
 
 type GetPayoutWalletCallback connect.ApiCallback[*GetPayoutWalletIdResult]
