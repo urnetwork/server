@@ -29,9 +29,38 @@ func newDeviceStats() *DeviceStats {
 }
 
 func (self *DeviceStats) GetConnectCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.connectCount
 }
 
-func (self *DeviceStats) GetNetConnectDurationSeconds() float32 {
+func (self *DeviceStats) GetNetConnectDurationSeconds() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int(self.netConnectDuration / time.Second)
+}
+
+func (self *DeviceStats) GetMaxConnectDurationSeconds() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int(self.maxConnectDuration / time.Second)
+}
+
+func (self *DeviceStats) GetNetRemoteSendByteCount() ByteCount {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.netRemoteSendByteCount
+}
+
+func (self *DeviceStats) GetNetRemoteReceiveByteCount() ByteCount {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.netRemoteReceiveByteCount
 }
 
 func (self *DeviceStats) GetUserSuccess() bool {

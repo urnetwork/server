@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"bringyour.com/connect"
@@ -17,6 +18,15 @@ import (
 // 1. network space creates api
 // 2. api creates device
 // use `UpdateNetworkSpace` to create a new network space
+
+func NormalEnvName(envName string) string {
+	switch envName {
+	case "":
+		return "main"
+	default:
+		return strings.ToLower(envName)
+	}
+}
 
 type NetExtender struct {
 	Ip     string `json:"ip"`
@@ -36,7 +46,7 @@ type NetworkSpaceKey struct {
 func NewNetworkSpaceKey(hostName string, envName string) *NetworkSpaceKey {
 	return &NetworkSpaceKey{
 		HostName: hostName,
-		EnvName:  envName,
+		EnvName:  NormalEnvName(envName),
 	}
 }
 
@@ -419,9 +429,11 @@ func (self *NetworkSpaceManager) SetActiveNetworkSpace(networkSpace *NetworkSpac
 			return
 		}
 
-		if _, ok := self.networkSpaces[networkSpace.key]; !ok {
-			// does not exist
-			return
+		if networkSpace != nil {
+			if _, ok := self.networkSpaces[networkSpace.key]; !ok {
+				// does not exist
+				return
+			}
 		}
 
 		self.activeNetworkSpace = networkSpace
@@ -452,6 +464,10 @@ func (self *NetworkSpaceManager) GetNetworkSpace(key *NetworkSpaceKey) *NetworkS
 }
 
 func (self *NetworkSpaceManager) UpdateNetworkSpace(key *NetworkSpaceKey, callback NetworkSpaceUpdate) *NetworkSpace {
+	return self.updateNetworkSpace(key, callback.Update)
+}
+
+func (self *NetworkSpaceManager) updateNetworkSpace(key *NetworkSpaceKey, callback func(values *NetworkSpaceValues)) *NetworkSpace {
 	var copyValues NetworkSpaceValues
 
 	func() {
@@ -463,7 +479,7 @@ func (self *NetworkSpaceManager) UpdateNetworkSpace(key *NetworkSpaceKey, callba
 		}
 	}()
 
-	callback.Update(&copyValues)
+	callback(&copyValues)
 
 	activeSet := false
 	func() {
