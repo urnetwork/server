@@ -68,7 +68,7 @@ Options:
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
 		router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
 		router.NewRoute("POST", "/pay/coinbase", handlers.CoinbaseWebhook),
-		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook),
+		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
@@ -96,6 +96,7 @@ Options:
 		router.NewRoute("GET", "/hello", handlers.Hello),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
+		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
 		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
