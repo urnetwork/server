@@ -235,32 +235,6 @@ func (self *BringYourDevice) GetApi() *BringYourApi {
 	return self.networkSpace.GetApi()
 }
 
-// func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
-// 	extenderIpSecrets := map[netip.Addr]string{}
-// 	if extender != nil {
-// 		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
-// 			extenderIpSecrets[ip] = extender.Secret
-// 		}
-// 	}
-// 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
-// }
-
-// func (self *BringYourDevice) GetCustomExtender() *Extender {
-// 	extenderIpSecrets := self.clientStrategy.CustomExtenders()
-// 	extenders := []*Extender{}
-// 	for ip, secret := range extenderIpSecrets {
-// 		extender := &Extender{
-// 			Ip:     ip.String(),
-// 			Secret: secret,
-// 		}
-// 		extenders = append(extenders, extender)
-// 	}
-// 	if 0 < len(extenders) {
-// 		return extenders[0]
-// 	}
-// 	return nil
-// }
-
 // func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
 // 	// FIXME
 // }
@@ -304,20 +278,6 @@ func (self *BringYourDevice) GetRouteLocal() bool {
 // func (self *BringYourDevice) CustomExtenderResolver() *ExtenderResolver {
 // 	// FIXME
 // 	return nil
-// }
-
-// func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
-// 	self.stateLock.Lock()
-// 	defer self.stateLock.Unlock()
-
-// 	self.routeLocal = routeLocal
-// }
-
-// func (self *BringYourDevice) GetRouteLocal() bool {
-// 	self.stateLock.Lock()
-// 	defer self.stateLock.Unlock()
-
-// 	return self.routeLocal
 // }
 
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
