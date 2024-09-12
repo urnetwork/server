@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/mobile/gl"
+	// "golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
 )
@@ -22,7 +22,7 @@ type LoginViewController struct {
 
 	networkCheck *networkCheck
 
-	glViewController
+	// glViewController
 }
 
 func NewLoginViewController(api *BringYourApi) *LoginViewController {
@@ -33,13 +33,13 @@ func newLoginViewControllerWithContext(ctx context.Context, api *BringYourApi) *
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &LoginViewController{
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		api:              api,
-		networkCheck:     newNetworkCheck(cancelCtx, api, defaultNetworkCheckTimeout),
-		glViewController: *newGLViewController(),
+		ctx:          cancelCtx,
+		cancel:       cancel,
+		api:          api,
+		networkCheck: newNetworkCheck(cancelCtx, api, defaultNetworkCheckTimeout),
+		// glViewController: *newGLViewController(),
 	}
-	vc.drawController = vc
+	// vc.drawController = vc
 	return vc
 }
 
@@ -51,19 +51,19 @@ func (self *LoginViewController) Stop() {
 	// FIXME
 }
 
-func (self *LoginViewController) draw(g gl.Context) {
-	// lvcLog("draw")
+// func (self *LoginViewController) draw(g gl.Context) {
+// 	// lvcLog("draw")
 
-	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
-	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-}
+// 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
+// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+// }
 
-func (self *LoginViewController) drawLoopOpen() {
-	self.frameRate = 24
-}
+// func (self *LoginViewController) drawLoopOpen() {
+// 	self.frameRate = 24
+// }
 
-func (self *LoginViewController) drawLoopClose() {
-}
+// func (self *LoginViewController) drawLoopClose() {
+// }
 
 func (self *LoginViewController) Close() {
 	lvcLog("close")

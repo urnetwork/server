@@ -223,6 +223,16 @@ func NewTransferBalanceList() *TransferBalanceList {
 	}
 }
 
+type NetworkSpaceList struct {
+	exportedList[*NetworkSpace]
+}
+
+func NewNetworkSpaceList() *NetworkSpaceList {
+	return &NetworkSpaceList{
+		exportedList: *newExportedList[*NetworkSpace](),
+	}
+}
+
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type Time struct {
 	impl time.Time

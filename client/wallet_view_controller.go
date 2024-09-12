@@ -161,7 +161,7 @@ func (vc *WalletViewController) ValidateAddress(
 	callback ValidateAddressCallback,
 ) {
 
-	vc.device.Api().WalletValidateAddress(
+	vc.device.GetApi().WalletValidateAddress(
 		&WalletValidateAddressArgs{
 			Address: address,
 			Chain:   blockchain,
@@ -224,7 +224,7 @@ func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blo
 			DefaultTokenType: "USDC",
 		}
 
-		vc.device.Api().CreateAccountWallet(args, CreateAccountWalletCallback(connect.NewApiCallback[*CreateAccountWalletResult](
+		vc.device.GetApi().CreateAccountWallet(args, CreateAccountWalletCallback(connect.NewApiCallback[*CreateAccountWalletResult](
 			func(result *CreateAccountWalletResult, err error) {
 
 				if err != nil {
@@ -268,7 +268,7 @@ func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
 		WalletId: walletId,
 	}
 
-	vc.device.Api().SetPayoutWallet(args, SetPayoutWalletCallback(connect.NewApiCallback[*SetPayoutWalletResult](
+	vc.device.GetApi().SetPayoutWallet(args, SetPayoutWalletCallback(connect.NewApiCallback[*SetPayoutWalletResult](
 		func(result *SetPayoutWalletResult, setWalletErr error) {
 
 			if setWalletErr != nil {
@@ -292,7 +292,7 @@ func (vc *WalletViewController) GetPayoutWalletId() (id *Id) {
 
 func (vc *WalletViewController) FetchPayoutWallet() {
 
-	vc.device.Api().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
+	vc.device.GetApi().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
 		func(result *GetPayoutWalletIdResult, err error) {
 
 			if err != nil {
@@ -347,7 +347,7 @@ func (vc *WalletViewController) accountWalletsChanged() {
 
 func (vc *WalletViewController) fetchAccountWallets() {
 
-	vc.device.Api().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
+	vc.device.GetApi().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
 		func(results *GetAccountWalletsResult, err error) {
 
 			if err != nil {
@@ -422,7 +422,7 @@ func (vc *WalletViewController) setAccountPayments(payments []*AccountPayment) {
 
 func (vc *WalletViewController) fetchPayments() {
 
-	vc.device.Api().GetAccountPayments(connect.NewApiCallback[*GetNetworkAccountPaymentsResult](
+	vc.device.GetApi().GetAccountPayments(connect.NewApiCallback[*GetNetworkAccountPaymentsResult](
 		func(results *GetNetworkAccountPaymentsResult, err error) {
 
 			if err != nil {

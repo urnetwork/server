@@ -499,8 +499,11 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
 
 func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 
+	bringyour.Logger().Println("VerifyCircleBody")
+
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
+		bringyour.Logger().Printf("VerifyCircleBody: reading body err: %s\n", err.Error())
 		return nil, err
 	}
 
@@ -510,8 +513,11 @@ func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 		bodyBytes,
 	)
 	if err != nil {
+		bringyour.Logger().Printf("VerifyCircleBody: verifyCircleAuth: %s\n", err.Error())
 		return nil, err
 	}
+
+	bringyour.Logger().Println("VerifyCircleBody: continuing")
 
 	return bytes.NewReader(bodyBytes), nil
 }
@@ -529,6 +535,7 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 		func(response *http.Response, responseBodyBytes []byte) (*string, error) {
 			_, data, err := parseCircleResponseData(responseBodyBytes)
 			if err != nil {
+				bringyour.Logger().Printf("verifyCircleAuth: parseCircleResponseData err: %s\n", err.Error())
 				return nil, err
 			}
 
@@ -548,6 +555,7 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 
 	err = verifySignature(*pk, signature, responseBodyBytes)
 	if err != nil {
+		bringyour.Logger().Printf("verifyCircleAuth: verifySignature err: %s\n", err.Error())
 		return err
 	}
 
@@ -555,6 +563,11 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 }
 
 func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
+
+	bringyour.Logger().Printf("verifySignature: publicKeyBase64: %s\n", publicKeyBase64)
+	bringyour.Logger().Printf("verifySignature: signatureBase64: %s\n", signatureBase64)
+	bringyour.Logger().Printf("verifySignature: responseBodyBytes: %s\n", responseBodyBytes)
+
 	// Decode the public key from base64
 	publicKeyDer, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
@@ -642,6 +655,8 @@ func CircleWalletWebhook(
 	clientSession *session.ClientSession,
 ) (*CircleWalletWebhookResult, error) {
 
+	bringyour.Logger().Println("CircleWalletWebhook:")
+
 	if circleWalletWebhook.NotificationType == "challenges.initialize" {
 
 		event := circleWalletWebhook.Notification
@@ -658,16 +673,20 @@ func CircleWalletWebhook(
 
 			circleWallet, err := getCircleWallet(circleWalletId)
 			if err != nil {
+				bringyour.Logger().Printf("CircleWalletWebhook: getCircleWalletErr: %s\n", err.Error())
+
 				return nil, err
 			}
 
 			userId, err := bringyour.ParseId(event.UserId)
 			if err != nil {
+				bringyour.Logger().Printf("CircleWalletWebhook: ParseId: %s\n", err.Error())
 				return nil, err
 			}
 
 			userUC := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
 			if userUC == nil {
+				bringyour.Logger().Printf("CircleWalletWebhook: GetCircleUCByCircleUCUserId no user found: %s\n", userId)
 				return nil, fmt.Errorf("no circle user control found")
 			}
 
@@ -687,6 +706,8 @@ func CircleWalletWebhook(
 				DefaultTokenType: "USDC",
 			}
 
+			bringyour.Logger().Println("CircleWalletWebhook: about to CreateAccountWalletCircle")
+
 			// no account_wallet exists, create a new one
 			walletId := model.CreateAccountWalletCircle(
 				clientSession.Ctx,
@@ -694,6 +715,7 @@ func CircleWalletWebhook(
 			)
 
 			if walletId == nil {
+				bringyour.Logger().Println("CircleWalletWebhook: no wallet id found")
 				return nil, fmt.Errorf("error creating account wallet")
 			}
 

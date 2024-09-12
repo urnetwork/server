@@ -7,15 +7,16 @@ import (
 
 	"sync"
 
-	"golang.org/x/mobile/gl"
+	// "golang.org/x/mobile/gl"
 
 	"bringyour.com/connect"
+	"golang.org/x/mobile/gl"
 )
 
 var cvcLog = logFn("connect_view_controller")
 
 type ConnectViewController struct {
-	glViewController
+	// glViewController
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -37,10 +38,10 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ConnectViewController{
-		glViewController: *newGLViewController(),
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		device:           device,
+		// glViewController: *newGLViewController(),
+		ctx:    cancelCtx,
+		cancel: cancel,
+		device: device,
 
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
@@ -51,7 +52,7 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		selectedLocationListeners: connect.NewCallbackList[SelectedLocationListener](),
 		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
 	}
-	vc.drawController = vc
+	// vc.drawController = vc
 	return vc
 }
 
@@ -233,17 +234,18 @@ func (self *ConnectViewController) Disconnect() {
 
 func (self *ConnectViewController) draw(g gl.Context) {
 	// cvcLog("draw")
-
-	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
-	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
 }
 
-func (self *ConnectViewController) drawLoopOpen() {
-	self.frameRate = 24
-}
+// 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
+// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+// }
 
-func (self *ConnectViewController) drawLoopClose() {
-}
+// func (self *ConnectViewController) drawLoopOpen() {
+// 	self.frameRate = 24
+// }
+
+// func (self *ConnectViewController) drawLoopClose() {
+// }
 
 func (self *ConnectViewController) Close() {
 	cvcLog("close")

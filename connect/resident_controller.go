@@ -14,9 +14,9 @@ import (
 	"github.com/golang/glog"
 
 	"bringyour.com/bringyour"
-	// "bringyour.com/bringyour/model"
+	"bringyour.com/bringyour/controller"
 	// "bringyour.com/connect"
-	// "bringyour.com/protocol"
+	"bringyour.com/protocol"
 )
 
 type residentController struct {
@@ -45,14 +45,24 @@ func newResidentController(
 	}
 }
 
-// the message is verified from source `clientId`
+// the frames are verified from source `clientId`
 // control messages are not allowed to have replies
 // messages with replies must use resident_oob_controller in the api
-func (self *residentController) HandleControlMessage(message any) {
-	switch v := message.(type) {
-	default:
-		glog.Infof("[resident]Unknown control message: %T", v)
+func (self *residentController) HandleControlFrames(frames []*protocol.Frame) error {
+	outFrames, err := controller.ConnectControlFrames(
+		self.ctx,
+		self.clientId,
+		frames,
+	)
+	if err != nil {
+		return err
 	}
+
+	if 0 < len(outFrames) {
+		glog.Infof("[rr]dropped control reply frames: %d\n", len(outFrames))
+	}
+
+	return nil
 }
 
 // all controller activity moved to `controller.resident_oob_controller` via the api

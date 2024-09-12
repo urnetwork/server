@@ -314,7 +314,7 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 		Count: 1024,
 	}
 
-	vc.device.Api().FindProviders2(args, FindProviders2Callback(connect.NewApiCallback[*FindProviders2Result](
+	vc.device.GetApi().FindProviders2(args, FindProviders2Callback(connect.NewApiCallback[*FindProviders2Result](
 		func(result *FindProviders2Result, err error) {
 
 			isCanceling := vc.isCanceling()

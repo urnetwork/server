@@ -5,13 +5,14 @@ go 1.22.0
 require (
 	bringyour.com/connect v0.0.0
 	bringyour.com/protocol v0.0.0
+	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.2.0
+	github.com/golang/glog v1.2.1
 	golang.org/x/mobile v0.0.0-20230427221453-e8d11dd0ba41
 )
 
 require (
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
-	github.com/golang/glog v1.2.1 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
