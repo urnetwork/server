@@ -99,6 +99,7 @@ Options:
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
+		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
 	}
 
