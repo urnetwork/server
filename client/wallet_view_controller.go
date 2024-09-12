@@ -16,6 +16,10 @@ type AccountWalletsListener interface {
 	AccountWalletsChanged()
 }
 
+type PaymentsListener interface {
+	PaymentsChanged()
+}
+
 type IsCreatingExternalWalletListener interface {
 	StateChanged(bool)
 }
@@ -36,11 +40,27 @@ type AccountWallet struct {
 	CreateTime       *Time      `json:"create_time"`
 }
 
-type Payout struct {
-	WalletId        *Id     `json:"wallet_id"`
-	WalletAddress   string  `json:"wallet_address"`
-	CompleteTimeFmt string  `json:"complete_time"` // formatted to "Jan 2"
-	AmountUsd       float32 `json:"amount_usd"`
+type AccountPayment struct {
+	PaymentId       *Id       `json:"payment_id"`
+	PaymentPlanId   *Id       `json:"payment_plan_id"`
+	WalletId        *Id       `json:"wallet_id"`
+	NetworkId       *Id       `json:"network_id"`
+	PayoutByteCount ByteCount `json:"payout_byte_count"`
+	Payout          NanoCents `json:"payout_nano_cents"`
+	MinSweepTime    *Time     `json:"min_sweep_time"`
+	CreateTime      *Time     `json:"create_time"`
+
+	PaymentRecord  string  `json:"payment_record,omitempty"`
+	TokenType      string  `json:"token_type"`
+	TokenAmount    float64 `json:"token_amount,omitempty"`
+	PaymentTime    *Time   `json:"payment_time,omitempty"`
+	PaymentReceipt string  `json:"payment_receipt,omitempty"`
+
+	Completed    bool  `json:"completed,omitempty"`
+	CompleteTime *Time `json:"complete_time,omitempty"`
+
+	Canceled   bool  `json:"canceled"`
+	CancelTime *Time `json:"cancel_time,omitempty"`
 }
 
 type WalletViewController struct {
@@ -51,11 +71,13 @@ type WalletViewController struct {
 	wallets                *AccountWalletsList
 	isAddingExternalWallet bool
 	payoutWalletId         *Id
+	accountPayments        *AccountPaymentsList
 
 	stateLock sync.Mutex
 
 	accountWalletsListeners           *connect.CallbackList[AccountWalletsListener]
 	payoutWalletListeners             *connect.CallbackList[PayoutWalletListener]
+	paymentsListeners                 *connect.CallbackList[PaymentsListener]
 	isCreatingExternalWalletListeners *connect.CallbackList[IsCreatingExternalWalletListener]
 }
 
@@ -70,9 +92,11 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		wallets:                NewAccountWalletsList(),
 		isAddingExternalWallet: false,
 		payoutWalletId:         nil,
+		accountPayments:        NewAccountPaymentsList(),
 
 		accountWalletsListeners:           connect.NewCallbackList[AccountWalletsListener](),
 		payoutWalletListeners:             connect.NewCallbackList[PayoutWalletListener](),
+		paymentsListeners:                 connect.NewCallbackList[PaymentsListener](),
 		isCreatingExternalWalletListeners: connect.NewCallbackList[IsCreatingExternalWalletListener](),
 	}
 	return vc
@@ -81,6 +105,7 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 func (vc *WalletViewController) Start() {
 	vc.fetchAccountWallets()
 	vc.FetchPayoutWallet()
+	vc.fetchPayments()
 }
 
 func (vc *WalletViewController) Stop() {
@@ -358,6 +383,60 @@ func (vc *WalletViewController) fetchAccountWallets() {
 			vc.wallets = newWalletsList
 
 			vc.accountWalletsChanged()
+
+		}))
+
+}
+
+func (vc *WalletViewController) AddPaymentsListener(listener PaymentsListener) Sub {
+	callbackId := vc.paymentsListeners.Add(listener)
+	return newSub(func() {
+		vc.paymentsListeners.Remove(callbackId)
+	})
+}
+
+func (vc *WalletViewController) paymentsChanged() {
+	for _, listener := range vc.paymentsListeners.Get() {
+		connect.HandleError(func() {
+			listener.PaymentsChanged()
+		})
+	}
+}
+
+func (vc *WalletViewController) GetAccountPayments() *AccountPaymentsList {
+	return vc.accountPayments
+}
+
+func (vc *WalletViewController) setAccountPayments(payments []*AccountPayment) {
+
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.accountPayments = NewAccountPaymentsList()
+		vc.accountPayments.addAll(payments...)
+	}()
+
+	vc.paymentsChanged()
+
+}
+
+func (vc *WalletViewController) fetchPayments() {
+
+	vc.device.Api().GetAccountPayments(connect.NewApiCallback[*GetNetworkAccountPaymentsResult](
+		func(results *GetNetworkAccountPaymentsResult, err error) {
+
+			if err != nil {
+				return
+			}
+
+			payouts := []*AccountPayment{}
+
+			for i := 0; i < results.AccountPayments.Len(); i += 1 {
+				accountPayment := results.AccountPayments.Get(i)
+				payouts = append(payouts, accountPayment)
+			}
+
+			vc.setAccountPayments(payouts)
 
 		}))
 
