@@ -740,6 +740,30 @@ func (self *BringYourApi) WalletBalance(callback WalletBalanceCallback) {
 	})
 }
 
+type GetAccountPaymentsCallback connect.ApiCallback[*GetNetworkAccountPaymentsResult]
+
+type GetNetworkAccountPaymentsError struct {
+	Message string `json:"message"`
+}
+
+type GetNetworkAccountPaymentsResult struct {
+	AccountPayments *AccountPaymentsList            `json:"account_payments,omitempty"`
+	Error           *GetNetworkAccountPaymentsError `json:"error,omitempty"`
+}
+
+func (self *BringYourApi) GetAccountPayments(callback GetAccountPaymentsCallback) {
+	go connect.HandleError(func() {
+		connect.HttpGetWithStrategy(
+			self.ctx,
+			self.clientStrategy,
+			fmt.Sprintf("%s/account/payments", self.apiUrl),
+			self.byJwt,
+			&GetNetworkAccountPaymentsResult{},
+			callback,
+		)
+	})
+}
+
 type WalletCircleTransferOutCallback connect.ApiCallback[*WalletCircleTransferOutResult]
 
 type WalletCircleTransferOutArgs struct {

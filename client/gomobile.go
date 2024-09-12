@@ -183,6 +183,16 @@ func NewAccountWalletsList() *AccountWalletsList {
 	}
 }
 
+type AccountPaymentsList struct {
+	exportedList[*AccountPayment]
+}
+
+func NewAccountPaymentsList() *AccountPaymentsList {
+	return &AccountPaymentsList{
+		exportedList: *newExportedList[*AccountPayment](),
+	}
+}
+
 type NetworkClientInfoList struct {
 	exportedList[*NetworkClientInfo]
 }
@@ -232,6 +242,10 @@ func newTime(impl time.Time) *Time {
 
 func (self *Time) UnixMilli() int64 {
 	return self.impl.UnixMilli()
+}
+
+func (self *Time) Format(layout string) string {
+	return self.impl.Format(layout)
 }
 
 func (self *Time) UnmarshalJSON(b []byte) error {
