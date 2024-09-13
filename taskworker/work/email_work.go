@@ -31,6 +31,8 @@ func WarmEmail(
 	warmEmail *WarmEmailArgs,
 	clientSession *session.ClientSession,
 ) (*WarmEmailResult, error) {
+	// FIXME we need to monitor these for bounces
+	// FIXME we can just use warmupinbox for now
 	// send a continuous verification code message to a bunch of popular email providers
 	emails := []string{
 		"reallilwidget@gmail.com",
