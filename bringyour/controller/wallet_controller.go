@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	mathrand "math/rand"
 	"net/http"
@@ -615,7 +614,6 @@ func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBod
 
 	// Verify the signature using the parsed r and s values
 	if ecdsa.Verify(ecdsaPublicKey, hash[:], ecdsaSig.R, ecdsaSig.S) {
-		log.Println("Signature is valid.")
 		return nil
 	} else {
 		return fmt.Errorf("signature verification failed")
