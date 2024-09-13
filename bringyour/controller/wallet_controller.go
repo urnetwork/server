@@ -595,7 +595,7 @@ func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBod
 		return fmt.Errorf("failed to decode signature: %w", err)
 	}
 
-	// Parse the ASN.1 DER-encoded signature (which is likely the issue)
+	// Parse the ASN.1 DER-encoded signature
 	var ecdsaSig ECDSASignature
 	_, err = asn1.Unmarshal(signatureBytes, &ecdsaSig)
 	if err != nil {
