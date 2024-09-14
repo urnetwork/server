@@ -845,6 +845,10 @@ func (self *BringYourApi) SubscriptionBalance(callback SubscriptionBalanceCallba
 	})
 }
 
+/**
+ * Create subscription payment id
+ */
+
 type SubscriptionCreatePaymentIdCallback connect.ApiCallback[*SubscriptionCreatePaymentIdResult]
 
 type SubscriptionCreatePaymentIdArgs struct {
@@ -885,6 +889,10 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
 	)
 }
 
+/**
+ * Get network user
+ */
+
 type NetworkUser struct {
 	UserId   *Id    `json:"userId"`
 	UserName string `json:"userName"`
@@ -915,6 +923,10 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 	)
 }
 
+/**
+ * Get network referral code
+ */
+
 type GetNetworkReferralCodeResult struct {
 	ReferralCode string                       `json:"referralCode,omitempty"`
 	Error        *GetNetworkReferralCodeError `json:"error,omitempty"`
@@ -936,6 +948,10 @@ func (self *BringYourApi) GetNetworkReferralCode(callback GetNetworkReferralCode
 		callback,
 	)
 }
+
+/**
+ * Remove wallet
+ */
 
 type RemoveWalletError struct {
 	Message string `json:"message"`
@@ -963,6 +979,37 @@ func (self *BringYourApi) RemoveWallet(
 		removeWallet,
 		self.GetByJwt(),
 		&RemoveWalletResult{},
+		callback,
+	)
+}
+
+/**
+ * Send feedback
+ */
+
+type FeedbackSendArgs struct {
+	Needs FeedbackSendNeeds `json:"needs"`
+}
+
+type FeedbackSendNeeds struct {
+	Other *string `json:"other"`
+}
+
+type FeedbackSendResult struct{}
+
+type SendFeedbackCallback connect.ApiCallback[*FeedbackSendResult]
+
+func (self *BringYourApi) SendFeedback(
+	sendFeedback *FeedbackSendArgs,
+	callback SendFeedbackCallback,
+) (*FeedbackSendResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/feedback/send-feedback", self.apiUrl),
+		sendFeedback,
+		self.GetByJwt(),
+		&FeedbackSendResult{},
 		callback,
 	)
 }

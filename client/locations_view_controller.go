@@ -35,7 +35,7 @@ type LocationsViewController struct {
 func newLocationsViewController(ctx context.Context, device *BringYourDevice) *LocationsViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	vm := &LocationsViewController{
+	vc := &LocationsViewController{
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
@@ -46,7 +46,7 @@ func newLocationsViewController(ctx context.Context, device *BringYourDevice) *L
 
 		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
 	}
-	return vm
+	return vc
 }
 
 func (vc *LocationsViewController) Start() {

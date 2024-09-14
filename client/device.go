@@ -601,6 +601,12 @@ func (self *BringYourDevice) OpenAccountViewController() *AccountViewController 
 	return vc
 }
 
+func (self *BringYourDevice) OpenFeedbackViewController() *FeedbackViewController {
+	vc := newFeedbackViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)
