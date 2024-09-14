@@ -24,6 +24,10 @@ type IsCreatingExternalWalletListener interface {
 	StateChanged(bool)
 }
 
+type IsRemovingWalletListener interface {
+	StateChanged(bool)
+}
+
 type PayoutWalletListener interface {
 	PayoutWalletChanged(*Id)
 }
@@ -70,6 +74,7 @@ type WalletViewController struct {
 
 	wallets                *AccountWalletsList
 	isAddingExternalWallet bool
+	isRemovingWallet       bool
 	payoutWalletId         *Id
 	accountPayments        *AccountPaymentsList
 
@@ -79,6 +84,7 @@ type WalletViewController struct {
 	payoutWalletListeners             *connect.CallbackList[PayoutWalletListener]
 	paymentsListeners                 *connect.CallbackList[PaymentsListener]
 	isCreatingExternalWalletListeners *connect.CallbackList[IsCreatingExternalWalletListener]
+	isRemovingWalletListeners         *connect.CallbackList[IsRemovingWalletListener]
 }
 
 func newWalletViewController(ctx context.Context, device *BringYourDevice) *WalletViewController {
@@ -91,6 +97,7 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 
 		wallets:                NewAccountWalletsList(),
 		isAddingExternalWallet: false,
+		isRemovingWallet:       false,
 		payoutWalletId:         nil,
 		accountPayments:        NewAccountPaymentsList(),
 
@@ -98,6 +105,7 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		payoutWalletListeners:             connect.NewCallbackList[PayoutWalletListener](),
 		paymentsListeners:                 connect.NewCallbackList[PaymentsListener](),
 		isCreatingExternalWalletListeners: connect.NewCallbackList[IsCreatingExternalWalletListener](),
+		isRemovingWalletListeners:         connect.NewCallbackList[IsRemovingWalletListener](),
 	}
 	return vc
 }
@@ -385,6 +393,11 @@ func (vc *WalletViewController) fetchAccountWallets() {
 
 			vc.accountWalletsChanged()
 
+			// we fetch wallets after removing a wallet
+			if vc.isRemovingWallet {
+				vc.setIsRemovingWallet(false)
+			}
+
 		}))
 
 }
@@ -440,5 +453,58 @@ func (vc *WalletViewController) fetchPayments() {
 			vc.setAccountPayments(payouts)
 
 		}))
+
+}
+
+func (vc *WalletViewController) AddIsRemovingWalletListener(listener IsRemovingWalletListener) Sub {
+	callbackId := vc.isRemovingWalletListeners.Add(listener)
+	return newSub(func() {
+		vc.isRemovingWalletListeners.Remove(callbackId)
+	})
+}
+
+func (vc *WalletViewController) isRemovingWalletChanged(isRemoving bool) {
+	for _, listener := range vc.isRemovingWalletListeners.Get() {
+		connect.HandleError(func() {
+			listener.StateChanged(isRemoving)
+		})
+	}
+}
+
+func (vc *WalletViewController) setIsRemovingWallet(isRemoving bool) {
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+
+		vc.isRemovingWallet = isRemoving
+	}()
+
+	vc.isRemovingWalletChanged(isRemoving)
+}
+
+func (vc *WalletViewController) RemoveWallet(walletId *Id) {
+
+	if !vc.isRemovingWallet {
+		vc.setIsRemovingWallet(true)
+
+		vc.device.GetApi().RemoveWallet(
+			&RemoveWalletArgs{
+				WalletId: walletId.IdStr,
+			},
+			RemoveWalletCallback(connect.NewApiCallback[*RemoveWalletResult](
+				func(result *RemoveWalletResult, err error) {
+
+					if err != nil || !result.Success {
+						vc.setIsRemovingWallet(false)
+					}
+
+					if result.Success {
+						vc.fetchAccountWallets()
+					}
+
+				}),
+			),
+		)
+	}
 
 }
