@@ -988,11 +988,11 @@ func (self *BringYourApi) RemoveWallet(
  */
 
 type FeedbackSendArgs struct {
-	Needs FeedbackSendNeeds `json:"needs"`
+	Needs *FeedbackSendNeeds `json:"needs"`
 }
 
 type FeedbackSendNeeds struct {
-	Other *string `json:"other"`
+	Other string `json:"other"`
 }
 
 type FeedbackSendResult struct{}

@@ -82,8 +82,8 @@ func (vc *FeedbackViewController) SendFeedback(msg string) {
 		vc.setIsSendingFeedback(true)
 
 		args := &FeedbackSendArgs{
-			Needs: FeedbackSendNeeds{
-				Other: &msg,
+			Needs: &FeedbackSendNeeds{
+				Other: msg,
 			},
 		}
 
