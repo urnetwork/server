@@ -936,3 +936,33 @@ func (self *BringYourApi) GetNetworkReferralCode(callback GetNetworkReferralCode
 		callback,
 	)
 }
+
+type RemoveWalletError struct {
+	Message string `json:"message"`
+}
+
+type RemoveWalletResult struct {
+	Success bool               `json:"success"`
+	Error   *RemoveWalletError `json:"error,omitempty"`
+}
+
+type RemoveWalletArgs struct {
+	WalletId string `json:"wallet_id"`
+}
+
+type RemoveWalletCallback connect.ApiCallback[*RemoveWalletResult]
+
+func (self *BringYourApi) RemoveWallet(
+	removeWallet *RemoveWalletArgs,
+	callback RemoveWalletCallback,
+) (*RemoveWalletResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/account/wallets/remove", self.apiUrl),
+		removeWallet,
+		self.GetByJwt(),
+		&RemoveWalletResult{},
+		callback,
+	)
+}
