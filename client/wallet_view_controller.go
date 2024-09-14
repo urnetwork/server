@@ -235,6 +235,7 @@ func (vc *WalletViewController) AddExternalWallet(address string, blockchain Blo
 
 				vc.setIsCreatingExternalWallet(false)
 				vc.fetchAccountWallets()
+				vc.FetchPayoutWallet()
 
 			})))
 
