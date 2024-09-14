@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -562,11 +563,14 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 	return nil
 }
 
-func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
+type ECDSASignature struct {
+	R, S *big.Int
+}
 
+func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
 	bringyour.Logger().Printf("verifySignature: publicKeyBase64: %s\n", publicKeyBase64)
 	bringyour.Logger().Printf("verifySignature: signatureBase64: %s\n", signatureBase64)
-	bringyour.Logger().Printf("verifySignature: responseBodyBytes: %s\n", responseBodyBytes)
+	bringyour.Logger().Printf("verifySignature: responseBodyBytes: %s\n", string(responseBodyBytes))
 
 	// Decode the public key from base64
 	publicKeyDer, err := base64.StdEncoding.DecodeString(publicKeyBase64)
@@ -579,6 +583,7 @@ func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBod
 	if err != nil {
 		return fmt.Errorf("failed to parse public key: %w", err)
 	}
+
 	ecdsaPublicKey, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
 		return errors.New("failed to cast public key to ECDSA")
@@ -590,30 +595,28 @@ func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBod
 		return fmt.Errorf("failed to decode signature: %w", err)
 	}
 
-	// Format the JSON response body
-	var jsonData map[string]interface{}
-	if err := json.Unmarshal(responseBodyBytes, &jsonData); err != nil {
-		return fmt.Errorf("failed to unmarshal JSON response body: %w", err)
-	}
-	formattedJson, err := json.Marshal(jsonData)
+	// Parse the ASN.1 DER-encoded signature
+	var ecdsaSig ECDSASignature
+	_, err = asn1.Unmarshal(signatureBytes, &ecdsaSig)
 	if err != nil {
-		return fmt.Errorf("failed to marshal JSON data: %w", err)
+		return fmt.Errorf("failed to unmarshal DER signature: %w", err)
 	}
 
-	// Hash the formatted JSON response body
-	hash := sha256.Sum256(formattedJson)
+	// compact the JSON before hashing
+	var compactJSON bytes.Buffer
+	if err := json.Compact(&compactJSON, responseBodyBytes); err != nil {
+		return fmt.Errorf("failed to compact JSON: %w", err)
+	}
+	formattedJSONBytes := compactJSON.Bytes()
 
-	// Verify the signature
-	r := big.Int{}
-	s := big.Int{}
-	sigLen := len(signatureBytes)
-	r.SetBytes(signatureBytes[:sigLen/2])
-	s.SetBytes(signatureBytes[sigLen/2:])
+	// Hash the compacted JSON response body
+	hash := sha256.Sum256(formattedJSONBytes)
 
-	if ecdsa.Verify(ecdsaPublicKey, hash[:], &r, &s) {
-		return nil // Signature is valid
+	// Verify the signature using the parsed r and s values
+	if ecdsa.Verify(ecdsaPublicKey, hash[:], ecdsaSig.R, ecdsaSig.S) {
+		return nil
 	} else {
-		return fmt.Errorf("signature is invalid")
+		return fmt.Errorf("signature verification failed")
 	}
 }
 
