@@ -607,6 +607,12 @@ func (self *BringYourDevice) OpenFeedbackViewController() *FeedbackViewControlle
 	return vc
 }
 
+func (self *BringYourDevice) OpenNetworkUserViewController() *NetworkUserViewController {
+	vc := newNetworkUserViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)
