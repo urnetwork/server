@@ -893,14 +893,6 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
  * Get network user
  */
 
-type NetworkUser struct {
-	UserId   *Id    `json:"userId"`
-	UserName string `json:"userName"`
-	UserAuth string `json:"userAuth"`
-	Verified bool   `json:"verified"`
-	AuthType string `json:"authType"`
-}
-
 type GetNetworkUserError struct {
 	Message string `json:"message"`
 }
