@@ -354,6 +354,16 @@ func (vc *WalletViewController) accountWalletsChanged() {
 	}
 }
 
+func (vc *WalletViewController) setAccountWallets(wallets *AccountWalletsList) {
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.wallets = wallets
+	}()
+
+	vc.accountWalletsChanged()
+}
+
 func (vc *WalletViewController) fetchAccountWallets() {
 
 	vc.device.GetApi().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
@@ -389,9 +399,7 @@ func (vc *WalletViewController) fetchAccountWallets() {
 
 			newWalletsList.addAll(wallets...)
 
-			vc.wallets = newWalletsList
-
-			vc.accountWalletsChanged()
+			vc.setAccountWallets(newWalletsList)
 
 			// we fetch wallets after removing a wallet
 			if vc.isRemovingWallet {
