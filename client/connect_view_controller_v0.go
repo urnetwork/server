@@ -304,7 +304,9 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 
 	vc.setConnectionStatus(Connecting)
 
-	specs := &ProviderSpecList{}
+	vc.clearProviderPoints()
+
+	specs := NewProviderSpecList()
 	specs.Add(&ProviderSpec{
 		BestAvailable: true,
 	})
@@ -323,12 +325,18 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 			} else {
 
 				if err == nil && result.ProviderStats != nil {
+					specs = NewProviderSpecList()
 
-					clientIds := []Id{}
 					for _, provider := range result.ProviderStats.exportedList.values {
-						clientId := provider.ClientId
-						clientIds = append(clientIds, *clientId)
+
+						specs.Add(&ProviderSpec{
+							ClientId: provider.ClientId,
+						})
+
 					}
+
+					vc.device.SetDestination(specs, ProvideModePublic)
+
 					vc.setConnectionStatus(DestinationSet)
 				} else {
 					vc.setConnectionStatus(Disconnected)
@@ -339,10 +347,11 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 }
 
 func (vc *ConnectViewControllerV0) CancelConnection() {
-	vc.stateLock.Lock()
-	defer vc.stateLock.Unlock()
-	status := Canceling
-	vc.connectionStatus = status
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.connectionStatus = Canceling
+	}()
 	vc.connectionStatusChanged()
 }
 
@@ -368,6 +377,11 @@ func (vc *ConnectViewControllerV0) monitorWindowEvents() {
 
 					func() {
 						windowEvents := vc.device.WindowEvents()
+
+						if windowEvents == nil {
+							cvcLog("window events are nil")
+							return
+						}
 
 						if vc.windowCurrentSize != int32(windowEvents.CurrentSize()) {
 							vc.setWindowCurrentSize(int32(windowEvents.CurrentSize()))
