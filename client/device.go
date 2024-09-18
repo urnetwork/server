@@ -147,12 +147,14 @@ func newBringYourDevice(
 	clientStrategy := networkSpace.clientStrategy
 
 	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byJwt, apiUrl)
+	clientSettings := connect.DefaultClientSettings()
+	// clientSettings.ControlPingTimeout = 30 * time.Second
 	client := connect.NewClient(
 		ctx,
 		clientId,
 		clientOob,
 		// connect.DefaultClientSettingsNoNetworkEvents(),
-		connect.DefaultClientSettings(),
+		clientSettings,
 	)
 
 	// routeManager := connect.NewRouteManager(connectClient)

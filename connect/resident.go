@@ -314,6 +314,7 @@ func (self *Exchange) NominateLocalResident(
 				}
 			}
 		}()
+		// FIXME live view
 		// poll the resident the same as exchange connections
 		go func() {
 			defer resident.Cancel()
@@ -683,6 +684,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	return err
 }
 
+// FIXME move header to protobuf
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
 	if _, err := io.ReadFull(conn, self.buffer[0:33]); err != nil {
@@ -1713,8 +1715,8 @@ func (self *Resident) IsDone() bool {
 	select {
 	case <-self.ctx.Done():
 		return true
-	case <-self.client.Done():
-		return true
+	// case <-self.client.Done():
+	// 	return true
 	default:
 		return false
 	}
