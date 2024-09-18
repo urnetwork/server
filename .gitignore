@@ -2,6 +2,8 @@
 **/build
 **/.DS_Store
 **/test.out
+**/profile/cpu
+**/profile/memory
 
 # binaries
 client/build
