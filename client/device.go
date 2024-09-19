@@ -364,40 +364,42 @@ func (self *BringYourDevice) GetConnectEnabled() bool {
 }
 
 func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		// TODO create a new provider only client?
-
-		provideModes := map[protocol.ProvideMode]bool{}
-		if ProvideModePublic <= provideMode {
-			provideModes[protocol.ProvideMode_Public] = true
-		}
-		if ProvideModeFriendsAndFamily <= provideMode {
-			provideModes[protocol.ProvideMode_FriendsAndFamily] = true
-		}
-		if ProvideModeNetwork <= provideMode {
-			provideModes[protocol.ProvideMode_Network] = true
-		}
-		self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
-
-		// recreate the provider user nat
-		if self.remoteUserNatProviderLocalUserNat != nil {
-			self.remoteUserNatProviderLocalUserNat.Close()
-			self.remoteUserNatProviderLocalUserNat = nil
-		}
-		if self.remoteUserNatProvider != nil {
-			self.remoteUserNatProvider.Close()
-			self.remoteUserNatProvider = nil
-		}
-
-		if ProvideModeNone < provideMode {
-			self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
-			self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
-		}
-	}()
+	self.setProvideModeNoEvent(provideMode)
 	self.provideChanged(self.GetProvideEnabled())
+}
+
+func (self *BringYourDevice) setProvideModeNoEvent(provideMode ProvideMode) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	// TODO create a new provider only client?
+
+	provideModes := map[protocol.ProvideMode]bool{}
+	if ProvideModePublic <= provideMode {
+		provideModes[protocol.ProvideMode_Public] = true
+	}
+	if ProvideModeFriendsAndFamily <= provideMode {
+		provideModes[protocol.ProvideMode_FriendsAndFamily] = true
+	}
+	if ProvideModeNetwork <= provideMode {
+		provideModes[protocol.ProvideMode_Network] = true
+	}
+	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
+
+	// recreate the provider user nat
+	if self.remoteUserNatProviderLocalUserNat != nil {
+		self.remoteUserNatProviderLocalUserNat.Close()
+		self.remoteUserNatProviderLocalUserNat = nil
+	}
+	if self.remoteUserNatProvider != nil {
+		self.remoteUserNatProvider.Close()
+		self.remoteUserNatProvider = nil
+	}
+
+	if ProvideModeNone < provideMode {
+		self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
+		self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
+	}
 }
 
 func (self *BringYourDevice) GetProvideMode() ProvideMode {

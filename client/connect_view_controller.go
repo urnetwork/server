@@ -22,7 +22,6 @@ const (
 	Connecting     ConnectionStatus = "CONNECTING"
 	DestinationSet ConnectionStatus = "DESTINATION_SET"
 	Connected      ConnectionStatus = "CONNECTED"
-	Canceling      ConnectionStatus = "CANCELING"
 )
 
 type SelectedLocationListener interface {
@@ -241,16 +240,6 @@ func (self *ConnectViewController) windowEventSizeChanged() {
 	}
 }
 
-func (self *ConnectViewController) isCanceling() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	isCanceling := false
-	if self.connectionStatus == Canceling {
-		isCanceling = true
-	}
-	return isCanceling
-}
-
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	func() {
 		self.stateLock.Lock()
@@ -262,22 +251,26 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 
 	self.setConnectionStatus(Connecting)
 
-	if self.isCanceling() {
-		self.setConnectionStatus(Disconnected)
-	} else {
-		// persist the connection location for automatic reconnect
-		// self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(location)
-		self.device.SetConnectLocation(location)
-		self.setSelectedLocation(location)
-		self.setConnectionStatus(DestinationSet)
-	}
+	// enable provider
+	provideMode := ProvideModePublic
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
+	self.device.setProvideModeNoEvent(provideMode)
+
+	// persist the connection location for automatic reconnect
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(location)
+	self.device.SetConnectLocation(location)
+	self.setSelectedLocation(location)
+	self.setConnectionStatus(DestinationSet)
 }
 
 func (self *ConnectViewController) Disconnect() {
 	self.clearProviderPoints()
 
-	// persist the connection location for automatic reconnect
-	// self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
+	provideMode := ProvideModeNone
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
+	self.device.setProvideModeNoEvent(provideMode)
+
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
 	self.device.SetConnectLocation(nil)
 	self.setConnectionStatus(Disconnected)
 }
