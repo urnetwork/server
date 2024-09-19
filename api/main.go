@@ -64,6 +64,7 @@ Options:
 		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2),
 		router.NewRoute("POST", "/network/create-provider-spec", handlers.NetworkCreateProviderSpec),
 		router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
+		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkUser),
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.PreferencesSet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
 		router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
@@ -100,6 +101,7 @@ Options:
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
 		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
+		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
 	}
 

@@ -216,6 +216,14 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, accountBalance.Balance.PaidByteCount, paidByteCount)
 		}
 
+		networkPayments, err := GetNetworkAccountPayments(destinationSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(networkPayments.AccountPayments), len(pendingPayments))
+		assert.Equal(t, networkPayments.AccountPayments[0].NetworkId, destinationSession.ByJwt.NetworkId)
+
+		sourcePayments, err := GetNetworkAccountPayments(sourceSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(sourcePayments.AccountPayments), 0)
 	})
 }
 
