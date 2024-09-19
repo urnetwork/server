@@ -85,6 +85,8 @@ type BringYourDevice struct {
 
 	stateLock sync.Mutex
 
+	connectLocation *ConnectLocation
+
 	// when nil, packets get routed to the local user nat
 	remoteUserNatClient connect.UserNatClient
 
@@ -204,6 +206,7 @@ func newBringYourDevice(
 		platformTransport:                 platformTransport,
 		localUserNat:                      localUserNat,
 		stats:                             newDeviceStats(),
+		connectLocation:                   nil,
 		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
@@ -233,6 +236,10 @@ func (self *BringYourDevice) ClientId() *Id {
 
 func (self *BringYourDevice) GetApi() *BringYourApi {
 	return self.networkSpace.GetApi()
+}
+
+func (self *BringYourDevice) GetNetworkSpace() *NetworkSpace {
+	return self.networkSpace
 }
 
 // func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
@@ -475,6 +482,34 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	return
 }
 
+func (self *BringYourDevice) SetConnectLocation(location *ConnectLocation) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.connectLocation = location
+	}()
+
+	if location == nil {
+		self.RemoveDestination()
+	} else {
+		specs := NewProviderSpecList()
+		specs.Add(&ProviderSpec{
+			LocationId:      location.ConnectLocationId.LocationId,
+			LocationGroupId: location.ConnectLocationId.LocationGroupId,
+			ClientId:        location.ConnectLocationId.ClientId,
+			BestAvailable:   location.ConnectLocationId.BestAvailable,
+		})
+
+		self.SetDestination(specs, ProvideModePublic)
+	}
+}
+
+func (self *BringYourDevice) GetConnectLocation() *ConnectLocation {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connectLocation
+}
+
 func (self *BringYourDevice) Shuffle() {
 	var remoteUserNatClient connect.UserNatClient
 	func() {
@@ -547,20 +582,14 @@ func (self *BringYourDevice) closeViewController(vc ViewController) {
 	delete(self.openedViewControllers, vc)
 }
 
-func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
-	vc := newConnectViewController(self.ctx, self)
-	self.openViewController(vc)
-	return vc
-}
-
 func (self *BringYourDevice) OpenLocationsViewController() *LocationsViewController {
 	vm := newLocationsViewController(self.ctx, self)
 	self.openViewController(vm)
 	return vm
 }
 
-func (self *BringYourDevice) OpenConnectViewControllerV0() *ConnectViewControllerV0 {
-	vm := newConnectViewControllerV0(self.ctx, self)
+func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
+	vm := newConnectViewController(self.ctx, self)
 	self.openViewController(vm)
 	return vm
 }

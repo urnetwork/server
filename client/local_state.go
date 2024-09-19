@@ -345,7 +345,7 @@ func (self *AsyncLocalState) serialAsync(work func() error, callbacks ...CommitC
 }
 
 // get the sync local state
-func (self *AsyncLocalState) LocalState() *LocalState {
+func (self *AsyncLocalState) GetLocalState() *LocalState {
 	return self.localState
 }
 

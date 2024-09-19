@@ -7,6 +7,8 @@ import (
 	"bringyour.com/connect"
 )
 
+var overlayVcLog = logFn("overlay_view_controller")
+
 type OverlayModeListener interface {
 	OverlayModeChanged(mode string)
 }
@@ -42,7 +44,7 @@ func (vc *OverlayViewController) Stop() {
 }
 
 func (vc *OverlayViewController) Close() {
-	cvcLog("close")
+	overlayVcLog("close")
 
 	vc.cancel()
 }
