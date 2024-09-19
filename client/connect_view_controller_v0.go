@@ -93,6 +93,7 @@ func newConnectViewControllerV0(ctx context.Context, device *BringYourDevice) *C
 
 func (vc *ConnectViewControllerV0) Start() {
 	vc.monitorWindowEvents()
+	vc.monitorWindowEvents2()
 }
 
 func (vc *ConnectViewControllerV0) Stop() {}
@@ -445,6 +446,16 @@ func (vc *ConnectViewControllerV0) monitorWindowEvents() {
 		}
 	}()
 
+}
+
+func (self *ConnectViewControllerV0) monitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent) {
+	connectVcLog("window event received!: current size %d; target size %d", windowExpandEvent.CurrentSize, windowExpandEvent.TargetSize)
+}
+
+func (vc *ConnectViewControllerV0) monitorWindowEvents2() {
+	connectVcLog("monitorWindowEvents2 called")
+	var monitorEventFunc connect.MonitorEventFunction = vc.monitorEventCallback
+	vc.device.addMonitorEventCallback(monitorEventFunc)
 }
 
 type ProviderState = string
