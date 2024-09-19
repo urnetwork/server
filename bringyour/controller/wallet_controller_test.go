@@ -192,3 +192,22 @@ func TestCircleWalletIdParsing(t *testing.T) {
 		assert.Equal(t, circleWalletId, walletId.String())
 	})
 }
+
+func TestCircleWebhookVerifySignature(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+
+		// values pulled from example docs at https://developers.circle.com/w3s/docs/web3-services-notifications-quickstart
+		publicKeyBase64 := "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESl76SZPBJemW0mJNN4KTvYkLT8bOT4UGhFhzNk3fJqf6iuPlLQLq533FelXwczJbjg2U1PHTvQTK7qOQnDL2Tg=="
+		signatureBase64 := "MEQCIBlJPX7t0FDOcozsRK6qIQwik5Fq6mhAtCSSgIB/yQO7AiB9U5lVpdufKvPhk3cz4TH2f5MP7ArnmPRBmhPztpsIFQ=="
+		responseBodyBytes := []byte("{\n\"subscriptionId\":\"00000000-0000-0000-0000-000000000000\",\"notificationId\":\"00000000-0000-0000-0000-000000000000\",\"notificationType\":\"webhooks.test\",\"notification\":{\"hello\":\"world\"},\"timestamp\":\"2024-01-26T18:22:19.779834211Z\",\"version\":2}")
+
+		err := verifySignature(
+			publicKeyBase64,
+			signatureBase64,
+			responseBodyBytes,
+		)
+
+		assert.Equal(t, err, nil)
+
+	})
+}

@@ -92,7 +92,7 @@ func initTasks(ctx context.Context) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
-		work.ScheduleWarmEmail(clientSession, tx)
+		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
@@ -111,7 +111,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 	taskWorker := task.NewTaskWorker(ctx)
 
 	taskWorker.AddTargets(
-		task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
+		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(work.ExportStats, work.ExportStatsPost),
 		task.NewTaskTargetWithPost(work.RemoveExpiredAuthCodes, work.RemoveExpiredAuthCodesPost),
 		task.NewTaskTargetWithPost(work.Payout, work.PayoutPost),
