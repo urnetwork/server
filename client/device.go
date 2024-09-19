@@ -283,7 +283,6 @@ func (self *BringYourDevice) GetRouteLocal() bool {
 func (self *BringYourDevice) WindowEvents() *WindowEvents {
 	switch v := self.remoteUserNatClient.(type) {
 	case *connect.RemoteUserNatMultiClient:
-		// v.Monitor().AddMonitorEventCallback()
 		return newWindowEvents(v.Monitor().Events())
 	default:
 		return nil
