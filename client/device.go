@@ -289,6 +289,13 @@ func (self *BringYourDevice) WindowEvents() *WindowEvents {
 	}
 }
 
+func (self *BringYourDevice) addMonitorEventCallback(callback connect.MonitorEventFunction) {
+	switch v := self.remoteUserNatClient.(type) {
+	case *connect.RemoteUserNatMultiClient:
+		v.Monitor().AddMonitorEventCallback(callback)
+	}
+}
+
 func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeListener) Sub {
 	callbackId := self.provideChangeListeners.Add(listener)
 	return newSub(func() {
