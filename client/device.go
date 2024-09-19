@@ -290,8 +290,6 @@ func (self *BringYourDevice) WindowEvents() *WindowEvents {
 	}
 }
 
-// type MonitorEventFunction = func(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[Id]*connect.ProviderEvent)
-
 func (self *BringYourDevice) addMonitorEventCallback(callback connect.MonitorEventFunction) {
 	switch v := self.remoteUserNatClient.(type) {
 	case *connect.RemoteUserNatMultiClient:

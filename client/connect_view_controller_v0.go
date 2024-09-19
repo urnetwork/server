@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"time"
 
 	"sync"
 
@@ -91,10 +90,7 @@ func newConnectViewControllerV0(ctx context.Context, device *BringYourDevice) *C
 	return vm
 }
 
-func (vc *ConnectViewControllerV0) Start() {
-	vc.monitorWindowEvents()
-	vc.monitorWindowEvents2()
-}
+func (vc *ConnectViewControllerV0) Start() {}
 
 func (vc *ConnectViewControllerV0) Stop() {}
 
@@ -280,6 +276,8 @@ func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 			vc.device.SetDestination(specs, ProvideModePublic)
 			vc.setSelectedLocation(location)
 			vc.setConnectionStatus(DestinationSet)
+
+			vc.addWindowEventMonitor()
 		}
 
 	} else {
@@ -297,6 +295,8 @@ func (vc *ConnectViewControllerV0) Connect(location *ConnectLocation) {
 			vc.device.SetDestination(specs, ProvideModePublic)
 			vc.setSelectedLocation(location)
 			vc.setConnectionStatus(DestinationSet)
+
+			vc.addWindowEventMonitor()
 		}
 	}
 }
@@ -339,6 +339,9 @@ func (vc *ConnectViewControllerV0) ConnectBestAvailable() {
 					vc.device.SetDestination(specs, ProvideModePublic)
 
 					vc.setConnectionStatus(DestinationSet)
+
+					vc.addWindowEventMonitor()
+
 				} else {
 					vc.setConnectionStatus(Disconnected)
 				}
@@ -356,103 +359,68 @@ func (vc *ConnectViewControllerV0) CancelConnection() {
 	vc.connectionStatusChanged()
 }
 
-func (vc *ConnectViewControllerV0) monitorWindowEvents() {
-
-	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-
-		defer func() {
-			if r := recover(); r != nil {
-				connectVcLog("monitorWindowEvents: recovered from panic: %v", r)
-			}
-		}()
-
-		for {
-			select {
-			case <-vc.ctx.Done():
-				return
-			case <-ticker.C:
-
-				if vc.connectionStatus == Connected || vc.connectionStatus == Connecting || vc.connectionStatus == DestinationSet {
-
-					func() {
-						windowEvents := vc.device.WindowEvents()
-
-						if windowEvents == nil {
-							cvcLog("window events are nil")
-							return
-						}
-
-						if vc.windowCurrentSize != int32(windowEvents.CurrentSize()) {
-							vc.setWindowCurrentSize(int32(windowEvents.CurrentSize()))
-						}
-
-						if vc.windowTargetSize != int32(windowEvents.TargetSize()) {
-							vc.setWindowTargetSize(int32(windowEvents.TargetSize()))
-
-							if vc.grid == nil {
-								vc.initGrid(int32(windowEvents.TargetSize()))
-							}
-						}
-
-						for _, providerEvent := range windowEvents.providerEvents {
-
-							vc.stateLock.Lock()
-							point := vc.GetProviderGridPointByClientId(newId(providerEvent.ClientId))
-							vc.stateLock.Unlock()
-
-							providerEventState, err := vc.parseConnectProviderState(string(providerEvent.State))
-							if err != nil {
-								connectVcLog("Error prasing connect provider state: %s", string(providerEvent.State))
-								continue
-							}
-
-							if point == nil {
-								// insert a new item in the grid
-
-								vc.addProviderGridPoint(
-									newId(providerEvent.ClientId),
-									providerEventState,
-									newTime(providerEvent.EventTime),
-								)
-
-								continue
-							}
-
-							// check if eventTime is more recent than current point latest event time
-							if providerEvent.EventTime.UnixMilli() > point.EventTime.UnixMilli() {
-								// update the point
-								vc.updateProviderGridPoint(
-									point.ClientId,
-									newTime(providerEvent.EventTime),
-									providerEventState,
-								)
-
-							}
-						}
-
-						// current size equals target size, mark connection status as connected
-						if (vc.connectionStatus == Connecting || vc.connectionStatus == DestinationSet) && vc.windowCurrentSize >= vc.windowTargetSize {
-							vc.setConnectionStatus(Connected)
-						}
-
-						if vc.connectionStatus == Connected && (vc.windowCurrentSize < vc.windowTargetSize && vc.windowCurrentSize < 2) {
-							vc.setConnectionStatus(Connecting)
-						}
-					}()
-				}
-			}
-		}
-	}()
-
-}
-
 func (self *ConnectViewControllerV0) monitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent) {
-	connectVcLog("window event received!: current size %d; target size %d", windowExpandEvent.CurrentSize, windowExpandEvent.TargetSize)
+
+	if self.windowCurrentSize != int32(windowExpandEvent.CurrentSize) {
+		self.setWindowCurrentSize(int32(windowExpandEvent.CurrentSize))
+	}
+
+	if self.windowTargetSize != int32(windowExpandEvent.TargetSize) {
+		self.setWindowTargetSize(int32(windowExpandEvent.TargetSize))
+
+		if self.grid == nil {
+			self.initGrid(int32(windowExpandEvent.TargetSize))
+		}
+	}
+
+	for id, providerEvent := range providerEvents {
+
+		self.stateLock.Lock()
+		point := self.GetProviderGridPointByClientId(newId(id))
+		self.stateLock.Unlock()
+
+		providerEventState, err := self.parseConnectProviderState(string(providerEvent.State))
+		if err != nil {
+			connectVcLog("Error prasing connect provider state: %s", string(providerEvent.State))
+			continue
+		}
+
+		if point == nil {
+			// insert a new item in the grid
+
+			self.addProviderGridPoint(
+				newId(providerEvent.ClientId),
+				providerEventState,
+				newTime(providerEvent.EventTime),
+			)
+
+			continue
+		}
+
+		// check if eventTime is more recent than current point latest event time
+		if providerEvent.EventTime.UnixMilli() > point.EventTime.UnixMilli() {
+			// update the point
+			self.updateProviderGridPoint(
+				point.ClientId,
+				newTime(providerEvent.EventTime),
+				providerEventState,
+			)
+
+		}
+	}
+
+	// current size equals target size, mark connection status as connected
+	if (self.connectionStatus == Connecting || self.connectionStatus == DestinationSet) && self.windowCurrentSize >= self.windowTargetSize {
+		self.setConnectionStatus(Connected)
+	}
+
+	if self.connectionStatus == Connected && (self.windowCurrentSize < self.windowTargetSize && self.windowCurrentSize < 2) {
+		self.setConnectionStatus(Connecting)
+	}
+
 }
 
-func (vc *ConnectViewControllerV0) monitorWindowEvents2() {
+func (vc *ConnectViewControllerV0) addWindowEventMonitor() {
 	connectVcLog("monitorWindowEvents2 called")
 	var monitorEventFunc connect.MonitorEventFunction = vc.monitorEventCallback
 	vc.device.addMonitorEventCallback(monitorEventFunc)
