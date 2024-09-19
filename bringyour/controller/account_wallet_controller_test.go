@@ -53,6 +53,11 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(walletResults.Wallets), 0)
 
+		// payout wallet should be nil
+		payoutWalletId := model.GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, payoutWalletId, nil)
+
 		// success
 		wallet := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",
@@ -68,6 +73,14 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(walletResults.Wallets), 1)
 
+		firstWalletId := walletResults.Wallets[0].WalletId
+
+		// check if a payout wallet has been created too
+		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, payoutWalletId, firstWalletId)
+
+
 		wallet2 := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",
 			WalletAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
@@ -80,6 +93,11 @@ func TestAccountWallet(t *testing.T) {
 
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(walletResults.Wallets), 2)
+
+		// payout wallet should still be the first wallet
+		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, payoutWalletId, firstWalletId)
 
 		// fail with invalid wallet id string
 		toRemoveArgs := &model.RemoveWalletArgs{
