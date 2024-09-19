@@ -38,7 +38,7 @@ func (vc *ReferralCodeViewController) Close() {
 }
 
 func (vc *ReferralCodeViewController) GetNetworkReferralCode() (code string, err error) {
-	vc.device.Api().GetNetworkReferralCode(
+	vc.device.GetApi().GetNetworkReferralCode(
 		GetNetworkReferralCodeCallback(
 			connect.NewApiCallback[*GetNetworkReferralCodeResult](
 				func(result *GetNetworkReferralCodeResult, apiErr error) {

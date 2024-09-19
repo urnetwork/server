@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -63,4 +64,19 @@ func CreateAccountWalletExternal(
 func GetAccountWallets(session *session.ClientSession) (*model.GetAccountWalletsResult, error) {
 	walletsResult := model.GetActiveAccountWallets(session)
 	return walletsResult, nil
+}
+
+func RemoveWallet(args *model.RemoveWalletArgs, session *session.ClientSession) (*model.RemoveWalletResult, error) {
+
+	id, err := bringyour.ParseId(args.WalletId)
+	if err != nil {
+		return &model.RemoveWalletResult{
+			Success: false,
+			Error: &model.RemoveWalletError{
+				Message: fmt.Sprintf("Error parsing id %s", args.WalletId),
+			},
+		}, nil
+	}
+
+	return model.RemoveWallet(id, session), nil
 }

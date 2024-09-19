@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
@@ -435,6 +436,133 @@ func auditNetworkCreate(
 	auditNetworkEvent.NetworkId = networkId
 	auditNetworkEvent.EventDetails = &detailsJsonString
 	AddAuditEvent(session.Ctx, auditNetworkEvent)
+}
+
+type NetworkUpdateArgs struct {
+	NetworkName string
+}
+
+type NetworkUpdateError struct {
+	Message string `json:"message"`
+}
+
+type NetworkUpdateResult struct {
+	Error *NetworkUpdateError `json:"error,omitempty"`
+}
+
+func NetworkUpdate(
+	networkUpdate NetworkUpdateArgs,
+	session *session.ClientSession,
+) (*NetworkUpdateResult, error) {
+
+	var existingNetworkId *bringyour.Id
+	var networkCreateResult = &NetworkUpdateResult{}
+	networkName := strings.TrimSpace(networkUpdate.NetworkName)
+
+	if len(networkName) < 5 {
+		networkCreateResult = &NetworkUpdateResult{
+			Error: &NetworkUpdateError{
+				Message: "Network name must have at least 5 characters",
+			},
+		}
+		return networkCreateResult, nil
+	}
+
+	taken := networkNameSearch.AnyAround(session.Ctx, networkName, 1)
+
+	if taken {
+		networkCreateResult = &NetworkUpdateResult{
+			Error: &NetworkUpdateError{
+				Message: "Network name not available.",
+			},
+		}
+		return networkCreateResult, nil
+	}
+
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+
+		result, err := tx.Query(
+			session.Ctx,
+			`
+				SELECT network_id FROM network WHERE network_name = $1
+			`,
+			networkName,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&existingNetworkId))
+			}
+		})
+
+		if existingNetworkId != nil {
+
+			networkCreateResult = &NetworkUpdateResult{
+				Error: &NetworkUpdateError{
+					Message: "Network name not available.",
+				},
+			}
+			return
+		}
+
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+							UPDATE network
+							SET
+									network_name = $2
+							WHERE
+									network_id = $1
+					`,
+			session.ByJwt.NetworkId,
+			networkName,
+		))
+
+	})
+
+	return networkCreateResult, nil
+}
+
+type Network struct {
+	NetworkId   *bringyour.Id `json:"network_id"`
+	NetworkName string        `json:"network_name"`
+	AdminUserId *bringyour.Id `json:"admin_user_id"`
+}
+
+func GetNetwork(
+	session *session.ClientSession,
+) *Network {
+	var network *Network
+
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+
+		result, err := tx.Query(
+			session.Ctx,
+			`
+			SELECT
+				network_id,
+				network_name,
+				admin_user_id
+			FROM network 
+			WHERE network_id = $1
+		`,
+			session.ByJwt.NetworkId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+
+				network = &Network{}
+
+				bringyour.Raise(result.Scan(
+					&network.NetworkId,
+					&network.NetworkName,
+					&network.AdminUserId,
+				))
+			}
+		})
+
+	})
+
+	return network
 }
 
 func Testing_CreateNetwork(

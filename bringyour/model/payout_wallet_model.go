@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
 type SetPayoutWalletArgs struct {
@@ -53,4 +54,22 @@ func GetPayoutWalletId(ctx context.Context, networkId bringyour.Id) *bringyour.I
 		})
 	})
 	return walletId
+}
+
+func deletePayoutWallet(walletId bringyour.Id, session *session.ClientSession) {
+
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+            DELETE FROM payout_wallet
+            WHERE 
+                wallet_id = $1 AND 
+                network_id = $2
+            `,
+			walletId,
+			session.ByJwt.NetworkId,
+		))
+	})
+
 }

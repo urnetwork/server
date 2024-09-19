@@ -214,8 +214,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	standardContractTransferByteCount := 4 * maxMessageContentSize
 	standardContractFillFraction := float32(0.5)
 
-	clientStrategyA := connect.DefaultClientStrategy(ctx)
-	clientStrategyB := connect.DefaultClientStrategy(ctx)
+	clientStrategyA := connect.NewClientStrategyWithDefaults(ctx)
+	clientStrategyB := connect.NewClientStrategyWithDefaults(ctx)
 
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
@@ -231,6 +231,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsA.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
@@ -251,6 +252,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsB.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
@@ -600,12 +602,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
-										if uint32(i) <= v.MessageIndex {
-											assert.Equal(t, uint32(i), v.MessageIndex)
-											break ReceiveAckB
-										}
-										// else this is a retransmit that was picked up as the start of a sequence
-										// due to the receive sequence timing out
+										assert.Equal(t, uint32(i), v.MessageIndex)
+										break ReceiveAckB
 									} else {
 										nackBCount += 1
 									}
@@ -772,12 +770,8 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
-										if uint32(i) <= v.MessageIndex {
-											assert.Equal(t, uint32(i), v.MessageIndex)
-											break ReceiveAckA
-										}
-										// else this is a retransmit that was picked up as the start of a sequence
-										// due to the receive sequence timing out
+										assert.Equal(t, uint32(i), v.MessageIndex)
+										break ReceiveAckA
 									} else {
 										nackACount += 1
 									}

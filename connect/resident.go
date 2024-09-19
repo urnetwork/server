@@ -128,7 +128,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ExchangeConnectTimeout:                5 * time.Second,
 		ExchangePingTimeout:                   exchangePingTimeout,
-		ExchangeReadTimeout:                   2 * exchangePingTimeout,
+		ExchangeReadTimeout:                   15 * time.Second,
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
@@ -1636,12 +1636,9 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	self.UpdateActivity()
 	self.controlLimiter.delay()
 
-	for _, frame := range frames {
-		if message, err := connect.FromFrame(frame); err == nil {
-			bringyour.HandleError(func() {
-				self.residentController.HandleControlMessage(message)
-			})
-		}
+	err := self.residentController.HandleControlFrames(frames)
+	if err == nil {
+		glog.Infof("[rr]control error = %s\n", err)
 	}
 }
 

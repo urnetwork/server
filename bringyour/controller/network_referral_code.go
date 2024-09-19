@@ -7,7 +7,7 @@ import (
 )
 
 type NetworkReferralResult struct {
-	ReferralCode bringyour.Id `json:"referralCode"`
+	ReferralCode bringyour.Id `json:"referral_code"`
 }
 
 func GetNetworkReferralCode(
