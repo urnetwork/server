@@ -15,6 +15,8 @@ import (
 	"bringyour.com/connect"
 )
 
+var lsLog = logFn("local_state")
+
 const AsyncQueueSize = 32
 
 const LocalStorageFilePermissions = 0700
