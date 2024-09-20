@@ -528,6 +528,10 @@ func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
 		connectClientId := self.ClientId.toConnectId()
 		connectProviderSpec.ClientId = &connectClientId
 	}
+	if self.BestAvailable {
+		connectProviderSpec.BestAvailable = true
+	}
+
 	return connectProviderSpec
 }
 
