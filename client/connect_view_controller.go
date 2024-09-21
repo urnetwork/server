@@ -58,6 +58,8 @@ type ConnectViewController struct {
 	windowTargetSize  int32
 	windowCurrentSize int32
 
+	windowSub Sub
+
 	selectedLocationListeners  *connect.CallbackList[SelectedLocationListener]
 	connectionStatusListeners  *connect.CallbackList[ConnectionStatusListener]
 	connectGridListeners       *connect.CallbackList[ConnectGridListener]
@@ -79,6 +81,8 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		windowTargetSize:      0,
 		windowCurrentSize:     0,
 		providerGridPointList: NewProviderGridPointList(),
+
+		windowSub: nil,
 
 		selectedLocationListeners:  connect.NewCallbackList[SelectedLocationListener](),
 		connectionStatusListeners:  connect.NewCallbackList[ConnectionStatusListener](),
@@ -271,14 +275,16 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 }
 
 func (self *ConnectViewController) Disconnect() {
-	self.clearProviderPoints()
-
 	provideMode := ProvideModeNone
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
 	self.device.setProvideModeNoEvent(provideMode)
 
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
 	self.device.SetConnectLocation(nil)
+	self.clearProviderPoints()
+
+	self.windowSub.Close()
+
 	self.setConnectionStatus(Disconnected)
 }
 
@@ -345,7 +351,10 @@ func (self *ConnectViewController) monitorEventCallback(windowExpandEvent *conne
 
 func (self *ConnectViewController) addWindowEventMonitor() {
 	var monitorEventFunc connect.MonitorEventFunction = self.monitorEventCallback
-	self.device.addMonitorEventCallback(monitorEventFunc)
+
+	self.stateLock.Lock()
+	self.windowSub = self.device.addMonitorEventCallback(monitorEventFunc)
+	self.stateLock.Unlock()
 }
 
 type ProviderState = string
