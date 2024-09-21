@@ -352,7 +352,7 @@ func (self *BringYourDevice) GetProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	return self.remoteUserNatProvider != nil
+	return self.remoteUserNatProvider != nil && self.client.ContractManager().IsProvidePaused()
 }
 
 func (self *BringYourDevice) GetConnectEnabled() bool {
@@ -416,6 +416,7 @@ func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
 	glog.Infof("[device]provide paused = %t\n", providePaused)
 
 	self.client.ContractManager().SetProvidePaused(providePaused)
+	self.provideChanged(self.GetProvideEnabled())
 }
 
 func (self *BringYourDevice) GetProvidePaused() bool {
