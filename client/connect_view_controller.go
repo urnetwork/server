@@ -3,11 +3,13 @@ package client
 import (
 	"context"
 	"errors"
-	"fmt"
+	// "fmt"
 	"math"
-	"math/rand"
-
+	mathrand "math/rand"
 	"sync"
+	"time"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/connect"
 )
@@ -31,16 +33,12 @@ type ConnectionStatusListener interface {
 	ConnectionStatusChanged()
 }
 
-type ConnectGridListener interface {
-	ConnectGridPointChanged(index int32)
-}
+// type ConnectGridListener interface {
+// 	ConnectGridPointChanged(index int32)
+// }
 
-type WindowEventSizeListener interface {
-	WindowEventSizeChanged()
-}
-
-type ProviderGridPointsUpdated interface {
-	ProviderGridPointsUpdated()
+type GridListener interface {
+	GridChanged()
 }
 
 type ConnectViewController struct {
@@ -50,21 +48,17 @@ type ConnectViewController struct {
 
 	stateLock sync.Mutex
 
-	selectedLocation      *ConnectLocation
-	connectionStatus      ConnectionStatus
-	grid                  *ConnectGrid
-	providerGridPointList *ProviderGridPointList
+	// this is set when the client is connected
+	connected        bool
+	connectionStatus ConnectionStatus
+	selectedLocation *ConnectLocation
+	grid             *ConnectGrid
+	// providerGridPointList *ProviderGridPointList
 
-	windowTargetSize  int32
-	windowCurrentSize int32
-
-	windowSub Sub
-
-	selectedLocationListeners  *connect.CallbackList[SelectedLocationListener]
-	connectionStatusListeners  *connect.CallbackList[ConnectionStatusListener]
-	connectGridListeners       *connect.CallbackList[ConnectGridListener]
-	windowEventSizeListeners   *connect.CallbackList[WindowEventSizeListener]
-	providerGridPointListeners *connect.CallbackList[ProviderGridPointsUpdated]
+	selectedLocationListeners *connect.CallbackList[SelectedLocationListener]
+	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
+	// connectGridListeners       *connect.CallbackList[ConnectGridListener]
+	gridListeners *connect.CallbackList[GridListener]
 }
 
 func newConnectViewController(ctx context.Context, device *BringYourDevice) *ConnectViewController {
@@ -75,25 +69,22 @@ func newConnectViewController(ctx context.Context, device *BringYourDevice) *Con
 		cancel: cancel,
 		device: device,
 
-		connectionStatus:      Disconnected,
-		selectedLocation:      nil,
-		grid:                  nil,
-		windowTargetSize:      0,
-		windowCurrentSize:     0,
-		providerGridPointList: NewProviderGridPointList(),
+		connected:        false,
+		connectionStatus: Disconnected,
+		selectedLocation: nil,
+		grid:             nil,
 
-		windowSub: nil,
-
-		selectedLocationListeners:  connect.NewCallbackList[SelectedLocationListener](),
-		connectionStatusListeners:  connect.NewCallbackList[ConnectionStatusListener](),
-		connectGridListeners:       connect.NewCallbackList[ConnectGridListener](),
-		windowEventSizeListeners:   connect.NewCallbackList[WindowEventSizeListener](),
-		providerGridPointListeners: connect.NewCallbackList[ProviderGridPointsUpdated](),
+		selectedLocationListeners: connect.NewCallbackList[SelectedLocationListener](),
+		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
+		// connectGridListeners:       connect.NewCallbackList[ConnectGridListener](),
+		// windowSizeListeners:   connect.NewCallbackList[WindowSizeListener](),
+		gridListeners: connect.NewCallbackList[GridListener](),
 	}
 	if location := device.GetConnectLocation(); location != nil {
+		vc.setConnected(true)
 		vc.setSelectedLocation(location)
 		vc.setConnectionStatus(DestinationSet)
-		vc.addWindowEventMonitor()
+		vc.setGrid()
 	}
 	return vc
 }
@@ -104,11 +95,13 @@ func (self *ConnectViewController) Stop() {}
 
 func (self *ConnectViewController) Close() {
 	connectVcLog("close")
-	if self.windowSub != nil {
-		self.windowSub.Close()
-	}
-
 	self.cancel()
+}
+
+func (self *ConnectViewController) GetConnected() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connected
 }
 
 func (self *ConnectViewController) GetConnectionStatus() ConnectionStatus {
@@ -118,12 +111,18 @@ func (self *ConnectViewController) GetConnectionStatus() ConnectionStatus {
 }
 
 func (self *ConnectViewController) setConnectionStatus(status ConnectionStatus) {
+	changed := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.connectionStatus = status
+		if self.connectionStatus != status {
+			self.connectionStatus = status
+			changed = true
+		}
 	}()
-	self.connectionStatusChanged()
+	if changed {
+		self.connectionStatusChanged()
+	}
 }
 
 func (self *ConnectViewController) connectionStatusChanged() {
@@ -171,89 +170,91 @@ func (self *ConnectViewController) selectedLocationChanged(location *ConnectLoca
 	}
 }
 
-func (self *ConnectViewController) AddProviderGridPointListener(listener ProviderGridPointsUpdated) Sub {
-	callbackId := self.providerGridPointListeners.Add(listener)
+func (self *ConnectViewController) AddGridListener(listener GridListener) Sub {
+	callbackId := self.gridListeners.Add(listener)
 	return newSub(func() {
-		self.providerGridPointListeners.Remove(callbackId)
+		self.gridListeners.Remove(callbackId)
 	})
 }
 
-func (self *ConnectViewController) providerGridPointChanged() {
-	for _, listener := range self.providerGridPointListeners.Get() {
+func (self *ConnectViewController) gridChanged() {
+	for _, listener := range self.gridListeners.Get() {
 		connect.HandleError(func() {
-			listener.ProviderGridPointsUpdated()
+			listener.GridChanged()
 		})
 	}
 }
 
-func (self *ConnectViewController) AddConnectGridListener(listener ConnectGridListener) Sub {
-	callbackId := self.connectGridListeners.Add(listener)
-	return newSub(func() {
-		self.connectGridListeners.Remove(callbackId)
-	})
-}
+// func (self *ConnectViewController) AddConnectGridListener(listener ConnectGridListener) Sub {
+// 	callbackId := self.connectGridListeners.Add(listener)
+// 	return newSub(func() {
+// 		self.connectGridListeners.Remove(callbackId)
+// 	})
+// }
 
-func (self *ConnectViewController) connectGridPointChanged(index int32) {
-	for _, listener := range self.connectGridListeners.Get() {
-		connect.HandleError(func() {
-			listener.ConnectGridPointChanged(index)
-		})
-	}
-}
+// func (self *ConnectViewController) connectGridPointChanged(index int32) {
+// 	for _, listener := range self.connectGridListeners.Get() {
+// 		connect.HandleError(func() {
+// 			listener.ConnectGridPointChanged(index)
+// 		})
+// 	}
+// }
 
-func (self *ConnectViewController) GetWindowTargetSize() int32 {
-	return self.windowTargetSize
-}
+// func (self *ConnectViewController) AddWindowSizeListener(listener WindowSizeListener) Sub {
+// 	callbackId := self.windowSizeListeners.Add(listener)
+// 	return newSub(func() {
+// 		self.windowSizeListeners.Remove(callbackId)
+// 	})
+// }
 
-func (self *ConnectViewController) setWindowTargetSize(size int32) {
+// func (self *ConnectViewController) windowSizeChanged() {
+// 	for _, listener := range self.windowSizeListeners.Get() {
+// 		connect.HandleError(func() {
+// 			listener.WindowSizeChanged()
+// 		})
+// 	}
+// }
 
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.windowTargetSize = size
-	}()
-
-	self.windowEventSizeChanged()
-}
-
-func (self *ConnectViewController) GetWindowCurrentSize() int32 {
-	return self.windowCurrentSize
-}
-
-func (self *ConnectViewController) setWindowCurrentSize(size int32) {
-
+func (self *ConnectViewController) setConnected(connected bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	self.windowCurrentSize = size
-
-	self.windowEventSizeChanged()
+	self.connected = connected
 }
 
-func (self *ConnectViewController) AddWindowEventSizeListener(listener WindowEventSizeListener) Sub {
-	callbackId := self.windowEventSizeListeners.Add(listener)
-	return newSub(func() {
-		self.windowEventSizeListeners.Remove(callbackId)
-	})
-}
+func (self *ConnectViewController) setGrid() {
+	var grid *ConnectGrid
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
-func (self *ConnectViewController) windowEventSizeChanged() {
-	for _, listener := range self.windowEventSizeListeners.Get() {
-		connect.HandleError(func() {
-			listener.WindowEventSizeChanged()
-		})
+		if self.grid != nil {
+			self.grid.close()
+		}
+		if self.connected {
+			grid = newConnectGridWithDefaults(self.ctx, self)
+		}
+
+		if self.grid != grid {
+			self.grid = grid
+			changed = true
+		}
+	}()
+
+	if grid != nil {
+		if windowMonitor := self.device.windowMonitor(); windowMonitor != nil {
+			grid.listenToWindow(windowMonitor)
+		}
+	}
+
+	if changed {
+		self.gridChanged()
 	}
 }
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.selectedLocation = location
-	}()
-
-	self.clearProviderPoints()
-
+	self.setConnected(true)
 	self.setConnectionStatus(Connecting)
 
 	// enable provider
@@ -264,9 +265,11 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	// persist the connection location for automatic reconnect
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(location)
 	self.device.SetConnectLocation(location)
+
 	self.setSelectedLocation(location)
 	self.setConnectionStatus(DestinationSet)
-	self.addWindowEventMonitor()
+
+	self.setGrid()
 }
 
 func (self *ConnectViewController) ConnectBestAvailable() {
@@ -278,86 +281,23 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 }
 
 func (self *ConnectViewController) Disconnect() {
+	self.setConnected(false)
 	provideMode := ProvideModeNone
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
 	self.device.setProvideModeNoEvent(provideMode)
 
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
 	self.device.SetConnectLocation(nil)
-	self.clearProviderPoints()
-
-	self.windowSub.Close()
 
 	self.setConnectionStatus(Disconnected)
+
+	self.setGrid()
 }
 
-func (self *ConnectViewController) monitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent) {
-
-	if self.windowCurrentSize != int32(windowExpandEvent.CurrentSize) {
-		self.setWindowCurrentSize(int32(windowExpandEvent.CurrentSize))
-	}
-
-	if self.windowTargetSize != int32(windowExpandEvent.TargetSize) {
-		self.setWindowTargetSize(int32(windowExpandEvent.TargetSize))
-
-		if self.grid == nil {
-			self.initGrid(int32(windowExpandEvent.TargetSize))
-		}
-	}
-
-	for id, providerEvent := range providerEvents {
-
-		self.stateLock.Lock()
-		point := self.GetProviderGridPointByClientId(newId(id))
-		self.stateLock.Unlock()
-
-		providerEventState, err := self.parseConnectProviderState(string(providerEvent.State))
-		if err != nil {
-			connectVcLog("Error prasing connect provider state: %s", string(providerEvent.State))
-			continue
-		}
-
-		if point == nil {
-			// insert a new item in the grid
-
-			self.addProviderGridPoint(
-				newId(providerEvent.ClientId),
-				providerEventState,
-				newTime(providerEvent.EventTime),
-			)
-
-			continue
-		}
-
-		// check if eventTime is more recent than current point latest event time
-		if providerEvent.EventTime.UnixMilli() > point.EventTime.UnixMilli() {
-			// update the point
-			self.updateProviderGridPoint(
-				point.ClientId,
-				newTime(providerEvent.EventTime),
-				providerEventState,
-			)
-
-		}
-	}
-
-	// current size equals target size, mark connection status as connected
-	if (self.connectionStatus == Connecting || self.connectionStatus == DestinationSet) && self.windowCurrentSize >= self.windowTargetSize {
-		self.setConnectionStatus(Connected)
-	}
-
-	if self.connectionStatus == Connected && (self.windowCurrentSize < self.windowTargetSize && self.windowCurrentSize < 2) {
-		self.setConnectionStatus(Connecting)
-	}
-
-}
-
-func (self *ConnectViewController) addWindowEventMonitor() {
-	var monitorEventFunc connect.MonitorEventFunction = self.monitorEventCallback
-
+func (self *ConnectViewController) GetGrid() *ConnectGrid {
 	self.stateLock.Lock()
-	self.windowSub = self.device.addMonitorEventCallback(monitorEventFunc)
-	self.stateLock.Unlock()
+	defer self.stateLock.Unlock()
+	return self.grid
 }
 
 type ProviderState = string
@@ -370,17 +310,17 @@ const (
 	ProviderStateRemoved          ProviderState = "Removed"
 )
 
-func (self *ConnectViewController) parseConnectProviderState(state string) (ProviderState, error) {
+func parseProviderState(state connect.ProviderState) (ProviderState, error) {
 	switch state {
-	case string(ProviderStateInEvaluation):
+	case connect.ProviderStateInEvaluation:
 		return ProviderStateInEvaluation, nil
-	case string(ProviderStateEvaluationFailed):
+	case connect.ProviderStateEvaluationFailed:
 		return ProviderStateEvaluationFailed, nil
-	case string(ProviderStateNotAdded):
+	case connect.ProviderStateNotAdded:
 		return ProviderStateNotAdded, nil
-	case string(ProviderStateAdded):
+	case connect.ProviderStateAdded:
 		return ProviderStateAdded, nil
-	case string(ProviderStateRemoved):
+	case connect.ProviderStateRemoved:
 		return ProviderStateRemoved, nil
 	default:
 		return "", errors.New("invalid ProviderState")
@@ -388,220 +328,444 @@ func (self *ConnectViewController) parseConnectProviderState(state string) (Prov
 }
 
 type ProviderGridPoint struct {
-	X         int32
-	Y         int32
-	ClientId  *Id
-	EventTime *Time
-	State     ProviderState
+	// note gomobile does not support struct composition
+	X        int32
+	Y        int32
+	ClientId *Id
+	// EventTime *Time
+	State ProviderState
+	// the time when this point will be removed
+	// the ui can transition out based on this value
+	EndTime *Time
+	// wether the point is active for routing
+	Active bool
 }
 
-func (self *ConnectViewController) GetProviderGridPointByClientId(clientId *Id) *ProviderGridPoint {
-
-	if self.providerGridPointList == nil {
-		return nil
-	}
-
-	for i := 0; i < self.providerGridPointList.Len(); i++ {
-
-		point := self.providerGridPointList.Get(i)
-
-		if point.ClientId.Cmp(clientId) == 0 {
-			return point
-		}
-
-	}
-
-	return nil
-
+type gridPointCoord struct {
+	X int
+	Y int
 }
-
-func (self *ConnectViewController) updateProviderGridPoint(
-	clientId *Id,
-	eventTime *Time,
-	state ProviderState,
-) {
-
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		if self.providerGridPointList == nil || self.providerGridPointList.Len() <= 0 {
-			return
-		}
-
-		for i := 0; i < self.providerGridPointList.Len(); i++ {
-
-			point := self.providerGridPointList.Get(i)
-
-			if point.ClientId == clientId {
-
-				point.State = state
-				point.EventTime = eventTime
-
-				self.providerGridPointChanged()
-
-			}
-
-		}
-
-	}()
-
-}
-
-type GridPoint struct {
-	X         int32
-	Y         int32
+type gridPoint struct {
+	gridPointCoord
 	Plottable bool
 	Occupied  bool
 }
 
-type ConnectGrid struct {
-	Width  int32
-	Height int32
-	Points *GridPointList
+func defaultConnectGridSettings() *connectGridSettings {
+	return &connectGridSettings{
+		MinSideLength:  16,
+		ExpandFraction: 1.5,
+		RemoveTimeout:  1 * time.Second,
+	}
 }
 
-func (self *ConnectViewController) addProviderGridPoint(
-	clientId *Id,
-	state ProviderState,
-	eventTime *Time,
-) {
+type connectGridSettings struct {
+	MinSideLength  int
+	ExpandFraction float32
+	RemoveTimeout  time.Duration
+}
 
+type ConnectGrid struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	connectViewController *ConnectViewController
+	settings              *connectGridSettings
+
+	providerGridPointsMonitor *connect.Monitor
+
+	stateLock sync.Mutex
+
+	windowTargetSize  int
+	windowCurrentSize int
+
+	windowSub func()
+
+	sideLength         int
+	gridPoints         map[gridPointCoord]*gridPoint
+	providerGridPoints map[connect.Id]*ProviderGridPoint
+}
+
+func newConnectGridWithDefaults(ctx context.Context, connectViewController *ConnectViewController) *ConnectGrid {
+	return newConnectGrid(ctx, connectViewController, defaultConnectGridSettings())
+}
+
+func newConnectGrid(ctx context.Context, connectViewController *ConnectViewController, settings *connectGridSettings) *ConnectGrid {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	providerGrid := &ConnectGrid{
+		ctx:                       cancelCtx,
+		cancel:                    cancel,
+		connectViewController:     connectViewController,
+		settings:                  settings,
+		providerGridPointsMonitor: connect.NewMonitor(),
+		windowTargetSize:          0,
+		windowCurrentSize:         0,
+		windowSub:                 nil,
+		sideLength:                0,
+		gridPoints:                map[gridPointCoord]*gridPoint{},
+		providerGridPoints:        map[connect.Id]*ProviderGridPoint{},
+	}
+	go providerGrid.run()
+	return providerGrid
+}
+
+func (self *ConnectGrid) GetWidth() int32 {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	availableGridPoint, err := self.getAvailableGridPoint()
-	if err != nil {
-		return
-	}
-
-	self.providerGridPointList.Add(&ProviderGridPoint{
-		X:         availableGridPoint.X,
-		Y:         availableGridPoint.Y,
-		ClientId:  clientId,
-		State:     state,
-		EventTime: eventTime,
-	})
-
-	availableGridPoint.Occupied = true
-
-	self.providerGridPointChanged()
-
+	return int32(self.sideLength)
 }
 
-func (self *ConnectViewController) GetProviderGridPointList() *ProviderGridPointList {
-	return self.providerGridPointList
+func (self *ConnectGrid) GetHeight() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int32(self.sideLength)
 }
 
-func buildGridPointList(width int, height int) []*GridPoint {
+func (self *ConnectGrid) GetWindowTargetSize() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 
-	gridPoints := []*GridPoint{}
-
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-
-			gridPoints = append(gridPoints, &GridPoint{X: int32(x), Y: int32(y), Plottable: true, Occupied: false})
-
-		}
-	}
-
-	return gridPoints
+	return int32(self.windowTargetSize)
 }
 
-func (self *ConnectViewController) getAvailableGridPoint() (*GridPoint, error) {
+func (self *ConnectGrid) GetWindowCurrentSize() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 
-	if self.grid == nil {
-		return nil, fmt.Errorf("grid uninitialized")
-	}
-
-	var availablePoints []*GridPoint
-
-	for i := 0; i < self.grid.Points.Len(); i++ {
-		point := self.grid.Points.Get(i)
-		if point.Plottable && !point.Occupied {
-
-			availablePoints = append(availablePoints, point)
-
-		}
-
-	}
-
-	if len(availablePoints) == 0 {
-		return nil, fmt.Errorf("no plottable points available")
-	}
-
-	// randomly select one & set latest event
-	randomIndex := rand.Intn(len(availablePoints))
-	return availablePoints[randomIndex], nil
+	return int32(self.windowCurrentSize)
 }
 
-func (self *ConnectViewController) clearProviderPoints() {
+func (self *ConnectGrid) GetProviderGridPointByClientId(clientId *Id) *ProviderGridPoint {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.providerGridPoints[clientId.toConnectId()]
+}
+
+func (self *ConnectGrid) GetProviderGridPointList() *ProviderGridPointList {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	providerGridPointList := NewProviderGridPointList()
+	for _, providerGridPoint := range self.providerGridPoints {
+		// make a copy
+		copyProviderGridPoint := *providerGridPoint
+		providerGridPointList.Add(&copyProviderGridPoint)
+	}
+	return providerGridPointList
+}
+
+// *important* do not call this while holding the view controller state lock
+// because this intialized with the current state, it will call back into the view controller
+func (self *ConnectGrid) listenToWindow(windowMonitor *connect.RemoteUserNatMultiClientMonitor) {
+	done := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.providerGridPointList = NewProviderGridPointList()
+
+		select {
+		case <-self.ctx.Done():
+			done = true
+			return
+		default:
+		}
+
+		if self.windowSub != nil {
+			self.windowSub()
+		}
+		self.windowSub = windowMonitor.AddMonitorEventCallback(self.windowMonitorEventCallback)
 	}()
 
-	self.providerGridPointChanged()
+	if done {
+		return
+	}
+
+	// initialize with the current values
+	self.windowMonitorEventCallback(windowMonitor.Events())
 }
 
+func (self *ConnectGrid) close() {
+	self.cancel()
+
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.windowSub != nil {
+			self.windowSub()
+			self.windowSub = nil
+		}
+	}()
+}
+
+func (self *ConnectGrid) run() {
+	defer self.cancel()
+
+	for {
+		providerGridPointChanged := false
+		var notify chan struct{}
+		var minEndPoint *ProviderGridPoint
+		var timeout time.Duration
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			notify = self.providerGridPointsMonitor.NotifyChannel()
+			now := time.Now()
+			removedCount := 0
+			for clientId, point := range self.providerGridPoints {
+				if point.EndTime != nil {
+					if !now.Before(point.EndTime.toTime()) {
+						// remove
+						delete(self.providerGridPoints, clientId)
+						gridPointCoord := gridPointCoord{X: int(point.X), Y: int(point.Y)}
+						self.gridPoints[gridPointCoord].Occupied = false
+						providerGridPointChanged = true
+						removedCount += 1
+					} else if minEndPoint == nil || point.EndTime.toTime().Before(minEndPoint.EndTime.toTime()) {
+						minEndPoint = point
+					}
+				}
+			}
+			if minEndPoint != nil {
+				timeout = minEndPoint.EndTime.toTime().Sub(now)
+			}
+
+			if 0 < removedCount {
+				glog.Infof(
+					"[grid]%d->%d points=%d(-%d)\n",
+					self.windowCurrentSize,
+					self.windowTargetSize,
+					len(self.providerGridPoints),
+					removedCount,
+				)
+			}
+		}()
+
+		if providerGridPointChanged {
+			self.connectViewController.gridChanged()
+		}
+
+		if minEndPoint != nil {
+			// there is a next point to be removed after `timeout`
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-notify:
+			case <-time.After(timeout):
+			}
+		} else {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-notify:
+			}
+		}
+	}
+}
+
+// must be called with the state lock
 // create a new grid based on targetClientSize sets specific points as plottable or unplottable
-func (self *ConnectViewController) initGrid(targetClientSize int32) {
+func (self *ConnectGrid) resize() {
+	targetClientSize := int(math.Ceil(float64(len(self.providerGridPoints)) * float64(self.settings.ExpandFraction)))
 
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	sideLength := max(
+		self.settings.MinSideLength,
+		// currently the size never contracts
+		self.sideLength,
+		int(math.Ceil(math.Sqrt(float64(targetClientSize)))),
+	)
 
-	sideLength := int(math.Ceil(math.Sqrt(float64(targetClientSize))))
-	if sideLength < 16 {
-		sideLength = 16
-	}
-	width := sideLength
-	height := sideLength
-
-	points := buildGridPointList(width, height)
-
-	oneEighth := height / 8
-	oneFourth := width / 4
-	oneEighthWidth := width / 8
-
-	// Set the first and last 1/4 columns of the first and last 1/8 rows as unplottable
-	for y := 0; y < oneEighth; y++ {
-		for x := 0; x < width; x++ {
-			if x < oneFourth || x >= width-oneFourth {
-				points[y*width+x].Plottable = false
-			}
-		}
-	}
-	for y := height - oneEighth; y < height; y++ {
-		for x := 0; x < width; x++ {
-			if x < oneFourth || x >= width-oneFourth {
-				points[y*width+x].Plottable = false
+	gridPoints := map[gridPointCoord]*gridPoint{}
+	// merge the existing state
+	for x := range sideLength {
+		for y := range sideLength {
+			c := gridPointCoord{X: x, Y: y}
+			point, ok := self.gridPoints[c]
+			if ok {
+				// reset the plottable state, which will be set below to the new shape
+				point.Plottable = true
+			} else {
+				point = &gridPoint{
+					gridPointCoord: c,
+					Plottable:      true,
+					Occupied:       false,
+				}
+				gridPoints[c] = point
 			}
 		}
 	}
 
-	// Set the first and last 1/8 columns of the second 1/8 and second to last 1/8 rows as unplottable
-	for y := oneEighth; y < 2*oneEighth; y++ {
-		for x := 0; x < width; x++ {
-			if x < oneEighthWidth || x >= width-oneEighthWidth {
-				points[y*width+x].Plottable = false
-			}
-		}
-	}
-	for y := height - 2*oneEighth; y < height-oneEighth; y++ {
-		for x := 0; x < width; x++ {
-			if x < oneEighthWidth || x >= width-oneEighthWidth {
-				points[y*width+x].Plottable = false
+	// in a equal corner triangle, x+y<s
+	// cut out 1/3 corner triangles
+	for x := range sideLength / 3 {
+		for y := range sideLength / 3 {
+			if x+y < sideLength/3 {
+				gridPoints[gridPointCoord{X: x, Y: y}].Plottable = false
+
+				// flip x
+				gridPoints[gridPointCoord{X: sideLength - 1 - x, Y: y}].Plottable = false
+
+				// flip y
+				gridPoints[gridPointCoord{X: x, Y: sideLength - 1 - y}].Plottable = false
+
+				// flip x and y
+				gridPoints[gridPointCoord{X: sideLength - 1 - x, Y: sideLength - 1 - y}].Plottable = false
 			}
 		}
 	}
 
-	pointsList := NewGridPointList()
-	pointsList.addAll(points...)
-
-	self.grid = &ConnectGrid{Width: int32(width), Height: int32(height), Points: pointsList}
+	self.sideLength = sideLength
+	self.gridPoints = gridPoints
 }
 
-func (self *ConnectViewController) GetGrid() *ConnectGrid {
-	return self.grid
+// connect.MonitorEventFunction
+func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent) {
+	done := false
+	windowSizeChanged := false
+	providerGridPointChanged := false
+	var connectionStatus ConnectionStatus
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		select {
+		case <-self.ctx.Done():
+			done = true
+			return
+		default:
+		}
+
+		// eventTime := time.Now()
+
+		for clientId, providerEvent := range providerEvents {
+			providerState, err := parseProviderState(providerEvent.State)
+			if err != nil {
+				glog.Errorf("[grid]could not parse provider event state: %s", string(providerEvent.State))
+				continue
+			}
+
+			point, ok := self.providerGridPoints[clientId]
+
+			if ok {
+				if point.State != providerState {
+					point.State = providerState
+					var endTime *Time
+					if providerEvent.State.IsTerminal() {
+						// schedule the point to be removed
+						// note this resets the end time if already set
+						endTime = newTime(time.Now().Add(self.settings.RemoveTimeout))
+					}
+					point.EndTime = endTime
+					point.Active = providerEvent.State.IsActive()
+					providerGridPointChanged = true
+				}
+				// point.EventTime = newTime(eventTime)
+			} else {
+				// insert a new provider point
+
+				findUnuccupiedGridPoint := func() *gridPoint {
+					// try random sampling, then use an exhaustive search
+					if self.sideLength == 0 {
+						return nil
+					}
+
+					for range 8 {
+						c := gridPointCoord{
+							X: mathrand.Intn(self.sideLength),
+							Y: mathrand.Intn(self.sideLength),
+						}
+						if gridPoint, ok := self.gridPoints[c]; ok && gridPoint.Plottable && !gridPoint.Occupied {
+							return gridPoint
+						}
+					}
+
+					unoccupiedGridPoints := []*gridPoint{}
+					for _, gridPoint := range self.gridPoints {
+						if gridPoint.Plottable && !gridPoint.Occupied {
+							unoccupiedGridPoints = append(unoccupiedGridPoints, gridPoint)
+						}
+					}
+					if len(unoccupiedGridPoints) == 0 {
+						return nil
+					}
+					return unoccupiedGridPoints[mathrand.Intn(len(unoccupiedGridPoints))]
+				}
+
+				unoccupiedGridPoint := findUnuccupiedGridPoint()
+				if unoccupiedGridPoint == nil {
+					self.resize()
+					unoccupiedGridPoint = findUnuccupiedGridPoint()
+				}
+				if unoccupiedGridPoint == nil {
+					// resize is broken
+					// TODO log
+					continue
+				}
+
+				unoccupiedGridPoint.Occupied = true
+				var endTime *Time
+				if providerEvent.State.IsTerminal() {
+					// schedule the point to be removed
+					endTime = newTime(time.Now().Add(self.settings.RemoveTimeout))
+				}
+				point = &ProviderGridPoint{
+					X:        int32(unoccupiedGridPoint.X),
+					Y:        int32(unoccupiedGridPoint.Y),
+					ClientId: newId(clientId),
+					State:    providerState,
+					// EventTime: newTime(eventTime),
+					EndTime: endTime,
+					Active:  providerEvent.State.IsActive(),
+				}
+				self.providerGridPoints[clientId] = point
+				providerGridPointChanged = true
+			}
+		}
+
+		// compute the window size here from the number of added providers
+		windowCurrentSize := 0
+		for _, point := range self.providerGridPoints {
+			if point.Active {
+				windowCurrentSize += 1
+			}
+		}
+
+		if self.windowCurrentSize != windowCurrentSize || self.windowTargetSize != windowExpandEvent.TargetSize {
+			self.windowCurrentSize = windowCurrentSize
+			self.windowTargetSize = windowExpandEvent.TargetSize
+			windowSizeChanged = true
+		}
+
+		// note the callback is only active while the device is connected
+		if windowExpandEvent.MinSatisfied {
+			connectionStatus = Connected
+		} else {
+			connectionStatus = Connecting
+		}
+
+		glog.Infof(
+			"[grid]%d->%d(%t) points=%d %s (w=%t, p=%t)\n",
+			self.windowCurrentSize,
+			self.windowTargetSize,
+			windowExpandEvent.MinSatisfied,
+			len(self.providerGridPoints),
+			connectionStatus,
+			windowSizeChanged,
+			providerGridPointChanged,
+		)
+	}()
+
+	if done {
+		return
+	}
+
+	if providerGridPointChanged {
+		self.providerGridPointsMonitor.NotifyAll()
+	}
+	if windowSizeChanged || providerGridPointChanged {
+		self.connectViewController.gridChanged()
+	}
+	self.connectViewController.setConnectionStatus(connectionStatus)
 }
