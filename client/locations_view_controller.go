@@ -50,7 +50,7 @@ func newLocationsViewController(ctx context.Context, device *BringYourDevice) *L
 }
 
 func (vc *LocationsViewController) Start() {
-	vc.FilterLocations("")
+	go vc.FilterLocations("")
 }
 
 func (vc *LocationsViewController) Stop() {}

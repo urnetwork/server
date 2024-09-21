@@ -111,9 +111,9 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 }
 
 func (vc *WalletViewController) Start() {
-	vc.fetchAccountWallets()
-	vc.FetchPayoutWallet()
-	vc.fetchPayments()
+	go vc.fetchAccountWallets()
+	go vc.FetchPayoutWallet()
+	go vc.fetchPayments()
 }
 
 func (vc *WalletViewController) Stop() {
