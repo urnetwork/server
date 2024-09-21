@@ -57,7 +57,7 @@ func newNetworkUserViewController(ctx context.Context, device *BringYourDevice) 
 }
 
 func (vc *NetworkUserViewController) Start() {
-	vc.fetchNetworkUser()
+	go vc.fetchNetworkUser()
 }
 
 func (vc *NetworkUserViewController) Stop() {}
