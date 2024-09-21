@@ -287,20 +287,12 @@ func (self *BringYourDevice) GetRouteLocal() bool {
 // 	return nil
 // }
 
-func (self *BringYourDevice) WindowEvents() *WindowEvents {
+func (self *BringYourDevice) addMonitorEventCallback(callback connect.MonitorEventFunction) Sub {
 	switch v := self.remoteUserNatClient.(type) {
 	case *connect.RemoteUserNatMultiClient:
-		return newWindowEvents(v.Monitor().Events())
-	default:
-		return nil
+		return newSub(v.Monitor().AddMonitorEventCallback(callback))
 	}
-}
-
-func (self *BringYourDevice) addMonitorEventCallback(callback connect.MonitorEventFunction) {
-	switch v := self.remoteUserNatClient.(type) {
-	case *connect.RemoteUserNatMultiClient:
-		v.Monitor().AddMonitorEventCallback(callback)
-	}
+	return nil
 }
 
 func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeListener) Sub {
