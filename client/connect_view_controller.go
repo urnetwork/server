@@ -104,6 +104,9 @@ func (self *ConnectViewController) Stop() {}
 
 func (self *ConnectViewController) Close() {
 	connectVcLog("close")
+	if self.windowSub != nil {
+		self.windowSub.Close()
+	}
 
 	self.cancel()
 }
