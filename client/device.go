@@ -25,6 +25,10 @@ type ProvideChangeListener interface {
 	ProvideChanged(provideEnabled bool)
 }
 
+type ProvidePausedChangeListener interface {
+	ProvidePausedChanged(providePaused bool)
+}
+
 type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
@@ -99,9 +103,10 @@ type BringYourDevice struct {
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
-	provideChangeListeners    *connect.CallbackList[ProvideChangeListener]
-	connectChangeListeners    *connect.CallbackList[ConnectChangeListener]
-	routeLocalChangeListeners *connect.CallbackList[RouteLocalChangeListener]
+	provideChangeListeners       *connect.CallbackList[ProvideChangeListener]
+	providePausedChangeListeners *connect.CallbackList[ProvidePausedChangeListener]
+	connectChangeListeners       *connect.CallbackList[ConnectChangeListener]
+	routeLocalChangeListeners    *connect.CallbackList[RouteLocalChangeListener]
 
 	localUserNatUnsub func()
 }
@@ -214,6 +219,7 @@ func newBringYourDevice(
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
+		providePausedChangeListeners:      connect.NewCallbackList[ProvidePausedChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
 		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
 	}
@@ -302,6 +308,13 @@ func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeList
 	})
 }
 
+func (self *BringYourDevice) AddProvidePausedChangeListener(listener ProvidePausedChangeListener) Sub {
+	callbackId := self.providePausedChangeListeners.Add(listener)
+	return newSub(func() {
+		self.providePausedChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) AddConnectChangeListener(listener ConnectChangeListener) Sub {
 	callbackId := self.connectChangeListeners.Add(listener)
 	return newSub(func() {
@@ -320,6 +333,14 @@ func (self *BringYourDevice) provideChanged(provideEnabled bool) {
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvideChanged(provideEnabled)
+		})
+	}
+}
+
+func (self *BringYourDevice) providePausedChanged(providePaused bool) {
+	for _, listener := range self.providePausedChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ProvidePausedChanged(providePaused)
 		})
 	}
 }
@@ -352,7 +373,7 @@ func (self *BringYourDevice) GetProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	return self.remoteUserNatProvider != nil && self.client.ContractManager().IsProvidePaused()
+	return self.remoteUserNatProvider != nil
 }
 
 func (self *BringYourDevice) GetConnectEnabled() bool {
@@ -410,19 +431,13 @@ func (self *BringYourDevice) GetProvideMode() ProvideMode {
 }
 
 func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	glog.Infof("[device]provide paused = %t\n", providePaused)
 
 	self.client.ContractManager().SetProvidePaused(providePaused)
-	self.provideChanged(self.GetProvideEnabled())
+	self.providePausedChanged(self.GetProvidePaused())
 }
 
 func (self *BringYourDevice) GetProvidePaused() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	return self.client.ContractManager().IsProvidePaused()
 }
 
