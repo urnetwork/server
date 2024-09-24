@@ -20,7 +20,9 @@ func TestNetworkUser(t *testing.T) {
 		userId := bringyour.NewId()
 		clientId := bringyour.NewId()
 
-		Testing_CreateNetwork(ctx, networkId, "a", userId)
+		networkName := "hello_world"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId,
@@ -36,6 +38,7 @@ func TestNetworkUser(t *testing.T) {
 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
 		assert.Equal(t, networkUser.Verified, true)
 		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		assert.Equal(t, networkUser.NetworkName, networkName)
 
 		// update username
 		updatedName := "Lorem Ipsum"
