@@ -293,12 +293,13 @@ func (self *BringYourDevice) GetRouteLocal() bool {
 // 	return nil
 // }
 
-func (self *BringYourDevice) addMonitorEventCallback(callback connect.MonitorEventFunction) Sub {
+func (self *BringYourDevice) windowMonitor() *connect.RemoteUserNatMultiClientMonitor {
 	switch v := self.remoteUserNatClient.(type) {
 	case *connect.RemoteUserNatMultiClient:
-		return newSub(v.Monitor().AddMonitorEventCallback(callback))
+		return v.Monitor()
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeListener) Sub {
@@ -711,6 +712,7 @@ func parseByJwtClientId(byJwt string) (connect.Id, error) {
 	}
 }
 
+/*
 type WindowEvents struct {
 	windowExpandEvent *connect.WindowExpandEvent
 	providerEvents    map[connect.Id]*connect.ProviderEvent
@@ -773,3 +775,4 @@ func (self *WindowEvents) EvaluationFailedClientCount() int {
 	}
 	return count
 }
+*/

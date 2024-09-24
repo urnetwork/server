@@ -123,16 +123,6 @@ func NewProviderGridPointList() *ProviderGridPointList {
 	}
 }
 
-type GridPointList struct {
-	exportedList[*GridPoint]
-}
-
-func NewGridPointList() *GridPointList {
-	return &GridPointList{
-		exportedList: *newExportedList[*GridPoint](),
-	}
-}
-
 type LocationResultList struct {
 	exportedList[*LocationResult]
 }
@@ -236,22 +226,45 @@ func NewNetworkSpaceList() *NetworkSpaceList {
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type Time struct {
 	impl time.Time
+	// store this on the object to support gomobile "equals" and "hashCode"
+	TimeStr string
 }
 
 func NewTimeUnixMilli(unixMilli int64) *Time {
-	return &Time{
-		impl: time.UnixMilli(unixMilli),
-	}
+	return newTime(time.UnixMilli(unixMilli))
 }
 
 func newTime(impl time.Time) *Time {
 	return &Time{
-		impl: impl,
+		impl:    impl,
+		TimeStr: impl.String(),
 	}
+}
+
+func (self *Time) String() string {
+	return self.TimeStr
+}
+
+func (self *Time) Cmp(b *Time) int {
+	if self.impl.Before(b.impl) {
+		return -1
+	}
+	if b.impl.Before(self.impl) {
+		return 1
+	}
+	return 0
+}
+
+func (self *Time) toTime() time.Time {
+	return self.impl
 }
 
 func (self *Time) UnixMilli() int64 {
 	return self.impl.UnixMilli()
+}
+
+func (self *Time) MillisUntil() int32 {
+	return int32(self.impl.Sub(time.Now()))
 }
 
 func (self *Time) Format(layout string) string {

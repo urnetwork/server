@@ -54,3 +54,53 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 		assert.Equal(t, result.Error.Message, AgreeToTerms)
 	})
 }
+
+func TestNetworkUpdate(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := bringyour.NewId()
+		userId := bringyour.NewId()
+		clientId := bringyour.NewId()
+		networkName := "abcdef"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		// fail
+		// network name unavailable
+		networkUpdateArgs := NetworkUpdateArgs{
+			NetworkName: networkName,
+		}
+		result, err := NetworkUpdate(networkUpdateArgs, sourceSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.Error, nil)
+
+		// fail
+		// network name should be at least 6 characters
+		networkUpdateArgs = NetworkUpdateArgs{
+			NetworkName: "a",
+		}
+		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.Error, nil)
+
+		// success
+		newName := "uvwxyz"
+		networkUpdateArgs = NetworkUpdateArgs{
+			NetworkName: newName,
+		}
+		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+
+		network := GetNetwork(sourceSession)
+		assert.Equal(t, network.NetworkName, newName)
+
+	})
+}
