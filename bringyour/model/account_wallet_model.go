@@ -335,3 +335,53 @@ func GetActiveAccountWallets(session *session.ClientSession) *GetAccountWalletsR
 		Wallets: wallets,
 	}
 }
+
+type RemoveWalletError struct {
+	Message string `json:"message"`
+}
+
+type RemoveWalletResult struct {
+	Success bool               `json:"success"`
+	Error   *RemoveWalletError `json:"error,omitempty"`
+}
+
+type RemoveWalletArgs struct {
+	WalletId string `json:"wallet_id"`
+}
+
+func RemoveWallet(id bringyour.Id, session *session.ClientSession) *RemoveWalletResult {
+
+	var result = &RemoveWalletResult{
+		Success: false,
+	}
+
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		tag := bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+				UPDATE account_wallet
+				SET 
+						active = $1
+				WHERE 
+						wallet_id = $2 AND
+						network_id = $3
+			`,
+			false,
+			id,
+			session.ByJwt.NetworkId,
+		))
+
+		if tag.RowsAffected() == 1 {
+			result = &RemoveWalletResult{
+				Success: true,
+			}
+
+			deletePayoutWallet(id, session)
+
+		}
+
+	})
+
+	return result
+
+}
