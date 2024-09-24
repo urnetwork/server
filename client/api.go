@@ -659,6 +659,10 @@ func (self *BringYourApi) CreateAccountWallet(createAccountWallet *CreateAccount
 	})
 }
 
+/**
+ * Set payout wallet
+ */
+
 type SetPayoutWalletArgs struct {
 	WalletId *Id `json:"wallet_id"`
 }
@@ -917,6 +921,39 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 		&GetNetworkUserResult{},
 		callback,
 	)
+}
+
+/**
+ * Update Network User
+ **/
+
+type NetworkUserUpdateArgs struct {
+	NetworkName string `json:"network_name"`
+	UserName    string `json:"username"`
+}
+
+type NetworkUserUpdateError struct {
+	Message string `json:"message"`
+}
+
+type NetworkUserUpdateResult struct {
+	Error *NetworkUserUpdateError `json:"error,omitempty"`
+}
+
+type NetworkUserUpdateCallback connect.ApiCallback[*NetworkUserUpdateResult]
+
+func (self *BringYourApi) NetworkUserUpdate(updateNetworkUser *NetworkUserUpdateArgs, callback NetworkUserUpdateCallback) {
+	go connect.HandleError(func() {
+		connect.HttpPostWithStrategy(
+			self.ctx,
+			self.clientStrategy,
+			fmt.Sprintf("%s/network/user/update", self.apiUrl),
+			updateNetworkUser,
+			self.GetByJwt(),
+			&NetworkUserUpdateResult{},
+			callback,
+		)
+	})
 }
 
 /**

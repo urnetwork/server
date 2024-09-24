@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/session"
 )
 
 type NetworkUser struct {
@@ -55,5 +56,27 @@ func GetNetworkUser(
 	})
 
 	return networkUser
+}
+
+func NetworkUserUpdate(
+	name string,
+	session *session.ClientSession,
+) {
+
+	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+							UPDATE network_user
+							SET
+									user_name = $2
+							WHERE
+									user_id = $1
+					`,
+			session.ByJwt.UserId,
+			name,
+		))
+
+	})
 
 }
