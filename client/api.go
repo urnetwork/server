@@ -861,11 +861,12 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
 }
 
 type NetworkUser struct {
-	UserId   *Id    `json:"userId"`
-	UserName string `json:"userName"`
-	UserAuth string `json:"userAuth"`
-	Verified bool   `json:"verified"`
-	AuthType string `json:"authType"`
+	UserId      *Id    `json:"userId"`
+	UserName    string `json:"user_name"`
+	UserAuth    string `json:"user_auth"`
+	Verified    bool   `json:"verified"`
+	AuthType    string `json:"auth_type"`
+	NetworkName string `json:"network_name"`
 }
 
 type GetNetworkUserError struct {
