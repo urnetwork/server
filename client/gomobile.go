@@ -241,6 +241,20 @@ func newTime(impl time.Time) *Time {
 	}
 }
 
+func (self *Time) String() string {
+	return self.TimeStr
+}
+
+func (self *Time) Cmp(b *Time) int {
+	if self.impl.Before(b.impl) {
+		return -1
+	}
+	if b.impl.Before(self.impl) {
+		return 1
+	}
+	return 0
+}
+
 func (self *Time) toTime() time.Time {
 	return self.impl
 }
