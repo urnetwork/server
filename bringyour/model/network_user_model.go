@@ -8,11 +8,12 @@ import (
 )
 
 type NetworkUser struct {
-	UserId   bringyour.Id `json:"userId"`
-	UserName string       `json:"userName"`
-	UserAuth string       `json:"userAuth"`
-	Verified bool         `json:"verified"`
-	AuthType string       `json:"authType"`
+	UserId      bringyour.Id `json:"user_id"`
+	UserName    string       `json:"user_name"`
+	UserAuth    string       `json:"user_auth"`
+	Verified    bool         `json:"verified"`
+	AuthType    string       `json:"auth_type"`
+	NetworkName string       `json:"network_name"`
 }
 
 func GetNetworkUser(
@@ -28,12 +29,15 @@ func GetNetworkUser(
 			ctx,
 			`
 			SELECT
-				user_id,
-				user_name,
-				auth_type,
-				user_auth,
-				verified
-			FROM network_user 
+				network_user.user_id,
+				network_user.user_name,
+				network_user.auth_type,
+				network_user.user_auth,
+				network_user.verified,
+				network.network_name
+			FROM network_user
+			LEFT JOIN network ON
+				network.admin_user_id = network_user.user_id
 			WHERE user_id = $1
 		`,
 			userId,
@@ -49,6 +53,7 @@ func GetNetworkUser(
 					&networkUser.AuthType,
 					&networkUser.UserAuth,
 					&networkUser.Verified,
+					&networkUser.NetworkName,
 				))
 			}
 		})

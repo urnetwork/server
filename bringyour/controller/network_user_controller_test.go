@@ -80,6 +80,7 @@ func TestGetNetworkUser(t *testing.T) {
 		networkUserResult, err = GetNetworkUser(userSession)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, networkUserResult.NetworkUser.UserName, updatedName)
+		assert.Equal(t, networkUserResult.NetworkUser.NetworkName, updatedNetworkName)
 
 		network := model.GetNetwork(userSession)
 		assert.Equal(t, network.NetworkId, userSession.ByJwt.NetworkId)

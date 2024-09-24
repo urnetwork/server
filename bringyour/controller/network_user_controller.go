@@ -6,7 +6,7 @@ import (
 )
 
 type GetNetworkUserResult struct {
-	NetworkUser *model.NetworkUser         `json:"networkUser,omitempty"`
+	NetworkUser *model.NetworkUser         `json:"network_user,omitempty"`
 	Error       *GetNetworkUserResultError `json:"error,omitempty"`
 }
 

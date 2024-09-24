@@ -906,7 +906,7 @@ type GetNetworkUserError struct {
 }
 
 type GetNetworkUserResult struct {
-	NetworkUser *NetworkUser         `json:"networkUser,omitempty"`
+	NetworkUser *NetworkUser         `json:"network_user,omitempty"`
 	Error       *GetNetworkUserError `json:"error,omitempty"`
 }
 

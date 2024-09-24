@@ -729,7 +729,13 @@ func newWindowEvents(
 }
 
 func (self *WindowEvents) CurrentSize() int {
-	return self.windowExpandEvent.CurrentSize
+	count := 0
+	for _, providerEvent := range self.providerEvents {
+		if providerEvent.State.IsActive() {
+			count += 1
+		}
+	}
+	return count
 }
 
 func (self *WindowEvents) TargetSize() int {
