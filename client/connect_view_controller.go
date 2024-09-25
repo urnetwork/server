@@ -243,25 +243,19 @@ func (self *ConnectViewController) setGrid() {
 		}
 	}()
 
+	if changed {
+		self.gridChanged()
+	}
+
 	if grid != nil {
 		if windowMonitor := self.device.windowMonitor(); windowMonitor != nil {
 			grid.listenToWindow(windowMonitor)
 		}
 	}
-
-	if changed {
-		self.gridChanged()
-	}
 }
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
-
-	if self.connectionStatus != Disconnected {
-		self.Disconnect()
-	}
-
 	self.setConnected(true)
-	self.setConnectionStatus(Connecting)
 
 	// enable provider
 	provideMode := ProvideModePublic
@@ -274,6 +268,8 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 
 	self.setSelectedLocation(location)
 	self.setConnectionStatus(DestinationSet)
+
+	// self.setConnectionStatus(Connecting)
 
 	self.setGrid()
 }
