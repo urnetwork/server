@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+
 	// "fmt"
 	"math"
 	mathrand "math/rand"
@@ -254,6 +255,11 @@ func (self *ConnectViewController) setGrid() {
 }
 
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
+
+	if self.connectionStatus != Disconnected {
+		self.Disconnect()
+	}
+
 	self.setConnected(true)
 	self.setConnectionStatus(Connecting)
 
