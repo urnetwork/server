@@ -22,7 +22,14 @@ func TestGetNetworkUser(t *testing.T) {
 		userId := bringyour.NewId()
 		networkName := "abcdef"
 
+		networkIdB := bringyour.NewId()
+		// clientIdB := bringyour.NewId()
+		userIdB := bringyour.NewId()
+		networkNameB := "bcdefg"
+
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		model.Testing_CreateNetwork(ctx, networkIdB, networkNameB, userIdB)
 
 		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId,
@@ -56,7 +63,7 @@ func TestGetNetworkUser(t *testing.T) {
 
 		// should fail because network name unavailable
 		updateArgs = &NetworkUserUpdateArgs{
-			NetworkName: "abcdef",
+			NetworkName: networkNameB,
 			UserName:    updatedName,
 		}
 		updateNetworkUserResult, err = UpdateNetworkUser(updateArgs, userSession)
@@ -67,8 +74,24 @@ func TestGetNetworkUser(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, networkUserResult.NetworkUser.UserName, "test")
 
-		// should pass
+		// should update only the username since network name is unchanged
+		updateArgs = &NetworkUserUpdateArgs{
+			NetworkName: networkName,
+			UserName:    updatedName,
+		}
+		updateNetworkUserResult, err = UpdateNetworkUser(updateArgs, userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, updateNetworkUserResult.Error, nil)
+
+		networkUserResult, err = GetNetworkUser(userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkUserResult.NetworkUser.UserName, updatedName)
+		// should be the original network name
+		assert.Equal(t, networkUserResult.NetworkUser.NetworkName, networkName)
+
+		// should update both network name && username
 		updatedNetworkName := "uvwxyz"
+		updatedName = "hello world"
 		updateArgs = &NetworkUserUpdateArgs{
 			NetworkName: updatedNetworkName,
 			UserName:    updatedName,
