@@ -37,6 +37,10 @@ type RouteLocalChangeListener interface {
 	RouteLocalChanged(routeLocal bool)
 }
 
+type ConnectLocationChangeListener interface {
+	ConnectLocationChanged(location *ConnectLocation)
+}
+
 // receive a packet into the local raw socket
 type ReceivePacket interface {
 	ReceivePacket(packet []byte)
@@ -103,10 +107,11 @@ type BringYourDevice struct {
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
-	provideChangeListeners       *connect.CallbackList[ProvideChangeListener]
-	providePausedChangeListeners *connect.CallbackList[ProvidePausedChangeListener]
-	connectChangeListeners       *connect.CallbackList[ConnectChangeListener]
-	routeLocalChangeListeners    *connect.CallbackList[RouteLocalChangeListener]
+	provideChangeListeners         *connect.CallbackList[ProvideChangeListener]
+	providePausedChangeListeners   *connect.CallbackList[ProvidePausedChangeListener]
+	connectChangeListeners         *connect.CallbackList[ConnectChangeListener]
+	routeLocalChangeListeners      *connect.CallbackList[RouteLocalChangeListener]
+	connectLocationChangeListeners *connect.CallbackList[ConnectLocationChangeListener]
 
 	localUserNatUnsub func()
 }
@@ -222,6 +227,7 @@ func newBringYourDevice(
 		providePausedChangeListeners:      connect.NewCallbackList[ProvidePausedChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
 		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
+		connectLocationChangeListeners:    connect.NewCallbackList[ConnectLocationChangeListener](),
 	}
 
 	// set up with nil destination
@@ -330,6 +336,13 @@ func (self *BringYourDevice) AddRouteLocalChangeListener(listener RouteLocalChan
 	})
 }
 
+func (self *BringYourDevice) AddConnectLocationChangeListener(listener ConnectLocationChangeListener) Sub {
+	callbackId := self.connectLocationChangeListeners.Add(listener)
+	return newSub(func() {
+		self.connectLocationChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) provideChanged(provideEnabled bool) {
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
@@ -358,6 +371,14 @@ func (self *BringYourDevice) routeLocalChanged(routeLocal bool) {
 	for _, listener := range self.routeLocalChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.RouteLocalChanged(routeLocal)
+		})
+	}
+}
+
+func (self *BringYourDevice) connectLocationChanged(location *ConnectLocation) {
+	for _, listener := range self.connectLocationChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectLocationChanged(location)
 		})
 	}
 }
@@ -443,13 +464,15 @@ func (self *BringYourDevice) GetProvidePaused() bool {
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
-	return self.SetDestination(nil, ProvideModeNone)
+	return self.SetDestination(nil, nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
+func (self *BringYourDevice) SetDestination(location *ConnectLocation, specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+
+		self.connectLocation = location
 
 		if self.remoteUserNatClient != nil {
 			self.remoteUserNatClient.Close()
@@ -494,6 +517,7 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	if returnErr != nil {
 		return
 	}
+	self.connectLocationChanged(self.GetConnectLocation())
 	connectEnabled := self.GetConnectEnabled()
 	self.stats.UpdateConnect(connectEnabled)
 	self.connectChanged(connectEnabled)
@@ -501,12 +525,6 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 }
 
 func (self *BringYourDevice) SetConnectLocation(location *ConnectLocation) {
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.connectLocation = location
-	}()
-
 	if location == nil {
 		self.RemoveDestination()
 	} else {
@@ -518,7 +536,7 @@ func (self *BringYourDevice) SetConnectLocation(location *ConnectLocation) {
 			BestAvailable:   location.ConnectLocationId.BestAvailable,
 		})
 
-		self.SetDestination(specs, ProvideModePublic)
+		self.SetDestination(location, specs, ProvideModePublic)
 	}
 }
 

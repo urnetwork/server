@@ -264,7 +264,7 @@ func (self *Time) UnixMilli() int64 {
 }
 
 func (self *Time) MillisUntil() int32 {
-	return int32(self.impl.Sub(time.Now()))
+	return int32(self.impl.Sub(time.Now()) / time.Millisecond)
 }
 
 func (self *Time) Format(layout string) string {

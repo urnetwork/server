@@ -223,45 +223,8 @@ func (self *ConnectViewController) setConnected(connected bool) {
 	self.connected = connected
 }
 
-func (self *ConnectViewController) setGrid() {
-	var grid *ConnectGrid
-	changed := false
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		if self.grid != nil {
-			self.grid.close()
-		}
-		if self.connected {
-			grid = newConnectGridWithDefaults(self.ctx, self)
-		}
-
-		if self.grid != grid {
-			self.grid = grid
-			changed = true
-		}
-	}()
-
-	if grid != nil {
-		if windowMonitor := self.device.windowMonitor(); windowMonitor != nil {
-			grid.listenToWindow(windowMonitor)
-		}
-	}
-
-	if changed {
-		self.gridChanged()
-	}
-}
-
 func (self *ConnectViewController) Connect(location *ConnectLocation) {
-
-	if self.connectionStatus != Disconnected {
-		self.Disconnect()
-	}
-
 	self.setConnected(true)
-	self.setConnectionStatus(Connecting)
 
 	// enable provider
 	provideMode := ProvideModePublic
@@ -273,7 +236,6 @@ func (self *ConnectViewController) Connect(location *ConnectLocation) {
 	self.device.SetConnectLocation(location)
 
 	self.setSelectedLocation(location)
-	self.setConnectionStatus(DestinationSet)
 
 	self.setGrid()
 }
@@ -288,6 +250,8 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 
 func (self *ConnectViewController) Disconnect() {
 	self.setConnected(false)
+
+	// disable provider
 	provideMode := ProvideModeNone
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
 	self.device.setProvideModeNoEvent(provideMode)
@@ -295,9 +259,45 @@ func (self *ConnectViewController) Disconnect() {
 	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
 	self.device.SetConnectLocation(nil)
 
-	self.setConnectionStatus(Disconnected)
-
 	self.setGrid()
+}
+
+func (self *ConnectViewController) setGrid() {
+	var grid *ConnectGrid
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.connected {
+			if self.grid != nil {
+				self.grid.close()
+			}
+			grid = newConnectGridWithDefaults(self.ctx, self)
+			self.grid = grid
+			changed = true
+		} else if self.grid != nil {
+			self.grid.close()
+			self.grid = nil
+			changed = true
+		}
+	}()
+
+	if !changed {
+		return
+	}
+
+	self.gridChanged()
+
+	if grid != nil {
+		self.setConnectionStatus(DestinationSet)
+
+		if windowMonitor := self.device.windowMonitor(); windowMonitor != nil {
+			grid.listenToWindow(windowMonitor)
+		}
+	} else {
+		self.setConnectionStatus(Disconnected)
+	}
 }
 
 func (self *ConnectViewController) GetGrid() *ConnectGrid {
@@ -361,7 +361,7 @@ func defaultConnectGridSettings() *connectGridSettings {
 	return &connectGridSettings{
 		MinSideLength:  16,
 		ExpandFraction: 1.5,
-		RemoveTimeout:  1 * time.Second,
+		RemoveTimeout:  8 * time.Second,
 	}
 }
 
