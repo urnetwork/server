@@ -361,7 +361,7 @@ func defaultConnectGridSettings() *connectGridSettings {
 	return &connectGridSettings{
 		MinSideLength:  16,
 		ExpandFraction: 1.5,
-		RemoveTimeout:  1 * time.Second,
+		RemoveTimeout:  8 * time.Second,
 	}
 }
 
