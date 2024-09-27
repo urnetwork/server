@@ -9,10 +9,10 @@ import (
 	"math"
 	"os"
 
-	"net/http"
-	_ "net/http/pprof"
+	// "net/http"
+	// _ "net/http/pprof"
 
-	"github.com/golang/glog"
+	// "github.com/golang/glog"
 
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
@@ -47,11 +47,11 @@ func initGlog() {
 	os.Stderr = os.Stdout
 }
 
-func initPprof() {
-	go func() {
-		glog.Infof("pprof = %s\n", http.ListenAndServe("localhost:6060", nil))
-	}()
-}
+// func initPprof() {
+// 	go func() {
+// 		glog.Infof("pprof = %s\n", http.ListenAndServe("localhost:6060", nil))
+// 	}()
+// }
 
 // this value is set via the linker, e.g.
 // -ldflags "-X client.Version=$WARP_VERSION"
