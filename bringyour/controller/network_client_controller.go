@@ -15,7 +15,7 @@ func ConnectNetworkClient(
 	handlerId bringyour.Id,
 ) bringyour.Id {
 	connectionId := model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
-	bringyour.Logger().Printf("Parse client address: %s", clientAddress)
+	// bringyour.Logger().Printf("Parse client address: %s", clientAddress)
 
 	if ipStr, _, err := bringyour.ParseClientAddress(clientAddress); err == nil {
 		go bringyour.HandleError(func() {
