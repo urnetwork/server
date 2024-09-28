@@ -466,8 +466,10 @@ func (vc *WalletViewController) setAccountPayments(payments []*AccountPayment) {
 	func() {
 		vc.stateLock.Lock()
 		defer vc.stateLock.Unlock()
-		vc.accountPayments = NewAccountPaymentsList()
-		vc.accountPayments.addAll(payments...)
+		if len(payments) > 0 {
+			vc.accountPayments = NewAccountPaymentsList()
+			vc.accountPayments.addAll(payments...)
+		}
 	}()
 
 	vc.paymentsChanged()
@@ -480,6 +482,7 @@ func (vc *WalletViewController) fetchPayments() {
 		func(results *GetNetworkAccountPaymentsResult, err error) {
 
 			if err != nil {
+				wvcLog("fetch payments failed: %s", err.Error())
 				return
 			}
 
