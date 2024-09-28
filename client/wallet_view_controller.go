@@ -72,11 +72,13 @@ type WalletViewController struct {
 	cancel context.CancelFunc
 	device *BringYourDevice
 
-	wallets                *AccountWalletsList
-	isAddingExternalWallet bool
-	isRemovingWallet       bool
-	payoutWalletId         *Id
-	accountPayments        *AccountPaymentsList
+	wallets                 *AccountWalletsList
+	isAddingExternalWallet  bool
+	isRemovingWallet        bool
+	payoutWalletId          *Id
+	accountPayments         *AccountPaymentsList
+	isPollingAccountWallets bool
+	isPollingPayoutWallet   bool
 
 	stateLock sync.Mutex
 
@@ -95,11 +97,13 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		cancel: cancel,
 		device: device,
 
-		wallets:                NewAccountWalletsList(),
-		isAddingExternalWallet: false,
-		isRemovingWallet:       false,
-		payoutWalletId:         nil,
-		accountPayments:        NewAccountPaymentsList(),
+		wallets:                 NewAccountWalletsList(),
+		isAddingExternalWallet:  false,
+		isRemovingWallet:        false,
+		payoutWalletId:          nil,
+		accountPayments:         NewAccountPaymentsList(),
+		isPollingAccountWallets: false,
+		isPollingPayoutWallet:   false,
 
 		accountWalletsListeners:           connect.NewCallbackList[AccountWalletsListener](),
 		payoutWalletListeners:             connect.NewCallbackList[PayoutWalletListener](),
@@ -110,10 +114,11 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 	return vc
 }
 
-func (vc *WalletViewController) Start() {
-	go vc.fetchAccountWallets()
-	go vc.FetchPayoutWallet()
-	go vc.fetchPayments()
+func (self *WalletViewController) Start() {
+	go self.fetchAccountWallets()
+	go self.FetchPayoutWallet()
+	go self.fetchPayments()
+	self.pollNewWallets()
 }
 
 func (vc *WalletViewController) Stop() {
@@ -266,7 +271,7 @@ func (vc *WalletViewController) payoutWalletIdChanged(id *Id) {
 	}
 }
 
-func (vc *WalletViewController) SetPayoutWallet(walletId *Id) (err error) {
+func (vc *WalletViewController) UpdatePayoutWallet(walletId *Id) (err error) {
 
 	if walletId == nil {
 		err = fmt.Errorf("no wallet id provided")
@@ -299,9 +304,19 @@ func (vc *WalletViewController) GetPayoutWalletId() (id *Id) {
 	return vc.payoutWalletId
 }
 
-func (vc *WalletViewController) FetchPayoutWallet() {
+func (self *WalletViewController) setPayoutWalletId(id *Id) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.payoutWalletId = id
+	}()
 
-	vc.device.GetApi().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
+	self.payoutWalletIdChanged(id)
+}
+
+func (self *WalletViewController) FetchPayoutWallet() {
+
+	self.device.GetApi().GetPayoutWallet(GetPayoutWalletCallback(connect.NewApiCallback[*GetPayoutWalletIdResult](
 		func(result *GetPayoutWalletIdResult, err error) {
 
 			if err != nil {
@@ -309,7 +324,17 @@ func (vc *WalletViewController) FetchPayoutWallet() {
 				return
 			}
 
-			vc.payoutWalletIdChanged(result.WalletId)
+			// if is polling
+			// check if existing value matches result
+			if self.isPollingPayoutWallet && (
+			// no existing payout wallet, but result exists or
+			(self.payoutWalletId == nil && result.WalletId != nil) ||
+				// existing payout wallet does not equal incoming payout wallet
+				(self.payoutWalletId != nil && result.WalletId != nil && self.payoutWalletId.Cmp(result.WalletId) != 0)) {
+				self.SetIsPollingPayoutWallet(false)
+			}
+
+			self.setPayoutWalletId(result.WalletId)
 
 		})))
 }
@@ -364,9 +389,9 @@ func (vc *WalletViewController) setAccountWallets(wallets *AccountWalletsList) {
 	vc.accountWalletsChanged()
 }
 
-func (vc *WalletViewController) fetchAccountWallets() {
+func (self *WalletViewController) fetchAccountWallets() {
 
-	vc.device.GetApi().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
+	self.device.GetApi().GetAccountWallets(connect.NewApiCallback[*GetAccountWalletsResult](
 		func(results *GetAccountWalletsResult, err error) {
 
 			if err != nil {
@@ -376,6 +401,13 @@ func (vc *WalletViewController) fetchAccountWallets() {
 
 			newWalletsList := NewAccountWalletsList()
 			var wallets []*AccountWallet
+
+			// if we are polling for new wallets
+			// and the new results length does not match the existing wallets length
+			// stop polling
+			if self.isPollingAccountWallets && results.Wallets.Len() != self.wallets.Len() {
+				self.SetIsPollingAccountWallets(false)
+			}
 
 			for i := 0; i < results.Wallets.Len(); i++ {
 
@@ -399,11 +431,11 @@ func (vc *WalletViewController) fetchAccountWallets() {
 
 			newWalletsList.addAll(wallets...)
 
-			vc.setAccountWallets(newWalletsList)
+			self.setAccountWallets(newWalletsList)
 
 			// we fetch wallets after removing a wallet
-			if vc.isRemovingWallet {
-				vc.setIsRemovingWallet(false)
+			if self.isRemovingWallet {
+				self.setIsRemovingWallet(false)
 			}
 
 		}))
@@ -434,8 +466,10 @@ func (vc *WalletViewController) setAccountPayments(payments []*AccountPayment) {
 	func() {
 		vc.stateLock.Lock()
 		defer vc.stateLock.Unlock()
-		vc.accountPayments = NewAccountPaymentsList()
-		vc.accountPayments.addAll(payments...)
+		if len(payments) > 0 {
+			vc.accountPayments = NewAccountPaymentsList()
+			vc.accountPayments.addAll(payments...)
+		}
 	}()
 
 	vc.paymentsChanged()
@@ -448,6 +482,7 @@ func (vc *WalletViewController) fetchPayments() {
 		func(results *GetNetworkAccountPaymentsResult, err error) {
 
 			if err != nil {
+				wvcLog("fetch payments failed: %s", err.Error())
 				return
 			}
 
@@ -514,5 +549,53 @@ func (vc *WalletViewController) RemoveWallet(walletId *Id) {
 			),
 		)
 	}
+}
+
+func (self *WalletViewController) SetIsPollingAccountWallets(isPolling bool) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.isPollingAccountWallets = isPolling
+	}()
+}
+
+func (self *WalletViewController) SetIsPollingPayoutWallet(isPolling bool) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.isPollingPayoutWallet = isPolling
+	}()
+}
+
+// when a user creates a circle wallet, we wait for a webhook from circle
+// which creates an account_wallet entry
+func (self *WalletViewController) pollNewWallets() {
+
+	go func() {
+		ticker := time.NewTicker(2500 * time.Millisecond)
+		defer ticker.Stop()
+
+		defer func() {
+			if r := recover(); r != nil {
+				connectVcLog("pollNewWallets: recovered from panic: %v", r)
+			}
+		}()
+
+		for {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-ticker.C:
+
+				if self.isPollingAccountWallets {
+					self.fetchAccountWallets()
+				}
+
+				if self.isPollingPayoutWallet {
+					self.FetchPayoutWallet()
+				}
+			}
+		}
+	}()
 
 }
