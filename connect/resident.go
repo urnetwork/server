@@ -105,7 +105,6 @@ type ExchangeChaosSettings struct {
 
 func DefaultExchangeSettings() *ExchangeSettings {
 	connectionHandlerSettings := DefaultConnectHandlerSettings()
-	exchangePingTimeout := connectionHandlerSettings.WriteTimeout
 	exchangeResidentWaitTimeout := 5 * time.Second
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
@@ -127,8 +126,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ControlMinTimeout:   5 * time.Millisecond,
 
 		ExchangeConnectTimeout:                5 * time.Second,
-		ExchangePingTimeout:                   exchangePingTimeout,
-		ExchangeReadTimeout:                   15 * time.Second,
+		ExchangePingTimeout:                   connectionHandlerSettings.PingTimeout,
+		ExchangeReadTimeout:                   connectionHandlerSettings.ReadTimeout,
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
