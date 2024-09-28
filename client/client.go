@@ -231,3 +231,8 @@ func UsdToNanoCents(usd float64) NanoCents {
 func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
+
+type ProvideSecretKey struct {
+	ProvideMode      ProvideMode `json:"provide_mode"`
+	ProvideSecretKey string      `json:"provide_secret_key"`
+}
