@@ -105,7 +105,6 @@ type ExchangeChaosSettings struct {
 
 func DefaultExchangeSettings() *ExchangeSettings {
 	connectionHandlerSettings := DefaultConnectHandlerSettings()
-	exchangePingTimeout := connectionHandlerSettings.WriteTimeout
 	exchangeResidentWaitTimeout := 5 * time.Second
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
@@ -127,8 +126,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ControlMinTimeout:   5 * time.Millisecond,
 
 		ExchangeConnectTimeout:                5 * time.Second,
-		ExchangePingTimeout:                   exchangePingTimeout,
-		ExchangeReadTimeout:                   15 * time.Second,
+		ExchangePingTimeout:                   connectionHandlerSettings.PingTimeout,
+		ExchangeReadTimeout:                   connectionHandlerSettings.ReadTimeout,
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
@@ -283,7 +282,7 @@ func (self *Exchange) NominateLocalResident(
 		)
 		go bringyour.HandleError(func() {
 			bringyour.HandleError(resident.Run)
-			glog.Infof("[r]close %s\n", clientId)
+			glog.V(1).Infof("[r]close %s\n", clientId)
 
 			self.residentsLock.Lock()
 			defer self.residentsLock.Unlock()
@@ -309,7 +308,7 @@ func (self *Exchange) NominateLocalResident(
 				}
 
 				if resident.IsIdle() {
-					glog.Infof("[r]idle %s\n", clientId)
+					glog.V(1).Infof("[r]idle %s\n", clientId)
 					return
 				}
 			}
@@ -333,7 +332,7 @@ func (self *Exchange) NominateLocalResident(
 				}
 
 				if !pollResident() {
-					glog.Infof("[r]not current %s\n", clientId)
+					glog.V(1).Infof("[r]not current %s\n", clientId)
 					return
 				}
 			}
@@ -343,7 +342,7 @@ func (self *Exchange) NominateLocalResident(
 			replacedResident.Cancel()
 		}
 		self.residents[clientId] = resident
-		glog.Infof("[r]open %s\n", clientId)
+		glog.V(1).Infof("[r]open %s\n", clientId)
 	}()
 
 	return true
@@ -484,18 +483,18 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	}
 
 	if resident == nil {
-		glog.Infof("[ecr]no resident\n")
+		glog.V(1).Infof("[ecr]no resident\n")
 		return
 	}
 
 	if resident.IsDone() {
-		glog.Infof("[ecr]resident done %s/%s\n", header.ClientId, header.ResidentId)
+		glog.V(1).Infof("[ecr]resident done %s/%s\n", header.ClientId, header.ResidentId)
 		return
 	}
 
 	// echo back the header
 	if err := receiveBuffer.WriteHeader(handleCtx, conn, header); err != nil {
-		glog.Infof("[ecr]write header %s/%s error = %s\n", header.ClientId, header.ResidentId, err)
+		glog.V(1).Infof("[ecr]write header %s/%s error = %s\n", header.ClientId, header.ResidentId, err)
 		return
 	}
 
@@ -643,9 +642,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	select {
 	case <-handleCtx.Done():
-		glog.Infof("[ecr]handle done\n")
+		glog.V(1).Infof("[ecr]handle done\n")
 	case <-resident.Done():
-		glog.Infof("[ecr]resident done\n")
+		glog.V(1).Infof("[ecr]resident done\n")
 	}
 }
 
@@ -1094,7 +1093,7 @@ func (self *ResidentTransport) Run() {
 			)
 
 			if err != nil {
-				glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				glog.V(1).Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
 			}
 
 			if err == nil {
@@ -1243,7 +1242,7 @@ func (self *ResidentForward) Run() {
 					return
 				case connection.send <- message:
 				case <-time.After(self.exchange.settings.WriteTimeout):
-					glog.Infof("[rf]drop %s->\n", self.clientId)
+					glog.V(1).Infof("[rf]drop %s->\n", self.clientId)
 				}
 			}
 		}
@@ -1265,7 +1264,7 @@ func (self *ResidentForward) Run() {
 				self.exchange.settings,
 			)
 			if err != nil {
-				glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				glog.V(1).Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
 			}
 			if err == nil {
 				c := func() {
@@ -1528,7 +1527,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		if !isAck(transferFrameBytes) {
 			hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
 			if !hasActiveContract {
-				fmt.Printf("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
+				glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
 				// there is no active contract
 				// drop
 				self.abuseLimiter.delay()
@@ -1545,7 +1544,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
 			go func() {
 				bringyour.HandleError(forward.Run)
-				glog.Infof("[rf]close %s->%s\n", sourceId, destinationId)
+				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
 
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
@@ -1558,7 +1557,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				defer forward.Cancel()
 				for {
 					if forward.IsIdle() {
-						glog.Infof("[rf]idle %s->%s\n", sourceId, destinationId)
+						glog.V(1).Infof("[rf]idle %s->%s\n", sourceId, destinationId)
 						return
 					}
 
@@ -1576,7 +1575,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				replacedForward.Cancel()
 			}
 			self.forwards[destinationId] = forward
-			glog.Infof("[rf]open %s->%s\n", sourceId, destinationId)
+			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
 
 			return forward
 		}
@@ -1606,7 +1605,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			forward.UpdateActivity()
 			return true
 		case <-time.After(self.exchange.settings.WriteTimeout):
-			glog.Infof("[rf]drop %s->%s", sourceId, destinationId)
+			glog.V(1).Infof("[rf]drop %s->%s", sourceId, destinationId)
 			return false
 		}
 	}
@@ -1626,7 +1625,7 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	sourceId := bringyour.Id(source.SourceId)
 
 	if sourceId != self.clientId {
-		glog.Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
+		glog.V(1).Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
 		// only messages from the resident client are processed by the resident
 		// drop
 		self.abuseLimiter.delay()
@@ -1638,7 +1637,7 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 
 	err := self.residentController.HandleControlFrames(frames)
 	if err == nil {
-		glog.Infof("[rr]control error = %s\n", err)
+		glog.V(1).Infof("[rr]control error = %s\n", err)
 	}
 }
 

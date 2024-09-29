@@ -9,6 +9,11 @@ import (
 	"math"
 	"os"
 
+	// "net/http"
+	// _ "net/http/pprof"
+
+	// "github.com/golang/glog"
+
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
 )
@@ -30,6 +35,8 @@ import (
 
 func init() {
 	initGlog()
+
+	// initPprof()
 }
 
 func initGlog() {
@@ -39,6 +46,12 @@ func initGlog() {
 	// unlike unix, the android/ios standard is for diagnostics to go to stdout
 	os.Stderr = os.Stdout
 }
+
+// func initPprof() {
+// 	go func() {
+// 		glog.Infof("pprof = %s\n", http.ListenAndServe("localhost:6060", nil))
+// 	}()
+// }
 
 // this value is set via the linker, e.g.
 // -ldflags "-X client.Version=$WARP_VERSION"
@@ -343,4 +356,9 @@ func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
 	}
 
 	return 0
+}
+
+type ProvideSecretKey struct {
+	ProvideMode      ProvideMode `json:"provide_mode"`
+	ProvideSecretKey string      `json:"provide_secret_key"`
 }

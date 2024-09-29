@@ -223,6 +223,16 @@ func NewNetworkSpaceList() *NetworkSpaceList {
 	}
 }
 
+type ProvideSecretKeyList struct {
+	exportedList[*ProvideSecretKey]
+}
+
+func NewProvideSecretKeyList() *ProvideSecretKeyList {
+	return &ProvideSecretKeyList{
+		exportedList: *newExportedList[*ProvideSecretKey](),
+	}
+}
+
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type Time struct {
 	impl time.Time
