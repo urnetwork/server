@@ -220,6 +220,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
+	// clientSettingsA.SendBufferSettings.AckTimeout = 90 * time.Second
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsA.ForwardBufferSettings.SequenceBufferSize = 0
@@ -241,6 +242,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsB := connect.DefaultClientSettings()
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
+	// clientSettingsB.SendBufferSettings.AckTimeout = 90 * time.Second
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsB.ForwardBufferSettings.SequenceBufferSize = 0

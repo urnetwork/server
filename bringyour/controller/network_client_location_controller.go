@@ -39,7 +39,7 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *mode
 		}
 
 		token := ipInfoConfig()["access_token"].(string)
-		bringyour.Logger().Printf("Ipinfo token: %s", token)
+		// bringyour.Logger().Printf("Ipinfo token: %s", token)
 
 		// tokenBase64 := base64.StdEncoding.EncodeToString([]byte(token))
 
@@ -62,12 +62,12 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *mode
 		}
 		resultJson = bringyour.AttemptCompactJson(resultJson)
 
-		bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
+		// bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
 
 		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
 	}
 
-	bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
+	// bringyour.Logger().Printf("Got ipinfo result %s", string(resultJson))
 
 	/*
 		example result:

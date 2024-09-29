@@ -358,6 +358,33 @@ func (self *BringYourDevice) receive(source connect.TransferPath, ipProtocol con
 	}
 }
 
+func (self *BringYourDevice) GetProvideSecretKeys() *ProvideSecretKeyList {
+	provideSecretKeys := self.client.ContractManager().GetProvideSecretKeys()
+	provideSecretKeyList := NewProvideSecretKeyList()
+	for provideMode, provideSecretKey := range provideSecretKeys {
+		provideSecretKey := &ProvideSecretKey{
+			ProvideMode:      ProvideMode(provideMode),
+			ProvideSecretKey: string(provideSecretKey),
+		}
+		provideSecretKeyList.Add(provideSecretKey)
+	}
+	return provideSecretKeyList
+}
+
+func (self *BringYourDevice) LoadProvideSecretKeys(provideSecretKeyList *ProvideSecretKeyList) {
+	provideSecretKeys := map[protocol.ProvideMode][]byte{}
+	for i := 0; i < provideSecretKeyList.Len(); i += 1 {
+		provideSecretKey := provideSecretKeyList.Get(i)
+		provideMode := protocol.ProvideMode(provideSecretKey.ProvideMode)
+		provideSecretKeys[provideMode] = []byte(provideSecretKey.ProvideSecretKey)
+	}
+	self.client.ContractManager().LoadProvideSecretKeys(provideSecretKeys)
+}
+
+func (self *BringYourDevice) InitProvideSecretKeys() {
+	self.client.ContractManager().InitProvideSecretKeys()
+}
+
 func (self *BringYourDevice) GetProvideEnabled() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

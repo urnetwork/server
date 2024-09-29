@@ -9,10 +9,10 @@ import (
 	"math"
 	"os"
 
-	"net/http"
-	_ "net/http/pprof"
+	// "net/http"
+	// _ "net/http/pprof"
 
-	"github.com/golang/glog"
+	// "github.com/golang/glog"
 
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
@@ -47,11 +47,11 @@ func initGlog() {
 	os.Stderr = os.Stdout
 }
 
-func initPprof() {
-	go func() {
-		glog.Infof("pprof = %s\n", http.ListenAndServe("localhost:6060", nil))
-	}()
-}
+// func initPprof() {
+// 	go func() {
+// 		glog.Infof("pprof = %s\n", http.ListenAndServe("localhost:6060", nil))
+// 	}()
+// }
 
 // this value is set via the linker, e.g.
 // -ldflags "-X client.Version=$WARP_VERSION"
@@ -230,4 +230,9 @@ func UsdToNanoCents(usd float64) NanoCents {
 
 func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
+}
+
+type ProvideSecretKey struct {
+	ProvideMode      ProvideMode `json:"provide_mode"`
+	ProvideSecretKey string      `json:"provide_secret_key"`
 }

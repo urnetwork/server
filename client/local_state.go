@@ -219,6 +219,31 @@ func (self *LocalState) GetConnectLocation() *ConnectLocation {
 	return nil
 }
 
+func (self *LocalState) SetProvideSecretKeys(provideSecretKeyList *ProvideSecretKeyList) error {
+	path := filepath.Join(self.localStorageDir, ".provide_secret_keys")
+	if provideSecretKeyList == nil {
+		os.Remove(path)
+		return nil
+	} else {
+		provideSecretKeysBytes, err := json.Marshal(provideSecretKeyList)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, provideSecretKeysBytes, LocalStorageFilePermissions)
+	}
+}
+
+func (self *LocalState) GetProvideSecretKeys() *ProvideSecretKeyList {
+	path := filepath.Join(self.localStorageDir, ".provide_secret_keys")
+	if connectLocationBytes, err := os.ReadFile(path); err == nil {
+		var provideSecretKeys ProvideSecretKeyList
+		if err := json.Unmarshal(connectLocationBytes, &provideSecretKeys); err == nil {
+			return &provideSecretKeys
+		}
+	}
+	return nil
+}
+
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(
