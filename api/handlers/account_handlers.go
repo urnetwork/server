@@ -8,10 +8,6 @@ import (
 	"bringyour.com/bringyour/router"
 )
 
-func PreferencesSet(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(model.PreferencesSet, w, r)
-}
-
 func FeedbackSend(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.FeedbackSend, w, r)
 }
