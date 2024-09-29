@@ -45,7 +45,7 @@ func newAccountPreferencesViewController(ctx context.Context, device *BringYourD
 }
 
 func (self *AccountPreferencesViewController) Start() {
-	self.fetchAllowProductUpdates()
+	go self.fetchAllowProductUpdates()
 }
 
 func (self *AccountPreferencesViewController) Stop() {
@@ -146,7 +146,12 @@ func (self *AccountPreferencesViewController) fetchAllowProductUpdates() {
 					return
 				}
 
-				self.setAllowProductUpdates(result.ProductUpdates)
+				if result == nil {
+					self.setAllowProductUpdates(false)
+				} else {
+					self.setAllowProductUpdates(result.ProductUpdates)
+				}
+
 				self.setIsFetching(false)
 
 			})))
