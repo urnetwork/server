@@ -8,10 +8,10 @@ import (
 	"bringyour.com/bringyour/router"
 )
 
-func FeedbackSend(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(model.FeedbackSend, w, r)
+func AccountPreferencesSet(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.AccountPreferencesSet, w, r)
 }
 
-func GetNetworkReferralCode(w http.ResponseWriter, r *http.Request) {
+func AccountPreferencesGet(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetNetworkReferralCode, w, r)
 }

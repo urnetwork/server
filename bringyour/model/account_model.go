@@ -7,37 +7,7 @@ import (
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
-	// "bringyour.com/bringyour/ulid"
 )
-
-type PreferencesSetArgs struct {
-	ProductUpdates bool `json:"product_updates"`
-}
-
-type PreferencesSetResult struct {
-}
-
-func PreferencesSet(
-	preferencesSet PreferencesSetArgs,
-	session *session.ClientSession,
-) (*PreferencesSetResult, error) {
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		_, err := tx.Exec(
-			session.Ctx,
-			`
-				INSERT INTO account_preferences (network_id, product_updates)
-				VALUES ($1, $2)
-				ON CONFLICT (network_id) DO UPDATE SET product_updates = $2
-			`,
-			session.ByJwt.NetworkId,
-			preferencesSet.ProductUpdates,
-		)
-		bringyour.Raise(err)
-	})
-
-	result := &PreferencesSetResult{}
-	return result, nil
-}
 
 type FeedbackSendArgs struct {
 	Uses  FeedbackSendUses  `json:"uses"`
