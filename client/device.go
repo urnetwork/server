@@ -678,6 +678,12 @@ func (self *BringYourDevice) OpenNetworkUserViewController() *NetworkUserViewCon
 	return vc
 }
 
+func (self *BringYourDevice) OpenAccountPreferencesViewController() *AccountPreferencesViewController {
+	vc := newAccountPreferencesViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)

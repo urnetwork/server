@@ -1046,3 +1046,51 @@ func (self *BringYourApi) SendFeedback(
 		callback,
 	)
 }
+
+/**
+ * Update Account Preferences
+ */
+
+type AccountPreferencesSetArgs struct {
+	ProductUpdates bool `json:"product_updates"`
+}
+
+type AccountPreferencesSetResult struct{}
+
+type AccountPreferencesSetCallback connect.ApiCallback[*AccountPreferencesSetResult]
+
+func (self *BringYourApi) AccountPreferencesUpdate(
+	accountPreferences *AccountPreferencesSetArgs,
+	callback AccountPreferencesSetCallback,
+) (*AccountPreferencesSetResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/preferences/set-preferences", self.apiUrl),
+		accountPreferences,
+		self.GetByJwt(),
+		&AccountPreferencesSetResult{},
+		callback,
+	)
+}
+
+/**
+ * Fetch Account Preferences
+ **/
+
+type AccountPreferencesGetResult struct {
+	ProductUpdates bool `json:"product_updates,omitempty"`
+}
+
+type AccountPreferencesGetCallback connect.ApiCallback[*AccountPreferencesGetResult]
+
+func (self *BringYourApi) AccountPreferencesGet(callback AccountPreferencesGetCallback) (*AccountPreferencesGetResult, error) {
+	return connect.HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/preferences", self.apiUrl),
+		self.GetByJwt(),
+		&AccountPreferencesGetResult{},
+		callback,
+	)
+}
