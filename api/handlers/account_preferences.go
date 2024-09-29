@@ -13,5 +13,5 @@ func AccountPreferencesSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func AccountPreferencesGet(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.GetNetworkReferralCode, w, r)
+	router.WrapRequireAuth(controller.AccountPreferencesGet, w, r)
 }
