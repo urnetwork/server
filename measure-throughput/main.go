@@ -82,38 +82,56 @@ func main() {
 			multi := pterm.DefaultMultiPrinter
 			postgresWriter := multi.NewWriter()
 			redisWriter := multi.NewWriter()
+			apiWriter := multi.NewWriter()
 
 			multi.Start()
 			defer multi.Stop()
 
-			eg, egCtx := errgroup.WithContext(ctx)
+			{
 
-			var pgCleanup func() error
+				eg, egCtx := errgroup.WithContext(ctx)
 
-			eg.Go(func() (err error) {
-				pgCleanup, err = setupPostgres(egCtx, vaultDir, postgresWriter)
+				var pgCleanup func() error
+
+				eg.Go(func() (err error) {
+					pgCleanup, err = setupPostgres(egCtx, vaultDir, postgresWriter)
+					if err != nil {
+						return fmt.Errorf("failed to setup postgres: %w", err)
+					}
+					return nil
+				})
+
+				var redisCleanup func() error
+
+				eg.Go(func() (err error) {
+					redisCleanup, err = setupRedis(egCtx, vaultDir, redisWriter)
+					if err != nil {
+						return fmt.Errorf("failed to setup redis: %w", err)
+					}
+					return nil
+				})
+
+				eg.Go(func() (err error) {
+					err = runGoMainProcess(egCtx, "API", apiWriter, filepath.Join(myMainDir, "..", "api"))
+					if err != nil {
+						return fmt.Errorf("failed to run API: %w", err)
+					}
+					return nil
+				})
+
+				err = eg.Wait()
+				defer runIfNotNil(pgCleanup)
+				defer runIfNotNil(redisCleanup)
 				if err != nil {
-					return fmt.Errorf("failed to setup postgres: %w", err)
+					return fmt.Errorf("failed to setup services: %w", err)
 				}
-				return nil
-			})
 
-			var redisCleanup func() error
-
-			eg.Go(func() (err error) {
-				redisCleanup, err = setupRedis(egCtx, vaultDir, redisWriter)
-				if err != nil {
-					return fmt.Errorf("failed to setup redis: %w", err)
-				}
-				return nil
-			})
-
-			err = eg.Wait()
-			defer runIfNotNil(pgCleanup)
-			defer runIfNotNil(redisCleanup)
-			if err != nil {
-				return fmt.Errorf("failed to setup services: %w", err)
 			}
+
+			// {
+			// 	eg, egCtx := errgroup.WithContext(ctx)
+
+			// }
 
 			return nil
 		},
