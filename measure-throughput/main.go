@@ -86,7 +86,7 @@ func main() {
 			pw := progress.NewWriter()
 			pw.SetAutoStop(false)
 			pw.SetMessageLength(40)
-			pw.SetNumTrackersExpected(4)
+			pw.SetNumTrackersExpected(5)
 			pw.SetSortBy(progress.SortByNone)
 			pw.SetStyle(progress.StyleDefault)
 			pw.SetTrackerLength(25)
@@ -164,6 +164,11 @@ func main() {
 				sgErr := servicesGroup.Wait()
 				err = errors.Join(err, sgErr)
 			}()
+
+			_, err = setupNewNetwork(completeRunCtx, pw)
+			if err != nil {
+				return fmt.Errorf("failed to setup network: %w", err)
+			}
 
 			<-completeRunCtx.Done()
 
