@@ -73,6 +73,9 @@ func main() {
 			os.Setenv("WARP_VAULT_HOME", vaultDir)
 			os.Setenv("WARP_ENV", "test")
 			os.Setenv("WARP_VERSION", "0.0.1")
+			os.Setenv("WARP_SERVICE", "bringyour")
+			os.Setenv("WARP_BLOCK", "local")
+			os.Setenv("WARP_PORTS", "5080:5080")
 
 			err = createPrivateKey(vaultDir)
 			if err != nil {
@@ -144,13 +147,18 @@ func main() {
 
 			{
 
-				if err != nil {
-					return fmt.Errorf("failed to create API spinner: %w", err)
-				}
-
 				eg, egCtx := errgroup.WithContext(ctx)
+
 				eg.Go(func() (err error) {
-					err = runGoMainProcess(egCtx, "API", pw, filepath.Join(myMainDir, "..", "api"))
+					err = runGoMainProcess(egCtx, "API", pw, filepath.Join(myMainDir, "..", "api"), "-p", "8080")
+					if err != nil {
+						return fmt.Errorf("failed to run API: %w", err)
+					}
+					return nil
+				})
+
+				eg.Go(func() (err error) {
+					err = runGoMainProcess(egCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), "-p", "7070")
 					if err != nil {
 						return fmt.Errorf("failed to run API: %w", err)
 					}
