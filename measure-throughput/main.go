@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -110,10 +111,6 @@ func main() {
 				// takes a while, so we use spinners
 				// to show progress
 
-				if err != nil {
-					return fmt.Errorf("failed to create redis spinner: %w", err)
-				}
-
 				eg, egCtx := errgroup.WithContext(ctx)
 
 				var pgCleanup func() error
@@ -145,32 +142,30 @@ func main() {
 
 			}
 
-			{
+			servicesGroup, completeRunCtx := errgroup.WithContext(ctx)
 
-				eg, egCtx := errgroup.WithContext(ctx)
-
-				eg.Go(func() (err error) {
-					err = runGoMainProcess(egCtx, "API", pw, filepath.Join(myMainDir, "..", "api"), "-p", "8080")
-					if err != nil {
-						return fmt.Errorf("failed to run API: %w", err)
-					}
-					return nil
-				})
-
-				eg.Go(func() (err error) {
-					err = runGoMainProcess(egCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), "-p", "7070")
-					if err != nil {
-						return fmt.Errorf("failed to run API: %w", err)
-					}
-					return nil
-				})
-
-				err = eg.Wait()
+			servicesGroup.Go(func() (err error) {
+				err = runGoMainProcess(completeRunCtx, "API", pw, filepath.Join(myMainDir, "..", "api"), "-p", "8080")
 				if err != nil {
-					return fmt.Errorf("failed to run services: %w", err)
+					return fmt.Errorf("failed to run API: %w", err)
 				}
+				return nil
+			})
 
-			}
+			servicesGroup.Go(func() (err error) {
+				err = runGoMainProcess(completeRunCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), "-p", "7070")
+				if err != nil {
+					return fmt.Errorf("failed to run API: %w", err)
+				}
+				return nil
+			})
+
+			defer func() {
+				sgErr := servicesGroup.Wait()
+				err = errors.Join(err, sgErr)
+			}()
+
+			<-completeRunCtx.Done()
 
 			return nil
 		},
