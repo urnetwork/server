@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"bringyour.com/bringyour"
 	"github.com/pterm/pterm"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -70,19 +72,49 @@ func main() {
 
 			multi := pterm.DefaultMultiPrinter
 			postgresWriter := multi.NewWriter()
+			redisWriter := multi.NewWriter()
 
 			multi.Start()
 			defer multi.Stop()
 
-			pgCleanup, err := setupPostgres(runDir, postgresWriter)
-			if err != nil {
-				return fmt.Errorf("failed to setup postgres: %w", err)
-			}
+			eg, ctx := errgroup.WithContext(context.Background())
 
-			defer pgCleanup()
+			var pgCleanup func() error
+
+			eg.Go(func() (err error) {
+				pgCleanup, err = setupPostgres(ctx, runDir, postgresWriter)
+				if err != nil {
+					return fmt.Errorf("failed to setup postgres: %w", err)
+				}
+				return nil
+			})
+
+			var redisCleanup func() error
+
+			eg.Go(func() (err error) {
+				redisCleanup, err = setupRedis(ctx, runDir, redisWriter)
+				if err != nil {
+					return fmt.Errorf("failed to setup redis: %w", err)
+				}
+				return nil
+			})
+
+			err = eg.Wait()
+			defer runIfNotNil(pgCleanup)
+			defer runIfNotNil(redisCleanup)
+			if err != nil {
+				return fmt.Errorf("failed to setup services: %w", err)
+			}
 
 			return nil
 		},
 	}
 	app.RunAndExitOnError()
+}
+
+func runIfNotNil(fn func() error) error {
+	if fn != nil {
+		return fn()
+	}
+	return nil
 }

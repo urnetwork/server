@@ -16,19 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func setupPostgres(tempDir string, w io.Writer) (fn func() error, err error) {
-
-	// progress, err := pterm.DefaultProgressbar.
-	// 	WithTotal(5).
-	// 	WithWriter(w).
-	// 	WithRemoveWhenDone(true).
-	// 	Start("postgres setup")
-
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to create postgres progress bar: %w", err)
-	// }
-
-	// defer progress.Stop()
+func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() error, err error) {
 
 	spinner, err := pterm.DefaultSpinner.
 		WithWriter(w).
@@ -45,13 +33,11 @@ func setupPostgres(tempDir string, w io.Writer) (fn func() error, err error) {
 		spinner.Stop()
 	}()
 
-	ctx := context.Background()
-
 	dbName := "bringyour"
 	dbUser := "bringyour"
 	dbPassword := "thisisatest"
 
-	spinner.UpdateText("starting database")
+	spinner.UpdateText("Starting Postgres")
 	postgresContainer, err := postgres.Run(
 		ctx,
 		"docker.io/postgres:16-alpine",
@@ -100,7 +86,7 @@ func setupPostgres(tempDir string, w io.Writer) (fn func() error, err error) {
 	spinner.UpdateText("applying migrations")
 	bringyour.ApplyDbMigrations(ctx)
 
-	spinner.Success("Database ready")
+	spinner.Success("Postgres ready")
 
 	return func() error {
 		return postgresContainer.Terminate(context.Background())
