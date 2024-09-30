@@ -4,34 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
-	"github.com/pterm/pterm"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/testcontainers/testcontainers-go/modules/redis"
 )
 
-func setupRedis(ctx context.Context, vaultDir string, w io.Writer) (func() error, error) {
+func setupRedis(ctx context.Context, vaultDir string, pw progress.Writer) (fn func() error, err error) {
 
-	spinner, err := pterm.DefaultSpinner.
-		WithWriter(w).
-		WithText("Starting Redis").
-		Start("Redis")
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create redis spinner: %w", err)
+	tracker := &progress.Tracker{
+		Message: "Redis",
+		Total:   1,
+		// Units:   *units,
 	}
+
+	pw.AppendTracker(tracker)
+
+	tracker.Start()
 
 	defer func() {
 		if err != nil {
-			spinner.Fail("failed: %v", err)
+			tracker.UpdateMessage(fmt.Sprintf("Starting Redis failed: %v", err))
+			tracker.MarkAsErrored()
+			return
 		}
-		spinner.Stop()
+		tracker.UpdateMessage("Redis is ready")
+		tracker.MarkAsDone()
 	}()
 
 	redisContainer, err := redis.Run(ctx, "redis:7.4.0")
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to start redis container: %w", err)
 	}
@@ -63,7 +65,7 @@ func setupRedis(ctx context.Context, vaultDir string, w io.Writer) (func() error
 		return nil, fmt.Errorf("failed to write redis config: %w", err)
 	}
 
-	spinner.Success("Redis ready")
+	tracker.Increment(1)
 
 	return func() error {
 		return redisContainer.Terminate(context.Background())

@@ -5,20 +5,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
 
 	"bringyour.com/bringyour"
-	"github.com/pterm/pterm"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() error, err error) {
+func setupPostgres(ctx context.Context, tempDir string, pw progress.Writer) (fn func() error, err error) {
+
+	tracker := &progress.Tracker{
+		Message: "Postgres",
+		Total:   2,
+		// Units:   *units,
+	}
+
+	pw.AppendTracker(tracker)
+	tracker.Start()
 
 	// bringyour.ApplyDbMigrations can panic
 	defer func() {
@@ -34,26 +42,22 @@ func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() 
 		}
 	}()
 
-	spinner, err := pterm.DefaultSpinner.
-		WithWriter(w).
-		Start("Database")
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create postgres spinner: %w", err)
-	}
-
 	defer func() {
 		if err != nil {
-			spinner.Fail(fmt.Sprintf("failed: %v", err))
+			tracker.UpdateMessage(fmt.Sprintf("Starting Postgres failed: %v", err))
+			tracker.MarkAsErrored()
+			return
 		}
-		spinner.Stop()
+
+		tracker.UpdateMessage("Postgres is ready")
+		tracker.MarkAsDone()
 	}()
 
 	dbName := "bringyour"
 	dbUser := "bringyour"
 	dbPassword := "thisisatest"
 
-	spinner.UpdateText("Starting Postgres")
+	tracker.UpdateMessage("Postgres: Starting Container")
 	postgresContainer, err := postgres.Run(
 		ctx,
 		"docker.io/postgres:16-alpine",
@@ -69,10 +73,10 @@ func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() 
 	if err != nil {
 		return nil, fmt.Errorf("failed to start postgres container: %w", err)
 	}
+	tracker.Increment(1)
 
 	defer func() {
 		if err != nil {
-			spinner.Fail("failed: %v", err)
 			postgresContainer.Terminate(context.Background())
 		}
 	}()
@@ -99,10 +103,9 @@ func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() 
 		return nil, fmt.Errorf("failed to write pg.yml: %w", err)
 	}
 
-	spinner.UpdateText("applying migrations")
+	tracker.UpdateMessage("Postgres: applying migrations")
 	bringyour.ApplyDbMigrations(ctx)
-
-	spinner.Success("Postgres ready")
+	tracker.Increment(1)
 
 	return func() error {
 		return postgresContainer.Terminate(context.Background())

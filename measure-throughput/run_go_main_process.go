@@ -1,31 +1,35 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 
-	"github.com/pterm/pterm"
+	"github.com/jedib0t/go-pretty/v6/progress"
 )
 
-func runGoMainProcess(ctx context.Context, name string, progressWriter io.Writer, mainDir string, args ...string) (err error) {
+func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, mainDir string, args ...string) (err error) {
 
-	spinner, err := pterm.DefaultSpinner.
-		WithWriter(progressWriter).
-		Start("Running " + name)
-
-	if err != nil {
-		return fmt.Errorf("failed to create spinner: %w", err)
+	tracker := &progress.Tracker{
+		Message: fmt.Sprintf("Running %s", name),
+		Total:   0,
+		// Units:   *units,
 	}
+
+	pw.AppendTracker(tracker)
+	tracker.Start()
+
+	tracker.Increment(1)
 
 	defer func() {
 		if err != nil {
-			spinner.Fail(fmt.Sprintf("%s failed: %v", name, err))
+			tracker.UpdateMessage(fmt.Sprintf("%s failed: %v", name, err))
+			tracker.MarkAsErrored()
+			return
 		}
-		spinner.Stop()
+		tracker.UpdateMessage(fmt.Sprintf("%s is done", name))
+		tracker.MarkAsDone()
 	}()
 
 	cmd := exec.CommandContext(ctx, "go", append([]string{"run", "."}, args...)...)
@@ -33,14 +37,10 @@ func runGoMainProcess(ctx context.Context, name string, progressWriter io.Writer
 
 	cmd.Env = os.Environ()
 
-	out := bytes.NewBuffer(nil)
-	cmd.Stdout = out
-	cmd.Stderr = out
-
-	err = cmd.Run()
+	out, err := cmd.CombinedOutput()
 
 	if err != nil {
-		fmt.Println("err:", err, out.String())
+		fmt.Println("err:", err, string(out))
 		return err
 	}
 

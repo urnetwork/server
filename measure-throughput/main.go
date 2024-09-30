@@ -9,9 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"time"
 
 	"bringyour.com/bringyour"
-	"github.com/pterm/pterm"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
 )
@@ -70,31 +71,52 @@ func main() {
 			}()
 
 			os.Setenv("WARP_VAULT_HOME", vaultDir)
+			os.Setenv("WARP_ENV", "test")
+			os.Setenv("WARP_VERSION", "0.0.1")
 
 			err = createPrivateKey(vaultDir)
 			if err != nil {
 				return fmt.Errorf("failed to create private key: %w", err)
 			}
 
-			// starting contaiers for postgres and redis
-			// takes a while, so we use spinners
-			// to show progress
-			multi := pterm.DefaultMultiPrinter
-			postgresWriter := multi.NewWriter()
-			redisWriter := multi.NewWriter()
-			apiWriter := multi.NewWriter()
+			pw := progress.NewWriter()
+			pw.SetAutoStop(false)
+			pw.SetMessageLength(40)
+			pw.SetNumTrackersExpected(4)
+			pw.SetSortBy(progress.SortByNone)
+			pw.SetStyle(progress.StyleDefault)
+			pw.SetTrackerLength(25)
+			pw.SetTrackerPosition(progress.PositionRight)
+			pw.SetUpdateFrequency(time.Millisecond * 200)
+			pw.Style().Colors = progress.StyleColorsExample
+			pw.Style().Options.PercentFormat = "%4.1f%%"
+			pw.Style().Visibility.ETA = false
+			pw.Style().Visibility.ETAOverall = false
+			pw.Style().Visibility.Percentage = true
+			pw.Style().Visibility.Speed = false
+			pw.Style().Visibility.SpeedOverall = false
+			pw.Style().Visibility.Time = false
+			pw.Style().Visibility.TrackerOverall = true
+			pw.Style().Visibility.Value = true
+			pw.Style().Visibility.Pinned = false
 
-			multi.Start()
-			defer multi.Stop()
+			go pw.Render()
 
 			{
+				// starting containers for postgres and redis
+				// takes a while, so we use spinners
+				// to show progress
+
+				if err != nil {
+					return fmt.Errorf("failed to create redis spinner: %w", err)
+				}
 
 				eg, egCtx := errgroup.WithContext(ctx)
 
 				var pgCleanup func() error
 
 				eg.Go(func() (err error) {
-					pgCleanup, err = setupPostgres(egCtx, vaultDir, postgresWriter)
+					pgCleanup, err = setupPostgres(egCtx, vaultDir, pw)
 					if err != nil {
 						return fmt.Errorf("failed to setup postgres: %w", err)
 					}
@@ -104,17 +126,9 @@ func main() {
 				var redisCleanup func() error
 
 				eg.Go(func() (err error) {
-					redisCleanup, err = setupRedis(egCtx, vaultDir, redisWriter)
+					redisCleanup, err = setupRedis(egCtx, vaultDir, pw)
 					if err != nil {
 						return fmt.Errorf("failed to setup redis: %w", err)
-					}
-					return nil
-				})
-
-				eg.Go(func() (err error) {
-					err = runGoMainProcess(egCtx, "API", apiWriter, filepath.Join(myMainDir, "..", "api"))
-					if err != nil {
-						return fmt.Errorf("failed to run API: %w", err)
 					}
 					return nil
 				})
@@ -128,10 +142,27 @@ func main() {
 
 			}
 
-			// {
-			// 	eg, egCtx := errgroup.WithContext(ctx)
+			{
 
-			// }
+				if err != nil {
+					return fmt.Errorf("failed to create API spinner: %w", err)
+				}
+
+				eg, egCtx := errgroup.WithContext(ctx)
+				eg.Go(func() (err error) {
+					err = runGoMainProcess(egCtx, "API", pw, filepath.Join(myMainDir, "..", "api"))
+					if err != nil {
+						return fmt.Errorf("failed to run API: %w", err)
+					}
+					return nil
+				})
+
+				err = eg.Wait()
+				if err != nil {
+					return fmt.Errorf("failed to run services: %w", err)
+				}
+
+			}
 
 			return nil
 		},
