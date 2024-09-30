@@ -20,18 +20,12 @@ func main() {
 		Name: "measure-throughput",
 		Action: func(c *cli.Context) (err error) {
 
-			runDir, err := os.MkdirTemp("", "vault")
+			vaultDir, err := os.MkdirTemp("", "vault")
 			if err != nil {
 				return fmt.Errorf("failed to create temp dir: %w", err)
 			}
 
-			vaultDir := filepath.Join(runDir, "vault")
-			err = os.Mkdir(vaultDir, 0755)
-			if err != nil {
-				return fmt.Errorf("failed to create vault dir: %w", err)
-			}
-
-			stderrFileName := filepath.Join(runDir, "stderr.log")
+			stderrFileName := filepath.Join(vaultDir, "stderr.log")
 			stderr, err := os.OpenFile(stderrFileName, os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to create stderr file: %w", err)
@@ -65,11 +59,19 @@ func main() {
 			flag.Parse()
 
 			defer func() {
-				os.RemoveAll(runDir)
+				os.RemoveAll(vaultDir)
 			}()
 
-			os.Setenv("WARP_VAULT_HOME", runDir)
+			os.Setenv("WARP_VAULT_HOME", vaultDir)
 
+			err = createPrivateKey(vaultDir)
+			if err != nil {
+				return fmt.Errorf("failed to create private key: %w", err)
+			}
+
+			// starting contaiers for postgres and redis
+			// takes a while, so we use spinners
+			// to show progress
 			multi := pterm.DefaultMultiPrinter
 			postgresWriter := multi.NewWriter()
 			redisWriter := multi.NewWriter()
@@ -82,7 +84,7 @@ func main() {
 			var pgCleanup func() error
 
 			eg.Go(func() (err error) {
-				pgCleanup, err = setupPostgres(ctx, runDir, postgresWriter)
+				pgCleanup, err = setupPostgres(ctx, vaultDir, postgresWriter)
 				if err != nil {
 					return fmt.Errorf("failed to setup postgres: %w", err)
 				}
@@ -92,7 +94,7 @@ func main() {
 			var redisCleanup func() error
 
 			eg.Go(func() (err error) {
-				redisCleanup, err = setupRedis(ctx, runDir, redisWriter)
+				redisCleanup, err = setupRedis(ctx, vaultDir, redisWriter)
 				if err != nil {
 					return fmt.Errorf("failed to setup redis: %w", err)
 				}

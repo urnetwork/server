@@ -12,7 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/redis"
 )
 
-func setupRedis(ctx context.Context, tempDir string, w io.Writer) (func() error, error) {
+func setupRedis(ctx context.Context, vaultDir string, w io.Writer) (func() error, error) {
 
 	spinner, err := pterm.DefaultSpinner.
 		WithWriter(w).
@@ -58,7 +58,7 @@ func setupRedis(ctx context.Context, tempDir string, w io.Writer) (func() error,
 		return nil, fmt.Errorf("failed to marshal redis config: %w", err)
 	}
 
-	err = os.WriteFile(filepath.Join(tempDir, "redis.yml"), d, 0644)
+	err = os.WriteFile(filepath.Join(vaultDir, "redis.yml"), d, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write redis config: %w", err)
 	}
