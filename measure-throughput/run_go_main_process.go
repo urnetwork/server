@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
 )
@@ -14,7 +15,6 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 	tracker := &progress.Tracker{
 		Message: fmt.Sprintf("Running %s", name),
 		Total:   0,
-		// Units:   *units,
 	}
 
 	pw.AppendTracker(tracker)
@@ -34,8 +34,21 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 
 	cmd := exec.CommandContext(ctx, "go", append([]string{"run", "."}, args...)...)
 	cmd.Dir = mainDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+		Pgid:    0,
+	}
 
 	cmd.Env = os.Environ()
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err != nil {
+			tracker.UpdateMessage(fmt.Sprintf("%s failed to kill group: %v", name, err))
+			return err
+		}
+		tracker.UpdateMessage(fmt.Sprintf("%s killing process group %d", name, -cmd.Process.Pid))
+		return nil
+	}
 
 	out, err := cmd.CombinedOutput()
 
