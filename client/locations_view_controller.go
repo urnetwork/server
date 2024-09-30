@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"bringyour.com/connect"
 )
@@ -83,7 +84,6 @@ func (vc *LocationsViewController) AddFilteredLocationsListener(listener Filtere
 }
 
 func (vc *LocationsViewController) FilterLocations(filter string) {
-	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
 	locationsVcLog("FILTER LOCATIONS %s", filter)
@@ -94,27 +94,49 @@ func (vc *LocationsViewController) FilterLocations(filter string) {
 	filterSequenceNumber = vc.nextFilterSequenceNumber
 	vc.stateLock.Unlock()
 
-	locationsVcLog("POST FILTER LOCATIONS %s", filter)
+	maxRetries := 3
+	retryCount := 0
+	retryInterval := 10 * time.Second
 
 	if filter == "" {
-		vc.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
-			func(result *FindLocationsResult, err error) {
-				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
-				if err == nil {
-					var update bool
-					vc.stateLock.Lock()
-					if vc.previousFilterSequenceNumber < filterSequenceNumber {
-						vc.previousFilterSequenceNumber = filterSequenceNumber
-						update = true
-					}
-					vc.stateLock.Unlock()
 
-					if update {
-						vc.setFilteredLocationsFromResult(result)
+		// we want to retry this point if it times out or failes
+		for {
+
+			// break out of loop if retry count is greater than or equals maxRetries
+			if retryCount >= maxRetries {
+				break
+			}
+
+			vc.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
+				func(result *FindLocationsResult, err error) {
+					locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
+					if err == nil {
+						var update bool
+						vc.stateLock.Lock()
+						if vc.previousFilterSequenceNumber < filterSequenceNumber {
+							vc.previousFilterSequenceNumber = filterSequenceNumber
+							update = true
+						}
+						vc.stateLock.Unlock()
+
+						if update {
+							vc.setFilteredLocationsFromResult(result)
+						}
+
+						// callback complete, we don't need to retry fetching locations
+						retryCount = maxRetries
+						locationsVcLog("retry count set to max")
+
 					}
-				}
-			},
-		)))
+				},
+			)))
+
+			// wait to retry
+			time.Sleep(retryInterval)
+			retryCount++
+		}
+
 	} else {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
