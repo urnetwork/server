@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"bringyour.com/bringyour"
@@ -18,6 +20,20 @@ import (
 
 func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() error, err error) {
 
+	// bringyour.ApplyDbMigrations can panic
+	defer func() {
+		r := recover()
+		if r != nil {
+			stackBuffer := make([]byte, 4096)
+			n := runtime.Stack(stackBuffer, false)
+			rerr, ok := r.(error)
+			if !ok {
+				err = errors.Join(err, fmt.Errorf("panic: %v\n%s", r, string(stackBuffer[:n])))
+			}
+			err = errors.Join(err, fmt.Errorf("panic: %w\n%s", rerr, string(stackBuffer[:n])))
+		}
+	}()
+
 	spinner, err := pterm.DefaultSpinner.
 		WithWriter(w).
 		Start("Database")
@@ -28,7 +44,7 @@ func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() 
 
 	defer func() {
 		if err != nil {
-			spinner.Fail("failed: %v", err)
+			spinner.Fail(fmt.Sprintf("failed: %v", err))
 		}
 		spinner.Stop()
 	}()
@@ -57,7 +73,7 @@ func setupPostgres(ctx context.Context, tempDir string, w io.Writer) (fn func() 
 	defer func() {
 		if err != nil {
 			spinner.Fail("failed: %v", err)
-			postgresContainer.Terminate(ctx)
+			postgresContainer.Terminate(context.Background())
 		}
 	}()
 

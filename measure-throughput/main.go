@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 
 	"bringyour.com/bringyour"
@@ -19,6 +20,16 @@ func main() {
 	app := &cli.App{
 		Name: "measure-throughput",
 		Action: func(c *cli.Context) (err error) {
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+			defer cancel()
+
+			myMainDir, err := getMyMainDir()
+			if err != nil {
+				return fmt.Errorf("failed to get main dir: %w", err)
+			}
+
+			fmt.Println("my main dir:", myMainDir)
 
 			vaultDir, err := os.MkdirTemp("", "vault")
 			if err != nil {
@@ -51,11 +62,7 @@ func main() {
 			flag.Set("logtostderr", "false")    // Log to standard error instead of files
 			flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
 			flag.Set("v", "0")                  // Set the verbosity level to 1
-			// You can set other flags similarly, like "log_dir" for logging to a file
 
-			// os.Stderr = new(bytes.Buffer)
-
-			// Parse the flags after setting them
 			flag.Parse()
 
 			defer func() {
@@ -79,12 +86,12 @@ func main() {
 			multi.Start()
 			defer multi.Stop()
 
-			eg, ctx := errgroup.WithContext(context.Background())
+			eg, egCtx := errgroup.WithContext(ctx)
 
 			var pgCleanup func() error
 
 			eg.Go(func() (err error) {
-				pgCleanup, err = setupPostgres(ctx, vaultDir, postgresWriter)
+				pgCleanup, err = setupPostgres(egCtx, vaultDir, postgresWriter)
 				if err != nil {
 					return fmt.Errorf("failed to setup postgres: %w", err)
 				}
@@ -94,7 +101,7 @@ func main() {
 			var redisCleanup func() error
 
 			eg.Go(func() (err error) {
-				redisCleanup, err = setupRedis(ctx, vaultDir, redisWriter)
+				redisCleanup, err = setupRedis(egCtx, vaultDir, redisWriter)
 				if err != nil {
 					return fmt.Errorf("failed to setup redis: %w", err)
 				}
