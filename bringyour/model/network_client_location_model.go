@@ -1346,6 +1346,8 @@ func FindProviderLocations(
 				// find the match score
 				if searchResult, ok := locationSearchResults[locationResult.LocationId]; ok {
 					locationResult.MatchDistance = searchResult.ValueDistance
+				} else {
+					locationResult.MatchDistance = maxSearchDistance + 1
 				}
 				locationResults[locationResult.LocationId] = locationResult
 			}
@@ -1383,6 +1385,8 @@ func FindProviderLocations(
 				// find the match score
 				if searchResult, ok := locationGroupSearchResults[locationGroupResult.LocationGroupId]; ok {
 					locationGroupResult.MatchDistance = searchResult.ValueDistance
+				} else {
+					locationGroupResult.MatchDistance = maxSearchDistance + 1
 				}
 				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
 			}
