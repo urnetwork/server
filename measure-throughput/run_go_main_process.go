@@ -51,8 +51,8 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 		return nil
 	}
 
-	// cmd.Stdout = os.Stdout
-	// cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	err = cmd.Run()
 

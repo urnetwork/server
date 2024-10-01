@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"bringyor.com/measure-throughput/bwestimator"
 	"bringyor.com/measure-throughput/clientdevice"
+	"bringyor.com/measure-throughput/datasource"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/bringyour"
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -90,7 +93,7 @@ func main() {
 			pw := progress.NewWriter()
 			pw.SetAutoStop(false)
 			pw.SetMessageLength(40)
-			pw.SetNumTrackersExpected(5)
+			pw.SetNumTrackersExpected(7)
 			pw.SetSortBy(progress.SortByNone)
 			pw.SetStyle(progress.StyleDefault)
 			pw.SetTrackerLength(25)
@@ -149,6 +152,14 @@ func main() {
 			servicesGroup, completeRunCtx := errgroup.WithContext(ctx)
 
 			servicesGroup.Go(func() (err error) {
+				err = datasource.Run(completeRunCtx, ":5080", pw, 10*1024, time.Second*5)
+				if err != nil {
+					return fmt.Errorf("failed to run API: %w", err)
+				}
+				return nil
+			})
+
+			servicesGroup.Go(func() (err error) {
 				err = runGoMainProcess(
 					completeRunCtx,
 					"API",
@@ -203,7 +214,7 @@ func main() {
 				return nil
 			})
 
-			// time.Sleep(time.Second * 3)
+			time.Sleep(time.Second * 3)
 
 			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
 			if err != nil {
@@ -232,11 +243,24 @@ func main() {
 
 			hc := http.Client{
 				Transport: clientDev.Transport(),
-				// Timeout:   time.Second * 5,
+				Timeout:   time.Second * 5,
+			}
+
+			addrs, err := net.InterfaceAddrs()
+			if err != nil {
+				return fmt.Errorf("failed to get interface addresses: %w", err)
+			}
+
+			for _, a := range addrs {
+				ipNet, ok := a.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback())
 			}
 
 			{
-				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "https://www.google.com", nil)
+				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "http://192.168.178.24:8080", nil)
 				if err != nil {
 					return fmt.Errorf("failed to create request: %w", err)
 				}
@@ -256,6 +280,20 @@ func main() {
 				fmt.Println("response:\n\n\n\n\n\n\n\n", string(d))
 
 			}
+
+			conn, err := clientDev.DialContext(completeRunCtx, "tcp", "192.168.178.24:5080")
+			if err != nil {
+				return fmt.Errorf("failed to dial: %w", err)
+			}
+			defer conn.Close()
+
+			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, 1024, time.Second*5)
+			if err != nil {
+				return fmt.Errorf("failed to estimate bandwidth: %w", err)
+			}
+
+			fmt.Println("\n\n\n\n\n\nestimated bandwidth:\n\n\n\n\n", bandwidth)
+
 			cancel()
 
 			<-completeRunCtx.Done()
