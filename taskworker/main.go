@@ -12,6 +12,7 @@ import (
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/router"
 	"bringyour.com/bringyour/session"
 	"bringyour.com/bringyour/task"
@@ -103,6 +104,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
 		ScheduleTaskCleanup(clientSession, tx)
 		controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
+		model.ScheduleIndexSearchLocations(clientSession, tx)
 	})
 }
 
@@ -123,6 +125,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(work.CloseExpiredContracts, work.CloseExpiredContractsPost),
 		task.NewTaskTargetWithPost(work.CloseExpiredNetworkClientHandlers, work.CloseExpiredNetworkClientHandlersPost),
 		task.NewTaskTargetWithPost(work.DeleteDisconnectedNetworkClients, work.DeleteDisconnectedNetworkClientsPost),
+		task.NewTaskTargetWithPost(model.IndexSearchLocations, model.IndexSearchLocationsPost),
 	)
 
 	return taskWorker

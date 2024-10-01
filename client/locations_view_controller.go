@@ -211,6 +211,14 @@ func cmpConnectLocations(a *ConnectLocation, b *ConnectLocation) int {
 		return 0
 	}
 
+	if (a.MatchDistance <= 1) != (b.MatchDistance <= 1) {
+		if a.MatchDistance <= 1 {
+			return -1
+		} else {
+			return 1
+		}
+	}
+
 	// provider count descending
 	if a.ProviderCount != b.ProviderCount {
 		if a.ProviderCount < b.ProviderCount {

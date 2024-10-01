@@ -1034,7 +1034,7 @@ Wait:
 							`
 								UPDATE pending_task
 								SET
-									claim_time = $2
+									claim_time = $2,
 									release_time = $3
 								WHERE task_id = $1
 							`,

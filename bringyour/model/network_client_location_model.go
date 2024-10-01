@@ -14,16 +14,11 @@ import (
 	"golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/search"
+	// "bringyour.com/bringyour/search"
 	"bringyour.com/bringyour/session"
 )
 
 const DefaultMaxDistanceFraction = float32(0.2)
-
-// FIXME reindex these as search.SearchTypePrefix
-// FIXME e.g. 1. change the realm 2. point the old realm to reindex into a new realm 3. run that as a task
-var locationSearch = search.NewSearch("location", search.SearchTypeSubstring)
-var locationGroupSearch = search.NewSearch("location_group", search.SearchTypeSubstring)
 
 const StrongPrivacyLaws = "Strong Privacy Laws and Internet Freedom"
 
@@ -669,7 +664,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range countryLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -752,7 +747,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range regionLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -844,7 +839,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range cityLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, i, tx)
+				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -857,6 +852,12 @@ type LocationGroup struct {
 	Name              string
 	Promoted          bool
 	MemberLocationIds []bringyour.Id
+}
+
+func (self *LocationGroup) SearchStrings() []string {
+	return []string{
+		self.Name,
+	}
 }
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
@@ -882,7 +883,8 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 			locationGroup.Name,
 		))
 
-		locationGroup.LocationGroupId = bringyour.NewId()
+		locationGroupId := bringyour.NewId()
+		locationGroup.LocationGroupId = locationGroupId
 
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
@@ -914,6 +916,10 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 				)
 			}
 		})
+
+		for i, searchStr := range locationGroup.SearchStrings() {
+			locationGroupSearch.AddInTx(ctx, searchStr, locationGroupId, i, tx)
+		}
 	})
 }
 
@@ -1145,12 +1151,12 @@ func FindProviderLocations(
 	))
 	locationSearchResults := locationSearch.AroundIds(
 		session.Ctx,
-		search.NormalizeForSearch(findLocations.Query),
+		findLocations.Query,
 		maxSearchDistance,
 	)
 	locationGroupSearchResults := locationGroupSearch.AroundIds(
 		session.Ctx,
-		search.NormalizeForSearch(findLocations.Query),
+		findLocations.Query,
 		maxSearchDistance,
 	)
 
@@ -1340,6 +1346,8 @@ func FindProviderLocations(
 				// find the match score
 				if searchResult, ok := locationSearchResults[locationResult.LocationId]; ok {
 					locationResult.MatchDistance = searchResult.ValueDistance
+				} else {
+					locationResult.MatchDistance = maxSearchDistance + 1
 				}
 				locationResults[locationResult.LocationId] = locationResult
 			}
@@ -1377,6 +1385,8 @@ func FindProviderLocations(
 				// find the match score
 				if searchResult, ok := locationGroupSearchResults[locationGroupResult.LocationGroupId]; ok {
 					locationGroupResult.MatchDistance = searchResult.ValueDistance
+				} else {
+					locationGroupResult.MatchDistance = maxSearchDistance + 1
 				}
 				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
 			}
@@ -1548,12 +1558,12 @@ func FindLocations(
 	))
 	locationSearchResults := locationSearch.AroundIds(
 		session.Ctx,
-		search.NormalizeForSearch(findLocations.Query),
+		findLocations.Query,
 		maxSearchDistance,
 	)
 	locationGroupSearchResults := locationGroupSearch.AroundIds(
 		session.Ctx,
-		search.NormalizeForSearch(findLocations.Query),
+		findLocations.Query,
 		maxSearchDistance,
 	)
 
@@ -1770,9 +1780,10 @@ type ProviderSpec struct {
 }
 
 type FindProviders2Args struct {
-	Specs            []*ProviderSpec `json:"specs"`
-	Count            int             `json:"count"`
-	ExcludeClientIds []bringyour.Id  `json:"exclude_client_ids"`
+	Specs               []*ProviderSpec  `json:"specs"`
+	Count               int              `json:"count"`
+	ExcludeClientIds    []bringyour.Id   `json:"exclude_client_ids"`
+	ExcludeDestinations [][]bringyour.Id `json:"exclude_destinations"`
 }
 
 type FindProviders2Result struct {
@@ -1784,42 +1795,41 @@ type FindProvidersProvider struct {
 	EstimatedBytesPerSecond int          `json:"estimated_bytes_per_second"`
 }
 
-func findLocationGroupByName(
-	name string,
+func findLocationGroupByNameInTx(
 	ctx context.Context,
+	name string,
+	tx bringyour.PgTx,
 ) *LocationGroup {
 
 	var locationGroup *LocationGroup
 
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-						location_group_id,
-						location_group_name,
-						promoted
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT
+					location_group_id,
+					location_group_name,
+					promoted
 
-				FROM location_group
+			FROM location_group
 
-				WHERE
-						LOWER(location_group_name) = LOWER($1)
+			WHERE
+					location_group_name = $1
 
-				LIMIT 1
-			`,
-			name,
-		)
-		bringyour.WithPgResult(result, err, func() {
-			if result.Next() {
-				locationGroup = &LocationGroup{}
+			LIMIT 1
+		`,
+		name,
+	)
+	bringyour.WithPgResult(result, err, func() {
+		if result.Next() {
+			locationGroup = &LocationGroup{}
 
-				bringyour.Raise(result.Scan(
-					&locationGroup.LocationGroupId,
-					&locationGroup.Name,
-					&locationGroup.Promoted,
-				))
-			}
-		})
+			bringyour.Raise(result.Scan(
+				&locationGroup.LocationGroupId,
+				&locationGroup.Name,
+				&locationGroup.Promoted,
+			))
+		}
 	})
 
 	return locationGroup
@@ -1840,7 +1850,8 @@ func FindProviders2(
 	}
 
 	// score 0 is best
-	clientScores := map[bringyour.Id]clientScore{}
+	clientScores := map[bringyour.Id]*clientScore{}
+	scoreScale := 2
 
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
 		locationIds := map[bringyour.Id]bool{}
@@ -1854,10 +1865,10 @@ func FindProviders2(
 				locationGroupIds[*spec.LocationGroupId] = true
 			}
 			if spec.ClientId != nil {
-				clientScores[*spec.ClientId] = clientScore{}
+				clientScores[*spec.ClientId] = &clientScore{}
 			}
 			if spec.BestAvailable != nil && *spec.BestAvailable {
-				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByName(StrongPrivacyLaws, session.Ctx)
+				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByNameInTx(session.Ctx, StrongPrivacyLaws, tx)
 				if strongPrivacyLawsAndInternetFreedonGroupId != nil {
 					locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId.LocationGroupId] = true
 				}
@@ -1905,8 +1916,8 @@ func FindProviders2(
 					var clientId bringyour.Id
 					var netTypeScore int
 					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
-					clientScores[clientId] = clientScore{
-						netTypeScore: netTypeScore,
+					clientScores[clientId] = &clientScore{
+						netTypeScore: scoreScale * netTypeScore,
 						priority:     mathrand.Int(),
 					}
 				}
@@ -1966,8 +1977,8 @@ func FindProviders2(
 					var clientId bringyour.Id
 					var netTypeScore int
 					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
-					clientScores[clientId] = clientScore{
-						netTypeScore: netTypeScore,
+					clientScores[clientId] = &clientScore{
+						netTypeScore: scoreScale * netTypeScore,
 						priority:     mathrand.Int(),
 					}
 				}
@@ -1977,6 +1988,17 @@ func FindProviders2(
 
 	for _, clientId := range findProviders2.ExcludeClientIds {
 		delete(clientScores, clientId)
+	}
+	// the final hop is excluded
+	// intermediaries have net score incremented by scale/2
+	for _, destination := range findProviders2.ExcludeDestinations {
+		for _, clientId := range destination[:len(destination)-1] {
+			if clientScore, ok := clientScores[clientId]; ok {
+				// fmt.Printf("INCREMENT %s += %d\n", clientId, scoreScale / 2)
+				clientScore.netTypeScore += scoreScale / 2
+			}
+		}
+		delete(clientScores, destination[len(destination)-1])
 	}
 
 	clientIds := maps.Keys(clientScores)
