@@ -572,3 +572,61 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 	return networkPayments, nil
 
 }
+
+type TransferStats struct {
+	PaidBytesProvided   int `json:"paid_bytes_provided"`
+	UnpaidBytesProvided int `json:"unpaid_bytes_provided"`
+}
+
+/**
+ * Total paid and unpaid bytes for a network
+ * This is not live data, and depends on transfer_escrow_sweep
+ */
+func GetTransferStats(
+	ctx context.Context,
+	networkId bringyour.Id,
+) *TransferStats {
+
+	var transferStats *TransferStats
+
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					COALESCE(SUM(CASE 
+							WHEN tes.payment_id IS NOT NULL AND ap.completed = TRUE THEN tes.payout_byte_count 
+							ELSE 0 
+						END), 0) as paid_bytes_provided,
+					COALESCE(SUM(CASE 
+							WHEN tes.payment_id IS NULL OR ap.completed = FALSE THEN tes.payout_byte_count 
+							ELSE 0 
+						END), 0) as unpaid_bytes_provided
+				FROM
+					transfer_escrow_sweep tes
+				LEFT JOIN account_payment ap
+					ON tes.payment_id = ap.payment_id
+				WHERE
+					tes.network_id = $1
+			`,
+			networkId,
+		)
+
+		bringyour.WithPgResult(result, err, func() {
+
+			if result.Next() {
+
+				transferStats = &TransferStats{}
+
+				bringyour.Raise(
+					result.Scan(
+						&transferStats.PaidBytesProvided,
+						&transferStats.UnpaidBytesProvided,
+					),
+				)
+			}
+		})
+	})
+
+	return transferStats
+}
