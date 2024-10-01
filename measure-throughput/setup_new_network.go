@@ -166,3 +166,45 @@ func authDevice(ctx context.Context, userAuth, userPassword string) (string, err
 
 	return *cl.ByClientJwt, nil
 }
+
+func createBalanceCode(ctx context.Context) (string, error) {
+	// 1 TB
+	initialTransferBalance := model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024)
+	balanceCode, err := model.CreateBalanceCode(
+		ctx,
+		initialTransferBalance,
+		0,
+		"test-1",
+		"",
+		"",
+	)
+	if err != nil {
+		return "", fmt.Errorf("could not create balance code: %w", err)
+	}
+
+	return balanceCode.Secret, nil
+}
+
+func redeemBalanceCode(ctx context.Context, balanceCode string, clientJWT string) error {
+
+	byJwt, err := jwt.ParseByJwt(clientJWT)
+	if err != nil {
+		return fmt.Errorf("could not parse jwt: %w", err)
+	}
+
+	res, err := model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret: balanceCode,
+		},
+		session.NewLocalClientSession(ctx, "0.0.0.0", byJwt),
+	)
+	if err != nil {
+		return fmt.Errorf("could not redeem balance code: %w", err)
+	}
+
+	if res.Error != nil {
+		return fmt.Errorf("could not redeem balance code: %v", *res.Error)
+	}
+
+	return nil
+}

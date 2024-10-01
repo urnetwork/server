@@ -196,12 +196,22 @@ func main() {
 				return fmt.Errorf("failed to authenticate device: %w", err)
 			}
 
+			balanceCode, err := createBalanceCode(completeRunCtx)
+			if err != nil {
+				return fmt.Errorf("failed to create balance code: %w", err)
+			}
+
+			err = redeemBalanceCode(completeRunCtx, balanceCode, clientJWT)
+			if err != nil {
+				return fmt.Errorf("failed to redeem balance code: %w", err)
+			}
+
 			clientDev, err := clientdevice.Start(completeRunCtx, clientJWT, apiURL, connectURL, *providerID)
 			if err != nil {
 				return fmt.Errorf("failed to start client device: %w", err)
 			}
 
-			time.Sleep(time.Second * 30)
+			time.Sleep(time.Second * 10)
 
 			resp, err := resty.New().SetTransport(clientDev.Transport()).SetBaseURL("https://www.google.com").R().SetContext(completeRunCtx).Get("/")
 			if err != nil {
