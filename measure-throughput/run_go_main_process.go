@@ -14,7 +14,7 @@ import (
 func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, mainDir string, args ...string) (err error) {
 
 	tracker := &progress.Tracker{
-		Message: fmt.Sprintf("Running %s", name),
+		Message: fmt.Sprintf("%s is running", name),
 		Total:   0,
 	}
 

@@ -170,13 +170,21 @@ func main() {
 				return fmt.Errorf("failed to setup network: %w", err)
 			}
 
-			_, err = authDevice(completeRunCtx, userAuth, userPassword)
+			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate device: %w", err)
 			}
 
 			// fmt.Println("client JWT:", clientJWT)
-			cancel()
+			// cancel()
+
+			servicesGroup.Go(func() (err error) {
+				err = runProvider(completeRunCtx, clientJWT, pw)
+				if err != nil {
+					return fmt.Errorf("failed to run provider: %w", err)
+				}
+				return nil
+			})
 
 			<-completeRunCtx.Done()
 
