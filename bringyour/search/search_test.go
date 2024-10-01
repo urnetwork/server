@@ -39,42 +39,42 @@ func TestSearchSubstring(t *testing.T) {
 		id1 := bringyour.NewId()
 		id2 := bringyour.NewId()
 
-		testSearch.Add(ctx, "redwood city, california", id1, 0)
-		testSearch.Add(ctx, "redwood city, us", id1, 1)
-		testSearch.Add(ctx, "redwood city, united states", id1, 2)
-		testSearch.Add(ctx, "london, england", id2, 0)
-		testSearch.Add(ctx, "london, gb", id2, 1)
-		testSearch.Add(ctx, "london, great britain", id2, 2)
+		testSearch.AddRaw(ctx, "redwood city, california", id1, 0)
+		testSearch.AddRaw(ctx, "redwood city, us", id1, 1)
+		testSearch.AddRaw(ctx, "redwood city, united states", id1, 2)
+		testSearch.AddRaw(ctx, "london, england", id2, 0)
+		testSearch.AddRaw(ctx, "london, gb", id2, 1)
+		testSearch.AddRaw(ctx, "london, great britain", id2, 2)
 
-		results := testSearch.Around(ctx, "wood", 0)
+		results := testSearch.AroundRaw(ctx, "wood", 0)
 		resultValueIds := []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
 		}
 		assert.Equal(t, resultValueIds, []bringyour.Id{id1})
 
-		results = testSearch.Around(ctx, "united", 0)
+		results = testSearch.AroundRaw(ctx, "united", 0)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
 		}
 		assert.Equal(t, resultValueIds, []bringyour.Id{id1})
 
-		results = testSearch.Around(ctx, "redwood city", 0)
+		results = testSearch.AroundRaw(ctx, "redwood city", 0)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
 		}
 		assert.Equal(t, resultValueIds, []bringyour.Id{id1})
 
-		results = testSearch.Around(ctx, "united", 0)
+		results = testSearch.AroundRaw(ctx, "united", 0)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
 		}
 		assert.Equal(t, resultValueIds, []bringyour.Id{id1})
 
-		results = testSearch.Around(ctx, "london", 0)
+		results = testSearch.AroundRaw(ctx, "london", 0)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
@@ -82,14 +82,14 @@ func TestSearchSubstring(t *testing.T) {
 		assert.Equal(t, resultValueIds, []bringyour.Id{id2})
 
 		// test with some misspelling threshold
-		results = testSearch.Around(ctx, "redwd cit", 3)
+		results = testSearch.AroundRaw(ctx, "redwd cit", 3)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
 		}
 		assert.Equal(t, resultValueIds, []bringyour.Id{id1})
 
-		results = testSearch.Around(ctx, "lomdom", 3)
+		results = testSearch.AroundRaw(ctx, "lomdom", 3)
 		resultValueIds = []bringyour.Id{}
 		for _, result := range results {
 			resultValueIds = append(resultValueIds, result.ValueId)
@@ -128,7 +128,7 @@ func TestSearchSubstringRandom(t *testing.T) {
 		for i, valueId := range maps.Keys(values) {
 			value := values[valueId]
 			bringyour.Logger().Printf("[%d/%d] Adding search string\n", i+1, n)
-			testSearch.Add(ctx, value, valueId, 0)
+			testSearch.AddRaw(ctx, value, valueId, 0)
 		}
 
 		for i := 0; i < k; i += 1 {
@@ -140,7 +140,7 @@ func TestSearchSubstringRandom(t *testing.T) {
 			sub := value[start:end]
 
 			stats := OptStats()
-			results := testSearch.Around(ctx, sub, d, stats)
+			results := testSearch.AroundRaw(ctx, sub, d, stats)
 			resultValueIds := []bringyour.Id{}
 			for _, result := range results {
 				resultValueIds = append(resultValueIds, result.ValueId)

@@ -360,6 +360,14 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 		return 0
 	}
 
+	if (a.MatchDistance <= 1) != (b.MatchDistance <= 1) {
+		if a.MatchDistance <= 1 {
+			return -1
+		} else {
+			return 1
+		}
+	}
+
 	if a.IsDevice() != b.IsDevice() {
 		if a.IsDevice() {
 			return -1
@@ -396,6 +404,7 @@ func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
 
 		return a.ConnectLocationId.LocationGroupId.Cmp(b.ConnectLocationId.LocationGroupId)
 	} else {
+
 		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
 			if a.LocationType == LocationTypeCountry {
 				return -1
