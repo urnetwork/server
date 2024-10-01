@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
-	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/jedib0t/go-pretty/v6/progress"
 )
 
@@ -34,15 +34,7 @@ func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (e
 	}()
 
 	// parse the clientId
-	parser := gojwt.NewParser()
-	token, _, err := parser.ParseUnverified(byClientJwt, gojwt.MapClaims{})
-	if err != nil {
-		return fmt.Errorf("failed to parse jwt: %w", err)
-	}
-
-	claims := token.Claims.(gojwt.MapClaims)
-
-	clientId, err := connect.ParseId(claims["client_id"].(string))
+	clientId, err := jwtutil.ParseClientID(byClientJwt)
 	if err != nil {
 		return fmt.Errorf("failed to parse client id: %w", err)
 	}
@@ -50,7 +42,7 @@ func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (e
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
 
 	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byClientJwt, apiURL)
-	connectClient := connect.NewClientWithDefaults(ctx, clientId, clientOob)
+	connectClient := connect.NewClientWithDefaults(ctx, *clientId, clientOob)
 
 	instanceId := connect.NewId()
 

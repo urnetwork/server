@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"bringyor.com/measure-throughput/clientdevice"
+	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/bringyour"
+	"github.com/go-resty/resty/v2"
 	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
@@ -170,21 +173,42 @@ func main() {
 				return fmt.Errorf("failed to setup network: %w", err)
 			}
 
-			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
+			providerJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate device: %w", err)
 			}
 
-			// fmt.Println("client JWT:", clientJWT)
-			// cancel()
+			providerID, err := jwtutil.ParseClientID(providerJWT)
+			if err != nil {
+				return fmt.Errorf("failed to parse provider id: %w", err)
+			}
 
 			servicesGroup.Go(func() (err error) {
-				err = runProvider(completeRunCtx, clientJWT, pw)
+				err = runProvider(completeRunCtx, providerJWT, pw)
 				if err != nil {
 					return fmt.Errorf("failed to run provider: %w", err)
 				}
 				return nil
 			})
+
+			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
+			if err != nil {
+				return fmt.Errorf("failed to authenticate device: %w", err)
+			}
+
+			clientDev, err := clientdevice.Start(completeRunCtx, clientJWT, apiURL, connectURL, *providerID)
+			if err != nil {
+				return fmt.Errorf("failed to start client device: %w", err)
+			}
+
+			time.Sleep(time.Second * 30)
+
+			resp, err := resty.New().SetTransport(clientDev.Transport()).SetBaseURL("https://www.google.com").R().SetContext(completeRunCtx).Get("/")
+			if err != nil {
+				return fmt.Errorf("failed to get google: %w", err)
+			}
+
+			fmt.Println("response:\n\n\n\n\n\n\n\n", string(resp.Body()))
 
 			<-completeRunCtx.Done()
 

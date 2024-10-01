@@ -1,7 +1,10 @@
 {
   "cSpell.words": [
     "errgroup",
+    "jwtutil",
+    "netstack",
     "pterm",
-    "rerr"
+    "rerr",
+    "resty"
   ]
 }

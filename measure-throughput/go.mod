@@ -5,18 +5,22 @@ go 1.22.0
 require (
 	bringyour.com/bringyour v0.0.0
 	bringyour.com/connect v0.0.0
+	bringyour.com/protocol v0.0.0
+	github.com/go-resty/resty/v2 v2.15.3
 	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang/glog v1.2.1
+	github.com/google/gopacket v1.1.19
 	github.com/jedib0t/go-pretty/v6 v6.5.9
 	github.com/testcontainers/testcontainers-go v0.33.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.33.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.33.0
 	github.com/urfave/cli/v2 v2.27.4
-	github.com/urnetwork/protocol v0.0.3
+	golang.org/x/net v0.27.0
 	golang.org/x/sync v0.8.0
+	gvisor.dev/gvisor v0.0.0-20240917184434-23fa116b8449
 )
 
 require (
-	bringyour.com/protocol v0.0.0 // indirect
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -40,9 +44,8 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/glog v1.2.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/gopacket v1.1.19 // indirect
+	github.com/google/btree v1.1.2 // indirect
 	github.com/google/pprof v0.0.0-20211214055906-6f57359322fd // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
@@ -91,10 +94,10 @@ require (
 	golang.org/x/crypto v0.25.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.26.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/term v0.22.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
+	golang.org/x/time v0.6.0 // indirect
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
