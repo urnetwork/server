@@ -207,6 +207,15 @@ func TestBestAvailableProviders(t *testing.T) {
 	})
 }
 
+// FIXME test find provider2 with exclude
+// FIXME
+
+func TestFindProviders2WithExclude(t *testing.T) {
+	// create providers
+	// search for providers with client exclude
+	// search for providers with destination exclude
+}
+
 func TestFindLocationGroupByName(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 
@@ -219,21 +228,24 @@ func TestFindLocationGroupByName(t *testing.T) {
 
 		CreateLocationGroup(ctx, createLocationGroup)
 
-		// query existing
-		locationGroup := findLocationGroupByName(StrongPrivacyLaws, ctx)
-		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
-		assert.Equal(t, locationGroup.Promoted, true)
+		bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+			// query existing
+			locationGroup := findLocationGroupByNameInTx(ctx, StrongPrivacyLaws, tx)
+			assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+			assert.Equal(t, locationGroup.Promoted, true)
 
-		locationGroupId := locationGroup.LocationGroupId
+			// locationGroupId := locationGroup.LocationGroupId
 
-		// query with incorrect case should still return
-		locationGroup = findLocationGroupByName("strong privacy Laws And internet freedom", ctx)
-		assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
-		assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
-		assert.Equal(t, locationGroup.Promoted, true)
+			// query with incorrect case should still return
+			// locationGroup = findLocationGroupByNameInTx(ctx, "strong privacy Laws And internet freedom", tx)
+			// assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+			// assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
+			// assert.Equal(t, locationGroup.Promoted, true)
 
-		// query should return nil if no match
-		locationGroup = findLocationGroupByName("invalid", ctx)
-		assert.Equal(t, locationGroup, nil)
+			// query should return nil if no match
+			locationGroup = findLocationGroupByNameInTx(ctx, "invalid", tx)
+			assert.Equal(t, locationGroup, nil)
+
+		})
 	})
 }

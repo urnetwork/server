@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	// "unicode"
 
 	"golang.org/x/exp/maps"
 
@@ -38,6 +39,8 @@ type SearchProjection struct {
 }
 
 func computeProjection(value string) *SearchProjection {
+	value = NormalizeForSearch(value)
+
 	dims := map[rune]int{}
 	for _, dim := range value {
 		dims[dim] += 1
@@ -83,15 +86,14 @@ func (self *Search) AnyAround(ctx context.Context, query string, distance int) b
 	return 0 < len(results)
 }
 
-func (self *Search) AroundIds(ctx context.Context, query string, distance int) map[bringyour.Id]*SearchResult {
-	results := map[bringyour.Id]*SearchResult{}
-	for _, result := range self.Around(ctx, query, distance) {
-		results[result.ValueId] = result
-	}
-	return results
+func (self *Search) Around(ctx context.Context, query string, distance int) []*SearchResult {
+	results := self.AroundIds(ctx, query, distance)
+	return maps.Values(results)
 }
 
-func (self *Search) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
+func (self *Search) AroundIds(ctx context.Context, query string, distance int, options ...any) map[bringyour.Id]*SearchResult {
+	query = NormalizeForSearch(query)
+
 	stats := OptStats()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -265,6 +267,8 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 					&searchResult.Value,
 				))
 
+				// fmt.Printf("SEARCH FOUND: %s - %s\n", searchResult.Value, searchResult.AliasValue)
+
 				minSearchResult, ok := matches[searchResult.ValueId]
 				if ok && minSearchResult.ValueDistance == 0 {
 					// already have a perfect match, no need to compute any more
@@ -274,6 +278,8 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 				candidateCount += 1
 
 				searchResult.ValueDistance = EditDistance(query, searchResult.AliasValue)
+				// fmt.Printf("SEARCH FOUND SET VALUE DISTANCE: %s - %s = %d\n", searchResult.Value, searchResult.AliasValue, searchResult.ValueDistance)
+
 				if searchResult.ValueDistance <= distance {
 					if !ok || searchResult.ValueDistance < minSearchResult.ValueDistance {
 						matches[searchResult.ValueId] = searchResult
@@ -285,7 +291,7 @@ func (self *Search) Around(ctx context.Context, query string, distance int, opti
 		stats.CandidateCount = candidateCount
 	})
 
-	return maps.Values(matches)
+	return matches
 }
 
 func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id, valueVariant int) {
@@ -295,6 +301,8 @@ func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id,
 }
 
 func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
+	value = NormalizeForSearch(value)
+
 	bringyour.RaisePgResult(tx.Exec(
 		ctx,
 		`
