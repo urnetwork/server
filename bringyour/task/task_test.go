@@ -26,6 +26,13 @@ func Work1(
 	work1 *Work1Args,
 	clientSession *session.ClientSession,
 ) (*Work1Result, error) {
+	if 0 == mathrand.Intn(100) {
+		select {
+		case <-time.After(ReleaseTimeout / 2):
+		case <-clientSession.Ctx.Done():
+			return nil, errors.New("Timeout.")
+		}
+	}
 	if 0 == mathrand.Intn(3) {
 		return nil, errors.New("Error.")
 	}
@@ -47,6 +54,7 @@ func Work1Post(
 func TestTask(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		RescheduleTimeout = 1 * time.Second
+		ReleaseTimeout = 1 * time.Second
 
 		ctx := context.Background()
 
