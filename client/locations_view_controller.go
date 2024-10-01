@@ -89,10 +89,12 @@ func (vc *LocationsViewController) FilterLocations(filter string) {
 	locationsVcLog("FILTER LOCATIONS %s", filter)
 
 	var filterSequenceNumber int64
-	vc.stateLock.Lock()
-	vc.nextFilterSequenceNumber += 1
-	filterSequenceNumber = vc.nextFilterSequenceNumber
-	vc.stateLock.Unlock()
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.nextFilterSequenceNumber += 1
+		filterSequenceNumber = vc.nextFilterSequenceNumber
+	}()
 
 	locationsVcLog("POST FILTER LOCATIONS %s", filter)
 
@@ -198,7 +200,11 @@ func (vc *LocationsViewController) setFilteredLocationsFromResult(result *FindLo
 
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
-	vc.locations = exportedFilteredLocations
+	func() {
+		vc.stateLock.Lock()
+		defer vc.stateLock.Unlock()
+		vc.locations = exportedFilteredLocations
+	}()
 	vc.filteredLocationsChanged()
 }
 
