@@ -51,13 +51,16 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 		return nil
 	}
 
-	out, err := cmd.CombinedOutput()
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
+
+	err = cmd.Run()
 
 	if err != nil {
 		if strings.Contains(err.Error(), "signal: killed") {
 			return nil
 		}
-		fmt.Println("err:", err, string(out))
+		// fmt.Println("err:", err)
 		return err
 	}
 

@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"bringyor.com/measure-throughput/clientdevice"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/bringyour"
-	"github.com/go-resty/resty/v2"
 	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
@@ -26,7 +27,7 @@ func main() {
 		Name: "measure-throughput",
 		Action: func(c *cli.Context) (err error) {
 
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGPIPE)
 			defer cancel()
 
 			myMainDir, err := getMyMainDir()
@@ -148,7 +149,14 @@ func main() {
 			servicesGroup, completeRunCtx := errgroup.WithContext(ctx)
 
 			servicesGroup.Go(func() (err error) {
-				err = runGoMainProcess(completeRunCtx, "API", pw, filepath.Join(myMainDir, "..", "api"), "-p", "8080")
+				err = runGoMainProcess(
+					completeRunCtx,
+					"API",
+					pw,
+					filepath.Join(myMainDir, "..", "api"),
+					"-p",
+					"8080",
+				)
 				if err != nil {
 					return fmt.Errorf("failed to run API: %w", err)
 				}
@@ -168,6 +176,8 @@ func main() {
 				err = errors.Join(err, sgErr)
 			}()
 
+			time.Sleep(time.Second * 3)
+
 			_, err = setupNewNetwork(completeRunCtx, pw)
 			if err != nil {
 				return fmt.Errorf("failed to setup network: %w", err)
@@ -183,6 +193,8 @@ func main() {
 				return fmt.Errorf("failed to parse provider id: %w", err)
 			}
 
+			time.Sleep(time.Second * 3)
+
 			servicesGroup.Go(func() (err error) {
 				err = runProvider(completeRunCtx, providerJWT, pw)
 				if err != nil {
@@ -190,6 +202,8 @@ func main() {
 				}
 				return nil
 			})
+
+			// time.Sleep(time.Second * 3)
 
 			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
 			if err != nil {
@@ -211,14 +225,38 @@ func main() {
 				return fmt.Errorf("failed to start client device: %w", err)
 			}
 
-			time.Sleep(time.Second * 10)
+			time.Sleep(time.Second * 1)
 
-			resp, err := resty.New().SetTransport(clientDev.Transport()).SetBaseURL("https://www.google.com").R().SetContext(completeRunCtx).Get("/")
-			if err != nil {
-				return fmt.Errorf("failed to get google: %w", err)
+			tctx, tctxcancel := context.WithTimeout(completeRunCtx, time.Second*5)
+			defer tctxcancel()
+
+			hc := http.Client{
+				Transport: clientDev.Transport(),
+				// Timeout:   time.Second * 5,
 			}
 
-			fmt.Println("response:\n\n\n\n\n\n\n\n", string(resp.Body()))
+			{
+				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "https://www.google.com", nil)
+				if err != nil {
+					return fmt.Errorf("failed to create request: %w", err)
+				}
+
+				res, err := hc.Do(req)
+				if err != nil {
+					return fmt.Errorf("failed to get google: %w", err)
+				}
+
+				defer res.Body.Close()
+
+				d, err := io.ReadAll(res.Body)
+				if err != nil {
+					return fmt.Errorf("failed to read response: %w", err)
+				}
+
+				fmt.Println("response:\n\n\n\n\n\n\n\n", string(d))
+
+			}
+			cancel()
 
 			<-completeRunCtx.Done()
 

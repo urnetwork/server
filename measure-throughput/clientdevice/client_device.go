@@ -63,6 +63,8 @@ func Start(
 		ctx,
 		generator,
 		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
+
+			// fmt.Printf("\n\n\n\npacket from %v: %v\n\n\n\n", source, packet)
 			_, err := dev.Write(packet)
 			if err != nil {
 				fmt.Println("packet write error:", err)
@@ -74,8 +76,9 @@ func Start(
 	source := connect.SourceId(*myID)
 
 	go func() {
-		packet := make([]byte, 2000)
+
 		for ctx.Err() == nil {
+			packet := make([]byte, 2000)
 			n, err := dev.Read(packet)
 			if err != nil {
 				fmt.Println("read error:", err)

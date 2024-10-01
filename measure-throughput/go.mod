@@ -6,7 +6,6 @@ require (
 	bringyour.com/bringyour v0.0.0
 	bringyour.com/connect v0.0.0
 	bringyour.com/protocol v0.0.0
-	github.com/go-resty/resty/v2 v2.15.3
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/golang/glog v1.2.1
 	github.com/google/gopacket v1.1.19
@@ -17,7 +16,7 @@ require (
 	github.com/urfave/cli/v2 v2.27.4
 	golang.org/x/net v0.27.0
 	golang.org/x/sync v0.8.0
-	gvisor.dev/gvisor v0.0.0-20240917184434-23fa116b8449
+	gvisor.dev/gvisor v0.0.0-20240918042833-f6ce88d75f1c
 )
 
 require (
