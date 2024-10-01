@@ -39,8 +39,6 @@ type SearchProjection struct {
 }
 
 func computeProjection(value string) *SearchProjection {
-	value = NormalizeForSearch(value)
-
 	dims := map[rune]int{}
 	for _, dim := range value {
 		dims[dim] += 1
@@ -86,14 +84,21 @@ func (self *Search) AnyAround(ctx context.Context, query string, distance int) b
 	return 0 < len(results)
 }
 
-func (self *Search) Around(ctx context.Context, query string, distance int) []*SearchResult {
-	results := self.AroundIds(ctx, query, distance)
+func (self *Search) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
+	results := self.AroundIds(ctx, query, distance, options...)
+	return maps.Values(results)
+}
+
+func (self *Search) AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
+	results := self.AroundIdsRaw(ctx, query, distance, options...)
 	return maps.Values(results)
 }
 
 func (self *Search) AroundIds(ctx context.Context, query string, distance int, options ...any) map[bringyour.Id]*SearchResult {
-	query = NormalizeForSearch(query)
+	return self.AroundIdsRaw(ctx, NormalizeForSearch(query), distance, options)
+}
 
+func (self *Search) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[bringyour.Id]*SearchResult {
 	stats := OptStats()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -300,9 +305,17 @@ func (self *Search) Add(ctx context.Context, value string, valueId bringyour.Id,
 	})
 }
 
-func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
-	value = NormalizeForSearch(value)
+func (self *Search) AddRaw(ctx context.Context, value string, valueId bringyour.Id, valueVariant int) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		self.AddRawInTx(ctx, value, valueId, valueVariant, tx)
+	})
+}
 
+func (self *Search) AddInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
+	self.AddRawInTx(ctx, NormalizeForSearch(value), valueId, valueVariant, tx)
+}
+
+func (self *Search) AddRawInTx(ctx context.Context, value string, valueId bringyour.Id, valueVariant int, tx bringyour.PgTx) {
 	bringyour.RaisePgResult(tx.Exec(
 		ctx,
 		`

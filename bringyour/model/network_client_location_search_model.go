@@ -83,7 +83,7 @@ func indexSearchLocationsInTx(ctx context.Context, tx bringyour.PgTx) {
 		locationSearch.RemoveInTx(ctx, locationId, tx)
 		searchStrings := location.SearchStrings()
 		for j, searchStr := range searchStrings {
-			locationSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationId, j, tx)
+			locationSearch.AddInTx(ctx, searchStr, locationId, j, tx)
 			glog.Infof("[location]index %d/%d %d/%d: %s\n", i+1, len(locationIds), j+1, len(searchStrings), searchStr)
 		}
 	}
@@ -136,7 +136,7 @@ func indexSearchLocationsInTx(ctx context.Context, tx bringyour.PgTx) {
 		locationGroupSearch.RemoveInTx(ctx, locationGroupId, tx)
 		searchStrings := locationGroup.SearchStrings()
 		for j, searchStr := range searchStrings {
-			locationGroupSearch.AddInTx(ctx, search.NormalizeForSearch(searchStr), locationGroupId, j, tx)
+			locationGroupSearch.AddInTx(ctx, searchStr, locationGroupId, j, tx)
 			glog.Infof("[location]index group %d/%d %d/%d: %s\n", i+1, len(locationGroupIds), j+1, len(searchStrings), searchStr)
 		}
 	}

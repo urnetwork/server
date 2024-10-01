@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
+
+	"golang.org/x/exp/maps"
 
 	"github.com/go-playground/assert/v2"
 
@@ -207,13 +210,149 @@ func TestBestAvailableProviders(t *testing.T) {
 	})
 }
 
-// FIXME test find provider2 with exclude
-// FIXME
-
 func TestFindProviders2WithExclude(t *testing.T) {
 	// create providers
 	// search for providers with client exclude
 	// search for providers with destination exclude
+
+	bringyour.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []bringyour.Id{
+				city.CityLocationId,
+				city.RegionLocationId,
+				city.CountryLocationId,
+			},
+		}
+
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		clientSessions := map[bringyour.Id]*session.ClientSession{}
+		n := 16
+
+		for i := range n {
+			networkId := bringyour.NewId()
+
+			userId := bringyour.NewId()
+			guestMode := false
+
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				jwt.NewByJwt(networkId, userId, fmt.Sprintf("network%d", i), guestMode),
+			)
+
+			clientId := bringyour.NewId()
+
+			clientSessions[clientId] = clientSession
+
+			handlerId := CreateNetworkClientHandler(ctx)
+			connectionId := ConnectNetworkClient(
+				ctx,
+				clientId,
+				"0.0.0.0:0",
+				handlerId,
+			)
+
+			secretKeys := map[ProvideMode][]byte{
+				ProvideModePublic: make([]byte, 32),
+			}
+
+			SetProvide(ctx, clientId, secretKeys)
+
+			SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		}
+
+		clientIds := maps.Keys(clientSessions)
+		clientIdA := clientIds[0]
+		clientSessionA := clientSessions[clientIdA]
+
+		bestAvailable := true
+		findProviders2Args := &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					BestAvailable: &bestAvailable,
+				},
+			},
+			Count: 2 * n,
+		}
+		res, err := FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), n)
+
+		findProviders2Args = &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					BestAvailable: &bestAvailable,
+				},
+			},
+			Count:            2 * n,
+			ExcludeClientIds: []bringyour.Id{clientIdA},
+		}
+		res, err = FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), n-1)
+
+		findProviders2Args = &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					BestAvailable: &bestAvailable,
+				},
+			},
+			Count:            2 * n,
+			ExcludeClientIds: []bringyour.Id{clientIds[0]},
+			ExcludeDestinations: [][]bringyour.Id{
+				[]bringyour.Id{
+					clientIds[1], clientIds[2], clientIds[3],
+				},
+				[]bringyour.Id{
+					clientIds[4], clientIds[5], clientIds[6],
+				},
+				[]bringyour.Id{
+					clientIds[7], clientIds[8], clientIds[9],
+				},
+			},
+		}
+
+		// client ids not in the exclude destinations intermediaries will come first
+		priorityClientIds := map[bringyour.Id]bool{}
+		for _, clientId := range clientIds[10:] {
+			priorityClientIds[clientId] = true
+		}
+		// the exclude destination intermediaries (not the egress hop) will come next
+		otherClientIds := map[bringyour.Id]bool{}
+		otherClientIds[clientIds[1]] = true
+		otherClientIds[clientIds[2]] = true
+		otherClientIds[clientIds[4]] = true
+		otherClientIds[clientIds[5]] = true
+		otherClientIds[clientIds[7]] = true
+		otherClientIds[clientIds[8]] = true
+
+		res, err = FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), len(priorityClientIds)+len(otherClientIds))
+		for _, provider := range res.Providers[:len(priorityClientIds)] {
+			ok := priorityClientIds[provider.ClientId]
+			assert.Equal(t, ok, true)
+		}
+		for _, provider := range res.Providers[len(priorityClientIds):] {
+			ok := otherClientIds[provider.ClientId]
+			assert.Equal(t, ok, true)
+		}
+
+	})
 }
 
 func TestFindLocationGroupByName(t *testing.T) {

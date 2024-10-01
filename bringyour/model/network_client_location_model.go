@@ -1846,7 +1846,7 @@ func FindProviders2(
 	}
 
 	// score 0 is best
-	clientScores := map[bringyour.Id]clientScore{}
+	clientScores := map[bringyour.Id]*clientScore{}
 	scoreScale := 2
 
 	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
@@ -1861,7 +1861,7 @@ func FindProviders2(
 				locationGroupIds[*spec.LocationGroupId] = true
 			}
 			if spec.ClientId != nil {
-				clientScores[*spec.ClientId] = clientScore{}
+				clientScores[*spec.ClientId] = &clientScore{}
 			}
 			if spec.BestAvailable != nil && *spec.BestAvailable {
 				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByNameInTx(session.Ctx, StrongPrivacyLaws, tx)
@@ -1912,7 +1912,7 @@ func FindProviders2(
 					var clientId bringyour.Id
 					var netTypeScore int
 					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
-					clientScores[clientId] = clientScore{
+					clientScores[clientId] = &clientScore{
 						netTypeScore: scoreScale * netTypeScore,
 						priority:     mathrand.Int(),
 					}
@@ -1973,7 +1973,7 @@ func FindProviders2(
 					var clientId bringyour.Id
 					var netTypeScore int
 					bringyour.Raise(result.Scan(&clientId, &netTypeScore))
-					clientScores[clientId] = clientScore{
+					clientScores[clientId] = &clientScore{
 						netTypeScore: scoreScale * netTypeScore,
 						priority:     mathrand.Int(),
 					}
@@ -1985,11 +1985,12 @@ func FindProviders2(
 	for _, clientId := range findProviders2.ExcludeClientIds {
 		delete(clientScores, clientId)
 	}
-	// only the final hop is excluded from destinations
-	// clients have score incremented by 1 whether they have appeared in any hop
+	// the final hop is excluded
+	// intermediaries have net score incremented by scale/2
 	for _, destination := range findProviders2.ExcludeDestinations {
-		for _, clientId := range destination {
+		for _, clientId := range destination[:len(destination)-1] {
 			if clientScore, ok := clientScores[clientId]; ok {
+				// fmt.Printf("INCREMENT %s += %d\n", clientId, scoreScale / 2)
 				clientScore.netTypeScore += scoreScale / 2
 			}
 		}
