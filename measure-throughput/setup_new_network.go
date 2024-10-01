@@ -10,6 +10,15 @@ import (
 	"github.com/jedib0t/go-pretty/v6/progress"
 )
 
+const userName = "test"
+const userAuth = "test@bringyour.com"
+const userPassword = "aaksdfkasd634"
+const networkName = "thisisatest"
+
+func pointerOf[T any](v T) *T {
+	return &v
+}
+
 func setupNewNetwork(ctx context.Context, pw progress.Writer) (clientJWT string, err error) {
 
 	tracker := &progress.Tracker{
@@ -33,15 +42,10 @@ func setupNewNetwork(ctx context.Context, pw progress.Writer) (clientJWT string,
 
 	notJWTSession := session.NewLocalClientSession(ctx, "localhost:1234", nil)
 
-	userName := "test"
-	userAuth := "test@bringyour.com"
-	userPassword := "aaksdfkasd634"
-	networkName := "thisisatest"
-
 	result, err := model.NetworkCreate(model.NetworkCreateArgs{
 		UserName:    userName,
-		Password:    &userPassword,
-		UserAuth:    &userAuth,
+		Password:    pointerOf(userPassword),
+		UserAuth:    pointerOf(userAuth),
 		NetworkName: networkName,
 		Terms:       true,
 	}, notJWTSession)
@@ -118,8 +122,47 @@ func setupNewNetwork(ctx context.Context, pw progress.Writer) (clientJWT string,
 		return "", fmt.Errorf("failed to create network client jwt: %w", err)
 	}
 
+	if cl.Error != nil {
+		return "", fmt.Errorf("failed to create network client jwt: %v", *cl.Error)
+	}
+
 	tracker.Increment(1)
 
 	return *cl.ByClientJwt, nil
 
+}
+
+func authDevice(ctx context.Context, userAuth, userPassword string) (string, error) {
+
+	notJWTSession := session.NewLocalClientSession(ctx, "localhost:1234", nil)
+
+	login, err := model.AuthLoginWithPassword(model.AuthLoginWithPasswordArgs{
+		UserAuth: userAuth,
+		Password: userPassword,
+	}, notJWTSession)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to login: %w", err)
+	}
+
+	byJwt, err := jwt.ParseByJwt(*login.Network.ByJwt)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse by jwt: %w", err)
+	}
+
+	jwtSession := session.NewLocalClientSession(ctx, "localhost:1234", byJwt)
+
+	cl, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{
+		Description: "test",
+		DeviceSpec:  "test",
+	}, jwtSession)
+	if err != nil {
+		return "", fmt.Errorf("failed to create network client jwt: %w", err)
+	}
+
+	if cl.Error != nil {
+		return "", fmt.Errorf("failed to create network client jwt: %v", *cl.Error)
+	}
+
+	return *cl.ByClientJwt, nil
 }

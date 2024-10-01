@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -53,6 +54,9 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
+		if strings.Contains(err.Error(), "signal: killed") {
+			return nil
+		}
 		fmt.Println("err:", err, string(out))
 		return err
 	}

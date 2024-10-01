@@ -170,6 +170,14 @@ func main() {
 				return fmt.Errorf("failed to setup network: %w", err)
 			}
 
+			_, err = authDevice(completeRunCtx, userAuth, userPassword)
+			if err != nil {
+				return fmt.Errorf("failed to authenticate device: %w", err)
+			}
+
+			// fmt.Println("client JWT:", clientJWT)
+			cancel()
+
 			<-completeRunCtx.Done()
 
 			return nil
