@@ -51,21 +51,26 @@ func UpdateNetworkUser(
 	clientSession *session.ClientSession,
 ) (*NetworkUserUpdateResult, error) {
 
-	// update the network name
-	result, err := model.NetworkUpdate(
-		model.NetworkUpdateArgs{NetworkName: args.NetworkName},
-		clientSession,
-	)
-	if err != nil {
-		return nil, err
-	}
+	// get the current network name
+	network := model.GetNetwork(clientSession)
 
-	if result.Error != nil {
-		return &NetworkUserUpdateResult{
-			Error: &NetworkUserUpdateError{
-				Message: result.Error.Message,
-			},
-		}, nil
+	if network.NetworkName != args.NetworkName {
+		// update the network name
+		result, err := model.NetworkUpdate(
+			model.NetworkUpdateArgs{NetworkName: args.NetworkName},
+			clientSession,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if result.Error != nil {
+			return &NetworkUserUpdateResult{
+				Error: &NetworkUserUpdateError{
+					Message: result.Error.Message,
+				},
+			}, nil
+		}
 	}
 
 	// update the network_user username
