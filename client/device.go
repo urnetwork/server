@@ -711,6 +711,12 @@ func (self *BringYourDevice) OpenAccountPreferencesViewController() *AccountPref
 	return vc
 }
 
+func (self *BringYourDevice) OpenReferralCodeViewController() *ReferralCodeViewController {
+	vc := newReferralCodeViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
 func (self *BringYourDevice) CloseViewController(vc ViewController) {
 	vc.Close()
 	self.closeViewController(vc)
