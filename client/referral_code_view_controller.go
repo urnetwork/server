@@ -85,6 +85,7 @@ func (self *ReferralCodeViewController) fetchNetworkReferralCode() {
 				connect.NewApiCallback[*GetNetworkReferralCodeResult](
 					func(result *GetNetworkReferralCodeResult, err error) {
 						if err != nil {
+							self.setIsFetching(false)
 							referralCodeLog("error fetching referral code: %s", err.Error())
 							return
 						}
@@ -92,6 +93,8 @@ func (self *ReferralCodeViewController) fetchNetworkReferralCode() {
 						if result != nil && result.ReferralCode != "" {
 							self.referralCodeChanged(result.ReferralCode)
 						}
+
+						self.setIsFetching(false)
 					},
 				),
 			),
