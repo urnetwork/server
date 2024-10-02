@@ -240,6 +240,10 @@ func newBringYourDevice(
 }
 
 func (self *BringYourDevice) ClientId() *Id {
+	return self.GetClientId()
+}
+
+func (self *BringYourDevice) GetClientId() *Id {
 	// clientId := self.client.ClientId()
 	return newId(self.clientId)
 }
