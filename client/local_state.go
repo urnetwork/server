@@ -268,7 +268,7 @@ func (self *LocalState) GetCanShowRatingDialog() bool {
 			return canShowRatingDialog
 		}
 	}
-	return false
+	return true
 }
 
 // clears all auth tokens
