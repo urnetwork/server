@@ -267,6 +267,18 @@ func (self *BringYourDevice) GetStats() *DeviceStats {
 	return self.stats
 }
 
+func (self *BringYourDevice) GetShouldShowRatingDialog() bool {
+	if !self.stats.GetUserSuccess() {
+		return false
+	}
+	canShowRatingDialog := self.networkSpace.GetAsyncLocalState().GetLocalState().GetCanShowRatingDialog()
+	return canShowRatingDialog
+}
+
+func (self *BringYourDevice) SetCanShowRatingDialog(canShowRatingDialog bool) {
+	self.networkSpace.GetAsyncLocalState().GetLocalState().SetCanShowRatingDialog(canShowRatingDialog)
+}
+
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
 	set := false
 	func() {

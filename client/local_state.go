@@ -251,6 +251,26 @@ func (self *LocalState) GetProvideSecretKeys() *ProvideSecretKeyList {
 	return nil
 }
 
+func (self *LocalState) SetCanShowRatingDialog(canShowRatingDialog bool) error {
+	path := filepath.Join(self.localStorageDir, ".can_show_rating_dialog")
+	canShowRatingDialogBytes, err := json.Marshal(canShowRatingDialog)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, canShowRatingDialogBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetCanShowRatingDialog() bool {
+	path := filepath.Join(self.localStorageDir, ".can_show_rating_dialog")
+	if canShowRatingDialogBytes, err := os.ReadFile(path); err == nil {
+		var canShowRatingDialog bool
+		if err := json.Unmarshal(canShowRatingDialogBytes, &canShowRatingDialog); err == nil {
+			return canShowRatingDialog
+		}
+	}
+	return false
+}
+
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(
