@@ -961,7 +961,7 @@ func (self *BringYourApi) NetworkUserUpdate(updateNetworkUser *NetworkUserUpdate
  */
 
 type GetNetworkReferralCodeResult struct {
-	ReferralCode string                       `json:"referralCode,omitempty"`
+	ReferralCode string                       `json:"referral_code,omitempty"`
 	Error        *GetNetworkReferralCodeError `json:"error,omitempty"`
 }
 

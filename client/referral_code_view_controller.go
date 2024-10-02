@@ -2,17 +2,28 @@ package client
 
 import (
 	"context"
+	"sync"
 
 	"bringyour.com/connect"
 )
 
 var referralCodeLog = logFn("referral_code_view_controller")
 
+type ReferralCodeListener interface {
+	ReferralCodeUpdated(string)
+}
+
 type ReferralCodeViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	stateLock sync.Mutex
+
+	isFetching bool
+
 	device *BringYourDevice
+
+	referralCodeListeners *connect.CallbackList[ReferralCodeListener]
 }
 
 func newReferralCodeViewController(ctx context.Context, device *BringYourDevice) *ReferralCodeViewController {
@@ -23,36 +34,67 @@ func newReferralCodeViewController(ctx context.Context, device *BringYourDevice)
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
+
+		isFetching: false,
+
+		referralCodeListeners: connect.NewCallbackList[ReferralCodeListener](),
 	}
 	return vc
 }
 
-func (vc *ReferralCodeViewController) Start() {}
-
-func (vc *ReferralCodeViewController) Stop() {}
-
-func (vc *ReferralCodeViewController) Close() {
-	referralCodeLog("close")
-
-	vc.cancel()
+func (self *ReferralCodeViewController) AddReferralCodeListener(listener ReferralCodeListener) Sub {
+	callbackId := self.referralCodeListeners.Add(listener)
+	return newSub(func() {
+		self.referralCodeListeners.Remove(callbackId)
+	})
 }
 
-func (vc *ReferralCodeViewController) GetNetworkReferralCode() (code string, err error) {
-	vc.device.GetApi().GetNetworkReferralCode(
-		GetNetworkReferralCodeCallback(
-			connect.NewApiCallback[*GetNetworkReferralCodeResult](
-				func(result *GetNetworkReferralCodeResult, apiErr error) {
-					if apiErr != nil {
-						err = apiErr
-						return
-					}
+func (self *ReferralCodeViewController) referralCodeChanged(code string) {
+	for _, listener := range self.referralCodeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ReferralCodeUpdated(code)
+		})
+	}
+}
 
-					code = result.ReferralCode
+func (self *ReferralCodeViewController) Start() {
+	go self.fetchNetworkReferralCode()
+}
 
-				},
+func (self *ReferralCodeViewController) Stop() {}
+
+func (self *ReferralCodeViewController) Close() {
+	referralCodeLog("close")
+
+	self.cancel()
+}
+
+func (self *ReferralCodeViewController) setIsFetching(isFetching bool) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.isFetching = isFetching
+	}()
+}
+
+func (self *ReferralCodeViewController) fetchNetworkReferralCode() {
+
+	if !self.isFetching {
+		self.device.GetApi().GetNetworkReferralCode(
+			GetNetworkReferralCodeCallback(
+				connect.NewApiCallback[*GetNetworkReferralCodeResult](
+					func(result *GetNetworkReferralCodeResult, err error) {
+						if err != nil {
+							referralCodeLog("error fetching referral code: %s", err.Error())
+							return
+						}
+
+						if result != nil && result.ReferralCode != "" {
+							self.referralCodeChanged(result.ReferralCode)
+						}
+					},
+				),
 			),
-		),
-	)
-
-	return
+		)
+	}
 }
