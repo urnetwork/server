@@ -104,6 +104,7 @@ Options:
 		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
 		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
+		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 	}
 
 	// bringyour.Logger().Printf("%s\n", opts)

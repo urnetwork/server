@@ -1518,6 +1518,10 @@ var migrations = []any{
         ALTER TABLE ip_location_lookup ADD COLUMN valid bool NOT NULL DEFAULT true
     `),
 
+	newSqlMigration(`
+        CREATE INDEX transfer_escrow_sweep_network_id_payment_id_payout ON transfer_escrow_sweep (network_id, payment_id, payout_byte_count)
+    `),
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers
