@@ -599,7 +599,7 @@ func GetTransferStats(
 							ELSE 0 
 						END), 0) as paid_bytes_provided,
 					coalesce(SUM(CASE 
-							WHEN transfer_escrow_sweep.payment_id IS NULL OR account_payment.completed != true THEN transfer_escrow_sweep.payout_byte_count
+							WHEN account_payment.completed IS NULL OR account_payment.completed != true THEN transfer_escrow_sweep.payout_byte_count
 							ELSE 0 
 						END), 0) as unpaid_bytes_provided
 				FROM
