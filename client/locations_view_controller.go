@@ -18,6 +18,10 @@ type FilteredLocationsListener interface {
 	FilteredLocationsChanged()
 }
 
+type FilteredLocationsErrorListener interface {
+	ErrorExists(bool)
+}
+
 type LocationsViewController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -29,7 +33,8 @@ type LocationsViewController struct {
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 
-	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
+	filteredLocationListeners      *connect.CallbackList[FilteredLocationsListener]
+	filteredLocationErrorListeners *connect.CallbackList[FilteredLocationsErrorListener]
 }
 
 func newLocationsViewController(ctx context.Context, device *BringYourDevice) *LocationsViewController {
@@ -44,76 +49,93 @@ func newLocationsViewController(ctx context.Context, device *BringYourDevice) *L
 		previousFilterSequenceNumber: 0,
 		locations:                    NewConnectLocationList(),
 
-		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
+		filteredLocationListeners:      connect.NewCallbackList[FilteredLocationsListener](),
+		filteredLocationErrorListeners: connect.NewCallbackList[FilteredLocationsErrorListener](),
 	}
 	return vc
 }
 
-func (vc *LocationsViewController) Start() {
-	go vc.FilterLocations("")
+func (self *LocationsViewController) Start() {
+	go self.FilterLocations("")
 }
 
-func (vc *LocationsViewController) Stop() {}
+func (self *LocationsViewController) Stop() {}
 
-func (vc *LocationsViewController) Close() {
+func (self *LocationsViewController) Close() {
 	locationsVcLog("close")
 
-	vc.cancel()
+	self.cancel()
 }
 
-func (vc *LocationsViewController) GetLocations() *ConnectLocationList {
-	vc.stateLock.Lock()
-	defer vc.stateLock.Unlock()
-	return vc.locations
+func (self *LocationsViewController) GetLocations() *ConnectLocationList {
+	return self.locations
 }
 
-func (vc *LocationsViewController) filteredLocationsChanged() {
-	for _, listener := range vc.filteredLocationListeners.Get() {
+func (self *LocationsViewController) filteredLocationsChanged() {
+	for _, listener := range self.filteredLocationListeners.Get() {
 		connect.HandleError(func() {
 			listener.FilteredLocationsChanged()
 		})
 	}
 }
 
-func (vc *LocationsViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
-	callbackId := vc.filteredLocationListeners.Add(listener)
+func (self *LocationsViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
+	callbackId := self.filteredLocationListeners.Add(listener)
 	return newSub(func() {
-		vc.filteredLocationListeners.Remove(callbackId)
+		self.filteredLocationListeners.Remove(callbackId)
 	})
 }
 
-func (vc *LocationsViewController) FilterLocations(filter string) {
+func (self *LocationsViewController) fetchLocationsErrorExists(errorExists bool) {
+	for _, listener := range self.filteredLocationErrorListeners.Get() {
+		connect.HandleError(func() {
+			listener.ErrorExists(errorExists)
+		})
+	}
+}
+
+func (self *LocationsViewController) AddFilteredLocationsErrorListener(listener FilteredLocationsErrorListener) Sub {
+	callbackId := self.filteredLocationErrorListeners.Add(listener)
+	return newSub(func() {
+		self.filteredLocationErrorListeners.Remove(callbackId)
+	})
+}
+
+func (self *LocationsViewController) FilterLocations(filter string) {
 	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
 	locationsVcLog("FILTER LOCATIONS %s", filter)
+	self.fetchLocationsErrorExists(false)
 
 	var filterSequenceNumber int64
 	func() {
-		vc.stateLock.Lock()
-		defer vc.stateLock.Unlock()
-		vc.nextFilterSequenceNumber += 1
-		filterSequenceNumber = vc.nextFilterSequenceNumber
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.nextFilterSequenceNumber += 1
+		filterSequenceNumber = self.nextFilterSequenceNumber
 	}()
 
 	locationsVcLog("POST FILTER LOCATIONS %s", filter)
 
 	if filter == "" {
-		vc.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
+		self.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {
 					var update bool
-					vc.stateLock.Lock()
-					if vc.previousFilterSequenceNumber < filterSequenceNumber {
-						vc.previousFilterSequenceNumber = filterSequenceNumber
+					self.stateLock.Lock()
+					if self.previousFilterSequenceNumber < filterSequenceNumber {
+						self.previousFilterSequenceNumber = filterSequenceNumber
 						update = true
 					}
-					vc.stateLock.Unlock()
+					self.stateLock.Unlock()
 
 					if update {
-						vc.setFilteredLocationsFromResult(result)
+						self.setFilteredLocationsFromResult(result)
 					}
+				} else {
+					self.fetchLocationsErrorExists(true)
 				}
 			},
 		)))
@@ -121,28 +143,30 @@ func (vc *LocationsViewController) FilterLocations(filter string) {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
 		}
-		vc.device.GetApi().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
+		self.device.GetApi().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 				if err == nil {
 					var update bool
-					vc.stateLock.Lock()
-					if vc.previousFilterSequenceNumber < filterSequenceNumber {
-						vc.previousFilterSequenceNumber = filterSequenceNumber
+					self.stateLock.Lock()
+					if self.previousFilterSequenceNumber < filterSequenceNumber {
+						self.previousFilterSequenceNumber = filterSequenceNumber
 						update = true
 					}
-					vc.stateLock.Unlock()
+					self.stateLock.Unlock()
 
 					if update {
-						vc.setFilteredLocationsFromResult(result)
+						self.setFilteredLocationsFromResult(result)
 					}
+				} else {
+					self.fetchLocationsErrorExists(true)
 				}
 			},
 		)))
 	}
 }
 
-func (vc *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult) {
+func (self *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult) {
 	locationsVcLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
 
 	locations := []*ConnectLocation{}
@@ -201,11 +225,11 @@ func (vc *LocationsViewController) setFilteredLocationsFromResult(result *FindLo
 	exportedFilteredLocations := NewConnectLocationList()
 	exportedFilteredLocations.addAll(locations...)
 	func() {
-		vc.stateLock.Lock()
-		defer vc.stateLock.Unlock()
-		vc.locations = exportedFilteredLocations
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.locations = exportedFilteredLocations
 	}()
-	vc.filteredLocationsChanged()
+	self.filteredLocationsChanged()
 }
 
 func cmpConnectLocations(a *ConnectLocation, b *ConnectLocation) int {
