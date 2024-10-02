@@ -28,6 +28,10 @@ type IsRemovingWalletListener interface {
 	StateChanged(bool)
 }
 
+type UnpaidByteCountListener interface {
+	StateChanged(int)
+}
+
 type PayoutWalletListener interface {
 	PayoutWalletChanged(*Id)
 }
@@ -79,6 +83,8 @@ type WalletViewController struct {
 	accountPayments         *AccountPaymentsList
 	isPollingAccountWallets bool
 	isPollingPayoutWallet   bool
+	isFetchingTransferStats bool
+	unpaidByteCount         int
 
 	stateLock sync.Mutex
 
@@ -87,6 +93,7 @@ type WalletViewController struct {
 	paymentsListeners                 *connect.CallbackList[PaymentsListener]
 	isCreatingExternalWalletListeners *connect.CallbackList[IsCreatingExternalWalletListener]
 	isRemovingWalletListeners         *connect.CallbackList[IsRemovingWalletListener]
+	unpaidByteCountListeners          *connect.CallbackList[UnpaidByteCountListener]
 }
 
 func newWalletViewController(ctx context.Context, device *BringYourDevice) *WalletViewController {
@@ -104,12 +111,15 @@ func newWalletViewController(ctx context.Context, device *BringYourDevice) *Wall
 		accountPayments:         NewAccountPaymentsList(),
 		isPollingAccountWallets: false,
 		isPollingPayoutWallet:   false,
+		isFetchingTransferStats: false,
+		unpaidByteCount:         0,
 
 		accountWalletsListeners:           connect.NewCallbackList[AccountWalletsListener](),
 		payoutWalletListeners:             connect.NewCallbackList[PayoutWalletListener](),
 		paymentsListeners:                 connect.NewCallbackList[PaymentsListener](),
 		isCreatingExternalWalletListeners: connect.NewCallbackList[IsCreatingExternalWalletListener](),
 		isRemovingWalletListeners:         connect.NewCallbackList[IsRemovingWalletListener](),
+		unpaidByteCountListeners:          connect.NewCallbackList[UnpaidByteCountListener](),
 	}
 	return vc
 }
@@ -118,6 +128,7 @@ func (self *WalletViewController) Start() {
 	go self.fetchAccountWallets()
 	go self.FetchPayoutWallet()
 	go self.fetchPayments()
+	go self.FetchTransferStats()
 	self.pollNewWallets()
 }
 
@@ -597,5 +608,69 @@ func (self *WalletViewController) pollNewWallets() {
 			}
 		}
 	}()
+
+}
+
+func (self *WalletViewController) setIsFetchingTransferStats(isFetching bool) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.isFetchingTransferStats = isFetching
+	}()
+}
+
+func (self *WalletViewController) AddUnpaidByteCountListener(listener UnpaidByteCountListener) Sub {
+	callbackId := self.unpaidByteCountListeners.Add(listener)
+	return newSub(func() {
+		self.unpaidByteCountListeners.Remove(callbackId)
+	})
+}
+
+func (self *WalletViewController) unpaidByteCountChanged(count int) {
+	for _, listener := range self.unpaidByteCountListeners.Get() {
+		connect.HandleError(func() {
+			listener.StateChanged(count)
+		})
+	}
+}
+
+func (self *WalletViewController) setUnpaidByteCount(count int) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.unpaidByteCount = count
+	}()
+
+	self.unpaidByteCountChanged(count)
+}
+
+func (self *WalletViewController) GetUnpaidByteCount() int {
+	return self.unpaidByteCount
+}
+
+/**
+ * Sum of paid and unpaid bytes provided
+ **/
+func (self *WalletViewController) FetchTransferStats() {
+
+	if !self.isFetchingTransferStats {
+
+		self.setIsFetchingTransferStats(true)
+
+		self.device.GetApi().GetTransferStats(connect.NewApiCallback[*TransferStatsResult](
+			func(results *TransferStatsResult, err error) {
+
+				if err != nil {
+					wvcLog("error fetching transfer stats: %s", err.Error())
+					return
+				}
+
+				if results != nil {
+					self.setUnpaidByteCount(results.UnpaidBytesProvided)
+				}
+
+			}))
+
+	}
 
 }

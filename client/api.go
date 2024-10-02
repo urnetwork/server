@@ -1094,3 +1094,25 @@ func (self *BringYourApi) AccountPreferencesGet(callback AccountPreferencesGetCa
 		callback,
 	)
 }
+
+/**
+ * Fetch Provider Transfer Stats
+ **/
+
+type TransferStatsResult struct {
+	PaidBytesProvided   int `json:"paid_bytes_provided"`
+	UnpaidBytesProvided int `json:"unpaid_bytes_provided"`
+}
+
+type GetTransferStatsCallback connect.ApiCallback[*TransferStatsResult]
+
+func (self *BringYourApi) GetTransferStats(callback GetTransferStatsCallback) (*TransferStatsResult, error) {
+	return connect.HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/transfer/stats", self.apiUrl),
+		self.GetByJwt(),
+		&TransferStatsResult{},
+		callback,
+	)
+}
