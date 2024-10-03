@@ -17,10 +17,10 @@ func EstimateDownloadBandwidth(ctx context.Context, conn net.Conn, timeout time.
 
 	start := time.Now()
 
-	cnt, err := io.Copy(io.Discard, conn)
-	if err != nil {
-		return 0, fmt.Errorf("failed to copy: %w", err)
-	}
+	cnt, _ := io.Copy(io.Discard, conn)
+	// if err != nil {
+	// 	return 0, fmt.Errorf("failed to copy: %w", err)
+	// }
 
 	elapsed := time.Since(start)
 

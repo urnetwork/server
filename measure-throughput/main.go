@@ -57,7 +57,6 @@ func main() {
 
 			bringyour.SetLogger(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Lshortfile))
 
-			// fmt.Println("replaced stderr")
 			defer func() {
 				bringyour.Logger()
 				if err != nil {

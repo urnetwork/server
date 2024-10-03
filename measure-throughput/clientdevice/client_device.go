@@ -3,6 +3,7 @@ package clientdevice
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/netip"
 	"time"
@@ -17,6 +18,10 @@ type ClientDevice struct {
 	dev netstack.Device
 	*netstack.Net
 }
+
+var dropProbability = 0.00
+
+var packetDelay = time.Millisecond * 20
 
 func Start(
 	ctx context.Context,
@@ -64,10 +69,19 @@ func Start(
 		generator,
 		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 
-			_, err := dev.Write(packet)
-			if err != nil {
-				// fmt.Println("packet write error:", err)
+			if rand.Float64() < dropProbability {
+				fmt.Println("dropping incoming packet")
+				return
 			}
+
+			go func() {
+				time.Sleep(packetDelay)
+
+				_, err := dev.Write(packet)
+				if err != nil {
+					// fmt.Println("packet write error:", err)
+				}
+			}()
 		},
 		protocol.ProvideMode_Network,
 	)
@@ -84,12 +98,23 @@ func Start(
 				return
 			}
 			packet = packet[:n]
-			mc.SendPacket(
-				source,
-				protocol.ProvideMode_Network,
-				packet,
-				time.Second*15,
-			)
+
+			if rand.Float64() < dropProbability {
+				fmt.Println("dropping outgoing packet")
+				continue
+			}
+
+			go func() {
+
+				time.Sleep(packetDelay)
+
+				mc.SendPacket(
+					source,
+					protocol.ProvideMode_Network,
+					packet,
+					time.Second*15,
+				)
+			}()
 		}
 		mc.Close()
 	}()
