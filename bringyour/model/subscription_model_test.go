@@ -170,7 +170,8 @@ func TestEscrow(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan := PlanPayments(ctx)
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
@@ -196,7 +197,8 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -245,7 +247,8 @@ func TestEscrow(t *testing.T) {
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		assert.Equal(t, transferBalances, []*TransferBalance{})
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -274,7 +277,8 @@ func TestEscrow(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 	})
 }
@@ -411,7 +415,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan := PlanPayments(ctx)
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
@@ -442,7 +447,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -506,7 +512,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		assert.Equal(t, netBalanceByteCount, netTransferByteCount)
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -535,7 +542,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 	})
 }

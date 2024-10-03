@@ -3,30 +3,31 @@ package model
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
+
+	// "encoding/json"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 )
 
-
 type SubsidyConfig struct {
-	Days int 					`json:"days"`
-	MinDaysFraction float64     `json:"min_days_fraction"`
-	UsdPerActiveUser float64 	`json:"usd_per_active_user"`
-	SubscriptionNetRevenueFraction float64 	`json:"subscription_net_revenue_fraction"`
-	MinPayoutUsd  float64  `json:"min_payout_usd"`
-	ActiveUserByteCountThreshold  ByteCount  `json:"active_user_byte_count_threshold"`
+	Days                           int       `yaml:"days"`
+	MinDaysFraction                float64   `yaml:"min_days_fraction"`
+	UsdPerActiveUser               float64   `yaml:"usd_per_active_user"`
+	SubscriptionNetRevenueFraction float64   `yaml:"subscription_net_revenue_fraction"`
+	MinPayoutUsd                   float64   `yaml:"min_payout_usd"`
+	ActiveUserByteCountThreshold   ByteCount `yaml:"active_user_byte_count_threshold"`
 }
 
-envSubsidyConfig := sync.OnceValue(func()(*SubsidyConfig) {
+var envSubsidyConfig = sync.OnceValue(func() *SubsidyConfig {
 	var subsidy SubsidyConfig
-	json.Unmarshal(bringyour.ConfigValue("subsidy.yml"), &subsidy)
+	bringyour.Config.RequireSimpleResource("subsidy.yml").UnmarshalYaml(&subsidy)
 	return &subsidy
 })
-
-
-
 
 type AccountPayment struct {
 	PaymentId       bringyour.Id `json:"payment_id"`
@@ -203,8 +204,21 @@ type PaymentPlan struct {
 	PaymentPlanId bringyour.Id
 	// wallet_id -> payment
 	WalletPayments map[bringyour.Id]*AccountPayment
+	SubsidyPayment *SubsidyPayment
 	// these wallets have pending payouts but were not paid due to thresholds or other rules
 	WithheldWalletIds []bringyour.Id
+}
+
+type SubsidyPayment struct {
+	PaymentPlanId            bringyour.Id
+	StartTime                time.Time
+	EndTime                  time.Time
+	ActiveUserCount          int
+	PaidUserCount            int
+	NetPayoutByteCountPaid   ByteCount
+	NetPayoutByteCountUnpaid ByteCount
+	NetRevenue               NanoCents
+	NetPayout                NanoCents
 }
 
 // plan, manually check out and add balance to funding account, then complete
@@ -213,9 +227,6 @@ type PaymentPlan struct {
 func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr error) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 
-		
-
-		
 		paymentPlanId := bringyour.NewId()
 		// walletId -> AccountPayment
 		walletPayments := map[bringyour.Id]*AccountPayment{}
@@ -318,9 +329,7 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 			}
 		})
 
-
-
-		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, walletPayments)
+		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, paymentPlanId, walletPayments)
 		if err != nil {
 			// in this case, the subsidy is not possible in the current time range
 			// most likely because it completely overlaps with an existing subsidy
@@ -333,9 +342,6 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 			returnErr = err
 			return
 		}
-
-
-
 
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
@@ -400,31 +406,35 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 		paymentPlan = &PaymentPlan{
 			PaymentPlanId:     paymentPlanId,
 			WalletPayments:    walletPayments,
-			SubsidyPayment: subsidyPayment,
+			SubsidyPayment:    subsidyPayment,
 			WithheldWalletIds: walletIdsToRemove,
 		}
 	}, bringyour.TxReadCommitted)
 
-	return paymentPlan
+	return
 }
 
-
 // this assumes the table `temp_account_payment` exists in the transaction
-func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPayments map[bringyour.Id]*AccountPayment{}) (*SubsidyPayment, error) {
+func planSubsidyPaymentInTx(
+	ctx context.Context,
+	tx bringyour.PgTx,
+	paymentPlanId bringyour.Id,
+	walletPayments map[bringyour.Id]*AccountPayment,
+) (subsidyPayment *SubsidyPayment, returnErr error) {
 	// roll up all the sweeps per payee network, payout network
 	type networkSweep struct {
-		payeeNetworkId Id
-		payoutNetworkId Id
-		minSweepTime time.Time
-		netPayoutByteCountPaid ByteCount
+		payeeNetworkId           bringyour.Id
+		payoutNetworkId          bringyour.Id
+		minSweepTime             time.Time
+		netPayoutByteCountPaid   ByteCount
 		netPayoutByteCountUnpaid ByteCount
-		payoutWalletId Id	
+		payoutWalletId           bringyour.Id
 	}
 
 	subsidyConfig := envSubsidyConfig()
 
-	payeePayoutNetworkSweeps := map[Id]map[Id]*networkSweep{}
-	payeeSubscriptionNetRevenues := map[Id]NanoCents{}
+	payeePayoutNetworkSweeps := map[bringyour.Id]map[bringyour.Id]*networkSweep{}
+	payeeSubsidyNetRevenues := map[bringyour.Id]NanoCents{}
 
 	result, err := tx.Query(
 		ctx,
@@ -442,8 +452,14 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	            	transfer_balance.network_id AS payee_network_id,
 	                transfer_escrow_sweep.network_id AS payout_network_id,
 	                MIN(transfer_escrow_sweep.sweep_time) AS min_sweep_time,
-	                SUM(CASE WHEN transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count ELSE 0) AS net_payout_byte_count_paid,
-	                SUM(CASE WHEN NOT transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count ELSE 0) AS net_payout_byte_count_unpaid
+	                SUM(CASE
+	                	WHEN transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count
+	                	ELSE 0
+	                END) AS net_payout_byte_count_paid,
+	                SUM(CASE
+	                	WHEN NOT transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count
+	                	ELSE 0
+	                END) AS net_payout_byte_count_unpaid
 
 	            FROM transfer_escrow_sweep
 
@@ -454,7 +470,9 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	            INNER JOIN transfer_balance ON
 	                transfer_balance.balance_id = transfer_escrow_sweep.balance_id
 
-	            GROUP BY transfer_balance.network_id, transfer_escrow_sweep.network_id
+	            GROUP BY
+	            	transfer_balance.network_id,
+	            	transfer_escrow_sweep.network_id
 	        ) t
 
 	        INNER JOIN payout_wallet ON
@@ -463,36 +481,34 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	        INNER JOIN account_wallet ON
 	            account_wallet.wallet_id = payout_wallet.wallet_id AND
 	            account_wallet.active = true
-
-	        FOR UPDATE
         `,
 	)
 	bringyour.WithPgResult(result, err, func() {
 		for result.Next() {
-			networkSweep := &networkSweep{}
+			sweep := &networkSweep{}
 			bringyour.Raise(result.Scan(
-				&networkSweep.payeeNetworkId,
-				&networkSweep.payoutNetworkId,
-				&networkSweep.minSweepTime,
-				&networkSweep.netPayoutByteCountPaid,
-				&networkSweep.netPayoutByteCountUnpaid,
-				&networkSweep.payoutWalletId,
+				&sweep.payeeNetworkId,
+				&sweep.payoutNetworkId,
+				&sweep.minSweepTime,
+				&sweep.netPayoutByteCountPaid,
+				&sweep.netPayoutByteCountUnpaid,
+				&sweep.payoutWalletId,
 			))
-			payoutNetworkSweeps, ok := payeePayoutNetworkSweeps[networkSweep.payeeNetworkId]
+			payoutNetworkSweeps, ok := payeePayoutNetworkSweeps[sweep.payeeNetworkId]
 			if !ok {
-				payoutNetworkSweeps = map[Id]*networkSweep{}
-				payeePayoutNetworkSweeps[networkSweep.payeeNetworkId] = payoutNetworkSweeps
+				payoutNetworkSweeps = map[bringyour.Id]*networkSweep{}
+				payeePayoutNetworkSweeps[sweep.payeeNetworkId] = payoutNetworkSweeps
 			}
-			payoutNetworkSweeps[networkSweep.payoutNetworkId] = networkSweep
+			payoutNetworkSweeps[sweep.payoutNetworkId] = sweep
 		}
 	})
 
-	result, err := tx.Query(
+	result, err = tx.Query(
 		ctx,
 		`
 			SELECT
 	    		transfer_balance.network_id AS payee_network_id,
-	    		SUM(transfer_balance.subscription_net_revenue_nano_cents) AS subscription_net_revenue_nano_cents
+	    		SUM(transfer_balance.subsidy_net_revenue_nano_cents) AS subsidy_net_revenue_nano_cents
 	    	FROM (
 	    		SELECT
 	    			DISTINCT balance_id
@@ -505,10 +521,10 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	)
 	bringyour.WithPgResult(result, err, func() {
 		for result.Next() {
-			var payeeNetworkId Id
+			var payeeNetworkId bringyour.Id
 			var subscriptionNetRevenue NanoCents
 			bringyour.Raise(result.Scan(&payeeNetworkId, &subscriptionNetRevenue))
-			payeeSubscriptionNetRevenues[payeeNetworkId] = subscriptionNetRevenue
+			payeeSubsidyNetRevenues[payeeNetworkId] = subscriptionNetRevenue
 		}
 	})
 
@@ -520,31 +536,35 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	for payeeNetworkId, payoutNetworkSweeps := range payeePayoutNetworkSweeps {
 		payeeNetPayoutByteCountPaid := ByteCount(0)
 		payeeNetPayoutByteCountUnpaid := ByteCount(0)
-		for payoutNetworkId, networkSweep := range payoutNetworkSweeps {
-			netPaidByteCount += networkSweep.paidByteCount
-			netUnpaidByteCount += networkSweep.unpaidByteCount
-			payeeNetPaidByteCount += networkSweep.paidByteCount
-			payeeNetUnpaidByteCount += networkSweep.unpaidByteCount
+		for _, sweep := range payoutNetworkSweeps {
+			netPayoutByteCountPaid += sweep.netPayoutByteCountPaid
+			netPayoutByteCountUnpaid += sweep.netPayoutByteCountUnpaid
+			payeeNetPayoutByteCountPaid += sweep.netPayoutByteCountPaid
+			payeeNetPayoutByteCountUnpaid += sweep.netPayoutByteCountUnpaid
 		}
 
-		if subsidyConfig.ActiveUserByteCountThreshold <= networkSweep.paidByteCount + networkSweep.unpaidByteCount {
+		if subsidyConfig.ActiveUserByteCountThreshold <= payeeNetPayoutByteCountPaid+payeeNetPayoutByteCountUnpaid {
 			activeUserCount += 1
 		}
 		if 0 < payeeNetPayoutByteCountPaid {
 			paidUserCount += 1
-			netRevenue += payeeSubscriptionNetRevenues[payeeNetworkId]
+			netRevenue += payeeSubsidyNetRevenues[payeeNetworkId]
 		}
 	}
 
+	if paidUserCount == 0 {
+		// no subsidy
+		return
+	}
 
 	var subsidyStartTime time.Time
 	var subsidyEndTime time.Time
-	result, err := tx.Query(
+	result, err = tx.Query(
 		ctx,
 		`
     	SELECT
             MIN(transfer_contract.create_time) AS subsidy_start_time,
-            MIN(transfer_contract.close_time) AS subsidy_end_time,
+            MIN(transfer_contract.close_time) AS subsidy_end_time
 
         FROM transfer_escrow_sweep
 
@@ -558,25 +578,24 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 			bringyour.Raise(result.Scan(&subsidyStartTime, &subsidyEndTime))
 		} else {
 			subsidyEndTime = bringyour.NowUtc()
-			subsidyStartTime = subsidyStartTime.Add(-subsidyConfig.Days * 24 * time.Hour)
+			subsidyStartTime = subsidyStartTime.Add(-time.Duration(subsidyConfig.Days) * 24 * time.Hour)
 		}
 	})
-
 
 	// if the end time is contained in a subsidy, end
 	// move the start time forward to the max end time that contains the start time,
 	// and the end time backward to the min start time that contains the end time
-	result, err := tx.Query(
+	result, err = tx.Query(
 		ctx,
 		`
 		SELECT
 			start_time,
-			end_time,
-		FROM payment_subsidy
-		WHERE start_time < $1 AND $2 < end_time
+			end_time
+		FROM subsidy_payment
+		WHERE start_time < $2 AND $1 < end_time
 		`,
-		subsidyEndTime,
 		subsidyStartTime,
+		subsidyEndTime,
 	)
 	bringyour.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -584,91 +603,95 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 			var existingSubsidyEndTime time.Time
 			bringyour.Raise(result.Scan(&existingSubsidyStartTime, &existingSubsidyEndTime))
 
-			if existingSubsidyStartTime <= subsidyStartTime && subsidyStartTime < existingSubsidyEndTime {
+			if !subsidyStartTime.After(existingSubsidyStartTime) && subsidyStartTime.Before(existingSubsidyEndTime) {
 				subsidyStartTime = existingSubsidyEndTime
 			}
-			if existingSubsidyStartTime <= subsidyEndTime && subsidyEndTime < existingSubsidyEndTime {
+			if !subsidyEndTime.After(existingSubsidyStartTime) && subsidyEndTime.Before(existingSubsidyEndTime) {
 				subsidyEndTime = existingSubsidyStartTime
+			}
+			if existingSubsidyStartTime.Before(subsidyEndTime) && subsidyStartTime.Before(existingSubsidyEndTime) {
+				// existing is contained (split)
+				// use the most recent time region for this subsidy
+				subsidyStartTime = existingSubsidyEndTime
 			}
 		}
 	})
 
 	if !subsidyStartTime.Before(subsidyEndTime) {
 		// the subsidy is contained in existing subsidies
-		return fmt.Errorf("Planned subsidy overlaps with an existing subsdidy. Cannot double pay subsidies.")
+		returnErr = fmt.Errorf("Planned subsidy overlaps with an existing subsdidy. Cannot double pay subsidies.")
+		return
 	}
-
 
 	subsidyPayoutUsd := max(
 		subsidyConfig.MinPayoutUsd,
 		max(
-			subsidyConfig.UsdPerActionUser * activeUserCount,
-			subsidyConfig.SubscriptionNetRevenueFraction * netRevenue,
+			subsidyConfig.UsdPerActiveUser*float64(activeUserCount),
+			subsidyConfig.SubscriptionNetRevenueFraction*NanoCentsToUsd(netRevenue),
 		),
 	)
 	// the fraction of a `days` for this subsidy payout
-	subsidyScale := float64(subsidyEndTime.Sub(subsidyStartTime) / time.Minute) / float64(subsidyConfig.Days * 24 * time.Hour / time.Minute)
+	subsidyScale := float64(subsidyEndTime.Sub(subsidyStartTime)/time.Minute) / float64(time.Duration(subsidyConfig.Days)*24*time.Hour/time.Minute)
 	netPayout := UsdToNanoCents(subsidyScale * subsidyPayoutUsd)
 
 	if subsidyScale <= subsidyConfig.MinDaysFraction {
 		// no subsidy
-		return nil, nil
+		return
 	}
 
-	for payeeNetworkId, payoutNetworkSweeps := range payeePayoutNetworkSweeps {
+	for _, payoutNetworkSweeps := range payeePayoutNetworkSweeps {
 		netPayeePayoutByteCountPaid := ByteCount(0)
 		netPayeePayoutByteCountUnpaid := ByteCount(0)
-		for payoutNetworkId, networkSweep := range payoutNetworkSweeps {
-			netPayeePayoutByteCountPaid += networkSweep.netPayoutByteCountPaid
-			netPayeePayoutByteCountUnpaid += networkSweep.netPayoutByteCountUnpaid
+		for _, sweep := range payoutNetworkSweeps {
+			netPayeePayoutByteCountPaid += sweep.netPayoutByteCountPaid
+			netPayeePayoutByteCountUnpaid += sweep.netPayoutByteCountUnpaid
 		}
 
 		if netPayeePayoutByteCountPaid == 0 {
 			continue
 		}
 
-		for payoutNetworkId, networkSweep := range payoutNetworkSweeps {
-			if networkSweep.netPayoutByteCountPaid == 0 {
+		for _, sweep := range payoutNetworkSweeps {
+			if sweep.netPayoutByteCountPaid == 0 {
 				continue
 			}
 
 			// each paid user is weighted equally
-			weight := float64(networkSweep.netPayoutByteCountPaid) / (float64(netPayeePayoutByteCountPaid) * float64(paidUserCount))
+			weight := float64(sweep.netPayoutByteCountPaid) / (float64(netPayeePayoutByteCountPaid) * float64(paidUserCount))
 			payout := NanoCents(weight * float64(netPayout))
 
-			payment, ok := walletPayments[networkSweep.payoutWalletId]
+			payment, ok := walletPayments[sweep.payoutWalletId]
 			if !ok {
 				paymentId := bringyour.NewId()
 				payment = &AccountPayment{
 					PaymentId:     paymentId,
 					PaymentPlanId: paymentPlanId,
-					WalletId:      networkSweep.payoutWalletId,
+					WalletId:      sweep.payoutWalletId,
 					CreateTime:    bringyour.NowUtc(),
 				}
-				walletPayments[networkSweep.payoutWalletId] = payment
+				walletPayments[sweep.payoutWalletId] = payment
 			}
 			payment.Payout += payout
 
 			if payment.MinSweepTime.IsZero() {
-				payment.MinSweepTime = networkSweep.minSweepTime
+				payment.MinSweepTime = sweep.minSweepTime
 			} else {
-				payment.MinSweepTime = bringyour.MinTime(payment.MinSweepTime, networkSweep.minSweepTime)
+				payment.MinSweepTime = bringyour.MinTime(payment.MinSweepTime, sweep.minSweepTime)
 			}
 		}
 	}
 
-
 	bringyour.RaisePgResult(tx.Exec(
 		ctx,
 		`
-			INSERT INTO payment_subsidy (
+			INSERT INTO subsidy_payment (
 				payment_plan_id,
 		        start_time,
 		        end_time,
 		        active_user_count,
 		        paid_user_count,
-		        net_paid_byte_count,
-		        net_unpaid_byte_count,
+		        net_payout_byte_count_paid,
+		        net_payout_byte_count_unpaid,
 		        net_revenue_nano_cents,
 		        net_payout_nano_cents
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -687,7 +710,7 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 	glog.Infof(
 		"[plan][%s]subsidy %.2fdays %dusers/%dusers %dbytes/%dbytes. $%.2f revenue -> $%.2f paid\n",
 		paymentPlanId,
-		float64(subsidyEndTime.Sub(subsidyStartTime)) / float64(time.HOUR * 24),
+		float64(subsidyEndTime.Sub(subsidyStartTime))/float64(time.Hour*24),
 		paidUserCount,
 		activeUserCount,
 		netPayoutByteCountPaid,
@@ -696,11 +719,19 @@ func planSubsidyPaymentInTx(ctx context.Context, tx bringyour.PgTx, walletPaymen
 		NanoCentsToUsd(netPayout),
 	)
 
-	return nil
+	subsidyPayment = &SubsidyPayment{
+		PaymentPlanId:            paymentPlanId,
+		StartTime:                subsidyStartTime,
+		EndTime:                  subsidyEndTime,
+		ActiveUserCount:          activeUserCount,
+		PaidUserCount:            paidUserCount,
+		NetPayoutByteCountPaid:   netPayoutByteCountPaid,
+		NetPayoutByteCountUnpaid: netPayoutByteCountUnpaid,
+		NetRevenue:               netRevenue,
+		NetPayout:                netPayout,
+	}
+	return
 }
-
-
-
 
 // set the record before submitting to the processor
 // the controller should check if the payment already has a record before processing -

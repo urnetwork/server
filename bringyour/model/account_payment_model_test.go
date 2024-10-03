@@ -70,7 +70,8 @@ func TestCancelAccountPayment(t *testing.T) {
 
 		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 
-		paymentPlan := PlanPayments(ctx)
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
@@ -98,7 +99,8 @@ func TestCancelAccountPayment(t *testing.T) {
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		assert.Equal(t, len(contractIds), 0)
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -190,7 +192,8 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		assert.Equal(t, transferStats.PaidBytesProvided, int(0))
 
 		// Plan payments
-		plan := PlanPayments(ctx)
+		plan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 
 		// Since the plan is incomplete, should be still marked as unpaid
 		transferStats = GetTransferStats(ctx, destinationNetworkId)

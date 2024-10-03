@@ -459,12 +459,12 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 type SimpleResource struct {
 	path      string
 	override  []byte
-	parsedObj *map[string]any
+	parsedObj map[string]any
 }
 
 func (self *SimpleResource) Parse() map[string]any {
 	if self.parsedObj != nil {
-		return *self.parsedObj
+		return self.parsedObj
 	}
 	var bytes []byte
 	var err error
@@ -482,8 +482,26 @@ func (self *SimpleResource) Parse() map[string]any {
 	if err != nil {
 		panic(err)
 	}
-	self.parsedObj = &obj
+	self.parsedObj = obj
 	return obj
+}
+
+func (self *SimpleResource) UnmarshalYaml(value any) {
+	var bytes []byte
+	var err error
+	if self.override != nil {
+		// use the override value
+		bytes = self.override
+	} else {
+		bytes, err = os.ReadFile(self.path)
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = yaml.Unmarshal(bytes, value)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (self *SimpleResource) RequireInt(path ...string) int {
