@@ -162,6 +162,7 @@ func main() {
 					"API",
 					pw,
 					filepath.Join(myMainDir, "..", "api"),
+					vaultDir,
 					"-p",
 					"8080",
 				)
@@ -172,7 +173,7 @@ func main() {
 			})
 
 			servicesGroup.Go(func() (err error) {
-				err = runGoMainProcess(completeRunCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), "-p", "7070")
+				err = runGoMainProcess(completeRunCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), vaultDir, "-p", "7070")
 				if err != nil {
 					return fmt.Errorf("failed to run API: %w", err)
 				}
@@ -262,14 +263,14 @@ func main() {
 					return fmt.Errorf("failed to get google: %w", err)
 				}
 
-				defer res.Body.Close()
-
 				_, err = io.ReadAll(res.Body)
 				if err != nil {
 					return fmt.Errorf("failed to read response: %w", err)
 				}
 
-				pw.Log("got response")
+				res.Body.Close()
+
+				pw.Log("got http response")
 
 			}
 
@@ -277,11 +278,15 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("failed to dial: %w", err)
 			}
-			defer conn.Close()
 
 			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*5)
 			if err != nil {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
+			}
+
+			err = conn.Close()
+			if err != nil {
+				return fmt.Errorf("failed to close connection: %w", err)
 			}
 
 			pw.Log("estimated bandwidth: %.2f Mbit/s", bandwidth*8.0/1024.0/1024.0)
