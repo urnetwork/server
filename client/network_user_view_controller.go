@@ -25,6 +25,10 @@ type IsNetworkUserUpdatingListener interface {
 	StateChanged(bool)
 }
 
+type NetworkUserUpdateSuccessListener interface {
+	Success()
+}
+
 type NetworkUser struct {
 	UserId      *Id    `json:"userId"`
 	UserName    string `json:"user_name"`
@@ -45,10 +49,11 @@ type NetworkUserViewController struct {
 	isLoading   bool
 	isUpdating  bool
 
-	isLoadingListener              *connect.CallbackList[IsNetworkUserLoadingListener]
-	networkUserListener            *connect.CallbackList[NetworkUserListener]
-	networkUserUpdateErrorListener *connect.CallbackList[NetworkUserUpdateErrorListener]
-	isUpdatingListener             *connect.CallbackList[IsNetworkUserUpdatingListener]
+	isLoadingListener                *connect.CallbackList[IsNetworkUserLoadingListener]
+	networkUserListener              *connect.CallbackList[NetworkUserListener]
+	networkUserUpdateErrorListener   *connect.CallbackList[NetworkUserUpdateErrorListener]
+	isUpdatingListener               *connect.CallbackList[IsNetworkUserUpdatingListener]
+	networkUserUpdateSuccessListener *connect.CallbackList[NetworkUserUpdateSuccessListener]
 }
 
 func newNetworkUserViewController(ctx context.Context, device *BringYourDevice) *NetworkUserViewController {
@@ -62,16 +67,17 @@ func newNetworkUserViewController(ctx context.Context, device *BringYourDevice) 
 		networkUser: nil,
 		isLoading:   false,
 
-		isLoadingListener:              connect.NewCallbackList[IsNetworkUserLoadingListener](),
-		networkUserListener:            connect.NewCallbackList[NetworkUserListener](),
-		networkUserUpdateErrorListener: connect.NewCallbackList[NetworkUserUpdateErrorListener](),
-		isUpdatingListener:             connect.NewCallbackList[IsNetworkUserUpdatingListener](),
+		isLoadingListener:                connect.NewCallbackList[IsNetworkUserLoadingListener](),
+		networkUserListener:              connect.NewCallbackList[NetworkUserListener](),
+		networkUserUpdateErrorListener:   connect.NewCallbackList[NetworkUserUpdateErrorListener](),
+		isUpdatingListener:               connect.NewCallbackList[IsNetworkUserUpdatingListener](),
+		networkUserUpdateSuccessListener: connect.NewCallbackList[NetworkUserUpdateSuccessListener](),
 	}
 	return vc
 }
 
 func (vc *NetworkUserViewController) Start() {
-	go vc.fetchNetworkUser()
+	go vc.FetchNetworkUser()
 }
 
 func (vc *NetworkUserViewController) Stop() {}
@@ -126,40 +132,48 @@ func (vc *NetworkUserViewController) AddNetworkUserListener(listener NetworkUser
 	})
 }
 
-func (vc *NetworkUserViewController) setNetworkUser(nu *NetworkUser) {
+func (self *NetworkUserViewController) setNetworkUser(nu *NetworkUser) {
 	func() {
-		vc.stateLock.Lock()
-		defer vc.stateLock.Unlock()
-		vc.networkUser = nu
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.networkUser = nu
 	}()
 
-	vc.networkUserChanged()
+	self.networkUserChanged()
 }
 
-func (vc *NetworkUserViewController) fetchNetworkUser() {
-	if !vc.isLoading {
+func (self *NetworkUserViewController) FetchNetworkUser() {
 
-		vc.setIsLoading(true)
+	if !self.isLoading {
 
-		vc.device.GetApi().GetNetworkUser(GetNetworkUserCallback(connect.NewApiCallback[*GetNetworkUserResult](
+		self.setIsLoading(true)
+
+		self.device.GetApi().GetNetworkUser(GetNetworkUserCallback(connect.NewApiCallback[*GetNetworkUserResult](
 			func(result *GetNetworkUserResult, err error) {
 
 				if err != nil {
-
 					nuLog("fetchNetworkUser go error %s", err.Error())
-
-					vc.setIsLoading(false)
+					self.setIsLoading(false)
 					return
 				}
 
 				if result.Error != nil {
 					nuLog("fetchNetworkUser response error %s", result.Error.Message)
-					vc.setIsLoading(false)
+					self.setIsLoading(false)
 					return
 				}
 
-				vc.setNetworkUser(result.NetworkUser)
-				vc.setIsLoading(false)
+				networkUser := &NetworkUser{
+					UserId:      result.NetworkUser.UserId,
+					UserName:    result.NetworkUser.UserName,
+					UserAuth:    result.NetworkUser.UserAuth,
+					Verified:    result.NetworkUser.Verified,
+					AuthType:    result.NetworkUser.AuthType,
+					NetworkName: result.NetworkUser.NetworkName,
+				}
+
+				self.setNetworkUser(networkUser)
+				self.setIsLoading(false)
 
 			})))
 	}
@@ -177,6 +191,21 @@ func (self *NetworkUserViewController) AddNetworkUserUpdateErrorListener(listene
 	callbackId := self.networkUserUpdateErrorListener.Add(listener)
 	return newSub(func() {
 		self.networkUserUpdateErrorListener.Remove(callbackId)
+	})
+}
+
+func (vc *NetworkUserViewController) emitNetworkUserUpdateSuccess() {
+	for _, listener := range vc.networkUserUpdateSuccessListener.Get() {
+		connect.HandleError(func() {
+			listener.Success()
+		})
+	}
+}
+
+func (self *NetworkUserViewController) AddNetworkUserUpdateSuccessListener(listener NetworkUserUpdateSuccessListener) Sub {
+	callbackId := self.networkUserUpdateSuccessListener.Add(listener)
+	return newSub(func() {
+		self.networkUserUpdateSuccessListener.Remove(callbackId)
 	})
 }
 
@@ -231,11 +260,7 @@ func (self *NetworkUserViewController) UpdateNetworkUser(networkName string, use
 						return
 					}
 
-					self.stateLock.Lock()
-					updatedUser := self.networkUser
-					updatedUser.UserName = username
-					self.stateLock.Unlock()
-					self.setNetworkUser(updatedUser)
+					self.emitNetworkUserUpdateSuccess()
 					self.setIsNetworkUserUpdating(false)
 
 				}),
