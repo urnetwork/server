@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func EstimateDownloadBandwidth(ctx context.Context, conn net.Conn, expectedBytes int, timeout time.Duration) (float64, error) {
+func EstimateDownloadBandwidth(ctx context.Context, conn net.Conn, timeout time.Duration) (float64, error) {
 
 	err := conn.SetDeadline(time.Now().Add(timeout))
 	if err != nil {

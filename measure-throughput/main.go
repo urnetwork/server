@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -152,7 +151,7 @@ func main() {
 			servicesGroup, completeRunCtx := errgroup.WithContext(ctx)
 
 			servicesGroup.Go(func() (err error) {
-				err = datasource.Run(completeRunCtx, ":5080", pw, 10*1024, time.Second*5)
+				err = datasource.Run(completeRunCtx, ":15080", pw, 20*1024, time.Second*5)
 				if err != nil {
 					return fmt.Errorf("failed to run API: %w", err)
 				}
@@ -181,11 +180,6 @@ func main() {
 				}
 				return nil
 			})
-
-			defer func() {
-				sgErr := servicesGroup.Wait()
-				err = errors.Join(err, sgErr)
-			}()
 
 			time.Sleep(time.Second * 3)
 
@@ -246,21 +240,21 @@ func main() {
 				Timeout:   time.Second * 5,
 			}
 
-			addrs, err := net.InterfaceAddrs()
-			if err != nil {
-				return fmt.Errorf("failed to get interface addresses: %w", err)
-			}
+			// addrs, err := net.InterfaceAddrs()
+			// if err != nil {
+			// 	return fmt.Errorf("failed to get interface addresses: %w", err)
+			// }
 
-			for _, a := range addrs {
-				ipNet, ok := a.(*net.IPNet)
-				if !ok {
-					continue
-				}
-				fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback())
-			}
+			// for _, a := range addrs {
+			// 	ipNet, ok := a.(*net.IPNet)
+			// 	if !ok {
+			// 		continue
+			// 	}
+			// 	fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback())
+			// }
 
 			{
-				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "http://192.168.178.24:8080", nil)
+				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "http://192.168.178.89:8080", nil)
 				if err != nil {
 					return fmt.Errorf("failed to create request: %w", err)
 				}
@@ -272,33 +266,39 @@ func main() {
 
 				defer res.Body.Close()
 
-				d, err := io.ReadAll(res.Body)
+				_, err = io.ReadAll(res.Body)
 				if err != nil {
 					return fmt.Errorf("failed to read response: %w", err)
 				}
 
-				fmt.Println("response:\n\n\n\n\n\n\n\n", string(d))
+				pw.Log("got response")
 
 			}
 
-			conn, err := clientDev.DialContext(completeRunCtx, "tcp", "192.168.178.24:5080")
+			conn, err := clientDev.DialContext(completeRunCtx, "tcp", "192.168.178.89:15080")
 			if err != nil {
 				return fmt.Errorf("failed to dial: %w", err)
 			}
 			defer conn.Close()
 
-			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, 1024, time.Second*5)
+			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*5)
 			if err != nil {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
 			}
 
-			fmt.Println("\n\n\n\n\n\nestimated bandwidth:\n\n\n\n\n", bandwidth)
+			pw.Log("estimated bandwidth: %.2f mbit", bandwidth*8.0/1024.0/1024.0)
+			servicesGroup.Go(func() (err error) {
+				<-completeRunCtx.Done()
+				return errors.New("context done")
+			})
 
 			cancel()
 
-			<-completeRunCtx.Done()
+			err = servicesGroup.Wait()
 
-			return nil
+			pw.Stop()
+
+			return err
 		},
 	}
 	app.RunAndExitOnError()

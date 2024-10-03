@@ -53,6 +53,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
 	github.com/jackc/pgx/v5 v5.5.4 // indirect
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
+	github.com/jellydator/ttlcache/v3 v3.3.0 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
@@ -108,3 +109,5 @@ replace bringyour.com/bringyour v0.0.0 => ../bringyour
 replace bringyour.com/connect v0.0.0 => ../../connect/connect
 
 replace bringyour.com/protocol v0.0.0 => ../../connect/protocol/build/bringyour.com/protocol/
+
+replace golang.org/x/sync v0.8.0 => github.com/draganm/sync v0.8.2

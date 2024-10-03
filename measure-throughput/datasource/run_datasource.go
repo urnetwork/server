@@ -31,6 +31,10 @@ func Run(ctx context.Context, addr string, pw progress.Writer, kilobytesToWrite 
 	tracker.Increment(1)
 
 	defer func() {
+		if ctx.Err() != nil {
+			err = nil
+		}
+
 		if err != nil {
 			tracker.UpdateMessage(fmt.Sprintf("Datasource failed: %v", err))
 			tracker.MarkAsErrored()
@@ -63,7 +67,7 @@ func Run(ctx context.Context, addr string, pw progress.Writer, kilobytesToWrite 
 			conn.SetDeadline(time.Now().Add(timeout))
 
 			for range kilobytesToWrite {
-				_, err = conn.Write([]byte("hello"))
+				_, err = conn.Write(datablock)
 				if err != nil {
 					return
 				}

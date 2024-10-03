@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -24,6 +23,10 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 	tracker.Increment(1)
 
 	defer func() {
+		if ctx.Err() != nil {
+			err = nil
+		}
+
 		if err != nil {
 			tracker.UpdateMessage(fmt.Sprintf("%s failed: %v", name, err))
 			tracker.MarkAsErrored()
@@ -51,17 +54,15 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 		return nil
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
 
-	err = cmd.Run()
+	out, err := cmd.CombinedOutput()
 
 	if err != nil {
-		if strings.Contains(err.Error(), "signal: killed") {
-			return nil
-		}
+
 		// fmt.Println("err:", err)
-		return err
+		return fmt.Errorf("failed to run %s: %w", name, err, string(out))
 	}
 
 	return nil

@@ -15,6 +15,12 @@ const connectURL = "ws://localhost:7070"
 
 func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (err error) {
 
+	defer func() {
+		if ctx.Err() != nil {
+			err = nil
+		}
+	}()
+
 	tracker := &progress.Tracker{
 		Message: "Provider is running",
 		Total:   0,
