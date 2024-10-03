@@ -1522,6 +1522,71 @@ var migrations = []any{
         CREATE INDEX transfer_escrow_sweep_network_id_payment_id_payout ON transfer_escrow_sweep (network_id, payment_id, payout_byte_count)
     `),
 
+
+
+
+    // FIXME can we just have a bool on the transfer_balance whether it is paid?
+    // FIXME the byte transfer can be transfer points
+
+    // `subscription_net_revenue_nano_cents` is the amount associated with a subscription used for subsidy calculation
+    // It is not used for revenue share, which is `net_revenue_nano_cents`
+    newSqlMigration(`
+        ALTER TABLE transfer_balance ADD COLUMN (
+            subscription_net_revenue_nano_cents,
+            paid COMPUTED COLUMN (0 < subscription_net_revenue_nano_cents OR 0 < net_revenue_nano_cents),
+        )
+    `)
+
+    // `
+    // ALTER TABLE transfer_escrow ADD (balance_revenue_points, payout_revenue_points)
+    // `
+
+    // this joins to transfer_escrow_sweep
+    // paid data from source networks
+    // `
+    // CREATE TABLE transfer_escrow_sweep_source (
+    //     contract_id,
+    //     balance_id,
+    //     network_id,
+
+    //     // payout_revenue_points
+    //     payout_byte_count
+    // )
+    // `
+
+    // payment plan
+    // look at all sweep paid sources, normalize each network_id
+
+
+    newSqlMigration(`
+    CREATE TABLE payment_subsidy (
+        payment_plan_id uuid NOT NULL,
+
+        start_time
+        end_time
+
+        active_user_count
+
+        paid_user_count
+
+        net_payout_byte_count_paid
+        net_payout_byte_count_unpaid
+
+        net_revenue_nano_cents
+
+        net_payout_nano_cents
+    )
+    `),
+
+    // FIXME index by start time, end time
+
+
+    // newSqlMigration(`
+    //     ALTER TABLE subscription_payment ADD COLUMN (net_revenue_nano_cents)
+    // `),
+
+
+
 	// results of actively pinging providers
 	// task to actively ping providers
 	// check active connection for returning active providers
