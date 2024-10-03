@@ -1,5 +1,6 @@
 {
   "cSpell.words": [
+    "bwclient",
     "Datasource",
     "errgroup",
     "jwtutil",
@@ -7,5 +8,6 @@
     "pterm",
     "rerr",
     "resty"
-  ]
+  ],
+  "go.testOnSave": false,
 }

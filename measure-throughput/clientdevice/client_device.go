@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"time"
 
+	"bringyor.com/measure-throughput/bwclient"
 	"bringyor.com/measure-throughput/clientdevice/netstack"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/connect"
@@ -21,7 +22,7 @@ type ClientDevice struct {
 
 var dropProbability = 0.00
 
-var packetDelay = time.Millisecond * 20
+var packetDelay = time.Millisecond * 0
 
 func Start(
 	ctx context.Context,
@@ -36,57 +37,129 @@ func Start(
 		return nil, fmt.Errorf("failed to parse client id: %w", err)
 	}
 
-	generator := connect.NewApiMultiClientGenerator(
-		ctx,
-		[]*connect.ProviderSpec{
-			{
-				ClientId: &providerID,
-			},
-		},
-		connect.NewClientStrategyWithDefaults(ctx),
-		// exclude self
-		[]connect.Id{
-			*myID,
-		},
-		apiURL,
-		byJWT,
-		connectURL,
-		"my device",
-		"test",
-		"1.2.3",
-		// connect.DefaultClientSettingsNoNetworkEvents,
-		connect.DefaultClientSettings,
-		connect.DefaultApiMultiClientGeneratorSettings(),
-	)
+	// generator := connect.NewApiMultiClientGenerator(
+	// 	ctx,
+	// 	[]*connect.ProviderSpec{
+	// 		{
+	// 			ClientId: &providerID,
+	// 		},
+	// 	},
+	// 	connect.NewClientStrategyWithDefaults(ctx),
+	// 	// exclude self
+	// 	[]connect.Id{
+	// 		*myID,
+	// 	},
+	// 	apiURL,
+	// 	byJWT,
+	// 	connectURL,
+	// 	"my device",
+	// 	"test",
+	// 	"1.2.3",
+	// 	// connect.DefaultClientSettingsNoNetworkEvents,
+	// 	connect.DefaultClientSettings,
+	// 	connect.DefaultApiMultiClientGeneratorSettings(),
+	// )
 
 	dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, []netip.Addr{netip.MustParseAddr("100.100.100.100")}, 1500)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
 
-	mc := connect.NewRemoteUserNatMultiClientWithDefaults(
-		ctx,
-		generator,
-		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
+	// mc := connect.NewRemoteUserNatMultiClientWithDefaults(
+	// 	ctx,
+	// 	generator,
+	// 	func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 
+	// 		if rand.Float64() < dropProbability {
+	// 			fmt.Println("dropping incoming packet")
+	// 			return
+	// 		}
+
+	// 		// go func() {
+	// 		time.Sleep(packetDelay)
+
+	// 		_, err := dev.Write(packet)
+	// 		if err != nil {
+	// 			// fmt.Println("packet write error:", err)
+	// 		}
+	// 		// }()
+	// 	},
+	// 	protocol.ProvideMode_Network,
+	// )
+
+	// mc.SendPacket()
+
+	// source := connect.SourceId(*myID)
+
+	cl, err := bwclient.CreateDeviceClient(ctx, apiURL, connectURL, byJWT)
+	if err != nil {
+		return nil, fmt.Errorf("create device client failed: %w", err)
+	}
+
+	nc, err := connect.NewRemoteUserNatClient(
+		cl,
+		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 			if rand.Float64() < dropProbability {
 				fmt.Println("dropping incoming packet")
 				return
 			}
 
-			go func() {
-				time.Sleep(packetDelay)
+			// go func() {
+			time.Sleep(packetDelay)
 
-				_, err := dev.Write(packet)
-				if err != nil {
-					// fmt.Println("packet write error:", err)
-				}
-			}()
+			_, err := dev.Write(packet)
+			if err != nil {
+				// fmt.Println("packet write error:", err)
+			}
+		},
+		[]connect.MultiHopId{
+			connect.RequireMultiHopId(providerID),
 		},
 		protocol.ProvideMode_Network,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("create remote user nat client failed: %w", err)
+	}
 
 	source := connect.SourceId(*myID)
+
+	// cl.ContractManager().CreateContract(connect.ContractKey{
+	// 	Destination: connect.DestinationId(providerID),
+	// }, 5*time.Second)
+
+	// sendPacket := func(packet []byte, timeout time.Duration) error {
+	// 	ipPacketToProvider := &protocol.IpPacketToProvider{
+	// 		IpPacket: &protocol.IpPacket{
+	// 			PacketBytes: packet,
+	// 		},
+	// 	}
+
+	// 	frame, err := connect.ToFrame(ipPacketToProvider)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	opts := []any{
+	// 		// connect.ForceStream(),
+	// 		connect.NoAck(),
+	// 	}
+
+	// 	_, err = cl.SendMultiHopWithTimeoutDetailed(
+	// 		frame,
+	// 		connect.RequireMultiHopId(providerID),
+	// 		func(err error) {
+	// 			fmt.Println("ack callback:", err)
+	// 		},
+	// 		time.Second,
+	// 		opts...,
+	// 	)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	return nil
+
+	// }
 
 	go func() {
 
@@ -99,24 +172,28 @@ func Start(
 			}
 			packet = packet[:n]
 
-			if rand.Float64() < dropProbability {
-				fmt.Println("dropping outgoing packet")
-				continue
+			// if rand.Float64() < dropProbability {
+			// 	fmt.Println("dropping outgoing packet")
+			// 	continue
+			// }
+
+			// go func() {
+
+			// time.Sleep(packetDelay)
+
+			sent := nc.SendPacket(
+				source,
+				protocol.ProvideMode_Network,
+				packet,
+				time.Second*15,
+			)
+
+			if !sent {
+				fmt.Println("packet not sent")
 			}
-
-			go func() {
-
-				time.Sleep(packetDelay)
-
-				mc.SendPacket(
-					source,
-					protocol.ProvideMode_Network,
-					packet,
-					time.Second*15,
-				)
-			}()
+			// }()
 		}
-		mc.Close()
+		cl.Close()
 	}()
 
 	return &ClientDevice{

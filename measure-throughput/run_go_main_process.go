@@ -68,6 +68,10 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 	cmd.Dir = mainDir
 
 	cmd.Env = os.Environ()
+
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stdout
+
 	out, err = cmd.CombinedOutput()
 
 	if err != nil {

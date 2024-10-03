@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"bringyor.com/measure-throughput/bwclient"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
@@ -45,22 +46,18 @@ func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (e
 		return fmt.Errorf("failed to parse client id: %w", err)
 	}
 
-	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	connectClient, err := bwclient.CreateProviderClient(ctx, apiURL, connectURL, byClientJwt)
 
-	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byClientJwt, apiURL)
-	connectClient := connect.NewClientWithDefaults(ctx, *clientId, clientOob)
-
-	instanceId := connect.NewId()
-
-	auth := &connect.ClientAuth{
-		ByJwt: byClientJwt,
-		// ClientId: clientId,
-		InstanceId: instanceId,
-		AppVersion: "1.0.0",
-	}
-
-	connect.NewPlatformTransportWithDefaults(ctx, clientStrategy, connectClient.RouteManager(), connectURL, auth)
-	// go platformTransport.Run(connectClient.RouteManager())
+	seenSources := make(map[connect.TransferPath]bool)
+	connectClient.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+		_, found := seenSources[source]
+		if !found {
+			seenSources[source] = true
+			//
+			pw.Log("new source %s", source)
+		}
+		tracker.Increment(int64(len(frames)))
+	})
 
 	localUserNat := connect.NewLocalUserNatWithDefaults(ctx, clientId.String())
 	remoteUserNatProvider := connect.NewRemoteUserNatProviderWithDefaults(connectClient, localUserNat)

@@ -49,6 +49,8 @@ func main() {
 				return fmt.Errorf("failed to create stderr file: %w", err)
 			}
 
+			fmt.Println("stderr file:", stderrFileName)
+
 			defer stderr.Close()
 
 			realStderr := os.Stderr
@@ -71,9 +73,9 @@ func main() {
 
 			flag.Parse()
 
-			defer func() {
-				os.RemoveAll(vaultDir)
-			}()
+			// defer func() {
+			// 	os.RemoveAll(vaultDir)
+			// }()
 
 			os.Setenv("WARP_VAULT_HOME", vaultDir)
 			os.Setenv("WARP_ENV", "test")
