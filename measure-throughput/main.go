@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -286,17 +285,11 @@ func main() {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
 			}
 
-			pw.Log("estimated bandwidth: %.2f mbit", bandwidth*8.0/1024.0/1024.0)
-			servicesGroup.Go(func() (err error) {
-				<-completeRunCtx.Done()
-				return errors.New("context done")
-			})
+			pw.Log("estimated bandwidth: %.2f Mbit/s", bandwidth*8.0/1024.0/1024.0)
 
 			cancel()
 
 			err = servicesGroup.Wait()
-
-			pw.Stop()
 
 			return err
 		},

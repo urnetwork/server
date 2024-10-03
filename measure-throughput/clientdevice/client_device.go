@@ -5,24 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
-	"os"
 	"time"
 
 	"bringyor.com/measure-throughput/clientdevice/netstack"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcapgo"
 )
 
 type ClientDevice struct {
 	dev netstack.Device
 	*netstack.Net
 }
-
-const capFile = "/tmp/cap.pcap"
 
 func Start(
 	ctx context.Context,
@@ -36,21 +30,6 @@ func Start(
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse client id: %w", err)
 	}
-
-	f, err := os.OpenFile(capFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open cap file: %w", err)
-	}
-
-	pcapWriter := pcapgo.NewWriter(f)
-	err = pcapWriter.WriteFileHeader(65536, layers.LinkTypeIPv4)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write pcap file header: %w", err)
-	}
-
-	context.AfterFunc(ctx, func() {
-		f.Close()
-	})
 
 	generator := connect.NewApiMultiClientGenerator(
 		ctx,
@@ -85,17 +64,9 @@ func Start(
 		generator,
 		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
 
-			pcapWriter.WritePacket(gopacket.CaptureInfo{
-				Timestamp:      time.Now(),
-				CaptureLength:  len(packet),
-				Length:         len(packet),
-				InterfaceIndex: 0,
-			}, packet)
-
-			// fmt.Printf("\n\n\n\npacket from %v: %v\n\n\n\n", source, packet)
 			_, err := dev.Write(packet)
 			if err != nil {
-				fmt.Println("packet write error:", err)
+				// fmt.Println("packet write error:", err)
 			}
 		},
 		protocol.ProvideMode_Network,
@@ -113,15 +84,12 @@ func Start(
 				return
 			}
 			packet = packet[:n]
-			sent := mc.SendPacket(
+			mc.SendPacket(
 				source,
 				protocol.ProvideMode_Network,
 				packet,
 				time.Second*15,
 			)
-			if !sent {
-				fmt.Println("packet not sent")
-			}
 		}
 		mc.Close()
 	}()
