@@ -55,7 +55,7 @@ func (l *TCPLogger) Log(packet []byte) error {
 	// return l.w.Write([]string{time.Now().Format("15:04:05.000000000"), ip.SrcIP.String(), tcp.SrcPort.String(), ip.DstIP.String(), tcp.DstPort.String(), fmt.Sprintf("%d", tcp.Seq), fmt.Sprintf("%d", tcp.Ack), fmt.Sprintf("%d", len(packet))})
 
 	defer l.w.Flush()
-	return l.w.Write([]string{ip.SrcIP.String(), tcp.SrcPort.String(), ip.DstIP.String(), tcp.DstPort.String(), fmt.Sprintf("%d", tcp.Seq), fmt.Sprintf("%d", tcp.Ack), fmt.Sprintf("%d", len(packet))})
+	return l.w.Write([]string{ip.SrcIP.String(), tcp.SrcPort.String(), ip.DstIP.String(), tcp.DstPort.String(), fmt.Sprintf("%d", tcp.Seq), fmt.Sprintf("%d", tcp.Ack), fmt.Sprintf("%d", len(tcp.Payload))})
 
 }
 

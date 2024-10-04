@@ -35,6 +35,10 @@ func (d *DelayQueue) run(ctx context.Context) {
 }
 
 func (d *DelayQueue) GoDelayed(delay time.Duration, fn func()) {
+	if delay <= 0 {
+		fn()
+		return
+	}
 	d.queue <- delayedFn{
 		deadline: time.Now().Add(delay),
 		fn:       fn,

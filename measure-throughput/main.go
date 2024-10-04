@@ -307,12 +307,12 @@ func main() {
 
 			}
 
-			conn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15080", localAddress))
+			conn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15081", localAddress))
 			if err != nil {
 				return fmt.Errorf("failed to dial: %w", err)
 			}
 
-			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*40)
+			uploadBandwidth, _ := bwestimator.EstimateUploadBandwidth(completeRunCtx, conn, time.Second*30)
 			if err != nil {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
 			}
@@ -322,7 +322,24 @@ func main() {
 				return fmt.Errorf("failed to close connection: %w", err)
 			}
 
-			pw.Log("estimated bandwidth: %.2f Mbit/s", bandwidth*8.0/1024.0/1024.0)
+			conn, err = clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15080", localAddress))
+			if err != nil {
+				return fmt.Errorf("failed to dial: %w", err)
+			}
+
+			pw.Log("estimated upload bandwidth: %.2f Mbit/s", uploadBandwidth*8.0/1024.0/1024.0)
+
+			downloadBandwidth, _ := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*30)
+			if err != nil {
+				return fmt.Errorf("failed to estimate bandwidth: %w", err)
+			}
+
+			err = conn.Close()
+			if err != nil {
+				return fmt.Errorf("failed to close connection: %w", err)
+			}
+
+			pw.Log("estimated download bandwidth: %.2f Mbit/s", downloadBandwidth*8.0/1024.0/1024.0)
 
 			cancel()
 
