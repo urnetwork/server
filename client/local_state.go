@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+
 	// "io"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"bringyour.com/connect"
 )
 
+var lsLog = logFn("local_state")
+
 const AsyncQueueSize = 32
 
 const LocalStorageFilePermissions = 0700
@@ -22,6 +25,7 @@ type ByJwt struct {
 	UserId      *Id
 	NetworkName string
 	NetworkId   *Id
+	GuestMode   bool
 }
 
 type LocalState struct {
@@ -84,6 +88,9 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 		if networkId, err := ParseId(networkIdStr.(string)); err == nil {
 			byJwt.NetworkId = networkId
 		}
+	}
+	if guestMode, ok := claims["guest_mode"]; ok {
+		byJwt.GuestMode = guestMode.(bool)
 	}
 
 	return byJwt, nil
@@ -365,7 +372,7 @@ func (self *AsyncLocalState) serialAsync(work func() error, callbacks ...CommitC
 }
 
 // get the sync local state
-func (self *AsyncLocalState) LocalState() *LocalState {
+func (self *AsyncLocalState) GetLocalState() *LocalState {
 	return self.localState
 }
 

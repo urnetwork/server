@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+
 	// "net/netip"
 	"sync"
 	"time"
@@ -24,12 +25,20 @@ type ProvideChangeListener interface {
 	ProvideChanged(provideEnabled bool)
 }
 
+type ProvidePausedChangeListener interface {
+	ProvidePausedChanged(providePaused bool)
+}
+
 type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
 
 type RouteLocalChangeListener interface {
 	RouteLocalChanged(routeLocal bool)
+}
+
+type ConnectLocationChangeListener interface {
+	ConnectLocationChanged(location *ConnectLocation)
 }
 
 // receive a packet into the local raw socket
@@ -84,6 +93,8 @@ type BringYourDevice struct {
 
 	stateLock sync.Mutex
 
+	connectLocation *ConnectLocation
+
 	// when nil, packets get routed to the local user nat
 	remoteUserNatClient connect.UserNatClient
 
@@ -96,9 +107,11 @@ type BringYourDevice struct {
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
 
-	provideChangeListeners    *connect.CallbackList[ProvideChangeListener]
-	connectChangeListeners    *connect.CallbackList[ConnectChangeListener]
-	routeLocalChangeListeners *connect.CallbackList[RouteLocalChangeListener]
+	provideChangeListeners         *connect.CallbackList[ProvideChangeListener]
+	providePausedChangeListeners   *connect.CallbackList[ProvidePausedChangeListener]
+	connectChangeListeners         *connect.CallbackList[ConnectChangeListener]
+	routeLocalChangeListeners      *connect.CallbackList[RouteLocalChangeListener]
+	connectLocationChangeListeners *connect.CallbackList[ConnectLocationChangeListener]
 
 	localUserNatUnsub func()
 }
@@ -203,6 +216,7 @@ func newBringYourDevice(
 		platformTransport:                 platformTransport,
 		localUserNat:                      localUserNat,
 		stats:                             newDeviceStats(),
+		connectLocation:                   nil,
 		remoteUserNatClient:               nil,
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
@@ -210,8 +224,10 @@ func newBringYourDevice(
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
+		providePausedChangeListeners:      connect.NewCallbackList[ProvidePausedChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
 		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
+		connectLocationChangeListeners:    connect.NewCallbackList[ConnectLocationChangeListener](),
 	}
 
 	// set up with nil destination
@@ -234,31 +250,9 @@ func (self *BringYourDevice) GetApi() *BringYourApi {
 	return self.networkSpace.GetApi()
 }
 
-// func (self *BringYourDevice) SetCustomExtender(extender *Extender) {
-// 	extenderIpSecrets := map[netip.Addr]string{}
-// 	if extender != nil {
-// 		if ip, err := netip.ParseAddr(extender.Ip); err == nil {
-// 			extenderIpSecrets[ip] = extender.Secret
-// 		}
-// 	}
-// 	self.clientStrategy.SetCustomExtenders(extenderIpSecrets)
-// }
-
-// func (self *BringYourDevice) GetCustomExtender() *Extender {
-// 	extenderIpSecrets := self.clientStrategy.CustomExtenders()
-// 	extenders := []*Extender{}
-// 	for ip, secret := range extenderIpSecrets {
-// 		extender := &Extender{
-// 			Ip:     ip.String(),
-// 			Secret: secret,
-// 		}
-// 		extenders = append(extenders, extender)
-// 	}
-// 	if 0 < len(extenders) {
-// 		return extenders[0]
-// 	}
-// 	return nil
-// }
+func (self *BringYourDevice) GetNetworkSpace() *NetworkSpace {
+	return self.networkSpace
+}
 
 // func (self *BringYourDevice) SetCustomExtenderAutoConfigure(extenderAutoConfigure *ExtenderAutoConfigure) {
 // 	// FIXME
@@ -296,10 +290,19 @@ func (self *BringYourDevice) GetRouteLocal() bool {
 	return self.routeLocal
 }
 
-func (self *BringYourDevice) WindowEvents() *WindowEvents {
+// func (self *BringYourDevice) SetCustomExtenderResolver(extenderResolver *ExtenderResolver) {
+// 	// FIXME
+// }
+
+// func (self *BringYourDevice) CustomExtenderResolver() *ExtenderResolver {
+// 	// FIXME
+// 	return nil
+// }
+
+func (self *BringYourDevice) windowMonitor() *connect.RemoteUserNatMultiClientMonitor {
 	switch v := self.remoteUserNatClient.(type) {
 	case *connect.RemoteUserNatMultiClient:
-		return newWindowEvents(v.Monitor().Events())
+		return v.Monitor()
 	default:
 		return nil
 	}
@@ -309,6 +312,13 @@ func (self *BringYourDevice) AddProvideChangeListener(listener ProvideChangeList
 	callbackId := self.provideChangeListeners.Add(listener)
 	return newSub(func() {
 		self.provideChangeListeners.Remove(callbackId)
+	})
+}
+
+func (self *BringYourDevice) AddProvidePausedChangeListener(listener ProvidePausedChangeListener) Sub {
+	callbackId := self.providePausedChangeListeners.Add(listener)
+	return newSub(func() {
+		self.providePausedChangeListeners.Remove(callbackId)
 	})
 }
 
@@ -326,10 +336,25 @@ func (self *BringYourDevice) AddRouteLocalChangeListener(listener RouteLocalChan
 	})
 }
 
+func (self *BringYourDevice) AddConnectLocationChangeListener(listener ConnectLocationChangeListener) Sub {
+	callbackId := self.connectLocationChangeListeners.Add(listener)
+	return newSub(func() {
+		self.connectLocationChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) provideChanged(provideEnabled bool) {
 	for _, listener := range self.provideChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvideChanged(provideEnabled)
+		})
+	}
+}
+
+func (self *BringYourDevice) providePausedChanged(providePaused bool) {
+	for _, listener := range self.providePausedChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ProvidePausedChanged(providePaused)
 		})
 	}
 }
@@ -346,6 +371,14 @@ func (self *BringYourDevice) routeLocalChanged(routeLocal bool) {
 	for _, listener := range self.routeLocalChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.RouteLocalChanged(routeLocal)
+		})
+	}
+}
+
+func (self *BringYourDevice) connectLocationChanged(location *ConnectLocation) {
+	for _, listener := range self.connectLocationChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectLocationChanged(location)
 		})
 	}
 }
@@ -400,40 +433,42 @@ func (self *BringYourDevice) GetConnectEnabled() bool {
 }
 
 func (self *BringYourDevice) SetProvideMode(provideMode ProvideMode) {
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		// TODO create a new provider only client?
-
-		provideModes := map[protocol.ProvideMode]bool{}
-		if ProvideModePublic <= provideMode {
-			provideModes[protocol.ProvideMode_Public] = true
-		}
-		if ProvideModeFriendsAndFamily <= provideMode {
-			provideModes[protocol.ProvideMode_FriendsAndFamily] = true
-		}
-		if ProvideModeNetwork <= provideMode {
-			provideModes[protocol.ProvideMode_Network] = true
-		}
-		self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
-
-		// recreate the provider user nat
-		if self.remoteUserNatProviderLocalUserNat != nil {
-			self.remoteUserNatProviderLocalUserNat.Close()
-			self.remoteUserNatProviderLocalUserNat = nil
-		}
-		if self.remoteUserNatProvider != nil {
-			self.remoteUserNatProvider.Close()
-			self.remoteUserNatProvider = nil
-		}
-
-		if ProvideModeNone < provideMode {
-			self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
-			self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
-		}
-	}()
+	self.setProvideModeNoEvent(provideMode)
 	self.provideChanged(self.GetProvideEnabled())
+}
+
+func (self *BringYourDevice) setProvideModeNoEvent(provideMode ProvideMode) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	// TODO create a new provider only client?
+
+	provideModes := map[protocol.ProvideMode]bool{}
+	if ProvideModePublic <= provideMode {
+		provideModes[protocol.ProvideMode_Public] = true
+	}
+	if ProvideModeFriendsAndFamily <= provideMode {
+		provideModes[protocol.ProvideMode_FriendsAndFamily] = true
+	}
+	if ProvideModeNetwork <= provideMode {
+		provideModes[protocol.ProvideMode_Network] = true
+	}
+	self.client.ContractManager().SetProvideModesWithReturnTraffic(provideModes)
+
+	// recreate the provider user nat
+	if self.remoteUserNatProviderLocalUserNat != nil {
+		self.remoteUserNatProviderLocalUserNat.Close()
+		self.remoteUserNatProviderLocalUserNat = nil
+	}
+	if self.remoteUserNatProvider != nil {
+		self.remoteUserNatProvider.Close()
+		self.remoteUserNatProvider = nil
+	}
+
+	if ProvideModeNone < provideMode {
+		self.remoteUserNatProviderLocalUserNat = connect.NewLocalUserNatWithDefaults(self.client.Ctx(), self.clientId.String())
+		self.remoteUserNatProvider = connect.NewRemoteUserNatProviderWithDefaults(self.client, self.remoteUserNatProviderLocalUserNat)
+	}
 }
 
 func (self *BringYourDevice) GetProvideMode() ProvideMode {
@@ -445,29 +480,26 @@ func (self *BringYourDevice) GetProvideMode() ProvideMode {
 }
 
 func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	glog.Infof("[device]provide paused = %t\n", providePaused)
 
 	self.client.ContractManager().SetProvidePaused(providePaused)
+	self.providePausedChanged(self.GetProvidePaused())
 }
 
 func (self *BringYourDevice) GetProvidePaused() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	return self.client.ContractManager().IsProvidePaused()
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
-	return self.SetDestination(nil, ProvideModeNone)
+	return self.SetDestination(nil, nil, ProvideModeNone)
 }
 
-func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
+func (self *BringYourDevice) SetDestination(location *ConnectLocation, specs *ProviderSpecList, provideMode ProvideMode) (returnErr error) {
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+
+		self.connectLocation = location
 
 		if self.remoteUserNatClient != nil {
 			self.remoteUserNatClient.Close()
@@ -512,10 +544,33 @@ func (self *BringYourDevice) SetDestination(specs *ProviderSpecList, provideMode
 	if returnErr != nil {
 		return
 	}
+	self.connectLocationChanged(self.GetConnectLocation())
 	connectEnabled := self.GetConnectEnabled()
 	self.stats.UpdateConnect(connectEnabled)
 	self.connectChanged(connectEnabled)
 	return
+}
+
+func (self *BringYourDevice) SetConnectLocation(location *ConnectLocation) {
+	if location == nil {
+		self.RemoveDestination()
+	} else {
+		specs := NewProviderSpecList()
+		specs.Add(&ProviderSpec{
+			LocationId:      location.ConnectLocationId.LocationId,
+			LocationGroupId: location.ConnectLocationId.LocationGroupId,
+			ClientId:        location.ConnectLocationId.ClientId,
+			BestAvailable:   location.ConnectLocationId.BestAvailable,
+		})
+
+		self.SetDestination(location, specs, ProvideModePublic)
+	}
+}
+
+func (self *BringYourDevice) GetConnectLocation() *ConnectLocation {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connectLocation
 }
 
 func (self *BringYourDevice) Shuffle() {
@@ -590,8 +645,26 @@ func (self *BringYourDevice) closeViewController(vc ViewController) {
 	delete(self.openedViewControllers, vc)
 }
 
+func (self *BringYourDevice) OpenLocationsViewController() *LocationsViewController {
+	vm := newLocationsViewController(self.ctx, self)
+	self.openViewController(vm)
+	return vm
+}
+
 func (self *BringYourDevice) OpenConnectViewController() *ConnectViewController {
-	vc := newConnectViewController(self.ctx, self)
+	vm := newConnectViewController(self.ctx, self)
+	self.openViewController(vm)
+	return vm
+}
+
+func (self *BringYourDevice) OpenOverlayViewController() *OverlayViewController {
+	vc := newOverlayViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
+func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
+	vc := newWalletViewController(self.ctx, self)
 	self.openViewController(vc)
 	return vc
 }
@@ -620,8 +693,26 @@ func (self *BringYourDevice) OpenAccountViewController() *AccountViewController 
 	return vc
 }
 
-func (self *BringYourDevice) OpenWalletViewController() *WalletViewController {
-	vc := newWalletViewController(self.ctx, self)
+func (self *BringYourDevice) OpenFeedbackViewController() *FeedbackViewController {
+	vc := newFeedbackViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
+func (self *BringYourDevice) OpenNetworkUserViewController() *NetworkUserViewController {
+	vc := newNetworkUserViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
+func (self *BringYourDevice) OpenAccountPreferencesViewController() *AccountPreferencesViewController {
+	vc := newAccountPreferencesViewController(self.ctx, self)
+	self.openViewController(vc)
+	return vc
+}
+
+func (self *BringYourDevice) OpenReferralCodeViewController() *ReferralCodeViewController {
+	vc := newReferralCodeViewController(self.ctx, self)
 	self.openViewController(vc)
 	return vc
 }
@@ -678,6 +769,7 @@ func parseByJwtClientId(byJwt string) (connect.Id, error) {
 	}
 }
 
+/*
 type WindowEvents struct {
 	windowExpandEvent *connect.WindowExpandEvent
 	providerEvents    map[connect.Id]*connect.ProviderEvent
@@ -746,3 +838,4 @@ func (self *WindowEvents) EvaluationFailedClientCount() int {
 	}
 	return count
 }
+*/

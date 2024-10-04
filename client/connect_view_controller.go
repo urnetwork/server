@@ -2,575 +2,776 @@ package client
 
 import (
 	"context"
-	// "fmt"
-	"slices"
-	"strings"
-	"sync"
+	"errors"
 
-	// "golang.org/x/mobile/gl"
+	// "fmt"
+	"math"
+	mathrand "math/rand"
+	"sync"
+	"time"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/connect"
 )
 
-var cvcLog = logFn("connect_view_controller")
+var connectVcLog = logFn("connect_view_controller")
 
-type ConnectionListener interface {
-	ConnectionChanged(location *ConnectLocation)
+type ConnectionStatus = string
+
+const (
+	Disconnected   ConnectionStatus = "DISCONNECTED"
+	Connecting     ConnectionStatus = "CONNECTING"
+	DestinationSet ConnectionStatus = "DESTINATION_SET"
+	Connected      ConnectionStatus = "CONNECTED"
+)
+
+type SelectedLocationListener interface {
+	SelectedLocationChanged(location *ConnectLocation)
 }
 
-type FilteredLocationsListener interface {
-	FilteredLocationsChanged(filteredLocations *ConnectLocationList)
+type ConnectionStatusListener interface {
+	ConnectionStatusChanged()
 }
 
-type LocationListener interface {
-	LocationChanged(location *ConnectLocation)
+// type ConnectGridListener interface {
+// 	ConnectGridPointChanged(index int32)
+// }
+
+type GridListener interface {
+	GridChanged()
 }
 
 type ConnectViewController struct {
-	// glViewController
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	device *BringYourDevice
 
 	stateLock sync.Mutex
 
-	activeLocation               *ConnectLocation
-	nextFilterSequenceNumber     int64
-	previousFilterSequenceNumber int64
+	// this is set when the client is connected
+	connected        bool
+	connectionStatus ConnectionStatus
+	selectedLocation *ConnectLocation
+	grid             *ConnectGrid
+	// providerGridPointList *ProviderGridPointList
 
-	connectionListeners       *connect.CallbackList[ConnectionListener]
-	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
+	selectedLocationListeners *connect.CallbackList[SelectedLocationListener]
+	connectionStatusListeners *connect.CallbackList[ConnectionStatusListener]
+	// connectGridListeners       *connect.CallbackList[ConnectGridListener]
+	gridListeners *connect.CallbackList[GridListener]
 }
 
 func newConnectViewController(ctx context.Context, device *BringYourDevice) *ConnectViewController {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	vc := &ConnectViewController{
-		// glViewController: *newGLViewController(),
 		ctx:    cancelCtx,
 		cancel: cancel,
 		device: device,
 
-		nextFilterSequenceNumber:     0,
-		previousFilterSequenceNumber: 0,
+		connected:        false,
+		connectionStatus: Disconnected,
+		selectedLocation: nil,
+		grid:             nil,
 
-		connectionListeners:       connect.NewCallbackList[ConnectionListener](),
-		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
+		selectedLocationListeners: connect.NewCallbackList[SelectedLocationListener](),
+		connectionStatusListeners: connect.NewCallbackList[ConnectionStatusListener](),
+		// connectGridListeners:       connect.NewCallbackList[ConnectGridListener](),
+		// windowSizeListeners:   connect.NewCallbackList[WindowSizeListener](),
+		gridListeners: connect.NewCallbackList[GridListener](),
 	}
-	// vc.drawController = vc
+	if location := device.GetConnectLocation(); location != nil {
+		vc.setConnected(true)
+		vc.setSelectedLocation(location)
+		vc.setConnectionStatus(DestinationSet)
+		vc.setGrid()
+	}
 	return vc
 }
 
-func (self *ConnectViewController) Start() {
-	// var activeLocation *ConnectLocation
-	// self.stateLock.Lock()
-	// activeLocation = self.activeLocation
-	// self.stateLock.Unlock()
+func (self *ConnectViewController) Start() {}
 
-	// self.connectionChanged(activeLocation, activeLocation != nil)
-
-	// TODO filtered results
-}
-
-func (self *ConnectViewController) Stop() {
-	// FIXME
-}
-
-func (self *ConnectViewController) GetActiveLocation() *ConnectLocation {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.activeLocation
-}
-
-func (self *ConnectViewController) AddConnectionListener(listener ConnectionListener) Sub {
-	callbackId := self.connectionListeners.Add(listener)
-	return newSub(func() {
-		self.connectionListeners.Remove(callbackId)
-	})
-}
-
-// `ConnectionListener`
-func (self *ConnectViewController) connectionChanged(location *ConnectLocation) {
-	for _, listener := range self.connectionListeners.Get() {
-		connect.HandleError(func() {
-			listener.ConnectionChanged(location)
-		})
-	}
-}
-
-func (self *ConnectViewController) AddFilteredLocationsListener(listener FilteredLocationsListener) Sub {
-	callbackId := self.filteredLocationListeners.Add(listener)
-	return newSub(func() {
-		self.filteredLocationListeners.Remove(callbackId)
-	})
-}
-
-// `FilteredLocationsListener`
-func (self *ConnectViewController) filteredLocationsChanged(filteredLocations *ConnectLocationList) {
-	for _, listener := range self.filteredLocationListeners.Get() {
-		connect.HandleError(func() {
-			listener.FilteredLocationsChanged(filteredLocations)
-		})
-	}
-}
-
-// FIXME ConnectWithSpecs(SpecList)
-
-func (self *ConnectViewController) Connect(location *ConnectLocation) {
-	// api call to get client ids, device.SETLOCATION
-	// call callback
-
-	// TODO store the connected locationId
-	// TODO reset clientIds
-
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.activeLocation = location
-	}()
-
-	if location.IsDevice() {
-		destinationIds := []Id{
-			*location.ConnectLocationId.ClientId,
-		}
-
-		specs := NewProviderSpecList()
-		for _, destinationId := range destinationIds {
-			specs.Add(&ProviderSpec{
-				ClientId: &destinationId,
-			})
-		}
-		self.device.SetDestination(specs, ProvideModePublic)
-		self.connectionChanged(location)
-	} else {
-		specs := NewProviderSpecList()
-		specs.Add(&ProviderSpec{
-			LocationId:      location.ConnectLocationId.LocationId,
-			LocationGroupId: location.ConnectLocationId.LocationGroupId,
-		})
-
-		self.device.SetDestination(specs, ProvideModePublic)
-		self.connectionChanged(location)
-	}
-}
-
-func (self *ConnectViewController) Shuffle() {
-	self.device.Shuffle()
-}
-
-func (self *ConnectViewController) Broaden() {
-	// FIXME
-	var upLocation *ConnectLocation
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		if self.activeLocation != nil {
-			if !self.activeLocation.IsGroup() {
-				// a location
-				switch self.activeLocation.LocationType {
-				case LocationTypeCity:
-					upLocation = self.activeLocation.ToRegion()
-				case LocationTypeRegion:
-					upLocation = self.activeLocation.ToCountry()
-					// TODO Mark each country with an upgroup
-					// case Country:
-					// 	upLocation = self.activeLocation.UpGroup()
-				}
-			}
-		}
-	}()
-
-	if upLocation != nil {
-		self.Connect(upLocation)
-	}
-}
-
-func (self *ConnectViewController) Reset() {
-	// self.device.client().Reset()
-
-	// todo how to reset?
-}
-
-func (self *ConnectViewController) Disconnect() {
-	self.device.RemoveDestination()
-
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.activeLocation = nil
-	}()
-
-	self.connectionChanged(nil)
-}
-
-func (self *ConnectViewController) FilterLocations(filter string) {
-	// api call, call callback
-	filter = strings.TrimSpace(filter)
-
-	cvcLog("FILTER LOCATIONS %s", filter)
-
-	var filterSequenceNumber int64
-	self.stateLock.Lock()
-	self.nextFilterSequenceNumber += 1
-	filterSequenceNumber = self.nextFilterSequenceNumber
-	self.stateLock.Unlock()
-
-	cvcLog("POST FILTER LOCATIONS %s", filter)
-
-	if filter == "" {
-		self.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
-			func(result *FindLocationsResult, err error) {
-				cvcLog("FIND LOCATIONS RESULT %s %s", result, err)
-				if err == nil {
-					var update bool
-					self.stateLock.Lock()
-					if self.previousFilterSequenceNumber < filterSequenceNumber {
-						self.previousFilterSequenceNumber = filterSequenceNumber
-						update = true
-					}
-					self.stateLock.Unlock()
-
-					if update {
-						self.setFilteredLocationsFromResult(result)
-					}
-				}
-			},
-		)))
-	} else {
-		findLocations := &FindLocationsArgs{
-			Query: filter,
-		}
-		self.device.GetApi().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
-			func(result *FindLocationsResult, err error) {
-				cvcLog("FIND LOCATIONS RESULT %s %s", result, err)
-				if err == nil {
-					var update bool
-					self.stateLock.Lock()
-					if self.previousFilterSequenceNumber < filterSequenceNumber {
-						self.previousFilterSequenceNumber = filterSequenceNumber
-						update = true
-					}
-					self.stateLock.Unlock()
-
-					if update {
-						self.setFilteredLocationsFromResult(result)
-					}
-				}
-			},
-		)))
-	}
-}
-
-func (self *ConnectViewController) setFilteredLocationsFromResult(result *FindLocationsResult) {
-	cvcLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
-
-	locations := []*ConnectLocation{}
-
-	for i := 0; i < result.Groups.Len(); i += 1 {
-		groupResult := result.Groups.Get(i)
-
-		location := &ConnectLocation{
-			ConnectLocationId: &ConnectLocationId{
-				LocationGroupId: groupResult.LocationGroupId,
-			},
-			Name:          groupResult.Name,
-			ProviderCount: int32(groupResult.ProviderCount),
-			Promoted:      groupResult.Promoted,
-			MatchDistance: int32(groupResult.MatchDistance),
-		}
-		locations = append(locations, location)
-	}
-
-	for i := 0; i < result.Locations.Len(); i += 1 {
-		locationResult := result.Locations.Get(i)
-
-		location := &ConnectLocation{
-			ConnectLocationId: &ConnectLocationId{
-				LocationId: locationResult.LocationId,
-			},
-			LocationType:      locationResult.LocationType,
-			Name:              locationResult.Name,
-			City:              locationResult.City,
-			Region:            locationResult.Region,
-			Country:           locationResult.Country,
-			CountryCode:       locationResult.CountryCode,
-			CityLocationId:    locationResult.CityLocationId,
-			RegionLocationId:  locationResult.RegionLocationId,
-			CountryLocationId: locationResult.CountryLocationId,
-			ProviderCount:     int32(locationResult.ProviderCount),
-			MatchDistance:     int32(locationResult.MatchDistance),
-		}
-		locations = append(locations, location)
-	}
-
-	for i := 0; i < result.Devices.Len(); i += 1 {
-		locationDeviceResult := result.Devices.Get(i)
-
-		location := &ConnectLocation{
-			ConnectLocationId: &ConnectLocationId{
-				ClientId: locationDeviceResult.ClientId,
-			},
-			Name: locationDeviceResult.DeviceName,
-		}
-		locations = append(locations, location)
-	}
-
-	slices.SortStableFunc(locations, cmpConnectLocationLayout)
-
-	exportedFilteredLocations := NewConnectLocationList()
-	exportedFilteredLocations.addAll(locations...)
-	self.filteredLocationsChanged(exportedFilteredLocations)
-}
-
-// GL
-
-// func (self *ConnectViewController) draw(g gl.Context) {
-// 	// cvcLog("draw")
-
-// 	g.ClearColor(self.bgRed, self.bgGreen, self.bgBlue, 1.0)
-// 	g.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-// }
-
-// func (self *ConnectViewController) drawLoopOpen() {
-// 	self.frameRate = 24
-// }
-
-// func (self *ConnectViewController) drawLoopClose() {
-// }
+func (self *ConnectViewController) Stop() {}
 
 func (self *ConnectViewController) Close() {
-	cvcLog("close")
-
+	connectVcLog("close")
 	self.cancel()
 }
 
-func cmpConnectLocationLayout(a *ConnectLocation, b *ConnectLocation) int {
-	// sort locations
-	// - devices
-	// - groups
-	// - promoted
-	// - provider count descending
-	// - country
-	// - region, location
-	// - name
+func (self *ConnectViewController) GetConnected() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connected
+}
 
-	if a == b {
-		return 0
-	}
+func (self *ConnectViewController) GetConnectionStatus() ConnectionStatus {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connectionStatus
+}
 
-	if (a.MatchDistance <= 1) != (b.MatchDistance <= 1) {
-		if a.MatchDistance <= 1 {
-			return -1
-		} else {
-			return 1
+func (self *ConnectViewController) setConnectionStatus(status ConnectionStatus) {
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.connectionStatus != status {
+			self.connectionStatus = status
+			changed = true
 		}
+	}()
+	if changed {
+		self.connectionStatusChanged()
 	}
+}
 
-	if a.IsDevice() != b.IsDevice() {
-		if a.IsDevice() {
-			return -1
-		} else {
-			return 1
-		}
+func (self *ConnectViewController) connectionStatusChanged() {
+	for _, listener := range self.connectionStatusListeners.Get() {
+		connect.HandleError(func() {
+			listener.ConnectionStatusChanged()
+		})
 	}
+}
 
-	if a.IsGroup() != b.IsGroup() {
-		if a.IsGroup() {
-			return -1
-		} else {
-			return 1
-		}
+func (self *ConnectViewController) AddConnectionStatusListener(listener ConnectionStatusListener) Sub {
+	callbackId := self.connectionStatusListeners.Add(listener)
+	return newSub(func() {
+		self.connectionStatusListeners.Remove(callbackId)
+	})
+}
+
+func (self *ConnectViewController) AddSelectedLocationListener(listener SelectedLocationListener) Sub {
+	callbackId := self.selectedLocationListeners.Add(listener)
+	return newSub(func() {
+		self.selectedLocationListeners.Remove(callbackId)
+	})
+}
+
+func (self *ConnectViewController) setSelectedLocation(location *ConnectLocation) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.selectedLocation = location
+	}()
+	self.selectedLocationChanged(location)
+}
+
+func (self *ConnectViewController) GetSelectedLocation() *ConnectLocation {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.selectedLocation
+}
+
+func (self *ConnectViewController) selectedLocationChanged(location *ConnectLocation) {
+	for _, listener := range self.selectedLocationListeners.Get() {
+		connect.HandleError(func() {
+			listener.SelectedLocationChanged(location)
+		})
 	}
+}
 
-	if a.IsGroup() {
-		if a.Promoted != b.Promoted {
-			if a.Promoted {
-				return -1
-			} else {
-				return 1
+func (self *ConnectViewController) AddGridListener(listener GridListener) Sub {
+	callbackId := self.gridListeners.Add(listener)
+	return newSub(func() {
+		self.gridListeners.Remove(callbackId)
+	})
+}
+
+func (self *ConnectViewController) gridChanged() {
+	for _, listener := range self.gridListeners.Get() {
+		connect.HandleError(func() {
+			listener.GridChanged()
+		})
+	}
+}
+
+// func (self *ConnectViewController) AddConnectGridListener(listener ConnectGridListener) Sub {
+// 	callbackId := self.connectGridListeners.Add(listener)
+// 	return newSub(func() {
+// 		self.connectGridListeners.Remove(callbackId)
+// 	})
+// }
+
+// func (self *ConnectViewController) connectGridPointChanged(index int32) {
+// 	for _, listener := range self.connectGridListeners.Get() {
+// 		connect.HandleError(func() {
+// 			listener.ConnectGridPointChanged(index)
+// 		})
+// 	}
+// }
+
+// func (self *ConnectViewController) AddWindowSizeListener(listener WindowSizeListener) Sub {
+// 	callbackId := self.windowSizeListeners.Add(listener)
+// 	return newSub(func() {
+// 		self.windowSizeListeners.Remove(callbackId)
+// 	})
+// }
+
+// func (self *ConnectViewController) windowSizeChanged() {
+// 	for _, listener := range self.windowSizeListeners.Get() {
+// 		connect.HandleError(func() {
+// 			listener.WindowSizeChanged()
+// 		})
+// 	}
+// }
+
+func (self *ConnectViewController) setConnected(connected bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	self.connected = connected
+}
+
+func (self *ConnectViewController) Connect(location *ConnectLocation) {
+	self.setConnected(true)
+
+	// enable provider
+	provideMode := ProvideModePublic
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
+	self.device.setProvideModeNoEvent(provideMode)
+
+	// persist the connection location for automatic reconnect
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(location)
+	self.device.SetConnectLocation(location)
+
+	self.setSelectedLocation(location)
+
+	self.setGrid()
+}
+
+func (self *ConnectViewController) ConnectBestAvailable() {
+	self.Connect(&ConnectLocation{
+		ConnectLocationId: &ConnectLocationId{
+			BestAvailable: true,
+		},
+	})
+}
+
+func (self *ConnectViewController) Disconnect() {
+	self.setConnected(false)
+
+	// disable provider
+	provideMode := ProvideModeNone
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)
+	self.device.setProvideModeNoEvent(provideMode)
+
+	self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetConnectLocation(nil)
+	self.device.SetConnectLocation(nil)
+
+	self.setGrid()
+}
+
+func (self *ConnectViewController) setGrid() {
+	var grid *ConnectGrid
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.connected {
+			if self.grid != nil {
+				self.grid.close()
 			}
+			grid = newConnectGridWithDefaults(self.ctx, self)
+			self.grid = grid
+			changed = true
+		} else if self.grid != nil {
+			self.grid.close()
+			self.grid = nil
+			changed = true
 		}
+	}()
 
-		// provider count descending
-		if a.ProviderCount != b.ProviderCount {
-			if a.ProviderCount < b.ProviderCount {
-				return 1
-			} else {
-				return -1
-			}
+	if !changed {
+		return
+	}
+
+	self.gridChanged()
+
+	if grid != nil {
+		self.setConnectionStatus(DestinationSet)
+
+		if windowMonitor := self.device.windowMonitor(); windowMonitor != nil {
+			grid.listenToWindow(windowMonitor)
 		}
-
-		return a.ConnectLocationId.LocationGroupId.Cmp(b.ConnectLocationId.LocationGroupId)
 	} else {
+		self.setConnectionStatus(Disconnected)
+	}
+}
 
-		if (a.LocationType == LocationTypeCountry) != (b.LocationType == LocationTypeCountry) {
-			if a.LocationType == LocationTypeCountry {
-				return -1
+func (self *ConnectViewController) GetGrid() *ConnectGrid {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.grid
+}
+
+type ProviderState = string
+
+const (
+	ProviderStateInEvaluation     ProviderState = "InEvaluation"
+	ProviderStateEvaluationFailed ProviderState = "EvaluationFailed"
+	ProviderStateNotAdded         ProviderState = "NotAdded"
+	ProviderStateAdded            ProviderState = "Added"
+	ProviderStateRemoved          ProviderState = "Removed"
+)
+
+func parseProviderState(state connect.ProviderState) (ProviderState, error) {
+	switch state {
+	case connect.ProviderStateInEvaluation:
+		return ProviderStateInEvaluation, nil
+	case connect.ProviderStateEvaluationFailed:
+		return ProviderStateEvaluationFailed, nil
+	case connect.ProviderStateNotAdded:
+		return ProviderStateNotAdded, nil
+	case connect.ProviderStateAdded:
+		return ProviderStateAdded, nil
+	case connect.ProviderStateRemoved:
+		return ProviderStateRemoved, nil
+	default:
+		return "", errors.New("invalid ProviderState")
+	}
+}
+
+type ProviderGridPoint struct {
+	// note gomobile does not support struct composition
+	X        int32
+	Y        int32
+	ClientId *Id
+	// EventTime *Time
+	State ProviderState
+	// the time when this point will be removed
+	// the ui can transition out based on this value
+	EndTime *Time
+	// wether the point is active for routing
+	Active bool
+}
+
+type gridPointCoord struct {
+	X int
+	Y int
+}
+type gridPoint struct {
+	gridPointCoord
+	Plottable bool
+	Occupied  bool
+}
+
+func defaultConnectGridSettings() *connectGridSettings {
+	return &connectGridSettings{
+		MinSideLength:  16,
+		ExpandFraction: 1.5,
+		RemoveTimeout:  8 * time.Second,
+	}
+}
+
+type connectGridSettings struct {
+	MinSideLength  int
+	ExpandFraction float32
+	RemoveTimeout  time.Duration
+}
+
+type ConnectGrid struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	connectViewController *ConnectViewController
+	settings              *connectGridSettings
+
+	providerGridPointsMonitor *connect.Monitor
+
+	stateLock sync.Mutex
+
+	windowTargetSize  int
+	windowCurrentSize int
+
+	windowSub func()
+
+	sideLength         int
+	gridPoints         map[gridPointCoord]*gridPoint
+	providerGridPoints map[connect.Id]*ProviderGridPoint
+}
+
+func newConnectGridWithDefaults(ctx context.Context, connectViewController *ConnectViewController) *ConnectGrid {
+	return newConnectGrid(ctx, connectViewController, defaultConnectGridSettings())
+}
+
+func newConnectGrid(ctx context.Context, connectViewController *ConnectViewController, settings *connectGridSettings) *ConnectGrid {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	providerGrid := &ConnectGrid{
+		ctx:                       cancelCtx,
+		cancel:                    cancel,
+		connectViewController:     connectViewController,
+		settings:                  settings,
+		providerGridPointsMonitor: connect.NewMonitor(),
+		windowTargetSize:          0,
+		windowCurrentSize:         0,
+		windowSub:                 nil,
+		sideLength:                0,
+		gridPoints:                map[gridPointCoord]*gridPoint{},
+		providerGridPoints:        map[connect.Id]*ProviderGridPoint{},
+	}
+	go providerGrid.run()
+	return providerGrid
+}
+
+func (self *ConnectGrid) GetWidth() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int32(self.sideLength)
+}
+
+func (self *ConnectGrid) GetHeight() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int32(self.sideLength)
+}
+
+func (self *ConnectGrid) GetWindowTargetSize() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int32(self.windowTargetSize)
+}
+
+func (self *ConnectGrid) GetWindowCurrentSize() int32 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return int32(self.windowCurrentSize)
+}
+
+func (self *ConnectGrid) GetProviderGridPointByClientId(clientId *Id) *ProviderGridPoint {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.providerGridPoints[clientId.toConnectId()]
+}
+
+func (self *ConnectGrid) GetProviderGridPointList() *ProviderGridPointList {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	providerGridPointList := NewProviderGridPointList()
+	for _, providerGridPoint := range self.providerGridPoints {
+		// make a copy
+		copyProviderGridPoint := *providerGridPoint
+		providerGridPointList.Add(&copyProviderGridPoint)
+	}
+	return providerGridPointList
+}
+
+// *important* do not call this while holding the view controller state lock
+// because this intialized with the current state, it will call back into the view controller
+func (self *ConnectGrid) listenToWindow(windowMonitor *connect.RemoteUserNatMultiClientMonitor) {
+	done := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		select {
+		case <-self.ctx.Done():
+			done = true
+			return
+		default:
+		}
+
+		if self.windowSub != nil {
+			self.windowSub()
+		}
+		self.windowSub = windowMonitor.AddMonitorEventCallback(self.windowMonitorEventCallback)
+	}()
+
+	if done {
+		return
+	}
+
+	// initialize with the current values
+	self.windowMonitorEventCallback(windowMonitor.Events())
+}
+
+func (self *ConnectGrid) close() {
+	self.cancel()
+
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.windowSub != nil {
+			self.windowSub()
+			self.windowSub = nil
+		}
+	}()
+}
+
+func (self *ConnectGrid) run() {
+	defer self.cancel()
+
+	for {
+		providerGridPointChanged := false
+		var notify chan struct{}
+		var minEndPoint *ProviderGridPoint
+		var timeout time.Duration
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			notify = self.providerGridPointsMonitor.NotifyChannel()
+			now := time.Now()
+			removedCount := 0
+			for clientId, point := range self.providerGridPoints {
+				if point.EndTime != nil {
+					if !now.Before(point.EndTime.toTime()) {
+						// remove
+						delete(self.providerGridPoints, clientId)
+						gridPointCoord := gridPointCoord{X: int(point.X), Y: int(point.Y)}
+						self.gridPoints[gridPointCoord].Occupied = false
+						providerGridPointChanged = true
+						removedCount += 1
+					} else if minEndPoint == nil || point.EndTime.toTime().Before(minEndPoint.EndTime.toTime()) {
+						minEndPoint = point
+					}
+				}
+			}
+			if minEndPoint != nil {
+				timeout = minEndPoint.EndTime.toTime().Sub(now)
+			}
+
+			if 0 < removedCount {
+				glog.Infof(
+					"[grid]%d->%d points=%d(-%d)\n",
+					self.windowCurrentSize,
+					self.windowTargetSize,
+					len(self.providerGridPoints),
+					removedCount,
+				)
+			}
+		}()
+
+		if providerGridPointChanged {
+			self.connectViewController.gridChanged()
+		}
+
+		if minEndPoint != nil {
+			// there is a next point to be removed after `timeout`
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-notify:
+			case <-time.After(timeout):
+			}
+		} else {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-notify:
+			}
+		}
+	}
+}
+
+// must be called with the state lock
+// create a new grid based on targetClientSize sets specific points as plottable or unplottable
+func (self *ConnectGrid) resize() {
+	targetClientSize := int(math.Ceil(float64(len(self.providerGridPoints)) * float64(self.settings.ExpandFraction)))
+
+	sideLength := max(
+		self.settings.MinSideLength,
+		// currently the size never contracts
+		self.sideLength,
+		int(math.Ceil(math.Sqrt(float64(targetClientSize)))),
+	)
+
+	gridPoints := map[gridPointCoord]*gridPoint{}
+	// merge the existing state
+	for x := range sideLength {
+		for y := range sideLength {
+			c := gridPointCoord{X: x, Y: y}
+			point, ok := self.gridPoints[c]
+			if ok {
+				// reset the plottable state, which will be set below to the new shape
+				point.Plottable = true
 			} else {
-				return 1
+				point = &gridPoint{
+					gridPointCoord: c,
+					Plottable:      true,
+					Occupied:       false,
+				}
+				gridPoints[c] = point
+			}
+		}
+	}
+
+	// in a equal corner triangle, x+y<s
+	// cut out 1/3 corner triangles
+	for x := range sideLength / 3 {
+		for y := range sideLength / 3 {
+			if x+y < sideLength/3 {
+				gridPoints[gridPointCoord{X: x, Y: y}].Plottable = false
+
+				// flip x
+				gridPoints[gridPointCoord{X: sideLength - 1 - x, Y: y}].Plottable = false
+
+				// flip y
+				gridPoints[gridPointCoord{X: x, Y: sideLength - 1 - y}].Plottable = false
+
+				// flip x and y
+				gridPoints[gridPointCoord{X: sideLength - 1 - x, Y: sideLength - 1 - y}].Plottable = false
+			}
+		}
+	}
+
+	self.sideLength = sideLength
+	self.gridPoints = gridPoints
+}
+
+// connect.MonitorEventFunction
+func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.WindowExpandEvent, providerEvents map[connect.Id]*connect.ProviderEvent) {
+	done := false
+	windowSizeChanged := false
+	providerGridPointChanged := false
+	var connectionStatus ConnectionStatus
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		select {
+		case <-self.ctx.Done():
+			done = true
+			return
+		default:
+		}
+
+		// eventTime := time.Now()
+
+		for clientId, providerEvent := range providerEvents {
+			providerState, err := parseProviderState(providerEvent.State)
+			if err != nil {
+				glog.Errorf("[grid]could not parse provider event state: %s", string(providerEvent.State))
+				continue
+			}
+
+			point, ok := self.providerGridPoints[clientId]
+
+			if ok {
+				if point.State != providerState {
+					point.State = providerState
+					var endTime *Time
+					if providerEvent.State.IsTerminal() {
+						// schedule the point to be removed
+						// note this resets the end time if already set
+						endTime = newTime(time.Now().Add(self.settings.RemoveTimeout))
+					}
+					point.EndTime = endTime
+					point.Active = providerEvent.State.IsActive()
+					providerGridPointChanged = true
+				}
+				// point.EventTime = newTime(eventTime)
+			} else {
+				// insert a new provider point
+
+				findUnuccupiedGridPoint := func() *gridPoint {
+					// try random sampling, then use an exhaustive search
+					if self.sideLength == 0 {
+						return nil
+					}
+
+					for range 8 {
+						c := gridPointCoord{
+							X: mathrand.Intn(self.sideLength),
+							Y: mathrand.Intn(self.sideLength),
+						}
+						if gridPoint, ok := self.gridPoints[c]; ok && gridPoint.Plottable && !gridPoint.Occupied {
+							return gridPoint
+						}
+					}
+
+					unoccupiedGridPoints := []*gridPoint{}
+					for _, gridPoint := range self.gridPoints {
+						if gridPoint.Plottable && !gridPoint.Occupied {
+							unoccupiedGridPoints = append(unoccupiedGridPoints, gridPoint)
+						}
+					}
+					if len(unoccupiedGridPoints) == 0 {
+						return nil
+					}
+					return unoccupiedGridPoints[mathrand.Intn(len(unoccupiedGridPoints))]
+				}
+
+				unoccupiedGridPoint := findUnuccupiedGridPoint()
+				if unoccupiedGridPoint == nil {
+					self.resize()
+					unoccupiedGridPoint = findUnuccupiedGridPoint()
+				}
+				if unoccupiedGridPoint == nil {
+					// resize is broken
+					// TODO log
+					continue
+				}
+
+				unoccupiedGridPoint.Occupied = true
+				var endTime *Time
+				if providerEvent.State.IsTerminal() {
+					// schedule the point to be removed
+					endTime = newTime(time.Now().Add(self.settings.RemoveTimeout))
+				}
+				point = &ProviderGridPoint{
+					X:        int32(unoccupiedGridPoint.X),
+					Y:        int32(unoccupiedGridPoint.Y),
+					ClientId: newId(clientId),
+					State:    providerState,
+					// EventTime: newTime(eventTime),
+					EndTime: endTime,
+					Active:  providerEvent.State.IsActive(),
+				}
+				self.providerGridPoints[clientId] = point
+				providerGridPointChanged = true
 			}
 		}
 
-		// provider count descending
-		if a.ProviderCount != b.ProviderCount {
-			if a.ProviderCount < b.ProviderCount {
-				return 1
-			} else {
-				return -1
+		// compute the window size here from the number of added providers
+		windowCurrentSize := 0
+		for _, point := range self.providerGridPoints {
+			if point.Active {
+				windowCurrentSize += 1
 			}
 		}
 
-		if (a.LocationType == LocationTypeRegion) != (b.LocationType == LocationTypeRegion) {
-			if a.LocationType == LocationTypeRegion {
-				return -1
-			} else {
-				return 1
-			}
+		if self.windowCurrentSize != windowCurrentSize || self.windowTargetSize != windowExpandEvent.TargetSize {
+			self.windowCurrentSize = windowCurrentSize
+			self.windowTargetSize = windowExpandEvent.TargetSize
+			windowSizeChanged = true
 		}
 
-		if (a.LocationType == LocationTypeCity) != (b.LocationType == LocationTypeCity) {
-			if a.LocationType == LocationTypeCity {
-				return -1
-			} else {
-				return 1
-			}
+		// note the callback is only active while the device is connected
+		if windowExpandEvent.MinSatisfied {
+			connectionStatus = Connected
+		} else {
+			connectionStatus = Connecting
 		}
 
-		if a.Name != b.Name {
-			if a.Name < b.Name {
-				return -1
-			} else {
-				return 1
-			}
-		}
+		glog.Infof(
+			"[grid]%d->%d(%t) points=%d %s (w=%t, p=%t)\n",
+			self.windowCurrentSize,
+			self.windowTargetSize,
+			windowExpandEvent.MinSatisfied,
+			len(self.providerGridPoints),
+			connectionStatus,
+			windowSizeChanged,
+			providerGridPointChanged,
+		)
+	}()
 
-		return a.ConnectLocationId.Cmp(b.ConnectLocationId)
-	}
-}
-
-// merged location and location group
-type ConnectLocation struct {
-	ConnectLocationId *ConnectLocationId `json:"connect_location_id,omitempty"`
-	Name              string             `json:"name,omitempty"`
-
-	ProviderCount int32 `json:"provider_count,omitempty"`
-	Promoted      bool  `json:"promoted,omitempty"`
-	MatchDistance int32 `json:"match_distance,omitempty"`
-
-	LocationType LocationType `json:"location_type,omitempty"`
-
-	City        string `json:"city,omitempty"`
-	Region      string `json:"region,omitempty"`
-	Country     string `json:"country,omitempty"`
-	CountryCode string `json:"country_code,omitempty"`
-
-	CityLocationId    *Id `json:"city_location_id,omitempty"`
-	RegionLocationId  *Id `json:"region_location_id,omitempty"`
-	CountryLocationId *Id `json:"country_location_id,omitempty"`
-}
-
-func (self *ConnectLocation) IsGroup() bool {
-	return self.ConnectLocationId.IsGroup()
-}
-
-func (self *ConnectLocation) IsDevice() bool {
-	return self.ConnectLocationId.IsDevice()
-}
-
-func (self *ConnectLocation) ToRegion() *ConnectLocation {
-	return &ConnectLocation{
-		ConnectLocationId: self.ConnectLocationId,
-		Name:              self.Region,
-
-		ProviderCount: self.ProviderCount,
-		Promoted:      false,
-		MatchDistance: 0,
-
-		LocationType: LocationTypeRegion,
-
-		City:        "",
-		Region:      self.Region,
-		Country:     self.Country,
-		CountryCode: self.CountryCode,
-
-		CityLocationId:    nil,
-		RegionLocationId:  self.RegionLocationId,
-		CountryLocationId: self.CountryLocationId,
-	}
-}
-
-func (self *ConnectLocation) ToCountry() *ConnectLocation {
-	return &ConnectLocation{
-		ConnectLocationId: self.ConnectLocationId,
-		Name:              self.Country,
-
-		ProviderCount: self.ProviderCount,
-		Promoted:      false,
-		MatchDistance: 0,
-
-		LocationType: LocationTypeCountry,
-
-		City:        "",
-		Region:      "",
-		Country:     self.Country,
-		CountryCode: self.CountryCode,
-
-		CityLocationId:    nil,
-		RegionLocationId:  nil,
-		CountryLocationId: self.CountryLocationId,
-	}
-}
-
-// merged location and location group
-type ConnectLocationId struct {
-	// if set, the location is a direct connection to another device
-	ClientId        *Id `json:"client_id,omitempty"`
-	LocationId      *Id `json:"location_id,omitempty"`
-	LocationGroupId *Id `json:"location_group_id,omitempty"`
-}
-
-func (self *ConnectLocationId) IsGroup() bool {
-	return self.LocationGroupId != nil
-}
-
-func (self *ConnectLocationId) IsDevice() bool {
-	return self.ClientId != nil
-}
-
-func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
-	// - direct
-	// - group
-	if self.ClientId != nil && b.ClientId != nil {
-		if c := self.ClientId.Cmp(b.ClientId); c != 0 {
-			return c
-		}
-	} else if self.ClientId != nil {
-		return -1
-	} else if b.ClientId != nil {
-		return 1
+	if done {
+		return
 	}
 
-	if self.LocationGroupId != nil && b.LocationGroupId != nil {
-		if c := self.LocationGroupId.Cmp(b.LocationGroupId); c != 0 {
-			return c
-		}
-	} else if self.LocationGroupId != nil {
-		return -1
-	} else if b.LocationGroupId != nil {
-		return 1
+	if providerGridPointChanged {
+		self.providerGridPointsMonitor.NotifyAll()
 	}
-
-	if self.LocationId != nil && b.LocationId != nil {
-		if c := self.LocationId.Cmp(b.LocationId); c != 0 {
-			return c
-		}
-	} else if self.LocationId != nil {
-		return -1
-	} else if b.LocationId != nil {
-		return 1
+	if windowSizeChanged || providerGridPointChanged {
+		self.connectViewController.gridChanged()
 	}
-
-	return 0
+	self.connectViewController.setConnectionStatus(connectionStatus)
 }
