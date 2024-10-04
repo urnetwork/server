@@ -7,7 +7,8 @@
     "netstack",
     "pterm",
     "rerr",
-    "resty"
+    "resty",
+    "tcplogger"
   ],
   "go.testOnSave": false,
 }

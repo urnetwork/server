@@ -18,7 +18,22 @@ func CreateProviderClient(ctx context.Context, apiURL, connectURL, byClientJwt s
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
 
 	clientOob := connect.NewApiOutOfBandControl(ctx, clientStrategy, byClientJwt, apiURL)
-	connectClient := connect.NewClientWithDefaults(ctx, *clientId, clientOob)
+	settings := connect.DefaultClientSettings()
+
+	// settings.SendBufferSettings.SequenceBufferSize = 0
+	// settings.SendBufferSettings.AckBufferSize = 0
+	// settings.SendBufferSettings.AckTimeout = 90 * time.Second
+	// settings.SendBufferSettings.IdleTimeout = 180 * time.Second
+	// settings.ReceiveBufferSettings.SequenceBufferSize = 0
+	// settings.ReceiveBufferSettings.GapTimeout = 90 * time.Second
+	// settings.ReceiveBufferSettings.IdleTimeout = 180 * time.Second
+
+	connectClient := connect.NewClient(
+		ctx,
+		*clientId,
+		clientOob,
+		settings,
+	)
 
 	instanceId := connect.NewId()
 

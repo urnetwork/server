@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,6 +28,12 @@ func main() {
 	app := &cli.App{
 		Name: "measure-throughput",
 		Action: func(c *cli.Context) (err error) {
+
+			// flag.Set("logtostderr", "false")    // Log to standard error instead of files
+			// flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
+			// flag.Set("v", "2")                  // Set the verbosity level to 1
+
+			flag.Parse()
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGPIPE)
 			defer cancel()
@@ -66,12 +73,6 @@ func main() {
 					io.Copy(realStderr, stderr)
 				}
 			}()
-
-			flag.Set("logtostderr", "false")    // Log to standard error instead of files
-			flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
-			flag.Set("v", "0")                  // Set the verbosity level to 1
-
-			flag.Parse()
 
 			// defer func() {
 			// 	os.RemoveAll(vaultDir)
@@ -151,7 +152,15 @@ func main() {
 			servicesGroup, completeRunCtx := errgroup.WithContext(ctx)
 
 			servicesGroup.Go(func() (err error) {
-				err = datasource.Run(completeRunCtx, ":15080", pw, 20*1024, time.Second*5)
+				err = datasource.Run(completeRunCtx, ":15080", pw, 512*1024, time.Second*60)
+				if err != nil {
+					return fmt.Errorf("failed to run API: %w", err)
+				}
+				return nil
+			})
+
+			servicesGroup.Go(func() (err error) {
+				err = datasource.RunSink(completeRunCtx, ":15081", pw)
 				if err != nil {
 					return fmt.Errorf("failed to run API: %w", err)
 				}
@@ -175,7 +184,15 @@ func main() {
 			})
 
 			servicesGroup.Go(func() (err error) {
-				err = runGoMainProcess(completeRunCtx, "Connect", pw, filepath.Join(myMainDir, "..", "connect"), vaultDir, "-p", "7070")
+				err = runGoMainProcess(
+					completeRunCtx,
+					"Connect",
+					pw,
+					filepath.Join(myMainDir, "..", "connect"),
+					vaultDir,
+					"-p",
+					"7070",
+				)
 				if err != nil {
 					return fmt.Errorf("failed to run API: %w", err)
 				}
@@ -238,24 +255,38 @@ func main() {
 
 			hc := http.Client{
 				Transport: clientDev.Transport(),
-				Timeout:   time.Second * 5,
+				Timeout:   time.Second * 8,
 			}
 
-			// addrs, err := net.InterfaceAddrs()
-			// if err != nil {
-			// 	return fmt.Errorf("failed to get interface addresses: %w", err)
-			// }
+			addrs, err := net.InterfaceAddrs()
+			if err != nil {
+				return fmt.Errorf("failed to get interface addresses: %w", err)
+			}
 
-			// for _, a := range addrs {
-			// 	ipNet, ok := a.(*net.IPNet)
-			// 	if !ok {
-			// 		continue
-			// 	}
-			// 	fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback())
-			// }
+			nonLocalAddrs := []net.IP{}
+
+			for _, a := range addrs {
+				ipNet, ok := a.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				responds := datasource.PingPort(completeRunCtx, ipNet.IP, 15081)
+				fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback(), responds)
+				if !ipNet.IP.IsLoopback() && responds {
+					nonLocalAddrs = append(nonLocalAddrs, ipNet.IP)
+				}
+			}
+
+			if len(nonLocalAddrs) == 0 {
+				return fmt.Errorf("no non-local addresses found that respond on port 15081")
+			}
+
+			localAddress := nonLocalAddrs[0]
+
+			pw.Log("using address %s", localAddress)
 
 			{
-				req, err := http.NewRequestWithContext(tctx, http.MethodGet, "http://192.168.178.89:8080", nil)
+				req, err := http.NewRequestWithContext(tctx, http.MethodGet, fmt.Sprintf("http://%s:8080", localAddress), nil)
 				if err != nil {
 					return fmt.Errorf("failed to create request: %w", err)
 				}
@@ -276,12 +307,12 @@ func main() {
 
 			}
 
-			conn, err := clientDev.DialContext(completeRunCtx, "tcp", "192.168.178.89:15080")
+			conn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15080", localAddress))
 			if err != nil {
 				return fmt.Errorf("failed to dial: %w", err)
 			}
 
-			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*5)
+			bandwidth, err := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*40)
 			if err != nil {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
 			}

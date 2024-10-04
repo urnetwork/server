@@ -11,6 +11,7 @@ import (
 	"bringyor.com/measure-throughput/bwclient"
 	"bringyor.com/measure-throughput/clientdevice/netstack"
 	"bringyor.com/measure-throughput/jwtutil"
+	"bringyor.com/measure-throughput/tcplogger"
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
 )
@@ -22,7 +23,7 @@ type ClientDevice struct {
 
 var dropProbability = 0.00
 
-var packetDelay = time.Millisecond * 0
+var packetDelay = time.Millisecond * 10
 
 func Start(
 	ctx context.Context,
@@ -96,6 +97,11 @@ func Start(
 		return nil, fmt.Errorf("create device client failed: %w", err)
 	}
 
+	tl, err := tcplogger.NewLogger("/tmp/client-remote-nat.csv")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tcp logger: %w", err)
+	}
+
 	nc, err := connect.NewRemoteUserNatClient(
 		cl,
 		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
@@ -104,13 +110,15 @@ func Start(
 				return
 			}
 
-			// go func() {
-			time.Sleep(packetDelay)
+			go func() {
+				time.Sleep(packetDelay)
 
-			_, err := dev.Write(packet)
-			if err != nil {
-				// fmt.Println("packet write error:", err)
-			}
+				tl.Log(packet)
+				_, err := dev.Write(packet)
+				if err != nil {
+					// fmt.Println("packet write error:", err)
+				}
+			}()
 		},
 		[]connect.MultiHopId{
 			connect.RequireMultiHopId(providerID),
@@ -177,21 +185,23 @@ func Start(
 			// 	continue
 			// }
 
-			// go func() {
+			go func() {
 
-			// time.Sleep(packetDelay)
+				time.Sleep(packetDelay)
 
-			sent := nc.SendPacket(
-				source,
-				protocol.ProvideMode_Network,
-				packet,
-				time.Second*15,
-			)
+				tl.Log(packet)
 
-			if !sent {
-				fmt.Println("packet not sent")
-			}
-			// }()
+				_ = nc.SendPacket(
+					source,
+					protocol.ProvideMode_Network,
+					packet,
+					time.Second*15,
+				)
+
+				// if !sent {
+				// 	fmt.Println("packet not sent")
+				// }
+			}()
 		}
 		cl.Close()
 	}()
