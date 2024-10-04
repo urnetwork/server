@@ -499,9 +499,13 @@ func (vc *WalletViewController) fetchPayments() {
 
 			payouts := []*AccountPayment{}
 
-			for i := 0; i < results.AccountPayments.Len(); i += 1 {
-				accountPayment := results.AccountPayments.Get(i)
-				payouts = append(payouts, accountPayment)
+			// todo - why is results.AccountPayments nil and not an empty array?
+			if results != nil && results.AccountPayments != nil {
+
+				for i := 0; i < results.AccountPayments.Len(); i += 1 {
+					accountPayment := results.AccountPayments.Get(i)
+					payouts = append(payouts, accountPayment)
+				}
 			}
 
 			vc.setAccountPayments(payouts)
