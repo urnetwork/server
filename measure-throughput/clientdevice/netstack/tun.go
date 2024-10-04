@@ -82,13 +82,13 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (Device, *Ne
 		mtu:                 mtu,
 		registeredAddresses: make(map[netip.Addr]bool),
 	}
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
-	}
+	// sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+	// tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
+	// if tcpipErr != nil {
+	// 	return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	// }
 	dev.ep.AddNotify(dev)
-	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
+	tcpipErr := dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}

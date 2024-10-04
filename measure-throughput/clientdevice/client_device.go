@@ -24,7 +24,7 @@ type ClientDevice struct {
 
 var dropProbability = 0.00
 
-var packetDelay = time.Millisecond * 10
+var packetDelay = time.Millisecond * 50
 
 func Start(
 	ctx context.Context,
