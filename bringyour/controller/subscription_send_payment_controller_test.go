@@ -89,7 +89,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
 
-		paymentPlan := model.PlanPayments(ctx)
+		paymentPlan, err := model.PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
@@ -117,7 +118,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		contractIds := model.GetOpenContractIds(ctx, sourceId, destinationId)
 		assert.Equal(t, len(contractIds), 0)
 
-		paymentPlan = model.PlanPayments(ctx)
+		paymentPlan, err = model.PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		// these should hit -> default
@@ -126,9 +128,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		for _, payment := range paymentPlan.WalletPayments {
 
 			// initiate payment
-			paymentResult, err := ProviderPayout(payment, destinationSession)
+			complete, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
-			assert.Equal(t, paymentResult.Complete, false)
+			assert.Equal(t, complete, false)
 
 			// fetch the payment record which should have some updated fields
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
@@ -166,9 +168,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// coinbase api will return a pending status
 		// should return that payment is incomplete
 		for _, payment := range pendingPayments {
-			paymentResult, err := ProviderPayout(payment, destinationSession)
+			complete, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
-			assert.Equal(t, paymentResult.Complete, false)
+			assert.Equal(t, complete, false)
 
 			// account balance should not yet be updated
 			accountBalance := model.GetAccountBalance(destinationSession)
@@ -203,9 +205,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// these should hit completed
 		for _, payment := range pendingPayments {
 
-			paymentResult, err := ProviderPayout(payment, destinationSession)
+			complete, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
-			assert.Equal(t, paymentResult.Complete, true)
+			assert.Equal(t, complete, true)
 
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)

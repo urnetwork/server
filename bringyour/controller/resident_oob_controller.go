@@ -10,6 +10,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	// "github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
@@ -168,7 +170,7 @@ func CreateContract(
 	clientId bringyour.Id,
 	createContract *protocol.CreateContract,
 ) ([]*protocol.Frame, error) {
-	bringyour.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
+	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
 
 	destinationId := bringyour.RequireIdFromBytes(createContract.DestinationId)
 	var provideMode model.ProvideMode
@@ -182,7 +184,7 @@ func CreateContract(
 		provideRelationship := GetProvideRelationship(ctx, clientId, destinationId)
 
 		if provideModes := GetProvideModes(ctx, destinationId); !provideModes[provideRelationship] {
-			bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION (%s->%s)\n", clientId.String(), destinationId.String())
+			// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION (%s->%s)\n", clientId.String(), destinationId.String())
 			contractError := protocol.ContractError_NoPermission
 			result := &protocol.CreateContractResult{
 				Error: &contractError,
@@ -197,7 +199,7 @@ func CreateContract(
 
 	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
 	if err != nil {
-		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
+		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
 		contractError := protocol.ContractError_NoPermission
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -207,11 +209,11 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
-	contractId, transferByteCount, err := nextContract(ctx, clientId, createContract, provideMode)
-	bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
+	contractId, transferByteCount, priority, err := nextContract(ctx, clientId, createContract, provideMode)
+	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
-		bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
+		// bringyour.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
 		contractError := protocol.ContractError_InsufficientBalance
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -226,6 +228,7 @@ func CreateContract(
 		TransferByteCount: uint64(transferByteCount),
 		SourceId:          clientId.Bytes(),
 		DestinationId:     destinationId.Bytes(),
+		Priority:          &priority,
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
 
@@ -241,7 +244,7 @@ func CreateContract(
 	}
 	frame := connect.RequireToFrame(result)
 	// self.client.Send(frame, connect.Id(self.clientId), nil)
-	bringyour.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
+	// bringyour.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
 	return []*protocol.Frame{frame}, nil
 }
 
@@ -250,7 +253,7 @@ func nextContract(
 	clientId bringyour.Id,
 	createContract *protocol.CreateContract,
 	provideMode model.ProvideMode,
-) (bringyour.Id, model.ByteCount, error) {
+) (bringyour.Id, model.ByteCount, model.Priority, error) {
 	destinationId := bringyour.Id(createContract.DestinationId)
 
 	// look for existing open contracts that the requestor does not have
@@ -260,15 +263,15 @@ func nextContract(
 			usedContractIds[contractId] = true
 		}
 	}
-	contractIdTransferByteCounts := model.GetOpenTransferEscrowsOrderedByCreateTime(
+	escrows := model.GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 		ctx,
 		clientId,
 		destinationId,
 		model.ByteCount(createContract.TransferByteCount),
 	)
-	for contractId, transferByteCount := range contractIdTransferByteCounts {
-		if !usedContractIds[contractId] {
-			return contractId, transferByteCount, nil
+	for _, escrow := range escrows {
+		if !usedContractIds[escrow.ContractId] {
+			return escrow.ContractId, escrow.TransferByteCount, escrow.Priority, nil
 		}
 	}
 
@@ -291,7 +294,7 @@ func newContract(
 	companionContract bool,
 	transferByteCount model.ByteCount,
 	provideMode model.ProvideMode,
-) (contractId bringyour.Id, contractTransferByteCount model.ByteCount, returnErr error) {
+) (contractId bringyour.Id, contractTransferByteCount model.ByteCount, priority model.Priority, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
 	if err != nil {
 		// the source is not a real client
@@ -320,6 +323,7 @@ func newContract(
 			returnErr = err
 			return
 		}
+		priority = model.TrustedPriority
 	} else if companionContract {
 		escrow, err := model.CreateCompanionTransferEscrow(
 			ctx,
@@ -335,6 +339,7 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		priority = escrow.Priority
 	} else {
 		escrow, err := model.CreateTransferEscrow(
 			ctx,
@@ -349,6 +354,7 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		priority = escrow.Priority
 	}
 
 	return

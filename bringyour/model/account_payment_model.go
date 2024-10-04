@@ -15,12 +15,20 @@ import (
 )
 
 type SubsidyConfig struct {
-	Days                           int       `yaml:"days"`
-	MinDaysFraction                float64   `yaml:"min_days_fraction"`
-	UsdPerActiveUser               float64   `yaml:"usd_per_active_user"`
-	SubscriptionNetRevenueFraction float64   `yaml:"subscription_net_revenue_fraction"`
-	MinPayoutUsd                   float64   `yaml:"min_payout_usd"`
-	ActiveUserByteCountThreshold   ByteCount `yaml:"active_user_byte_count_threshold"`
+	Days                                      float64 `yaml:"days"`
+	MinDaysPerPayout                          float64 `yaml:"min_days_per_payout"`
+	UsdPerActiveUser                          float64 `yaml:"usd_per_active_user"`
+	SubscriptionNetRevenueFraction            float64 `yaml:"subscription_net_revenue_fraction"`
+	MinPayoutUsd                              float64 `yaml:"min_payout_usd"`
+	ActiveUserByteCountThresholdHumanReadable string  `yaml:"active_user_byte_count_threshold"`
+}
+
+func (self *SubsidyConfig) ActiveUserByteCountThreshold() ByteCount {
+	byteCount, err := ParseByteCount(self.ActiveUserByteCountThresholdHumanReadable)
+	if err != nil {
+		panic(err)
+	}
+	return byteCount
 }
 
 var envSubsidyConfig = sync.OnceValue(func() *SubsidyConfig {
@@ -543,7 +551,7 @@ func planSubsidyPaymentInTx(
 			payeeNetPayoutByteCountUnpaid += sweep.netPayoutByteCountUnpaid
 		}
 
-		if subsidyConfig.ActiveUserByteCountThreshold <= payeeNetPayoutByteCountPaid+payeeNetPayoutByteCountUnpaid {
+		if subsidyConfig.ActiveUserByteCountThreshold() <= payeeNetPayoutByteCountPaid+payeeNetPayoutByteCountUnpaid {
 			activeUserCount += 1
 		}
 		if 0 < payeeNetPayoutByteCountPaid {
@@ -623,6 +631,11 @@ func planSubsidyPaymentInTx(
 		return
 	}
 
+	if subsidyEndTime.Sub(subsidyStartTime)/time.Minute < time.Duration(subsidyConfig.MinDaysPerPayout*float64(24*time.Hour/time.Minute)) {
+		// no subsidy
+		return
+	}
+
 	subsidyPayoutUsd := max(
 		subsidyConfig.MinPayoutUsd,
 		max(
@@ -633,11 +646,6 @@ func planSubsidyPaymentInTx(
 	// the fraction of a `days` for this subsidy payout
 	subsidyScale := float64(subsidyEndTime.Sub(subsidyStartTime)/time.Minute) / float64(time.Duration(subsidyConfig.Days)*24*time.Hour/time.Minute)
 	netPayout := UsdToNanoCents(subsidyScale * subsidyPayoutUsd)
-
-	if subsidyScale <= subsidyConfig.MinDaysFraction {
-		// no subsidy
-		return
-	}
 
 	for _, payoutNetworkSweeps := range payeePayoutNetworkSweeps {
 		netPayeePayoutByteCountPaid := ByteCount(0)

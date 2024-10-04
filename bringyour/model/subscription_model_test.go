@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/session"
@@ -226,7 +228,7 @@ func TestEscrow(t *testing.T) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			if err != nil && 1024 < usedTransferByteCount {
 				usedTransferByteCount = usedTransferByteCount / 1024
-				bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferByteCount)
+				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				continue
 			}
 			if netTransferByteCount <= paidByteCount {
@@ -478,7 +480,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			transferEscrow, err := CreateCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount, 1*time.Hour)
 			if err != nil && 1024 < usedTransferByteCount {
 				usedTransferByteCount = usedTransferByteCount / 1024
-				bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferByteCount)
+				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false)
 				CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false)
 				continue
@@ -666,14 +668,13 @@ func TestInitialBalance(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 
 			transferBalances := GetActiveTransferBalances(ctx, networkId)
 			assert.Equal(t, 1, len(transferBalances))
@@ -707,14 +708,13 @@ func TestClosePartialContract(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -832,14 +832,13 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -938,14 +937,13 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -1068,14 +1066,13 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {

@@ -3,6 +3,8 @@ package bringyour
 import (
 	"context"
 	"fmt"
+
+	"github.com/golang/glog"
 )
 
 /*
@@ -89,7 +91,7 @@ func ApplyDbMigrations(ctx context.Context) {
 				defer func() {
 					if err := recover(); err != nil {
 						// print the sql for debugging
-						Logger().Printf("%s\n", v.sql)
+						glog.Infof("[migrate][%d/%d]%s\n", i, len(migrations), v.sql)
 						panic(err)
 					}
 				}()
@@ -614,6 +616,8 @@ var migrations = []any{
         )
     `),
 
+	// ADDED subsidy_net_revenue_nano_cents
+	// ADDED paid
 	// net_revenue_nano_cents is how much was received for this balance (revenue - intermediary fees)
 	newSqlMigration(`
         CREATE TABLE transfer_balance (
@@ -643,6 +647,7 @@ var migrations = []any{
 	// `),
 
 	// ADDED companion_contract_id
+	// ADDED priority
 	newSqlMigration(`
         CREATE TABLE transfer_contract (
             contract_id uuid NOT NULL,
@@ -1254,13 +1259,13 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE pending_task (
             task_id uuid NOT NULL,
-            function_name VARCHAR(1024) NOT NULL,
+            function_name varchar(1024) NOT NULL,
             args_json TEXT NOT NULL,
-            client_address VARCHAR(128) NOT NULL,
+            client_address varchar(128) NOT NULL,
             client_by_jwt_json TEXT NULL,
             run_at timestamp NOT NULL,
             run_at_block bigint GENERATED ALWAYS AS (extract(epoch from run_at) / 300) STORED,
-            run_once_key VARCHAR(1024) NULL,
+            run_once_key varchar(1024) NULL,
             run_priority integer NOT NULL,
             run_max_time_seconds integer NOT NULL,
 
@@ -1287,12 +1292,12 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE finished_task (
             task_id uuid NOT NULL,
-            function_name VARCHAR(1024) NOT NULL,
+            function_name varchar(1024) NOT NULL,
             args_json TEXT NOT NULL,
-            client_address VARCHAR(128) NOT NULL,
+            client_address varchar(128) NOT NULL,
             client_by_jwt_json TEXT NULL,
             run_at timestamp NOT NULL,
-            run_once_key VARCHAR(1024) NULL,
+            run_once_key varchar(1024) NULL,
             run_priority integer NOT NULL,
             run_max_time_seconds integer NOT NULL,
 
@@ -1346,7 +1351,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        ALTER TABLE transfer_balance ADD COLUMN purchase_token VARCHAR(1024) NULL
+        ALTER TABLE transfer_balance ADD COLUMN purchase_token varchar(1024) NULL
     `),
 
 	newSqlMigration(`
@@ -1552,5 +1557,22 @@ var migrations = []any{
 
 	newSqlMigration(`
         CREATE INDEX subsidy_payment_end_time_start_time ON subsidy_payment (end_time, start_time)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE transfer_contract ADD priority int NOT NULL DEFAULT 100
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE subscription_renewal (
+            network_id uuid NOT NULL,
+            subscription_type varchar(32) NOT NULL,
+            start_time timestamp NOT NULL,
+            end_time timestamp NOT NULL,
+            net_revenue_nano_cents bigint NOT NULL,
+            purchase_token varchar(1024) NULL,
+
+            PRIMARY KEY (network_id, subscription_type, end_time, start_time)
+        )
     `),
 }

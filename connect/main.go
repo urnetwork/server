@@ -10,6 +10,8 @@ import (
 
 	"github.com/docopt/docopt-go"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/router"
@@ -70,8 +72,8 @@ Options:
 
 	port, _ := opts.Int("--port")
 
-	bringyour.Logger().Printf(
-		"Serving %s %s on *:%d\n",
+	glog.Infof(
+		"[connect]serving %s %s on *:%d\n",
 		bringyour.RequireEnv(),
 		bringyour.RequireVersion(),
 		port,
@@ -79,6 +81,6 @@ Options:
 
 	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler); err != nil {
-		bringyour.Logger().Fatal(err)
+		glog.Errorf("[connect]close = %s\n", err)
 	}
 }

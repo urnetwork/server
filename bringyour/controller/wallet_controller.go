@@ -26,6 +26,8 @@ import (
 
 	// "strings"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/model"
@@ -500,11 +502,11 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
 
 func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 
-	bringyour.Logger().Println("VerifyCircleBody")
+	// bringyour.Logger().Println("VerifyCircleBody")
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
-		bringyour.Logger().Printf("VerifyCircleBody: reading body err: %s\n", err.Error())
+		glog.Infof("[wallet]VerifyCircleBody: reading body err: %s\n", err.Error())
 		return nil, err
 	}
 
@@ -514,11 +516,11 @@ func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 		bodyBytes,
 	)
 	if err != nil {
-		bringyour.Logger().Printf("VerifyCircleBody: verifyCircleAuth: %s\n", err.Error())
+		// bringyour.Logger().Printf("VerifyCircleBody: verifyCircleAuth: %s\n", err.Error())
 		return nil, err
 	}
 
-	bringyour.Logger().Println("VerifyCircleBody: continuing")
+	// bringyour.Logger().Println("VerifyCircleBody: continuing")
 
 	return bytes.NewReader(bodyBytes), nil
 }
@@ -536,7 +538,7 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 		func(response *http.Response, responseBodyBytes []byte) (*string, error) {
 			_, data, err := parseCircleResponseData(responseBodyBytes)
 			if err != nil {
-				bringyour.Logger().Printf("verifyCircleAuth: parseCircleResponseData err: %s\n", err.Error())
+				// bringyour.Logger().Printf("verifyCircleAuth: parseCircleResponseData err: %s\n", err.Error())
 				return nil, err
 			}
 
@@ -556,7 +558,7 @@ func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) 
 
 	err = verifySignature(*pk, signature, responseBodyBytes)
 	if err != nil {
-		bringyour.Logger().Printf("verifyCircleAuth: verifySignature err: %s\n", err.Error())
+		// bringyour.Logger().Printf("verifyCircleAuth: verifySignature err: %s\n", err.Error())
 		return err
 	}
 
@@ -568,9 +570,9 @@ type ECDSASignature struct {
 }
 
 func verifySignature(publicKeyBase64 string, signatureBase64 string, responseBodyBytes []byte) error {
-	bringyour.Logger().Printf("verifySignature: publicKeyBase64: %s\n", publicKeyBase64)
-	bringyour.Logger().Printf("verifySignature: signatureBase64: %s\n", signatureBase64)
-	bringyour.Logger().Printf("verifySignature: responseBodyBytes: %s\n", string(responseBodyBytes))
+	// bringyour.Logger().Printf("verifySignature: publicKeyBase64: %s\n", publicKeyBase64)
+	// bringyour.Logger().Printf("verifySignature: signatureBase64: %s\n", signatureBase64)
+	// bringyour.Logger().Printf("verifySignature: responseBodyBytes: %s\n", string(responseBodyBytes))
 
 	// Decode the public key from base64
 	publicKeyDer, err := base64.StdEncoding.DecodeString(publicKeyBase64)
@@ -658,7 +660,7 @@ func CircleWalletWebhook(
 	clientSession *session.ClientSession,
 ) (*CircleWalletWebhookResult, error) {
 
-	bringyour.Logger().Println("CircleWalletWebhook:")
+	// bringyour.Logger().Println("CircleWalletWebhook:")
 
 	if circleWalletWebhook.NotificationType == "challenges.initialize" {
 
@@ -676,20 +678,20 @@ func CircleWalletWebhook(
 
 			circleWallet, err := getCircleWallet(circleWalletId)
 			if err != nil {
-				bringyour.Logger().Printf("CircleWalletWebhook: getCircleWalletErr: %s\n", err.Error())
+				// bringyour.Logger().Printf("CircleWalletWebhook: getCircleWalletErr: %s\n", err.Error())
 
 				return nil, err
 			}
 
 			userId, err := bringyour.ParseId(event.UserId)
 			if err != nil {
-				bringyour.Logger().Printf("CircleWalletWebhook: ParseId: %s\n", err.Error())
+				// bringyour.Logger().Printf("CircleWalletWebhook: ParseId: %s\n", err.Error())
 				return nil, err
 			}
 
 			userUC := model.GetCircleUCByCircleUCUserId(clientSession.Ctx, userId)
 			if userUC == nil {
-				bringyour.Logger().Printf("CircleWalletWebhook: GetCircleUCByCircleUCUserId no user found: %s\n", userId)
+				// bringyour.Logger().Printf("CircleWalletWebhook: GetCircleUCByCircleUCUserId no user found: %s\n", userId)
 				return nil, fmt.Errorf("no circle user control found")
 			}
 
@@ -709,7 +711,7 @@ func CircleWalletWebhook(
 				DefaultTokenType: "USDC",
 			}
 
-			bringyour.Logger().Println("CircleWalletWebhook: about to CreateAccountWalletCircle")
+			// bringyour.Logger().Println("CircleWalletWebhook: about to CreateAccountWalletCircle")
 
 			// no account_wallet exists, create a new one
 			walletId := model.CreateAccountWalletCircle(
@@ -718,7 +720,7 @@ func CircleWalletWebhook(
 			)
 
 			if walletId == nil {
-				bringyour.Logger().Println("CircleWalletWebhook: no wallet id found")
+				// bringyour.Logger().Println("CircleWalletWebhook: no wallet id found")
 				return nil, fmt.Errorf("error creating account wallet")
 			}
 
@@ -984,7 +986,7 @@ func PopulateAccountWallets(
 		return nil, fmt.Errorf("no users found")
 	}
 
-	fmt.Printf("%d circle users found \n", len(circleUCUsers))
+	glog.V(2).Infof("[walletc]%d circle users found \n", len(circleUCUsers))
 
 	errUserIds := []bringyour.Id{}
 
@@ -992,20 +994,21 @@ func PopulateAccountWallets(
 		time.Sleep(500 * time.Millisecond)
 		err := handleUser(user, clientSession)
 		if err != nil {
-			fmt.Printf("Error for user %s: %v \n", user.UserId.String(), err)
+			glog.Infof("[walletc]error for user %s: %v \n", user.UserId.String(), err)
 			errUserIds = append(errUserIds, user.CircleUCUserId)
 		}
 	}
 
 	// create a JSON file with the user ids that failed
 	if len(errUserIds) > 0 {
-		fmt.Println("Error creating account wallets for the following users:")
-		for _, userId := range errUserIds {
-			fmt.Println(userId.String())
+		errUserIdStrs := []string{}
+		for _, errUserId := range errUserIds {
+			errUserIdStrs = append(errUserIdStrs, errUserId.String())
 		}
+		glog.Infof("[walletc]Error creating account wallets for the following users: %s", strings.Join(errUserIdStrs, ", "))
 	}
 
-	fmt.Println("PopulateAccountWallets done")
+	glog.V(2).Infof("[walletc]PopulateAccountWallets done")
 
 	return &PopulateAccountWalletsResult{}, nil
 
@@ -1027,7 +1030,7 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 		// check if account wallet exists
 		accountWallet := model.GetAccountWalletByCircleId(clientSession.Ctx, circleWallet.WalletId)
 		if accountWallet != nil {
-			fmt.Printf("Account wallet already exists for wallet id %s \n", circleWallet.WalletId)
+			glog.V(2).Infof("[walletc]Account wallet already exists for wallet id %s \n", circleWallet.WalletId)
 			continue
 		}
 

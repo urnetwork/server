@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 	// "bringyour.com/bringyour/jwt"
@@ -32,7 +34,7 @@ func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
 			return true
 		}
 
-		bringyour.Logger().Printf("Response (%T): %s\n", result, responseJson)
+		glog.V(2).Infof("[h]response (%T): %s\n", result, responseJson)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(responseJson)
 		return true
@@ -60,7 +62,7 @@ func wrap[R any](
 	// bringyour.Logger().Printf("Handling %s\n", impl)
 	result, err := impl(session)
 	if err != nil {
-		bringyour.Logger().Printf("Impl error: %s\n", err)
+		glog.Infof("[h]impl error: %s\n", err)
 		RaiseHttpError(err, w)
 		return
 	}
@@ -179,7 +181,7 @@ func wrapWithInput[T any, R any](
 
 	body, err := bodyFormatter(req)
 	if err != nil {
-		bringyour.Logger().Printf("Request body formatter error %s\n", err)
+		glog.Infof("[h]request body formatter error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -188,15 +190,15 @@ func wrapWithInput[T any, R any](
 
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
-		bringyour.Logger().Printf("Request read error %s\n", err)
+		glog.Infof("[h]request read error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 
-	bringyour.Logger().Printf("Request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
+	glog.V(2).Infof("[h]request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
 
 	err = json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&input)
 	if err != nil {
-		bringyour.Logger().Printf("Request decoding error %s\n", err)
+		glog.Infof("[h]request decoding error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -207,7 +209,7 @@ func wrapWithInput[T any, R any](
 		custom := map[string]any{
 			"headers": req.Header,
 		}
-		bringyour.Logger().Printf("Request impl error (%T): %s\n", input, bringyour.ErrorJsonWithCustomNoStack(err, custom))
+		glog.Infof("[h]request impl error (%T): %s\n", input, bringyour.ErrorJsonWithCustomNoStack(err, custom))
 		RaiseHttpError(err, w)
 		return
 	}

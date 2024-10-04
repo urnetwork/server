@@ -4,6 +4,8 @@ import (
 	"context"
 	// "strings"
 
+	// "github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 )
@@ -32,7 +34,7 @@ func setConnectionLocation(
 ) {
 	location, connectionLocationScores, err := GetLocationForIp(ctx, ipStr)
 	if err != nil {
-		bringyour.Logger().Printf("Get ip for location error: %s", err)
+		// bringyour.Logger().Printf("Get ip for location error: %s", err)
 		return
 	}
 

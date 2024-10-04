@@ -6,10 +6,11 @@ import (
 	"net/mail"
 	"strings"
 
+	// "github.com/golang/glog"
+
 	"github.com/nyaruka/phonenumbers"
 	"golang.org/x/crypto/argon2"
-
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
 )
 
 type UserAuthType string
@@ -33,7 +34,7 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 		return nil, UserAuthTypeNone
 	}
 
-	bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
+	// bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
 
 	normalUserAuth := strings.TrimSpace(*userAuth)
 	normalUserAuth = strings.ToLower(normalUserAuth)
@@ -46,14 +47,14 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	if err == nil {
 		// fixme trim out common alias like gmail + and domains
 		normalEmailAddress := emailAddress.Address
-		bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
+		// bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
 		return &normalEmailAddress, UserAuthTypeEmail
 	}
 
 	phoneNumber, err = phonenumbers.Parse(normalUserAuth, "US")
 	if err == nil && phonenumbers.IsPossibleNumber(phoneNumber) {
 		normalPhoneNumber := phonenumbers.Format(phoneNumber, phonenumbers.INTERNATIONAL)
-		bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
+		// bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
 		return &normalPhoneNumber, UserAuthTypePhone
 	}
 

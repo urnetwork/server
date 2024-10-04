@@ -8,6 +8,8 @@ import (
 
 	"github.com/docopt/docopt-go"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/router"
 	"bringyour.com/service/api/handlers"
@@ -107,12 +109,12 @@ Options:
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 	}
 
-	// bringyour.Logger().Printf("%s\n", opts)
+	// bringyour.().Printf("%s\n", opts)
 
 	port, _ := opts.Int("--port")
 
-	bringyour.Logger().Printf(
-		"Serving %s %s on *:%d\n",
+	glog.Infof(
+		"[api]serving %s %s on *:%d\n",
 		bringyour.RequireEnv(),
 		bringyour.RequireVersion(),
 		port,
@@ -120,6 +122,5 @@ Options:
 
 	routerHandler := router.NewRouter(cancelCtx, routes)
 	err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-
-	bringyour.Logger().Fatal(err)
+	glog.Errorf("[api]close = %s\n", err)
 }
