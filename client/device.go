@@ -101,7 +101,8 @@ type BringYourDevice struct {
 	remoteUserNatProviderLocalUserNat *connect.LocalUserNat
 	remoteUserNatProvider             *connect.RemoteUserNatProvider
 
-	routeLocal bool
+	routeLocal          bool
+	canShowRatingDialog bool
 
 	openedViewControllers map[ViewController]bool
 
@@ -221,6 +222,7 @@ func newBringYourDevice(
 		remoteUserNatProviderLocalUserNat: nil,
 		remoteUserNatProvider:             nil,
 		routeLocal:                        true,
+		canShowRatingDialog:               true,
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
@@ -238,6 +240,10 @@ func newBringYourDevice(
 }
 
 func (self *BringYourDevice) ClientId() *Id {
+	return self.GetClientId()
+}
+
+func (self *BringYourDevice) GetClientId() *Id {
 	// clientId := self.client.ClientId()
 	return newId(self.clientId)
 }
@@ -265,6 +271,27 @@ func (self *BringYourDevice) GetNetworkSpace() *NetworkSpace {
 
 func (self *BringYourDevice) GetStats() *DeviceStats {
 	return self.stats
+}
+
+func (self *BringYourDevice) GetShouldShowRatingDialog() bool {
+	if !self.stats.GetUserSuccess() {
+		return false
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.canShowRatingDialog
+}
+
+func (self *BringYourDevice) GetCanShowRatingDialog() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.canShowRatingDialog
+}
+
+func (self *BringYourDevice) SetCanShowRatingDialog(canShowRatingDialog bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.canShowRatingDialog = canShowRatingDialog
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
