@@ -69,10 +69,10 @@ func runGoMainProcess(ctx context.Context, name string, pw progress.Writer, main
 
 	cmd.Env = os.Environ()
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stdout
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stdout
 
-	err = cmd.Run()
+	out, err = cmd.CombinedOutput()
 
 	if err != nil {
 		return fmt.Errorf("failed to run %s: %w\n%s", name, err, string(out))

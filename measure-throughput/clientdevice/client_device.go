@@ -10,6 +10,7 @@ import (
 
 	"bringyor.com/measure-throughput/bwclient"
 	"bringyor.com/measure-throughput/clientdevice/netstack"
+	"bringyor.com/measure-throughput/delayqueue"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyor.com/measure-throughput/tcplogger"
 	"bringyour.com/connect"
@@ -102,6 +103,8 @@ func Start(
 		return nil, fmt.Errorf("failed to create tcp logger: %w", err)
 	}
 
+	inboundDelayedQueue := delayqueue.New(ctx, 30000)
+
 	nc, err := connect.NewRemoteUserNatClient(
 		cl,
 		func(source connect.TransferPath, ipProtocol connect.IpProtocol, packet []byte) {
@@ -110,15 +113,12 @@ func Start(
 				return
 			}
 
-			go func() {
-				time.Sleep(packetDelay)
-
+			inboundDelayedQueue.GoDelayed(packetDelay, func() {
 				tl.Log(packet)
 				_, err := dev.Write(packet)
 				if err != nil {
-					// fmt.Println("packet write error:", err)
 				}
-			}()
+			})
 		},
 		[]connect.MultiHopId{
 			connect.RequireMultiHopId(providerID),
@@ -169,6 +169,8 @@ func Start(
 
 	// }
 
+	outboundDelayedQueue := delayqueue.New(ctx, 30000)
+
 	go func() {
 
 		for ctx.Err() == nil {
@@ -185,9 +187,7 @@ func Start(
 			// 	continue
 			// }
 
-			go func() {
-
-				time.Sleep(packetDelay)
+			outboundDelayedQueue.GoDelayed(packetDelay, func() {
 
 				tl.Log(packet)
 
@@ -197,11 +197,11 @@ func Start(
 					packet,
 					time.Second*15,
 				)
+			})
 
-				// if !sent {
-				// 	fmt.Println("packet not sent")
-				// }
-			}()
+			// if !sent {
+			// 	fmt.Println("packet not sent")
+			// }
 		}
 		cl.Close()
 	}()

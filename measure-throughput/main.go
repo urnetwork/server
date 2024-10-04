@@ -250,14 +250,6 @@ func main() {
 
 			time.Sleep(time.Second * 1)
 
-			tctx, tctxcancel := context.WithTimeout(completeRunCtx, time.Second*5)
-			defer tctxcancel()
-
-			hc := http.Client{
-				Transport: clientDev.Transport(),
-				Timeout:   time.Second * 8,
-			}
-
 			addrs, err := net.InterfaceAddrs()
 			if err != nil {
 				return fmt.Errorf("failed to get interface addresses: %w", err)
@@ -282,6 +274,14 @@ func main() {
 			}
 
 			localAddress := nonLocalAddrs[0]
+
+			tctx, tctxcancel := context.WithTimeout(completeRunCtx, time.Second*10)
+			defer tctxcancel()
+
+			hc := http.Client{
+				Transport: clientDev.Transport(),
+				Timeout:   time.Second * 10,
+			}
 
 			pw.Log("using address %s", localAddress)
 
