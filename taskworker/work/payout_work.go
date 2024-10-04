@@ -61,18 +61,23 @@ func PayoutPost(
 	clientSession *session.ClientSession,
 	tx bringyour.PgTx,
 ) error {
-	schedulePayout := &SchedulePayoutArgs{
-		Retry: true,
+	if schedulePayoutResult.Success {
+		SchedulePayout(clientSession, tx)
+	} else {
+		// retry faster than the normal payment schedule
+		schedulePayout := &SchedulePayoutArgs{
+			Retry: true,
+		}
+		runAt := time.Now().Add(1 * time.Hour)
+		task.ScheduleTaskInTx(
+			tx,
+			Payout,
+			schedulePayout,
+			clientSession,
+			task.RunOnce("payout_retry"),
+			task.RunAt(runAt),
+		)
 	}
-	runAt := time.Now().Add(1 * time.Hour)
-	task.ScheduleTaskInTx(
-		tx,
-		Payout,
-		schedulePayout,
-		clientSession,
-		task.RunOnce("payout_retry"),
-		task.RunAt(runAt),
-	)
 	return nil
 }
 
