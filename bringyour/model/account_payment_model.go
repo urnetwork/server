@@ -1024,7 +1024,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_wallet.wallet_id = account_payment.wallet_id
 
             WHERE
-                network_id = $1
+                network_id = $1 AND completed = true
         `,
 			session.ByJwt.NetworkId,
 		)
