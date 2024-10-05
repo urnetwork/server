@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 )
 
@@ -109,31 +111,31 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 	}
 
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
-		bringyour.Logger().Printf("ComputeStats90 computeStatsProvider\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsProvider\n")
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsExtender\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsExtender\n")
 		// extender daily stats
 		computeStatsExtender(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsNetwork\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsNetwork\n")
 		// network daily stats
 		computeStatsNetwork(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsDevice\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsDevice\n")
 		// device daily stats
 		computeStatsDevice(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsTransfer\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsTransfer\n")
 		// all transfer
 		computeStatsTransfer(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsPackets\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsPackets\n")
 		// all packets
 		computeStatsPackets(ctx, stats, conn)
 
-		bringyour.Logger().Printf("ComputeStats90 computeStatsExtenderTransfer\n")
+		glog.Infof("[audit]ComputeStats90 computeStatsExtenderTransfer\n")
 		// extender transfer
 		computeStatsExtenderTransfer(ctx, stats, conn)
 	})
@@ -237,12 +239,12 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 		for result.Next() {
 			result.Scan(&day, &deviceId, &networkId, &eventType, &countryName, &regionName, &cityName)
 
-			bringyour.Logger().Printf("FOUND GEO \"%s\" \"%s\" \"%s\"\n", countryName, regionName, cityName)
+			// bringyour.Logger().Printf("FOUND GEO \"%s\" \"%s\" \"%s\"\n", countryName, regionName, cityName)
 
 			if day != activeDay {
 				exportActive()
 				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					bringyour.Logger().Printf("%s <> %s\n", packDay, day)
+					// bringyour.Logger().Printf("%s <> %s\n", packDay, day)
 					activeDay = packDay
 					exportActive()
 				}
@@ -275,7 +277,7 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn bringyour.PgCo
 		}
 		exportActive()
 		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
-			bringyour.Logger().Printf("%s <> %s\n", packDay, endDay)
+			// bringyour.Logger().Printf("%s <> %s\n", packDay, endDay)
 			activeDay = packDay
 			exportActive()
 		}

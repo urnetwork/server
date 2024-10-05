@@ -3,7 +3,7 @@ package controller
 import (
 	// "time"
 
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -22,9 +22,7 @@ func NetworkCreate(
 
 	model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
 
-	if success := AddInitialTransferBalance(session.Ctx, result.Network.NetworkId); !success {
-		bringyour.Logger().Printf("Could not add initial transfer balance to networkId=%s\n", result.Network.NetworkId)
-	}
+	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 
 	// if verification required, send it
 	if result.VerificationRequired != nil {

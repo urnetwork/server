@@ -7,6 +7,7 @@ import (
 	mathrand "math/rand"
 	"testing"
 	// "sort"
+	"fmt"
 	"slices"
 
 	"golang.org/x/exp/maps"
@@ -127,7 +128,7 @@ func TestSearchSubstringRandom(t *testing.T) {
 
 		for i, valueId := range maps.Keys(values) {
 			value := values[valueId]
-			bringyour.Logger().Printf("[%d/%d] Adding search string\n", i+1, n)
+			fmt.Printf("[%d/%d] Adding search string\n", i+1, n)
 			testSearch.AddRaw(ctx, value, valueId, 0)
 		}
 
@@ -178,7 +179,7 @@ func TestSearchSubstringRandom(t *testing.T) {
 
 			// this is a low estimate, since the scan is not finding the best match, just any match
 			speedup := float64(scanCandidateCount) / float64(stats.CandidateCount)
-			bringyour.Logger().Printf("[%d/%d] ED compute speedup %.2fx\n", i+1, k, speedup)
+			fmt.Printf("[%d/%d] ED compute speedup %.2fx\n", i+1, k, speedup)
 		}
 	})
 }

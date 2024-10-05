@@ -10,33 +10,36 @@ import (
 )
 
 type SchedulePayoutArgs struct {
+	Retry bool `json:"retry"`
 }
 
-type SchedulePayoutResult struct{}
-
-func getNextPayoutDate() time.Time {
-	now := time.Now().UTC()
-	year, month, day := now.Year(), now.Month(), now.Day()
-
-	if day < 15 {
-		return time.Date(year, month, 15, 0, 0, 0, 0, time.UTC)
-	}
-
-	if month == time.December {
-		return time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
-	}
-	return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+type SchedulePayoutResult struct {
+	Success bool `json:"success"`
 }
 
 func SchedulePayout(clientSession *session.ClientSession, tx bringyour.PgTx) {
+	runAt := func() time.Time {
+		now := time.Now().UTC()
+		year, month, day := now.Year(), now.Month(), now.Day()
 
+		if day < 15 {
+			// run on the 15th
+			return time.Date(year, month, 15, 0, 0, 0, 0, time.UTC)
+		}
+		// else run on the 1st
+		if month == time.December {
+			return time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+		} else {
+			return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+		}
+	}()
 	task.ScheduleTaskInTx(
 		tx,
 		Payout,
 		&SchedulePayoutArgs{},
 		clientSession,
 		task.RunOnce("payout"),
-		task.RunAt(getNextPayoutDate()),
+		task.RunAt(runAt),
 	)
 }
 
@@ -44,11 +47,12 @@ func Payout(
 	schedulePayout *SchedulePayoutArgs,
 	clientSession *session.ClientSession,
 ) (*SchedulePayoutResult, error) {
-	// send a continuous verification code message to a bunch of popular email providers
+	err := controller.SendPayments(clientSession)
+	success := err == nil
 
-	controller.SendPayments(clientSession)
-
-	return &SchedulePayoutResult{}, nil
+	return &SchedulePayoutResult{
+		Success: success,
+	}, nil
 }
 
 func PayoutPost(
@@ -57,14 +61,32 @@ func PayoutPost(
 	clientSession *session.ClientSession,
 	tx bringyour.PgTx,
 ) error {
-	SchedulePayout(clientSession, tx)
+	if schedulePayoutResult.Success {
+		SchedulePayout(clientSession, tx)
+	} else {
+		// retry faster than the normal payment schedule
+		schedulePayout := &SchedulePayoutArgs{
+			Retry: true,
+		}
+		runAt := time.Now().Add(1 * time.Hour)
+		task.ScheduleTaskInTx(
+			tx,
+			Payout,
+			schedulePayout,
+			clientSession,
+			task.RunOnce("payout_retry"),
+			task.RunAt(runAt),
+		)
+	}
 	return nil
 }
 
+// run at start
 type ProcessPendingPayoutsArgs struct {
 }
 
-type ProcessPendingPayoutsResult struct{}
+type ProcessPendingPayoutsResult struct {
+}
 
 func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx bringyour.PgTx) {
 	task.ScheduleTaskInTx(
@@ -73,7 +95,6 @@ func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx brin
 		&ProcessPendingPayoutsArgs{},
 		clientSession,
 		task.RunOnce("process_pending_payouts"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
 	)
 }
 
@@ -94,6 +115,5 @@ func ProcessPendingPayoutsPost(
 	clientSession *session.ClientSession,
 	tx bringyour.PgTx,
 ) error {
-	ScheduleProcessPendingPayouts(clientSession, tx)
 	return nil
 }

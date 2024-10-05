@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 )
 
@@ -63,8 +65,8 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						if bringyour.IsDoneError(r) {
 							// standard pattern to raise on context done. ignore
 						} else {
-							bringyour.Logger().Printf(
-								"Unhandled error from route %s: %s\n",
+							glog.Infof(
+								"[h]unhandled error from route %s: %s\n",
 								route.String(),
 								bringyour.ErrorJson(r, debug.Stack()),
 							)

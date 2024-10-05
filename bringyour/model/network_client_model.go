@@ -90,61 +90,6 @@ func AuthNetworkClient(
 	if authClient.ClientId == nil {
 		// important: use serializable tx for rate limits
 		bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-			/*
-				result, err := tx.Query(
-					session.Ctx,
-					`
-						SELECT COUNT(client_id) FROM network_client
-						WHERE network_id = $1 AND $2 <= create_time
-					`,
-					session.ByJwt.NetworkId,
-					bringyour.NowUtc().Add(-24 * time.Hour),
-				)
-				var last24HourCount int
-				bringyour.WithPgResult(result, err, func() {
-					if result.Next() {
-						bringyour.Raise(result.Scan(&last24HourCount))
-					}
-				})
-
-				if LimitClientIdsPer24Hours <= last24HourCount {
-					authClientResult = &AuthNetworkClientResult{
-						Error: &AuthNetworkClientError{
-							ClientLimitExceeded: true,
-							Message: "Too many new clients in the last 24 hours.",
-						},
-					}
-					return
-				}
-			*/
-
-			// FIXME
-			/*
-				result, err := tx.Query(
-					session.Ctx,
-					`
-						SELECT COUNT(client_id) FROM network_client
-						WHERE network_id = $1 AND active = true
-					`,
-					session.ByJwt.NetworkId,
-				)
-				var activeCount int
-				bringyour.WithPgResult(result, err, func() {
-					result.Next()
-					bringyour.Raise(result.Scan(&activeCount))
-				})
-
-				if LimitClientIdsPerNetwork <= activeCount {
-					authClientResult = &AuthNetworkClientResult{
-						Error: &AuthNetworkClientError{
-							ClientLimitExceeded: true,
-							Message: "Too many active clients.",
-						},
-					}
-					return
-				}
-			*/
-
 			createTime := bringyour.NowUtc()
 
 			clientId := bringyour.NewId()
@@ -1345,8 +1290,8 @@ type DeviceSetProvideError struct {
 }
 
 func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.ClientSession) (*DeviceSetProvideResult, error) {
-	// FIXME
-	return nil, nil
+	// FIXME we don't support remote setting of local settings at the moment
+	return nil, fmt.Errorf("Not implemented.")
 }
 
 func Testing_CreateDevice(

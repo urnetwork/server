@@ -15,6 +15,8 @@ import (
 
 	// "golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 )
@@ -24,6 +26,12 @@ type ByteCount = int64
 const Kib = ByteCount(1024)
 const Mib = ByteCount(1024 * 1024)
 const Gib = ByteCount(1024 * 1024 * 1024)
+
+type Priority = uint32
+
+const UnpaidPriority = 0
+const PaidPriority = 100
+const TrustedPriority = 200
 
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
@@ -35,30 +43,30 @@ func ByteCountHumanReadable(count ByteCount) string {
 
 	if 1024*1024*1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024*1024*1024))/100.0,
+			float64(1000*count/(1024*1024*1024*1024))/1000.0,
 			2,
-			"TiB",
+			"tib",
 		)
 	} else if 1024*1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024*1024))/100.0,
+			float64(1000*count/(1024*1024*1024))/1000.0,
 			2,
-			"GiB",
+			"gib",
 		)
 	} else if 1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024))/100.0,
+			float64(1000*count/(1024*1024))/1000.0,
 			2,
-			"MiB",
+			"mib",
 		)
 	} else if 1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024))/100.0,
+			float64(1000*count/(1024))/1000.0,
 			2,
-			"KiB",
+			"kib",
 		)
 	} else {
-		return fmt.Sprintf("%dB", count)
+		return fmt.Sprintf("%db", count)
 	}
 }
 
@@ -67,6 +75,8 @@ func ParseByteCount(humanReadable string) (ByteCount, error) {
 	tibLower := "tib"
 	gibLower := "gib"
 	mibLower := "mib"
+	kibLower := "kib"
+	bLower := "b"
 	if strings.HasSuffix(humanReadableLower, tibLower) {
 		countFloat, err := strconv.ParseFloat(
 			humanReadableLower[0:len(humanReadableLower)-len(tibLower)],
@@ -94,6 +104,24 @@ func ParseByteCount(humanReadable string) (ByteCount, error) {
 			return ByteCount(0), err
 		}
 		return ByteCount(countFloat * 1024 * 1024), nil
+	} else if strings.HasSuffix(humanReadableLower, kibLower) {
+		countFloat, err := strconv.ParseFloat(
+			humanReadableLower[0:len(humanReadableLower)-len(kibLower)],
+			64,
+		)
+		if err != nil {
+			return ByteCount(0), err
+		}
+		return ByteCount(countFloat * 1024), nil
+	} else if strings.HasSuffix(humanReadableLower, bLower) {
+		countFloat, err := strconv.ParseFloat(
+			humanReadableLower[0:len(humanReadableLower)-len(bLower)],
+			64,
+		)
+		if err != nil {
+			return ByteCount(0), err
+		}
+		return ByteCount(countFloat), nil
 	} else {
 		countInt, err := strconv.ParseInt(humanReadableLower, 10, 63)
 		if err != nil {
@@ -118,11 +146,6 @@ const BalanceCodeDuration = 365 * 24 * time.Hour
 
 // up to 4MiB
 const AcceptableTransfersByteDifference = 4 * 1024 * 1024
-
-var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
-
-// hold onto unpaid amounts for up to this time
-const WalletPayoutTimeout = 15 * 24 * time.Hour
 
 const ProviderRevenueShare float64 = 0.5
 
@@ -526,7 +549,6 @@ func CheckBalanceCode(
 	return
 }
 
-// FIXME add payment_token
 type TransferBalance struct {
 	BalanceId             bringyour.Id `json:"balance_id"`
 	NetworkId             bringyour.Id `json:"network_id"`
@@ -668,11 +690,11 @@ func AddBasicTransferBalance(
 	transferBalance ByteCount,
 	startTime time.Time,
 	endTime time.Time,
-) (success bool) {
+) {
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		balanceId := bringyour.NewId()
 
-		tag := bringyour.RaisePgResult(tx.Exec(
+		bringyour.RaisePgResult(tx.Exec(
 			ctx,
 			`
                 INSERT INTO transfer_balance (
@@ -693,10 +715,7 @@ func AddBasicTransferBalance(
 			transferBalance,
 			NanoCents(0),
 		))
-
-		success = (tag.RowsAffected() == 1)
 	})
-	return
 }
 
 // this finds networks with no entries in transfer_balance
@@ -729,19 +748,6 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []bring
 	return
 }
 
-type EscrowId struct {
-	ContractId bringyour.Id
-	BalanceId  bringyour.Id
-}
-
-// `bringyour.ComplexValue`
-func (self *EscrowId) Values() []any {
-	return []any{
-		self.ContractId,
-		self.BalanceId,
-	}
-}
-
 type ContractOutcome = string
 
 const (
@@ -759,8 +765,10 @@ const (
 )
 
 type TransferEscrow struct {
-	ContractId bringyour.Id
-	Balances   []*TransferEscrowBalance
+	ContractId        bringyour.Id
+	Priority          Priority
+	TransferByteCount ByteCount
+	Balances          []*TransferEscrowBalance
 }
 
 type TransferEscrowBalance struct {
@@ -779,15 +787,29 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *bringyour.Id,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// note it is possible to create a contract with `contractTransferByteCount = 0`
+
 	contractId := bringyour.NewId()
 
-	// order balances by end date, ascending
+	type escrow struct {
+		balanceId        bringyour.Id
+		paid             bool
+		balanceByteCount ByteCount
+	}
+
+	// add up the balance_byte_count until >= contractTransferByteCount
+	// if not enough, error
+	balanceEscrows := map[bringyour.Id]*escrow{}
+
+	// order balances by paid first, end date ascending
 	// take from the earlier before the later
+	// note: postgres boolean ascending order is false, true
 	result, err := tx.Query(
 		ctx,
 		`
             SELECT
                 balance_id,
+                paid,
                 balance_byte_count
             FROM transfer_balance
             WHERE
@@ -795,27 +817,30 @@ func createTransferEscrowInTx(
                 active = true AND
                 start_time <= $2 AND $2 < end_time
 
-            ORDER BY end_time ASC
+            ORDER BY paid DESC, end_time ASC
 
             FOR UPDATE
         `,
 		payerNetworkId,
 		bringyour.NowUtc(),
 	)
-	// add up the balance_byte_count until >= contractTransferByteCount
-	// if not enough, error
-	escrow := map[bringyour.Id]ByteCount{}
 	netEscrowBalanceByteCount := ByteCount(0)
 	bringyour.WithPgResult(result, err, func() {
 		for result.Next() {
 			var balanceId bringyour.Id
+			var paid bool
 			var balanceByteCount ByteCount
 			bringyour.Raise(result.Scan(
 				&balanceId,
+				&paid,
 				&balanceByteCount,
 			))
 			escrowBalanceByteCount := min(contractTransferByteCount-netEscrowBalanceByteCount, balanceByteCount)
-			escrow[balanceId] = escrowBalanceByteCount
+			balanceEscrows[balanceId] = &escrow{
+				balanceId:        balanceId,
+				paid:             paid,
+				balanceByteCount: escrowBalanceByteCount,
+			}
 			netEscrowBalanceByteCount += escrowBalanceByteCount
 			if contractTransferByteCount <= netEscrowBalanceByteCount {
 				break
@@ -828,17 +853,23 @@ func createTransferEscrowInTx(
 		return
 	}
 
-	/*
-	   bringyour.CreateTempJoinTableInTx(
-	       ctx,
-	       tx,
-	       "escrow(balance_id uuid -> balance_byte_count bigint)",
-	       escrow,
-	   )
-	*/
+	// the priority is blended between 0 and 100 depending on escrows
+	var priority Priority
+	if 0 < len(balanceEscrows) {
+		for _, escrow := range balanceEscrows {
+			if escrow.paid {
+				priority += PaidPriority
+			} else {
+				priority += UnpaidPriority
+			}
+		}
+		priority /= Priority(len(balanceEscrows))
+	} else {
+		priority = UnpaidPriority
+	}
 
 	bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
-		for balanceId, balanceByteCount := range escrow {
+		for balanceId, escrow := range balanceEscrows {
 			batch.Queue(
 				`
                     UPDATE transfer_balance
@@ -848,7 +879,7 @@ func createTransferEscrowInTx(
                         transfer_balance.balance_id = $1
                 `,
 				balanceId,
-				balanceByteCount,
+				escrow.balanceByteCount,
 			)
 
 			batch.Queue(
@@ -862,7 +893,7 @@ func createTransferEscrowInTx(
                 `,
 				contractId,
 				balanceId,
-				balanceByteCount,
+				escrow.balanceByteCount,
 			)
 		}
 	})
@@ -879,9 +910,10 @@ func createTransferEscrowInTx(
                 transfer_byte_count,
                 companion_contract_id,
                 payer_network_id,
-                create_time
+                create_time,
+                priority
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         `,
 		contractId,
 		sourceNetworkId,
@@ -892,20 +924,23 @@ func createTransferEscrowInTx(
 		companionContractId,
 		payerNetworkId,
 		bringyour.NowUtc(),
+		priority,
 	))
 
 	balances := []*TransferEscrowBalance{}
-	for balanceId, escrowBalanceByteCount := range escrow {
+	for balanceId, escrow := range balanceEscrows {
 		balance := &TransferEscrowBalance{
 			BalanceId:        balanceId,
-			BalanceByteCount: escrowBalanceByteCount,
+			BalanceByteCount: escrow.balanceByteCount,
 		}
 		balances = append(balances, balance)
 	}
 
 	transferEscrow = &TransferEscrow{
-		ContractId: contractId,
-		Balances:   balances,
+		ContractId:        contractId,
+		TransferByteCount: contractTransferByteCount,
+		Priority:          priority,
+		Balances:          balances,
 	}
 
 	return
@@ -1065,13 +1100,13 @@ func CreateCompanionTransferEscrow(
 // - at least `contractTransferByteCount` available
 // - not closed by any party
 // - with transfer escrow
-func GetOpenTransferEscrowsOrderedByCreateTime(
+func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	ctx context.Context,
 	sourceId bringyour.Id,
 	destinationId bringyour.Id,
 	contractTransferByteCount ByteCount,
-) map[bringyour.Id]ByteCount {
-	contractIdTransferByteCounts := map[bringyour.Id]ByteCount{}
+) []*TransferEscrow {
+	transferEscrows := []*TransferEscrow{}
 
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
@@ -1080,7 +1115,8 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
                 SELECT
                     
                     transfer_contract.contract_id,
-                    transfer_contract.transfer_byte_count
+                    transfer_contract.transfer_byte_count,
+                    transfer_contract.priority
 
                 FROM transfer_contract
 
@@ -1097,7 +1133,7 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
                     transfer_contract.transfer_byte_count <= $3 AND
                     contract_close.contract_id IS NULL
 
-                ORDER BY transfer_contract.create_time ASC
+                ORDER BY transfer_contract.priority DESC, transfer_contract.create_time ASC
             `,
 			sourceId,
 			destinationId,
@@ -1107,18 +1143,51 @@ func GetOpenTransferEscrowsOrderedByCreateTime(
 			for result.Next() {
 				var contractId bringyour.Id
 				var transferByteCount ByteCount
-				bringyour.Raise(result.Scan(&contractId, &transferByteCount))
-				contractIdTransferByteCounts[contractId] = transferByteCount
+				var priority Priority
+				bringyour.Raise(result.Scan(&contractId, &transferByteCount, &priority))
+				transferEscrow := &TransferEscrow{
+					ContractId:        contractId,
+					Priority:          priority,
+					TransferByteCount: transferByteCount,
+				}
+				transferEscrows = append(transferEscrows, transferEscrow)
 			}
 		})
 	})
 
-	return contractIdTransferByteCounts
+	return transferEscrows
 }
 
 func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEscrow *TransferEscrow) {
 	bringyour.Db(ctx, func(conn bringyour.PgConn) {
 		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    transfer_byte_count,
+                    priority
+
+                FROM transfer_byte_count
+                WHERE
+                    contract_id = $1
+            `,
+			contractId,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				transferEscrow = &TransferEscrow{}
+				bringyour.Raise(result.Scan(
+					&transferEscrow.TransferByteCount,
+					&transferEscrow.Priority,
+				))
+			}
+		})
+		if transferEscrow == nil {
+			// not found
+			return
+		}
+
+		result, err = conn.Query(
 			ctx,
 			`
                 SELECT
@@ -1131,9 +1200,6 @@ func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEs
             `,
 			contractId,
 		)
-
-		balances := []*TransferEscrowBalance{}
-
 		bringyour.WithPgResult(result, err, func() {
 			for result.Next() {
 				balance := &TransferEscrowBalance{}
@@ -1141,18 +1207,9 @@ func GetTransferEscrow(ctx context.Context, contractId bringyour.Id) (transferEs
 					&balance.BalanceId,
 					&balance.BalanceByteCount,
 				))
-				balances = append(balances, balance)
+				transferEscrow.Balances = append(transferEscrow.Balances, balance)
 			}
 		})
-
-		if len(balances) == 0 {
-			return
-		}
-
-		transferEscrow = &TransferEscrow{
-			ContractId: contractId,
-			Balances:   balances,
-		}
 	})
 
 	return
@@ -1338,9 +1395,9 @@ func CloseContract(
 					closes[closeParty] = closeUsedTransferByteCount
 				}
 			})
-			for closeParty, closeUsedTransferByteCount := range closes {
-				fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
-			}
+			// for closeParty, closeUsedTransferByteCount := range closes {
+			// 	fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+			// }
 
 			sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
 			destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
@@ -1365,14 +1422,12 @@ func CloseContract(
 
 				if hasEscrow {
 					diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
-					if 0 != diff {
-						fmt.Printf("CONTRACT (%s) PARTY DIFF %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
-					}
 					if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
-						fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
+						// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
 						returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
 					} else {
-						fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
+						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+						// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
 						setContractDisputeInTx(ctx, tx, contractId, true)
 					}
 				} else {
@@ -1449,7 +1504,7 @@ func settleEscrowInTx(
 				}
 				netUsedTransferByteCount += usedTransferByteCountForParty
 				partyCount += 1
-				fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
+				// fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
 			}
 		})
 		if partyCount != 2 {
@@ -1548,7 +1603,7 @@ func settleEscrowInTx(
 				returnByteCount: returnByteCount,
 				payout:          payout,
 			}
-			fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
+			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
 		}
 	})
 
@@ -2086,9 +2141,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 	})
 
 	for _, openContract := range openContracts {
-
-		fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
-
+		// fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
 		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
 
@@ -2272,26 +2325,6 @@ func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult 
 	return getAccountBalanceResult
 }
 
-type Subscription struct {
-	SubscriptionId bringyour.Id `json:"subscription_id"`
-	Store          string       `json:"store"`
-	Plan           string       `json:"plan"`
-}
-
-func CurrentSubscription(ctx context.Context, networkId bringyour.Id) *Subscription {
-	// FIXME
-	return nil
-}
-
-func GetNetPendingPayout(ctx context.Context, networkId bringyour.Id) NanoCents {
-	// add up
-	// - transfer_escrow_sweep
-	// - pending payments
-
-	// FIXME
-	return 0
-}
-
 type SubscriptionCreatePaymentIdArgs struct {
 }
 
@@ -2384,4 +2417,144 @@ func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPayme
 		})
 	})
 	return
+}
+
+type SubscriptionType = string
+
+const SubscriptionTypeSupporter = "supporter"
+
+type SubscriptionRenewal struct {
+	NetworkId        bringyour.Id
+	SubscriptionType SubscriptionType
+	StartTime        time.Time
+	EndTime          time.Time
+	NetRevenue       NanoCents
+	PurchaseToken    string
+}
+
+func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO subscription_renewal (
+					network_id,
+			        subscription_type,
+			        start_time,
+			        end_time,
+			        net_revenue_nano_cents,
+			        purchase_token
+				)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			renewal.NetworkId,
+			renewal.SubscriptionType,
+			renewal.StartTime,
+			renewal.EndTime,
+			renewal.NetRevenue,
+			renewal.PurchaseToken,
+		))
+	})
+}
+
+func HasSubscriptionRenewal(
+	ctx context.Context,
+	networkId bringyour.Id,
+	subscriptionType SubscriptionType,
+) bool {
+	active := false
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT 
+					 COUNT(*) AS subscription_renewal_count
+				FROM subscription_renewal
+				WHERE
+					network_id = $1 AND 
+					subscription_type = $2 AND
+					start_time <= $3 AND
+					$3 < end_time
+			`,
+			networkId,
+			subscriptionType,
+			bringyour.NowUtc(),
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				var count int
+				bringyour.Raise(result.Scan(&count))
+				active = (0 < count)
+			}
+		})
+	})
+	return active
+}
+
+func AddRefreshTransferBalanceToAllNetworks(
+	ctx context.Context,
+	startTime time.Time,
+	endTime time.Time,
+	supporterTransferBalance ByteCount,
+	freeTransferBalance ByteCount,
+) {
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		networkSupporters := map[bringyour.Id]bool{}
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					network_id,
+					(subscription_renewal.network_id IS NOT NONE) AS supporter
+				FROM network
+				
+				LEFT JOIN subscription_renewal ON
+					subscription_renewal.network_id = network.network_id AND
+					subscription_renewal.subscription_type = $1 AND
+					subscription_renewal.start_time <= $2 AND
+					$2 < subscription_renewal.end_time
+			`,
+			SubscriptionTypeSupporter,
+			bringyour.NowUtc(),
+		)
+		bringyour.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId bringyour.Id
+				bringyour.Raise(result.Scan(&networkId))
+				networkSupporters[networkId] = true
+			}
+		})
+
+		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
+			for networkId, supporter := range networkSupporters {
+				var balanceByteCount ByteCount
+				if supporter {
+					balanceByteCount = supporterTransferBalance
+				} else {
+					balanceByteCount = freeTransferBalance
+				}
+				batch.Queue(
+					`
+		                INSERT INTO transfer_balance (
+		                    balance_id,
+		                    network_id,
+		                    start_time,
+		                    end_time,
+		                    start_balance_byte_count,
+		                    net_revenue_nano_cents,
+		                    balance_byte_count
+		                )
+		                VALUES ($1, $2, $3, $4, $5, $6, $5)
+		            `,
+					bringyour.NewId(),
+					networkId,
+					startTime,
+					endTime,
+					balanceByteCount,
+					0,
+				)
+			}
+		})
+	})
 }

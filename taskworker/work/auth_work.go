@@ -3,6 +3,8 @@ package work
 import (
 	"time"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/task"
@@ -32,7 +34,7 @@ func RemoveExpiredAuthCodes(
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredAuthCodesResult, error) {
 	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, time.Now())
-	bringyour.Logger().Printf("Removed %d auth codes.\n", authCodeCount)
+	glog.Infof("[authw]removed %d auth codes.\n", authCodeCount)
 	return &RemoveExpiredAuthCodesResult{}, nil
 }
 

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 )
 
@@ -102,7 +104,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	)
 
 	if err != nil {
-		fmt.Printf("Error sending payment: %s", err)
+		glog.Infof("[circlec]error sending payment: %s", err)
 		return nil, err
 	}
 
@@ -300,7 +302,7 @@ func CreateDeveloperWalletSet(name string) {
 
 	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
 	if err != nil {
-		fmt.Printf("Error generating entity secret cipher: %s", err)
+		glog.Infof("[circlec]error generating entity secret cipher: %s", err)
 		return
 	}
 
@@ -332,12 +334,11 @@ func CreateDeveloperWalletSet(name string) {
 	)
 
 	if err != nil {
-		fmt.Printf("Error creating wallet set: %s", err)
+		glog.Infof("[circlec]error creating wallet set: %s", err)
 		return
 	}
 
-	fmt.Println("Created Wallet Set ID: ", walletSet.Id)
-
+	glog.Infof("[circlec]created Wallet Set ID: ", walletSet.Id)
 }
 
 type DeveloperWallet struct {
@@ -363,7 +364,7 @@ func CreateDeveloperWallet(walletSetId string) {
 
 	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
 	if err != nil {
-		fmt.Printf("Error generating entity secret cipher: %s", err)
+		glog.Infof("[circlec]error generating entity secret cipher: %s", err)
 		return
 	}
 
@@ -398,14 +399,12 @@ func CreateDeveloperWallet(walletSetId string) {
 	)
 
 	if err != nil {
-		fmt.Printf("Error creating wallet set: %s", err)
+		glog.Infof("[circlec]error creating wallet set: %s\n", err)
 		return
 	}
 
 	for _, wallet := range wallets {
-		fmt.Println(":: Created Wallet ========")
-		fmt.Println("Created Wallet ID: ", wallet.Id)
-		fmt.Println("Wallet Address: ", wallet.Address)
+		glog.Infof("[circlec]created wallet[%s] = %s\n", wallet.Id, wallet.Address)
 	}
 
 }

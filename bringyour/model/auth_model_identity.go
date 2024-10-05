@@ -6,10 +6,11 @@ import (
 	"net/mail"
 	"strings"
 
+	// "github.com/golang/glog"
+
 	"github.com/nyaruka/phonenumbers"
 	"golang.org/x/crypto/argon2"
-
-	"bringyour.com/bringyour"
+	// "bringyour.com/bringyour"
 )
 
 type UserAuthType string
@@ -23,17 +24,13 @@ const (
 // BE CAREFUL do not change without a backwards-compatible migration
 var passwordPepper = []byte("t1me4atoporita")
 
-// FIXME change this to not use *string
-// func NormalUserAuthV1(userAuth string) (string, UserAuthType, error) {
-// }
-
 // BE CAREFUL do not change without a backwards-compatible migration
 func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	if userAuth == nil {
 		return nil, UserAuthTypeNone
 	}
 
-	bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
+	// bringyour.Logger().Printf("Evaluating user auth %s\n", *userAuth)
 
 	normalUserAuth := strings.TrimSpace(*userAuth)
 	normalUserAuth = strings.ToLower(normalUserAuth)
@@ -44,16 +41,15 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 
 	emailAddress, err = mail.ParseAddress(normalUserAuth)
 	if err == nil {
-		// fixme trim out common alias like gmail + and domains
 		normalEmailAddress := emailAddress.Address
-		bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
+		// bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
 		return &normalEmailAddress, UserAuthTypeEmail
 	}
 
 	phoneNumber, err = phonenumbers.Parse(normalUserAuth, "US")
 	if err == nil && phonenumbers.IsPossibleNumber(phoneNumber) {
 		normalPhoneNumber := phonenumbers.Format(phoneNumber, phonenumbers.INTERNATIONAL)
-		bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
+		// bringyour.Logger().Printf("Parsed phone %s\n", normalPhoneNumber)
 		return &normalPhoneNumber, UserAuthTypePhone
 	}
 

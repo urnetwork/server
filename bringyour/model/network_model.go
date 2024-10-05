@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	// "github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 
@@ -300,15 +302,15 @@ func NetworkCreate(
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
 		// user is creating a network via social login
 
-		bringyour.Logger().Printf("Parsing JWT\n")
-		authJwt, err := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
-		bringyour.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
+		// bringyour.Logger().Printf("Parsing JWT\n")
+		authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+		// bringyour.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
 		if authJwt != nil {
 			// validate the user does not exist
 
 			normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
 
-			bringyour.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
+			// bringyour.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
 
 			created := false
 			var createdNetworkId bringyour.Id
@@ -331,11 +333,11 @@ func NetworkCreate(
 				})
 
 				if userId != nil {
-					bringyour.Logger().Printf("User already exists\n")
+					// bringyour.Logger().Printf("User already exists\n")
 					return
 				}
 
-				bringyour.Logger().Printf("JWT Creating a new network\n")
+				// bringyour.Logger().Printf("JWT Creating a new network\n")
 
 				created = true
 				createdUserId = bringyour.NewId()

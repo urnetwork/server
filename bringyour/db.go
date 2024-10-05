@@ -351,9 +351,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 					panic(pgErr)
 				}
 				if glog.V(2) {
-					glog.Infof("Transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
+					glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
 				} else {
-					glog.Infof("Transient error, retry = %v\n", pgErr)
+					glog.Infof("[db]transient error, retry = %v\n", pgErr)
 				}
 				continue
 			}
@@ -478,9 +478,9 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 					panic(pgErr)
 				}
 				if glog.V(2) {
-					glog.Infof("Transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
+					glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
 				} else {
-					glog.Infof("Transient error, retry = %v\n", pgErr)
+					glog.Infof("[db]transient error, retry = %v\n", pgErr)
 				}
 				continue
 			}
@@ -497,9 +497,9 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 					panic(commitErr)
 				}
 				if glog.V(2) {
-					glog.Infof("Commit error, retry: %s\n", ErrorJson(commitErr, debug.Stack()))
+					glog.Infof("[db]commit error, retry: %s\n", ErrorJson(commitErr, debug.Stack()))
 				} else {
-					glog.Infof("Commit error, retry = %v\n", commitErr)
+					glog.Infof("[db]commit error, retry = %v\n", commitErr)
 				}
 				continue
 			}

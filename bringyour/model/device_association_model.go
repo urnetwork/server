@@ -1455,7 +1455,5 @@ func qrPngBytes(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	// FIXME add bringyour logo to bottom right
-
 	return pngBytes, err
 }

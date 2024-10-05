@@ -11,6 +11,8 @@ import (
 	"encoding/base64"
 	"time"
 
+	// "github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/session"
 
@@ -246,16 +248,16 @@ func AuthLogin(
 			return result, nil
 		}
 	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
-		bringyour.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
-		authJwt, err := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
-		bringyour.Logger().Printf("login JWT result: %s, %s\n", authJwt, err)
+		// bringyour.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
+		authJwt, _ := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
+		// bringyour.Logger().Printf("login JWT result: %s, %s\n", authJwt, err)
 		if authJwt != nil {
 			var userId *bringyour.Id
 			var authType string
 			var networkId bringyour.Id
 			var networkName string
 			bringyour.Db(session.Ctx, func(conn bringyour.PgConn) {
-				bringyour.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+				// bringyour.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 				result, err := conn.Query(
 					session.Ctx,
 					`
@@ -405,7 +407,7 @@ func AuthLoginWithPassword(
 		return nil, errors.New("User does not exist.")
 	}
 
-	bringyour.Logger().Printf("Comparing password hashes\n")
+	// bringyour.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), passwordSalt)
 	if bytes.Equal(passwordHash, loginPasswordHash) {
 		if userVerified {

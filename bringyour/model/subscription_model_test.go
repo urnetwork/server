@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/session"
@@ -20,20 +22,38 @@ import (
 
 func TestByteCount(t *testing.T) {
 	(&bringyour.TestEnv{ApplyDbMigrations: false}).Run(func() {
-		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0B")
-		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5TiB")
+		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0b")
+		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5tib")
 
-		count, err := ParseByteCount("5MiB")
+		count, err := ParseByteCount("2")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(2))
+		assert.Equal(t, ByteCountHumanReadable(count), "2b")
+
+		count, err = ParseByteCount("5B")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(5))
+		assert.Equal(t, ByteCountHumanReadable(count), "5b")
+
+		count, err = ParseByteCount("123KiB")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(123*1024))
+		assert.Equal(t, ByteCountHumanReadable(count), "123kib")
+
+		count, err = ParseByteCount("5MiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(5*1024*1024))
+		assert.Equal(t, ByteCountHumanReadable(count), "5mib")
 
 		count, err = ParseByteCount("1.7GiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(17*1024*1024*1024)/ByteCount(10))
+		assert.Equal(t, ByteCountHumanReadable(count), "1.7gib")
 
 		count, err = ParseByteCount("13.1TiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(131*1024*1024*1024*1024)/ByteCount(10))
+		assert.Equal(t, ByteCountHumanReadable(count), "13.1tib")
 
 	})
 }
@@ -170,12 +190,13 @@ func TestEscrow(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan := PlanPayments(ctx)
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < MinWalletPayoutThreshold {
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			assert.Equal(t, err, nil)
 
@@ -196,7 +217,8 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -224,7 +246,7 @@ func TestEscrow(t *testing.T) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			if err != nil && 1024 < usedTransferByteCount {
 				usedTransferByteCount = usedTransferByteCount / 1024
-				bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferByteCount)
+				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				continue
 			}
 			if netTransferByteCount <= paidByteCount {
@@ -245,7 +267,8 @@ func TestEscrow(t *testing.T) {
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		assert.Equal(t, transferBalances, []*TransferBalance{})
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -274,7 +297,8 @@ func TestEscrow(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 	})
 }
@@ -411,12 +435,13 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan := PlanPayments(ctx)
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < MinWalletPayoutThreshold {
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, usedTransferByteCount)
 			assert.Equal(t, err, nil)
 			transferEscrow, err := CreateCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount, 1*time.Hour)
@@ -442,7 +467,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -472,7 +498,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			transferEscrow, err := CreateCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount, 1*time.Hour)
 			if err != nil && 1024 < usedTransferByteCount {
 				usedTransferByteCount = usedTransferByteCount / 1024
-				bringyour.Logger().Printf("Step down contract size to %d bytes.\n", usedTransferByteCount)
+				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false)
 				CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false)
 				continue
@@ -506,7 +532,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		assert.Equal(t, netBalanceByteCount, netTransferByteCount)
 
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
 
 		for _, payment := range paymentPlan.WalletPayments {
@@ -535,7 +562,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan = PlanPayments(ctx)
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
 		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
 	})
 }
@@ -658,14 +686,13 @@ func TestInitialBalance(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 
 			transferBalances := GetActiveTransferBalances(ctx, networkId)
 			assert.Equal(t, 1, len(transferBalances))
@@ -699,14 +726,13 @@ func TestClosePartialContract(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -824,14 +850,13 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -930,14 +955,13 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {
@@ -1060,14 +1084,13 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 
 			startTime := bringyour.NowUtc()
 			endTime := startTime.Add(initialTransferBalanceDuration)
-			success := AddBasicTransferBalance(
+			AddBasicTransferBalance(
 				ctx,
 				networkId,
 				initialTransferBalance,
 				startTime,
 				endTime,
 			)
-			assert.Equal(t, true, success)
 		}
 
 		for i := range 2 {

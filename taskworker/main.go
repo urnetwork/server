@@ -10,6 +10,8 @@ import (
 
 	"github.com/docopt/docopt-go"
 
+	"github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
@@ -55,8 +57,8 @@ Options:
 		batchSize, _ := opts.Int("--batch_size")
 		port, _ := opts.Int("--port")
 
-		bringyour.Logger().Printf(
-			"Starting %s %s %d task workers with batch size %d\n",
+		glog.Infof(
+			"[taskworker]starting %s %s %d task workers with batch size %d\n",
 			bringyour.RequireEnv(),
 			bringyour.RequireVersion(),
 			count,
@@ -75,8 +77,8 @@ Options:
 			router.NewRoute("GET", "/status", router.WarpStatus),
 		}
 
-		bringyour.Logger().Printf(
-			"Serving %s %s on *:%d\n",
+		glog.Infof(
+			"[taskworker]serving %s %s on *:%d\n",
 			bringyour.RequireEnv(),
 			bringyour.RequireVersion(),
 			port,
@@ -84,7 +86,7 @@ Options:
 
 		routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 		err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-		bringyour.Logger().Fatal(err)
+		glog.Errorf("[taskworker]close = %s\n", err)
 	}
 }
 
@@ -103,8 +105,9 @@ func initTasks(ctx context.Context) {
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
 		ScheduleTaskCleanup(clientSession, tx)
-		controller.ScheduleBackfillInitialTransferBalance(clientSession, tx)
+		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		model.ScheduleIndexSearchLocations(clientSession, tx)
+		controller.ScheduleRefreshTransferBalances(clientSession, tx)
 	})
 }
 
@@ -120,12 +123,14 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(work.ProcessPendingPayouts, work.ProcessPendingPayoutsPost),
 		task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
 		task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
-		task.NewTaskTargetWithPost(controller.BackfillInitialTransferBalance, controller.BackfillInitialTransferBalancePost),
+		task.NewTaskTargetWithPost(work.BackfillInitialTransferBalance, work.BackfillInitialTransferBalancePost),
 		task.NewTaskTargetWithPost(controller.PopulateAccountWallets, work.PopulateAccountWalletsPost),
 		task.NewTaskTargetWithPost(work.CloseExpiredContracts, work.CloseExpiredContractsPost),
 		task.NewTaskTargetWithPost(work.CloseExpiredNetworkClientHandlers, work.CloseExpiredNetworkClientHandlersPost),
 		task.NewTaskTargetWithPost(work.DeleteDisconnectedNetworkClients, work.DeleteDisconnectedNetworkClientsPost),
 		task.NewTaskTargetWithPost(model.IndexSearchLocations, model.IndexSearchLocationsPost),
+		task.NewTaskTargetWithPost(controller.RefreshTransferBalances, controller.RefreshTransferBalancesPost),
+		task.NewTaskTargetWithPost(controller.AdvancePayment, controller.AdvancePaymentPost),
 	)
 
 	return taskWorker
@@ -141,7 +146,7 @@ func evalTasks(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) 
 
 		finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(batchSize)
 		if err != nil {
-			bringyour.Logger().Printf("Error running tasks: %s\n", err)
+			glog.Infof("[taskworker]error running tasks: %s\n", err)
 			select {
 			case <-ctx.Done():
 				return

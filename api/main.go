@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"syscall"
 
 	"github.com/docopt/docopt-go"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/router"
@@ -31,9 +34,11 @@ Options:
 		panic(err)
 	}
 
-	// FIXME signal cancel
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	quitEvent := bringyour.NewEventWithContext(context.Background())
+	defer quitEvent.Set()
+
+	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
+	defer closeFn()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
@@ -107,19 +112,18 @@ Options:
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 	}
 
-	// bringyour.Logger().Printf("%s\n", opts)
+	// bringyour.().Printf("%s\n", opts)
 
 	port, _ := opts.Int("--port")
 
-	bringyour.Logger().Printf(
-		"Serving %s %s on *:%d\n",
+	glog.Infof(
+		"[api]serving %s %s on *:%d\n",
 		bringyour.RequireEnv(),
 		bringyour.RequireVersion(),
 		port,
 	)
 
-	routerHandler := router.NewRouter(cancelCtx, routes)
+	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-
-	bringyour.Logger().Fatal(err)
+	glog.Errorf("[api]close = %s\n", err)
 }

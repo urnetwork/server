@@ -6,120 +6,177 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"sync"
+	// "sync"
 	"time"
+
+	mathrand "math/rand"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
+	"bringyour.com/bringyour/task"
 )
 
-var (
-	processingPayments = make(map[bringyour.Id]struct{})
-	mu                 sync.Mutex
-)
-
-func isProcessing(paymentId bringyour.Id) bool {
-	mu.Lock()
-	defer mu.Unlock()
-
-	_, exists := processingPayments[paymentId]
-	return exists
-}
-
-func markAsProcessing(paymentId bringyour.Id) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	processingPayments[paymentId] = struct{}{}
-}
-
-func removeProcessing(paymentId bringyour.Id) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	delete(processingPayments, paymentId)
-}
-
-// run once on startup
-func SchedulePendingPayments(session *session.ClientSession) {
-
-	pendingPayments := model.GetPendingPayments(session.Ctx)
-
-	// schedule a task for CoinbasePayment for each paymentId
-	// (use balk because the payment id might already be worked on)
-	for _, payment := range pendingPayments {
-		if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
-			continue
+func SchedulePendingPayments(clientSession *session.ClientSession) {
+	pendingPayments := model.GetPendingPayments(clientSession.Ctx)
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		for _, payment := range pendingPayments {
+			ScheduleAdvancePayment(&AdvancePaymentArgs{
+				PaymentId: payment.PaymentId,
+			}, clientSession, tx)
 		}
-
-		// avoid circl rate limiting
-		time.Sleep(500 * time.Millisecond)
-
-		markAsProcessing(payment.PaymentId)
-
-		ProviderPayout(payment, session)
-
-		removeProcessing(payment.PaymentId)
-	}
+	})
 }
 
-// runs twice a day
-func SendPayments(session *session.ClientSession) {
-
-	plan := model.PlanPayments(session.Ctx)
-
-	// create coinbase payment records
-	// schedule a task for CoinbasePayment for each paymentId
-	// (use balk because the payment id might already be worked on)
-	for _, payment := range plan.WalletPayments {
-		if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
-			continue
-		}
-
-		// avoid circl rate limiting
-		time.Sleep(500 * time.Millisecond)
-
-		markAsProcessing(payment.PaymentId)
-
-		ProviderPayout(payment, session)
-
-		removeProcessing(payment.PaymentId)
-
-	}
-
-}
-
-// TODO start a task to retry a payment until it completes
-// payment_id
-func RetryPayment(payment_id bringyour.Id, session session.ClientSession) {
-	// get the payment
-	// schedule a task for CoinbasePayment for the payment
-	// (use balk because the payment id might already be worked on)
-	payment, err := model.GetPayment(session.Ctx, payment_id)
+func SendPayments(clientSession *session.ClientSession) error {
+	plan, err := model.PlanPayments(clientSession.Ctx)
 	if err != nil {
-		bringyour.Logger().Println("RetryPayment - Error getting payment", err)
-		return
+		return err
 	}
 
-	if isProcessing(payment.PaymentId) || payment.Completed || payment.Canceled {
-		return
+	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
+		for _, payment := range plan.WalletPayments {
+			ScheduleAdvancePayment(&AdvancePaymentArgs{
+				PaymentId: payment.PaymentId,
+			}, clientSession, tx)
+		}
+	})
+
+	return nil
+}
+
+// run at start
+type ProcessPendingPayoutsArgs struct {
+}
+
+type ProcessPendingPayoutsResult struct {
+}
+
+func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx bringyour.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		ProcessPendingPayouts,
+		&ProcessPendingPayoutsArgs{},
+		clientSession,
+		task.RunOnce("process_pending_payouts"),
+	)
+}
+
+func ProcessPendingPayouts(
+	processPending *ProcessPendingPayoutsArgs,
+	clientSession *session.ClientSession,
+) (*ProcessPendingPayoutsResult, error) {
+	// send a continuous verification code message to a bunch of popular email providers
+
+	SchedulePendingPayments(clientSession)
+
+	return &ProcessPendingPayoutsResult{}, nil
+}
+
+func ProcessPendingPayoutsPost(
+	processPendingArgs *ProcessPendingPayoutsArgs,
+	processPendingResult *ProcessPendingPayoutsResult,
+	clientSession *session.ClientSession,
+	tx bringyour.PgTx,
+) error {
+	return nil
+}
+
+// Advance payment handles a single payment until completion
+
+type AdvancePaymentArgs struct {
+	PaymentId bringyour.Id `json:"payment_id"`
+}
+
+type AdvancePaymentResult struct {
+	Complete bool `json:"complete"`
+	Canceled bool `json:"canceled"`
+}
+
+func ScheduleAdvancePayment(
+	advancePaymentArgs *AdvancePaymentArgs,
+	clientSession *session.ClientSession,
+	tx bringyour.PgTx,
+) {
+	// randomly schedule between now and 1 hour from now
+	// this avoid circle and coinbase rate limiting
+	timeout := time.Duration(mathrand.Float64()*float64(1*time.Hour/time.Second)) * time.Second
+	runAt := bringyour.NowUtc().Add(timeout)
+
+	task.ScheduleTaskInTx(
+		tx,
+		AdvancePayment,
+		advancePaymentArgs,
+		clientSession,
+		task.RunOnce("advance_payment", advancePaymentArgs.PaymentId),
+		task.RunAt(runAt),
+	)
+}
+
+func AdvancePayment(
+	advancePaymentArgs *AdvancePaymentArgs,
+	clientSession *session.ClientSession,
+) (*AdvancePaymentResult, error) {
+	payment, err := model.GetPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
+	if err != nil {
+		// payment doesn't exist
+		return &AdvancePaymentResult{
+			Complete: false,
+			Canceled: true,
+		}, nil
 	}
 
-	markAsProcessing(payment.PaymentId)
+	if payment.Completed || payment.Canceled {
+		return &AdvancePaymentResult{
+			Complete: payment.Completed,
+			Canceled: payment.Canceled,
+		}, nil
+	}
 
-	ProviderPayout(payment, &session)
-	removeProcessing(payment.PaymentId)
+	complete, err := advancePayment(payment, clientSession)
+	if err != nil {
+		// cancel this payment and let the payment plan create a new one
+		cancelErr := model.CancelPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
+		if cancelErr == nil {
+			return &AdvancePaymentResult{
+				Complete: false,
+				Canceled: true,
+			}, nil
+		} else {
+			// keep trying until we can cancel it
+			return &AdvancePaymentResult{
+				Complete: false,
+				Canceled: false,
+			}, nil
+		}
+	}
+	return &AdvancePaymentResult{
+		Complete: complete,
+		Canceled: false,
+	}, nil
 }
 
-type ProviderPayoutResult struct {
-	Complete bool
+func AdvancePaymentPost(
+	advancePaymentArgs *AdvancePaymentArgs,
+	advancePaymentResult *AdvancePaymentResult,
+	clientSession *session.ClientSession,
+	tx bringyour.PgTx,
+) error {
+	if !advancePaymentResult.Complete && !advancePaymentResult.Canceled {
+		// keep checking on the payment until it is completed or canceled
+		ScheduleAdvancePayment(advancePaymentArgs, clientSession, tx)
+	}
+	return nil
 }
 
-func ProviderPayout(
+func advancePayment(
 	payment *model.AccountPayment,
 	clientSession *session.ClientSession,
-) (*ProviderPayoutResult, error) {
+) (complete bool, returnErr error) {
+	if payment.Completed || payment.Canceled {
+		complete = true
+		return
+	}
 
 	// if has payment record, get the status of the transaction
 	// if complete, finish and send email
@@ -130,15 +187,8 @@ func ProviderPayout(
 	// GET https://api.coinbase.com/v2/accounts/:account_id/transactions/:transaction_id
 	// https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-transactions
 
-	if payment.Completed || payment.Canceled {
-		return &ProviderPayoutResult{
-			Complete: true,
-		}, nil
-	}
-
 	// payment exists
 	if payment.PaymentRecord != nil {
-
 		var tx *CircleTransaction
 		var txResponseBodyBytes []byte
 		var status string
@@ -146,7 +196,8 @@ func ProviderPayout(
 		// get the status of the transaction
 		txResult, err := circleClient.GetTransaction(*payment.PaymentRecord)
 		if err != nil {
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		tx = &txResult.Transaction
@@ -155,25 +206,15 @@ func ProviderPayout(
 
 		// Check the Circle Status of the payment
 		// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
-		switch status {
+		switch strings.ToUpper(status) {
 		case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
 			// check later
-			return &ProviderPayoutResult{
-				Complete: false,
-			}, nil
+			return
 
 		case "DENIED", "FAILED", "CANCELLED":
 
-			// Cancel this payment in our DB
-			err := model.CancelPayment(clientSession.Ctx, payment.PaymentId)
-			if err != nil {
-				return nil, err
-			}
-
-			// Returns complete, since we don't want to retry this payment
-			return &ProviderPayoutResult{
-				Complete: true,
-			}, nil
+			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId.String(), status)
+			return
 
 		case "COMPLETE":
 
@@ -186,7 +227,8 @@ func ProviderPayout(
 
 			userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
 			if err != nil {
-				return nil, err
+				returnErr = err
+				return
 			}
 
 			awsMessageSender := GetAWSMessageSender()
@@ -209,16 +251,16 @@ func ProviderPayout(
 				})
 			}
 
-			return &ProviderPayoutResult{
-				Complete: true,
-			}, nil
+			complete = true
+			return
 
 		default:
-			return nil, fmt.Errorf(
-				"no case set for status %s; payment_id is: %s",
-				status,
+			returnErr = fmt.Errorf(
+				"[%s]unknown status = %s",
 				payment.PaymentId.String(),
+				status,
 			)
+			return
 		}
 
 	} else {
@@ -229,7 +271,8 @@ func ProviderPayout(
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		payoutAmount := model.NanoCentsToUsd(payment.Payout)
@@ -240,24 +283,28 @@ func ProviderPayout(
 			formattedBlockchain,
 		)
 		if err != nil {
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
 		if err != nil {
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
 		if err != nil {
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		payoutAmount = payoutAmount - *feeInUSDC
 
 		// ensure paymout amount is greater than minimum payout threshold
-		if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
-			return nil, fmt.Errorf("payout - fee is less than minimum wallet payout threshold")
+		if model.UsdToNanoCents(payoutAmount) <= 0 {
+			returnErr = fmt.Errorf("[%s]payout - fee is negative", payment.PaymentId.String())
+			return
 		}
 
 		// send the payment
@@ -268,7 +315,8 @@ func ProviderPayout(
 		)
 		if err != nil {
 			auditAccountPayment(clientSession, payment.PaymentId, err)
-			return nil, err
+			returnErr = err
+			return
 		}
 
 		// set the payment record
@@ -279,12 +327,8 @@ func ProviderPayout(
 			payoutAmount,
 			transferResult.Id,
 		)
-
-		return &ProviderPayoutResult{
-			Complete: false,
-		}, nil
-
 	}
+	return
 }
 
 func CalculateFee(feeEstimate FeeEstimate, network string) (*float64, error) {

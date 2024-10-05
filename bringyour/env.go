@@ -14,6 +14,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"github.com/coreos/go-semver/semver"
 	"gopkg.in/yaml.v3"
 	// _ "github.com/golang/glog"
@@ -54,7 +56,7 @@ var DefaultWarpHome = "/srv/warp"
 func init() {
 	initGlog()
 	settingsObj := GetSettings()
-	Logger().Printf("Found settings %s\n", settingsObj)
+	glog.Infof("[env]settings = %s\n", settingsObj)
 	if envObj, ok := settingsObj["env_vars"]; ok {
 		switch v := envObj.(type) {
 		case map[string]any:
@@ -63,7 +65,7 @@ func init() {
 				case string:
 					os.Setenv(key, w)
 				default:
-					Logger().Printf("Env settings unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
+					glog.Infof("[env]unrecognized env value \"%s\"=\"%s\" (%T)\n", key, w, w)
 				}
 			}
 		}
@@ -459,12 +461,12 @@ func (self *Resolver) RequireSimpleResource(relPath string) *SimpleResource {
 type SimpleResource struct {
 	path      string
 	override  []byte
-	parsedObj *map[string]any
+	parsedObj map[string]any
 }
 
 func (self *SimpleResource) Parse() map[string]any {
 	if self.parsedObj != nil {
-		return *self.parsedObj
+		return self.parsedObj
 	}
 	var bytes []byte
 	var err error
@@ -482,8 +484,26 @@ func (self *SimpleResource) Parse() map[string]any {
 	if err != nil {
 		panic(err)
 	}
-	self.parsedObj = &obj
+	self.parsedObj = obj
 	return obj
+}
+
+func (self *SimpleResource) UnmarshalYaml(value any) {
+	var bytes []byte
+	var err error
+	if self.override != nil {
+		// use the override value
+		bytes = self.override
+	} else {
+		bytes, err = os.ReadFile(self.path)
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = yaml.Unmarshal(bytes, value)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (self *SimpleResource) RequireInt(path ...string) int {
@@ -493,7 +513,7 @@ func (self *SimpleResource) RequireInt(path ...string) int {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
 	value := values[0]
-	Logger().Printf("Env: %s[%s] = %d\n", self.path, strings.Join(path, " "), value)
+	glog.Infof("[env]%s[%s] = %d\n", self.path, strings.Join(path, " "), value)
 	return value
 }
 
@@ -504,7 +524,7 @@ func (self *SimpleResource) RequireString(path ...string) string {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
 	value := translateString(values[0])
-	Logger().Printf("Env: %s[%s] = %s\n", self.path, strings.Join(path, " "), value)
+	glog.Infof("[env]%s[%s] = %s\n", self.path, strings.Join(path, " "), value)
 	return value
 }
 
@@ -519,7 +539,7 @@ func translateString(value string) string {
 			return match
 		}
 		key := envMatches[1]
-		Logger().Printf("Env: lookup env var \"%s\"\n", key)
+		glog.Infof("[env]lookup env var \"%s\"\n", key)
 		envValue := os.Getenv(key)
 		if envValue == "" {
 			panic(fmt.Sprintf("Missing env var %s", key))
@@ -562,7 +582,7 @@ func versionLookup(root string, path []string) (returnPaths []string, returnErr 
 	// try root/<path[0]>/<versioned path[1:]>
 	// try root/<version>/<path[0]>/<versioned path[1:]>
 
-	Logger().Printf("Try %s, %s\n", root, path)
+	glog.Infof("[env]try %s, %s\n", root, path)
 
 	if len(path) == 0 {
 		returnErr = errors.New("Empty path")
@@ -599,7 +619,7 @@ func versionLookup(root string, path []string) (returnPaths []string, returnErr 
 	semverSortWithBuild(versions)
 	for i := len(versions) - 1; 0 <= i; i -= 1 {
 		versionedRoot := filepath.Join(root, versionNames[versions[i]])
-		Logger().Printf("Test %s, %s\n", versionedRoot, path)
+		glog.Infof("[env]test %s, %s\n", versionedRoot, path)
 		if info, err := os.Stat(versionedRoot); err == nil && info.Mode().IsDir() {
 			if versionedPaths, err := versionLookup(versionedRoot, path); err == nil {
 				returnPaths = append(returnPaths, versionedPaths...)

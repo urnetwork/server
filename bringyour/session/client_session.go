@@ -8,7 +8,9 @@ import (
 	// "encoding/base64"
 	"errors"
 
-	"bringyour.com/bringyour"
+	"github.com/golang/glog"
+
+	// "bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
 )
 
@@ -68,7 +70,7 @@ func (self *ClientSession) Auth(req *http.Request) error {
 			if !jwt.IsByJwtActive(self.Ctx, byJwt) {
 				return errors.New("JWT expired.")
 			}
-			bringyour.Logger().Printf("Authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+			glog.Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
 			self.ByJwt = byJwt
 			return nil
 		}

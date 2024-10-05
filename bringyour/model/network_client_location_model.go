@@ -11,6 +11,8 @@ import (
 	mathrand "math/rand"
 	"slices"
 
+	"github.com/golang/glog"
+
 	"golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
@@ -84,7 +86,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 	countryCodesToRemoveFromCities := []string{}
 	for countryCode, _ := range cities {
 		if _, ok := countries[countryCode]; !ok {
-			bringyour.Logger().Printf("Missing country for %s", countryCode)
+			// bringyour.Logger().Printf("Missing country for %s", countryCode)
 			countryCodesToRemoveFromCities = append(countryCodesToRemoveFromCities, countryCode)
 		}
 	}
@@ -98,7 +100,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		countryIndex := 0
 		for countryCode, country := range countries {
 			countryIndex += 1
-			bringyour.Logger().Printf("[%d/%d] %s, %s\n", countryIndex, countryCount, countryCode, country)
+			glog.Infof("[loc][%d/%d] %s, %s\n", countryIndex, countryCount, countryCode, country)
 			createCountry(countryCode, country.(string))
 		}
 	}()
@@ -126,7 +128,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 					if 0 <= cityLimit && cityLimit < cityIndex {
 						return
 					}
-					bringyour.Logger().Printf("[%d/%d] %s, %s, %s\n", cityIndex, cityCount, countryCode, region, city)
+					glog.Infof("[loc][%d/%d] %s, %s, %s\n", cityIndex, cityCount, countryCode, region, city)
 					createCity(countryCode, country, region, city.(string))
 				}
 			}
@@ -209,7 +211,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		},
 	}
 	for name, members := range promotedRegions {
-		bringyour.Logger().Printf("Create promoted group %s\n", name)
+		// bringyour.Logger().Printf("Create promoted group %s\n", name)
 		createLocationGroup(true, name, members...)
 	}
 
@@ -480,7 +482,7 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		},
 	}
 	for name, members := range unSubregions {
-		bringyour.Logger().Printf("Create group %s\n", name)
+		// bringyour.Logger().Printf("Create group %s\n", name)
 		createLocationGroup(false, name, members...)
 	}
 }
@@ -1160,8 +1162,8 @@ func FindProviderLocations(
 		maxSearchDistance,
 	)
 
-	bringyour.Logger().Printf("Found location search results: %v\n", locationSearchResults)
-	bringyour.Logger().Printf("Found location group results: %v\n", locationGroupSearchResults)
+	// bringyour.Logger().Printf("Found location search results: %v\n", locationSearchResults)
+	// bringyour.Logger().Printf("Found location group results: %v\n", locationGroupSearchResults)
 
 	locationResults := map[bringyour.Id]*LocationResult{}
 	locationGroupResults := map[bringyour.Id]*LocationGroupResult{}
@@ -1196,10 +1198,10 @@ func FindProviderLocations(
 			}
 		})
 
-		bringyour.Logger().Printf("Search location ids: %v\n", searchLocationIds)
-		for _, searchLocationId := range searchLocationIds {
-			bringyour.Logger().Printf("  Search location id: %s\n", searchLocationId.String())
-		}
+		// bringyour.Logger().Printf("Search location ids: %v\n", searchLocationIds)
+		// for _, searchLocationId := range searchLocationIds {
+		// bringyour.Logger().Printf("  Search location id: %s\n", searchLocationId.String())
+		// }
 
 		bringyour.CreateTempTableInTx(
 			session.Ctx,
@@ -1305,7 +1307,7 @@ func FindProviderLocations(
 			}
 		})
 
-		bringyour.Logger().Printf("Found provider counts: %v\n", providerCount)
+		// bringyour.Logger().Printf("Found provider counts: %v\n", providerCount)
 
 		bringyour.CreateTempJoinTableInTx(
 			session.Ctx,
@@ -2047,11 +2049,11 @@ func CreateProviderSpec(
 	createProviderSpec *CreateProviderSpecArgs,
 	session *session.ClientSession,
 ) (*CreateProviderSpecResult, error) {
-	// FIXME return empty for now
-
-	return &CreateProviderSpecResult{
-		Specs: []*ProviderSpec{},
-	}, nil
+	// return &CreateProviderSpecResult{
+	// 	Specs: []*ProviderSpec{},
+	// }, nil
+	// FIXME
+	return nil, fmt.Errorf("Not implemented.")
 }
 
 func GetProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bringyour.Id {
