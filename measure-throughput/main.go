@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -20,20 +19,30 @@ import (
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/bringyour"
 	"github.com/jedib0t/go-pretty/v6/progress"
+	md "github.com/nao1215/markdown"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sync/errgroup"
 )
 
 func main() {
+
+	cfg := struct {
+		reportFile string
+	}{}
 	app := &cli.App{
 		Name: "measure-throughput",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:        "report-file",
+				Destination: &cfg.reportFile,
+				EnvVars:     []string{"REPORT_FILE"},
+			},
+		},
 		Action: func(c *cli.Context) (err error) {
 
 			// flag.Set("logtostderr", "false")    // Log to standard error instead of files
 			// flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
 			// flag.Set("v", "2")                  // Set the verbosity level to 1
-
-			flag.Parse()
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGPIPE)
 			defer cancel()
@@ -340,6 +349,28 @@ func main() {
 			}
 
 			pw.Log("estimated download bandwidth: %.2f Mbit/s", downloadBandwidth*8.0/1024.0/1024.0)
+
+			if cfg.reportFile != "" {
+
+				rf, err := os.Create(cfg.reportFile)
+				if err != nil {
+					return fmt.Errorf("failed to create report file: %w", err)
+				}
+
+				defer rf.Close()
+
+				md.NewMarkdown(rf).
+					H1("Bandwidth Measurement Report").
+					Table(md.TableSet{
+						Header: []string{"Direction", "Bandwidth (Mbit/s)"},
+						Rows: [][]string{
+							{"Upload", fmt.Sprintf("%.2f", uploadBandwidth*8.0/1024.0/1024.0)},
+							{"Download", fmt.Sprintf("%.2f", downloadBandwidth*8.0/1024.0/1024.0)},
+						},
+					}).
+					Build()
+
+			}
 
 			cancel()
 
