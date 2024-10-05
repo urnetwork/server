@@ -11,6 +11,8 @@ import (
 
 	"github.com/docopt/docopt-go"
 
+	// "github.com/golang/glog"
+
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
@@ -171,11 +173,11 @@ Options:
 
 func dbVersion(opts docopt.Opts) {
 	version := bringyour.DbVersion(context.Background())
-	bringyour.Logger().Printf("Current DB version: %d\n", version)
+	fmt.Printf("Current DB version: %d\n", version)
 }
 
 func dbMigrate(opts docopt.Opts) {
-	bringyour.Logger().Printf("Applying DB migrations ...\n")
+	fmt.Printf("Applying DB migrations ...\n")
 	bringyour.ApplyDbMigrations(context.Background())
 }
 
@@ -222,7 +224,7 @@ func statsCompute(opts docopt.Opts) {
 	stats := model.ComputeStats90(context.Background())
 	statsJson, err := json.MarshalIndent(stats, "", "  ")
 	bringyour.Raise(err)
-	bringyour.Logger().Printf("%s\n", statsJson)
+	fmt.Printf("%s\n", statsJson)
 }
 
 func statsExport(opts docopt.Opts) {
@@ -236,7 +238,7 @@ func statsImport(opts docopt.Opts) {
 	if stats != nil {
 		statsJson, err := json.MarshalIndent(stats, "", "  ")
 		bringyour.Raise(err)
-		bringyour.Logger().Printf("%s\n", statsJson)
+		fmt.Printf("%s\n", statsJson)
 	}
 }
 
@@ -491,7 +493,11 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 }
 
 func planPayouts() {
-	plan := model.PlanPayments(context.Background())
+	plan, err := model.PlanPayments(context.Background())
+	if err != nil {
+		fmt.Printf("payout plan err = %s\n", err)
+		return
+	}
 	fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
 	fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
 	fmt.Println(strings.Repeat("-", 56))
@@ -568,7 +574,9 @@ func payoutByPaymentId(opts docopt.Opts) {
 
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	res, err := controller.ProviderPayout(accountPayment, clientSession)
+	res, err := controller.AdvancePayment(&controller.AdvancePaymentArgs{
+		PaymentId: accountPayment.PaymentId,
+	}, clientSession)
 	if err != nil {
 		panic(err)
 	}
