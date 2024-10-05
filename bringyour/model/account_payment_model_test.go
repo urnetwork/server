@@ -3,6 +3,9 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/jwt"
@@ -10,12 +13,6 @@ import (
 	"github.com/go-playground/assert/v2"
 	"golang.org/x/exp/maps"
 )
-
-func TestAccountPayment(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
-
-	})
-}
 
 func TestCancelAccountPayment(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
@@ -77,7 +74,7 @@ func TestCancelAccountPayment(t *testing.T) {
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 
-		for paid < MinWalletPayoutThreshold*2 {
+		for paid < 2*UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(
 				ctx,
 				sourceNetworkId,
@@ -173,7 +170,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 
 		// we want to meet MinWalletPayoutThreshold
 		// otherwise the plan will not include the payout
-		for paid < MinWalletPayoutThreshold {
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			assert.Equal(t, err, nil)
 
@@ -211,5 +208,281 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		assert.Equal(t, transferStats.UnpaidBytesProvided, int(0))
 
 	})
+}
 
+func TestPaymentPlanSubsidy(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+		netRevenue := UsdToNanoCents(10.00)
+
+		sourceNetworkId := bringyour.NewId()
+		sourceId := bringyour.NewId()
+		destinationNetworkId := bringyour.NewId()
+		destinationId := bringyour.NewId()
+
+		// add subscription to both source and destination
+		AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
+			NetworkId:        sourceNetworkId,
+			SubscriptionType: SubscriptionTypeSupporter,
+			StartTime:        bringyour.NowUtc(),
+			EndTime:          bringyour.NowUtc().Add(24 * time.Hour),
+		})
+		AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
+			NetworkId:        destinationNetworkId,
+			SubscriptionType: SubscriptionTypeSupporter,
+			StartTime:        bringyour.NowUtc(),
+			EndTime:          bringyour.NowUtc().Add(24 * time.Hour),
+		})
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		getAccountBalanceResult := GetAccountBalance(sourceSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		getAccountBalanceResult = GetAccountBalance(destinationSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret: balanceCode.Secret,
+		}, sourceSession)
+
+		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
+		assert.Equal(t, len(contractIds), 0)
+
+		// test that escrow prevents concurrent contracts
+
+		transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
+		assert.Equal(t, err, nil)
+
+		transferBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
+		netBalanceByteCount := ByteCount(0)
+		for _, transferBalance := range transferBalances {
+			netBalanceByteCount += transferBalance.BalanceByteCount
+		}
+		// nothing left
+		assert.Equal(t, netBalanceByteCount, ByteCount(0))
+
+		_, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
+		assert.NotEqual(t, err, nil)
+
+		CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false)
+		CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false)
+
+		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+		netBalanceByteCount = ByteCount(0)
+		for _, transferBalance := range transferBalances {
+			netBalanceByteCount += transferBalance.BalanceByteCount
+		}
+		assert.Equal(t, netBalanceByteCount, netTransferByteCount)
+
+		transferEscrow, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
+		assert.Equal(t, err, nil)
+
+		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
+		assert.Equal(t, contractIds, map[bringyour.Id]ContractParty{
+			transferEscrow.ContractId: "",
+		})
+
+		usedTransferByteCount := ByteCount(1024)
+		CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+		CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+		paidByteCount := usedTransferByteCount
+		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+
+		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
+		assert.Equal(t, len(contractIds), 0)
+
+		// check that the payout is pending
+		getAccountBalanceResult = GetAccountBalance(sourceSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		getAccountBalanceResult = GetAccountBalance(destinationSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+		netBalanceByteCount = 0
+		for _, transferBalance := range transferBalances {
+			netBalanceByteCount += transferBalance.BalanceByteCount
+		}
+		assert.Equal(t, netBalanceByteCount, netTransferByteCount-paidByteCount)
+
+		args := &CreateAccountWalletExternalArgs{
+			Blockchain:       "matic",
+			WalletAddress:    "",
+			DefaultTokenType: "usdc",
+		}
+		walletId := CreateAccountWalletExternal(destinationSession, args)
+		assert.NotEqual(t, walletId, nil)
+
+		wallet := GetAccountWallet(ctx, *walletId)
+		assert.NotEqual(t, wallet, nil)
+
+		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+
+		// plan a payment and complete the payment
+		// nothing to plan because the payout does not meet the min threshold
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+
+		subsidyPayment := GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
+		assert.NotEqual(t, subsidyPayment, nil)
+		assert.Equal(t, subsidyPayment.NetPayout, NanoCents(0))
+		assert.Equal(t, subsidyPayment.PaidUserCount, 1)
+		assert.Equal(t, subsidyPayment.ActiveUserCount, 1)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountPaid, paidByteCount)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
+
+		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paidByteCount += usedTransferByteCount
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
+		assert.Equal(t, len(contractIds), 0)
+
+		getAccountBalanceResult = GetAccountBalance(destinationSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+
+		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
+		assert.NotEqual(t, subsidyPayment, nil)
+		assert.Equal(t, subsidyPayment.NetPayout, NanoCents(0))
+		assert.Equal(t, subsidyPayment.PaidUserCount, 1)
+		assert.Equal(t, subsidyPayment.ActiveUserCount, 1)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountPaid, paidByteCount)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
+		subsidyPaidByteCount := paidByteCount
+
+		for _, payment := range paymentPlan.WalletPayments {
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			CompletePayment(ctx, payment.PaymentId, "")
+		}
+
+		// check that the payment is recorded
+		getAccountBalanceResult = GetAccountBalance(sourceSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		getAccountBalanceResult = GetAccountBalance(destinationSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
+
+		// repeat escrow until it fails due to no balance
+		contractCount := 0
+		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
+		for {
+			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			if err != nil && 1024 < usedTransferByteCount {
+				usedTransferByteCount = usedTransferByteCount / 1024
+				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
+				continue
+			}
+			if netTransferByteCount <= paidByteCount {
+				assert.NotEqual(t, err, nil)
+				break
+			} else {
+				assert.Equal(t, err, nil)
+			}
+
+			CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			paidByteCount += usedTransferByteCount
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			contractCount += 1
+		}
+		// at this point the balance should be fully used up
+
+		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+		assert.Equal(t, transferBalances, []*TransferBalance{})
+
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+
+		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
+		assert.NotEqual(t, subsidyPayment, nil)
+		assert.Equal(t, subsidyPayment.NetPayout, NanoCents(0))
+		assert.Equal(t, subsidyPayment.PaidUserCount, 1)
+		assert.Equal(t, subsidyPayment.ActiveUserCount, 1)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountPaid, paidByteCount-subsidyPaidByteCount)
+		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
+		subsidyPaidByteCount = paidByteCount - subsidyPaidByteCount
+
+		for _, payment := range paymentPlan.WalletPayments {
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			CompletePayment(ctx, payment.PaymentId, "")
+		}
+
+		// check that the payment is recorded
+		getAccountBalanceResult = GetAccountBalance(sourceSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+
+		// the revenue from
+		getAccountBalanceResult = GetAccountBalance(destinationSession)
+		assert.Equal(t, getAccountBalanceResult.Balance.ProvidedByteCount, netTransferByteCount)
+		// each contract can have a 1 nanocent rounding error
+		if e := getAccountBalanceResult.Balance.ProvidedNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
+			assert.Equal(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
+		}
+		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
+		// each contract can have a 1 nanocent rounding error
+		if e := getAccountBalanceResult.Balance.PaidNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
+			assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
+		}
+
+		// there shoud be no more payments
+		paymentPlan, err = PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+
+		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
+		assert.Equal(t, subsidyPayment, nil)
+
+	})
 }

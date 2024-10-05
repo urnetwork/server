@@ -1575,4 +1575,8 @@ var migrations = []any{
             PRIMARY KEY (network_id, subscription_type, end_time, start_time)
         )
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment ADD subsidy_payout_nano_cents bigint NOT NULL DEFAULT 0
+    `),
 }

@@ -43,30 +43,30 @@ func ByteCountHumanReadable(count ByteCount) string {
 
 	if 1024*1024*1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024*1024*1024))/100.0,
+			float64(1000*count/(1024*1024*1024*1024))/1000.0,
 			2,
-			"TiB",
+			"tib",
 		)
 	} else if 1024*1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024*1024))/100.0,
+			float64(1000*count/(1024*1024*1024))/1000.0,
 			2,
-			"GiB",
+			"gib",
 		)
 	} else if 1024*1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024*1024))/100.0,
+			float64(1000*count/(1024*1024))/1000.0,
 			2,
-			"MiB",
+			"mib",
 		)
 	} else if 1024 <= count {
 		return trimFloatString(
-			float64(100*count/(1024))/100.0,
+			float64(1000*count/(1024))/1000.0,
 			2,
-			"KiB",
+			"kib",
 		)
 	} else {
-		return fmt.Sprintf("%dB", count)
+		return fmt.Sprintf("%db", count)
 	}
 }
 
@@ -146,11 +146,6 @@ const BalanceCodeDuration = 365 * 24 * time.Hour
 
 // up to 4MiB
 const AcceptableTransfersByteDifference = 4 * 1024 * 1024
-
-var MinWalletPayoutThreshold = UsdToNanoCents(1.00)
-
-// hold onto unpaid amounts for up to this time
-const WalletPayoutTimeout = 15 * 24 * time.Hour
 
 const ProviderRevenueShare float64 = 0.5
 
@@ -554,7 +549,6 @@ func CheckBalanceCode(
 	return
 }
 
-// FIXME add payment_token
 type TransferBalance struct {
 	BalanceId             bringyour.Id `json:"balance_id"`
 	NetworkId             bringyour.Id `json:"network_id"`
@@ -752,19 +746,6 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []bring
 		})
 	})
 	return
-}
-
-type EscrowId struct {
-	ContractId bringyour.Id
-	BalanceId  bringyour.Id
-}
-
-// `bringyour.ComplexValue`
-func (self *EscrowId) Values() []any {
-	return []any{
-		self.ContractId,
-		self.BalanceId,
-	}
 }
 
 type ContractOutcome = string
@@ -2344,26 +2325,6 @@ func GetAccountBalance(session *session.ClientSession) *GetAccountBalanceResult 
 	return getAccountBalanceResult
 }
 
-type Subscription struct {
-	SubscriptionId bringyour.Id `json:"subscription_id"`
-	Store          string       `json:"store"`
-	Plan           string       `json:"plan"`
-}
-
-func CurrentSubscription(ctx context.Context, networkId bringyour.Id) *Subscription {
-	// FIXME
-	return nil
-}
-
-func GetNetPendingPayout(ctx context.Context, networkId bringyour.Id) NanoCents {
-	// add up
-	// - transfer_escrow_sweep
-	// - pending payments
-
-	// FIXME
-	return 0
-}
-
 type SubscriptionCreatePaymentIdArgs struct {
 }
 
@@ -2457,22 +2418,6 @@ func SubscriptionGetNetworkIdForPaymentId(ctx context.Context, subscriptionPayme
 	})
 	return
 }
-
-// FIXME
-
-/*
-renewal := &SupporterSubscriptionRenewal{
-					NetworkId: playSubscriptionRenewal.NetworkId,
-					StartTime: startTime,
-					EndTime:               expiryTime.Add(SubscriptionGracePeriod),
-					NetRevenue: model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
-					PurchaseToken: playSubscriptionRenewal.PurchaseToken,
-				}
-				model.AddSupporterSubscriptionRenewal(
-					clientSession.Ctx,
-					renewal,
-				)
-*/
 
 type SubscriptionType = string
 

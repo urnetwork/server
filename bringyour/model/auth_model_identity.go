@@ -24,10 +24,6 @@ const (
 // BE CAREFUL do not change without a backwards-compatible migration
 var passwordPepper = []byte("t1me4atoporita")
 
-// FIXME change this to not use *string
-// func NormalUserAuthV1(userAuth string) (string, UserAuthType, error) {
-// }
-
 // BE CAREFUL do not change without a backwards-compatible migration
 func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 	if userAuth == nil {
@@ -45,7 +41,6 @@ func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
 
 	emailAddress, err = mail.ParseAddress(normalUserAuth)
 	if err == nil {
-		// fixme trim out common alias like gmail + and domains
 		normalEmailAddress := emailAddress.Address
 		// bringyour.Logger().Printf("Parsed email %s\n", normalEmailAddress)
 		return &normalEmailAddress, UserAuthTypeEmail

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"syscall"
 
 	"github.com/docopt/docopt-go"
 
@@ -33,9 +34,11 @@ Options:
 		panic(err)
 	}
 
-	// FIXME signal cancel
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	quitEvent := bringyour.NewEventWithContext(context.Background())
+	defer quitEvent.Set()
+
+	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
+	defer closeFn()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
@@ -120,7 +123,7 @@ Options:
 		port,
 	)
 
-	routerHandler := router.NewRouter(cancelCtx, routes)
+	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 	glog.Errorf("[api]close = %s\n", err)
 }

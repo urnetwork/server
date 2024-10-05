@@ -22,20 +22,38 @@ import (
 
 func TestByteCount(t *testing.T) {
 	(&bringyour.TestEnv{ApplyDbMigrations: false}).Run(func() {
-		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0B")
-		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5TiB")
+		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0b")
+		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5tib")
 
-		count, err := ParseByteCount("5MiB")
+		count, err := ParseByteCount("2")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(2))
+		assert.Equal(t, ByteCountHumanReadable(count), "2b")
+
+		count, err = ParseByteCount("5B")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(5))
+		assert.Equal(t, ByteCountHumanReadable(count), "5b")
+
+		count, err = ParseByteCount("123KiB")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, count, ByteCount(123*1024))
+		assert.Equal(t, ByteCountHumanReadable(count), "123kib")
+
+		count, err = ParseByteCount("5MiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(5*1024*1024))
+		assert.Equal(t, ByteCountHumanReadable(count), "5mib")
 
 		count, err = ParseByteCount("1.7GiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(17*1024*1024*1024)/ByteCount(10))
+		assert.Equal(t, ByteCountHumanReadable(count), "1.7gib")
 
 		count, err = ParseByteCount("13.1TiB")
 		assert.Equal(t, err, nil)
 		assert.Equal(t, count, ByteCount(131*1024*1024*1024*1024)/ByteCount(10))
+		assert.Equal(t, ByteCountHumanReadable(count), "13.1tib")
 
 	})
 }
@@ -178,7 +196,7 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < MinWalletPayoutThreshold {
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			assert.Equal(t, err, nil)
 
@@ -423,7 +441,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < MinWalletPayoutThreshold {
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, usedTransferByteCount)
 			assert.Equal(t, err, nil)
 			transferEscrow, err := CreateCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount, 1*time.Hour)

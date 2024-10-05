@@ -63,8 +63,6 @@ func (self *Sku) BalanceByteCount() model.ByteCount {
 	return byteCount
 }
 
-// FIXME read from yml
-
 var stripeWebhookSigningSecret = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
 	return c["webhook"].(map[string]any)["signing_secret"].(string)
@@ -74,31 +72,6 @@ var stripeApiToken = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("stripe.yml").Parse()
 	return c["api"].(map[string]any)["token"].(string)
 })
-
-// type VaultSku struct {
-// 	ID               string `yaml:"id"`
-// 	BalanceByteCount int64  `yaml:"balance_byte_count"`
-// }
-
-// func parseVaultSkus(skusInterface []interface{}) []VaultSku {
-// 	var skus []VaultSku
-
-// 	for _, skuInterface := range skusInterface {
-// 		sku := skuInterface.(map[string]any)
-// 		skus = append(skus, VaultSku{
-// 			ID:               sku["id"].(string),
-// 			BalanceByteCount: int64(sku["balance_byte_count"].(int)),
-// 		})
-// 	}
-
-// 	return skus
-// }
-
-// var vaultStripeSkus = sync.OnceValue(func() []VaultSku {
-// 	c := bringyour.Config.RequireSimpleResource("stripe.yml").Parse()
-
-// 	return parseVaultSkus(c["skus"].([]interface{}))
-// })
 
 var stripeSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
@@ -110,29 +83,6 @@ var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
 	c := bringyour.Vault.RequireSimpleResource("coinbase.yml").Parse()
 	return c["webhook"].(map[string]any)["shared_secret"].(string)
 })
-
-// var vaultCoinbaseSkus = sync.OnceValue(func() []VaultSku {
-// 	c := bringyour.Config.RequireSimpleResource("coinbase.yml").Parse()
-
-// 	return parseVaultSkus(c["skus"].([]interface{}))
-// })
-
-// func coinbaseSkus() map[string]*Sku {
-// 	playSubscriptionFeeFraction := 0.3
-// 	vaultSkus := vaultCoinbaseSkus()
-
-// 	skus := make(map[string]*Sku)
-
-// 	for _, vaultSku := range vaultSkus {
-
-// 		skus[vaultSku.ID] = &Sku{
-// 			FeeFraction:      playSubscriptionFeeFraction,
-// 			BalanceByteCount: model.ByteCount(vaultSku.BalanceByteCount),
-// 		}
-// 	}
-
-// 	return skus
-// }
 
 var coinbaseSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
@@ -150,35 +100,11 @@ var playPackageName = sync.OnceValue(func() string {
 	return c["webhook"].(map[string]any)["package_name"].(string)
 })
 
-// FIXME eval once
-// func playSkus() map[string]*Sku {
-// 	playSubscriptionFeeFraction := 0.3
-// 	// FIXME read from json
-// 	return map[string]*Sku{
-// 		"monthly_transfer_300gib": &Sku{
-// 			FeeFraction:      playSubscriptionFeeFraction,
-// 			BalanceByteCount: model.ByteCount(300) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
-// 		},
-// 		"monthly_transfer_1tib": &Sku{
-// 			FeeFraction:      playSubscriptionFeeFraction,
-// 			BalanceByteCount: model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
-// 		},
-// 		"ultimate": &Sku{
-// 			FeeFraction:      playSubscriptionFeeFraction,
-// 			BalanceByteCount: model.ByteCount(10) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024),
-// 		},
-// 	}
-// }
-
 var playSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
 	bringyour.Config.RequireSimpleResource("play.yml").UnmarshalYaml(&skus)
 	return skus.Skus
 })
-
-// func companySenderEmail() string {
-// 	return "brien@bringyour.com"
-// }
 
 var companySenderEmail = sync.OnceValue(func() string {
 	c := bringyour.Config.RequireSimpleResource("email.yml").Parse()
@@ -206,11 +132,17 @@ var playRefreshToken = sync.OnceValue(func() string {
 
 type SubscriptionBalanceResult struct {
 	BalanceByteCount          model.ByteCount          `json:"balance_byte_count"`
-	CurrentSubscription       *model.Subscription      `json:"current_subscription,omitempty"`
+	CurrentSubscription       *Subscription            `json:"current_subscription,omitempty"`
 	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
 	WalletInfo                *CircleWalletInfo        `json:"wallet_info,omitempty"`
 	UpdateTime                time.Time                `json:"update_time"`
+}
+
+type Subscription struct {
+	SubscriptionId bringyour.Id `json:"subscription_id"`
+	Store          string       `json:"store"`
+	Plan           string       `json:"plan"`
 }
 
 func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
@@ -221,9 +153,15 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		netBalanceByteCount += transferBalance.BalanceByteCount
 	}
 
-	currentSubscription := model.CurrentSubscription(session.Ctx, session.ByJwt.NetworkId)
+	var currentSubscription *Subscription
+	if model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter) {
+		currentSubscription = &Subscription{
+			Plan: model.SubscriptionTypeSupporter,
+		}
+	}
 
-	pendingPayout := model.GetNetPendingPayout(session.Ctx, session.ByJwt.NetworkId)
+	// FIXME
+	pendingPayout := model.ByteCount(0)
 
 	// ignore any error with circle,
 	// since the model won't allow the wallet to enter a corrupt state
@@ -237,26 +175,6 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		WalletInfo:                walletInfo,
 		UpdateTime:                bringyour.NowUtc(),
 	}, nil
-}
-
-// run this every 15 minutes
-// circle.yml
-func AutoPayout() {
-	// auto accept payout as long as it is below an amount
-	// otherwise require manual processing
-	// FIXME use circle
-}
-
-// notification_count
-// next_notify_time
-func BalanceCodeNotify() {
-	// in a loop get all unredeemed balance codes where next notify time is null or >= now
-	// send a reminder that the customer has a balance code, and embed the code in the email
-	// 1 day, 7 days, 30 days, 90 days (final reminder)
-}
-
-func notifyBalanceCode(balanceCodeId bringyour.Id) {
-
 }
 
 type StripeWebhookArgs struct {

@@ -302,8 +302,8 @@ func advancePayment(
 		payoutAmount = payoutAmount - *feeInUSDC
 
 		// ensure paymout amount is greater than minimum payout threshold
-		if model.UsdToNanoCents(payoutAmount) < model.MinWalletPayoutThreshold {
-			returnErr = fmt.Errorf("[%s]payout - fee is less than the minimum allowed payout", payment.PaymentId.String())
+		if model.UsdToNanoCents(payoutAmount) <= 0 {
+			returnErr = fmt.Errorf("[%s]payout - fee is negative", payment.PaymentId.String())
 			return
 		}
 

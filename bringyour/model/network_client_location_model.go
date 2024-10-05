@@ -2049,11 +2049,11 @@ func CreateProviderSpec(
 	createProviderSpec *CreateProviderSpecArgs,
 	session *session.ClientSession,
 ) (*CreateProviderSpecResult, error) {
-	// FIXME return empty for now
-
-	return &CreateProviderSpecResult{
-		Specs: []*ProviderSpec{},
-	}, nil
+	// return &CreateProviderSpecResult{
+	// 	Specs: []*ProviderSpec{},
+	// }, nil
+	// FIXME
+	return nil, fmt.Errorf("Not implemented.")
 }
 
 func GetProvidersForLocation(ctx context.Context, locationId bringyour.Id) []bringyour.Id {
