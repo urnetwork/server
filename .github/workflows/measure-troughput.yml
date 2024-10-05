@@ -1,0 +1,39 @@
+name: Measure Troughput
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  checkout_repos:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the current repository in the 'current-repo' subdirectory
+      - name: Checkout Current Repo
+        uses: actions/checkout@v3
+        with:
+          path: bringyour
+
+      # Step 2: Check out another repository in the 'another-repo' subdirectory using GITHUB_TOKEN
+      - name: Checkout Another Repo
+        uses: actions/checkout@v3
+        with:
+          repository: bringyour/connect
+          path: connect
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker
+        run: |
+          docker --version
+          echo "Docker is ready to use."
+      - name: Build Connect image
+        working-directory: ./bringyour/measure-throughput
+        run: |
+          go run .
