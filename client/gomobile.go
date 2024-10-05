@@ -113,6 +113,16 @@ func NewFindProvidersProviderList() *FindProvidersProviderList {
 	}
 }
 
+type ProviderGridPointList struct {
+	exportedList[*ProviderGridPoint]
+}
+
+func NewProviderGridPointList() *ProviderGridPointList {
+	return &ProviderGridPointList{
+		exportedList: *newExportedList[*ProviderGridPoint](),
+	}
+}
+
 type LocationResultList struct {
 	exportedList[*LocationResult]
 }
@@ -160,6 +170,16 @@ type AccountWalletsList struct {
 func NewAccountWalletsList() *AccountWalletsList {
 	return &AccountWalletsList{
 		exportedList: *newExportedList[*AccountWallet](),
+	}
+}
+
+type AccountPaymentsList struct {
+	exportedList[*AccountPayment]
+}
+
+func NewAccountPaymentsList() *AccountPaymentsList {
+	return &AccountPaymentsList{
+		exportedList: *newExportedList[*AccountPayment](),
 	}
 }
 
@@ -216,22 +236,49 @@ func NewProvideSecretKeyList() *ProvideSecretKeyList {
 // conforms to `json.Marshaler` and `json.Unmarshaler`
 type Time struct {
 	impl time.Time
+	// store this on the object to support gomobile "equals" and "hashCode"
+	TimeStr string
 }
 
 func NewTimeUnixMilli(unixMilli int64) *Time {
-	return &Time{
-		impl: time.UnixMilli(unixMilli),
-	}
+	return newTime(time.UnixMilli(unixMilli))
 }
 
 func newTime(impl time.Time) *Time {
 	return &Time{
-		impl: impl,
+		impl:    impl,
+		TimeStr: impl.String(),
 	}
+}
+
+func (self *Time) String() string {
+	return self.TimeStr
+}
+
+func (self *Time) Cmp(b *Time) int {
+	if self.impl.Before(b.impl) {
+		return -1
+	}
+	if b.impl.Before(self.impl) {
+		return 1
+	}
+	return 0
+}
+
+func (self *Time) toTime() time.Time {
+	return self.impl
 }
 
 func (self *Time) UnixMilli() int64 {
 	return self.impl.UnixMilli()
+}
+
+func (self *Time) MillisUntil() int32 {
+	return int32(self.impl.Sub(time.Now()) / time.Millisecond)
+}
+
+func (self *Time) Format(layout string) string {
+	return self.impl.Format(layout)
 }
 
 func (self *Time) UnmarshalJSON(b []byte) error {

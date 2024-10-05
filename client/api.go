@@ -508,9 +508,10 @@ func (self *BringYourApi) FindProviders(findProviders *FindProvidersArgs, callba
 }
 
 type ProviderSpec struct {
-	LocationId      *Id `json:"location_id,omitempty"`
-	LocationGroupId *Id `json:"location_group_id,omitempty"`
-	ClientId        *Id `json:"client_id,omitempty"`
+	LocationId      *Id  `json:"location_id,omitempty"`
+	LocationGroupId *Id  `json:"location_group_id,omitempty"`
+	ClientId        *Id  `json:"client_id,omitempty"`
+	BestAvailable   bool `json:"best_available,omitempty"`
 }
 
 func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
@@ -527,6 +528,10 @@ func (self *ProviderSpec) toConnectProviderSpec() *connect.ProviderSpec {
 		connectClientId := self.ClientId.toConnectId()
 		connectProviderSpec.ClientId = &connectClientId
 	}
+	if self.BestAvailable {
+		connectProviderSpec.BestAvailable = true
+	}
+
 	return connectProviderSpec
 }
 
@@ -547,7 +552,7 @@ type FindProvidersProvider struct {
 	EstimatedBytesPerSecond int `json:"estimated_bytes_per_second"`
 }
 
-func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, callback FindProvidersCallback) {
+func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, callback FindProviders2Callback) {
 	go connect.HandleError(func() {
 		connect.HttpPostWithStrategy(
 			self.ctx,
@@ -555,7 +560,7 @@ func (self *BringYourApi) FindProviders2(findProviders2 *FindProviders2Args, cal
 			fmt.Sprintf("%s/network/find-providers2", self.apiUrl),
 			findProviders2,
 			self.GetByJwt(),
-			&FindProvidersResult{},
+			&FindProviders2Result{},
 			callback,
 		)
 	})
@@ -654,6 +659,10 @@ func (self *BringYourApi) CreateAccountWallet(createAccountWallet *CreateAccount
 	})
 }
 
+/**
+ * Set payout wallet
+ */
+
 type SetPayoutWalletArgs struct {
 	WalletId *Id `json:"wallet_id"`
 }
@@ -696,7 +705,7 @@ func (self *BringYourApi) GetAccountWallets(callback GetAccountWalletsCallback) 
 }
 
 type GetPayoutWalletIdResult struct {
-	Id *Id `json:"id"`
+	WalletId *Id `json:"wallet_id"`
 }
 
 type GetPayoutWalletCallback connect.ApiCallback[*GetPayoutWalletIdResult]
@@ -742,6 +751,30 @@ func (self *BringYourApi) WalletBalance(callback WalletBalanceCallback) {
 			fmt.Sprintf("%s/wallet/balance", self.apiUrl),
 			self.GetByJwt(),
 			&WalletBalanceResult{},
+			callback,
+		)
+	})
+}
+
+type GetAccountPaymentsCallback connect.ApiCallback[*GetNetworkAccountPaymentsResult]
+
+type GetNetworkAccountPaymentsError struct {
+	Message string `json:"message"`
+}
+
+type GetNetworkAccountPaymentsResult struct {
+	AccountPayments *AccountPaymentsList            `json:"account_payments,omitempty"`
+	Error           *GetNetworkAccountPaymentsError `json:"error,omitempty"`
+}
+
+func (self *BringYourApi) GetAccountPayments(callback GetAccountPaymentsCallback) {
+	go connect.HandleError(func() {
+		connect.HttpGetWithStrategy(
+			self.ctx,
+			self.clientStrategy,
+			fmt.Sprintf("%s/account/payments", self.apiUrl),
+			self.byJwt,
+			&GetNetworkAccountPaymentsResult{},
 			callback,
 		)
 	})
@@ -820,6 +853,10 @@ func (self *BringYourApi) SubscriptionBalance(callback SubscriptionBalanceCallba
 	})
 }
 
+/**
+ * Create subscription payment id
+ */
+
 type SubscriptionCreatePaymentIdCallback connect.ApiCallback[*SubscriptionCreatePaymentIdResult]
 
 type SubscriptionCreatePaymentIdArgs struct {
@@ -860,14 +897,9 @@ func (self *BringYourApi) SubscriptionCreatePaymentIdSync(createPaymentId *Subsc
 	)
 }
 
-type NetworkUser struct {
-	UserId      *Id    `json:"userId"`
-	UserName    string `json:"user_name"`
-	UserAuth    string `json:"user_auth"`
-	Verified    bool   `json:"verified"`
-	AuthType    string `json:"auth_type"`
-	NetworkName string `json:"network_name"`
-}
+/**
+ * Get network user
+ */
 
 type GetNetworkUserError struct {
 	Message string `json:"message"`
@@ -891,8 +923,45 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 	)
 }
 
+/**
+ * Update Network User
+ **/
+
+type NetworkUserUpdateArgs struct {
+	NetworkName string `json:"network_name"`
+	UserName    string `json:"username"`
+}
+
+type NetworkUserUpdateError struct {
+	Message string `json:"message"`
+}
+
+type NetworkUserUpdateResult struct {
+	Error *NetworkUserUpdateError `json:"error,omitempty"`
+}
+
+type NetworkUserUpdateCallback connect.ApiCallback[*NetworkUserUpdateResult]
+
+func (self *BringYourApi) NetworkUserUpdate(updateNetworkUser *NetworkUserUpdateArgs, callback NetworkUserUpdateCallback) {
+	go connect.HandleError(func() {
+		connect.HttpPostWithStrategy(
+			self.ctx,
+			self.clientStrategy,
+			fmt.Sprintf("%s/network/user/update", self.apiUrl),
+			updateNetworkUser,
+			self.GetByJwt(),
+			&NetworkUserUpdateResult{},
+			callback,
+		)
+	})
+}
+
+/**
+ * Get network referral code
+ */
+
 type GetNetworkReferralCodeResult struct {
-	ReferralCode string                       `json:"referralCode,omitempty"`
+	ReferralCode string                       `json:"referral_code,omitempty"`
 	Error        *GetNetworkReferralCodeError `json:"error,omitempty"`
 }
 
@@ -909,6 +978,141 @@ func (self *BringYourApi) GetNetworkReferralCode(callback GetNetworkReferralCode
 		fmt.Sprintf("%s/account/referral-code", self.apiUrl),
 		self.GetByJwt(),
 		&GetNetworkReferralCodeResult{},
+		callback,
+	)
+}
+
+/**
+ * Remove wallet
+ */
+
+type RemoveWalletError struct {
+	Message string `json:"message"`
+}
+
+type RemoveWalletResult struct {
+	Success bool               `json:"success"`
+	Error   *RemoveWalletError `json:"error,omitempty"`
+}
+
+type RemoveWalletArgs struct {
+	WalletId string `json:"wallet_id"`
+}
+
+type RemoveWalletCallback connect.ApiCallback[*RemoveWalletResult]
+
+func (self *BringYourApi) RemoveWallet(
+	removeWallet *RemoveWalletArgs,
+	callback RemoveWalletCallback,
+) (*RemoveWalletResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/account/wallets/remove", self.apiUrl),
+		removeWallet,
+		self.GetByJwt(),
+		&RemoveWalletResult{},
+		callback,
+	)
+}
+
+/**
+ * Send feedback
+ */
+
+type FeedbackSendArgs struct {
+	Needs *FeedbackSendNeeds `json:"needs"`
+}
+
+type FeedbackSendNeeds struct {
+	Other string `json:"other"`
+}
+
+type FeedbackSendResult struct{}
+
+type SendFeedbackCallback connect.ApiCallback[*FeedbackSendResult]
+
+func (self *BringYourApi) SendFeedback(
+	sendFeedback *FeedbackSendArgs,
+	callback SendFeedbackCallback,
+) (*FeedbackSendResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/feedback/send-feedback", self.apiUrl),
+		sendFeedback,
+		self.GetByJwt(),
+		&FeedbackSendResult{},
+		callback,
+	)
+}
+
+/**
+ * Update Account Preferences
+ */
+
+type AccountPreferencesSetArgs struct {
+	ProductUpdates bool `json:"product_updates"`
+}
+
+type AccountPreferencesSetResult struct{}
+
+type AccountPreferencesSetCallback connect.ApiCallback[*AccountPreferencesSetResult]
+
+func (self *BringYourApi) AccountPreferencesUpdate(
+	accountPreferences *AccountPreferencesSetArgs,
+	callback AccountPreferencesSetCallback,
+) (*AccountPreferencesSetResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/preferences/set-preferences", self.apiUrl),
+		accountPreferences,
+		self.GetByJwt(),
+		&AccountPreferencesSetResult{},
+		callback,
+	)
+}
+
+/**
+ * Fetch Account Preferences
+ **/
+
+type AccountPreferencesGetResult struct {
+	ProductUpdates bool `json:"product_updates,omitempty"`
+}
+
+type AccountPreferencesGetCallback connect.ApiCallback[*AccountPreferencesGetResult]
+
+func (self *BringYourApi) AccountPreferencesGet(callback AccountPreferencesGetCallback) (*AccountPreferencesGetResult, error) {
+	return connect.HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/preferences", self.apiUrl),
+		self.GetByJwt(),
+		&AccountPreferencesGetResult{},
+		callback,
+	)
+}
+
+/**
+ * Fetch Provider Transfer Stats
+ **/
+
+type TransferStatsResult struct {
+	PaidBytesProvided   int `json:"paid_bytes_provided"`
+	UnpaidBytesProvided int `json:"unpaid_bytes_provided"`
+}
+
+type GetTransferStatsCallback connect.ApiCallback[*TransferStatsResult]
+
+func (self *BringYourApi) GetTransferStats(callback GetTransferStatsCallback) (*TransferStatsResult, error) {
+	return connect.HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/transfer/stats", self.apiUrl),
+		self.GetByJwt(),
+		&TransferStatsResult{},
 		callback,
 	)
 }

@@ -232,6 +232,132 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
 
+// merged location and location group
+type ConnectLocation struct {
+	ConnectLocationId *ConnectLocationId `json:"connect_location_id,omitempty"`
+	Name              string             `json:"name,omitempty"`
+
+	ProviderCount int32 `json:"provider_count,omitempty"`
+	Promoted      bool  `json:"promoted,omitempty"`
+	MatchDistance int32 `json:"match_distance,omitempty"`
+
+	LocationType LocationType `json:"location_type,omitempty"`
+
+	City        string `json:"city,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Country     string `json:"country,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+
+	CityLocationId    *Id `json:"city_location_id,omitempty"`
+	RegionLocationId  *Id `json:"region_location_id,omitempty"`
+	CountryLocationId *Id `json:"country_location_id,omitempty"`
+}
+
+func (self *ConnectLocation) IsGroup() bool {
+	return self.ConnectLocationId.IsGroup()
+}
+
+func (self *ConnectLocation) IsDevice() bool {
+	return self.ConnectLocationId.IsDevice()
+}
+
+func (self *ConnectLocation) ToRegion() *ConnectLocation {
+	return &ConnectLocation{
+		ConnectLocationId: self.ConnectLocationId,
+		Name:              self.Region,
+
+		ProviderCount: self.ProviderCount,
+		Promoted:      false,
+		MatchDistance: 0,
+
+		LocationType: LocationTypeRegion,
+
+		City:        "",
+		Region:      self.Region,
+		Country:     self.Country,
+		CountryCode: self.CountryCode,
+
+		CityLocationId:    nil,
+		RegionLocationId:  self.RegionLocationId,
+		CountryLocationId: self.CountryLocationId,
+	}
+}
+
+func (self *ConnectLocation) ToCountry() *ConnectLocation {
+	return &ConnectLocation{
+		ConnectLocationId: self.ConnectLocationId,
+		Name:              self.Country,
+
+		ProviderCount: self.ProviderCount,
+		Promoted:      false,
+		MatchDistance: 0,
+
+		LocationType: LocationTypeCountry,
+
+		City:        "",
+		Region:      "",
+		Country:     self.Country,
+		CountryCode: self.CountryCode,
+
+		CityLocationId:    nil,
+		RegionLocationId:  nil,
+		CountryLocationId: self.CountryLocationId,
+	}
+}
+
+// merged location and location group
+type ConnectLocationId struct {
+	// if set, the location is a direct connection to another device
+	ClientId        *Id  `json:"client_id,omitempty"`
+	LocationId      *Id  `json:"location_id,omitempty"`
+	LocationGroupId *Id  `json:"location_group_id,omitempty"`
+	BestAvailable   bool `json:"best_available,omitempty"`
+}
+
+func (self *ConnectLocationId) IsGroup() bool {
+	return self.LocationGroupId != nil
+}
+
+func (self *ConnectLocationId) IsDevice() bool {
+	return self.ClientId != nil
+}
+
+func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
+	// - direct
+	// - group
+	if self.ClientId != nil && b.ClientId != nil {
+		if c := self.ClientId.Cmp(b.ClientId); c != 0 {
+			return c
+		}
+	} else if self.ClientId != nil {
+		return -1
+	} else if b.ClientId != nil {
+		return 1
+	}
+
+	if self.LocationGroupId != nil && b.LocationGroupId != nil {
+		if c := self.LocationGroupId.Cmp(b.LocationGroupId); c != 0 {
+			return c
+		}
+	} else if self.LocationGroupId != nil {
+		return -1
+	} else if b.LocationGroupId != nil {
+		return 1
+	}
+
+	if self.LocationId != nil && b.LocationId != nil {
+		if c := self.LocationId.Cmp(b.LocationId); c != 0 {
+			return c
+		}
+	} else if self.LocationId != nil {
+		return -1
+	} else if b.LocationId != nil {
+		return 1
+	}
+
+	return 0
+}
+
 type ProvideSecretKey struct {
 	ProvideMode      ProvideMode `json:"provide_mode"`
 	ProvideSecretKey string      `json:"provide_secret_key"`

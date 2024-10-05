@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+
 	// "io"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"bringyour.com/connect"
 )
 
+var lsLog = logFn("local_state")
+
 const AsyncQueueSize = 32
 
 const LocalStorageFilePermissions = 0700
@@ -22,6 +25,7 @@ type ByJwt struct {
 	UserId      *Id
 	NetworkName string
 	NetworkId   *Id
+	GuestMode   bool
 }
 
 type LocalState struct {
@@ -84,6 +88,9 @@ func (self *LocalState) ParseByJwt() (*ByJwt, error) {
 		if networkId, err := ParseId(networkIdStr.(string)); err == nil {
 			byJwt.NetworkId = networkId
 		}
+	}
+	if guestMode, ok := claims["guest_mode"]; ok {
+		byJwt.GuestMode = guestMode.(bool)
 	}
 
 	return byJwt, nil
@@ -244,6 +251,26 @@ func (self *LocalState) GetProvideSecretKeys() *ProvideSecretKeyList {
 	return nil
 }
 
+func (self *LocalState) SetCanShowRatingDialog(canShowRatingDialog bool) error {
+	path := filepath.Join(self.localStorageDir, ".can_show_rating_dialog")
+	canShowRatingDialogBytes, err := json.Marshal(canShowRatingDialog)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, canShowRatingDialogBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetCanShowRatingDialog() bool {
+	path := filepath.Join(self.localStorageDir, ".can_show_rating_dialog")
+	if canShowRatingDialogBytes, err := os.ReadFile(path); err == nil {
+		var canShowRatingDialog bool
+		if err := json.Unmarshal(canShowRatingDialogBytes, &canShowRatingDialog); err == nil {
+			return canShowRatingDialog
+		}
+	}
+	return true
+}
+
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(
@@ -365,7 +392,7 @@ func (self *AsyncLocalState) serialAsync(work func() error, callbacks ...CommitC
 }
 
 // get the sync local state
-func (self *AsyncLocalState) LocalState() *LocalState {
+func (self *AsyncLocalState) GetLocalState() *LocalState {
 	return self.localState
 }
 
