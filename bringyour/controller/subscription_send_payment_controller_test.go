@@ -136,6 +136,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 
+			// check the wallet address is correctly joined
+			assert.Equal(t, paymentRecord.WalletAddress, destinationWalletAddress)
+
 			// estimate fee
 			estimatedFees, err := mockCircleClient.EstimateTransferFee(
 				*paymentRecord.TokenAmount,
