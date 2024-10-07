@@ -1,8 +1,10 @@
 {
   "cSpell.words": [
     "bwclient",
+    "cenkalti",
     "Datasource",
     "errgroup",
+    "healthcheck",
     "jwtutil",
     "netstack",
     "pterm",
@@ -10,5 +12,5 @@
     "resty",
     "tcplogger"
   ],
-  "go.testOnSave": false,
+  "go.testOnSave": true,
 }
