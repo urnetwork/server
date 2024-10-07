@@ -1,0 +1,14 @@
+{
+  "cSpell.words": [
+    "bwclient",
+    "Datasource",
+    "errgroup",
+    "jwtutil",
+    "netstack",
+    "pterm",
+    "rerr",
+    "resty",
+    "tcplogger"
+  ],
+  "go.testOnSave": false,
+}

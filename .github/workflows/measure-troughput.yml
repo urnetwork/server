@@ -1,0 +1,74 @@
+name: Measure Troughput
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  checkout_repos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Current Repo
+        uses: actions/checkout@v3
+        with:
+          path: bringyour
+
+      - name: Checkout Another Repo
+        uses: actions/checkout@v3
+        with:
+          repository: bringyour/connect
+          path: connect
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker
+        run: |
+          docker --version
+          echo "Docker is ready to use."
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "^1.22.0"
+
+      - name: Install go protobuf plugin
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+      - name: Compile protocol proto files
+        working-directory: ./connect/protocol
+        run: |
+          make
+
+      - name: Compile API
+        working-directory: ./bringyour/api
+        run: |
+          go mod tidy && go build .
+
+      - name: Compile Connect
+        working-directory: ./bringyour/connect
+        run: |
+          go mod tidy && go build .
+
+      - name: Measure Troughput
+        working-directory: ./bringyour/measure-throughput
+        env:
+          REPORT_FILE: report.md
+        run: |
+          go run .
+
+      - name: Display Report as PR Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: github.event_name == 'pull_request'
+        with:
+          recreate: true
+          path: ./bringyour/measure-throughput/report.md
