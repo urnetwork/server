@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"bringyor.com/measure-throughput/bwestimator"
 	"bringyor.com/measure-throughput/clientdevice"
 	"bringyor.com/measure-throughput/datasource"
+	"bringyor.com/measure-throughput/healthcheck"
 	"bringyor.com/measure-throughput/jwtutil"
 	"bringyour.com/bringyour"
 	"github.com/jedib0t/go-pretty/v6/progress"
@@ -27,8 +29,9 @@ import (
 func main() {
 
 	cfg := struct {
-		reportFile string
-		logTCP     bool
+		reportFile     string
+		logTCP         bool
+		useMulticlient bool
 	}{}
 	app := &cli.App{
 		Name: "measure-throughput",
@@ -43,8 +46,33 @@ func main() {
 				Destination: &cfg.logTCP,
 				EnvVars:     []string{"LOG_TCP"},
 			},
+			&cli.BoolFlag{
+				Name:        "use-multiclient",
+				Destination: &cfg.useMulticlient,
+				EnvVars:     []string{"USE_MULTICLIENT"},
+			},
 		},
 		Action: func(c *cli.Context) (err error) {
+
+			fmt.Println("using multiclient:", cfg.useMulticlient)
+
+			f, err := os.Create("/tmp/measure-throughput.log")
+			if err != nil {
+				return fmt.Errorf("failed to create log file: %w", err)
+			}
+
+			defer f.Close()
+
+			slog.SetDefault(
+				slog.New(
+					slog.NewTextHandler(f,
+						&slog.HandlerOptions{
+							AddSource: true,
+							Level:     slog.LevelDebug,
+						},
+					),
+				),
+			)
 
 			// flag.Set("logtostderr", "false")    // Log to standard error instead of files
 			// flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
@@ -193,6 +221,7 @@ func main() {
 					"8080",
 				)
 				if err != nil {
+					slog.Error("failed to run API", "err", err)
 					return fmt.Errorf("failed to run API: %w", err)
 				}
 				return nil
@@ -209,12 +238,13 @@ func main() {
 					"7070",
 				)
 				if err != nil {
-					return fmt.Errorf("failed to run API: %w", err)
+					slog.Error("failed to run Connect", "err", err)
+					return fmt.Errorf("failed to run Connect: %w", err)
 				}
 				return nil
 			})
 
-			time.Sleep(time.Second * 3)
+			// time.Sleep(time.Second * 3)
 
 			_, err = setupNewNetwork(completeRunCtx, pw)
 			if err != nil {
@@ -231,18 +261,6 @@ func main() {
 				return fmt.Errorf("failed to parse provider id: %w", err)
 			}
 
-			time.Sleep(time.Second * 3)
-
-			servicesGroup.Go(func() (err error) {
-				err = runProvider(completeRunCtx, providerJWT, pw, cfg.logTCP)
-				if err != nil {
-					return fmt.Errorf("failed to run provider: %w", err)
-				}
-				return nil
-			})
-
-			time.Sleep(time.Second * 3)
-
 			clientJWT, err := authDevice(completeRunCtx, userAuth, userPassword)
 			if err != nil {
 				return fmt.Errorf("failed to authenticate device: %w", err)
@@ -258,12 +276,50 @@ func main() {
 				return fmt.Errorf("failed to redeem balance code: %w", err)
 			}
 
-			clientDev, err := clientdevice.Start(completeRunCtx, clientJWT, apiURL, connectURL, *providerID, cfg.logTCP)
+			err = healthcheck.WaitForEndpoint(
+				completeRunCtx,
+				"http://localhost:8080/status",
+				func(statusCode int, body []byte) bool {
+					return statusCode == http.StatusOK
+				},
+				time.Second*20,
+			)
+
+			err = healthcheck.WaitForEndpoint(
+				completeRunCtx,
+				"http://localhost:7070/status",
+				func(statusCode int, body []byte) bool {
+					return statusCode == http.StatusOK
+				},
+				time.Second*20,
+			)
+
+			if err != nil {
+				return fmt.Errorf("failed to wait for Connect endpoint: %w", err)
+			}
+
+			servicesGroup.Go(func() (err error) {
+				err = runProvider(completeRunCtx, providerJWT, pw, cfg.logTCP)
+				if err != nil {
+					return fmt.Errorf("failed to run provider: %w", err)
+				}
+				return nil
+			})
+
+			clientDev, err := clientdevice.Start(
+				completeRunCtx,
+				clientJWT,
+				apiURL,
+				connectURL,
+				*providerID,
+				cfg.logTCP,
+				cfg.useMulticlient,
+			)
 			if err != nil {
 				return fmt.Errorf("failed to start client device: %w", err)
 			}
 
-			time.Sleep(time.Second * 1)
+			time.Sleep(time.Second * 2)
 
 			addrs, err := net.InterfaceAddrs()
 			if err != nil {
@@ -278,7 +334,6 @@ func main() {
 					continue
 				}
 				responds := datasource.PingPort(completeRunCtx, ipNet.IP, 15081)
-				fmt.Println("interface address:", ipNet.IP, ipNet.IP.IsLoopback(), responds)
 				if !ipNet.IP.IsLoopback() && responds {
 					nonLocalAddrs = append(nonLocalAddrs, ipNet.IP)
 				}
@@ -322,39 +377,43 @@ func main() {
 
 			}
 
-			conn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15081", localAddress))
+			slog.Info("starting download bandwidth estimation")
+
+			dlConn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15080", localAddress))
 			if err != nil {
 				return fmt.Errorf("failed to dial: %w", err)
 			}
 
-			uploadBandwidth, _ := bwestimator.EstimateUploadBandwidth(completeRunCtx, conn, time.Second*30)
+			downloadBandwidth, _ := bwestimator.EstimateDownloadBandwidth(completeRunCtx, dlConn, time.Second*30)
 			if err != nil {
 				return fmt.Errorf("failed to estimate bandwidth: %w", err)
 			}
 
-			err = conn.Close()
-			if err != nil {
-				return fmt.Errorf("failed to close connection: %w", err)
-			}
-
-			conn, err = clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15080", localAddress))
-			if err != nil {
-				return fmt.Errorf("failed to dial: %w", err)
-			}
-
-			pw.Log("estimated upload bandwidth: %.2f Mbit/s", uploadBandwidth*8.0/1024.0/1024.0)
-
-			downloadBandwidth, _ := bwestimator.EstimateDownloadBandwidth(completeRunCtx, conn, time.Second*30)
-			if err != nil {
-				return fmt.Errorf("failed to estimate bandwidth: %w", err)
-			}
-
-			err = conn.Close()
+			err = dlConn.Close()
 			if err != nil {
 				return fmt.Errorf("failed to close connection: %w", err)
 			}
 
 			pw.Log("estimated download bandwidth: %.2f Mbit/s", downloadBandwidth*8.0/1024.0/1024.0)
+
+			slog.Info("starting upload bandwidth estimation")
+
+			ulConn, err := clientDev.DialContext(completeRunCtx, "tcp", fmt.Sprintf("%s:15081", localAddress))
+			if err != nil {
+				return fmt.Errorf("failed to dial: %w", err)
+			}
+
+			uploadBandwidth, _ := bwestimator.EstimateUploadBandwidth(completeRunCtx, ulConn, time.Second*30)
+			if err != nil {
+				return fmt.Errorf("failed to estimate bandwidth: %w", err)
+			}
+
+			err = ulConn.Close()
+			if err != nil {
+				return fmt.Errorf("failed to close connection: %w", err)
+			}
+
+			pw.Log("estimated upload bandwidth: %.2f Mbit/s", uploadBandwidth*8.0/1024.0/1024.0)
 
 			if cfg.reportFile != "" {
 
@@ -366,7 +425,6 @@ func main() {
 				defer rf.Close()
 
 				md.NewMarkdown(rf).
-					H1("Bandwidth Measurement Report").
 					Table(md.TableSet{
 						Header: []string{"Direction", "Bandwidth (Mbit/s)"},
 						Rows: [][]string{
@@ -377,6 +435,8 @@ func main() {
 					Build()
 
 			}
+
+			slog.Info("done estimating bandwidth")
 
 			cancel()
 

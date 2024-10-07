@@ -59,12 +59,29 @@ jobs:
         run: |
           go mod tidy && go build .
 
-      - name: Measure Troughput
+      - name: Measure Troughput - single client
         working-directory: ./bringyour/measure-throughput
         env:
-          REPORT_FILE: report.md
+          REPORT_FILE: report-single.md
         run: |
           go run .
+
+      - name: Measure Troughput - multi client
+        working-directory: ./bringyour/measure-throughput
+        env:
+          USE_MULTICLIENT: "true"
+          REPORT_FILE: report-multi.md
+        run: |
+          go run .
+
+      - name: Merge reports
+        working-directory: ./bringyour/measure-throughput
+        run: |
+          echo "# Bandwidth Measurements" > report.md
+          echo "## Single Client" >> report.md
+          cat report-single.md >> report.md
+          echo "## Multi Client" >> report.md
+          cat report-multi.md >> report.md
 
       - name: Display Report as PR Comment
         uses: marocchino/sticky-pull-request-comment@v2
