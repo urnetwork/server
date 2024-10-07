@@ -16,6 +16,7 @@ import (
 	"bringyor.com/measure-throughput/tcplogger"
 	"bringyour.com/connect"
 	"bringyour.com/protocol"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 type ClientDevice struct {
@@ -239,4 +240,8 @@ func (cd *ClientDevice) Transport() *http.Transport {
 	return &http.Transport{
 		DialContext: cd.Net.DialContext,
 	}
+}
+
+func (cd *ClientDevice) GetStats() tcpip.Stats {
+	return cd.dev.Stats()
 }

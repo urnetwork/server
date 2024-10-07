@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -424,12 +425,53 @@ func main() {
 
 				defer rf.Close()
 
+				stats := clientDev.GetStats().TCP
+
 				md.NewMarkdown(rf).
+					H3("Bandwidth Estimation").
 					Table(md.TableSet{
 						Header: []string{"Direction", "Bandwidth (Mbit/s)"},
 						Rows: [][]string{
 							{"Upload", fmt.Sprintf("%.2f", uploadBandwidth*8.0/1024.0/1024.0)},
 							{"Download", fmt.Sprintf("%.2f", downloadBandwidth*8.0/1024.0/1024.0)},
+						},
+					}).
+					H3("TCP Stats").
+					Table(md.TableSet{
+						Header: []string{"Name", "Count"},
+						Rows: [][]string{
+							{"ActiveConnectionOpenings", strconv.FormatUint(stats.ActiveConnectionOpenings.Value(), 10)},
+							{"PassiveConnectionOpenings", strconv.FormatUint(stats.PassiveConnectionOpenings.Value(), 10)},
+							{"CurrentEstablished", strconv.FormatUint(stats.CurrentEstablished.Value(), 10)},
+							{"CurrentConnected", strconv.FormatUint(stats.CurrentConnected.Value(), 10)},
+							{"EstablishedResets", strconv.FormatUint(stats.EstablishedResets.Value(), 10)},
+							{"EstablishedClosed", strconv.FormatUint(stats.EstablishedClosed.Value(), 10)},
+							{"EstablishedTimedout", strconv.FormatUint(stats.EstablishedTimedout.Value(), 10)},
+							{"ListenOverflowSynDrop", strconv.FormatUint(stats.ListenOverflowSynDrop.Value(), 10)},
+							{"ListenOverflowAckDrop", strconv.FormatUint(stats.ListenOverflowAckDrop.Value(), 10)},
+							{"ListenOverflowSynCookieSent", strconv.FormatUint(stats.ListenOverflowSynCookieSent.Value(), 10)},
+							{"ListenOverflowSynCookieRcvd", strconv.FormatUint(stats.ListenOverflowSynCookieRcvd.Value(), 10)},
+							{"ListenOverflowInvalidSynCookieRcvd", strconv.FormatUint(stats.ListenOverflowInvalidSynCookieRcvd.Value(), 10)},
+							{"FailedConnectionAttempts", strconv.FormatUint(stats.FailedConnectionAttempts.Value(), 10)},
+							{"ValidSegmentsReceived", strconv.FormatUint(stats.ValidSegmentsReceived.Value(), 10)},
+							{"InvalidSegmentsReceived", strconv.FormatUint(stats.InvalidSegmentsReceived.Value(), 10)},
+							{"SegmentsSent", strconv.FormatUint(stats.SegmentsSent.Value(), 10)},
+							{"SegmentSendErrors", strconv.FormatUint(stats.SegmentSendErrors.Value(), 10)},
+							{"ResetsSent", strconv.FormatUint(stats.ResetsSent.Value(), 10)},
+							{"ResetsReceived", strconv.FormatUint(stats.ResetsReceived.Value(), 10)},
+							{"Retransmits", strconv.FormatUint(stats.Retransmits.Value(), 10)},
+							{"FastRecovery", strconv.FormatUint(stats.FastRecovery.Value(), 10)},
+							{"SACKRecovery", strconv.FormatUint(stats.SACKRecovery.Value(), 10)},
+							{"TLPRecovery", strconv.FormatUint(stats.TLPRecovery.Value(), 10)},
+							{"SlowStartRetransmits", strconv.FormatUint(stats.SlowStartRetransmits.Value(), 10)},
+							{"FastRetransmit", strconv.FormatUint(stats.FastRetransmit.Value(), 10)},
+							{"Timeouts", strconv.FormatUint(stats.Timeouts.Value(), 10)},
+							{"ChecksumErrors", strconv.FormatUint(stats.ChecksumErrors.Value(), 10)},
+							{"FailedPortReservations", strconv.FormatUint(stats.FailedPortReservations.Value(), 10)},
+							{"SegmentsAckedWithDSACK", strconv.FormatUint(stats.SegmentsAckedWithDSACK.Value(), 10)},
+							{"SpuriousRecovery", strconv.FormatUint(stats.SpuriousRecovery.Value(), 10)},
+							{"SpuriousRTORecovery", strconv.FormatUint(stats.SpuriousRTORecovery.Value(), 10)},
+							{"ForwardMaxInFlightDrop", strconv.FormatUint(stats.ForwardMaxInFlightDrop.Value(), 10)},
 						},
 					}).
 					Build()

@@ -66,6 +66,8 @@ type Device interface {
 
 	// Close stops the Device and closes the Event channel.
 	Close() error
+
+	Stats() tcpip.Stats
 }
 
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (Device, *Net, error) {
@@ -121,6 +123,10 @@ func (tun *netTun) Name() (string, error) {
 
 func (tun *netTun) File() *os.File {
 	return nil
+}
+
+func (tun *netTun) Stats() tcpip.Stats {
+	return tun.stack.Stats()
 }
 
 func (tun *netTun) Read(buf []byte) (int, error) {
