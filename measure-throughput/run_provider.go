@@ -15,7 +15,12 @@ import (
 const apiURL = "http://localhost:8080"
 const connectURL = "ws://localhost:7070"
 
-func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (err error) {
+func runProvider(
+	ctx context.Context,
+	byClientJwt string,
+	pw progress.Writer,
+	logTCP bool,
+) (err error) {
 
 	defer func() {
 		if ctx.Err() != nil {
@@ -52,9 +57,13 @@ func runProvider(ctx context.Context, byClientJwt string, pw progress.Writer) (e
 		return fmt.Errorf("failed to create provider client: %w", err)
 	}
 
-	tl, err := tcplogger.NewLogger("/tmp/provider-local-nat.csv")
-	if err != nil {
-		return fmt.Errorf("failed to create tcp logger: %w", err)
+	var tl *tcplogger.TCPLogger
+
+	if logTCP {
+		tl, err = tcplogger.NewLogger("/tmp/provider-local-nat.csv")
+		if err != nil {
+			return fmt.Errorf("failed to create tcp logger: %w", err)
+		}
 	}
 
 	connectClient.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {

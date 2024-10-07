@@ -28,6 +28,7 @@ func main() {
 
 	cfg := struct {
 		reportFile string
+		logTCP     bool
 	}{}
 	app := &cli.App{
 		Name: "measure-throughput",
@@ -36,6 +37,11 @@ func main() {
 				Name:        "report-file",
 				Destination: &cfg.reportFile,
 				EnvVars:     []string{"REPORT_FILE"},
+			},
+			&cli.BoolFlag{
+				Name:        "log-tcp",
+				Destination: &cfg.logTCP,
+				EnvVars:     []string{"LOG_TCP"},
 			},
 		},
 		Action: func(c *cli.Context) (err error) {
@@ -228,7 +234,7 @@ func main() {
 			time.Sleep(time.Second * 3)
 
 			servicesGroup.Go(func() (err error) {
-				err = runProvider(completeRunCtx, providerJWT, pw)
+				err = runProvider(completeRunCtx, providerJWT, pw, cfg.logTCP)
 				if err != nil {
 					return fmt.Errorf("failed to run provider: %w", err)
 				}
@@ -252,7 +258,7 @@ func main() {
 				return fmt.Errorf("failed to redeem balance code: %w", err)
 			}
 
-			clientDev, err := clientdevice.Start(completeRunCtx, clientJWT, apiURL, connectURL, *providerID)
+			clientDev, err := clientdevice.Start(completeRunCtx, clientJWT, apiURL, connectURL, *providerID, cfg.logTCP)
 			if err != nil {
 				return fmt.Errorf("failed to start client device: %w", err)
 			}

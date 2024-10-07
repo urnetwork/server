@@ -31,6 +31,11 @@ func NewLogger(fileName string) (*TCPLogger, error) {
 }
 
 func (l *TCPLogger) Log(packet []byte) error {
+	// don't log if the logger is nil
+	if l == nil {
+		return nil
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -60,6 +65,11 @@ func (l *TCPLogger) Log(packet []byte) error {
 }
 
 func (l *TCPLogger) Close() error {
+	// don't close if the logger is nil
+	if l == nil {
+		return nil
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

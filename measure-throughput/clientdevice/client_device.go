@@ -32,6 +32,7 @@ func Start(
 	apiURL string,
 	connectURL string,
 	providerID connect.Id,
+	logTCP bool,
 ) (*ClientDevice, error) {
 
 	myID, err := jwtutil.ParseClientID(byJWT)
@@ -98,9 +99,13 @@ func Start(
 		return nil, fmt.Errorf("create device client failed: %w", err)
 	}
 
-	tl, err := tcplogger.NewLogger("/tmp/client-remote-nat.csv")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tcp logger: %w", err)
+	var tl *tcplogger.TCPLogger
+
+	if logTCP {
+		tl, err = tcplogger.NewLogger("/tmp/client-remote-nat.csv")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create tcp logger: %w", err)
+		}
 	}
 
 	inboundDelayedQueue := delayqueue.New(ctx, 30000)
@@ -182,10 +187,10 @@ func Start(
 			}
 			packet = packet[:n]
 
-			// if rand.Float64() < dropProbability {
-			// 	fmt.Println("dropping outgoing packet")
-			// 	continue
-			// }
+			if rand.Float64() < dropProbability {
+				fmt.Println("dropping outgoing packet")
+				continue
+			}
 
 			outboundDelayedQueue.GoDelayed(packetDelay, func() {
 
