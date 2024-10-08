@@ -31,11 +31,15 @@ func NetworkCreate(
 		}
 		AuthVerifySend(verifySend, session)
 	} else {
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			*result.UserAuth,
-			&NetworkWelcomeTemplate{},
-		)
+
+		if result.UserAuth != nil {
+			awsMessageSender := GetAWSMessageSender()
+			awsMessageSender.SendAccountMessageTemplate(
+				*result.UserAuth,
+				&NetworkWelcomeTemplate{},
+			)
+		}
+
 	}
 
 	return result, nil
