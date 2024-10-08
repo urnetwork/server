@@ -347,20 +347,21 @@ func testConnect(
 		1024 * 1024,
 	}
 
-	transportCount := 8
-	burstM := 8
+	transportCount := 6
+	burstM := 6
 	newInstanceM := 0
 	if config.enableNewInstance {
 		newInstanceM = 4
 	}
 	nackM := 0
 	if config.enableNack {
-		nackM = 4
+		nackM = 6
 	}
 
 	nackDroppedByteCount := ByteCount(0)
-	pauseTimeout := 300 * time.Millisecond
+	pauseTimeout := 200 * time.Millisecond
 	sequenceIdleTimeout := 100 * time.Millisecond
+	minResendInterval := 10 * time.Millisecond
 
 	// note the receiver idle timeout must be sufficiently large
 	// or else retransmits might be delivered multiple times
@@ -458,6 +459,7 @@ func testConnect(
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsA.SendBufferSettings.MinResendInterval = minResendInterval
 	clientSettingsA.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
@@ -481,6 +483,7 @@ func testConnect(
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsB.SendBufferSettings.MinResendInterval = minResendInterval
 	clientSettingsB.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
