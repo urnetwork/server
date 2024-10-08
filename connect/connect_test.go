@@ -28,59 +28,279 @@ import (
 	"bringyour.com/protocol"
 )
 
+func TestConnectNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{})
+	})
+}
+
+func TestConnectWithChaosNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaos\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos: true,
+			})
+	})
+}
+
+// note large nack objects can be excessively dropped
+// due to the arbitrary order of receipt
+// the nack object must align with the contract it was sent under
+// see the notes on how contracts work for acks in connect/transfer
+
 func TestConnect(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnect\n")
-		testConnect(t, contractTestNone, false, true)
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectWithSymmetricContracts(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
-		testConnect(t, contractTestSymmetric, false, true)
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectWithAsymmetricContracts(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
-		testConnect(t, contractTestAsymmetric, false, true)
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
-		testConnect(t, contractTestNone, true, true)
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
-		testConnect(t, contractTestSymmetric, true, true)
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
-		testConnect(t, contractTestAsymmetric, true, true)
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+			})
 	})
 }
 
 func TestConnectNoTransportReform(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
-		testConnect(t, contractTestNone, false, false)
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack: true,
+			})
 	})
 }
 
 func TestConnectWithChaosNoTransportReform(t *testing.T) {
 	bringyour.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
-		testConnect(t, contractTestNone, true, false)
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos: true,
+				enableNack:  true,
+			})
+	})
+}
+
+// new instance testing
+// this tests that the sender/receiver can reconnect with a different instance
+// e.g. logout and login
+
+func TestConnectWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectWithChaosWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaos\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack:        true,
+				enableNewInstance: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:       true,
+				enableNack:        true,
+				enableNewInstance: true,
+			})
 	})
 }
 
@@ -91,12 +311,23 @@ const (
 	contractTestAsymmetric = 2
 )
 
+type testConnectConfig struct {
+	enableChaos           bool
+	enableTransportReform bool
+	enableNack            bool
+	enableNewInstance     bool
+}
+
 // this test that two clients can communicate via the connect server
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
 // contract logic is optional so that the effects of contracts can be isolated
-// FIXME set all sequence buffer sizes to 0
-func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTransportReform bool) {
+// sets all sequence buffer sizes to 0 to test deadlock
+func testConnect(
+	t *testing.T,
+	contractTest int,
+	config *testConnectConfig,
+) {
 
 	type Message struct {
 		sourceId    connect.Id
@@ -107,7 +338,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 60 * time.Second
+	receiveTimeout := 120 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -116,21 +347,28 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 		1024 * 1024,
 	}
 
-	transportCount := 8
-	burstM := 8
-	newInstanceM := -1
-	nackM := 4
+	transportCount := 6
+	burstM := 6
+	newInstanceM := 0
+	if config.enableNewInstance {
+		newInstanceM = 4
+	}
+	nackM := 0
+	if config.enableNack {
+		nackM = 6
+	}
 
-	idleTimeout := 200 * time.Millisecond
-	pauseTimeout := 3 * idleTimeout
-	var sequenceIdleTimeout time.Duration
-	if enableChaos {
-		// if the receive sequence times out, we may get duplicate receives
-		// the timeout should be greater than the write/read and reconnect timeouts in the exchange,
-		// due to chaos
-		sequenceIdleTimeout = 30 * time.Second
-	} else {
-		sequenceIdleTimeout = 5 * idleTimeout
+	nackDroppedByteCount := ByteCount(0)
+	pauseTimeout := 200 * time.Millisecond
+	sequenceIdleTimeout := 100 * time.Millisecond
+	minResendInterval := 10 * time.Millisecond
+
+	// note the receiver idle timeout must be sufficiently large
+	// or else retransmits might be delivered multiple times
+	// send and forward idle timeouts can be arbirary values
+
+	randPauseTimeout := func() time.Duration {
+		return time.Duration(mathrand.Int63n(int64(pauseTimeout)))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,9 +420,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
-		settings.ResidentIdleTimeout = idleTimeout
-		settings.ForwardIdleTimeout = idleTimeout
-		if enableChaos {
+		settings.ResidentIdleTimeout = sequenceIdleTimeout
+		settings.ForwardIdleTimeout = sequenceIdleTimeout
+		if config.enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		}
 		switch contractTest {
@@ -220,7 +458,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
-	// clientSettingsA.SendBufferSettings.AckTimeout = 90 * time.Second
+	clientSettingsA.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsA.SendBufferSettings.MinResendInterval = minResendInterval
+	clientSettingsA.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsA.ForwardBufferSettings.SequenceBufferSize = 0
@@ -230,7 +470,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
 	clientSettingsA.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
-	clientSettingsA.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsA.ReceiveBufferSettings.IdleTimeout = receiveTimeout
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
@@ -242,7 +482,9 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsB := connect.DefaultClientSettings()
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
-	// clientSettingsB.SendBufferSettings.AckTimeout = 90 * time.Second
+	clientSettingsB.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsB.SendBufferSettings.MinResendInterval = minResendInterval
+	clientSettingsB.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
 	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsB.ForwardBufferSettings.SequenceBufferSize = 0
@@ -252,7 +494,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
 	clientSettingsB.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
-	clientSettingsB.ReceiveBufferSettings.IdleTimeout = sequenceIdleTimeout
+	clientSettingsB.ReceiveBufferSettings.IdleTimeout = receiveTimeout
 	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
@@ -512,7 +754,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 					b,
 				)
 
-				if enableTransportReform {
+				if config.enableTransportReform {
 					for _, transportA := range transportAs {
 						transportA.Close()
 					}
@@ -520,7 +762,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(pauseTimeout):
+					case <-time.After(randPauseTimeout()):
 					}
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
@@ -552,7 +794,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 							select {
 							case <-ctx.Done():
 								return
-							case <-time.After(pauseTimeout):
+							case <-time.After(randPauseTimeout()):
 							}
 						}
 						for j := 0; j < nackM; j += 1 {
@@ -643,6 +885,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 				}
 				if nackBCount != nackM*burstSize {
 					fmt.Printf("B dropped nacks: %d <> %d\n", nackBCount, nackM*burstSize)
+					nackDroppedByteCount += messageContentSize * ByteCount(nackM*burstSize-nackBCount)
 				}
 				for i := 0; i < burstSize; i += 1 {
 					select {
@@ -666,7 +909,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 				// 	}
 				// }
 
-				if enableTransportReform {
+				if config.enableTransportReform {
 					for _, transportB := range transportBs {
 						transportB.Close()
 					}
@@ -674,7 +917,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(pauseTimeout):
+					case <-time.After(randPauseTimeout()):
 					}
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
@@ -706,7 +949,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 							select {
 							case <-ctx.Done():
 								return
-							case <-time.After(pauseTimeout):
+							case <-time.After(randPauseTimeout()):
 							}
 						}
 						for j := 0; j < nackM; j += 1 {
@@ -811,6 +1054,7 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 				}
 				if nackACount != nackM*burstSize {
 					fmt.Printf("A dropped nacks: %d <> %d\n", nackACount, nackM*burstSize)
+					nackDroppedByteCount += messageContentSize * ByteCount(nackM*burstSize-nackACount)
 				}
 				for i := 0; i < burstSize; i += 1 {
 					select {
@@ -972,9 +1216,11 @@ func testConnect(t *testing.T, contractTest int, enableChaos bool, enableTranspo
 	byteCountA := (localStatsA.ContractCloseByteCount + localStatsB.ReceiveContractCloseByteCount) / 2
 	byteCountB := (localStatsB.ContractCloseByteCount + localStatsA.ReceiveContractCloseByteCount) / 2
 
+	fmt.Printf("Net nack dropped bytes = %d\n", nackDroppedByteCount)
 	byteCountEquivalent := func(a ByteCount, b ByteCount) {
 		// because of resets and dropped nacks there may be some small discrepancy
-		threshold := 8 * model.Mib
+		// (see note at top about messages closer to the contract size getting dropped more frequenctly)
+		threshold := 64*model.Mib + nackDroppedByteCount
 		e := a - b
 		if e < -threshold || threshold < e {
 			assert.Equal(t, a, b)

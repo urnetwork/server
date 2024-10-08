@@ -2217,6 +2217,9 @@ func SetIpLocationLookupResult(
                     result_json
                 )
                 VALUES ($1, $2)
+                ON CONFLICT (ip_address, lookup_time) DO UPDATE
+                SET
+                	result_json = $2
             `,
 			ipStr,
 			result,
