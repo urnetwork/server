@@ -67,6 +67,7 @@ type AccountPayment struct {
 	TokenAmount    *float64   `json:"token_amount"`
 	PaymentTime    *time.Time `json:"payment_time"`
 	PaymentReceipt *string    `json:"payment_receipt"`
+	WalletAddress  *string    `json:"wallet_address"`
 
 	Completed    bool       `json:"completed"`
 	CompleteTime *time.Time `json:"complete_time"`
@@ -109,7 +110,8 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
                 account_payment.complete_time,
                 account_payment.canceled,
                 account_payment.cancel_time,
-                account_wallet.network_id
+                account_wallet.network_id,
+								account_wallet.wallet_address
             FROM account_payment
 
             INNER JOIN account_wallet ON
@@ -154,6 +156,7 @@ func dbGetPayment(ctx context.Context, conn bringyour.PgConn, paymentId bringyou
 				&payment.Canceled,
 				&payment.CancelTime,
 				&payment.NetworkId,
+				&payment.WalletAddress,
 			))
 		}
 	})
@@ -1017,7 +1020,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.complete_time,
                 account_payment.canceled,
                 account_payment.cancel_time,
-                account_wallet.network_id
+                account_wallet.network_id,
+								account_wallet.wallet_address
             FROM account_payment
 
             INNER JOIN account_wallet ON
@@ -1053,6 +1057,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.Canceled,
 					&payment.CancelTime,
 					&payment.NetworkId,
+					&payment.WalletAddress,
 				))
 
 				networkPayments = append(networkPayments, payment)

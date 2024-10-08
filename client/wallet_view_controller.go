@@ -63,6 +63,7 @@ type AccountPayment struct {
 	TokenAmount    float64 `json:"token_amount,omitempty"`
 	PaymentTime    *Time   `json:"payment_time,omitempty"`
 	PaymentReceipt string  `json:"payment_receipt,omitempty"`
+	WalletAddress  string  `json:"wallet_address"`
 
 	Completed    bool  `json:"completed,omitempty"`
 	CompleteTime *Time `json:"complete_time,omitempty"`
