@@ -2495,9 +2495,9 @@ func AddRefreshTransferBalanceToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
 	endTime time.Time,
-	supporterTransferBalance ByteCount,
-	freeTransferBalance ByteCount,
-) {
+	supporterTransferBalances map[bool]ByteCount,
+) (addedTransferBalances map[bringyour.Id]ByteCount) {
+	addedTransferBalances = map[bringyour.Id]ByteCount{}
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		networkSupporters := map[bringyour.Id]bool{}
 
@@ -2505,8 +2505,8 @@ func AddRefreshTransferBalanceToAllNetworks(
 			ctx,
 			`
 				SELECT
-					network_id,
-					(subscription_renewal.network_id IS NOT NONE) AS supporter
+					network.network_id,
+					(subscription_renewal.network_id IS NOT NULL) AS supporter
 				FROM network
 				
 				LEFT JOIN subscription_renewal ON
@@ -2521,19 +2521,15 @@ func AddRefreshTransferBalanceToAllNetworks(
 		bringyour.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId bringyour.Id
-				bringyour.Raise(result.Scan(&networkId))
-				networkSupporters[networkId] = true
+				var supporter bool
+				bringyour.Raise(result.Scan(&networkId, &supporter))
+				networkSupporters[networkId] = supporter
 			}
 		})
 
 		bringyour.BatchInTx(ctx, tx, func(batch bringyour.PgBatch) {
 			for networkId, supporter := range networkSupporters {
-				var balanceByteCount ByteCount
-				if supporter {
-					balanceByteCount = supporterTransferBalance
-				} else {
-					balanceByteCount = freeTransferBalance
-				}
+				balanceByteCount := supporterTransferBalances[supporter]
 				batch.Queue(
 					`
 		                INSERT INTO transfer_balance (
@@ -2554,7 +2550,9 @@ func AddRefreshTransferBalanceToAllNetworks(
 					balanceByteCount,
 					0,
 				)
+				addedTransferBalances[networkId] = balanceByteCount
 			}
 		})
 	})
+	return
 }

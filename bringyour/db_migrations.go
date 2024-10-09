@@ -801,6 +801,7 @@ var migrations = []any{
         )
     `),
 
+	// ADDED subsidy_payout_nano_cents
 	// payment record is what was submitted to the payment processor
 	// payment receipt is the receipt from the payment processor
 	newSqlMigration(`
