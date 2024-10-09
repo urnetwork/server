@@ -1185,3 +1185,63 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 		assert.Equal(t, endingTransferBalanceB, initialTransferBalance)
 	})
 }
+
+func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		userIdA := bringyour.NewId()
+		networkIdA := bringyour.NewId()
+		userIdB := bringyour.NewId()
+		networkIdB := bringyour.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		subscriptionStartTime := bringyour.NowUtc().Add(-15 * 24 * time.Hour)
+		subscriptionEndTime := subscriptionStartTime.Add(30 * 24 * time.Hour)
+		AddSubscriptionRenewal(
+			ctx,
+			&SubscriptionRenewal{
+				NetworkId:        networkIdB,
+				SubscriptionType: SubscriptionTypeSupporter,
+				StartTime:        subscriptionStartTime,
+				EndTime:          subscriptionEndTime,
+				NetRevenue:       NanoCents(0),
+			},
+		)
+		assert.Equal(t, HasSubscriptionRenewal(ctx, networkIdA, SubscriptionTypeSupporter), false)
+		assert.Equal(t, HasSubscriptionRenewal(ctx, networkIdB, SubscriptionTypeSupporter), true)
+
+		startTime := bringyour.NowUtc()
+		endTime := startTime.Add(24 * time.Hour)
+		supporterTransferBalances := map[bool]ByteCount{
+			false: 1 * Mib,
+			true:  4 * Mib,
+		}
+		addedTransferBalances := AddRefreshTransferBalanceToAllNetworks(
+			ctx,
+			startTime,
+			endTime,
+			supporterTransferBalances,
+		)
+
+		assert.Equal(t, len(addedTransferBalances), 2)
+		assert.Equal(t, addedTransferBalances[networkIdA], 1*Mib)
+		assert.Equal(t, addedTransferBalances[networkIdB], 4*Mib)
+
+		transferBalancesA := GetActiveTransferBalances(ctx, networkIdA)
+		assert.Equal(t, 1, len(transferBalancesA))
+		transferBalanceA := transferBalancesA[0]
+		assert.Equal(t, addedTransferBalances[networkIdA], transferBalanceA.BalanceByteCount)
+		assert.Equal(t, startTime, transferBalanceA.StartTime)
+		assert.Equal(t, endTime, transferBalanceA.EndTime)
+
+		transferBalancesB := GetActiveTransferBalances(ctx, networkIdB)
+		assert.Equal(t, 1, len(transferBalancesB))
+		transferBalanceB := transferBalancesB[0]
+		assert.Equal(t, addedTransferBalances[networkIdB], transferBalanceB.BalanceByteCount)
+		assert.Equal(t, startTime, transferBalanceB.StartTime)
+		assert.Equal(t, endTime, transferBalanceB.EndTime)
+	})
+}
