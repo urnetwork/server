@@ -842,18 +842,6 @@ func verifyPlayAuth(auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-func AddInitialTransferBalance(ctx context.Context, networkId bringyour.Id) {
-	startTime := bringyour.NowUtc()
-	endTime := startTime.Add(InitialTransferBalanceDuration)
-	model.AddBasicTransferBalance(
-		ctx,
-		networkId,
-		InitialTransferBalance,
-		startTime,
-		endTime,
-	)
-}
-
 func AddRefreshTransferBalance(ctx context.Context, networkId bringyour.Id) {
 	startTime := bringyour.NowUtc()
 	endTime := startTime.Add(RefreshTransferBalanceDuration)
@@ -901,8 +889,10 @@ func RefreshTransferBalances(
 		clientSession.Ctx,
 		startTime,
 		endTime,
-		RefreshSupporterTransferBalance,
-		RefreshFreeTransferBalance,
+		map[bool]model.ByteCount{
+			false: RefreshFreeTransferBalance,
+			true:  RefreshSupporterTransferBalance,
+		},
 	)
 	return &RefreshTransferBalancesResult{}, nil
 }
