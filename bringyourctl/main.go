@@ -53,6 +53,7 @@ Usage:
     bringyourctl payouts plan
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
+		bringyourctl wallets sync-circle
     bringyourctl contracts close-expired
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
 
@@ -167,6 +168,10 @@ Options:
 		}
 		if close, _ := opts.Bool("close"); close {
 			closeContract(opts)
+		}
+	} else if wallets, _ := opts.Bool("wallets"); wallets {
+		if syncCircle, _ := opts.Bool("sync-circle"); syncCircle {
+			populateMissingCircleAccountWallets()
 		}
 	}
 }
@@ -731,4 +736,13 @@ func closeContract(opts docopt.Opts) {
 
 	fmt.Printf("Contract closed %s \n", contractIdStr)
 
+}
+
+func populateMissingCircleAccountWallets() {
+
+	ctx := context.Background()
+
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+	controller.PopulateAccountWallets(&controller.PopulateAccountWalletsArgs{}, clientSession)
 }
