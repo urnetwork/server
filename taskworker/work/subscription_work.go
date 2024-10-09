@@ -36,7 +36,7 @@ func BackfillInitialTransferBalance(
 	networkIds := model.FindNetworksWithoutTransferBalance(clientSession.Ctx)
 	for _, networkId := range networkIds {
 		// add initial transfer balance
-		controller.AddInitialTransferBalance(clientSession.Ctx, networkId)
+		controller.AddRefreshTransferBalance(clientSession.Ctx, networkId)
 	}
 	return &BackfillInitialTransferBalanceResult{}, nil
 }
