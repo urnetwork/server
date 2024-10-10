@@ -1,11 +1,12 @@
 module bringyor.com/measure-throughput
 
-go 1.22.0
+go 1.23.1
 
 require (
 	bringyour.com/bringyour v0.0.0
 	bringyour.com/connect v0.0.0
 	bringyour.com/protocol v0.0.0
+	github.com/cenkalti/backoff/v4 v4.2.1
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/golang/glog v1.2.1
 	github.com/google/gopacket v1.1.19
@@ -17,14 +18,13 @@ require (
 	github.com/urfave/cli/v2 v2.27.4
 	golang.org/x/net v0.27.0
 	golang.org/x/sync v0.8.0
-	gvisor.dev/gvisor v0.0.0-20240918042833-f6ce88d75f1c
+	gvisor.dev/gvisor v0.0.0-20241009022347-94b16c128c1c
 )
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/cenkalti/backoff/v4 v4.2.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/containerd/containerd v1.7.18 // indirect
 	github.com/containerd/log v0.1.0 // indirect
@@ -49,11 +49,13 @@ require (
 	github.com/google/pprof v0.0.0-20211214055906-6f57359322fd // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/guptarohit/asciigraph v0.7.2 // indirect
 	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
 	github.com/jackc/pgx/v5 v5.5.4 // indirect
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
+	github.com/jellydator/ttlcache/v3 v3.3.0 // indirect
 	github.com/karrick/godirwalk v1.17.0 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
