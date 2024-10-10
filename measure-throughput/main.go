@@ -20,7 +20,9 @@ import (
 	"bringyor.com/measure-throughput/datasource"
 	"bringyor.com/measure-throughput/healthcheck"
 	"bringyor.com/measure-throughput/jwtutil"
+	"bringyor.com/measure-throughput/memtracker"
 	"bringyour.com/bringyour"
+	"github.com/guptarohit/asciigraph"
 	"github.com/jedib0t/go-pretty/v6/progress"
 	md "github.com/nao1215/markdown"
 	"github.com/urfave/cli/v2"
@@ -299,6 +301,8 @@ func main() {
 				return fmt.Errorf("failed to wait for Connect endpoint: %w", err)
 			}
 
+			mt := memtracker.Start(completeRunCtx, pw)
+
 			servicesGroup.Go(func() (err error) {
 				err = runProvider(completeRunCtx, providerJWT, pw, cfg.logTCP)
 				if err != nil {
@@ -427,6 +431,11 @@ func main() {
 
 				stats := clientDev.GetStats().TCP
 
+				memUsage := []float64{}
+				for _, point := range mt.GetHistory() {
+					memUsage = append(memUsage, float64(point.Bytes)/1024.0/1024.0)
+				}
+
 				md.NewMarkdown(rf).
 					H3("Bandwidth Estimation").
 					Table(md.TableSet{
@@ -436,6 +445,8 @@ func main() {
 							{"Download", fmt.Sprintf("%.2f", downloadBandwidth*8.0/1024.0/1024.0)},
 						},
 					}).
+					H3("Memory Usage (MBytes)").
+					CodeBlocks(`text`, asciigraph.Plot(memUsage)).
 					H3("TCP Stats").
 					Table(md.TableSet{
 						Header: []string{"Name", "Count"},
