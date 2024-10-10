@@ -569,7 +569,7 @@ func PlayWebhook(
 
 			subscriptionPaymentId, err := bringyour.ParseId(sub.ObfuscatedExternalAccountId)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ObfuscatedExternalAccountId, err)
 			}
 
 			networkId, err := model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, subscriptionPaymentId)
