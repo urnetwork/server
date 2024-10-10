@@ -17,29 +17,19 @@
         nixpkgs.lib.genAttrs (import systems) (system:
           f (import nixpkgs {
             inherit system;
-            config = {
-              allowUnfree = true;
-            };
+            config = { allowUnfree = true; };
           }));
 
     in {
       devShells = eachSystem (pkgs: {
         default = pkgs.mkShell {
           shellHook = ''
-          # Set here the env vars you want to be available in the shell
+            # Set here the env vars you want to be available in the shell
           '';
           hardeningDisable = [ "all" ];
 
-          packages = [
-            pkgs.go_1_22
-            pkgs.goda
-            pkgs.gopls
-            pkgs.gops
-            pkgs.go-tools
-            pkgs.tmux
-            pkgs.nodejs_20
-            pkgs.python39Full
-          ];
+          packages =
+            [ pkgs.go_1_23 pkgs.tmux pkgs.nodejs_20 pkgs.python39Full ];
         };
       });
     };
