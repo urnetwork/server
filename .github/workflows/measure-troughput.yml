@@ -63,6 +63,7 @@ jobs:
       - name: Measure Troughput - single client
         working-directory: ./bringyour/measure-throughput
         env:
+          GOMEMLIMIT: "32MiB"
           REPORT_FILE: report-single.md
         run: |
           go mod tidy && go run .
@@ -70,6 +71,7 @@ jobs:
       - name: Measure Troughput - multi client
         working-directory: ./bringyour/measure-throughput
         env:
+          GOMEMLIMIT: "32MiB"
           USE_MULTICLIENT: "true"
           REPORT_FILE: report-multi.md
         run: |
