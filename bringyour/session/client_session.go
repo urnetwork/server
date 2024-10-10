@@ -70,7 +70,7 @@ func (self *ClientSession) Auth(req *http.Request) error {
 			if !jwt.IsByJwtActive(self.Ctx, byJwt) {
 				return errors.New("JWT expired.")
 			}
-			glog.Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+			glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
 			self.ByJwt = byJwt
 			return nil
 		}
