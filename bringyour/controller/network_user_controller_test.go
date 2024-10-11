@@ -42,72 +42,8 @@ func TestGetNetworkUser(t *testing.T) {
 		assert.Equal(t, err, nil)
 		networkUser := networkUserResult.NetworkUser
 		assert.Equal(t, networkUser.UserId, userId)
-		assert.Equal(t, networkUser.UserName, "test")
 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
 		assert.Equal(t, networkUser.Verified, true)
 		assert.Equal(t, networkUser.AuthType, model.AuthTypePassword)
-
-		// should fail because network not greater than 5 characters
-		updatedName := "usernameB"
-		updateArgs := &NetworkUserUpdateArgs{
-			NetworkName: "",
-			UserName:    updatedName,
-		}
-		updateNetworkUserResult, err := UpdateNetworkUser(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
-
-		networkUserResult, err = GetNetworkUser(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkUserResult.NetworkUser.UserName, "test")
-
-		// should fail because network name unavailable
-		updateArgs = &NetworkUserUpdateArgs{
-			NetworkName: networkNameB,
-			UserName:    updatedName,
-		}
-		updateNetworkUserResult, err = UpdateNetworkUser(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
-
-		networkUserResult, err = GetNetworkUser(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkUserResult.NetworkUser.UserName, "test")
-
-		// should update only the username since network name is unchanged
-		updateArgs = &NetworkUserUpdateArgs{
-			NetworkName: networkName,
-			UserName:    updatedName,
-		}
-		updateNetworkUserResult, err = UpdateNetworkUser(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, updateNetworkUserResult.Error, nil)
-
-		networkUserResult, err = GetNetworkUser(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkUserResult.NetworkUser.UserName, updatedName)
-		// should be the original network name
-		assert.Equal(t, networkUserResult.NetworkUser.NetworkName, networkName)
-
-		// should update both network name && username
-		updatedNetworkName := "uvwxyz"
-		updatedName = "hello world"
-		updateArgs = &NetworkUserUpdateArgs{
-			NetworkName: updatedNetworkName,
-			UserName:    updatedName,
-		}
-		updateNetworkUserResult, err = UpdateNetworkUser(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, updateNetworkUserResult.Error, nil)
-
-		networkUserResult, err = GetNetworkUser(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkUserResult.NetworkUser.UserName, updatedName)
-		assert.Equal(t, networkUserResult.NetworkUser.NetworkName, updatedNetworkName)
-
-		network := model.GetNetwork(userSession)
-		assert.Equal(t, network.NetworkId, userSession.ByJwt.NetworkId)
-		assert.Equal(t, network.NetworkName, updatedNetworkName)
-
 	})
 }

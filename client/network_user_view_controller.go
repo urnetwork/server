@@ -234,7 +234,7 @@ func (self *NetworkUserViewController) AddIsUpdatingListener(listener IsNetworkU
 	})
 }
 
-func (self *NetworkUserViewController) UpdateNetworkUser(networkName string, username string) {
+func (self *NetworkUserViewController) UpdateNetworkUser(networkName string) {
 
 	if !self.isUpdating {
 
@@ -243,7 +243,6 @@ func (self *NetworkUserViewController) UpdateNetworkUser(networkName string, use
 		self.device.GetApi().NetworkUserUpdate(
 			&NetworkUserUpdateArgs{
 				NetworkName: networkName,
-				UserName:    username,
 			},
 			NetworkUserUpdateCallback(connect.NewApiCallback[*NetworkUserUpdateResult](
 				func(result *NetworkUserUpdateResult, err error) {
