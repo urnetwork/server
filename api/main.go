@@ -69,7 +69,7 @@ Options:
 		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2),
 		router.NewRoute("POST", "/network/create-provider-spec", handlers.NetworkCreateProviderSpec),
 		router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
-		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkUser),
+		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
