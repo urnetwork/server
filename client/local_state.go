@@ -271,6 +271,26 @@ func (self *LocalState) GetCanShowRatingDialog() bool {
 	return true
 }
 
+func (self *LocalState) SetProvideWhileDisconnected(alwaysProvide bool) error {
+	path := filepath.Join(self.localStorageDir, ".provide_while_disconnected")
+	provideWhileDisconnectedBytes, err := json.Marshal(alwaysProvide)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, provideWhileDisconnectedBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetProvideWhileDisconnected() bool {
+	path := filepath.Join(self.localStorageDir, ".provide_while_disconnected")
+	if provideWhileDisconnectedBytes, err := os.ReadFile(path); err == nil {
+		var provideWhileDisconnected bool
+		if err := json.Unmarshal(provideWhileDisconnectedBytes, &provideWhileDisconnected); err == nil {
+			return provideWhileDisconnected
+		}
+	}
+	return false
+}
+
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(

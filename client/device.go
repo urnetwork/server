@@ -104,6 +104,8 @@ type BringYourDevice struct {
 	routeLocal          bool
 	canShowRatingDialog bool
 
+	provideWhileDisconnected bool
+
 	openedViewControllers map[ViewController]bool
 
 	receiveCallbacks *connect.CallbackList[connect.ReceivePacketFunction]
@@ -223,6 +225,7 @@ func newBringYourDevice(
 		remoteUserNatProvider:             nil,
 		routeLocal:                        true,
 		canShowRatingDialog:               true,
+		provideWhileDisconnected:          false,
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
@@ -292,6 +295,22 @@ func (self *BringYourDevice) SetCanShowRatingDialog(canShowRatingDialog bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.canShowRatingDialog = canShowRatingDialog
+}
+
+func (self *BringYourDevice) GetProvideWhileDisconnected() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.provideWhileDisconnected
+}
+
+func (self *BringYourDevice) SetProvideWhileDisconnected(provideWhileDisconnected bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.provideWhileDisconnected = provideWhileDisconnected
+
+	if self.provideWhileDisconnected {
+		// todo - set provide mode to public
+	}
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
