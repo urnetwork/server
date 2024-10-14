@@ -14,12 +14,29 @@ import (
 
 var locationsVcLog = logFn("locations_view_controller")
 
-type FilteredLocationsListener interface {
-	FilteredLocationsChanged()
+type FilterLocationsState = string
+
+const (
+	LocationsLoading FilterLocationsState = "LOCATIONS_LOADING"
+	LocationsLoaded  FilterLocationsState = "LOCATIONS_LOADED"
+	LocationsError   FilterLocationsState = "LOCATIONS_ERROR"
+)
+
+type FilteredLocations struct {
+	BestMatches *ConnectLocationList
+	Promoted    *ConnectLocationList
+	Countries   *ConnectLocationList
+	Cities      *ConnectLocationList
+	Regions     *ConnectLocationList
+	Devices     *ConnectLocationList
 }
 
-type FilteredLocationsErrorListener interface {
-	ErrorExists(bool)
+type FilteredLocationsStateListener interface {
+	Update(state FilterLocationsState)
+}
+
+type FilteredLocationsListener interface {
+	FilteredLocationsChanged(locations *FilteredLocations)
 }
 
 type LocationsViewController struct {
@@ -33,8 +50,8 @@ type LocationsViewController struct {
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 
-	filteredLocationListeners      *connect.CallbackList[FilteredLocationsListener]
-	filteredLocationErrorListeners *connect.CallbackList[FilteredLocationsErrorListener]
+	filteredLocationListeners       *connect.CallbackList[FilteredLocationsListener]
+	filteredLocationsStateListeners *connect.CallbackList[FilteredLocationsStateListener]
 }
 
 func newLocationsViewController(ctx context.Context, device *BringYourDevice) *LocationsViewController {
@@ -49,8 +66,8 @@ func newLocationsViewController(ctx context.Context, device *BringYourDevice) *L
 		previousFilterSequenceNumber: 0,
 		locations:                    NewConnectLocationList(),
 
-		filteredLocationListeners:      connect.NewCallbackList[FilteredLocationsListener](),
-		filteredLocationErrorListeners: connect.NewCallbackList[FilteredLocationsErrorListener](),
+		filteredLocationListeners:       connect.NewCallbackList[FilteredLocationsListener](),
+		filteredLocationsStateListeners: connect.NewCallbackList[FilteredLocationsStateListener](),
 	}
 	return vc
 }
@@ -71,10 +88,10 @@ func (self *LocationsViewController) GetLocations() *ConnectLocationList {
 	return self.locations
 }
 
-func (self *LocationsViewController) filteredLocationsChanged() {
+func (self *LocationsViewController) filteredLocationsChanged(locations *FilteredLocations) {
 	for _, listener := range self.filteredLocationListeners.Get() {
 		connect.HandleError(func() {
-			listener.FilteredLocationsChanged()
+			listener.FilteredLocationsChanged(locations)
 		})
 	}
 }
@@ -86,18 +103,18 @@ func (self *LocationsViewController) AddFilteredLocationsListener(listener Filte
 	})
 }
 
-func (self *LocationsViewController) fetchLocationsErrorExists(errorExists bool) {
-	for _, listener := range self.filteredLocationErrorListeners.Get() {
+func (self *LocationsViewController) filterLocationsStateChanged(state FilterLocationsState) {
+	for _, listener := range self.filteredLocationsStateListeners.Get() {
 		connect.HandleError(func() {
-			listener.ErrorExists(errorExists)
+			listener.Update(state)
 		})
 	}
 }
 
-func (self *LocationsViewController) AddFilteredLocationsErrorListener(listener FilteredLocationsErrorListener) Sub {
-	callbackId := self.filteredLocationErrorListeners.Add(listener)
+func (self *LocationsViewController) AddFilteredLocationsStateListener(listener FilteredLocationsStateListener) Sub {
+	callbackId := self.filteredLocationsStateListeners.Add(listener)
 	return newSub(func() {
-		self.filteredLocationErrorListeners.Remove(callbackId)
+		self.filteredLocationsStateListeners.Remove(callbackId)
 	})
 }
 
@@ -106,7 +123,7 @@ func (self *LocationsViewController) FilterLocations(filter string) {
 	filter = strings.TrimSpace(filter)
 
 	locationsVcLog("FILTER LOCATIONS %s", filter)
-	self.fetchLocationsErrorExists(false)
+	self.filterLocationsStateChanged(LocationsLoading)
 
 	var filterSequenceNumber int64
 	func() {
@@ -122,20 +139,21 @@ func (self *LocationsViewController) FilterLocations(filter string) {
 		self.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
-				if err == nil {
-					var update bool
-					self.stateLock.Lock()
-					if self.previousFilterSequenceNumber < filterSequenceNumber {
-						self.previousFilterSequenceNumber = filterSequenceNumber
-						update = true
-					}
-					self.stateLock.Unlock()
 
-					if update {
-						self.setFilteredLocationsFromResult(result)
+				var update bool
+				self.stateLock.Lock()
+				if self.previousFilterSequenceNumber < filterSequenceNumber {
+					self.previousFilterSequenceNumber = filterSequenceNumber
+					update = true
+				}
+				self.stateLock.Unlock()
+
+				if update {
+					if err == nil {
+						self.setFilteredLocationsFromResult(result, filter)
+					} else {
+						self.filterLocationsStateChanged(LocationsError)
 					}
-				} else {
-					self.fetchLocationsErrorExists(true)
 				}
 			},
 		)))
@@ -146,30 +164,37 @@ func (self *LocationsViewController) FilterLocations(filter string) {
 		self.device.GetApi().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
 			func(result *FindLocationsResult, err error) {
 				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
-				if err == nil {
-					var update bool
-					self.stateLock.Lock()
-					if self.previousFilterSequenceNumber < filterSequenceNumber {
-						self.previousFilterSequenceNumber = filterSequenceNumber
-						update = true
-					}
-					self.stateLock.Unlock()
 
-					if update {
-						self.setFilteredLocationsFromResult(result)
+				var update bool
+				self.stateLock.Lock()
+				if self.previousFilterSequenceNumber < filterSequenceNumber {
+					self.previousFilterSequenceNumber = filterSequenceNumber
+					update = true
+				}
+				self.stateLock.Unlock()
+				if update {
+					if err == nil {
+						if update {
+							self.setFilteredLocationsFromResult(result, filter)
+						}
+					} else {
+						self.filterLocationsStateChanged(LocationsError)
 					}
-				} else {
-					self.fetchLocationsErrorExists(true)
 				}
 			},
 		)))
 	}
 }
 
-func (self *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult) {
+func (self *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult, filter string) {
 	locationsVcLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
 
-	locations := []*ConnectLocation{}
+	var bestMatch []*ConnectLocation
+	var promoted []*ConnectLocation
+	var countries []*ConnectLocation
+	var cities []*ConnectLocation
+	var regions []*ConnectLocation
+	var devices []*ConnectLocation
 
 	for i := 0; i < result.Groups.Len(); i += 1 {
 		groupResult := result.Groups.Get(i)
@@ -183,7 +208,12 @@ func (self *LocationsViewController) setFilteredLocationsFromResult(result *Find
 			Promoted:      groupResult.Promoted,
 			MatchDistance: int32(groupResult.MatchDistance),
 		}
-		locations = append(locations, location)
+
+		if groupResult.MatchDistance == 0 && filter != "" {
+			bestMatch = append(bestMatch, location)
+		} else if groupResult.Promoted {
+			promoted = append(promoted, location)
+		}
 	}
 
 	for i := 0; i < result.Locations.Len(); i += 1 {
@@ -205,7 +235,27 @@ func (self *LocationsViewController) setFilteredLocationsFromResult(result *Find
 			ProviderCount:     int32(locationResult.ProviderCount),
 			MatchDistance:     int32(locationResult.MatchDistance),
 		}
-		locations = append(locations, location)
+
+		if location.MatchDistance == 0 && filter != "" {
+			bestMatch = append(bestMatch, location)
+		} else {
+
+			if location.LocationType == LocationTypeCountry {
+				countries = append(countries, location)
+			}
+
+			// only show cities when searching
+			if location.LocationType == LocationTypeCity && filter != "" {
+				cities = append(cities, location)
+			}
+
+			// only show regions when searching
+			if location.LocationType == LocationTypeRegion && filter != "" {
+				regions = append(regions, location)
+			}
+
+		}
+
 	}
 
 	for i := 0; i < result.Devices.Len(); i += 1 {
@@ -217,19 +267,45 @@ func (self *LocationsViewController) setFilteredLocationsFromResult(result *Find
 			},
 			Name: locationDeviceResult.DeviceName,
 		}
-		locations = append(locations, location)
+		devices = append(devices, location)
 	}
 
-	slices.SortStableFunc(locations, cmpConnectLocations)
+	slices.SortStableFunc(bestMatch, cmpConnectLocations)
+	slices.SortStableFunc(promoted, cmpConnectLocations)
+	slices.SortStableFunc(countries, cmpConnectLocations)
+	slices.SortStableFunc(cities, cmpConnectLocations)
+	slices.SortStableFunc(regions, cmpConnectLocations)
 
-	exportedFilteredLocations := NewConnectLocationList()
-	exportedFilteredLocations.addAll(locations...)
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.locations = exportedFilteredLocations
-	}()
-	self.filteredLocationsChanged()
+	exportedBestMatches := NewConnectLocationList()
+	exportedBestMatches.addAll(bestMatch...)
+
+	exportedPromoted := NewConnectLocationList()
+	exportedPromoted.addAll(promoted...)
+
+	exportedCountries := NewConnectLocationList()
+	exportedCountries.addAll(countries...)
+
+	exportedCities := NewConnectLocationList()
+	exportedCities.addAll(cities...)
+
+	exportedRegions := NewConnectLocationList()
+	exportedRegions.addAll(regions...)
+
+	exportedDevices := NewConnectLocationList()
+	exportedDevices.addAll(devices...)
+
+	filteredLocations := &FilteredLocations{
+		BestMatches: exportedBestMatches,
+		Promoted:    exportedPromoted,
+		Countries:   exportedCountries,
+		Cities:      exportedCities,
+		Regions:     exportedRegions,
+		Devices:     exportedDevices,
+	}
+
+	self.filteredLocationsChanged(filteredLocations)
+	self.filterLocationsStateChanged(LocationsLoaded)
+
 }
 
 func cmpConnectLocations(a *ConnectLocation, b *ConnectLocation) int {
