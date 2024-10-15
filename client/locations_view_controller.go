@@ -31,12 +31,12 @@ type FilteredLocations struct {
 	Devices     *ConnectLocationList
 }
 
-type FilteredLocationsStateListener interface {
-	Update(state FilterLocationsState)
-}
+// type FilteredLocationsStateListener interface {
+// 	Update(state FilterLocationsState)
+// }
 
 type FilteredLocationsListener interface {
-	FilteredLocationsChanged(locations *FilteredLocations)
+	FilteredLocationsChanged(locations *FilteredLocations, state FilterLocationsState)
 }
 
 type LocationsViewController struct {
@@ -46,12 +46,14 @@ type LocationsViewController struct {
 
 	stateLock sync.Mutex
 
-	locations                    *ConnectLocationList
 	nextFilterSequenceNumber     int64
 	previousFilterSequenceNumber int64
 
-	filteredLocationListeners       *connect.CallbackList[FilteredLocationsListener]
-	filteredLocationsStateListeners *connect.CallbackList[FilteredLocationsStateListener]
+	filteredLocations     *FilteredLocations
+	filteredLocationState FilterLocationsState
+
+	filteredLocationListeners *connect.CallbackList[FilteredLocationsListener]
+	// filteredLocationsStateListeners *connect.CallbackList[FilteredLocationsStateListener]
 }
 
 func newLocationsViewController(ctx context.Context, device *BringYourDevice) *LocationsViewController {
@@ -64,10 +66,11 @@ func newLocationsViewController(ctx context.Context, device *BringYourDevice) *L
 
 		nextFilterSequenceNumber:     0,
 		previousFilterSequenceNumber: 0,
-		locations:                    NewConnectLocationList(),
+		filteredLocations:            nil,
+		filteredLocationState:        LocationsError,
 
-		filteredLocationListeners:       connect.NewCallbackList[FilteredLocationsListener](),
-		filteredLocationsStateListeners: connect.NewCallbackList[FilteredLocationsStateListener](),
+		filteredLocationListeners: connect.NewCallbackList[FilteredLocationsListener](),
+		// filteredLocationsStateListeners: connect.NewCallbackList[FilteredLocationsStateListener](),
 	}
 	return vc
 }
@@ -84,14 +87,26 @@ func (self *LocationsViewController) Close() {
 	self.cancel()
 }
 
-func (self *LocationsViewController) GetLocations() *ConnectLocationList {
-	return self.locations
+// func (self *LocationsViewController) GetLocations() *ConnectLocationList {
+// 	return self.locations
+// }
+
+func (self *LocationsViewController) GetFilteredLocations() *FilteredLocations {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.filteredLocations
 }
 
-func (self *LocationsViewController) filteredLocationsChanged(locations *FilteredLocations) {
+func (self *LocationsViewController) GetFilteredLocationState() FilterLocationsState {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.filteredLocationState
+}
+
+func (self *LocationsViewController) filteredLocationsChanged(locations *FilteredLocations, state FilterLocationsState) {
 	for _, listener := range self.filteredLocationListeners.Get() {
 		connect.HandleError(func() {
-			listener.FilteredLocationsChanged(locations)
+			listener.FilteredLocationsChanged(locations, state)
 		})
 	}
 }
@@ -103,27 +118,27 @@ func (self *LocationsViewController) AddFilteredLocationsListener(listener Filte
 	})
 }
 
-func (self *LocationsViewController) filterLocationsStateChanged(state FilterLocationsState) {
-	for _, listener := range self.filteredLocationsStateListeners.Get() {
-		connect.HandleError(func() {
-			listener.Update(state)
-		})
-	}
-}
+// func (self *LocationsViewController) filterLocationsStateChanged(state FilterLocationsState) {
+// 	for _, listener := range self.filteredLocationsStateListeners.Get() {
+// 		connect.HandleError(func() {
+// 			listener.Update(state)
+// 		})
+// 	}
+// }
 
-func (self *LocationsViewController) AddFilteredLocationsStateListener(listener FilteredLocationsStateListener) Sub {
-	callbackId := self.filteredLocationsStateListeners.Add(listener)
-	return newSub(func() {
-		self.filteredLocationsStateListeners.Remove(callbackId)
-	})
-}
+// func (self *LocationsViewController) AddFilteredLocationsStateListener(listener FilteredLocationsStateListener) Sub {
+// 	callbackId := self.filteredLocationsStateListeners.Add(listener)
+// 	return newSub(func() {
+// 		self.filteredLocationsStateListeners.Remove(callbackId)
+// 	})
+// }
 
 func (self *LocationsViewController) FilterLocations(filter string) {
 	// api call, call callback
 	filter = strings.TrimSpace(filter)
 
 	locationsVcLog("FILTER LOCATIONS %s", filter)
-	self.filterLocationsStateChanged(LocationsLoading)
+	// self.filterLocationsStateChanged(LocationsLoading)
 
 	var filterSequenceNumber int64
 	func() {
@@ -131,68 +146,55 @@ func (self *LocationsViewController) FilterLocations(filter string) {
 		defer self.stateLock.Unlock()
 		self.nextFilterSequenceNumber += 1
 		filterSequenceNumber = self.nextFilterSequenceNumber
+
+		self.filteredLocationState = LocationsLoading
 	}()
+
+	self.filteredLocationsChanged(self.GetFilteredLocations(), self.GetFilteredLocationState())
 
 	locationsVcLog("POST FILTER LOCATIONS %s", filter)
 
-	if filter == "" {
-		self.device.GetApi().GetProviderLocations(FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
-			func(result *FindLocationsResult, err error) {
-				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
+	callback := FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
+		func(result *FindLocationsResult, err error) {
+			locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
 
-				var update bool
+			update := false
+			func() {
 				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
 				if self.previousFilterSequenceNumber < filterSequenceNumber {
 					self.previousFilterSequenceNumber = filterSequenceNumber
 					update = true
-				}
-				self.stateLock.Unlock()
-
-				if update {
 					if err == nil {
-
-						// all lists are completely empty
-						if result.Devices.Len() == 0 && result.Locations.Len() == 0 && result.Groups.Len() == 0 {
-							self.filterLocationsStateChanged(LocationsError)
-							return
-						}
-
 						self.setFilteredLocationsFromResult(result, filter)
 					} else {
-						self.filterLocationsStateChanged(LocationsError)
+						self.filteredLocationState = LocationsError
+						self.filteredLocations = nil
 					}
 				}
-			},
-		)))
+			}()
+			if update {
+				self.filteredLocationsChanged(self.GetFilteredLocations(), self.GetFilteredLocationState())
+			}
+		},
+	))
+
+	if filter == "" {
+		self.device.GetApi().GetProviderLocations(callback)
 	} else {
 		findLocations := &FindLocationsArgs{
 			Query: filter,
 		}
-		self.device.GetApi().FindProviderLocations(findLocations, FindLocationsCallback(connect.NewApiCallback[*FindLocationsResult](
-			func(result *FindLocationsResult, err error) {
-				locationsVcLog("FIND LOCATIONS RESULT %s %s", result, err)
-
-				var update bool
-				self.stateLock.Lock()
-				if self.previousFilterSequenceNumber < filterSequenceNumber {
-					self.previousFilterSequenceNumber = filterSequenceNumber
-					update = true
-				}
-				self.stateLock.Unlock()
-				if update {
-					if err == nil {
-						if update {
-							self.setFilteredLocationsFromResult(result, filter)
-						}
-					} else {
-						self.filterLocationsStateChanged(LocationsError)
-					}
-				}
-			},
-		)))
+		self.device.GetApi().FindProviderLocations(findLocations, callback)
 	}
 }
 
+// must be called with the state lock
+// func (self *LocationsViewController) setFilteredLocationState(state FilterLocationsState) {
+// 	self.filteredLocationState = state
+// }
+
+// must be called with the state lock
 func (self *LocationsViewController) setFilteredLocationsFromResult(result *FindLocationsResult, filter string) {
 	locationsVcLog("SET FILTERED LOCATIONS FROM RESULT %s", result)
 
@@ -310,8 +312,11 @@ func (self *LocationsViewController) setFilteredLocationsFromResult(result *Find
 		Devices:     exportedDevices,
 	}
 
-	self.filteredLocationsChanged(filteredLocations)
-	self.filterLocationsStateChanged(LocationsLoaded)
+	// self.filteredLocationsChanged(filteredLocations)
+	// self.filterLocationsStateChanged(LocationsLoaded)
+
+	self.filteredLocations = filteredLocations
+	self.filteredLocationState = LocationsLoaded
 
 }
 
