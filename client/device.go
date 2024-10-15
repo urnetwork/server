@@ -484,7 +484,6 @@ func (self *BringYourDevice) setProvideModeNoEvent(provideMode ProvideMode) {
 	defer self.stateLock.Unlock()
 
 	// TODO create a new provider only client?
-	deviceLog("setting provide mode to %s", provideMode)
 
 	provideModes := map[protocol.ProvideMode]bool{}
 	if ProvideModePublic <= provideMode {
