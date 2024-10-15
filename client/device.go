@@ -307,10 +307,6 @@ func (self *BringYourDevice) SetProvideWhileDisconnected(provideWhileDisconnecte
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.provideWhileDisconnected = provideWhileDisconnected
-
-	if self.provideWhileDisconnected {
-		// todo - set provide mode to public
-	}
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
@@ -488,6 +484,7 @@ func (self *BringYourDevice) setProvideModeNoEvent(provideMode ProvideMode) {
 	defer self.stateLock.Unlock()
 
 	// TODO create a new provider only client?
+	deviceLog("setting provide mode to %s", provideMode)
 
 	provideModes := map[protocol.ProvideMode]bool{}
 	if ProvideModePublic <= provideMode {
