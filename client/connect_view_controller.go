@@ -251,7 +251,7 @@ func (self *ConnectViewController) ConnectBestAvailable() {
 func (self *ConnectViewController) Disconnect() {
 	self.setConnected(false)
 
-	if !self.device.provideWhileDisconnected {
+	if !self.device.GetProvideWhileDisconnected() {
 		// disable provider
 		provideMode := ProvideModeNone
 		self.device.GetNetworkSpace().GetAsyncLocalState().GetLocalState().SetProvideMode(provideMode)

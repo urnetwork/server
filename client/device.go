@@ -304,9 +304,25 @@ func (self *BringYourDevice) GetProvideWhileDisconnected() bool {
 }
 
 func (self *BringYourDevice) SetProvideWhileDisconnected(provideWhileDisconnected bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.provideWhileDisconnected = provideWhileDisconnected
+
+	changed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.provideWhileDisconnected != provideWhileDisconnected {
+			changed = true
+			self.provideWhileDisconnected = provideWhileDisconnected
+		}
+	}()
+
+	if changed && !self.GetConnectEnabled() {
+		if !self.GetProvideWhileDisconnected() {
+			self.SetProvideMode(ProvideModeNone)
+		} else {
+			self.SetProvideMode(ProvideModePublic)
+		}
+	}
+
 }
 
 func (self *BringYourDevice) SetRouteLocal(routeLocal bool) {
