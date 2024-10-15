@@ -150,6 +150,13 @@ func (self *LocationsViewController) FilterLocations(filter string) {
 
 				if update {
 					if err == nil {
+
+						// all lists are completely empty
+						if result.Devices.Len() == 0 && result.Locations.Len() == 0 && result.Groups.Len() == 0 {
+							self.filterLocationsStateChanged(LocationsError)
+							return
+						}
+
 						self.setFilteredLocationsFromResult(result, filter)
 					} else {
 						self.filterLocationsStateChanged(LocationsError)
