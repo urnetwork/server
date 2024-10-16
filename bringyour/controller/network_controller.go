@@ -44,3 +44,45 @@ func NetworkCreate(
 
 	return result, nil
 }
+
+type UpdateNetworkNameArgs struct {
+	NetworkName string `json:"network_name"`
+}
+
+type UpdateNetworkNameError struct {
+	Message string `json:"message"`
+}
+
+type UpdateNetworkNameResult struct {
+	Error *UpdateNetworkNameError `json:"error,omitempty"`
+}
+
+func UpdateNetworkName(
+	args *UpdateNetworkNameArgs,
+	clientSession *session.ClientSession,
+) (*UpdateNetworkNameResult, error) {
+
+	// get the current network name
+	network := model.GetNetwork(clientSession)
+
+	if network.NetworkName != args.NetworkName {
+		// update the network name
+		result, err := model.NetworkUpdate(
+			model.NetworkUpdateArgs{NetworkName: args.NetworkName},
+			clientSession,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if result.Error != nil {
+			return &UpdateNetworkNameResult{
+				Error: &UpdateNetworkNameError{
+					Message: result.Error.Message,
+				},
+			}, nil
+		}
+	}
+
+	return &UpdateNetworkNameResult{}, nil
+}

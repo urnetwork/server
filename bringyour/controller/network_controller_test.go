@@ -10,6 +10,7 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"bringyour.com/bringyour"
+	"bringyour.com/bringyour/jwt"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
@@ -41,5 +42,67 @@ func TestNetworkCreate(t *testing.T) {
 		assert.Equal(t, transferBalance.BalanceByteCount, RefreshFreeTransferBalance)
 		assert.Equal(t, !transferBalance.StartTime.After(time.Now()), true)
 		assert.Equal(t, time.Now().Before(transferBalance.EndTime), true)
+	})
+}
+
+func TestNetworkNameUpdate(t *testing.T) {
+	bringyour.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := bringyour.NewId()
+		clientId := bringyour.NewId()
+		userId := bringyour.NewId()
+		networkName := "abcdef"
+
+		networkIdB := bringyour.NewId()
+		userIdB := bringyour.NewId()
+		networkNameB := "bcdefg"
+
+		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		model.Testing_CreateNetwork(ctx, networkIdB, networkNameB, userIdB)
+
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		// should fail because network not greater than 5 characters
+		updateArgs := &UpdateNetworkNameArgs{
+			NetworkName: "",
+		}
+		updateNetworkUserResult, err := UpdateNetworkName(updateArgs, userSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
+
+		networkResult := model.GetNetwork(userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkResult.NetworkName, networkName)
+
+		// should fail because network name unavailable
+		updateArgs = &UpdateNetworkNameArgs{
+			NetworkName: networkNameB,
+		}
+		updateNetworkUserResult, err = UpdateNetworkName(updateArgs, userSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
+
+		networkResult = model.GetNetwork(userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkResult.NetworkName, networkName)
+
+		// should update the network name
+		updatedNetworkName := "uvwxyz"
+		updateArgs = &UpdateNetworkNameArgs{
+			NetworkName: updatedNetworkName,
+		}
+		updateNetworkUserResult, err = UpdateNetworkName(updateArgs, userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, updateNetworkUserResult.Error, nil)
+
+		networkResult = model.GetNetwork(userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkResult.NetworkName, updatedNetworkName)
 	})
 }

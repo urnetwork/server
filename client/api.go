@@ -929,7 +929,6 @@ func (self *BringYourApi) GetNetworkUser(callback GetNetworkUserCallback) (*GetN
 
 type NetworkUserUpdateArgs struct {
 	NetworkName string `json:"network_name"`
-	UserName    string `json:"username"`
 }
 
 type NetworkUserUpdateError struct {

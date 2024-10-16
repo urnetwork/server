@@ -4,12 +4,10 @@ import (
 	"context"
 
 	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
 )
 
 type NetworkUser struct {
 	UserId      bringyour.Id `json:"user_id"`
-	UserName    string       `json:"user_name"`
 	UserAuth    string       `json:"user_auth"`
 	Verified    bool         `json:"verified"`
 	AuthType    string       `json:"auth_type"`
@@ -30,7 +28,6 @@ func GetNetworkUser(
 			`
 			SELECT
 				network_user.user_id,
-				network_user.user_name,
 				network_user.auth_type,
 				network_user.user_auth,
 				network_user.verified,
@@ -49,7 +46,6 @@ func GetNetworkUser(
 
 				bringyour.Raise(result.Scan(
 					&networkUser.UserId,
-					&networkUser.UserName,
 					&networkUser.AuthType,
 					&networkUser.UserAuth,
 					&networkUser.Verified,
@@ -61,27 +57,4 @@ func GetNetworkUser(
 	})
 
 	return networkUser
-}
-
-func NetworkUserUpdate(
-	name string,
-	session *session.ClientSession,
-) {
-
-	bringyour.Tx(session.Ctx, func(tx bringyour.PgTx) {
-		bringyour.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-							UPDATE network_user
-							SET
-									user_name = $2
-							WHERE
-									user_id = $1
-					`,
-			session.ByJwt.UserId,
-			name,
-		))
-
-	})
-
 }

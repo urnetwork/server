@@ -15,3 +15,7 @@ func NetworkCheck(w http.ResponseWriter, r *http.Request) {
 func NetworkCreate(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.NetworkCreate, w, r)
 }
+
+func UpdateNetworkName(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.UpdateNetworkName, w, r)
+}
