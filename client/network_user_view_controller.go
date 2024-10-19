@@ -32,7 +32,7 @@ type NetworkUserUpdateSuccessListener interface {
 type NetworkUser struct {
 	UserId      *Id    `json:"userId"`
 	UserName    string `json:"user_name"`
-	UserAuth    string `json:"user_auth"`
+	UserAuth    string `json:"user_auth,omitempty"`
 	Verified    bool   `json:"verified"`
 	AuthType    string `json:"auth_type"`
 	NetworkName string `json:"network_name"`
