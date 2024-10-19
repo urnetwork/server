@@ -603,3 +603,37 @@ func Testing_CreateNetwork(
 
 	return
 }
+
+func Testing_CreateGuestNetwork(
+	ctx context.Context,
+	networkId bringyour.Id,
+	networkName string,
+	adminUserId bringyour.Id,
+) {
+
+	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network (network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			networkId,
+			networkName,
+			adminUserId,
+		))
+
+		bringyour.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+				VALUES ($1, $2, $3, $4)
+			`,
+			adminUserId,
+			"test",
+			AuthTypeGuest,
+			false,
+		))
+	})
+
+}
