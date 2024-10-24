@@ -110,6 +110,8 @@ Options:
 		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
+		router.NewRoute("GET", "/connect", handlers.AuthConnect),
+		router.NewRoute("POST", "/connect", handlers.AuthConnect),
 	}
 
 	// bringyour.().Printf("%s\n", opts)

@@ -47,3 +47,8 @@ func AuthCodeCreate(w http.ResponseWriter, r *http.Request) {
 func AuthCodeLogin(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(model.AuthCodeLogin, w, r)
 }
+
+// FIXME read the url from the config
+func AuthConnect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "https://ur.io", http.StatusSeeOther)
+}
