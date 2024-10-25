@@ -29,6 +29,10 @@ type ProvidePausedChangeListener interface {
 	ProvidePausedChanged(providePaused bool)
 }
 
+type OfflineChangeListener interface {
+	OfflineChanged(offline bool, vpnInterfaceWhileOffline bool)
+}
+
 type ConnectChangeListener interface {
 	ConnectChanged(connectEnabled bool)
 }
@@ -105,6 +109,8 @@ type BringYourDevice struct {
 	canShowRatingDialog bool
 
 	provideWhileDisconnected bool
+	offline                  bool
+	vpnInterfaceWhileOffline bool
 
 	openedViewControllers map[ViewController]bool
 
@@ -112,6 +118,7 @@ type BringYourDevice struct {
 
 	provideChangeListeners         *connect.CallbackList[ProvideChangeListener]
 	providePausedChangeListeners   *connect.CallbackList[ProvidePausedChangeListener]
+	offlineChangeListeners         *connect.CallbackList[OfflineChangeListener]
 	connectChangeListeners         *connect.CallbackList[ConnectChangeListener]
 	routeLocalChangeListeners      *connect.CallbackList[RouteLocalChangeListener]
 	connectLocationChangeListeners *connect.CallbackList[ConnectLocationChangeListener]
@@ -226,10 +233,13 @@ func newBringYourDevice(
 		routeLocal:                        true,
 		canShowRatingDialog:               true,
 		provideWhileDisconnected:          false,
+		offline:                           true,
+		vpnInterfaceWhileOffline:          false,
 		openedViewControllers:             map[ViewController]bool{},
 		receiveCallbacks:                  connect.NewCallbackList[connect.ReceivePacketFunction](),
 		provideChangeListeners:            connect.NewCallbackList[ProvideChangeListener](),
 		providePausedChangeListeners:      connect.NewCallbackList[ProvidePausedChangeListener](),
+		offlineChangeListeners:            connect.NewCallbackList[OfflineChangeListener](),
 		connectChangeListeners:            connect.NewCallbackList[ConnectChangeListener](),
 		routeLocalChangeListeners:         connect.NewCallbackList[RouteLocalChangeListener](),
 		connectLocationChangeListeners:    connect.NewCallbackList[ConnectLocationChangeListener](),
@@ -380,6 +390,13 @@ func (self *BringYourDevice) AddProvidePausedChangeListener(listener ProvidePaus
 	})
 }
 
+func (self *BringYourDevice) AddOfflineChangeListener(listener OfflineChangeListener) Sub {
+	callbackId := self.offlineChangeListeners.Add(listener)
+	return newSub(func() {
+		self.offlineChangeListeners.Remove(callbackId)
+	})
+}
+
 func (self *BringYourDevice) AddConnectChangeListener(listener ConnectChangeListener) Sub {
 	callbackId := self.connectChangeListeners.Add(listener)
 	return newSub(func() {
@@ -413,6 +430,14 @@ func (self *BringYourDevice) providePausedChanged(providePaused bool) {
 	for _, listener := range self.providePausedChangeListeners.Get() {
 		connect.HandleError(func() {
 			listener.ProvidePausedChanged(providePaused)
+		})
+	}
+}
+
+func (self *BringYourDevice) offlineChanged(offline bool, vpnInterfaceWhileOffline bool) {
+	for _, listener := range self.offlineChangeListeners.Get() {
+		connect.HandleError(func() {
+			listener.OfflineChanged(offline, vpnInterfaceWhileOffline)
 		})
 	}
 }
@@ -546,6 +571,38 @@ func (self *BringYourDevice) SetProvidePaused(providePaused bool) {
 
 func (self *BringYourDevice) GetProvidePaused() bool {
 	return self.client.ContractManager().IsProvidePaused()
+}
+
+func (self *BringYourDevice) SetOffline(offline bool) {
+	glog.Infof("[device]offline = %t\n", offline)
+
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.offline = offline
+	}()
+	self.offlineChanged(self.GetOffline(), self.GetVpnInterfaceWhileOffline())
+}
+
+func (self *BringYourDevice) GetOffline() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.offline
+}
+
+func (self *BringYourDevice) SetVpnInterfaceWhileOffline(vpnInterfaceWhileOffline bool) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.vpnInterfaceWhileOffline = vpnInterfaceWhileOffline
+	}()
+	self.offlineChanged(self.GetOffline(), self.GetVpnInterfaceWhileOffline())
+}
+
+func (self *BringYourDevice) GetVpnInterfaceWhileOffline() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.vpnInterfaceWhileOffline
 }
 
 func (self *BringYourDevice) RemoveDestination() error {
