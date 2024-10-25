@@ -109,7 +109,11 @@ func NetworkCreate(
 			createdUserId = bringyour.NewId()
 			createdNetworkId = bringyour.NewId()
 
-			networkName = fmt.Sprintf("guest_%s", bringyour.NewId().String())
+			// remove dashes from the network name
+			networkName = fmt.Sprintf(
+				"g%s",
+				strings.ReplaceAll(bringyour.NewId().String(), "-", ""),
+			)
 
 			_, err = tx.Exec(
 				session.Ctx,
