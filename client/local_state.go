@@ -271,9 +271,29 @@ func (self *LocalState) GetCanShowRatingDialog() bool {
 	return true
 }
 
-func (self *LocalState) SetProvideWhileDisconnected(alwaysProvide bool) error {
+func (self *LocalState) SetVpnInterfaceWhileOffline(vpnInterfaceWhileOffline bool) error {
+	path := filepath.Join(self.localStorageDir, ".vpn_interface_while_offline")
+	vpnInterfaceWhileOfflineBytes, err := json.Marshal(vpnInterfaceWhileOffline)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, vpnInterfaceWhileOfflineBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetVpnInterfaceWhileOffline() bool {
+	path := filepath.Join(self.localStorageDir, ".vpn_interface_while_offline")
+	if vpnInterfaceWhileOfflineBytes, err := os.ReadFile(path); err == nil {
+		var vpnInterfaceWhileOffline bool
+		if err := json.Unmarshal(vpnInterfaceWhileOfflineBytes, &vpnInterfaceWhileOffline); err == nil {
+			return vpnInterfaceWhileOffline
+		}
+	}
+	return false
+}
+
+func (self *LocalState) SetProvideWhileDisconnected(provideWhileDisconnected bool) error {
 	path := filepath.Join(self.localStorageDir, ".provide_while_disconnected")
-	provideWhileDisconnectedBytes, err := json.Marshal(alwaysProvide)
+	provideWhileDisconnectedBytes, err := json.Marshal(provideWhileDisconnected)
 	if err != nil {
 		return err
 	}

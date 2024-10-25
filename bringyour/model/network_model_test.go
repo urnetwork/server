@@ -24,7 +24,7 @@ func TestNetworkCreateGuestMode(t *testing.T) {
 
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
 
-		pattern := `^guest`
+		pattern := `^g[0-9a-f]+$`
 
 		// Compile the regex
 		regex, err := regexp.Compile(pattern)
