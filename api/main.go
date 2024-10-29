@@ -112,6 +112,7 @@ Options:
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 		router.NewRoute("GET", "/connect", handlers.AuthConnect),
 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
+		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 	}
 
 	// bringyour.().Printf("%s\n", opts)

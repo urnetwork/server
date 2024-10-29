@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"io"
 	"net/http"
+
+	"github.com/golang/glog"
 
 	"bringyour.com/bringyour/controller"
 	"bringyour.com/bringyour/model"
@@ -51,4 +54,18 @@ func AuthCodeLogin(w http.ResponseWriter, r *http.Request) {
 // FIXME read the url from the config
 func AuthConnect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://ur.io", http.StatusSeeOther)
+}
+
+func AppleNotification(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		glog.Infof("[apple]notification error = %s\n", err)
+		http.Error(w, "Could not read notification.", http.StatusInternalServerError)
+		return
+	}
+	glog.Infof("[apple]notification: %s\n", string(bodyBytes))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte("{}"))
 }
