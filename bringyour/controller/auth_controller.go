@@ -5,11 +5,17 @@ import (
 	// "fmt"
 	// "errors"
 	// "time"
+	"sync"
 
-	// "bringyour.com/bringyour"
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/model"
 	"bringyour.com/bringyour/session"
 )
+
+var SsoRedirectUrl = sync.OnceValue(func() string {
+	c := bringyour.Config.RequireSimpleResource("sso.yml").Parse()
+	return c["web_connect"].(map[string]any)["redirect_url"].(string)
+})
 
 func AuthLogin(
 	login model.AuthLoginArgs,
