@@ -1018,6 +1018,7 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 			for result.Next() {
 				var authCodeId bringyour.Id
 				bringyour.Raise(result.Scan(&authCodeId))
+				authCodeIds = append(authCodeIds, authCodeId)
 			}
 		})
 
