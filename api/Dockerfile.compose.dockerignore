@@ -1,3 +1,4 @@
+.git
 **/bin
 **/build
 **/.DS_Store
@@ -9,12 +10,16 @@ bringyourctl/bringyourctl
 api/api
 taskworker/taskworker
 gpt/gpt
-# connect/connect
 connect/connect.test
 connect/profile/memory
 connect/profile/cpu
 
 temp/*
 
+build/androi
+
 .vscode/*
 .direnv
+android
+ICS/
+connect/explore

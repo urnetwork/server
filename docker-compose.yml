@@ -1,0 +1,119 @@
+services:
+  api:
+    environment:
+      - WARP_VERSION=0.0.0
+      - WARP_ENV=local
+      - WARP_VAULT_HOME=/vault
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+    build:
+      context: ../
+      dockerfile: bringyour/api/Dockerfile.compose
+    develop:
+      watch:
+        - path: api
+          action: rebuild
+    ports:
+      - "8080:80"
+    volumes:
+      - ../vault:/vault
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  connect:
+    environment:
+      - WARP_VERSION=0.0.0
+      - WARP_ENV=local
+      - WARP_SERVICE=local
+      - WARP_BLOCK=local
+      - WARP_VAULT_HOME=/vault
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+      - WARP_PORTS=5080:5080,5081:5081
+    build:
+      context: ../
+      dockerfile: bringyour/connect/Dockerfile.compose
+    develop:
+      watch:
+        - path: .
+          action: rebuild
+    ports:
+      - "7070:80"
+    volumes:
+      - ../vault:/vault
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+  taskworker:
+    environment:
+      - WARP_VERSION=0.0.0
+      - WARP_ENV=local
+      - WARP_VAULT_HOME=/vault
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+    build:
+      context: ../
+      dockerfile: bringyour/taskworker/Dockerfile.compose
+    develop:
+      watch:
+        - path: .
+          action: rebuild
+    volumes:
+      - ../vault:/vault
+    restart: on-failure
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  db-migrate:
+    environment:
+      - WARP_VERSION=0.0.0
+      - WARP_ENV=local
+      - WARP_VAULT_HOME=/vault
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+    build:
+      context: ../
+      dockerfile: bringyour/bringyourctl/Dockerfile.compose
+    volumes:
+      - ../vault:/vault
+    restart: on-failure:5
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: docker.io/postgres:16-alpine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bringyour"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      - POSTGRES_DB=bringyour
+      - POSTGRES_USER=bringyour
+      - POSTGRES_PASSWORD=pigsty-vesicle-trombone-vigour
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+
+  setup-local-user:
+    build:
+      context: ../
+      dockerfile: bringyour/local/setup-local-user/Dockerfile
+    restart: on-failure
+    environment:
+      - WARP_VERSION=0.0.0
+      - WARP_ENV=local
+      - WARP_VAULT_HOME=/vault
+      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ../vault:/vault
+    develop:
+      watch:
+        - path: local/setup-local-user
+          action: rebuild
+
+  redis:
+    image: redis:7.4.0
