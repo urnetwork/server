@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: bringyour/connect
+          ref: gvisor-test
           path: connect
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -62,17 +63,19 @@ jobs:
       - name: Measure Troughput - single client
         working-directory: ./bringyour/measure-throughput
         env:
+          GOMEMLIMIT: "32MiB"
           REPORT_FILE: report-single.md
         run: |
-          go run .
+          go mod tidy && go run .
 
       - name: Measure Troughput - multi client
         working-directory: ./bringyour/measure-throughput
         env:
+          GOMEMLIMIT: "32MiB"
           USE_MULTICLIENT: "true"
           REPORT_FILE: report-multi.md
         run: |
-          go run .
+          go mod tidy && go run .
 
       - name: Merge reports
         working-directory: ./bringyour/measure-throughput

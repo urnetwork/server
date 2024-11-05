@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "net/http/pprof"
+
 	"bringyor.com/measure-throughput/bwestimator"
 	"bringyor.com/measure-throughput/clientdevice"
 	"bringyor.com/measure-throughput/datasource"
@@ -76,6 +78,10 @@ func main() {
 					),
 				),
 			)
+
+			go func() {
+				log.Println(http.ListenAndServe("localhost:6060", nil))
+			}()
 
 			// flag.Set("logtostderr", "false")    // Log to standard error instead of files
 			// flag.Set("stderrthreshold", "WARN") // Set the threshold level for logging to stderr
