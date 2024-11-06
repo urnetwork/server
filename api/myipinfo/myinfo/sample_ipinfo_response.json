@@ -1,0 +1,58 @@
+{
+    "ip": "81.6.15.76",
+    "hostname": "76-15-6-81.pool.dsl-net.ch",
+    "city": "Zürich",
+    "region": "Zurich",
+    "country": "CH",
+    "country_name": "Switzerland",
+    "country_flag": {
+        "emoji": "🇨🇭",
+        "unicode": "U+1F1E8 U+1F1ED"
+    },
+    "country_flag_url": "https://cdn.ipinfo.io/static/images/countries-flags/CH.svg",
+    "country_currency": {
+        "code": "CHF",
+        "symbol": "CHF"
+    },
+    "continent": {
+        "code": "EU",
+        "name": "Europe"
+    },
+    "loc": "47.3667,8.5500",
+    "postal": "8000",
+    "timezone": "Europe/Zurich",
+    "asn": {
+        "asn": "AS1836",
+        "name": "green.ch AG",
+        "domain": "green.ch",
+        "route": "81.6.0.0/19",
+        "type": "hosting"
+    },
+    "company": {
+        "name": "green.ch AG, Brugg, Switzerland",
+        "domain": "green.ch",
+        "type": "hosting"
+    },
+    "privacy": {
+        "vpn": false,
+        "proxy": false,
+        "tor": false,
+        "relay": false,
+        "hosting": true,
+        "service": ""
+    },
+    "abuse": {
+        "address": "green.ch AG Industriestrasse 33 CH-5242 Lupfig Schweiz",
+        "country": "CH",
+        "country_name": "Switzerland",
+        "email": "abuse@green.ch",
+        "name": "green.ch AG, Brugg, Switzerland",
+        "network": "81.6.8.0-81.6.31.255",
+        "phone": "+41 56 460 23 23"
+    },
+    "domains": {
+        "ip": "",
+        "total": 0,
+        "domains": []
+    }
+}

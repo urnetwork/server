@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+
 	// "encoding/base64"
 	"fmt"
 	"io"
@@ -120,6 +121,52 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *mode
 	}
 
 	return location, connectionLocationScores, nil
+}
+
+func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
+	earliestResultTime := bringyour.NowUtc().Add(-LocationLookupResultExpiration)
+
+	var resultJson []byte
+	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
+		resultJson = []byte(resultJsonStr)
+		return resultJson, nil
+	}
+	req, err := http.NewRequest(
+		"GET",
+		fmt.Sprintf("https://ipinfo.io/%s/json", ipStr),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	token, ok := ipInfoConfig()["access_token"].(string)
+
+	if !ok {
+		return nil, fmt.Errorf("could not cast access_token to string")
+	}
+
+	req.Header.Add(
+		"Authorization",
+		fmt.Sprintf("Bearer %s", token),
+	)
+
+	client := bringyour.DefaultHttpClient()
+
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %w", err)
+	}
+	defer res.Body.Close()
+
+	resultJson, err = io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response body: %w", err)
+	}
+
+	model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
+
+	return resultJson, nil
 }
 
 type IpInfoResult struct {
