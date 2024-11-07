@@ -1115,3 +1115,38 @@ func (self *BringYourApi) GetTransferStats(callback GetTransferStatsCallback) (*
 		callback,
 	)
 }
+
+/**
+ * Auth Code Login
+ * https://docs.ur.io/api/api-reference/auth/code-login
+ */
+
+type AuthCodeLoginArgs struct {
+	AuthCode string `json:"auth_code"`
+}
+
+type AuthCodeLoginError struct {
+	Message string `json:"message"`
+}
+
+type AuthCodeLoginResult struct {
+	Jwt   string              `json:"by_jwt"`
+	Error *AuthCodeLoginError `json:"error,omitempty"`
+}
+
+type AuthCodeLoginCallback connect.ApiCallback[*AuthCodeLoginResult]
+
+func (self *BringYourApi) AuthCodeLogin(
+	codeLoginArgs *AuthCodeLoginArgs,
+	callback AuthCodeLoginCallback,
+) (*AuthCodeLoginResult, error) {
+	return connect.HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/auth/code-login", self.apiUrl),
+		codeLoginArgs,
+		self.GetByJwt(),
+		&AuthCodeLoginResult{},
+		callback,
+	)
+}
