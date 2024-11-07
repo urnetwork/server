@@ -3,10 +3,14 @@ package model
 import (
 	"context"
 	"errors"
+	"net"
+	"net/netip"
+
 	// "bytes"
 	"fmt"
 	"time"
 
+	"github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
@@ -649,7 +653,19 @@ func ConnectNetworkClient(
 		service, _ := bringyour.Service()
 		block, _ := bringyour.Block()
 
-		_, err := tx.Exec(
+		addressOnly, _, err := net.SplitHostPort(clientAddress)
+		bringyour.Raise(err)
+
+		parsedAddr, err := netip.ParseAddr(addressOnly)
+		bringyour.Raise(err)
+
+		mh := murmur3.New128()
+		_, err = mh.Write(parsedAddr.AsSlice())
+		bringyour.Raise(err)
+
+		addressHash := mh.Sum(nil)
+
+		_, err = tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_connection (
@@ -660,9 +676,10 @@ func ConnectNetworkClient(
 					connection_service,
 					connection_block,
 					client_address,
+					client_address_hash,
 					handler_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			`,
 			clientId,
 			connectionId,
@@ -671,6 +688,7 @@ func ConnectNetworkClient(
 			service,
 			block,
 			clientAddress,
+			addressHash,
 			handlerId,
 		)
 		bringyour.Raise(err)

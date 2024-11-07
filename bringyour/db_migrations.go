@@ -1580,4 +1580,12 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE account_payment ADD subsidy_payout_nano_cents bigint NOT NULL DEFAULT 0
     `),
+
+	newSqlMigration(`
+        ALTER TABLE  network_client_connection ADD client_address_hash BYTEA NULL
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash,connected)
+    `),
 }
