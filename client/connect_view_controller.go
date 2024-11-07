@@ -576,24 +576,38 @@ func (self *ConnectGrid) run() {
 // must be called with the state lock
 // create a new grid based on targetClientSize sets specific points as plottable or unplottable
 func (self *ConnectGrid) resize() {
-	targetClientSize := int(math.Ceil(float64(len(self.providerGridPoints)) * float64(self.settings.ExpandFraction)))
+	targetClientSize := math.Ceil(math.Pow(float64(len(self.providerGridPoints)), float64(self.settings.ExpandFraction)))
 
 	sideLength := max(
 		self.settings.MinSideLength,
 		// currently the size never contracts
 		self.sideLength,
-		int(math.Ceil(math.Sqrt(float64(targetClientSize)))),
+		int(math.Ceil(math.Sqrt(targetClientSize))),
 	)
+
+	if self.sideLength == sideLength {
+		return
+	}
 
 	gridPoints := map[gridPointCoord]*gridPoint{}
 	// merge the existing state
 	for x := range sideLength {
 		for y := range sideLength {
 			c := gridPointCoord{X: x, Y: y}
+			// shiftC := gridPointCoord{
+			// 	X: x - (sideLength - self.sideLength) / 2,
+			// 	Y: y - (sideLength - self.sideLength) / 2,
+			// }
 			point, ok := self.gridPoints[c]
 			if ok {
 				// reset the plottable state, which will be set below to the new shape
 				point.Plottable = true
+				// point = &gridPoint{
+				// 	gridPointCoord: c,
+				// 	Plottable:      true,
+				// 	Occupied:       point.Occupied,
+				// }
+				gridPoints[c] = point
 			} else {
 				point = &gridPoint{
 					gridPointCoord: c,
@@ -609,6 +623,7 @@ func (self *ConnectGrid) resize() {
 	// cut out 1/3 corner triangles
 	for x := range sideLength / 3 {
 		for y := range sideLength / 3 {
+			// triangle is w*y+h*x<=w*h
 			if x+y < sideLength/3 {
 				gridPoints[gridPointCoord{X: x, Y: y}].Plottable = false
 
@@ -701,6 +716,7 @@ func (self *ConnectGrid) windowMonitorEventCallback(windowExpandEvent *connect.W
 					return unoccupiedGridPoints[mathrand.Intn(len(unoccupiedGridPoints))]
 				}
 
+				self.resize()
 				unoccupiedGridPoint := findUnuccupiedGridPoint()
 				if unoccupiedGridPoint == nil {
 					self.resize()

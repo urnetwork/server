@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	// "hash/fnv"
+	"encoding/json"
 	"flag"
 	"math"
 	"os"
@@ -355,7 +356,23 @@ func (self *ConnectLocationId) Cmp(b *ConnectLocationId) int {
 		return 1
 	}
 
+	if self.BestAvailable != b.BestAvailable {
+		if self.BestAvailable {
+			return -1
+		} else {
+			return 1
+		}
+	}
+
 	return 0
+}
+
+func (self *ConnectLocationId) String() string {
+	jsonBytes, err := json.Marshal(self)
+	if err != nil {
+		panic(err)
+	}
+	return string(jsonBytes)
 }
 
 type ProvideSecretKey struct {
