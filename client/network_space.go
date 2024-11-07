@@ -59,6 +59,7 @@ type NetworkSpaceValues struct {
 	MigrationHostName        string `json:"migration_host_name,omitempty"`
 	Store                    string `json:"store,omitempty"`
 	Wallet                   string `json:"wallet,omitempty"`
+	SsoGoogle                bool   `json:"sso_google,omitempty"`
 
 	// custom extender
 	// this overrides any auto discovered extenders
@@ -218,6 +219,10 @@ func (self *NetworkSpace) GetNetExtender() *NetExtender {
 
 func (self *NetworkSpace) GetNetExtenderAutoConfigure() *NetExtenderAutoConfigure {
 	return self.values.NetExtenderAutoConfigure
+}
+
+func (self *NetworkSpace) GetSsoGoogle() bool {
+	return self.values.SsoGoogle
 }
 
 func (self *NetworkSpace) GetAsyncLocalState() *AsyncLocalState {
