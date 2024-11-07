@@ -24,14 +24,15 @@ type response struct {
 }
 
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
-	remoteIP := r.Header.Get("X-Forwarded-For")
-	if remoteIP == "" {
-		var err error
-		remoteIP, _, err = net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	remoteIPPort := r.Header.Get("X-Forwarded-For")
+	if remoteIPPort == "" {
+		remoteIPPort = r.RemoteAddr
+	}
+
+	remoteIP, _, err := net.SplitHostPort(remoteIPPort)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
