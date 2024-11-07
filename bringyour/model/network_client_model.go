@@ -629,6 +629,42 @@ func SetProvide(
 	})
 }
 
+func IsAddressConnectedToNetwork(
+	ctx context.Context,
+	clientAddress string,
+) bool {
+
+	parsedAddr, err := netip.ParseAddr(clientAddress)
+	bringyour.Raise(err)
+
+	mh := murmur3.New128()
+	_, err = mh.Write(parsedAddr.AsSlice())
+	bringyour.Raise(err)
+
+	addressHash := mh.Sum(nil)
+
+	var connected bool
+
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT count(*) > 0 FROM network_client_connection
+				WHERE client_address_hash = $1 AND connected
+			`,
+			addressHash,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&connected))
+			}
+		})
+	})
+
+	return connected
+
+}
+
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
 // there is one resident transport
