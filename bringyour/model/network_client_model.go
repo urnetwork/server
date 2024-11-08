@@ -3,10 +3,16 @@ package model
 import (
 	"context"
 	"errors"
+	"net"
+	"net/netip"
+	"regexp"
+	"strings"
+
 	// "bytes"
 	"fmt"
 	"time"
 
+	"github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
 	"bringyour.com/bringyour"
@@ -625,6 +631,46 @@ func SetProvide(
 	})
 }
 
+func IsAddressConnectedToNetwork(
+	ctx context.Context,
+	clientAddress string,
+) bool {
+
+	parsedAddr, err := netip.ParseAddr(clientAddress)
+	bringyour.Raise(err)
+
+	mh := murmur3.New128()
+	_, err = mh.Write(parsedAddr.AsSlice())
+	bringyour.Raise(err)
+
+	addressHash := mh.Sum(nil)
+
+	var connected bool
+
+	bringyour.Db(ctx, func(conn bringyour.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT count(*) > 0 FROM network_client_connection
+				WHERE client_address_hash = $1 AND connected
+			`,
+			addressHash,
+		)
+		bringyour.WithPgResult(result, err, func() {
+			if result.Next() {
+				bringyour.Raise(result.Scan(&connected))
+			}
+		})
+	})
+
+	return connected
+
+}
+
+// matches the first group to the IPV6 address when the input is <ipv6>:<port>
+// example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
+var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
+
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
 // there is one resident transport
@@ -649,7 +695,35 @@ func ConnectNetworkClient(
 		service, _ := bringyour.Service()
 		block, _ := bringyour.Block()
 
-		_, err := tx.Exec(
+		columnCount := strings.Count(clientAddress, ":")
+		bracketCount := strings.Count(clientAddress, "[")
+
+		var addressOnly string
+
+		// if the address is malformed, extract the address from the address:port string
+		if columnCount > 1 && bracketCount == 0 {
+			groups := malformedIPV6WithPort.FindStringSubmatch(clientAddress)
+
+			if len(groups) > 1 {
+				addressOnly = groups[1]
+			}
+
+		} else {
+			var err error
+			addressOnly, _, err = net.SplitHostPort(clientAddress)
+			bringyour.Raise(err)
+		}
+
+		parsedAddr, err := netip.ParseAddr(addressOnly)
+		bringyour.Raise(err)
+
+		mh := murmur3.New128()
+		_, err = mh.Write(parsedAddr.AsSlice())
+		bringyour.Raise(err)
+
+		addressHash := mh.Sum(nil)
+
+		_, err = tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_connection (
@@ -660,9 +734,10 @@ func ConnectNetworkClient(
 					connection_service,
 					connection_block,
 					client_address,
+					client_address_hash,
 					handler_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			`,
 			clientId,
 			connectionId,
@@ -671,6 +746,7 @@ func ConnectNetworkClient(
 			service,
 			block,
 			clientAddress,
+			addressHash,
 			handlerId,
 		)
 		bringyour.Raise(err)
