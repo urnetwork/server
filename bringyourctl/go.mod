@@ -35,7 +35,6 @@ require (
 	github.com/redis/go-redis/v9 v9.0.3 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
 	github.com/stripe/stripe-go/v76 v76.16.0 // indirect
-	github.com/twmb/murmur3 v1.1.8 // indirect
 	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	go.uber.org/mock v0.4.0 // indirect
 	golang.org/x/crypto v0.25.0 // indirect

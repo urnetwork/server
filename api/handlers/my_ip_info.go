@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/model"
 	"bringyour.com/service/api/myipinfo/landmarks"
 	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/ipinfo/go/v2/ipinfo"
@@ -20,9 +19,8 @@ func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 type response struct {
-	Info               myinfo.MyInfo              `json:"info"`
-	ExpectedRTTs       []landmarks.LandmarkAndRTT `json:"landmarks"`
-	ConnectedToNetwork bool                       `json:"connected_to_network"`
+	Info         myinfo.MyInfo              `json:"info"`
+	ExpectedRTTs []landmarks.LandmarkAndRTT `json:"landmarks"`
 }
 
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
@@ -76,9 +74,8 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respStruct := response{
-		Info:               myInfo,
-		ExpectedRTTs:       landmarksAndRTTs,
-		ConnectedToNetwork: model.IsAddressConnectedToNetwork(r.Context(), remoteIP),
+		Info:         myInfo,
+		ExpectedRTTs: landmarksAndRTTs,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
