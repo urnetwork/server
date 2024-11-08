@@ -46,6 +46,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/quic-go/quic-go v0.46.0 // indirect
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
+	github.com/twmb/murmur3 v1.1.8 // indirect
 	go.uber.org/mock v0.4.0 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect

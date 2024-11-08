@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 
+	"bringyour.com/bringyour"
 	"bringyour.com/bringyour/controller"
+	"bringyour.com/bringyour/model"
 	"bringyour.com/service/api/myipinfo/landmarks"
 	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/ipinfo/go/v2/ipinfo"
@@ -19,27 +22,55 @@ func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 type response struct {
-	Info         myinfo.MyInfo              `json:"info"`
-	ExpectedRTTs []landmarks.LandmarkAndRTT `json:"landmarks"`
+	Info               myinfo.MyInfo              `json:"info"`
+	ExpectedRTTs       []landmarks.LandmarkAndRTT `json:"landmarks"`
+	ConnectedToNetwork bool                       `json:"connected_to_network"`
 }
 
+// matches the first group to the IPV6 address when the input is <ipv6>:<port>
+// example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
+var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
+
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
-	remoteIPPort := r.Header.Get("X-Forwarded-For")
-	if remoteIPPort == "" {
-		remoteIPPort = r.RemoteAddr
+	remoteAddr := r.Header.Get("X-Forwarded-For")
+
+	if remoteAddr == "" {
+		remoteAddr = r.RemoteAddr
 	}
 
-	remoteIP, _, err := net.SplitHostPort(remoteIPPort)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	columnCount := strings.Count(remoteAddr, ":")
+	bracketCount := strings.Count(remoteAddr, "[")
+
+	var addressOnly string
+
+	// if the address is malformed, extract the address from the address:port string
+	if columnCount > 1 && bracketCount == 0 {
+		groups := malformedIPV6WithPort.FindStringSubmatch(remoteAddr)
+
+		if len(groups) > 1 {
+			addressOnly = groups[1]
+		}
+
+	} else {
+		var err error
+		addressOnly, _, err = net.SplitHostPort(remoteAddr)
+		bringyour.Raise(err)
 	}
+
+	// if remoteIP == "" {
+	// 	var err error
+	// 	remoteIP, _, err = net.SplitHostPort(r.RemoteAddr)
+	// 	if err != nil {
+	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// 		return
+	// 	}
+	// }
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
-	ipInfoRaw, err := controller.GetIPInfo(r.Context(), remoteIP)
+	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -63,7 +94,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isIPV6 := strings.Contains(remoteIP, ":")
+	isIPV6 := strings.Contains(addressOnly, ":")
 
 	var landmarksAndRTTs []landmarks.LandmarkAndRTT
 
@@ -74,8 +105,9 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respStruct := response{
-		Info:         myInfo,
-		ExpectedRTTs: landmarksAndRTTs,
+		Info:               myInfo,
+		ExpectedRTTs:       landmarksAndRTTs,
+		ConnectedToNetwork: model.IsAddressConnectedToNetwork(r.Context(), addressOnly),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
