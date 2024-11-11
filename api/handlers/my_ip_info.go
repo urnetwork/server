@@ -16,9 +16,6 @@ import (
 )
 
 func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
 type response struct {
@@ -56,19 +53,6 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		addressOnly, _, err = net.SplitHostPort(remoteAddr)
 		bringyour.Raise(err)
 	}
-
-	// if remoteIP == "" {
-	// 	var err error
-	// 	remoteIP, _, err = net.SplitHostPort(r.RemoteAddr)
-	// 	if err != nil {
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// }
-
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)
 	if err != nil {
