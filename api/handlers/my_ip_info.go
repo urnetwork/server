@@ -16,9 +16,6 @@ import (
 )
 
 func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
 type response struct {
@@ -57,19 +54,6 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		bringyour.Raise(err)
 	}
 
-	// if remoteIP == "" {
-	// 	var err error
-	// 	remoteIP, _, err = net.SplitHostPort(r.RemoteAddr)
-	// 	if err != nil {
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// }
-
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -82,6 +66,24 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// enrich the IP info with additional data
+	func(v *ipinfo.Core) {
+		if v.Country != "" {
+			v.CountryName = ipinfo.GetCountryName(v.Country)
+			v.IsEU = ipinfo.IsEU(v.Country)
+			v.CountryFlag.Emoji = ipinfo.GetCountryFlagEmoji(v.Country)
+			v.CountryFlag.Unicode = ipinfo.GetCountryFlagUnicode(v.Country)
+			v.CountryFlagURL = ipinfo.GetCountryFlagURL(v.Country)
+			v.CountryCurrency.Code = ipinfo.GetCountryCurrencyCode(v.Country)
+			v.CountryCurrency.Symbol = ipinfo.GetCountryCurrencySymbol(v.Country)
+			v.Continent.Code = ipinfo.GetContinentCode(v.Country)
+			v.Continent.Name = ipinfo.GetContinentName(v.Country)
+		}
+		if v.Abuse != nil && v.Abuse.Country != "" {
+			v.Abuse.CountryName = ipinfo.GetCountryName(v.Abuse.Country)
+		}
+	}(info)
 
 	if info.Bogon {
 		http.Error(w, "bogon IP", http.StatusForbidden)
