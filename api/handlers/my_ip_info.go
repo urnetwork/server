@@ -67,6 +67,24 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// enrich the IP info with additional data
+	func(v *ipinfo.Core) {
+		if v.Country != "" {
+			v.CountryName = ipinfo.GetCountryName(v.Country)
+			v.IsEU = ipinfo.IsEU(v.Country)
+			v.CountryFlag.Emoji = ipinfo.GetCountryFlagEmoji(v.Country)
+			v.CountryFlag.Unicode = ipinfo.GetCountryFlagUnicode(v.Country)
+			v.CountryFlagURL = ipinfo.GetCountryFlagURL(v.Country)
+			v.CountryCurrency.Code = ipinfo.GetCountryCurrencyCode(v.Country)
+			v.CountryCurrency.Symbol = ipinfo.GetCountryCurrencySymbol(v.Country)
+			v.Continent.Code = ipinfo.GetContinentCode(v.Country)
+			v.Continent.Name = ipinfo.GetContinentName(v.Country)
+		}
+		if v.Abuse != nil && v.Abuse.Country != "" {
+			v.Abuse.CountryName = ipinfo.GetCountryName(v.Abuse.Country)
+		}
+	}(info)
+
 	if info.Bogon {
 		http.Error(w, "bogon IP", http.StatusForbidden)
 		return
