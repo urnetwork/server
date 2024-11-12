@@ -131,29 +131,30 @@ Options:
 		port,
 	)
 
-	pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
-		Gatherer(prometheus.DefaultGatherer).
-		Grouping("warp_block", bringyour.RequireBlock()).
-		Grouping("warp_env", bringyour.RequireEnv()).
-		Grouping("warp_version", bringyour.RequireVersion()).
-		Grouping("warp_service", bringyour.RequireService()).
-		Grouping("warp_config_version", bringyour.RequireConfigVersion()).
-		Grouping("warp_host", bringyour.RequireHost())
+	if os.Getenv("SKIP_METRICS") == "" {
+		pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
+			Gatherer(prometheus.DefaultGatherer).
+			Grouping("warp_block", bringyour.RequireBlock()).
+			Grouping("warp_env", bringyour.RequireEnv()).
+			Grouping("warp_version", bringyour.RequireVersion()).
+			Grouping("warp_service", bringyour.RequireService()).
+			Grouping("warp_config_version", bringyour.RequireConfigVersion()).
+			Grouping("warp_host", bringyour.RequireHost())
 
-	go func() {
-		for {
-			select {
-			case <-quitEvent.Ctx.Done():
-				return
-			case <-time.NewTicker(30 * time.Second).C:
-				err := pushMetrics.Push()
-				if err != nil {
-					glog.Errorf("[api]pushMetrics.Push = %s\n", err)
+		go func() {
+			for {
+				select {
+				case <-quitEvent.Ctx.Done():
+					return
+				case <-time.NewTicker(30 * time.Second).C:
+					err := pushMetrics.Push()
+					if err != nil {
+						glog.Errorf("[api]pushMetrics.Push = %s\n", err)
+					}
 				}
 			}
-		}
-	}()
-
+		}()
+	}
 	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 	glog.Errorf("[api]close = %s\n", err)
