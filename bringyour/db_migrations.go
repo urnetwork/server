@@ -1582,4 +1582,12 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE account_payment ADD subsidy_payout_nano_cents bigint NOT NULL DEFAULT 0
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment ADD network_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment ALTER COLUMN wallet_id DROP NOT NULL
+    `),
 }

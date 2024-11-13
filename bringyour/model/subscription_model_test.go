@@ -192,8 +192,8 @@ func TestEscrow(t *testing.T) {
 		// nothing to plan because the payout does not meet the min threshold
 		paymentPlan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldNetworkIds, []bringyour.Id{destinationNetworkId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
@@ -219,9 +219,9 @@ func TestEscrow(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -269,9 +269,9 @@ func TestEscrow(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -299,7 +299,7 @@ func TestEscrow(t *testing.T) {
 		// there shoud be no more payments
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
 	})
 }
 
@@ -437,8 +437,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		// nothing to plan because the payout does not meet the min threshold
 		paymentPlan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldNetworkIds, []bringyour.Id{sourceNetworkId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
@@ -469,9 +469,9 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{sourceNetworkId})
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -534,9 +534,9 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{sourceNetworkId})
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -564,7 +564,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		// there shoud be no more payments
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
 	})
 }
 
