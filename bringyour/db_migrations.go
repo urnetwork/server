@@ -648,6 +648,8 @@ var migrations = []any{
 
 	// ADDED companion_contract_id
 	// ADDED priority
+	// ADDED payer_network_id
+	// ADDED payee_network_id
 	newSqlMigration(`
         CREATE TABLE transfer_contract (
             contract_id uuid NOT NULL,

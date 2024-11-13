@@ -1245,3 +1245,7 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 		assert.Equal(t, endTime, transferBalanceB.EndTime)
 	})
 }
+
+// FIXME a subsidy test where N clients pay each other
+// FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
+// FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
