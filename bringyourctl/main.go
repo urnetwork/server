@@ -506,7 +506,7 @@ func planPayouts() {
 	fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
 	fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
 	fmt.Println(strings.Repeat("-", 56))
-	for _, payment := range plan.WalletPayments {
+	for _, payment := range plan.NetworkPayments {
 		payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
 		fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
 	}
