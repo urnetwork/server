@@ -17,6 +17,5 @@ image:
 		--build-arg warp_env=${WARP_ENV} \
 		--platform linux/arm64/v8,linux/amd64 \
 		-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
-		--no-cache \
 		--push \
 		.

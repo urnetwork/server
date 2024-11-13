@@ -1584,6 +1584,14 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
+        ALTER TABLE  network_client_connection ADD client_address_hash BYTEA NULL
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash,connected)
+    `),
+
+	newSqlMigration(`
         ALTER TABLE account_payment ADD network_id uuid NULL
     `),
 
