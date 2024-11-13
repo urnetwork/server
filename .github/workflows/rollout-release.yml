@@ -1,0 +1,102 @@
+name: Create Release
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  checkout_repos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout bringyour Repo
+        uses: actions/checkout@v3
+        with:
+          path: bringyour
+
+      - name: Checkout connect Repo
+        uses: actions/checkout@v3
+        with:
+          repository: bringyour/connect
+          path: connect
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "^1.23.2"
+
+      - name: Install go protobuf plugin
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+      - name: Compile protocol proto files
+        working-directory: ./connect/protocol
+        run: |
+          make
+
+      - name: build api
+        working-directory: ./bringyour/api
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
+
+      # API
+      - name: build api docker image
+        working-directory: ./bringyour/api
+        env:
+          VERSION: ${{ github.run_number }}
+        run: |
+          docker buildx build --progress=plain --build-arg warp_env=main --platform linux/arm64/v8,linux/amd64 -t bringyour/main-api:"$VERSION" .
+
+      # Connect
+      - name: build connect
+        working-directory: ./bringyour/connect
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
+
+      - name: build connect docker image
+        working-directory: ./bringyour/connect
+        env:
+          VERSION: ${{ github.run_number }}
+        run: |
+          docker buildx build --progress=plain --build-arg warp_env=main --platform linux/arm64/v8,linux/amd64 -t bringyour/main-connect:"$VERSION" .
+
+      # Taskworker
+      - name: build taskworker
+        working-directory: ./bringyour/taskworker
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
+
+      - name: build taskworker docker image
+        working-directory: ./bringyour/taskworker
+        env:
+          VERSION: ${{ github.run_number }}
+        run: |
+          docker buildx build --progress=plain --build-arg warp_env=main --platform linux/arm64/v8,linux/amd64 -t bringyour/main-taskworker:"$VERSION" .
+
+      # Disabled because it's very slow to build for arm
+      # # GPT
+      # - name: build gpt
+      #   working-directory: ./bringyour/gpt
+      #   run: |
+      #     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
+      #     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
+
+      # - name: build gpt docker image
+      #   working-directory: ./bringyour/gpt
+      #   env:
+      #     VERSION: ${{ github.run_number }}
+      #   run: |
+      #     docker buildx build --progress=plain --build-arg warp_env=main --platform linux/arm64/v8,linux/amd64 -t bringyour/main-gpt:"$VERSION" .
