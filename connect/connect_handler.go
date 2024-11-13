@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/golang/glog"
 
@@ -67,7 +68,25 @@ func NewConnectHandler(ctx context.Context, handlerId bringyour.Id, exchange *Ex
 	}
 }
 
+var connectedGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connected_clients",
+		Help:      "Number of connected clients",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(connectedGauge)
+}
+
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	connectedGauge.Add(1)
+	defer func() {
+		connectedGauge.Sub(1)
+	}()
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 

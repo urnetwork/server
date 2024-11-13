@@ -63,6 +63,7 @@ jobs:
         working-directory: ./bringyour/measure-throughput
         env:
           REPORT_FILE: report-single.md
+          SKIP_METRICS: "true"
         run: |
           go run .
 
@@ -71,6 +72,7 @@ jobs:
         env:
           USE_MULTICLIENT: "true"
           REPORT_FILE: report-multi.md
+          SKIP_METRICS: "true"
         run: |
           go run .
 
