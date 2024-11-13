@@ -91,8 +91,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		paymentPlan, err := model.PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldNetworkIds, []bringyour.Id{destinationNetworkId})
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
@@ -120,12 +120,12 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		paymentPlan, err = model.PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
 		// these should hit -> default
 		// payment.PaymentRecord should all be empty
 		// meaning they will make a call to send a transaction to the provider
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 
 			// initiate payment
 			complete, err := advancePayment(payment, destinationSession)

@@ -648,6 +648,8 @@ var migrations = []any{
 
 	// ADDED companion_contract_id
 	// ADDED priority
+	// ADDED payer_network_id
+	// ADDED payee_network_id
 	newSqlMigration(`
         CREATE TABLE transfer_contract (
             contract_id uuid NOT NULL,
@@ -1587,5 +1589,13 @@ var migrations = []any{
 
 	newSqlMigration(`
         CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash,connected)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment ADD network_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment ALTER COLUMN wallet_id DROP NOT NULL
     `),
 }

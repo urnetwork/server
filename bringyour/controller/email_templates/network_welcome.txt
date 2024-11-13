@@ -1,26 +1,18 @@
 
-Welcome to BringYour!
+Welcome to URnetwork!
 
-Thanks for joining this project. Our mission to build the highest quality VPN that puts you in the driver's seat of your privacy supply chain. That means hard privacy by keeping your identifiable data away from our servers and egress sites, the most regions where everything just works, and tools to remove your data from the cloud, cutting it off before it gets sold, leaked, or marketed. We believe that a correctly designed and operated VPN gives everyone a better internet.
+1. your network 2. you are network 3. our network
 
-To get started, we gave you an initial balance of 30GiB of transfer data valid for 30 days. You can subscribe in app to get more transfer data and enable advanced privacy management.
+When I started in 2023, I wanted to replace the shady VPNs of the world with something truly better - undetectable, unblockable, reproducible, free. I wanted everyone to have the experience of sitting in a friend's living room, anywhere in the world, at any time, on the fastest and most private internet connection. No questions asked.
 
-Some links you may find useful:
+Thanks for joining us on this mission. As we build our apps and launch our labs for better ad blockers and group internet sharing, your feedback and support is what drives us forward. Hearing stories of URnetwork just working is the best part of my day.
 
-Manage your network: https://app.bringyour.com
+Send me a note anytime.
 
-Support: https://support.bringyour.com <support@bringyour.com>
+Brien Colwell <brien@ur.io> Founder, URnetwork
 
-Install apps: https://bringyour.com/install
-
-Help grow the network and earn USDC: https://bringyour.com/participate
-
-I'm giving my all the build a product worthy of your recommendation. If you think it's lived up to your needs, please spread the word. If not, please contact me personally and I want to make sure I have your feedback captured so that I can eventually make it right.
-
-
-Brien Colwell <brien@bringyour.com>
-Founder, BringYour
+Btw, did you know that URnetwork is not only a free VPN, but you get paid to participate? The more decentralized we are, the better the product gets. Just 4% of our users who sign up as supporters power all of the subsidy payments. You can earn more money by running more providers. See our docs.
 
 Copyright {{.CopyrightYear}} BringYour, Inc.
 2261 Market Street #5245, San Francisco, CA 94114, United States
-https://bringyour.com
+https://ur.io

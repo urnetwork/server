@@ -165,6 +165,16 @@ func (self *SendPaymentTemplate) Funcs(funcs texttemplate.FuncMap) {
 	funcs["CreatedAt"] = self.CreatedAt
 }
 
+type MissingWalletTemplate struct {
+	PaymentId bringyour.Id
+	AmountUsd string
+	BaseTemplate
+}
+
+func (self *MissingWalletTemplate) Name() string {
+	return "subscription_missing_wallet"
+}
+
 // fixme - we can clean this up so all public functions are in the interface
 type MessageSender interface {
 	SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error

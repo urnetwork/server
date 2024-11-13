@@ -25,12 +25,15 @@
         -webkit-user-select: all;
       "
     >
-      You earned {{.AmountUsd}} USDC
+      You earned {{.AmountUsd}} USDC ...
     </div>
 
     <div style="margin-top: 24px">
-      You just got paid {{.AmountUsd}} USDC for participating in URnetwork up to
-      {{.CreatedAt}} UTC.
+      But you need to connect a wallet before we can send it to you. Open the app and connect a wallet in the account section. The payment will be automatically retried once a wallet is connected.
+    </div>
+
+    <div style="margin-top: 24px">
+      This reminder is generated once per pay period when you have new earnings in that pay period.
     </div>
 
     <div style="margin-top: 24px">
@@ -40,29 +43,6 @@
     </div>
 
     <div style="margin-top: 24px">We're building an internet that gives not takes.</div>
-
-    <div
-      style="
-        margin-top: 24px;
-/*        border: 4px dotted rgb(214, 230, 244);*/
-        background: rgb(239, 247, 187);
-        padding: 24px;
-        font-family: monospace;
-        font-size: 10pt;
-        font-weight: 100;
-        border-radius: 24px;
-      "
-    >
-      <p>URnetwork Payment ID {{.PaymentId}}</p>
-      <p>
-        {{.AmountUsd}} sent on {{.Blockchain}} to {{.DestinationAddress}} in
-        transaction
-        <a href="{{.ExplorerBasePath}}/{{.TxHash}}" target="_blank"
-          >{{.TxHash}}</a
-        >
-      </p>
-    </div>
-  </div>
 
   <div
     style="

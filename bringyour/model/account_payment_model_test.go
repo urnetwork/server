@@ -69,8 +69,8 @@ func TestCancelAccountPayment(t *testing.T) {
 
 		paymentPlan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldNetworkIds, []bringyour.Id{destinationNetworkId})
 
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 
@@ -98,9 +98,9 @@ func TestCancelAccountPayment(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 
 			assert.Equal(t, payment.Canceled, false)
 
@@ -198,7 +198,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		assert.Equal(t, transferStats.PaidBytesProvided, int(0))
 
 		// mark plan items as complete
-		for _, payment := range plan.WalletPayments {
+		for _, payment := range plan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -346,8 +346,8 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		// nothing to plan because the payout does not meet the min threshold
 		paymentPlan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldWalletIds, []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
+		assert.Equal(t, paymentPlan.WithheldNetworkIds, []bringyour.Id{destinationNetworkId})
 
 		subsidyPayment := GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
 		assert.NotEqual(t, subsidyPayment, nil)
@@ -381,7 +381,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
 		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
 		assert.NotEqual(t, subsidyPayment, nil)
@@ -392,7 +392,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
 		subsidyPaidByteCount := paidByteCount
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
@@ -440,7 +440,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.WalletPayments), []bringyour.Id{wallet.WalletId})
+		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []bringyour.Id{destinationNetworkId})
 
 		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
 		assert.NotEqual(t, subsidyPayment, nil)
@@ -451,9 +451,10 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
 		subsidyPaidByteCount = paidByteCount - subsidyPaidByteCount
 
-		for _, payment := range paymentPlan.WalletPayments {
+		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "")
+			UpdatePaymentWallet(ctx, payment.PaymentId)
 		}
 
 		// check that the payment is recorded
@@ -479,7 +480,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		// there shoud be no more payments
 		paymentPlan, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.WalletPayments), 0)
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
 
 		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
 		assert.Equal(t, subsidyPayment, nil)

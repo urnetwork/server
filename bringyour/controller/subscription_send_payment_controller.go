@@ -34,8 +34,26 @@ func SendPayments(clientSession *session.ClientSession) error {
 		return err
 	}
 
+	// for any newtork that is missing a wallet id, send a notice
+	for networkId, payment := range plan.NetworkPayments {
+		if payment.WalletId == nil {
+			userAuth, err := model.GetUserAuth(clientSession.Ctx, networkId)
+			if err != nil {
+				return err
+			}
+
+			awsMessageSender := GetAWSMessageSender()
+			// TODO handler error
+
+			awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
+				PaymentId: payment.PaymentId,
+				AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(payment.Payout)),
+			})
+		}
+	}
+
 	bringyour.Tx(clientSession.Ctx, func(tx bringyour.PgTx) {
-		for _, payment := range plan.WalletPayments {
+		for _, payment := range plan.NetworkPayments {
 			ScheduleAdvancePayment(&AdvancePaymentArgs{
 				PaymentId: payment.PaymentId,
 			}, clientSession, tx)
@@ -117,6 +135,7 @@ func AdvancePayment(
 	advancePaymentArgs *AdvancePaymentArgs,
 	clientSession *session.ClientSession,
 ) (*AdvancePaymentResult, error) {
+	model.UpdatePaymentWallet(clientSession.Ctx, advancePaymentArgs.PaymentId)
 	payment, err := model.GetPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
 	if err != nil {
 		// payment doesn't exist
@@ -131,6 +150,11 @@ func AdvancePayment(
 			Complete: payment.Completed,
 			Canceled: payment.Canceled,
 		}, nil
+	}
+
+	if payment.WalletId == nil {
+		// cannot advance until the wallet is set
+		return &AdvancePaymentResult{}, nil
 	}
 
 	complete, err := advancePayment(payment, clientSession)
@@ -268,7 +292,7 @@ func advancePayment(
 		// create and send a new payment via Circle
 
 		// get the user wallet to send the payment to
-		accountWallet := model.GetAccountWallet(clientSession.Ctx, payment.WalletId)
+		accountWallet := model.GetAccountWallet(clientSession.Ctx, *payment.WalletId)
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
 			returnErr = err
