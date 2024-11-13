@@ -254,6 +254,7 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId bringyour.Id) [
 }
 
 func UpdatePaymentWallet(ctx context.Context, paymentId bringyour.Id) {
+	// note the wallet cannot be updated once there is a payment record
 	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
 		bringyour.RaisePgResult(tx.Exec(
 			ctx,
@@ -274,7 +275,12 @@ func UpdatePaymentWallet(ctx context.Context, paymentId bringyour.Id) {
 			        account_wallet.wallet_id = payout_wallet.wallet_id AND
 			        account_wallet.active = true
 
-		        WHERE account_payment.payment_id = $1
+		        WHERE
+		        	account_payment.payment_id = $1 AND
+		        	account_payment.payment_record IS NULL AND
+		        	account_payment.completed = false AND
+		        	account_payment.canceled = false
+
 		    ) t
 		    WHERE account_payment.payment_id = t.payment_id
 			`,
