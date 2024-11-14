@@ -35,7 +35,7 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urfave/cli/v2 v2.27.4
-	github.com/urnetwork/connect v0.0.0-20241114133038-f5f52fa1e08e
+	github.com/urnetwork/connect v0.1.0
 	github.com/urnetwork/protocol v0.1.0
 	golang.org/x/crypto v0.25.0
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
