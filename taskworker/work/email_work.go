@@ -3,12 +3,12 @@ package work
 import (
 	"time"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/task"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 
-	// "github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/session"
+	// "github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
 )
 
 type WarmEmailArgs struct {
@@ -17,7 +17,7 @@ type WarmEmailArgs struct {
 type WarmEmailResult struct {
 }
 
-func ScheduleWarmEmail(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleWarmEmail(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		WarmEmail,
@@ -58,7 +58,7 @@ func WarmEmailPost(
 	warmEmail *WarmEmailArgs,
 	warmEmailResult *WarmEmailResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleWarmEmail(clientSession, tx)
 	return nil

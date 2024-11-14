@@ -3,13 +3,13 @@ package work
 import (
 	"time"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/session"
-	"github.com/urnetwork/server/bringyour/task"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
-func SchedulePopulateAccountWallets(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func SchedulePopulateAccountWallets(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		controller.PopulateAccountWallets,
@@ -24,7 +24,7 @@ func PopulateAccountWalletsPost(
 	populateAccountWallets *controller.PopulateAccountWalletsArgs,
 	populateAccountWalletsResult *controller.PopulateAccountWalletsResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	SchedulePopulateAccountWallets(clientSession, tx)
 	return nil

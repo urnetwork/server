@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"github.com/jedib0t/go-pretty/v6/progress"
-	"github.com/urnetwork/server/bringyour/jwt"
-	"github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/session"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 const userName = "test"

@@ -3,10 +3,10 @@ package work
 import (
 	"time"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/session"
-	"github.com/urnetwork/server/bringyour/task"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 type SchedulePayoutArgs struct {
@@ -17,7 +17,7 @@ type SchedulePayoutResult struct {
 	Success bool `json:"success"`
 }
 
-func SchedulePayout(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 	runAt := func() time.Time {
 		now := time.Now().UTC()
 		year, month, day := now.Year(), now.Month(), now.Day()
@@ -59,7 +59,7 @@ func PayoutPost(
 	schedulePayoutArgs *SchedulePayoutArgs,
 	schedulePayoutResult *SchedulePayoutResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	if schedulePayoutResult.Success {
 		SchedulePayout(clientSession, tx)
@@ -88,7 +88,7 @@ type ProcessPendingPayoutsArgs struct {
 type ProcessPendingPayoutsResult struct {
 }
 
-func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		ProcessPendingPayouts,
@@ -113,7 +113,7 @@ func ProcessPendingPayoutsPost(
 	processPendingArgs *ProcessPendingPayoutsArgs,
 	processPendingResult *ProcessPendingPayoutsResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	return nil
 }

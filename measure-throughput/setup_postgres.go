@@ -14,7 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server"
 )
 
 func setupPostgres(ctx context.Context, tempDir string, pw progress.Writer) (fn func() error, err error) {
@@ -28,7 +28,7 @@ func setupPostgres(ctx context.Context, tempDir string, pw progress.Writer) (fn 
 	pw.AppendTracker(tracker)
 	tracker.Start()
 
-	// bringyour.ApplyDbMigrations can panic
+	// server.ApplyDbMigrations can panic
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -104,7 +104,7 @@ func setupPostgres(ctx context.Context, tempDir string, pw progress.Writer) (fn 
 	}
 
 	tracker.UpdateMessage("Postgres: applying migrations")
-	bringyour.ApplyDbMigrations(ctx)
+	server.ApplyDbMigrations(ctx)
 	tracker.Increment(1)
 
 	return func() error {

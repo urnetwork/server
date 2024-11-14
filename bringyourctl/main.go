@@ -13,11 +13,11 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/search"
-	"github.com/urnetwork/server/bringyour/session"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/search"
+	"github.com/urnetwork/server/session"
 )
 
 func main() {
@@ -76,7 +76,7 @@ Options:
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
@@ -177,13 +177,13 @@ Options:
 }
 
 func dbVersion(opts docopt.Opts) {
-	version := bringyour.DbVersion(context.Background())
+	version := server.DbVersion(context.Background())
 	fmt.Printf("Current DB version: %d\n", version)
 }
 
 func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
-	bringyour.ApplyDbMigrations(context.Background())
+	server.ApplyDbMigrations(context.Background())
 }
 
 func searchAdd(opts docopt.Opts) {
@@ -196,7 +196,7 @@ func searchAdd(opts docopt.Opts) {
 	)
 
 	value, _ := opts.String("<value>")
-	valueId := bringyour.NewId()
+	valueId := server.NewId()
 	searchService.Add(context.Background(), value, valueId, 0)
 }
 
@@ -228,7 +228,7 @@ func searchClear(opts docopt.Opts) {
 func statsCompute(opts docopt.Opts) {
 	stats := model.ComputeStats90(context.Background())
 	statsJson, err := json.MarshalIndent(stats, "", "  ")
-	bringyour.Raise(err)
+	server.Raise(err)
 	fmt.Printf("%s\n", statsJson)
 }
 
@@ -242,7 +242,7 @@ func statsImport(opts docopt.Opts) {
 	stats := model.GetExportedStats(context.Background(), 90)
 	if stats != nil {
 		statsJson, err := json.MarshalIndent(stats, "", "  ")
-		bringyour.Raise(err)
+		server.Raise(err)
 		fmt.Printf("%s\n", statsJson)
 	}
 }
@@ -296,7 +296,7 @@ func networkRemove(opts docopt.Opts) {
 
 	networkIdStr, _ := opts.String("--network_id")
 
-	networkId, err := bringyour.ParseId(networkIdStr)
+	networkId, err := server.ParseId(networkIdStr)
 	if err != nil {
 		panic(err)
 	}
@@ -310,9 +310,9 @@ func balanceCodeCreate(opts docopt.Opts) {
 		ctx,
 		1024,
 		0,
-		bringyour.NewId().String(),
-		bringyour.NewId().String(),
-		"brien@bringyour.com",
+		server.NewId().String(),
+		server.NewId().String(),
+		"brien@brienyour.com",
 	)
 	if err != nil {
 		panic(err)
@@ -435,8 +435,8 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
 		ctx,
 		balanceByteCount,
 		netRevenue,
-		bringyour.NewId().String(),
-		bringyour.NewId().String(),
+		server.NewId().String(),
+		server.NewId().String(),
 		userAuth,
 	)
 
@@ -465,10 +465,10 @@ func sendPayoutEmail(opts docopt.Opts) {
 	err := awsMessageSender.SendAccountMessageTemplate(
 		userAuth,
 		&controller.SendPaymentTemplate{
-			PaymentId:          bringyour.NewId(),
+			PaymentId:          server.NewId(),
 			TxHash:             "0x1234567890",
 			ExplorerBasePath:   "https://explorer.solana.com/tx",
-			ReferralCode:       bringyour.NewId().String(),
+			ReferralCode:       server.NewId().String(),
 			Blockchain:         "Solana",
 			DestinationAddress: "0x1234567890",
 			AmountUsd:          "5.00",
@@ -489,7 +489,7 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 	err := awsMessageSender.SendAccountMessageTemplate(
 		userAuth,
 		&controller.NetworkUserInterviewRequest1Template{},
-		controller.SenderEmail("brien@bringyour.com"),
+		controller.SenderEmail("brien@brienyour.com"),
 	)
 	if err != nil {
 		panic(err)
@@ -520,7 +520,7 @@ func listPendingPayouts(opts docopt.Opts) {
 	var payouts []*model.AccountPayment
 
 	if planIdStr != "" {
-		planId, err := bringyour.ParseId(planIdStr)
+		planId, err := server.ParseId(planIdStr)
 		if err != nil {
 			panic(err)
 		}
@@ -557,7 +557,7 @@ func payoutByPaymentId(opts docopt.Opts) {
 
 	ctx := context.Background()
 
-	accountPaymentId, err := bringyour.ParseId(accountPaymentIdStr)
+	accountPaymentId, err := server.ParseId(accountPaymentIdStr)
 	if err != nil {
 		panic(err)
 	}
@@ -605,7 +605,7 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 
 	amountNanoCents := model.UsdToNanoCents(amountUsd)
 
-	planId, err := bringyour.ParseId(planIdStr)
+	planId, err := server.ParseId(planIdStr)
 	if err != nil {
 		panic(err)
 	}
@@ -703,7 +703,7 @@ func closeContract(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	contractId, err := bringyour.ParseId(contractIdStr)
+	contractId, err := server.ParseId(contractIdStr)
 	if err != nil {
 		panic(err)
 	}
@@ -713,7 +713,7 @@ func closeContract(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	targetId, err := bringyour.ParseId(targetIdStr)
+	targetId, err := server.ParseId(targetIdStr)
 	if err != nil {
 		panic(err)
 	}

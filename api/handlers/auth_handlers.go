@@ -6,9 +6,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 func AuthLogin(w http.ResponseWriter, r *http.Request) {

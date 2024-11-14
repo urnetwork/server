@@ -3,9 +3,9 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/urnetwork/server/bringyour/controller"
-	"github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 func FeedbackSend(w http.ResponseWriter, r *http.Request) {

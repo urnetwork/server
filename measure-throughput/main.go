@@ -19,7 +19,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/progress"
 	md "github.com/nao1215/markdown"
 	"github.com/urfave/cli/v2"
-	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/measure-throughput/bwestimator"
 	"github.com/urnetwork/server/measure-throughput/clientdevice"
 	"github.com/urnetwork/server/measure-throughput/datasource"
@@ -110,10 +110,10 @@ func main() {
 
 			os.Stderr = stderr
 
-			bringyour.SetLogger(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Lshortfile))
+			server.SetLogger(log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Lshortfile))
 
 			defer func() {
-				bringyour.Logger()
+				server.Logger()
 				if err != nil {
 					stderr.Seek(0, 0)
 					io.Copy(realStderr, stderr)

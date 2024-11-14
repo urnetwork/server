@@ -13,8 +13,8 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 
 	// "github.com/urnetwork/connect"
 	"github.com/urnetwork/protocol"
@@ -24,7 +24,7 @@ type residentController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientId bringyour.Id
+	clientId server.Id
 
 	residentContractManager *residentContractManager
 	settings                *ExchangeSettings
@@ -33,7 +33,7 @@ type residentController struct {
 func newResidentController(
 	ctx context.Context,
 	cancel context.CancelFunc,
-	clientId bringyour.Id,
+	clientId server.Id,
 	residentContractManager *residentContractManager,
 	settings *ExchangeSettings,
 ) *residentController {

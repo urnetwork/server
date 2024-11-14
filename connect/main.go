@@ -14,9 +14,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/server/bringyour"
-	"github.com/urnetwork/server/bringyour/model"
-	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 func main() {
@@ -32,14 +32,14 @@ Options:
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
 
-	// bringyour.Logger().Printf("%s\n", opts)
+	// server.Logger().Printf("%s\n", opts)
 
-	quitEvent := bringyour.NewEventWithContext(context.Background())
+	quitEvent := server.NewEventWithContext(context.Background())
 	defer quitEvent.Set()
 
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
@@ -76,20 +76,20 @@ Options:
 
 	glog.Infof(
 		"[connect]serving %s %s on *:%d\n",
-		bringyour.RequireEnv(),
-		bringyour.RequireVersion(),
+		server.RequireEnv(),
+		server.RequireVersion(),
 		port,
 	)
 
 	if os.Getenv("SKIP_METRICS") == "" {
-		pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
+		pushMetrics := push.New("push-gateway.cluster.server.dev", "my_job").
 			Gatherer(prometheus.DefaultGatherer).
-			Grouping("warp_block", bringyour.RequireBlock()).
-			Grouping("warp_env", bringyour.RequireEnv()).
-			Grouping("warp_version", bringyour.RequireVersion()).
-			Grouping("warp_service", bringyour.RequireService()).
-			Grouping("warp_config_version", bringyour.RequireConfigVersion()).
-			Grouping("warp_host", bringyour.RequireHost())
+			Grouping("warp_block", server.RequireBlock()).
+			Grouping("warp_env", server.RequireEnv()).
+			Grouping("warp_version", server.RequireVersion()).
+			Grouping("warp_service", server.RequireService()).
+			Grouping("warp_config_version", server.RequireConfigVersion()).
+			Grouping("warp_host", server.RequireHost())
 
 		go func() {
 			for {
