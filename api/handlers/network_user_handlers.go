@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/router"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/router"
 )
 
 func GetNetworkUser(w http.ResponseWriter, r *http.Request) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
 	"github.com/jackc/pgx/v5"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type WalletType = string

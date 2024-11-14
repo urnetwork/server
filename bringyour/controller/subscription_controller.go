@@ -22,10 +22,10 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/task"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/session"
+	"github.com/urnetwork/server/bringyour/task"
 )
 
 const InitialTransferBalance = 32 * model.Gib

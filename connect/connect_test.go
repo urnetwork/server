@@ -18,14 +18,14 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func TestConnectNoNack(t *testing.T) {

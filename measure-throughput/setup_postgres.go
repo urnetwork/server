@@ -10,11 +10,11 @@ import (
 	"runtime"
 	"time"
 
-	"bringyour.com/bringyour"
 	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/urnetwork/server/bringyour"
 )
 
 func setupPostgres(ctx context.Context, tempDir string, pw progress.Writer) (fn func() error, err error) {

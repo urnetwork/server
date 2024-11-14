@@ -3,9 +3,9 @@ package handlers
 import (
 	"net/http"
 
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func DeviceAdd(w http.ResponseWriter, r *http.Request) {

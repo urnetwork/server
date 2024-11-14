@@ -4,12 +4,13 @@ import (
 	"context"
 	"sync"
 	"time"
+
 	// "fmt"
 
 	// "golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 type residentContractManager struct {

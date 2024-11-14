@@ -12,8 +12,8 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type SubsidyConfig struct {

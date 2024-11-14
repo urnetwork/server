@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/router"
 )
 
 func NetworkGetProviderLocations(w http.ResponseWriter, r *http.Request) {

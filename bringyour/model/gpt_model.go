@@ -3,11 +3,12 @@ package model
 import (
 	"context"
 	"fmt"
+
 	// "strings"
 	"time"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type CompletePrivacyPolicy struct {

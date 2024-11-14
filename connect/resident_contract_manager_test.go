@@ -1,15 +1,13 @@
 package main
 
-import (
 // "context"
 // "testing"
 // "time"
 
 // "github.com/go-playground/assert/v2"
 
-// "bringyour.com/bringyour"
-// "bringyour.com/bringyour/model"
-)
+// "github.com/urnetwork/server/bringyour"
+// "github.com/urnetwork/server/bringyour/model"
 
 /*
 func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {

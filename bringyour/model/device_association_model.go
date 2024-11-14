@@ -14,9 +14,9 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type CodeType = string

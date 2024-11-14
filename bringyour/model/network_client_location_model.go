@@ -15,9 +15,9 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
-	// "bringyour.com/bringyour/search"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	// "github.com/urnetwork/server/bringyour/search"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 const DefaultMaxDistanceFraction = float32(0.2)

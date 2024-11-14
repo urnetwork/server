@@ -14,9 +14,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/router"
 )
 
 func main() {

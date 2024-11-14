@@ -9,9 +9,11 @@ import (
 	"net"
 	"sync"
 	"time"
+
 	// "errors"
 	mathrand "math/rand"
 	"slices"
+
 	// "runtime/debug"
 
 	"golang.org/x/exp/maps"
@@ -20,10 +22,10 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 // note -

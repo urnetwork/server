@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"bringyor.com/measure-throughput/jwtutil"
-	"bringyour.com/connect"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server/measure-throughput/jwtutil"
 )
 
 func CreateProviderClient(ctx context.Context, apiURL, connectURL, byClientJwt string) (*connect.Client, error) {

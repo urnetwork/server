@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 type NetworkUser struct {

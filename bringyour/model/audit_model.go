@@ -13,7 +13,7 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 type AuditEventType = string

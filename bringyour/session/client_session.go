@@ -5,13 +5,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
 	// "encoding/base64"
 	"errors"
 
 	"github.com/golang/glog"
 
-	// "bringyour.com/bringyour"
-	"bringyour.com/bringyour/jwt"
+	// "github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/jwt"
 )
 
 // https://www.rfc-editor.org/rfc/rfc6750

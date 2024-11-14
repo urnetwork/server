@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/service/api/myipinfo/landmarks"
-	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/ipinfo/go/v2/ipinfo"
+	"github.com/urnetwork/server/api/myipinfo/landmarks"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {

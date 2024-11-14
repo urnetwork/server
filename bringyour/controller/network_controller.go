@@ -3,9 +3,9 @@ package controller
 import (
 	// "time"
 
-	// "bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/session"
+	// "github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func NetworkCreate(

@@ -1,8 +1,6 @@
 package search
 
-import (
-// "bringyour.com/bringyour"
-)
+// "github.com/urnetwork/server/bringyour"
 
 // https://en.wikipedia.org/wiki/Levenshtein_distance
 func EditDistance(a string, b string) int {

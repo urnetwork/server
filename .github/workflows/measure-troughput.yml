@@ -12,21 +12,12 @@ on:
       - main
 
 jobs:
-  checkout_repos:
+  measure_throughput:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Current Repo
         uses: actions/checkout@v3
-        with:
-          path: bringyour
-
-      - name: Checkout Another Repo
-        uses: actions/checkout@v3
-        with:
-          repository: bringyour/connect
-          path: connect
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker
         run: |
@@ -40,44 +31,29 @@ jobs:
         with:
           go-version: "^1.23.0"
 
-      - name: Install go protobuf plugin
-        run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-
-      - name: Compile protocol proto files
-        working-directory: ./connect/protocol
-        run: |
-          make
-
-      - name: Compile API
-        working-directory: ./bringyour/api
-        run: |
-          go mod tidy && go build .
-
-      - name: Compile Connect
-        working-directory: ./bringyour/connect
-        run: |
-          go mod tidy && go build .
-
-      - name: Measure Troughput - single client
-        working-directory: ./bringyour/measure-throughput
+      - name: Precompile Everything
         env:
           REPORT_FILE: report-single.md
           SKIP_METRICS: "true"
         run: |
-          go run .
+          go build ./...
+
+      - name: Measure Troughput - single client
+        env:
+          REPORT_FILE: report-single.md
+          SKIP_METRICS: "true"
+        run: |
+          go run ./measure-throughput
 
       - name: Measure Troughput - multi client
-        working-directory: ./bringyour/measure-throughput
         env:
           USE_MULTICLIENT: "true"
           REPORT_FILE: report-multi.md
           SKIP_METRICS: "true"
         run: |
-          go run .
+          go run ./measure-throughput
 
       - name: Merge reports
-        working-directory: ./bringyour/measure-throughput
         run: |
           echo "# Bandwidth Measurements" > report.md
           echo "## Single Client" >> report.md
@@ -90,4 +66,4 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           recreate: true
-          path: ./bringyour/measure-throughput/report.md
+          path: ./report.md

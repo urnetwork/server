@@ -3,7 +3,7 @@ package model
 import (
 	"fmt"
 
-	"bringyour.com/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/jwt"
 )
 
 type AuthJwt struct {

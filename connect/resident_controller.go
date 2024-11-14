@@ -13,10 +13,11 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	// "bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+
+	// "github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
 )
 
 type residentController struct {

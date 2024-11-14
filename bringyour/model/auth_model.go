@@ -13,11 +13,11 @@ import (
 
 	// "github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 
-	// "bringyour.com/bringyour/ulid"
-	"bringyour.com/bringyour/jwt"
+	// "github.com/urnetwork/server/bringyour/ulid"
+	"github.com/urnetwork/server/bringyour/jwt"
 )
 
 // 4 hours

@@ -7,10 +7,10 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/search"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/task"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/search"
+	"github.com/urnetwork/server/bringyour/session"
+	"github.com/urnetwork/server/bringyour/task"
 )
 
 var locationSearch = search.NewSearch("location_prefix", search.SearchTypePrefix)

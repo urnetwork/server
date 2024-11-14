@@ -1,8 +1,8 @@
 package controller
 
 import (
-	"bringyour.com/bringyour/session"
-	// "bringyour.com/bringyour/model"
+	"github.com/urnetwork/server/bringyour/session"
+	// "github.com/urnetwork/server/bringyour/model"
 )
 
 type HelloResult struct {

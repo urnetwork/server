@@ -10,7 +10,7 @@ import (
 
 	"github.com/nyaruka/phonenumbers"
 	"golang.org/x/crypto/argon2"
-	// "bringyour.com/bringyour"
+	// "github.com/urnetwork/server/bringyour"
 )
 
 type UserAuthType string

@@ -15,17 +15,17 @@ import (
 	"syscall"
 	"time"
 
-	"bringyor.com/measure-throughput/bwestimator"
-	"bringyor.com/measure-throughput/clientdevice"
-	"bringyor.com/measure-throughput/datasource"
-	"bringyor.com/measure-throughput/healthcheck"
-	"bringyor.com/measure-throughput/jwtutil"
-	"bringyor.com/measure-throughput/memtracker"
-	"bringyour.com/bringyour"
 	"github.com/guptarohit/asciigraph"
 	"github.com/jedib0t/go-pretty/v6/progress"
 	md "github.com/nao1215/markdown"
 	"github.com/urfave/cli/v2"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/measure-throughput/bwestimator"
+	"github.com/urnetwork/server/measure-throughput/clientdevice"
+	"github.com/urnetwork/server/measure-throughput/datasource"
+	"github.com/urnetwork/server/measure-throughput/healthcheck"
+	"github.com/urnetwork/server/measure-throughput/jwtutil"
+	"github.com/urnetwork/server/measure-throughput/memtracker"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -130,6 +130,7 @@ func main() {
 			os.Setenv("WARP_SERVICE", "bringyour")
 			os.Setenv("WARP_BLOCK", "local")
 			os.Setenv("WARP_PORTS", "5080:5080")
+			os.Setenv("WARP_CONFIG_VERSION", "0.0.1")
 
 			err = createPrivateKey(vaultDir)
 			if err != nil {

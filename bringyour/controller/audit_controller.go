@@ -3,8 +3,8 @@ package controller
 import (
 	"context"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 func AddSampleEvents(ctx context.Context, intervalSeconds int) {

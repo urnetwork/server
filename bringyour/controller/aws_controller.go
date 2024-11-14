@@ -19,8 +19,8 @@ import (
 
 	// "github.com/aws/aws-sdk-go/aws/awserr"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 // IMPORTANT this controller is for account messages only

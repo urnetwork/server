@@ -11,12 +11,12 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/model"
 )
 
 // each client connection is a transport for the resident client

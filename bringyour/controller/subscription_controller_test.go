@@ -8,7 +8,7 @@ package controller
 
 //     "github.com/go-playground/assert/v2"
 
-//     "bringyour.com/bringyour"
+//     "github.com/urnetwork/server/bringyour"
 // )
 
 /*

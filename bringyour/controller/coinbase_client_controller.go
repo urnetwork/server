@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 type CoinbaseClient interface {

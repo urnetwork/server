@@ -5,8 +5,8 @@ import (
 
 	mathrand "math/rand"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type StatsProvidersOverviewArgs struct {

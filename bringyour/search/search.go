@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
 	// "unicode"
 
 	"golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 type SearchType string

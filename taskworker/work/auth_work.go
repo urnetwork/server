@@ -5,11 +5,12 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
-	// "bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/task"
+
+	// "github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type RemoveExpiredAuthCodesArgs struct {

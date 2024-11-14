@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"bringyour.com/bringyour"
 	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/server/bringyour"
 )
 
 func TestNetworkReferralCode(t *testing.T) {

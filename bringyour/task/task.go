@@ -17,9 +17,9 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 // the task system captures work that needs to be done to advance the platform

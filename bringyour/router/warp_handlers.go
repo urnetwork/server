@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func WarpStatus(w http.ResponseWriter, r *http.Request) {

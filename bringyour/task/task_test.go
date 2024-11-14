@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	// "bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
+	// "github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 type Work1Args struct {

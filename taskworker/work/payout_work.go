@@ -3,10 +3,10 @@ package work
 import (
 	"time"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/task"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/session"
+	"github.com/urnetwork/server/bringyour/task"
 )
 
 type SchedulePayoutArgs struct {

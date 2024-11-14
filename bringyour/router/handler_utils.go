@@ -14,9 +14,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
-	// "bringyour.com/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
+	// "github.com/urnetwork/server/bringyour/jwt"
 )
 
 // const BanMessage = "This client has been temporarily banned by bandit. support@bringyour.com"

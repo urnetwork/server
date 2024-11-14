@@ -1,8 +1,8 @@
 package controller
 
 import (
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func TransferStats(session *session.ClientSession) (*model.TransferStats, error) {

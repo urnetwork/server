@@ -15,10 +15,10 @@ import (
 	"github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/session"
-	// "bringyour.com/bringyour/ulid"
-	// "bringyour.com/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/session"
+	// "github.com/urnetwork/server/bringyour/ulid"
+	// "github.com/urnetwork/server/bringyour/jwt"
 )
 
 const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second

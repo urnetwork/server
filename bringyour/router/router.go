@@ -10,7 +10,7 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 // regex table approach inspired by https://benhoyt.com/writings/go-routing/

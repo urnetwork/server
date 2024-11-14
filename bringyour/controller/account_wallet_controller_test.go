@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/session"
 	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/model"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func TestAccountWallet(t *testing.T) {
@@ -79,7 +79,6 @@ func TestAccountWallet(t *testing.T) {
 		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, payoutWalletId, firstWalletId)
-
 
 		wallet2 := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",

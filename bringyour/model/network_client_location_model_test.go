@@ -9,9 +9,9 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/jwt"
+	"github.com/urnetwork/server/bringyour/session"
 )
 
 func TestAddDefaultLocations(t *testing.T) {

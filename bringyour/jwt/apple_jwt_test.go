@@ -8,7 +8,7 @@ import (
 
 	// "github.com/golang/glog"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 func TestAppleJwk(t *testing.T) {

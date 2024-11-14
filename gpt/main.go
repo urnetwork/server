@@ -9,10 +9,10 @@ import (
 
 	"github.com/docopt/docopt-go"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/service/gpt/handlers"
+	"github.com/urnetwork/server/bringyour"
+	"github.com/urnetwork/server/bringyour/controller"
+	"github.com/urnetwork/server/bringyour/router"
+	"github.com/urnetwork/server/gpt/handlers"
 )
 
 func main() {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"bringyour.com/bringyour"
 	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/server/bringyour"
 )
 
 func TestNetworkUser(t *testing.T) {

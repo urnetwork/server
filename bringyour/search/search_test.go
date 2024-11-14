@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	mathrand "math/rand"
 	"testing"
+
 	// "sort"
 	"fmt"
 	"slices"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"bringyour.com/bringyour"
+	"github.com/urnetwork/server/bringyour"
 )
 
 func TestEditDistance(t *testing.T) {

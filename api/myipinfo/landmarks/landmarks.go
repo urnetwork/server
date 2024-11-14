@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"bringyour.com/service/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
 )
 
 type Landmarks struct {
