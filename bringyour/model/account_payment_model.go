@@ -629,7 +629,9 @@ func planSubsidyPaymentInTx(
 	)
 	bringyour.WithPgResult(result, err, func() {
 		for result.Next() {
-			sweep := &networkSweep{}
+			sweep := &networkSweep{
+				payout: NanoCents(0),
+			}
 			bringyour.Raise(result.Scan(
 				&sweep.payerNetworkId,
 				&sweep.payeeNetworkId,
@@ -788,10 +790,8 @@ func planSubsidyPaymentInTx(
 
 	subsidyPayoutUsd := max(
 		subsidyConfig.MinPayoutUsd,
-		max(
-			subsidyConfig.UsdPerActiveUser*float64(activeUserCount),
-			subsidyConfig.SubscriptionNetRevenueFraction*NanoCentsToUsd(netRevenue),
-		),
+		subsidyConfig.UsdPerActiveUser*float64(activeUserCount),
+		subsidyConfig.SubscriptionNetRevenueFraction*NanoCentsToUsd(netRevenue),
 	)
 	// the fraction of a `days` for this subsidy payout
 	// restrict the time range to a single subsidy epoch
@@ -802,6 +802,7 @@ func planSubsidyPaymentInTx(
 	subsidyNetPayoutUsd := subsidyScale * subsidyPayoutUsd
 	subsidyNetPayoutUsdPaid := min(subsidyNetPayoutUsd, float64(paidUserCount)*subsidyConfig.MaxPayoutUsdPerPaidUser)
 	subsidyNetPayoutUsdUnpaid := subsidyNetPayoutUsd - subsidyNetPayoutUsdPaid
+	glog.Infof("[plan]payout $%.2f ($%.2f/$%.2f)\n", subsidyNetPayoutUsd, subsidyNetPayoutUsdPaid, subsidyNetPayoutUsdUnpaid)
 
 	// this is added up as the exact net payment, which may be rounded from `subsidyNetPayout`
 	netPayout := NanoCents(0)
@@ -818,17 +819,19 @@ func planSubsidyPaymentInTx(
 			// each user is weighted equally, relative to their own traffic
 			if 0 < netPayerPayoutByteCountPaid {
 				paidWeight := float64(sweep.netPayoutByteCountPaid) / float64(netPayerPayoutByteCountPaid)
-				sweep.payout += NanoCents(paidWeight * subsidyNetPayoutUsdPaid / float64(paidUserCount))
+				sweep.payout += UsdToNanoCents(paidWeight * subsidyNetPayoutUsdPaid / float64(paidUserCount))
 			}
 			if 0 < netPayerPayoutByteCountUnpaid {
 				unpaidWeight := float64(sweep.netPayoutByteCountUnpaid) / float64(netPayerPayoutByteCountUnpaid)
-				sweep.payout += NanoCents(unpaidWeight * subsidyNetPayoutUsdUnpaid / float64(unpaidUserCount))
+				sweep.payout += UsdToNanoCents(unpaidWeight * subsidyNetPayoutUsdUnpaid / float64(unpaidUserCount))
 			}
 			netPayout += sweep.payout
 		}
 	}
 
-	if UsdToNanoCents(subsidyNetPayoutUsd) < netPayout {
+	// +1 for rounding errors
+	if UsdToNanoCents(subsidyNetPayoutUsd+1) < netPayout {
+		glog.Infof("[plan]net payment exceeded\n")
 		returnErr = fmt.Errorf("Planned subsidy pays out more than the allowed amount: %d <> %d", UsdToNanoCents(subsidyNetPayoutUsd), netPayout)
 		return
 	}

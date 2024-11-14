@@ -12,6 +12,7 @@ import (
 	mathrand "math/rand"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"time"
 
@@ -674,11 +675,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	defer func() {
 		if r := recover(); r != nil {
-			if err, ok := r.(error); ok {
-				returnErr = err
-			} else {
-				returnErr = fmt.Errorf("%s", r)
-			}
+			returnErr = fmt.Errorf("Unhandled: %s", bringyour.ErrorJson(r, debug.Stack()))
 		}
 	}()
 
@@ -751,11 +748,7 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	defer func() {
 		if r := recover(); r != nil {
-			if err, ok := r.(error); ok {
-				returnErr = err
-			} else {
-				returnErr = fmt.Errorf("%s", r)
-			}
+			returnErr = fmt.Errorf("Unhandled: %s", bringyour.ErrorJson(r, debug.Stack()))
 		}
 	}()
 

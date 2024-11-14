@@ -2446,6 +2446,10 @@ func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
 			        purchase_token
 				)
 				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (network_id, subscription_type, end_time, start_time) DO UPDATE
+				SET
+					net_revenue_nano_cents = $5,
+					purchase_token = $6
 			`,
 			renewal.NetworkId,
 			renewal.SubscriptionType,
