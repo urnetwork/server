@@ -111,6 +111,7 @@ type BringYourDevice struct {
 	provideWhileDisconnected bool
 	offline                  bool
 	vpnInterfaceWhileOffline bool
+	canRefer                 bool
 
 	openedViewControllers map[ViewController]bool
 
@@ -305,6 +306,18 @@ func (self *BringYourDevice) SetCanShowRatingDialog(canShowRatingDialog bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.canShowRatingDialog = canShowRatingDialog
+}
+
+func (self *BringYourDevice) GetCanRefer() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.canRefer
+}
+
+func (self *BringYourDevice) SetCanRefer(canRefer bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.canRefer = canRefer
 }
 
 func (self *BringYourDevice) GetProvideWhileDisconnected() bool {

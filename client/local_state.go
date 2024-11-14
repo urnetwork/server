@@ -311,6 +311,26 @@ func (self *LocalState) GetProvideWhileDisconnected() bool {
 	return false
 }
 
+func (self *LocalState) SetCanRefer(canRefer bool) error {
+	path := filepath.Join(self.localStorageDir, ".can_refer")
+	canReferBytes, err := json.Marshal(canRefer)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, canReferBytes, LocalStorageFilePermissions)
+}
+
+func (self *LocalState) GetCanRefer() bool {
+	path := filepath.Join(self.localStorageDir, ".can_refer")
+	if canReferBytes, err := os.ReadFile(path); err == nil {
+		var canRefer bool
+		if err := json.Unmarshal(canReferBytes, &canRefer); err == nil {
+			return canRefer
+		}
+	}
+	return false
+}
+
 // clears all auth tokens
 func (self *LocalState) Logout() error {
 	return errors.Join(
