@@ -57,7 +57,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				allow = append(allow, route.method)
 				continue
 			}
-			ctx := context.WithValue(self.ctx, pathValuesKey{}, matches[1:])
+			ctx := context.WithValue(r.Context(), pathValuesKey{}, matches[1:])
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
