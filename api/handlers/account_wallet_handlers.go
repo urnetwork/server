@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/router"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/router"
 )
 
 func CreateAccountWallet(w http.ResponseWriter, r *http.Request) {

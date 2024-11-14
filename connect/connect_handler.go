@@ -11,12 +11,12 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 )
 
 // each client connection is a transport for the resident client
@@ -50,16 +50,16 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 type ConnectHandler struct {
 	ctx       context.Context
-	handlerId bringyour.Id
+	handlerId server.Id
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
 }
 
-func NewConnectHandlerWithDefaults(ctx context.Context, handlerId bringyour.Id, exchange *Exchange) *ConnectHandler {
+func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
 	return NewConnectHandler(ctx, handlerId, exchange, DefaultConnectHandlerSettings())
 }
 
-func NewConnectHandler(ctx context.Context, handlerId bringyour.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
+func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	return &ConnectHandler{
 		ctx:       ctx,
 		handlerId: handlerId,
@@ -107,7 +107,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 	messageType, authFrameBytes, err := ws.ReadMessage()
 	if err != nil {
-		// bringyour.Logger("TIMEOUT HA\n")
+		// server.Logger("TIMEOUT HA\n")
 		return
 	}
 	if messageType != websocket.BinaryMessage {
@@ -134,7 +134,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	clientId := *byJwt.ClientId
 
-	instanceId, err := bringyour.IdFromBytes(auth.InstanceId)
+	instanceId, err := server.IdFromBytes(auth.InstanceId)
 	if err != nil {
 		return
 	}
@@ -143,7 +143,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// this will fail for example if the client has been removed
 	client := model.GetNetworkClient(handleCtx, clientId)
 	if client == nil || client.NetworkId != byJwt.NetworkId {
-		// bringyour.Logger("ERROR HB\n")
+		// server.Logger("ERROR HB\n")
 		return
 	}
 
@@ -151,7 +151,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
 	if err != nil {
-		// bringyour.Logger("TIMEOUT HC\n")
+		// server.Logger("TIMEOUT HC\n")
 		return
 	}
 
@@ -167,7 +167,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
 		defer model.DisconnectNetworkClient(self.ctx, connectionId)
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			// disconnect the client if the model marks the connection closed
 			defer handleCancel()
 
@@ -192,11 +192,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		)
 		go func() {
 			defer handleCancel()
-			bringyour.HandleError(residentTransport.Run)
+			server.HandleError(residentTransport.Run)
 			// close is done in the write
 		}()
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
 				residentTransport.Close()
@@ -230,7 +230,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 		}, handleCancel)
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 
 			for {
@@ -268,7 +268,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if glog.V(2) {
-		bringyour.Trace(
+		server.Trace(
 			fmt.Sprintf("[rt]connect %s", clientId.String()),
 			c,
 		)

@@ -9,9 +9,11 @@ import (
 	"net"
 	"sync"
 	"time"
+
 	// "errors"
 	mathrand "math/rand"
 	"slices"
+
 	// "runtime/debug"
 
 	"golang.org/x/exp/maps"
@@ -20,10 +22,10 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // note -
@@ -57,7 +59,7 @@ client (A)
 
 type ByteCount = model.ByteCount
 
-var ControlId = bringyour.Id(connect.ControlId)
+var ControlId = server.Id(connect.ControlId)
 
 // use 0 for deadlock testing
 const DefaultExchangeBufferSize = 32
@@ -170,7 +172,7 @@ type Exchange struct {
 	settings *ExchangeSettings
 
 	residentsLock sync.Mutex
-	residents     map[bringyour.Id]*Resident
+	residents     map[server.Id]*Resident
 }
 
 func NewExchange(
@@ -192,11 +194,11 @@ func NewExchange(
 		block:              block,
 		hostToServicePorts: hostToServicePorts,
 		routes:             routes,
-		residents:          map[bringyour.Id]*Resident{},
+		residents:          map[server.Id]*Resident{},
 		settings:           settings,
 	}
 
-	go bringyour.HandleError(exchange.Run, cancel)
+	go server.HandleError(exchange.Run, cancel)
 
 	return exchange
 }
@@ -214,13 +216,13 @@ func NewExchangeWithDefaults(
 
 // reads the host and port configuration from the env
 func NewExchangeFromEnv(ctx context.Context, settings *ExchangeSettings) *Exchange {
-	host := bringyour.RequireHost()
-	service := bringyour.RequireService()
-	block := bringyour.RequireBlock()
-	routes := bringyour.Routes()
+	host := server.RequireHost()
+	service := server.RequireService()
+	block := server.RequireBlock()
+	routes := server.Routes()
 
 	// service port -> host port
-	hostPorts := bringyour.RequireHostPorts()
+	hostPorts := server.RequireHostPorts()
 	// internal ports start at `StartInternalPort` and proceed consecutively
 	// each port can handle 65k connections
 	// the number of connections depends on the number of expected concurrent destinations
@@ -250,11 +252,11 @@ func NewExchangeFromEnvWithDefaults(ctx context.Context) *Exchange {
 }
 
 func (self *Exchange) NominateLocalResident(
-	clientId bringyour.Id,
-	instanceId bringyour.Id,
-	residentIdToReplace *bringyour.Id,
+	clientId server.Id,
+	instanceId server.Id,
+	residentIdToReplace *server.Id,
 ) bool {
-	residentId := bringyour.NewId()
+	residentId := server.NewId()
 
 	nominated := model.NominateResident(self.ctx, residentIdToReplace, &model.NetworkClientResident{
 		ClientId:              clientId,
@@ -280,8 +282,8 @@ func (self *Exchange) NominateLocalResident(
 			instanceId,
 			residentId,
 		)
-		go bringyour.HandleError(func() {
-			bringyour.HandleError(resident.Run)
+		go server.HandleError(func() {
+			server.HandleError(resident.Run)
 			glog.V(1).Infof("[r]close %s\n", clientId)
 
 			self.residentsLock.Lock()
@@ -355,7 +357,7 @@ func (self *Exchange) Run() {
 	func() {
 		self.residentsLock.Lock()
 		defer self.residentsLock.Unlock()
-		residentIds := map[bringyour.Id]bool{}
+		residentIds := map[server.Id]bool{}
 		for _, resident := range self.residents {
 			residentIds[resident.residentId] = true
 		}
@@ -378,7 +380,7 @@ func (self *Exchange) Run() {
 	// start exchange connection servers
 	for _, servicePort := range self.hostToServicePorts {
 		port := servicePort
-		go bringyour.HandleError(
+		go server.HandleError(
 			func() {
 				self.serveExchangeConnection(port)
 			},
@@ -395,13 +397,13 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	defer self.cancel()
 
 	// leave host part empty to listen on all available interfaces
-	server, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	serverSocket, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return
 	}
-	defer server.Close()
+	defer serverSocket.Close()
 
-	go bringyour.HandleError(func() {
+	go server.HandleError(func() {
 		defer self.cancel()
 
 		for {
@@ -411,11 +413,11 @@ func (self *Exchange) serveExchangeConnection(port int) {
 			default:
 			}
 
-			conn, err := server.Accept()
+			conn, err := serverSocket.Accept()
 			if err != nil {
 				return
 			}
-			go bringyour.HandleError(
+			go server.HandleError(
 				func() {
 					self.handleExchangeConnection(conn)
 				},
@@ -474,7 +476,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	var resident *Resident
 	if glog.V(2) {
 		// use shallow log to avoid unsafe memory reads on print
-		resident = bringyour.TraceWithReturnShallowLog(
+		resident = server.TraceWithReturnShallowLog(
 			fmt.Sprintf("[ecr]wait for resident %s/%s", header.ClientId, header.ResidentId),
 			c,
 		)
@@ -504,7 +506,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		send, receive, closeTransport := resident.AddTransport()
 		defer closeTransport()
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
@@ -534,7 +536,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			}
 		}, handleCancel)
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
 				close(receive)
@@ -586,7 +588,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		// messages from the forward are to be forwarded by the resident
 		// the only route a resident has is to its client_id
 		// a forward is a send where the source id does not match the client
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
@@ -605,7 +607,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			}
 		}, handleCancel)
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 
 			for {
@@ -629,7 +631,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					return resident.Forward(message)
 				}
 				if glog.V(2) {
-					bringyour.TraceWithReturn(
+					server.TraceWithReturn(
 						fmt.Sprintf("[ecrf]forward %s/%s", resident.clientId, resident.residentId),
 						c,
 					)
@@ -689,8 +691,8 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	}
 
 	return &ExchangeHeader{
-		ClientId:   bringyour.Id(self.buffer[0:16]),
-		ResidentId: bringyour.Id(self.buffer[16:32]),
+		ClientId:   server.Id(self.buffer[0:16]),
+		ResidentId: server.Id(self.buffer[16:32]),
 		Op:         ExchangeOp(self.buffer[32]),
 	}, nil
 }
@@ -744,8 +746,8 @@ const (
 )
 
 type ExchangeHeader struct {
-	ClientId   bringyour.Id
-	ResidentId bringyour.Id
+	ClientId   server.Id
+	ResidentId server.Id
 	Op         ExchangeOp
 }
 
@@ -760,16 +762,16 @@ type ExchangeConnection struct {
 	receive       chan []byte
 	settings      *ExchangeSettings
 
-	clientId   bringyour.Id
-	residentId bringyour.Id
+	clientId   server.Id
+	residentId server.Id
 	host       string
 	port       int
 }
 
 func NewExchangeConnection(
 	ctx context.Context,
-	clientId bringyour.Id,
-	residentId bringyour.Id,
+	clientId server.Id,
+	residentId server.Id,
 	host string,
 	port int,
 	op ExchangeOp,
@@ -840,7 +842,7 @@ func NewExchangeConnection(
 		host:          host,
 		port:          port,
 	}
-	go bringyour.HandleError(connection.Run, cancel)
+	go server.HandleError(connection.Run, cancel)
 
 	return connection, nil
 }
@@ -854,7 +856,7 @@ func (self *ExchangeConnection) Run() {
 	// only a transport connection will receive messages
 	switch self.op {
 	case ExchangeOpTransport:
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer func() {
 				self.cancel()
 				close(self.receive)
@@ -889,7 +891,7 @@ func (self *ExchangeConnection) Run() {
 		// nothing to receive, but time out on missing pings
 		close(self.receive)
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer self.cancel()
 
 			for {
@@ -910,7 +912,7 @@ func (self *ExchangeConnection) Run() {
 		}, self.cancel)
 	}
 
-	go bringyour.HandleError(func() {
+	go server.HandleError(func() {
 		defer self.cancel()
 
 		for {
@@ -968,8 +970,8 @@ type ResidentTransport struct {
 
 	exchange *Exchange
 
-	clientId   bringyour.Id
-	instanceId bringyour.Id
+	clientId   server.Id
+	instanceId server.Id
 
 	routes map[string]string
 
@@ -980,8 +982,8 @@ type ResidentTransport struct {
 func NewResidentTransport(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId bringyour.Id,
-	instanceId bringyour.Id,
+	clientId server.Id,
+	instanceId server.Id,
 ) *ResidentTransport {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentTransport{
@@ -1006,7 +1008,7 @@ func (self *ResidentTransport) Run() {
 		handleCtx, handleCancel := context.WithCancel(self.ctx)
 		defer handleCancel()
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 			for {
 				select {
@@ -1020,7 +1022,7 @@ func (self *ResidentTransport) Run() {
 			}
 		})
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
 				connection.Close()
@@ -1108,7 +1110,7 @@ func (self *ResidentTransport) Run() {
 					})
 				}
 				if glog.V(2) {
-					bringyour.Trace(
+					server.Trace(
 						fmt.Sprintf("[rt]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
 						c,
 					)
@@ -1124,7 +1126,7 @@ func (self *ResidentTransport) Run() {
 		case <-reconnect.After():
 		}
 
-		var residentIdToReplace *bringyour.Id
+		var residentIdToReplace *server.Id
 		if resident != nil {
 			residentIdToReplace = &resident.ResidentId
 		}
@@ -1137,7 +1139,7 @@ func (self *ResidentTransport) Run() {
 			)
 		}
 		if glog.V(2) {
-			bringyour.TraceWithReturn(
+			server.TraceWithReturn(
 				fmt.Sprintf("[rt]nominate %s", self.clientId),
 				c,
 			)
@@ -1176,7 +1178,7 @@ type ResidentForward struct {
 
 	exchange *Exchange
 
-	clientId bringyour.Id
+	clientId server.Id
 
 	send chan []byte
 
@@ -1187,7 +1189,7 @@ type ResidentForward struct {
 func NewResidentForward(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId bringyour.Id,
+	clientId server.Id,
 ) *ResidentForward {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentForward{
@@ -1211,7 +1213,7 @@ func (self *ResidentForward) Run() {
 			connection.Close()
 		}()
 
-		go bringyour.HandleError(func() {
+		go server.HandleError(func() {
 			defer handleCancel()
 			for {
 				select {
@@ -1278,7 +1280,7 @@ func (self *ResidentForward) Run() {
 					})
 				}
 				if glog.V(2) {
-					bringyour.Trace(
+					server.Trace(
 						fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
 						c,
 					)
@@ -1339,9 +1341,9 @@ type Resident struct {
 
 	exchange *Exchange
 
-	clientId   bringyour.Id
-	instanceId bringyour.Id
-	residentId bringyour.Id
+	clientId   server.Id
+	instanceId server.Id
+	residentId server.Id
 
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
@@ -1353,7 +1355,7 @@ type Resident struct {
 	transports map[*clientTransport]bool
 
 	// destination id -> forward
-	forwards map[bringyour.Id]*ResidentForward
+	forwards map[server.Id]*ResidentForward
 
 	abuseLimiter   *limiter
 	controlLimiter *limiter
@@ -1367,9 +1369,9 @@ type Resident struct {
 func NewResident(
 	ctx context.Context,
 	exchange *Exchange,
-	clientId bringyour.Id,
-	instanceId bringyour.Id,
-	residentId bringyour.Id,
+	clientId server.Id,
+	instanceId server.Id,
+	residentId server.Id,
 ) *Resident {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
@@ -1408,7 +1410,7 @@ func NewResident(
 		residentContractManager: residentContractManager,
 		residentController:      residentController,
 		transports:              map[*clientTransport]bool{},
-		forwards:                map[bringyour.Id]*ResidentForward{},
+		forwards:                map[server.Id]*ResidentForward{},
 		abuseLimiter:            newLimiter(cancelCtx, exchange.settings.AbuseMinTimeout),
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 		lastActivityTime:        time.Now(),
@@ -1420,9 +1422,9 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
-	// go bringyour.HandleError(resident.clientForward, cancel)
+	// go server.HandleError(resident.clientForward, cancel)
 	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
-		go bringyour.HandleError(resident.chaos, cancel)
+		go server.HandleError(resident.chaos, cancel)
 	}
 
 	return resident
@@ -1502,8 +1504,8 @@ func (self *Resident) clientForward() {
 
 // `connect.ForwardFunction`
 func (self *Resident) handleClientForward(path connect.TransferPath, transferFrameBytes []byte) {
-	sourceId := bringyour.Id(path.SourceId)
-	destinationId := bringyour.Id(path.DestinationId)
+	sourceId := server.Id(path.SourceId)
+	destinationId := server.Id(path.DestinationId)
 
 	self.UpdateActivity()
 
@@ -1543,7 +1545,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		nextForward := func() *ResidentForward {
 			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
 			go func() {
-				bringyour.HandleError(forward.Run)
+				server.HandleError(forward.Run)
 				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
 
 				self.stateLock.Lock()
@@ -1611,7 +1613,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	}
 
 	if glog.V(2) {
-		bringyour.TraceWithReturn(
+		server.TraceWithReturn(
 			fmt.Sprintf("[rf]handle client forward %s->%s", sourceId, destinationId),
 			c,
 		)
@@ -1622,7 +1624,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 // `connect.ReceiveFunction`
 func (self *Resident) handleClientReceive(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
-	sourceId := bringyour.Id(source.SourceId)
+	sourceId := server.Id(source.SourceId)
 
 	if sourceId != self.clientId {
 		glog.V(1).Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)

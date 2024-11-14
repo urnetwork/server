@@ -14,9 +14,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/service/api/handlers"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/api/handlers"
+	"github.com/urnetwork/server/router"
 )
 
 func main() {
@@ -32,12 +32,12 @@ Options:
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
 
-	quitEvent := bringyour.NewEventWithContext(context.Background())
+	quitEvent := server.NewEventWithContext(context.Background())
 	defer quitEvent.Set()
 
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
@@ -120,26 +120,26 @@ Options:
 		router.NewRoute("OPTIONS", "/my-ip-info", handlers.MyIPInfoOptions),
 	}
 
-	// bringyour.().Printf("%s\n", opts)
+	// server.().Printf("%s\n", opts)
 
 	port, _ := opts.Int("--port")
 
 	glog.Infof(
 		"[api]serving %s %s on *:%d\n",
-		bringyour.RequireEnv(),
-		bringyour.RequireVersion(),
+		server.RequireEnv(),
+		server.RequireVersion(),
 		port,
 	)
 
 	if os.Getenv("SKIP_METRICS") == "" {
-		pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
+		pushMetrics := push.New("push-gateway.cluster.server.dev", "my_job").
 			Gatherer(prometheus.DefaultGatherer).
-			Grouping("warp_block", bringyour.RequireBlock()).
-			Grouping("warp_env", bringyour.RequireEnv()).
-			Grouping("warp_version", bringyour.RequireVersion()).
-			Grouping("warp_service", bringyour.RequireService()).
-			Grouping("warp_config_version", bringyour.RequireConfigVersion()).
-			Grouping("warp_host", bringyour.RequireHost())
+			Grouping("warp_block", server.RequireBlock()).
+			Grouping("warp_env", server.RequireEnv()).
+			Grouping("warp_version", server.RequireVersion()).
+			Grouping("warp_service", server.RequireService()).
+			Grouping("warp_config_version", server.RequireConfigVersion()).
+			Grouping("warp_host", server.RequireHost())
 
 		go func() {
 			for {

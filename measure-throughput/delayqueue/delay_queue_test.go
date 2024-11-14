@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"bringyor.com/measure-throughput/delayqueue"
+	"github.com/urnetwork/server/measure-throughput/delayqueue"
 )
 
 func TestDelayQueue(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"math"
 	"math/rand"
 
-	"bringyour.com/service/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
 )
 
 // Point represents a geographical point with longitude and latitude in degrees.

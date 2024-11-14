@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"bringyor.com/measure-throughput/jwtutil"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/measure-throughput/jwtutil"
 )
 
 func CreateDeviceClient(ctx context.Context, apiURL, connectURL, byClientJwt string) (*connect.Client, error) {

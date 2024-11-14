@@ -5,11 +5,12 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
-	// "bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/task"
+
+	// "github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
 )
 
 type RemoveExpiredAuthCodesArgs struct {
@@ -18,7 +19,7 @@ type RemoveExpiredAuthCodesArgs struct {
 type RemoveExpiredAuthCodesResult struct {
 }
 
-func ScheduleRemoveExpiredAuthCodes(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleRemoveExpiredAuthCodes(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveExpiredAuthCodes,
@@ -33,7 +34,7 @@ func RemoveExpiredAuthCodes(
 	removeExpiredAuthCodes *RemoveExpiredAuthCodesArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredAuthCodesResult, error) {
-	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, bringyour.NowUtc())
+	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, server.NowUtc())
 	glog.Infof("[authw]removed %d auth codes.\n", authCodeCount)
 	return &RemoveExpiredAuthCodesResult{}, nil
 }
@@ -42,7 +43,7 @@ func RemoveExpiredAuthCodesPost(
 	removeExpiredAuthCodes *RemoveExpiredAuthCodesArgs,
 	removeExpiredAuthCodesResult *RemoveExpiredAuthCodesResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 	return nil

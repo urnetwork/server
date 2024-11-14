@@ -9,13 +9,13 @@ import (
 	"net/netip"
 	"time"
 
-	"bringyor.com/measure-throughput/bwclient"
-	"bringyor.com/measure-throughput/clientdevice/netstack"
-	"bringyor.com/measure-throughput/delayqueue"
-	"bringyor.com/measure-throughput/jwtutil"
-	"bringyor.com/measure-throughput/tcplogger"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/measure-throughput/bwclient"
+	"github.com/urnetwork/server/measure-throughput/clientdevice/netstack"
+	"github.com/urnetwork/server/measure-throughput/delayqueue"
+	"github.com/urnetwork/server/measure-throughput/jwtutil"
+	"github.com/urnetwork/server/measure-throughput/tcplogger"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 

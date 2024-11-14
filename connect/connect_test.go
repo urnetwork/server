@@ -18,18 +18,18 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 func TestConnectNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -39,7 +39,7 @@ func TestConnectNoNack(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -49,7 +49,7 @@ func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{})
@@ -57,7 +57,7 @@ func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
 }
 
 func TestConnectWithChaosNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -68,7 +68,7 @@ func TestConnectWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -79,7 +79,7 @@ func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -90,7 +90,7 @@ func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectNoTransportReformNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{})
@@ -98,7 +98,7 @@ func TestConnectNoTransportReformNoNack(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -113,7 +113,7 @@ func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
 // see the notes on how contracts work for acks in connect/transfer
 
 func TestConnect(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -124,7 +124,7 @@ func TestConnect(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContracts(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -135,7 +135,7 @@ func TestConnectWithSymmetricContracts(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContracts(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -146,7 +146,7 @@ func TestConnectWithAsymmetricContracts(t *testing.T) {
 }
 
 func TestConnectWithChaos(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -158,7 +158,7 @@ func TestConnectWithChaos(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -170,7 +170,7 @@ func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -182,7 +182,7 @@ func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 }
 
 func TestConnectNoTransportReform(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -192,7 +192,7 @@ func TestConnectNoTransportReform(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReform(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -207,7 +207,7 @@ func TestConnectWithChaosNoTransportReform(t *testing.T) {
 // e.g. logout and login
 
 func TestConnectWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -219,7 +219,7 @@ func TestConnectWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -231,7 +231,7 @@ func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -243,7 +243,7 @@ func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithChaosWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -256,7 +256,7 @@ func TestConnectWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -269,7 +269,7 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -282,7 +282,7 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -293,7 +293,7 @@ func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
-	bringyour.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(func() {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -328,6 +328,9 @@ func testConnect(
 	contractTest int,
 	config *testConnectConfig,
 ) {
+	if testing.Short() {
+		return
+	}
 
 	type Message struct {
 		sourceId    connect.Id
@@ -377,10 +380,10 @@ func testConnect(
 	service := "testConnect"
 	block := "test"
 
-	clientIdA := bringyour.NewId()
-	clientAInstanceId := bringyour.NewId()
-	clientIdB := bringyour.NewId()
-	clientBInstanceId := bringyour.NewId()
+	clientIdA := server.NewId()
+	clientAInstanceId := server.NewId()
+	clientIdB := server.NewId()
+	clientBInstanceId := server.NewId()
 
 	routes := map[string]string{}
 	for i := 0; i < 10; i += 1 {
@@ -389,7 +392,7 @@ func testConnect(
 	}
 
 	createServer := func(exchange *Exchange, port int) *http.Server {
-		connectHandler := NewConnectHandlerWithDefaults(ctx, bringyour.NewId(), exchange)
+		connectHandler := NewConnectHandlerWithDefaults(ctx, server.NewId(), exchange)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
@@ -503,10 +506,10 @@ func testConnect(
 	// clientB.Setup(routeManagerB, contractManagerB)
 	// go clientB.Run()
 
-	networkIdA := bringyour.NewId()
+	networkIdA := server.NewId()
 	networkNameA := "testConnectNetworkA"
-	userIdA := bringyour.NewId()
-	deviceIdA := bringyour.NewId()
+	userIdA := server.NewId()
+	deviceIdA := server.NewId()
 
 	model.Testing_CreateNetwork(
 		ctx,
@@ -523,10 +526,10 @@ func testConnect(
 		"a",
 	)
 
-	networkIdB := bringyour.NewId()
+	networkIdB := server.NewId()
 	networkNameB := "testConnectNetworkB"
-	userIdB := bringyour.NewId()
-	deviceIdB := bringyour.NewId()
+	userIdB := server.NewId()
+	deviceIdB := server.NewId()
 
 	model.Testing_CreateNetwork(
 		ctx,
@@ -766,7 +769,7 @@ func testConnect(
 					}
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
-						clientAInstanceId = bringyour.NewId()
+						clientAInstanceId = server.NewId()
 					}
 					authA = &connect.ClientAuth{
 						ByJwt: byJwtA.Sign(),
@@ -809,7 +812,7 @@ func testConnect(
 								-1,
 								connect.NoAck(),
 							)
-							if err != nil && !bringyour.IsDoneError(err) {
+							if err != nil && !server.IsDoneError(err) {
 								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
@@ -825,7 +828,7 @@ func testConnect(
 							},
 							-1,
 						)
-						if err != nil && !bringyour.IsDoneError(err) {
+						if err != nil && !server.IsDoneError(err) {
 							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
@@ -921,7 +924,7 @@ func testConnect(
 					}
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
-						clientBInstanceId = bringyour.NewId()
+						clientBInstanceId = server.NewId()
 					}
 					authB = &connect.ClientAuth{
 						ByJwt: byJwtB.Sign(),
@@ -971,7 +974,7 @@ func testConnect(
 								-1,
 								opts...,
 							)
-							if err != nil && !bringyour.IsDoneError(err) {
+							if err != nil && !server.IsDoneError(err) {
 								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
@@ -992,7 +995,7 @@ func testConnect(
 							-1,
 							opts...,
 						)
-						if err != nil && !bringyour.IsDoneError(err) {
+						if err != nil && !server.IsDoneError(err) {
 							panic(fmt.Errorf("Could not send = %v", err))
 						}
 					}
@@ -1125,13 +1128,13 @@ func testConnect(
 	case <-time.After(1 * time.Second):
 	}
 
-	flushedContractIdsA := []bringyour.Id{}
+	flushedContractIdsA := []server.Id{}
 	for _, contractId := range clientA.ContractManager().Flush(false) {
-		flushedContractIdsA = append(flushedContractIdsA, bringyour.Id(contractId))
+		flushedContractIdsA = append(flushedContractIdsA, server.Id(contractId))
 	}
-	flushedContractIdsB := []bringyour.Id{}
+	flushedContractIdsB := []server.Id{}
 	for _, contractId := range clientB.ContractManager().Flush(false) {
-		flushedContractIdsB = append(flushedContractIdsB, bringyour.Id(contractId))
+		flushedContractIdsB = append(flushedContractIdsB, server.Id(contractId))
 	}
 
 	clientA.Flush()
@@ -1280,10 +1283,10 @@ func printAllStacks() {
 
 type controllerOutOfBandControl struct {
 	ctx      context.Context
-	clientId bringyour.Id
+	clientId server.Id
 }
 
-func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId bringyour.Id) connect.OutOfBandControl {
+func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId server.Id) connect.OutOfBandControl {
 	return &controllerOutOfBandControl{
 		ctx:      ctx,
 		clientId: clientId,
@@ -1291,7 +1294,7 @@ func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId bringyo
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
-	bringyour.HandleError(func() {
+	server.HandleError(func() {
 		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames)
 		callback(resultFrames, err)
 	})

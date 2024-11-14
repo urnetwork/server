@@ -3,11 +3,12 @@ package work
 import (
 	"time"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
-	// "bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/task"
+
+	// "github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
 )
 
 type ExportStatsArgs struct {
@@ -16,7 +17,7 @@ type ExportStatsArgs struct {
 type ExportStatsResult struct {
 }
 
-func ScheduleExportStats(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		ExportStats,
@@ -37,7 +38,7 @@ func ExportStatsPost(
 	exportStats *ExportStatsArgs,
 	exportStatsResult *ExportStatsResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleExportStats(clientSession, tx)
 	return nil

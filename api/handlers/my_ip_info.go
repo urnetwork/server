@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/service/api/myipinfo/landmarks"
-	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/ipinfo/go/v2/ipinfo"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/api/myipinfo/landmarks"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +51,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		var err error
 		addressOnly, _, err = net.SplitHostPort(remoteAddr)
-		bringyour.Raise(err)
+		server.Raise(err)
 	}
 
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)

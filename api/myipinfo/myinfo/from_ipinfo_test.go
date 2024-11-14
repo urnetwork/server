@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/ipinfo/go/v2/ipinfo"
 	"github.com/stretchr/testify/require"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
 )
 
 //go:embed sample_ipinfo_response.json

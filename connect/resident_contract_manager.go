@@ -4,19 +4,20 @@ import (
 	"context"
 	"sync"
 	"time"
+
 	// "fmt"
 
 	// "golang.org/x/exp/maps"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 type residentContractManager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	clientId bringyour.Id
+	clientId server.Id
 
 	settings *ExchangeSettings
 
@@ -27,7 +28,7 @@ type residentContractManager struct {
 func newResidentContractManager(
 	ctx context.Context,
 	cancel context.CancelFunc,
-	clientId bringyour.Id,
+	clientId server.Id,
 	settings *ExchangeSettings,
 ) *residentContractManager {
 	residentContractManager := &residentContractManager{
@@ -43,7 +44,7 @@ func newResidentContractManager(
 
 // all other controller activity moved to `controller.resident_oob_controller` via the api
 
-func (self *residentContractManager) HasActiveContract(sourceId bringyour.Id, destinationId bringyour.Id) bool {
+func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
 	transferPair := model.NewTransferPair(sourceId, destinationId)
 
 	// entry is either not expired or nil

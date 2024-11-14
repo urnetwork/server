@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 func StatsProvidersOverviewLast90(w http.ResponseWriter, r *http.Request) {

@@ -3,8 +3,8 @@ package myinfo_test
 import (
 	"testing"
 
-	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/stretchr/testify/require"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
 )
 
 func TestParseCoordinates(t *testing.T) {
