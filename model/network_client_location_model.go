@@ -1883,13 +1883,14 @@ func FindProviders2(
 	type clientScore struct {
 		netTypeScore      int
 		priority          int
-		group             int
 		clientAddressHash string
 	}
 
 	// score 0 is best
 	clientScores := map[server.Id]*clientScore{}
-	scoreScale := 2
+	scoreScale := 10
+	intermediaryScore := 5
+	duplicateClientAddressScore := 2
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		locationIds := map[server.Id]bool{}
@@ -1963,7 +1964,6 @@ func FindProviders2(
 					clientScores[clientId] = &clientScore{
 						netTypeScore:      scoreScale * netTypeScore,
 						priority:          mathrand.Int(),
-						group:             0,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
 					}
 				}
@@ -2032,7 +2032,6 @@ func FindProviders2(
 					clientScores[clientId] = &clientScore{
 						netTypeScore:      scoreScale * netTypeScore,
 						priority:          mathrand.Int(),
-						group:             0,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
 					}
 				}
@@ -2055,50 +2054,38 @@ func FindProviders2(
 	for _, destination := range findProviders2.ExcludeDestinations {
 		for _, clientId := range destination[:len(destination)-1] {
 			if clientScore, ok := clientScores[clientId]; ok {
-				// fmt.Printf("INCREMENT %s += %d\n", clientId, scoreScale / 2)
-				clientScore.netTypeScore += scoreScale / 2
+				clientScore.netTypeScore += intermediaryScore
 			}
 		}
 		delete(clientScores, destination[len(destination)-1])
 	}
 
 	clientIds := maps.Keys(clientScores)
-	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
-		clientScoreA := clientScores[a]
-		clientScoreB := clientScores[b]
 
-		if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
-			return c
-		}
-		if c := clientScoreA.priority - clientScoreB.priority; c != 0 {
-			return c
-		}
-		return 0
-	})
+	sort := func() {
+		slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
+			clientScoreA := clientScores[a]
+			clientScoreB := clientScores[b]
 
+			if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
+				return c
+			}
+			if c := clientScoreA.priority - clientScoreB.priority; c != 0 {
+				return c
+			}
+			return 0
+		})
+	}
+
+	sort()
 	// assign group based on number of ip hashes seen before
 	for _, clientId := range clientIds {
 		clientScore := clientScores[clientId]
 		c := clientAddressHashCounts[clientScore.clientAddressHash]
-		clientScore.group = c
+		clientScore.netTypeScore += c * duplicateClientAddressScore
 		clientAddressHashCounts[clientScore.clientAddressHash] = c + 1
 	}
-
-	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
-		clientScoreA := clientScores[a]
-		clientScoreB := clientScores[b]
-
-		if c := clientScoreA.group - clientScoreB.group; c != 0 {
-			return c
-		}
-		if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
-			return c
-		}
-		if c := clientScoreA.priority - clientScoreB.priority; c != 0 {
-			return c
-		}
-		return 0
-	})
+	sort()
 
 	if findProviders2.Count < len(clientIds) {
 		// keep the highest (score, priority)
