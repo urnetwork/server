@@ -128,9 +128,10 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		for _, payment := range paymentPlan.NetworkPayments {
 
 			// initiate payment
-			complete, err := advancePayment(payment, destinationSession)
+			complete, canceled, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, complete, false)
+			assert.Equal(t, canceled, false)
 
 			// fetch the payment record which should have some updated fields
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
@@ -171,9 +172,10 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// coinbase api will return a pending status
 		// should return that payment is incomplete
 		for _, payment := range pendingPayments {
-			complete, err := advancePayment(payment, destinationSession)
+			complete, canceled, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, complete, false)
+			assert.Equal(t, canceled, false)
 
 			// account balance should not yet be updated
 			accountBalance := model.GetAccountBalance(destinationSession)
@@ -208,9 +210,10 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// these should hit completed
 		for _, payment := range pendingPayments {
 
-			complete, err := advancePayment(payment, destinationSession)
+			complete, canceled, err := advancePayment(payment, destinationSession)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, complete, true)
+			assert.Equal(t, canceled, false)
 
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)

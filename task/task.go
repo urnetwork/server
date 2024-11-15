@@ -675,7 +675,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	defer func() {
 		if r := recover(); r != nil {
-			returnErr = fmt.Errorf("Unhandled: %s", bringyour.ErrorJson(r, debug.Stack()))
+			returnErr = fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
 		}
 	}()
 
@@ -748,7 +748,7 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	defer func() {
 		if r := recover(); r != nil {
-			returnErr = fmt.Errorf("Unhandled: %s", bringyour.ErrorJson(r, debug.Stack()))
+			returnErr = fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
 		}
 	}()
 
