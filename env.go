@@ -476,13 +476,13 @@ func (self *SimpleResource) Parse() map[string]any {
 	} else {
 		bytes, err = os.ReadFile(self.path)
 		if err != nil {
-			panic(err)
+			panic(fmt.Errorf("%s: %s", self.path, err))
 		}
 	}
 	obj := map[string]any{}
 	err = yaml.Unmarshal(bytes, &obj)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("%s: %s", self.path, err))
 	}
 	self.parsedObj = obj
 	return obj

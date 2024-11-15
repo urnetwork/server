@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mathrand "math/rand"
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -155,30 +156,17 @@ func AdvancePayment(
 
 	if payment.WalletId == nil {
 		// cannot advance until the wallet is set
-		return &AdvancePaymentResult{}, nil
+		return &AdvancePaymentResult{
+			Complete: false,
+			Canceled: false,
+		}, fmt.Errorf("Wallet not set.")
 	}
 
-	complete, err := advancePayment(payment, clientSession)
-	if err != nil {
-		// cancel this payment and let the payment plan create a new one
-		cancelErr := model.CancelPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
-		if cancelErr == nil {
-			return &AdvancePaymentResult{
-				Complete: false,
-				Canceled: true,
-			}, nil
-		} else {
-			// keep trying until we can cancel it
-			return &AdvancePaymentResult{
-				Complete: false,
-				Canceled: false,
-			}, nil
-		}
-	}
+	complete, canceled, err := advancePayment(payment, clientSession)
 	return &AdvancePaymentResult{
 		Complete: complete,
-		Canceled: false,
-	}, nil
+		Canceled: canceled,
+	}, err
 }
 
 func AdvancePaymentPost(
@@ -197,9 +185,10 @@ func AdvancePaymentPost(
 func advancePayment(
 	payment *model.AccountPayment,
 	clientSession *session.ClientSession,
-) (complete bool, returnErr error) {
+) (complete bool, canceled bool, returnErr error) {
 	if payment.Completed || payment.Canceled {
-		complete = true
+		complete = payment.Completed
+		canceled = payment.Canceled
 		return
 	}
 
@@ -328,7 +317,11 @@ func advancePayment(
 
 		// ensure paymout amount is greater than minimum payout threshold
 		if model.UsdToNanoCents(payoutAmount) <= 0 {
-			returnErr = fmt.Errorf("[%s]payout - fee is negative", payment.PaymentId.String())
+			// cancel this payment, and let the next plan pick up the contracts
+			// in a new (larger) payment. Otherwise, we will likely keep failing due
+			// to the payment not being large enough to cover the transfer fee.
+			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
+			canceled = true
 			return
 		}
 

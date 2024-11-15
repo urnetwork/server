@@ -11,13 +11,14 @@ import (
 
 	"github.com/docopt/docopt-go"
 
-	// "github.com/golang/glog"
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/search"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 func main() {
@@ -50,12 +51,13 @@ Usage:
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
-    bringyourctl payouts plan
+    bringyourctl payouts plan [--send]
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
     bringyourctl contracts close-expired
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
+    bringyourctl task ls
 
 Options:
     -h --help     Show this screen.
@@ -148,11 +150,9 @@ Options:
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
 			listPendingPayouts(opts)
-		}
-		if plan, _ := opts.Bool("plan"); plan {
-			planPayouts()
-		}
-		if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
+		} else if plan, _ := opts.Bool("plan"); plan {
+			planPayouts(opts)
+		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
 			payoutPlanApplyBonus(opts)
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
@@ -172,6 +172,10 @@ Options:
 	} else if wallets, _ := opts.Bool("wallets"); wallets {
 		if syncCircle, _ := opts.Bool("sync-circle"); syncCircle {
 			populateMissingCircleAccountWallets()
+		}
+	} else if task, _ := opts.Bool("task"); task {
+		if ls, _ := opts.Bool("ls"); ls {
+			taskLs(opts)
 		}
 	}
 }
@@ -497,18 +501,27 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 	fmt.Printf("Sent\n")
 }
 
-func planPayouts() {
-	plan, err := model.PlanPayments(context.Background())
-	if err != nil {
-		fmt.Printf("payout plan err = %s\n", err)
-		return
-	}
-	fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
-	fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
-	fmt.Println(strings.Repeat("-", 56))
-	for _, payment := range plan.NetworkPayments {
-		payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
-		fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+func planPayouts(opts docopt.Opts) {
+	send, _ := opts.Bool("--send")
+
+	if send {
+		glog.Infof("[payouts]send\n")
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		controller.SendPayments(clientSession)
+	} else {
+		plan, err := model.PlanPayments(context.Background())
+		if err != nil {
+			fmt.Printf("payout plan err = %s\n", err)
+			return
+		}
+		fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
+		fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
+		fmt.Println(strings.Repeat("-", 56))
+		for _, payment := range plan.NetworkPayments {
+			payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
+			fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+		}
 	}
 }
 
@@ -745,4 +758,21 @@ func populateMissingCircleAccountWallets() {
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
 	controller.PopulateAccountWallets(&controller.PopulateAccountWalletsArgs{}, clientSession)
+}
+
+func taskLs(opts docopt.Opts) {
+
+	ctx := context.Background()
+	taskIds := task.ListPendingTasks(ctx)
+	tasks := task.GetTasks(ctx, taskIds...)
+
+	fmt.Printf("%d pending tasks:\n", len(tasks))
+	for taskId, task := range tasks {
+		if task.RescheduleError != "" {
+			fmt.Printf("  %s %s: rescheduled err = %s\n", taskId, task.FunctionName, task.RescheduleError)
+		} else {
+			fmt.Printf("  %s %s\n", taskId, task.FunctionName)
+		}
+	}
+
 }
