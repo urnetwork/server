@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -1085,28 +1086,28 @@ func SetConnectionLocation(
 
 type LocationGroupResult struct {
 	LocationGroupId server.Id `json:"location_group_id"`
-	Name            string       `json:"name"`
-	ProviderCount   int          `json:"provider_count,omitempty"`
-	Promoted        bool         `json:"promoted,omitempty"`
-	MatchDistance   int          `json:"match_distance,omitempty"`
+	Name            string    `json:"name"`
+	ProviderCount   int       `json:"provider_count,omitempty"`
+	Promoted        bool      `json:"promoted,omitempty"`
+	MatchDistance   int       `json:"match_distance,omitempty"`
 }
 
 type LocationResult struct {
-	LocationId   server.Id `json:"location_id"`
+	LocationId   server.Id    `json:"location_id"`
 	LocationType LocationType `json:"location_type"`
 	Name         string       `json:"name"`
 	// FIXME add City, Region, Country names
 	CityLocationId    *server.Id `json:"city_location_id,omitempty"`
 	RegionLocationId  *server.Id `json:"region_location_id,omitempty"`
 	CountryLocationId *server.Id `json:"country_location_id,omitempty"`
-	CountryCode       string        `json:"country_code"`
-	ProviderCount     int           `json:"provider_count,omitempty"`
-	MatchDistance     int           `json:"match_distance,omitempty"`
+	CountryCode       string     `json:"country_code"`
+	ProviderCount     int        `json:"provider_count,omitempty"`
+	MatchDistance     int        `json:"match_distance,omitempty"`
 }
 
 type LocationDeviceResult struct {
 	ClientId   server.Id `json:"client_id"`
-	DeviceName string       `json:"device_name"`
+	DeviceName string    `json:"device_name"`
 }
 
 type FindLocationsArgs struct {
@@ -1721,7 +1722,7 @@ func FindLocations(
 type FindProvidersArgs struct {
 	LocationId       *server.Id  `json:"location_id,omitempty"`
 	LocationGroupId  *server.Id  `json:"location_group_id,omitempty"`
-	Count            int            `json:"count"`
+	Count            int         `json:"count"`
 	ExcludeClientIds []server.Id `json:"exclude_location_ids,omitempty"`
 }
 
@@ -1778,14 +1779,14 @@ type ProviderSpec struct {
 	LocationId      *server.Id `json:"location_id,omitempty"`
 	LocationGroupId *server.Id `json:"location_group_id,omitempty"`
 	ClientId        *server.Id `json:"client_id,omitempty"`
-	BestAvailable   *bool         `json:"best_available,omitempty"`
+	BestAvailable   *bool      `json:"best_available,omitempty"`
 }
 
 type FindProviders2Args struct {
-	Specs               []*ProviderSpec  `json:"specs"`
-	Count               int              `json:"count"`
-	ExcludeClientIds    []server.Id   `json:"exclude_client_ids"`
-	ExcludeDestinations [][]server.Id `json:"exclude_destinations"`
+	Specs               []*ProviderSpec `json:"specs"`
+	Count               int             `json:"count"`
+	ExcludeClientIds    []server.Id     `json:"exclude_client_ids"`
+	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
 }
 
 type FindProviders2Result struct {
@@ -1794,7 +1795,7 @@ type FindProviders2Result struct {
 
 type FindProvidersProvider struct {
 	ClientId                server.Id `json:"client_id"`
-	EstimatedBytesPerSecond int          `json:"estimated_bytes_per_second"`
+	EstimatedBytesPerSecond int       `json:"estimated_bytes_per_second"`
 }
 
 func findLocationGroupByNameInTx(
@@ -1837,6 +1838,39 @@ func findLocationGroupByNameInTx(
 	return locationGroup
 }
 
+func findHomeLocationIdInTx(
+	tx server.PgTx,
+	session *session.ClientSession,
+) (locationId server.Id, found bool) {
+	// TODO this should be set per network
+
+	result, err := tx.Query(
+		session.Ctx,
+		`
+			SELECT
+				location_id
+			FROM location
+			WHERE
+				location_type = $1 AND
+				country_code = $2 AND
+				location_name = $3
+
+			LIMIT 1
+		`,
+		LocationTypeCountry,
+		"us",
+		"United States",
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&locationId))
+			found = true
+		}
+	})
+
+	return
+}
+
 func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
@@ -1847,8 +1881,10 @@ func FindProviders2(
 	}
 
 	type clientScore struct {
-		netTypeScore int
-		priority     int
+		netTypeScore      int
+		priority          int
+		group             int
+		clientAddressHash string
 	}
 
 	// score 0 is best
@@ -1870,9 +1906,9 @@ func FindProviders2(
 				clientScores[*spec.ClientId] = &clientScore{}
 			}
 			if spec.BestAvailable != nil && *spec.BestAvailable {
-				strongPrivacyLawsAndInternetFreedonGroupId := findLocationGroupByNameInTx(session.Ctx, StrongPrivacyLaws, tx)
-				if strongPrivacyLawsAndInternetFreedonGroupId != nil {
-					locationGroupIds[strongPrivacyLawsAndInternetFreedonGroupId.LocationGroupId] = true
+				homeLocationId, found := findHomeLocationIdInTx(tx, session)
+				if found {
+					locationIds[homeLocationId] = true
 				}
 			}
 		}
@@ -1891,7 +1927,8 @@ func FindProviders2(
                 SELECT
 
                     network_client_location.client_id,
-                    network_client_location.net_type_score
+                    network_client_location.net_type_score,
+                    network_client_connection.client_address_hash
 
                 FROM network_client_location
 
@@ -1917,10 +1954,17 @@ func FindProviders2(
 				for result.Next() {
 					var clientId server.Id
 					var netTypeScore int
-					server.Raise(result.Scan(&clientId, &netTypeScore))
+					var clientAddressHash []byte
+					server.Raise(result.Scan(
+						&clientId,
+						&netTypeScore,
+						&clientAddressHash,
+					))
 					clientScores[clientId] = &clientScore{
-						netTypeScore: scoreScale * netTypeScore,
-						priority:     mathrand.Int(),
+						netTypeScore:      scoreScale * netTypeScore,
+						priority:          mathrand.Int(),
+						group:             0,
+						clientAddressHash: hex.EncodeToString(clientAddressHash),
 					}
 				}
 			})
@@ -1940,7 +1984,8 @@ func FindProviders2(
                     SELECT
 
                         network_client_location.client_id,
-                        network_client_location.net_type_score
+                        network_client_location.net_type_score,
+                        network_client_connection.client_address_hash
 
                     FROM network_client_location
 
@@ -1978,18 +2023,32 @@ func FindProviders2(
 				for result.Next() {
 					var clientId server.Id
 					var netTypeScore int
-					server.Raise(result.Scan(&clientId, &netTypeScore))
+					var clientAddressHash []byte
+					server.Raise(result.Scan(
+						&clientId,
+						&netTypeScore,
+						&clientAddressHash,
+					))
 					clientScores[clientId] = &clientScore{
-						netTypeScore: scoreScale * netTypeScore,
-						priority:     mathrand.Int(),
+						netTypeScore:      scoreScale * netTypeScore,
+						priority:          mathrand.Int(),
+						group:             0,
+						clientAddressHash: hex.EncodeToString(clientAddressHash),
 					}
 				}
 			})
 		}
 	})
 
+	// distribute providers based on client address hash
+	// deprioritize providers with the same client address hash as those excluded or included
+	clientAddressHashCounts := map[string]int{}
+
 	for _, clientId := range findProviders2.ExcludeClientIds {
-		delete(clientScores, clientId)
+		if clientScore, ok := clientScores[clientId]; ok {
+			delete(clientScores, clientId)
+			clientAddressHashCounts[clientScore.clientAddressHash] += 1
+		}
 	}
 	// the final hop is excluded
 	// intermediaries have net score incremented by scale/2
@@ -2008,6 +2067,30 @@ func FindProviders2(
 		clientScoreA := clientScores[a]
 		clientScoreB := clientScores[b]
 
+		if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
+			return c
+		}
+		if c := clientScoreA.priority - clientScoreB.priority; c != 0 {
+			return c
+		}
+		return 0
+	})
+
+	// assign group based on number of ip hashes seen before
+	for _, clientId := range clientIds {
+		clientScore := clientScores[clientId]
+		c := clientAddressHashCounts[clientScore.clientAddressHash]
+		clientScore.group = c
+		clientAddressHashCounts[clientScore.clientAddressHash] = c + 1
+	}
+
+	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
+		clientScoreA := clientScores[a]
+		clientScoreB := clientScores[b]
+
+		if c := clientScoreA.group - clientScoreB.group; c != 0 {
+			return c
+		}
 		if c := clientScoreA.netTypeScore - clientScoreB.netTypeScore; c != 0 {
 			return c
 		}
