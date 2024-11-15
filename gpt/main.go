@@ -9,10 +9,10 @@ import (
 
 	"github.com/docopt/docopt-go"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/service/gpt/handlers"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/gpt/handlers"
+	"github.com/urnetwork/server/router"
 )
 
 func main() {
@@ -31,7 +31,7 @@ Options:
   -p --port=<port>  Listen port [default: 80].
   --url=<url>   Test url.`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
@@ -75,20 +75,20 @@ Options:
 			router.NewRoute("POST", "/gpt/bemyprivacyagent", handlers.GptBeMyPrivacyAgent),
 		}
 
-		// bringyour.Logger().Printf("%s\n", opts)
+		// server.Logger().Printf("%s\n", opts)
 
 		port, _ := opts.Int("--port")
 
-		bringyour.Logger().Printf(
+		server.Logger().Printf(
 			"Serving %s %s on *:%d\n",
-			bringyour.RequireEnv(),
-			bringyour.RequireVersion(),
+			server.RequireEnv(),
+			server.RequireVersion(),
 			port,
 		)
 
 		routerHandler := router.NewRouter(cancelCtx, routes)
 		err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
-		bringyour.Logger().Fatal(err)
+		server.Logger().Fatal(err)
 	}
 }

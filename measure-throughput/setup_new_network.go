@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"bringyour.com/bringyour/jwt"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/session"
 	"github.com/jedib0t/go-pretty/v6/progress"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 const userName = "test"

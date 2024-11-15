@@ -1,18 +1,16 @@
 package main
 
-import (
 // "context"
 // "testing"
 // "time"
 
 // "github.com/go-playground/assert/v2"
 
-// "bringyour.com/bringyour"
-// "bringyour.com/bringyour/model"
-)
+// "github.com/urnetwork/server"
+// "github.com/urnetwork/server/model"
 
 /*
-func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
+func TestCreateContract(t *testing.T) { server.DefaultTestEnv().Run(func() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	settings := DefaultExchangeSettings()
@@ -24,15 +22,15 @@ func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 	endTime := startTime.Add(30 * 24 * time.Hour)
 
 
-    networkIdA := bringyour.NewId()
-    userIdA := bringyour.NewId()
-    clientIdA := bringyour.NewId()
-    deviceIdA := bringyour.NewId()
+    networkIdA := server.NewId()
+    userIdA := server.NewId()
+    clientIdA := server.NewId()
+    deviceIdA := server.NewId()
 
-    networkIdB := bringyour.NewId()
-    userIdB := bringyour.NewId()
-    clientIdB := bringyour.NewId()
-    deviceIdB := bringyour.NewId()
+    networkIdB := server.NewId()
+    userIdB := server.NewId()
+    clientIdB := server.NewId()
+    deviceIdB := server.NewId()
 
     model.Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 	model.Testing_CreateDevice(
@@ -54,7 +52,7 @@ func TestCreateContract(t *testing.T) { bringyour.DefaultTestEnv().Run(func() {
 		"b",
 	)
 
-    for _, networkId := range []bringyour.Id{networkIdA, networkIdB} {
+    for _, networkId := range []server.Id{networkIdA, networkIdB} {
 	    success := model.AddBasicTransferBalance(
 	        ctx,
 	        networkId,

@@ -3,11 +3,12 @@ package work
 import (
 	"time"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/task"
-	// "bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/session"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/task"
+
+	// "github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/session"
 )
 
 type CloseExpiredNetworkClientHandlersArgs struct {
@@ -16,7 +17,7 @@ type CloseExpiredNetworkClientHandlersArgs struct {
 type CloseExpiredNetworkClientHandlersResult struct {
 }
 
-func ScheduleCloseExpiredNetworkClientHandlers(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleCloseExpiredNetworkClientHandlers(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		CloseExpiredNetworkClientHandlers,
@@ -39,7 +40,7 @@ func CloseExpiredNetworkClientHandlersPost(
 	closeExpiredNetworkClientHandlers *CloseExpiredNetworkClientHandlersArgs,
 	closeExpiredNetworkClientHandlersResult *CloseExpiredNetworkClientHandlersResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 	return nil
@@ -51,7 +52,7 @@ type DeleteDisconnectedNetworkClientsArgs struct {
 type DeleteDisconnectedNetworkClientsResult struct {
 }
 
-func ScheduleDeleteDisconnectedNetworkClients(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleDeleteDisconnectedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		DeleteDisconnectedNetworkClients,
@@ -75,7 +76,7 @@ func DeleteDisconnectedNetworkClientsPost(
 	deleteDisconnectedNetworkClients *DeleteDisconnectedNetworkClientsArgs,
 	deleteDisconnectedNetworkClientsResult *DeleteDisconnectedNetworkClientsResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
 	return nil

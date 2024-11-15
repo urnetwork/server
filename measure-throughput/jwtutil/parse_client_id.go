@@ -3,8 +3,8 @@ package jwtutil
 import (
 	"fmt"
 
-	"bringyour.com/connect"
 	gojwt "github.com/golang-jwt/jwt/v5"
+	"github.com/urnetwork/connect"
 )
 
 func ParseClientID(byClientJwt string) (*connect.Id, error) {

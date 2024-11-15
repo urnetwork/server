@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"bringyor.com/measure-throughput/bwclient"
-	"bringyor.com/measure-throughput/jwtutil"
-	"bringyor.com/measure-throughput/tcplogger"
-	"bringyour.com/connect"
-	"bringyour.com/protocol"
 	"github.com/jedib0t/go-pretty/v6/progress"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/server/measure-throughput/bwclient"
+	"github.com/urnetwork/server/measure-throughput/jwtutil"
+	"github.com/urnetwork/server/measure-throughput/tcplogger"
 )
 
 const apiURL = "http://localhost:8080"

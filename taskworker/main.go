@@ -12,13 +12,13 @@ import (
 
 	"github.com/golang/glog"
 
-	"bringyour.com/bringyour"
-	"bringyour.com/bringyour/controller"
-	"bringyour.com/bringyour/model"
-	"bringyour.com/bringyour/router"
-	"bringyour.com/bringyour/session"
-	"bringyour.com/bringyour/task"
-	"bringyour.com/service/taskworker/work"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
+	"github.com/urnetwork/server/taskworker/work"
 )
 
 const RemoveTaskTimeout = 90 * 24 * time.Hour
@@ -41,12 +41,12 @@ Options:
   -n --count=<count>  Number of worker processes [default: 16].
   -b --batch_size=<batch_size>  Batch size [default: 8].`
 
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], bringyour.RequireVersion())
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
 		panic(err)
 	}
 
-	quitEvent := bringyour.NewEventWithContext(context.Background())
+	quitEvent := server.NewEventWithContext(context.Background())
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
@@ -59,8 +59,8 @@ Options:
 
 		glog.Infof(
 			"[taskworker]starting %s %s %d task workers with batch size %d\n",
-			bringyour.RequireEnv(),
-			bringyour.RequireVersion(),
+			server.RequireEnv(),
+			server.RequireVersion(),
 			count,
 			batchSize,
 		)
@@ -79,8 +79,8 @@ Options:
 
 		glog.Infof(
 			"[taskworker]serving %s %s on *:%d\n",
-			bringyour.RequireEnv(),
-			bringyour.RequireVersion(),
+			server.RequireEnv(),
+			server.RequireVersion(),
 			port,
 		)
 
@@ -91,7 +91,7 @@ Options:
 }
 
 func initTasks(ctx context.Context) {
-	bringyour.Tx(ctx, func(tx bringyour.PgTx) {
+	server.Tx(ctx, func(tx server.PgTx) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
@@ -170,7 +170,7 @@ type TaskCleanupArgs struct {
 type TaskCleanupResult struct {
 }
 
-func ScheduleTaskCleanup(clientSession *session.ClientSession, tx bringyour.PgTx) {
+func ScheduleTaskCleanup(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
 		TaskCleanup,
@@ -194,7 +194,7 @@ func TaskCleanupPost(
 	taskCleanup *TaskCleanupArgs,
 	taskCleanupResult *TaskCleanupResult,
 	clientSession *session.ClientSession,
-	tx bringyour.PgTx,
+	tx server.PgTx,
 ) error {
 	ScheduleTaskCleanup(clientSession, tx)
 	return nil

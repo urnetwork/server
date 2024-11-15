@@ -11,7 +11,7 @@ func TestHandleContract() {
 	residentController := newResidentController(
 		ctx context.Context,
 	    cancel context.CancelFunc,
-	    clientId bringyour.Id,
+	    clientId server.Id,
 	    client *connect.Client,
 	    residentContractManager *residentContractManager,
 	    settings *ExchangeSettings,
@@ -97,7 +97,7 @@ func TestHandleContractCompanion() {
 	residentController := newResidentController(
 		ctx context.Context,
 	    cancel context.CancelFunc,
-	    clientId bringyour.Id,
+	    clientId server.Id,
 	    client *connect.Client,
 	    residentContractManager *residentContractManager,
 	    settings *ExchangeSettings,

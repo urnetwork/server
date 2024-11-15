@@ -3,9 +3,9 @@ package landmarks
 import (
 	"slices"
 
-	"bringyour.com/service/api/myipinfo/landmarks/kmeanspp"
-	"bringyour.com/service/api/myipinfo/myinfo"
 	"github.com/samber/lo"
+	"github.com/urnetwork/server/api/myipinfo/landmarks/kmeanspp"
+	"github.com/urnetwork/server/api/myipinfo/myinfo"
 )
 
 type LandmarkAndRTT struct {
