@@ -35,8 +35,8 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urfave/cli/v2 v2.27.4
-	github.com/urnetwork/connect v0.1.0
-	github.com/urnetwork/protocol v0.1.0
+	github.com/urnetwork/connect v0.0.0
+	github.com/urnetwork/protocol v0.0.0
 	golang.org/x/crypto v0.25.0
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 	golang.org/x/net v0.27.0
@@ -124,3 +124,7 @@ require (
 )
 
 replace golang.org/x/sync v0.8.0 => github.com/draganm/sync v0.8.2
+
+replace github.com/urnetwork/connect v0.0.0 => ../connect
+
+replace github.com/urnetwork/protocol v0.0.0 => ../protocol
