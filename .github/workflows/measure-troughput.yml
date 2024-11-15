@@ -24,12 +24,12 @@ jobs:
           docker --version
           echo "Docker is ready to use."
 
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "^1.23.0"
+      - name: Edit go mod
+        run: |
+          go mod edit -dropreplace github.com/urnetwork/connect@v0.0.0
+          go mod edit -dropreplace github.com/urnetwork/protocol@v0.0.0
+          go mod edit -require github.com/urnetwork/connect@main -require github.com/urnetwork/protocol@main
+          go mod tidy
 
       - name: Precompile Everything
         env:
