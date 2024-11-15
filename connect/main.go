@@ -82,7 +82,7 @@ Options:
 	)
 
 	if os.Getenv("SKIP_METRICS") == "" {
-		pushMetrics := push.New("push-gateway.cluster.server.dev", "my_job").
+		pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
 			Gatherer(prometheus.DefaultGatherer).
 			Grouping("warp_block", server.RequireBlock()).
 			Grouping("warp_env", server.RequireEnv()).
