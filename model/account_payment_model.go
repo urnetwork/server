@@ -67,11 +67,11 @@ type AccountPayment struct {
 	PaymentPlanId   server.Id  `json:"payment_plan_id"`
 	WalletId        *server.Id `json:"wallet_id"`
 	NetworkId       server.Id  `json:"network_id"`
-	PayoutByteCount ByteCount     `json:"payout_byte_count"`
-	Payout          NanoCents     `json:"payout_nano_cents"`
-	SubsidyPayout   NanoCents     `json:"subsidy_payout_nano_cents"`
-	MinSweepTime    time.Time     `json:"min_sweep_time"`
-	CreateTime      time.Time     `json:"create_time"`
+	PayoutByteCount ByteCount  `json:"payout_byte_count"`
+	Payout          NanoCents  `json:"payout_nano_cents"`
+	SubsidyPayout   NanoCents  `json:"subsidy_payout_nano_cents"`
+	MinSweepTime    time.Time  `json:"min_sweep_time"`
+	CreateTime      time.Time  `json:"create_time"`
 
 	PaymentRecord  *string    `json:"payment_record"`
 	TokenType      *string    `json:"token_type"`
@@ -194,7 +194,7 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
                     payment_id
                 FROM account_payment
                 WHERE
-                    NOT completed AND NOT canceled
+                    completed = false AND canceled = false
             `,
 		)
 		paymentIds := []server.Id{}
@@ -207,8 +207,10 @@ func GetPendingPayments(ctx context.Context) []*AccountPayment {
 		})
 
 		for _, paymentId := range paymentIds {
-			payment, _ := dbGetPayment(ctx, conn, paymentId)
-			if payment != nil {
+			payment, err := dbGetPayment(ctx, conn, paymentId)
+			if err != nil {
+				glog.Errorf("[payment]could not load %s\n", paymentId)
+			} else {
 				payments = append(payments, payment)
 			}
 		}
@@ -243,8 +245,10 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId server.Id) []*A
 		})
 
 		for _, paymentId := range paymentIds {
-			payment, _ := dbGetPayment(ctx, conn, paymentId)
-			if payment != nil {
+			payment, err := dbGetPayment(ctx, conn, paymentId)
+			if err != nil {
+				glog.Errorf("[payment]could not load %s in plan %s\n", paymentId, paymentPlanId)
+			} else {
 				payments = append(payments, payment)
 			}
 		}
@@ -350,11 +354,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
             WHERE
                 account_payment.payment_id IS NULL OR
-                NOT account_payment.completed AND account_payment.canceled
+                account_payment.canceled = true
             `,
 		))
-
-		// FIXME can find networks missing payout/account wallets here
 
 		result, err := tx.Query(
 			ctx,
@@ -1123,7 +1125,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_wallet.wallet_id = account_payment.wallet_id
 
             WHERE
-                account_payment.network_id = $1 AND completed = true
+                account_payment.network_id = $1 AND 
+                canceled = false
         `,
 			session.ByJwt.NetworkId,
 		)
@@ -1166,8 +1169,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 }
 
 type TransferStats struct {
-	PaidBytesProvided   int `json:"paid_bytes_provided"`
-	UnpaidBytesProvided int `json:"unpaid_bytes_provided"`
+	PaidBytesProvided   ByteCount `json:"paid_bytes_provided"`
+	UnpaidBytesProvided ByteCount `json:"unpaid_bytes_provided"`
 }
 
 /**
@@ -1187,11 +1190,11 @@ func GetTransferStats(
 			`
 				SELECT
 					coalesce(SUM(CASE 
-							WHEN account_payment.completed = true THEN transfer_escrow_sweep.payout_byte_count 
+							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count 
 							ELSE 0 
 						END), 0) as paid_bytes_provided,
 					coalesce(SUM(CASE 
-							WHEN account_payment.completed IS NULL OR account_payment.completed != true THEN transfer_escrow_sweep.payout_byte_count
+							WHEN account_payment.payment_id IS NULL OR account_payment.canceled = true THEN transfer_escrow_sweep.payout_byte_count
 							ELSE 0 
 						END), 0) as unpaid_bytes_provided
 				FROM
