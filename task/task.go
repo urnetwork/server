@@ -822,7 +822,7 @@ func (self *TaskWorker) RunPost(
 		})
 		return
 	} else {
-		returnErr = errors.New("Target not found.")
+		returnErr = fmt.Errorf("Target not found (%s).", finishedTask.FunctionName)
 		return
 	}
 }
@@ -1006,7 +1006,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					rescheduledTasks[task.TaskId] = err
 				}
 			} else {
-				rescheduledTasks[task.TaskId] = errors.New("Target not found.")
+				rescheduledTasks[task.TaskId] = fmt.Errorf("Target not found (%s).", task.FunctionName)
 			}
 		}
 	}()

@@ -115,22 +115,78 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 
 	taskWorker := task.NewTaskWorker(ctx)
 
+	// 2024.11.15 migration from "bringyour.com" to new package
+
 	taskWorker.AddTargets(
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
-		task.NewTaskTargetWithPost(work.ExportStats, work.ExportStatsPost),
-		task.NewTaskTargetWithPost(work.RemoveExpiredAuthCodes, work.RemoveExpiredAuthCodesPost),
-		task.NewTaskTargetWithPost(work.Payout, work.PayoutPost),
-		task.NewTaskTargetWithPost(work.ProcessPendingPayouts, work.ProcessPendingPayoutsPost),
-		task.NewTaskTargetWithPost(TaskCleanup, TaskCleanupPost),
-		task.NewTaskTargetWithPost(controller.PlaySubscriptionRenewal, controller.PlaySubscriptionRenewalPost),
-		task.NewTaskTargetWithPost(work.BackfillInitialTransferBalance, work.BackfillInitialTransferBalancePost),
-		task.NewTaskTargetWithPost(controller.PopulateAccountWallets, work.PopulateAccountWalletsPost),
-		task.NewTaskTargetWithPost(work.CloseExpiredContracts, work.CloseExpiredContractsPost),
-		task.NewTaskTargetWithPost(work.CloseExpiredNetworkClientHandlers, work.CloseExpiredNetworkClientHandlersPost),
-		task.NewTaskTargetWithPost(work.DeleteDisconnectedNetworkClients, work.DeleteDisconnectedNetworkClientsPost),
-		task.NewTaskTargetWithPost(model.IndexSearchLocations, model.IndexSearchLocationsPost),
-		task.NewTaskTargetWithPost(controller.RefreshTransferBalances, controller.RefreshTransferBalancesPost),
-		task.NewTaskTargetWithPost(controller.AdvancePayment, controller.AdvancePaymentPost),
+		task.NewTaskTargetWithPost(
+			work.ExportStats,
+			work.ExportStatsPost,
+			"bringyour.com/service/taskworker/work.ExportStats",
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredAuthCodes,
+			work.RemoveExpiredAuthCodesPost,
+			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
+		),
+		task.NewTaskTargetWithPost(
+			work.Payout,
+			work.PayoutPost,
+			"bringyour.com/service/taskworker/work.Payout",
+		),
+		task.NewTaskTargetWithPost(
+			work.ProcessPendingPayouts,
+			work.ProcessPendingPayoutsPost,
+			"bringyour.com/service/taskworker/work.ProcessPendingPayouts",
+		),
+		task.NewTaskTargetWithPost(
+			TaskCleanup,
+			TaskCleanupPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.PlaySubscriptionRenewal,
+			controller.PlaySubscriptionRenewalPost,
+			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",
+		),
+		task.NewTaskTargetWithPost(
+			work.BackfillInitialTransferBalance,
+			work.BackfillInitialTransferBalancePost,
+			"bringyour.com/bringyour/controller.BackfillInitialTransferBalance",
+		),
+		task.NewTaskTargetWithPost(
+			controller.PopulateAccountWallets,
+			work.PopulateAccountWalletsPost,
+			"bringyour.com/bringyour/controller.PopulateAccountWallets",
+		),
+		task.NewTaskTargetWithPost(
+			work.CloseExpiredContracts,
+			work.CloseExpiredContractsPost,
+			"bringyour.com/service/taskworker/work.CloseExpiredContracts",
+		),
+		task.NewTaskTargetWithPost(
+			work.CloseExpiredNetworkClientHandlers,
+			work.CloseExpiredNetworkClientHandlersPost,
+			"bringyour.com/service/taskworker/work.CloseExpiredNetworkClientHandlers",
+		),
+		task.NewTaskTargetWithPost(
+			work.DeleteDisconnectedNetworkClients,
+			work.DeleteDisconnectedNetworkClientsPost,
+			"bringyour.com/service/taskworker/work.DeleteDisconnectedNetworkClients",
+		),
+		task.NewTaskTargetWithPost(
+			model.IndexSearchLocations,
+			model.IndexSearchLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.RefreshTransferBalances,
+			controller.RefreshTransferBalancesPost,
+			"bringyour.com/bringyour/controller.RefreshTransferBalances",
+		),
+		task.NewTaskTargetWithPost(
+			controller.AdvancePayment,
+			controller.AdvancePaymentPost,
+			"bringyour.com/bringyour/controller.AdvancePayment",
+		),
 	)
 
 	return taskWorker

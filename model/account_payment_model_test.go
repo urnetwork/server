@@ -161,12 +161,12 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		// Check network stats
 		// Everything should be 0
 		transferStats := GetTransferStats(ctx, destinationNetworkId)
-		assert.Equal(t, transferStats.UnpaidBytesProvided, int(0))
-		assert.Equal(t, transferStats.PaidBytesProvided, int(0))
+		assert.Equal(t, transferStats.UnpaidBytesProvided, ByteCount(0))
+		assert.Equal(t, transferStats.PaidBytesProvided, ByteCount(0))
 
 		usedTransferByteCount := ByteCount(1024)
-		paidByteCount := int64(0)
-		paid := int64(0)
+		paidByteCount := ByteCount(0)
+		paid := NanoCents(0)
 
 		// we want to meet MinWalletPayoutThreshold
 		// otherwise the plan will not include the payout
@@ -185,17 +185,17 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		// Check network stats
 		// Should register unpaid byte count
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		assert.Equal(t, int64(transferStats.UnpaidBytesProvided), paidByteCount)
-		assert.Equal(t, transferStats.PaidBytesProvided, int(0))
+		assert.Equal(t, transferStats.UnpaidBytesProvided, paidByteCount)
+		assert.Equal(t, transferStats.PaidBytesProvided, ByteCount(0))
 
 		// Plan payments
 		plan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
 
-		// Since the plan is incomplete, should be still marked as unpaid
+		// Since the plan is in progress, should be marked as paid
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		assert.Equal(t, int64(transferStats.UnpaidBytesProvided), paidByteCount)
-		assert.Equal(t, transferStats.PaidBytesProvided, int(0))
+		assert.Equal(t, transferStats.UnpaidBytesProvided, ByteCount(0))
+		assert.Equal(t, transferStats.PaidBytesProvided, paidByteCount)
 
 		// mark plan items as complete
 		for _, payment := range plan.NetworkPayments {
@@ -204,8 +204,8 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		}
 
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		assert.Equal(t, int64(transferStats.PaidBytesProvided), paidByteCount)
-		assert.Equal(t, transferStats.UnpaidBytesProvided, int(0))
+		assert.Equal(t, transferStats.PaidBytesProvided, paidByteCount)
+		assert.Equal(t, transferStats.UnpaidBytesProvided, ByteCount(0))
 
 	})
 }
