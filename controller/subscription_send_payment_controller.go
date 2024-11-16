@@ -10,8 +10,8 @@ import (
 	// "sync"
 	"time"
 
-	mathrand "math/rand"
 	"github.com/golang/glog"
+	mathrand "math/rand"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -118,9 +118,10 @@ func ScheduleAdvancePayment(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) {
-	// randomly schedule between now and 1 hour from now
+	// randomly schedule between now and 5 minutes from now
+	delay := 5 * time.Minute
 	// this avoid circle and coinbase rate limiting
-	timeout := time.Duration(mathrand.Float64()*float64(1*time.Hour/time.Second)) * time.Second
+	timeout := time.Duration(mathrand.Float64()*float64(delay/time.Second)) * time.Second
 	runAt := server.NowUtc().Add(timeout)
 
 	task.ScheduleTaskInTx(
