@@ -20,17 +20,25 @@ type SchedulePayoutResult struct {
 func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 	runAt := func() time.Time {
 		now := time.Now().UTC()
-		year, month, day := now.Year(), now.Month(), now.Day()
+		year, month, day := now.Date()
 
-		if day < 15 {
+		if day < 7 {
+			// run on the 7th
+			return time.Date(year, month, 7, 0, 0, 0, 0, time.UTC)
+		} else if day < 15 {
 			// run on the 15th
 			return time.Date(year, month, 15, 0, 0, 0, 0, time.UTC)
-		}
-		// else run on the 1st
-		if month == time.December {
-			return time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+		} else if day < 22 {
+			// run on the 22nd
+			return time.Date(year, month, 22, 0, 0, 0, 0, time.UTC)
 		} else {
-			return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+			// else run on the 1st of next month
+			month += 1
+			if 12 < month {
+				month -= 12
+				year += 1
+			}
+			return time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
 		}
 	}()
 	task.ScheduleTaskInTx(
