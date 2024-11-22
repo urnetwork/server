@@ -733,9 +733,9 @@ func PlaySubscriptionRenewalPost(
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else if server.NowUtc().Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
-		// check again in 30 minutes
-		playSubscriptionRenewal.CheckTime = server.NowUtc().Add(30 * time.Minute)
+	} else now := server.NowUtc(); if playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+		// check again in an hour
+		playSubscriptionRenewal.CheckTime = now.Add(1 * time.Hour)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
