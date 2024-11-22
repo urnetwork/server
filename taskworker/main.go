@@ -147,6 +147,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			controller.PlaySubscriptionRenewal,
 			controller.PlaySubscriptionRenewalPost,
 			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",
+			"github.com/urnetwork/server/bringyour/controller.PlaySubscriptionRenewal",
 		),
 		task.NewTaskTargetWithPost(
 			work.BackfillInitialTransferBalance,

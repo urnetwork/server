@@ -141,8 +141,8 @@ type SubscriptionBalanceResult struct {
 
 type Subscription struct {
 	SubscriptionId server.Id `json:"subscription_id"`
-	Store          string       `json:"store"`
-	Plan           string       `json:"plan"`
+	Store          string    `json:"store"`
+	Plan           string    `json:"plan"`
 }
 
 func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
@@ -615,10 +615,10 @@ func PlayWebhook(
 
 type PlaySubscriptionRenewalArgs struct {
 	NetworkId      server.Id `json:"network_id"`
-	PackageName    string       `json:"package_name"`
-	SubscriptionId string       `json:"subscription_id"`
-	PurchaseToken  string       `json:"purchase_token"`
-	CheckTime      time.Time    `json:"check_time"`
+	PackageName    string    `json:"package_name"`
+	SubscriptionId string    `json:"subscription_id"`
+	PurchaseToken  string    `json:"purchase_token"`
+	CheckTime      time.Time `json:"check_time"`
 	// ExpiryTime time.Time `json:"expiry_time"`
 }
 
@@ -733,7 +733,7 @@ func PlaySubscriptionRenewalPost(
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else now := server.NowUtc(); if playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+	} else if now := server.NowUtc(); playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
 		// check again in an hour
 		playSubscriptionRenewal.CheckTime = now.Add(1 * time.Hour)
 		SchedulePlaySubscriptionRenewal(
