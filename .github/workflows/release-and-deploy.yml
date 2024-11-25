@@ -96,7 +96,7 @@ jobs:
 
       - name: Docker Build and Push API
         if: ${{steps.release_needed.outputs.RELEASE_NEEDED == 'true'}}
-        working-directory: server/api
+        working-directory: api
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
@@ -104,7 +104,7 @@ jobs:
 
       - name: Docker Build and Push Connect
         if: ${{steps.release_needed.outputs.RELEASE_NEEDED == 'true'}}
-        working-directory: server/connect
+        working-directory: connect
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
@@ -112,7 +112,7 @@ jobs:
 
       - name: Docker Build and Push Taskworker
         if: ${{steps.release_needed.outputs.RELEASE_NEEDED == 'true'}}
-        working-directory: server/taskworker
+        working-directory: taskworker
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
