@@ -51,44 +51,57 @@ jobs:
           git clone git@github-connect-key:urnetwork/connect.git
           git clone git@github-protocol-key:urnetwork/protocol.git
           git clone git@github-userwireguard-key:urnetwork/userwireguard.git
-          echo $PWD
-          ls -la
 
       - name: Install semver-release
-        run: go install github.com/urnetwork/semver-release@v0.0.4
+        run: |
+          go install github.com/urnetwork/semver-release@v0.0.7
+          echo "$HOME/go/bin/" >> "$GITHUB_PATH"
+
+      - name: Check if releases are needed
+        id: releases_needed
+        run: |
+          echo "PROTOCOL_RELEASE_NEEDED=$(semver-release release-needed protocol)" >> "$GITHUB_OUTPUT"
+          echo "USERWIREGUARD_RELEASE_NEEDED=$(semver-release release-needed userwireguard)" >> "$GITHUB_OUTPUT"
+          echo "CONNECT_RELEASE_NEEDED=$(semver-release release-needed connect)" >> "$GITHUB_OUTPUT"
+          echo "SERVER_RELEASE_NEEDED=$(semver-release release-needed server)" >> "$GITHUB_OUTPUT"
 
       - name: Release protocol
         working-directory: protocol
+        if: ${{steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true'}}
         run: |
-          $HOME/go/bin/semver-release release
+          semver-release release
           git push origin --tags
 
       - name: Release UserWireGuard
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true'}}
         working-directory: userwireguard
         run: |
-          $HOME/go/bin/semver-release release
+          semver-release release
           git push origin --tags
 
       - name: Release Connect
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true'  }}
         working-directory: connect
         run: |
           go mod edit -dropreplace github.com/urnetwork/userwireguard@v0.0.0
           go mod edit -dropreplace github.com/urnetwork/protocol@v0.0.0
-          go mod edit -require github.com/urnetwork/userwireguard@v"$($HOME/go/bin/semver-release latest -n /home/runner/work/server/server/userwireguard)" -require github.com/urnetwork/protocol@v"$($HOME/go/bin/semver-release latest -n /home/runner/work/server/server/protocol)"
+          go mod edit -require github.com/urnetwork/userwireguard@v"$(semver-release latest -n /home/runner/work/server/server/userwireguard)" -require github.com/urnetwork/protocol@v"$(semver-release latest -n /home/runner/work/server/server/protocol)"
           go mod tidy
-          $HOME/go/bin/semver-release release
+          semver-release release
           git push origin --tags
 
       - name: Edit go mod for server
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server
         run: |
           go mod edit -dropreplace github.com/urnetwork/connect@v0.0.0
           go mod edit -dropreplace github.com/urnetwork/protocol@v0.0.0
-          go mod edit -require github.com/urnetwork/connect@v"$($HOME/go/bin/semver-release latest -n /home/runner/work/server/server/connect)" -require github.com/urnetwork/protocol@v"$($HOME/go/bin/semver-release latest -n /home/runner/work/server/server/protocol)"
+          go mod edit -require github.com/urnetwork/connect@v"$(semver-release latest -n /home/runner/work/server/server/connect)" -require github.com/urnetwork/protocol@v"$(semver-release latest -n /home/runner/work/server/server/protocol)"
           go mod tidy
-          $HOME/go/bin/semver-release release
+          semver-release release
 
       - name: Precompile Everything
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server
         env:
           SKIP_METRICS: "true"
@@ -96,6 +109,7 @@ jobs:
           go build ./...
 
       - name: Measure Throughput - single client
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server
         env:
           SKIP_METRICS: "true"
@@ -103,6 +117,7 @@ jobs:
           go run ./measure-throughput
 
       - name: Measure Throughput - multi client
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server
         env:
           USE_MULTICLIENT: "true"
@@ -111,39 +126,45 @@ jobs:
           go run ./measure-throughput
 
       - name: Set up Docker Buildx
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         run: docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" -p "${{ secrets.DOCKER_HUB_TOKEN }}"
 
       - name: Docker Build and Push API
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server/api
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
-          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-api:"$($HOME/go/bin/semver-release latest .)" --push .
+          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-api:"$(semver-release latest .)" --push .
 
       - name: Docker Build and Push Connect
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server/connect
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
-          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-connect:"$($HOME/go/bin/semver-release latest .)" --push .
+          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-connect:"$(semver-release latest .)" --push .
 
       - name: Docker Build and Push Taskworker
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server/taskworker
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o build/linux/arm64/
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o build/linux/amd64/
-          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-taskworker:"$($HOME/go/bin/semver-release latest .)" --push .
+          docker buildx build --platform linux/amd64,linux/arm64 -t bringyour/main-taskworker:"$(semver-release latest .)" --push .
 
       - name: Roll out the Relese
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-west-1
         run: |
-          LATEST_VERSION="$($HOME/go/bin/semver-release latest server)"
+          LATEST_VERSION="$(semver-release latest server)"
 
           aws dynamodb update-item --table-name=deployment-blocks --key '{"env-service-block": {"S": "main-api-beta"}}' --update-expression 'SET version=:version' --expression-attribute-values='{":version": {"S": "'${LATEST_VERSION}'"}}' --return-values ALL_NEW
           aws dynamodb update-item --table-name=deployment-blocks --key '{"env-service-block": {"S": "main-api-g1"}}' --update-expression 'SET version=:version' --expression-attribute-values='{":version": {"S": "'${LATEST_VERSION}'"}}' --return-values ALL_NEW
@@ -157,6 +178,7 @@ jobs:
           aws dynamodb update-item --table-name=deployment-blocks --key '{"env-service-block": {"S": "main-taskworker-g1"}}' --update-expression 'SET version=:version' --expression-attribute-values='{":version": {"S": "'${LATEST_VERSION}'"}}' --return-values ALL_NEW
 
       - name: Push the release tag
+        if: ${{steps.releases_needed.outputs.USERWIREGUARD_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.PROTOCOL_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.CONNECT_RELEASE_NEEDED == 'true' || steps.releases_needed.outputs.SERVER_RELEASE_NEEDED == 'true'}}
         working-directory: server
         run: |
           git push origin -f --tags
