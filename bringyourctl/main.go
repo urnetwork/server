@@ -58,6 +58,7 @@ Usage:
     bringyourctl contracts close-expired
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl task ls
+    bringyourctl auth login <auth_code>
 
 Options:
     -h --help     Show this screen.
@@ -176,6 +177,10 @@ Options:
 	} else if task, _ := opts.Bool("task"); task {
 		if ls, _ := opts.Bool("ls"); ls {
 			taskLs(opts)
+		}
+	} else if auth, _ := opts.Bool("auth"); auth {
+		if login, _ := opts.Bool("login"); login {
+			authLogin(opts)
 		}
 	}
 }
@@ -774,5 +779,26 @@ func taskLs(opts docopt.Opts) {
 			fmt.Printf("  %s %s\n", taskId, task.FunctionName)
 		}
 	}
+
+}
+
+func authLogin(opts docopt.Opts) {
+
+	authCode, _ := opts.String("<auth_code>")
+
+	ctx := context.Background()
+
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+	authCodeLogin := &model.AuthCodeLoginArgs{
+		AuthCode: authCode,
+	}
+
+	authCodeLoginResult, err := model.AuthCodeLogin(authCodeLogin, clientSession)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("RESULT: %+v\n", authCodeLoginResult)
 
 }
