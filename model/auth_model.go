@@ -583,6 +583,7 @@ func AuthVerify(
 
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
+	CodeType VerifyCodeType
 }
 
 type AuthVerifyCreateCodeResult struct {
@@ -647,7 +648,7 @@ func AuthVerifyCreateCode(
 
 		created = true
 		userAuthVerifyId := server.NewId()
-		verifyCode = createVerifyCode()
+		verifyCode = createVerifyCode(verifyCreateCode.CodeType)
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`

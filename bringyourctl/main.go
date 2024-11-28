@@ -368,10 +368,12 @@ func sendAuthVerify(opts docopt.Opts) {
 
 	awsMessageSender := controller.GetAWSMessageSender()
 
+	code := model.Testing_CreateVerifyCode()
+
 	err := awsMessageSender.SendAccountMessageTemplate(
 		userAuth,
 		&controller.AuthVerifyTemplate{
-			VerifyCode: "abcdefghij",
+			VerifyCode: code,
 		},
 	)
 	if err != nil {
