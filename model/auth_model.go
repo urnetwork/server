@@ -203,6 +203,18 @@ func AuthLogin(
 ) (*AuthLoginResult, error) {
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
+	if login.AuthJwt != nil {
+		server.Logger().Printf("login JWT %s\n", *login.AuthJwt)
+	} else {
+		server.Logger().Printf("login JWT is nil")
+	}
+
+	if login.AuthJwtType != nil {
+		server.Logger().Printf("login JWT type %s\n", *login.AuthJwtType)
+	} else {
+		server.Logger().Printf("login JWT type is nil")
+	}
+
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
 		return nil, maxUserAuthAttemptsError()
