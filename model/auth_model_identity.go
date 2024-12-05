@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"math/big"
+	mathrand "math/rand"
 	"net/mail"
 	"strings"
 
@@ -100,12 +100,8 @@ const (
 func createVerifyCode(verifyCodeType VerifyCodeType) string {
 
 	if verifyCodeType == VerifyCodeNumeric {
-		max := big.NewInt(1000000) // 10^6
-		n, err := rand.Int(rand.Reader, max)
-		if err != nil {
-			panic(err)
-		}
-		return fmt.Sprintf("%06d", n.Int64())
+		code := mathrand.Int63n(1000000)
+		return fmt.Sprintf("%06d", code)
 	} else {
 		verifyCode := make([]byte, 4)
 		_, err := rand.Read(verifyCode)
