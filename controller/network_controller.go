@@ -24,10 +24,17 @@ func NetworkCreate(
 
 	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 
+	verifyUseNumeric := false
+
+	if networkCreate.VerifyUseNumeric {
+		verifyUseNumeric = true
+	}
+
 	// if verification required, send it
 	if result.VerificationRequired != nil {
 		verifySend := AuthVerifySendArgs{
-			UserAuth: result.VerificationRequired.UserAuth,
+			UserAuth:   result.VerificationRequired.UserAuth,
+			UseNumeric: verifyUseNumeric,
 		}
 		AuthVerifySend(verifySend, session)
 	} else {

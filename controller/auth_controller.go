@@ -51,7 +51,8 @@ func AuthLoginWithPassword(
 }
 
 type AuthVerifySendArgs struct {
-	UserAuth string `json:"user_auth"`
+	UserAuth   string `json:"user_auth"`
+	UseNumeric bool   `json:"use_numeric,omitempty"`
 }
 
 type AuthVerifySendResult struct {
@@ -64,8 +65,14 @@ func AuthVerifySend(
 ) (*AuthVerifySendResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&verifySend.UserAuth)
 
+	verifyCodeType := model.VerifyCodeDefault
+	if verifySend.UseNumeric {
+		verifyCodeType = model.VerifyCodeNumeric
+	}
+
 	verifyCreateCode := model.AuthVerifyCreateCodeArgs{
 		UserAuth: *userAuth,
+		CodeType: verifyCodeType,
 	}
 	verifyCreateCodeResult, err := model.AuthVerifyCreateCode(verifyCreateCode, session)
 	if err != nil {

@@ -3,6 +3,8 @@ package model
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	mathrand "math/rand"
 	"net/mail"
 	"strings"
 
@@ -88,17 +90,30 @@ func createPasswordSalt() []byte {
 	return passwordSalt
 }
 
-func createVerifyCode() string {
-	verifyCode := make([]byte, 4)
-	_, err := rand.Read(verifyCode)
-	if err != nil {
-		panic(err)
+type VerifyCodeType int
+
+const (
+	VerifyCodeDefault VerifyCodeType = iota
+	VerifyCodeNumeric
+)
+
+func createVerifyCode(verifyCodeType VerifyCodeType) string {
+
+	if verifyCodeType == VerifyCodeNumeric {
+		code := mathrand.Int63n(1000000)
+		return fmt.Sprintf("%06d", code)
+	} else {
+		verifyCode := make([]byte, 4)
+		_, err := rand.Read(verifyCode)
+		if err != nil {
+			panic(err)
+		}
+		return strings.ToLower(hex.EncodeToString(verifyCode))
 	}
-	return strings.ToLower(hex.EncodeToString(verifyCode))
 }
 
 func Testing_CreateVerifyCode() string {
-	return createVerifyCode()
+	return createVerifyCode(VerifyCodeNumeric)
 }
 
 func createResetCode() string {

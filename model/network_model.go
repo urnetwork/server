@@ -43,14 +43,15 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 }
 
 type NetworkCreateArgs struct {
-	UserName    string  `json:"user_name"`
-	UserAuth    *string `json:"user_auth,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	Password    *string `json:"password,omitempty"`
-	NetworkName string  `json:"network_name"`
-	Terms       bool    `json:"terms"`
-	GuestMode   bool    `json:"guest_mode"`
+	UserName         string  `json:"user_name"`
+	UserAuth         *string `json:"user_auth,omitempty"`
+	AuthJwt          *string `json:"auth_jwt,omitempty"`
+	AuthJwtType      *string `json:"auth_jwt_type,omitempty"`
+	Password         *string `json:"password,omitempty"`
+	NetworkName      string  `json:"network_name"`
+	Terms            bool    `json:"terms"`
+	GuestMode        bool    `json:"guest_mode"`
+	VerifyUseNumeric bool    `json:"verify_use_numeric"`
 }
 
 type NetworkCreateResult struct {
@@ -61,9 +62,9 @@ type NetworkCreateResult struct {
 }
 
 type NetworkCreateResultNetwork struct {
-	ByJwt       *string      `json:"by_jwt,omitempty"`
+	ByJwt       *string   `json:"by_jwt,omitempty"`
 	NetworkId   server.Id `json:"network_id,omitempty"`
-	NetworkName string       `json:"network_name,omitempty"`
+	NetworkName string    `json:"network_name,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -530,7 +531,7 @@ func NetworkUpdate(
 
 type Network struct {
 	NetworkId   *server.Id `json:"network_id"`
-	NetworkName string        `json:"network_name"`
+	NetworkName string     `json:"network_name"`
 	AdminUserId *server.Id `json:"admin_user_id"`
 }
 
