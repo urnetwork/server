@@ -1598,4 +1598,12 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE account_payment ALTER COLUMN wallet_id DROP NOT NULL
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network ADD COLUMN create_time timestamp NOT NULL default now()
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location ADD COLUMN network_id uuid NULL
+    `),
 }

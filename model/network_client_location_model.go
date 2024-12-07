@@ -996,20 +996,27 @@ func SetConnectionLocation(
 	connectionLocationScores *ConnectionLocationScores,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// note the network_id is allowed to be nil for a connection without an associated client
 		result, err := tx.Query(
 			ctx,
 			`
                 SELECT
-                    client_id
+                    network_client_connection.client_id,
+                    network_client.network_id
                 FROM network_client_connection 
-                WHERE connection_id = $1
+                LEFT JOIN network_client ON network_client.client_id = network_client_connection.client_id
+                WHERE network_client_connection.connection_id = $1
             `,
 			connectionId,
 		)
 		var clientId *server.Id
+		var networkId *server.Id
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&clientId))
+				server.Raise(result.Scan(
+					&clientId,
+					&networkId,
+				))
 			}
 		})
 
@@ -1055,9 +1062,10 @@ func SetConnectionLocation(
 		            net_type_proxy,
 		            net_type_tor,
 		            net_type_relay,
-		            net_type_hosting
+		            net_type_hosting,
+		            network_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -1068,7 +1076,8 @@ func SetConnectionLocation(
                     net_type_proxy = $7,
                     net_type_tor = $8,
                     net_type_relay = $9,
-                    net_type_hosting = $10
+                    net_type_hosting = $10,
+                    network_id = $11
             `,
 			connectionId,
 			clientId,
@@ -1080,6 +1089,7 @@ func SetConnectionLocation(
 			connectionLocationScores.NetTypeTor,
 			connectionLocationScores.NetTypeRelay,
 			connectionLocationScores.NetTypeHosting,
+			networkId,
 		))
 	})
 }
