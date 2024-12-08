@@ -2073,7 +2073,7 @@ func FindProviders2(
 	}
 
 	clientIds := maps.Keys(clientScores)
-	mathrand.Shuffle(len(clientIds), func(i, j) {
+	mathrand.Shuffle(len(clientIds), func(i int, j int) {
 		clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 	})
 

@@ -262,7 +262,8 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			connectionId := ConnectNetworkClient(
 				ctx,
 				clientId,
-				"0.0.0.0:0",
+				// use a unique ip per connection
+				fmt.Sprintf("0.0.0.%d:0", i),
 				handlerId,
 			)
 
