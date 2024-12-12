@@ -42,8 +42,16 @@ func AuthLoginWithPassword(
 	result, err := model.AuthLoginWithPassword(loginWithPassword, session)
 	// if verification required, send it
 	if result != nil && result.VerificationRequired != nil {
+
+		useNumeric := false
+
+		if loginWithPassword.VerifyOtpNumeric {
+			useNumeric = true
+		}
+
 		verifySend := AuthVerifySendArgs{
-			UserAuth: result.VerificationRequired.UserAuth,
+			UserAuth:   result.VerificationRequired.UserAuth,
+			UseNumeric: useNumeric,
 		}
 		AuthVerifySend(verifySend, session)
 	}
