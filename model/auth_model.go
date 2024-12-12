@@ -322,8 +322,9 @@ func AuthLogin(
 }
 
 type AuthLoginWithPasswordArgs struct {
-	UserAuth string `json:"user_auth"`
-	Password string `json:"password"`
+	UserAuth         string `json:"user_auth"`
+	Password         string `json:"password"`
+	VerifyOtpNumeric bool   `json:"verify_otp_numeric,omitempty"`
 }
 
 type AuthLoginWithPasswordResult struct {
