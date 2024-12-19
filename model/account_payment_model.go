@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -1162,6 +1163,11 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 
 			}
 		})
+	})
+
+	slices.SortFunc(networkPayments, func(a *AccountPayment, b *AccountPayment) int {
+		// descending in create time
+		return -a.CreateTime.Compare(b.CreateTime)
 	})
 
 	return networkPayments, nil
