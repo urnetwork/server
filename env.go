@@ -29,13 +29,21 @@ support two deployment cases:
 
 */
 
+func getenvWithDefault(key string, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
 func initGlog() {
 	if !slices.Contains(os.Args, "-logtostderr") {
 		fmt.Printf("[env]glog not configured from command line. Using default configuration.\n")
 
-		flag.Set("logtostderr", "true")
-		flag.Set("stderrthreshold", "INFO")
-		flag.Set("v", "0")
+		flag.Set("logtostderr", getenvWithDefault("BY_LOG_LOGTOSTDERR", "true"))
+		flag.Set("stderrthreshold", getenvWithDefault("BY_LOG_STDERRTHRESHOLD", "INFO"))
+		flag.Set("v", getenvWithDefault("BY_LOG_V", "0"))
 	}
 }
 
