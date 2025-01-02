@@ -51,7 +51,13 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		var err error
 		addressOnly, _, err = net.SplitHostPort(remoteAddr)
-		server.Raise(err)
+		if err != nil {
+			if strings.Contains(err.Error(), "missing port in address") {
+				addressOnly = remoteAddr
+			} else {
+				server.Raise(err)
+			}
+		}
 	}
 
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)
