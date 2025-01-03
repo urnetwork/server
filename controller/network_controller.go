@@ -93,3 +93,17 @@ func UpdateNetworkName(
 
 	return &UpdateNetworkNameResult{}, nil
 }
+
+func UpgradeFromGuest(
+	upgradeGuest model.UpgradeGuestArgs,
+	session *session.ClientSession,
+) (*model.UpgradeGuestResult, error) {
+
+	result, err := model.UpgradeGuest(
+		upgradeGuest,
+		session,
+	)
+
+	return result, err
+
+}
