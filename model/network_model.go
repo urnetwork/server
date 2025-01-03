@@ -550,7 +550,11 @@ func NetworkUpdate(
 type UpgradeGuestResult struct {
 	Error                *UpgradeGuestError              `json:"error,omitempty"`
 	VerificationRequired *UpgradeGuestResultVerification `json:"verification_required,omitempty"`
-	ByJwt                *string                         `json:"by_jwt,omitempty"`
+	Network              *UpgradeGuestNetwork            `json:"network,omitempty"`
+}
+
+type UpgradeGuestNetwork struct {
+	ByJwt *string `json:"by_jwt,omitempty"`
 }
 
 type UpgradeGuestResultVerification struct {
@@ -742,7 +746,9 @@ func UpgradeGuest(
 				byJwtSigned := byJwt.Sign()
 
 				result = &UpgradeGuestResult{
-					ByJwt: &byJwtSigned,
+					Network: &UpgradeGuestNetwork{
+						ByJwt: &byJwtSigned,
+					},
 				}
 
 			}
