@@ -183,18 +183,8 @@ func NetworkCreate(
 	}
 
 	// user is create an authenticated network
+
 	// check if the network name is already taken
-	// taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 1)
-
-	// if taken {
-	// 	result := &NetworkCreateResult{
-	// 		Error: &NetworkCreateResultError{
-	// 			Message: "Network name not available.",
-	// 		},
-	// 	}
-	// 	return result, nil
-	// }
-
 	err := checkNetworkNameAvailability(networkCreate.NetworkName, session)
 	if err != nil {
 		result := &NetworkCreateResult{
@@ -562,19 +552,6 @@ type UpgradeGuestResult struct {
 	VerificationRequired *UpgradeGuestResultVerification `json:"verification_required,omitempty"`
 	ByJwt                *string                         `json:"by_jwt,omitempty"`
 }
-
-// type NetworkCreateResult struct {
-// 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
-// 	UserAuth             *string                          `json:"user_auth,omitempty"`
-// 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
-// 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
-// }
-
-// type NetworkCreateResultNetwork struct {
-// 	ByJwt       *string   `json:"by_jwt,omitempty"`
-// 	NetworkId   server.Id `json:"network_id,omitempty"`
-// 	NetworkName string    `json:"network_name,omitempty"`
-// }
 
 type UpgradeGuestResultVerification struct {
 	UserAuth string `json:"user_auth"`
