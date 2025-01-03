@@ -54,6 +54,14 @@ type NetworkCreateArgs struct {
 	VerifyUseNumeric bool    `json:"verify_use_numeric"`
 }
 
+type UpgradeGuestArgs struct {
+	NetworkName string  `json:"network_name"`
+	UserAuth    *string `json:"user_auth,omitempty"`
+	AuthJwt     *string `json:"auth_jwt,omitempty"`
+	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
 type NetworkCreateResult struct {
 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
 	UserAuth             *string                          `json:"user_auth,omitempty"`
@@ -176,12 +184,22 @@ func NetworkCreate(
 
 	// user is create an authenticated network
 	// check if the network name is already taken
-	taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 1)
+	// taken := networkNameSearch.AnyAround(session.Ctx, networkCreate.NetworkName, 1)
 
-	if taken {
+	// if taken {
+	// 	result := &NetworkCreateResult{
+	// 		Error: &NetworkCreateResultError{
+	// 			Message: "Network name not available.",
+	// 		},
+	// 	}
+	// 	return result, nil
+	// }
+
+	err := checkNetworkNameAvailability(networkCreate.NetworkName, session)
+	if err != nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
-				Message: "Network name not available.",
+				Message: err.Error(),
 			},
 		}
 		return result, nil
@@ -457,45 +475,35 @@ type NetworkUpdateResult struct {
 	Error *NetworkUpdateError `json:"error,omitempty"`
 }
 
-func NetworkUpdate(
-	networkUpdate NetworkUpdateArgs,
+func checkNetworkNameAvailability(
+	networkName string,
 	session *session.ClientSession,
-) (*NetworkUpdateResult, error) {
+) (err error) {
 
 	var existingNetworkId *server.Id
-	var networkCreateResult = &NetworkUpdateResult{}
-	networkName := strings.TrimSpace(networkUpdate.NetworkName)
 
 	if len(networkName) < 5 {
-		networkCreateResult = &NetworkUpdateResult{
-			Error: &NetworkUpdateError{
-				Message: "Network name must have at least 5 characters",
-			},
-		}
-		return networkCreateResult, nil
+		err = errors.New("Network name must have at least 5 characters")
+		return
 	}
 
 	taken := networkNameSearch.AnyAround(session.Ctx, networkName, 1)
 
 	if taken {
-		networkCreateResult = &NetworkUpdateResult{
-			Error: &NetworkUpdateError{
-				Message: "Network name not available.",
-			},
-		}
-		return networkCreateResult, nil
+		err = errors.New("Network name not available")
+		return
 	}
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 
-		result, err := tx.Query(
+		result, queryErr := tx.Query(
 			session.Ctx,
 			`
 				SELECT network_id FROM network WHERE network_name = $1
 			`,
 			networkName,
 		)
-		server.WithPgResult(result, err, func() {
+		server.WithPgResult(result, queryErr, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&existingNetworkId))
 			}
@@ -503,13 +511,33 @@ func NetworkUpdate(
 
 		if existingNetworkId != nil {
 
-			networkCreateResult = &NetworkUpdateResult{
-				Error: &NetworkUpdateError{
-					Message: "Network name not available.",
-				},
-			}
+			err = errors.New("Network name not available")
 			return
+
 		}
+	})
+
+	return err
+}
+
+func NetworkUpdate(
+	networkUpdate NetworkUpdateArgs,
+	session *session.ClientSession,
+) (*NetworkUpdateResult, error) {
+	var networkCreateResult = &NetworkUpdateResult{}
+	networkName := strings.TrimSpace(networkUpdate.NetworkName)
+
+	err := checkNetworkNameAvailability(networkName, session)
+	if err != nil {
+		networkCreateResult = &NetworkUpdateResult{
+			Error: &NetworkUpdateError{
+				Message: err.Error(),
+			},
+		}
+		return networkCreateResult, nil
+	}
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
 
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -527,6 +555,243 @@ func NetworkUpdate(
 	})
 
 	return networkCreateResult, nil
+}
+
+type UpgradeGuestResult struct {
+	Error                *UpgradeGuestError              `json:"error,omitempty"`
+	VerificationRequired *UpgradeGuestResultVerification `json:"verification_required,omitempty"`
+	ByJwt                *string                         `json:"by_jwt,omitempty"`
+}
+
+// type NetworkCreateResult struct {
+// 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
+// 	UserAuth             *string                          `json:"user_auth,omitempty"`
+// 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
+// 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
+// }
+
+// type NetworkCreateResultNetwork struct {
+// 	ByJwt       *string   `json:"by_jwt,omitempty"`
+// 	NetworkId   server.Id `json:"network_id,omitempty"`
+// 	NetworkName string    `json:"network_name,omitempty"`
+// }
+
+type UpgradeGuestResultVerification struct {
+	UserAuth string `json:"user_auth"`
+}
+
+type UpgradeGuestError struct {
+	Message string `json:"message"`
+}
+
+func UpgradeGuest(
+	upgradeGuest UpgradeGuestArgs,
+	session *session.ClientSession,
+) (*UpgradeGuestResult, error) {
+
+	userAuth, _ := NormalUserAuthV1(upgradeGuest.UserAuth)
+
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	if !allow {
+		return nil, maxUserAuthAttemptsError()
+	}
+
+	var result = &UpgradeGuestResult{}
+	networkName := strings.TrimSpace(upgradeGuest.NetworkName)
+
+	err := checkNetworkNameAvailability(networkName, session)
+	if err != nil {
+		result = &UpgradeGuestResult{
+			Error: &UpgradeGuestError{
+				Message: err.Error(),
+			},
+		}
+		return result, nil
+	}
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+
+		if upgradeGuest.UserAuth != nil {
+
+			/**
+			 * Upgrade from guest from email + password
+			 */
+
+			if userAuth == nil {
+				result = &UpgradeGuestResult{
+					Error: &UpgradeGuestError{
+						Message: "Invalid email or phone number.",
+					},
+				}
+				return
+			}
+
+			/**
+			 * Validate the user does not exist
+			 */
+
+			var userId *server.Id
+
+			userCheck, err := tx.Query(
+				session.Ctx,
+				`
+					 SELECT user_id FROM network_user WHERE user_auth = $1
+				 `,
+				userAuth,
+			)
+			server.WithPgResult(userCheck, err, func() {
+				if userCheck.Next() {
+					server.Raise(userCheck.Scan(&userId))
+				}
+			})
+
+			if userId != nil {
+				result = &UpgradeGuestResult{
+					Error: &UpgradeGuestError{
+						Message: "User already exists",
+					},
+				}
+				return
+			}
+
+			/**
+			 * Handle password
+			 */
+
+			passwordSalt := createPasswordSalt()
+			passwordHash := computePasswordHashV1([]byte(*upgradeGuest.Password), passwordSalt)
+
+			/**
+			 * Update network user from guest
+			 */
+
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+								UPDATE network_user
+								SET
+										auth_type = $2,
+										user_auth = $3,
+										password_hash = $4,
+										password_salt = $5
+	
+								WHERE
+										user_id = $1
+						`,
+				session.ByJwt.UserId,
+				AuthTypePassword,
+				userAuth,
+				passwordHash,
+				passwordSalt,
+			))
+
+			// do we need to run auditNetworkCreate on the upgrade from guest -> normal account?
+
+			networkNameSearch.Add(session.Ctx, networkName, session.ByJwt.NetworkId, 0)
+
+			result = &UpgradeGuestResult{
+				VerificationRequired: &UpgradeGuestResultVerification{
+					UserAuth: *userAuth,
+				},
+			}
+
+		} else if upgradeGuest.AuthJwt != nil && upgradeGuest.AuthJwtType != nil {
+
+			/**
+			 * Upgrade from guest from social login
+			 */
+
+			authJwt, _ := ParseAuthJwt(*upgradeGuest.AuthJwt, AuthType(*upgradeGuest.AuthJwtType))
+
+			if authJwt != nil {
+
+				/**
+				 * Validate the user does not exist
+				 */
+				normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+				var userId *server.Id
+
+				userCheck, err := tx.Query(
+					session.Ctx,
+					`
+					SELECT user_id FROM network_user WHERE user_auth = $1
+				`,
+					normalJwtUserAuth,
+				)
+				server.WithPgResult(userCheck, err, func() {
+					if userCheck.Next() {
+						server.Raise(userCheck.Scan(&userId))
+					}
+				})
+
+				if userId != nil {
+					result = &UpgradeGuestResult{
+						Error: &UpgradeGuestError{
+							Message: "User already exists",
+						},
+					}
+					return
+				}
+
+				/**
+				 * Update network user from guest
+				 */
+				server.RaisePgResult(tx.Exec(
+					session.Ctx,
+					`
+								UPDATE network_user
+								SET
+										auth_type = $2,
+										user_auth = $3,
+										auth_jwt = $4
+	
+								WHERE
+										user_id = $1
+						`,
+					session.ByJwt.UserId,
+					upgradeGuest.AuthJwtType,
+					normalJwtUserAuth,
+					upgradeGuest.AuthJwt,
+				))
+
+				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+				byJwt := jwt.NewByJwt(
+					session.ByJwt.NetworkId,
+					session.ByJwt.UserId,
+					networkName,
+					false,
+				)
+				byJwtSigned := byJwt.Sign()
+
+				result = &UpgradeGuestResult{
+					ByJwt: &byJwtSigned,
+				}
+
+			}
+
+		}
+
+		/**
+		 * Update the network name
+		 */
+		server.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+							UPDATE network
+							SET
+								network_name = $2
+
+							WHERE
+									network_id = $1
+					`,
+			session.ByJwt.NetworkId,
+			networkName,
+		))
+
+	})
+
+	return result, nil
 }
 
 type Network struct {
