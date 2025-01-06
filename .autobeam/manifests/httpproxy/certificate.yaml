@@ -1,0 +1,11 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-proxy-prod-ur-network
+spec:
+  secretName: wildcard-proxy-prod-ur-network
+  dnsNames:
+    - "*.proxy.prod.ur.network"
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
