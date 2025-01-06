@@ -123,7 +123,7 @@ func exchange(ctx context.Context, m *dns.Msg, address string) (*dns.Msg, time.D
 func resolveDoT(ctx context.Context, domain string, recordType uint16) ([]string, time.Time, error) {
 
 	// TLS resolver server (e.g., Cloudflare's DoT server)
-	serverAddr := "1.1.1.1:853" // Cloudflare DNS over TLS
+	serverAddr := "9.9.9.9:853" // Cloudflare DNS over TLS
 
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), recordType)
