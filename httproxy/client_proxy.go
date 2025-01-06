@@ -98,7 +98,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, []netip.Addr{netip.MustParseAddr("100.100.100.100")}, 1500)
+	dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, 1500)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
@@ -138,7 +138,6 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 	}()
 
 	proxy := goproxy.NewProxyHttpServer()
-	// proxy.Verbose = true
 
 	proxy.Tr = &http.Transport{
 		Dial: func(network, addr string) (net.Conn, error) {
@@ -155,7 +154,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 	}
 
 	proxy.ConnectDialWithReq = func(req *http.Request, network string, addr string) (net.Conn, error) {
-		return tnet.DialContext(ctx, network, addr)
+		return tnet.DialContext(req.Context(), network, addr)
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
