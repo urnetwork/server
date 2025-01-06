@@ -19,6 +19,7 @@ spec:
         - image: ${dockerImage}
           imagePullPolicy: IfNotPresent
           name: httpproxy
+          command: ["/app/httproxy"]
           env:
             - name: CERT_FILE
               value: "/etc/ssl/certs/proxy/tls.crt"
