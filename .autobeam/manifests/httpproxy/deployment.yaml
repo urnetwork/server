@@ -38,7 +38,6 @@ spec:
               name: httpproxy
               protocol: TCP
             - containerPort: 9090
-              hostPort: 9090
               name: metrics
               protocol: TCP
           resources:
