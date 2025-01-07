@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: httpproxy
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9090"
+      prometheus.io/path: "/metrics"
     spec:
       containers:
         - image: ${dockerImage}
@@ -36,6 +40,10 @@ spec:
             - containerPort: 30001
               hostPort: 30001
               name: httpproxy
+              protocol: TCP
+            - containerPort: 9090
+              hostPort: 9090
+              name: metrics
               protocol: TCP
           resources:
             limits:
