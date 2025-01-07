@@ -112,6 +112,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 				fmt.Println("packet write error:", err)
 			}
 			stats.bytesReceived(uint64(len(packet)))
+			bytesReceived.Add(float64(len(packet)))
 		},
 		protocol.ProvideMode_Network,
 	)
@@ -134,6 +135,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 				time.Second*15,
 			)
 			stats.bytesSent(uint64(len(packet)))
+			bytesSent.Add(float64(len(packet)))
 		}
 	}()
 

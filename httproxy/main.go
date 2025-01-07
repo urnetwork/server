@@ -14,11 +14,60 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/urfave/cli/v2"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/httproxy/connprovider"
 	"github.com/urnetwork/server/httproxy/ratelimiter"
+)
+
+// Prometheus metrics
+var (
+	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_active_connections",
+		Help:      "The current number of active proxy connections",
+	})
+
+	totalConnections = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_total_connections",
+		Help:      "The total number of proxy connections made",
+	})
+
+	bytesSent = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_bytes_sent_total",
+		Help:      "The total number of bytes sent through the proxy",
+	})
+
+	bytesReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_bytes_received_total",
+		Help:      "The total number of bytes received through the proxy",
+	})
+
+	requestDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_request_duration_seconds",
+		Help:      "The duration of proxy requests in seconds",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	rateLimitExceeded = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_rate_limit_exceeded_total",
+		Help:      "The total number of requests that exceeded the rate limit",
+	})
+
+	authFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Name:      "httproxy_auth_failures_total",
+		Help:      "The total number of authentication failures",
+	})
 )
 
 type ConnectionConfig struct {
@@ -44,6 +93,7 @@ func main() {
 		platformURL string
 		certFile    string
 		keyFile     string
+		metricsAddr string
 		redis       struct {
 			addr     string
 			password string
@@ -82,6 +132,13 @@ func main() {
 				EnvVars:     []string{"PROXY_ADDR"},
 				Destination: &cfg.proxyAddr,
 				Value:       ":10000",
+			},
+			&cli.StringFlag{
+				Name:        "metrics-addr",
+				Usage:       "Prometheus metrics endpoint address",
+				EnvVars:     []string{"METRICS_ADDR"},
+				Destination: &cfg.metricsAddr,
+				Value:       ":9090",
 			},
 			&cli.StringFlag{
 				Name:        "cert-file",
@@ -147,6 +204,11 @@ func main() {
 			rl := ratelimiter.New(rdb)
 
 			proxyFunc := func(w http.ResponseWriter, r *http.Request) {
+				start := time.Now()
+				defer func() {
+					requestDuration.Observe(time.Since(start).Seconds())
+				}()
+
 				log := log.With("path", r.URL.Path, "method", r.Method)
 				hostname := r.TLS.ServerName
 
@@ -169,6 +231,7 @@ func main() {
 					err := val.Err()
 					if err != nil {
 						log.Error("failed to get auth code", "error", err)
+						authFailures.Inc()
 						http.Error(w, "proxy not found", http.StatusNotFound)
 						return
 					}
@@ -192,7 +255,6 @@ func main() {
 				}
 
 				proxy.ServeHTTP(w, r)
-
 			}
 
 			mux.HandleFunc("OPTIONS /add-client", func(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +280,6 @@ func main() {
 			}
 
 			mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(
 					StatusResponse{
@@ -229,10 +290,13 @@ func main() {
 						Host:          hostname,
 					},
 				)
-
 			})
 
 			mux.HandleFunc("POST /add-client", func(w http.ResponseWriter, r *http.Request) {
+				start := time.Now()
+				defer func() {
+					requestDuration.Observe(time.Since(start).Seconds())
+				}()
 
 				log := log.With("path", r.URL.Path, "method", r.Method)
 				w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -243,14 +307,12 @@ func main() {
 					return
 				}
 
-				// Assert the address to *net.TCPAddr
 				ta, ok := a.(*net.TCPAddr)
 				if !ok {
 					http.Error(w, "Unexpected address type", http.StatusInternalServerError)
 					return
 				}
 
-				// Get the port
 				port := ta.Port
 
 				cr := ConnectRequest{}
@@ -274,6 +336,7 @@ func main() {
 				jwt, err := connprovider.ConvertAuthCodeToJWT(ctx, cfg.apiURL, cr.AuthCode)
 				if err != nil {
 					log.Error("failed to convert auth code to jwt", "error", err)
+					authFailures.Inc()
 					http.Error(w, "failed to convert auth code to jwt", http.StatusUnauthorized)
 					return
 				}
@@ -281,6 +344,7 @@ func main() {
 				byjwt, err := connect.ParseByJwtUnverified(jwt)
 				if err != nil {
 					log.Error("failed to parse byJwt", "error", err)
+					authFailures.Inc()
 					http.Error(w, "failed to parse jwt", http.StatusUnauthorized)
 					return
 				}
@@ -288,6 +352,7 @@ func main() {
 				err = rl.AllowPerMinute(ctx, fmt.Sprintf("clientid-%s", byjwt.ClientId.String()), cfg.rateLimits.networkPerMinute)
 				if err == ratelimiter.ErrRateLimitExceeded {
 					log.Error("rate limit exceeded", "error", err)
+					rateLimitExceeded.Inc()
 					http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 					return
 				}
@@ -317,6 +382,9 @@ func main() {
 				proxies[id.String()] = proxy
 				mu.Unlock()
 
+				totalConnections.Inc()
+				activeConnections.Inc()
+
 				w.Header().Set("Content-Type", "application/json")
 
 				serverName := r.TLS.ServerName
@@ -331,6 +399,19 @@ func main() {
 				)
 				log.Info("added client", "id", id, "host", strings.Join(parts, "."), "port", port)
 			})
+
+			// Start metrics server
+			go func() {
+				metricsServer := &http.Server{
+					Addr:    cfg.metricsAddr,
+					Handler: promhttp.Handler(),
+				}
+				log.Info("serving metrics on", "addr", cfg.metricsAddr)
+				err := metricsServer.ListenAndServe()
+				if err != nil && err != http.ErrServerClosed {
+					log.Error("metrics server error", "error", err)
+				}
+			}()
 
 			server := &http.Server{
 				Addr: cfg.addr,
@@ -349,9 +430,7 @@ func main() {
 
 			log.Info("serving requests on", "addr", cfg.addr)
 			return server.ListenAndServeTLS(cfg.certFile, cfg.keyFile)
-
 		},
 	}
 	app.RunAndExitOnError()
-
 }
