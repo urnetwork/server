@@ -3,22 +3,22 @@ kind: DaemonSet
 metadata:
   annotations:
   labels:
-    name: httpproxy
-  name: httpproxy
+    name: httproxy
+  name: httproxy
 spec:
   revisionHistoryLimit: 0
   selector:
     matchLabels:
-      app: httpproxy
+      app: httproxy
   template:
     metadata:
       labels:
-        app: httpproxy
+        app: httproxy
     spec:
       containers:
         - image: ${dockerImage}
           imagePullPolicy: IfNotPresent
-          name: httpproxy
+          name: httproxy
           command: ["/app/httproxy"]
           env:
             - name: CERT_FILE
@@ -35,7 +35,7 @@ spec:
           ports:
             - containerPort: 30001
               hostPort: 30001
-              name: httpproxy
+              name: httproxy
               protocol: TCP
             - containerPort: 9090
               name: metrics
