@@ -1,0 +1,11 @@
+name: "httpproxy"
+docker_image: "bringyour/server"
+main_branch: "main"
+platforms:
+  - "linux/amd64"
+  - "linux/arm64"
+pr_comment: |
+  After merging deploy it here: https://argo.prod.ur.network/applications/argo-cd/httpproxy?view=tree&resource=
+gitops_repo:
+  repo_url: git@github.com:urnetwork/gitops-prod.git
+  branch: main

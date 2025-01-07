@@ -10,6 +10,7 @@ This project provides an HTTP proxy server that routes all network connections t
 - TLS encryption
 - Redis-based session management
 - Connection statistics monitoring
+- Prometheus metrics export
 
 ## Running the Service
 
@@ -19,6 +20,7 @@ This project provides an HTTP proxy server that routes all network connections t
 - `API_URL`: API endpoint URL (default: `https://api.bringyour.com`)
 - `PLATFORM_URL`: Platform WebSocket URL (default: `wss://connect.bringyour.com`)
 - `PROXY_ADDR`: Proxy listener address (default: `:10000`)
+- `METRICS_ADDR`: Prometheus metrics endpoint address (default: `:9090`)
 - `CERT_FILE`: Path to TLS certificate file (required)
 - `KEY_FILE`: Path to TLS private key file (required)
 - `REDIS_ADDR`: Redis server address (required)
@@ -111,5 +113,58 @@ Run tests:
 
 ```bash
 go test ./...
+```
+
+## Prometheus Metrics
+
+The service exposes the following Prometheus metrics at `/metrics` endpoint:
+
+### Connection Metrics
+- `urnetwork_httproxy_active_connections`: Current number of active proxy connections
+- `urnetwork_httproxy_total_connections`: Total number of proxy connections made
+- `urnetwork_httproxy_bytes_sent_total`: Total number of bytes sent through the proxy
+- `urnetwork_httproxy_bytes_received_total`: Total number of bytes received through the proxy
+
+### Performance Metrics
+- `urnetwork_httproxy_request_duration_seconds`: Histogram of request durations
+
+### Error Metrics
+- `urnetwork_httproxy_rate_limit_exceeded_total`: Number of requests that exceeded rate limits
+- `urnetwork_httproxy_auth_failures_total`: Number of authentication failures
+
+### Kubernetes Integration
+
+The service includes a `PodMonitor` resource for automatic metric collection in Kubernetes environments with the Prometheus Operator:
+
+```yaml
+# podmonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: httproxy
+  labels:
+    app: httproxy
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: httproxy
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+```
+
+Apply the PodMonitor:
+```bash
+kubectl apply -f podmonitor.yaml
+```
+
+For non-Kubernetes environments, use this Prometheus configuration:
+```yaml
+scrape_configs:
+  - job_name: 'httproxy'
+    static_configs:
+      - targets: ['localhost:9090']
 ```
 

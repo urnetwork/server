@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  annotations:
+  labels:
+    name: httproxy
+  name: httproxy
+spec:
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: httproxy
+  template:
+    metadata:
+      labels:
+        app: httproxy
+    spec:
+      containers:
+        - image: ${dockerImage}
+          imagePullPolicy: IfNotPresent
+          name: httproxy
+          command: ["/app/httproxy"]
+          env:
+            - name: CERT_FILE
+              value: "/etc/ssl/certs/proxy/tls.crt"
+            - name: KEY_FILE
+              value: "/etc/ssl/certs/proxy/tls.key"
+            - name: REDIS_ADDR
+              value: "redis-master:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis
+                  key: redis-password
+          ports:
+            - containerPort: 30001
+              hostPort: 30001
+              name: httproxy
+              protocol: TCP
+            - containerPort: 9090
+              name: metrics
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: proxy-cert
+              mountPath: /etc/ssl/certs/proxy
+              readOnly: true
+      volumes:
+        - name: proxy-cert
+          secret:
+            secretName: wildcard-proxy-prod-ur-network
+      restartPolicy: Always

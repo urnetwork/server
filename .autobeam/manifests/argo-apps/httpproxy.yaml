@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: httpproxy
+spec:
+  destination:
+    namespace: urnetwork
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    directory:
+      recurse: true
+    path: httpproxy
+    repoURL:  git@github.com:urnetwork/gitops-prod.git
+    targetRevision: HEAD
+  syncPolicy:
+    syncOptions:
+      - PruneLast=true
+      - CreateNamespace=true

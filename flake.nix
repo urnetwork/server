@@ -1,17 +1,19 @@
 {
-  description = "ethereum-validator-watch";
+  description = "urnetwork server";
   inputs = {
-    devshell = {
-      url = "github:numtide/devshell";
-      inputs.systems.follows = "systems";
+
+    autobeam = {
+      url = "github:draganm/autobeam";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-    nixpkgs = { url = "github:NixOS/nixpkgs/nixos-24.05"; };
+
+    nixpkgs = { url = "github:NixOS/nixpkgs/nixos-24.11"; };
 
     systems.url = "github:nix-systems/default";
 
   };
 
-  outputs = { self, nixpkgs, systems, ... }@inputs:
+  outputs = { self, nixpkgs, systems, autobeam, ... }@inputs:
     let
       eachSystem = f:
         nixpkgs.lib.genAttrs (import systems) (system:
@@ -21,17 +23,19 @@
           }));
 
     in {
-      devShells = eachSystem (pkgs: {
-        default = pkgs.mkShell {
-          shellHook = ''
-            # Set here the env vars you want to be available in the shell
-          '';
-          hardeningDisable = [ "all" ];
+      devShells = eachSystem (pkgs:
+        let autobeam_ = autobeam.packages.${pkgs.system}.default;
+        in {
+          default = pkgs.mkShell {
+            shellHook = ''
+              # Set here the env vars you want to be available in the shell
+            '';
+            hardeningDisable = [ "all" ];
 
-          packages =
-            [ pkgs.go_1_23 pkgs.tmux pkgs.nodejs_20 pkgs.python39Full ];
-        };
-      });
+            packages =
+              [ autobeam_ pkgs.go pkgs.tmux pkgs.nodejs_20 pkgs.python39Full ];
+          };
+        });
     };
 }
 
