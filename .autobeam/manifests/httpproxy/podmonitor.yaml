@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: httproxy
+  labels:
+    app: httproxy
+spec:
+  selector:
+    matchLabels:
+      app: httproxy
+  podMetricsEndpoints:
+    - port: metrics # The port name in the pod spec where metrics are exposed
+      path: /metrics
+      interval: 30s # Scrape interval
+      scrapeTimeout: 10s

@@ -120,19 +120,47 @@ go test ./...
 The service exposes the following Prometheus metrics at `/metrics` endpoint:
 
 ### Connection Metrics
-- `httproxy_active_connections`: Current number of active proxy connections
-- `httproxy_total_connections`: Total number of proxy connections made
-- `httproxy_bytes_sent_total`: Total number of bytes sent through the proxy
-- `httproxy_bytes_received_total`: Total number of bytes received through the proxy
+- `urnetwork_httproxy_active_connections`: Current number of active proxy connections
+- `urnetwork_httproxy_total_connections`: Total number of proxy connections made
+- `urnetwork_httproxy_bytes_sent_total`: Total number of bytes sent through the proxy
+- `urnetwork_httproxy_bytes_received_total`: Total number of bytes received through the proxy
 
 ### Performance Metrics
-- `httproxy_request_duration_seconds`: Histogram of request durations
+- `urnetwork_httproxy_request_duration_seconds`: Histogram of request durations
 
 ### Error Metrics
-- `httproxy_rate_limit_exceeded_total`: Number of requests that exceeded rate limits
-- `httproxy_auth_failures_total`: Number of authentication failures
+- `urnetwork_httproxy_rate_limit_exceeded_total`: Number of requests that exceeded rate limits
+- `urnetwork_httproxy_auth_failures_total`: Number of authentication failures
 
-Example Prometheus configuration:
+### Kubernetes Integration
+
+The service includes a `PodMonitor` resource for automatic metric collection in Kubernetes environments with the Prometheus Operator:
+
+```yaml
+# podmonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: httproxy
+  labels:
+    app: httproxy
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: httproxy
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+```
+
+Apply the PodMonitor:
+```bash
+kubectl apply -f podmonitor.yaml
+```
+
+For non-Kubernetes environments, use this Prometheus configuration:
 ```yaml
 scrape_configs:
   - job_name: 'httproxy'

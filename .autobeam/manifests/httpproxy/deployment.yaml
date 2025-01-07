@@ -12,10 +12,6 @@ spec:
       app: httpproxy
   template:
     metadata:
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
       labels:
         app: httpproxy
     spec:
