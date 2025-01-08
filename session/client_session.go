@@ -29,7 +29,12 @@ type ClientSession struct {
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	cancelCtx, cancel := context.WithCancel(req.Context())
 
-	clientAddress := req.Header.Get("X-Forwarded-For")
+	clientAddress := req.Header.Get("X-UR-Forwarded-For")
+
+	if clientAddress == "" {
+		clientAddress = req.Header.Get("X-Forwarded-For")
+	}
+
 	if clientAddress == "" {
 		clientAddress = req.RemoteAddr
 	}

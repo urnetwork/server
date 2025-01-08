@@ -157,7 +157,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// find the client ip:port from the request header
 	// `X-Forwarded-For` is added by the warp lb
-	clientAddress := r.Header.Get("X-Forwarded-For")
+	clientAddress := r.Header.Get("X-UR-Forwarded-For")
+
+	if clientAddress == "" {
+		clientAddress = r.Header.Get("X-Forwarded-For")
+	}
+
 	if clientAddress == "" {
 		// use the raw connection remote address
 		clientAddress = r.RemoteAddr

@@ -29,7 +29,12 @@ type response struct {
 var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
 
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
-	remoteAddr := r.Header.Get("X-Forwarded-For")
+
+	remoteAddr := r.Header.Get("X-UR-Forwarded-For")
+
+	if remoteAddr == "" {
+		remoteAddr = r.Header.Get("X-Forwarded-For")
+	}
 
 	if remoteAddr == "" {
 		remoteAddr = r.RemoteAddr
