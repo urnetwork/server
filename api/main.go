@@ -62,7 +62,7 @@ Options:
 		router.NewRoute("POST", "/auth/network-create", handlers.NetworkCreate),
 		router.NewRoute("POST", "/auth/code-create", handlers.AuthCodeCreate),
 		router.NewRoute("POST", "/auth/code-login", handlers.AuthCodeLogin),
-		router.NewRoute("POST", "/auth/upgrade-guest", handlers.AuthCodeLogin),
+		router.NewRoute("POST", "/auth/upgrade-guest", handlers.UpgradeGuest),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
