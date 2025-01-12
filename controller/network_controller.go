@@ -104,6 +104,25 @@ func UpgradeFromGuest(
 		session,
 	)
 
+	// if verification required, send it
+	if result.VerificationRequired != nil {
+		verifySend := AuthVerifySendArgs{
+			UserAuth:   result.VerificationRequired.UserAuth,
+			UseNumeric: true,
+		}
+		AuthVerifySend(verifySend, session)
+	} else {
+
+		if result.UserAuth != nil {
+			awsMessageSender := GetAWSMessageSender()
+			awsMessageSender.SendAccountMessageTemplate(
+				*result.UserAuth,
+				&NetworkWelcomeTemplate{},
+			)
+		}
+
+	}
+
 	return result, err
 
 }
