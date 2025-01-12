@@ -551,6 +551,7 @@ type UpgradeGuestResult struct {
 	Error                *UpgradeGuestError              `json:"error,omitempty"`
 	VerificationRequired *UpgradeGuestResultVerification `json:"verification_required,omitempty"`
 	Network              *UpgradeGuestNetwork            `json:"network,omitempty"`
+	UserAuth             *string                         `json:"user_auth,omitempty"`
 }
 
 type UpgradeGuestNetwork struct {
@@ -749,6 +750,7 @@ func UpgradeGuest(
 					Network: &UpgradeGuestNetwork{
 						ByJwt: &byJwtSigned,
 					},
+					UserAuth: &normalJwtUserAuth,
 				}
 
 			}
