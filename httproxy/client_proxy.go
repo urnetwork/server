@@ -71,6 +71,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connprovider.ConnectionOptions{
 			DeviceDescription: "my device",
 			DeviceSpec:        "httpproxy",
+			Location:          cc.Location,
 		},
 	)
 	if err != nil {

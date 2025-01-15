@@ -75,10 +75,12 @@ type ConnectionConfig struct {
 	ApiURL      string
 	PlatformURL string
 	JWT         string
+	Location    string
 }
 
 type ConnectRequest struct {
 	AuthCode string `json:"auth_code"`
+	Location string `json:"location"`
 }
 
 type ClientProxyResponse struct {
@@ -227,7 +229,7 @@ func main() {
 				if !ok {
 					log.Error("proxy not found, fetching auth jwt from redis", "auth", auth)
 
-					val := rdb.Get(ctx, fmt.Sprintf("proxy-auth-jwt-%s", auth))
+					val := rdb.Get(ctx, fmt.Sprintf("proxy-auth-jwt-cc-%s", auth))
 
 					err := val.Err()
 					if err != nil {
@@ -237,10 +239,13 @@ func main() {
 						return
 					}
 
-					cc := ConnectionConfig{
-						ApiURL:      cfg.apiURL,
-						PlatformURL: cfg.platformURL,
-						JWT:         val.Val(),
+					cc := ConnectionConfig{}
+					err = val.Scan(&cc)
+					if err != nil {
+						log.Error("failed to scan auth code", "error", err)
+						authFailures.Inc()
+						http.Error(w, "proxy not found", http.StatusNotFound)
+						return
 					}
 
 					proxy, err = NewClientProxy(context.Background(), cc)
@@ -372,6 +377,7 @@ func main() {
 					ApiURL:      cfg.apiURL,
 					PlatformURL: cfg.platformURL,
 					JWT:         jwt,
+					Location:    cr.Location,
 				}
 
 				proxy, err := NewClientProxy(context.Background(), cc)
@@ -381,7 +387,7 @@ func main() {
 					return
 				}
 
-				sc := rdb.Set(ctx, fmt.Sprintf("proxy-auth-jwt-%s", id.String()), jwt, time.Hour*24)
+				sc := rdb.Set(ctx, fmt.Sprintf("proxy-auth-jwt-cc-%s", cc), jwt, time.Hour*24)
 				err = sc.Err()
 				if err != nil {
 					log.Error("failed to set auth code", "error", err)

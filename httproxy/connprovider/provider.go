@@ -59,16 +59,30 @@ func (p *Provider) ConnectWithToken(jwt string, opts ConnectionOptions) (*Connec
 	if err != nil {
 		return nil, fmt.Errorf("parse byJwt client id failed: %w", err)
 	}
+	providersSpec := []*connect.ProviderSpec{
+		{
+			BestAvailable: true,
+		},
+	}
+
+	if opts.Location != "" {
+		locationId, err := connect.ParseId(opts.Location)
+		if err != nil {
+			return nil, fmt.Errorf("parse location id failed: %w", err)
+		}
+
+		providersSpec = []*connect.ProviderSpec{
+			{
+				LocationId: &locationId,
+			},
+		}
+	}
 
 	return &ConnectionInfo{
-		JWT:       jwt,
-		ClientJWT: clientJWT,
-		ClientID:  clientID,
-		ProvidersSpec: []*connect.ProviderSpec{
-			{
-				BestAvailable: true,
-			},
-		},
+		JWT:           jwt,
+		ClientJWT:     clientJWT,
+		ClientID:      clientID,
+		ProvidersSpec: providersSpec,
 	}, nil
 }
 
@@ -87,6 +101,7 @@ func (p *Provider) Connect(userAuth, password string, opts ConnectionOptions) (*
 type ConnectionOptions struct {
 	DeviceDescription string
 	DeviceSpec        string
+	Location          string
 }
 
 type ConnectionInfo struct {
