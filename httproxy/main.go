@@ -21,6 +21,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/httproxy/connprovider"
+	"github.com/urnetwork/server/httproxy/locations"
 	"github.com/urnetwork/server/httproxy/ratelimiter"
 )
 
@@ -290,6 +291,16 @@ func main() {
 						Host:          hostname,
 					},
 				)
+			})
+
+			locations, err := locations.NewLocationsList(ctx, log, cfg.apiURL, time.Minute*10)
+			if err != nil {
+				return fmt.Errorf("failed to create locations list: %w", err)
+			}
+
+			mux.HandleFunc("GET /locations", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(locations.GetLocations())
 			})
 
 			mux.HandleFunc("POST /add-client", func(w http.ResponseWriter, r *http.Request) {
