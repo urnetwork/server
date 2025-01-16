@@ -126,3 +126,12 @@ func UpgradeFromGuest(
 	return result, err
 
 }
+
+type NetworkRemoveResult struct{}
+
+func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
+
+	model.RemoveNetwork(session.Ctx, session.ByJwt.NetworkId)
+
+	return &NetworkRemoveResult{}, nil
+}
