@@ -194,6 +194,9 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 
 func RemoveNetwork(ctx context.Context, networkId server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
+
+		// TODO: Remove network user wallets
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
