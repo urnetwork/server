@@ -14,3 +14,7 @@ func GetNetworkUser(w http.ResponseWriter, r *http.Request) {
 func UpgradeGuest(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.UpgradeFromGuest, w, r)
 }
+
+func UpgradeGuestExisting(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.UpgradeFromGuestExisting, w, r)
+}

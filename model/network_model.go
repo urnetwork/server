@@ -779,10 +779,196 @@ func UpgradeGuest(
 	return result, nil
 }
 
+type UpgradeGuestExistingArgs struct {
+	UserAuth    *string `json:"user_auth,omitempty"`
+	Password    *string `json:"password,omitempty"`
+	AuthJwt     *string `json:"auth_jwt,omitempty"`
+	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+}
+
+type UpgradeGuestExistingError struct {
+	Message string `json:"message"`
+}
+
+type UpgradeGuestExistingResult struct {
+	Error                *UpgradeGuestExistingError                `json:"error,omitempty"`
+	VerificationRequired *UpgradeGuestExistingVerificationRequired `json:"verification_required,omitempty"`
+	Network              *UpgradeGuestExistingResultNetwork        `json:"network,omitempty"`
+	// Error                *AuthLoginWithPasswordResultError        `json:"error,omitempty"`
+}
+
+type UpgradeGuestExistingVerificationRequired struct {
+	UserAuth string `json:"user_auth"`
+}
+
+type UpgradeGuestExistingResultNetwork struct {
+	ByJwt *string `json:"by_jwt,omitempty"`
+	// NetworkName *string `json:"name,omitempty"`
+}
+
+func UpgradeFromGuestExisting(
+	upgradeGuestExisting UpgradeGuestExistingArgs,
+	session *session.ClientSession,
+) (*UpgradeGuestExistingResult, error) {
+
+	if upgradeGuestExisting.UserAuth != nil && upgradeGuestExisting.Password != nil {
+		/**
+		 * Upgrade from guest from email + password
+		 */
+
+		args := AuthLoginWithPasswordArgs{
+			UserAuth: *upgradeGuestExisting.UserAuth,
+			Password: *upgradeGuestExisting.Password,
+		}
+
+		loginResult, err := AuthLoginWithPassword(args, session)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Invalid login",
+				},
+			}, nil
+		}
+
+		if loginResult.Error != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: loginResult.Error.Message,
+				},
+			}, nil
+		}
+
+		if loginResult.Network.ByJwt == nil {
+
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Invalid network token",
+				},
+			}, nil
+		}
+
+		network, err := jwt.ParseByJwt(*loginResult.Network.ByJwt)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Error parsing network token",
+				},
+			}, nil
+		}
+
+		err = markUpgradedNetworkId(network.NetworkId, session)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Error marking upgraded network id",
+				},
+			}, nil
+		}
+
+		result := &UpgradeGuestExistingResult{
+			Network: &UpgradeGuestExistingResultNetwork{
+				ByJwt: loginResult.Network.ByJwt,
+			},
+		}
+
+		if loginResult.VerificationRequired != nil {
+			result.VerificationRequired = &UpgradeGuestExistingVerificationRequired{
+				UserAuth: loginResult.VerificationRequired.UserAuth,
+			}
+		}
+
+		return result, nil
+
+	}
+
+	if upgradeGuestExisting.AuthJwt != nil && upgradeGuestExisting.AuthJwtType != nil {
+		/**
+		 * Upgrade from guest from social login
+		 */
+
+		args := AuthLoginArgs{
+			UserAuth: upgradeGuestExisting.UserAuth,
+		}
+
+		loginResult, err := AuthLogin(args, session)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Invalid login",
+				},
+			}, nil
+		}
+
+		if loginResult.Error != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: loginResult.Error.Message,
+				},
+			}, nil
+		}
+
+		network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Error parsing network token",
+				},
+			}, nil
+		}
+
+		err = markUpgradedNetworkId(network.NetworkId, session)
+		if err != nil {
+			return &UpgradeGuestExistingResult{
+				Error: &UpgradeGuestExistingError{
+					Message: "Error marking upgraded network id",
+				},
+			}, nil
+		}
+
+		return &UpgradeGuestExistingResult{
+			Network: &UpgradeGuestExistingResultNetwork{
+				ByJwt: &loginResult.Network.ByJwt,
+			},
+		}, nil
+
+	}
+
+	return &UpgradeGuestExistingResult{
+		Error: &UpgradeGuestExistingError{
+			Message: "Invalid args",
+		},
+	}, nil
+
+}
+
+func markUpgradedNetworkId(
+	upgradedNetworkId server.Id,
+	session *session.ClientSession,
+) error {
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+				UPDATE network
+				SET 
+						guest_upgrade_network_id = $1
+				WHERE 
+						network_id = $2
+			`,
+			upgradedNetworkId,
+			session.ByJwt.NetworkId,
+		))
+	})
+
+	return nil
+}
+
 type Network struct {
-	NetworkId   *server.Id `json:"network_id"`
-	NetworkName string     `json:"network_name"`
-	AdminUserId *server.Id `json:"admin_user_id"`
+	NetworkId             *server.Id `json:"network_id"`
+	NetworkName           string     `json:"network_name"`
+	AdminUserId           *server.Id `json:"admin_user_id"`
+	GuestUpgradeNetworkId *server.Id `json:"guest_upgrade_network_id"`
 }
 
 func GetNetwork(
@@ -798,7 +984,8 @@ func GetNetwork(
 			SELECT
 				network_id,
 				network_name,
-				admin_user_id
+				admin_user_id,
+				guest_upgrade_network_id
 			FROM network 
 			WHERE network_id = $1
 		`,
@@ -813,6 +1000,7 @@ func GetNetwork(
 					&network.NetworkId,
 					&network.NetworkName,
 					&network.AdminUserId,
+					&network.GuestUpgradeNetworkId,
 				))
 			}
 		})
@@ -829,6 +1017,10 @@ func Testing_CreateNetwork(
 	adminUserId server.Id,
 ) (userAuth string) {
 	userAuth = fmt.Sprintf("%s@bringyour.com", networkId)
+	password := "password"
+
+	passwordSalt := createPasswordSalt()
+	passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -845,14 +1037,16 @@ func Testing_CreateNetwork(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified)
-				VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
 			`,
 			adminUserId,
 			"test",
 			AuthTypePassword,
 			userAuth,
 			true,
+			passwordHash,
+			passwordSalt,
 		))
 	})
 

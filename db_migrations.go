@@ -1606,4 +1606,8 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_client_location ADD COLUMN network_id uuid NULL
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network ADD COLUMN guest_upgrade_network_id uuid NULL
+    `),
 }
