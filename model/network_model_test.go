@@ -1,13 +1,15 @@
-package model
+package model_test
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -15,7 +17,7 @@ func TestNetworkCreateGuestMode(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 
-		networkCreate := NetworkCreateArgs{
+		networkCreate := model.NetworkCreateArgs{
 			Terms:     true,
 			GuestMode: true,
 		}
@@ -30,7 +32,7 @@ func TestNetworkCreateGuestMode(t *testing.T) {
 		regex, err := regexp.Compile(pattern)
 		assert.Equal(t, err, nil)
 
-		result, err := NetworkCreate(networkCreate, clientSession)
+		result, err := model.NetworkCreate(networkCreate, clientSession)
 		assert.Equal(t, err, nil)
 
 		assert.MatchRegex(t, result.Network.NetworkName, regex)
@@ -52,7 +54,7 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
 
-		Testing_CreateGuestNetwork(
+		model.Testing_CreateGuestNetwork(
 			ctx,
 			networkId,
 			"abcdef",
@@ -61,12 +63,12 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 
 		// fetch the network user and make sure it's a guest
 
-		network := GetNetwork(clientSession)
+		network := model.GetNetwork(clientSession)
 		assert.NotEqual(t, network, nil)
 
-		networkUser := GetNetworkUser(ctx, *network.AdminUserId)
+		networkUser := model.GetNetworkUser(ctx, *network.AdminUserId)
 
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
+		assert.Equal(t, networkUser.AuthType, model.AuthTypeGuest)
 
 		// upgrade to non-guest
 
@@ -74,13 +76,13 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 		password := "abcdefg1234567"
 		upgradedNetworkName := "abcdef1234"
 
-		upgradeGuestArgs := UpgradeGuestArgs{
+		upgradeGuestArgs := model.UpgradeGuestArgs{
 			NetworkName: upgradedNetworkName,
 			UserAuth:    &userAuth,
 			Password:    &password,
 		}
 
-		upgradeGuestResult, err := UpgradeGuest(
+		upgradeGuestResult, err := model.UpgradeGuest(
 			upgradeGuestArgs,
 			clientSession,
 		)
@@ -89,12 +91,67 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 		assert.Equal(t, upgradeGuestResult.VerificationRequired.UserAuth, userAuth)
 
 		// fetch the network user and make sure it's no longer a guest
-		networkUser = GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		networkUser = model.GetNetworkUser(ctx, userId)
+		assert.Equal(t, networkUser.AuthType, model.AuthTypePassword)
 
 		// ensure network name has been updated
-		network = GetNetwork(clientSession)
+		network = model.GetNetwork(clientSession)
 		assert.Equal(t, network.NetworkName, upgradedNetworkName)
+
+	})
+}
+
+func TestUpgradeGuestExistingUser(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+		networkId := server.NewId()
+		userId := server.NewId()
+		// clientId := server.NewId()
+		networkName := "abcdef"
+
+		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		guestNetworkId := server.NewId()
+		guestUserId := server.NewId()
+
+		byJwt := jwt.ByJwt{
+			NetworkId: guestNetworkId,
+			UserId:    guestUserId,
+		}
+
+		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
+
+		model.Testing_CreateGuestNetwork(
+			ctx,
+			guestNetworkId,
+			fmt.Sprintf("guest-%s", networkId.String()),
+			guestUserId,
+		)
+
+		// fetch the network
+		// it should have no guest upgrade network id
+		network := model.GetNetwork(clientSession)
+		assert.NotEqual(t, network, nil)
+		assert.Equal(t, network.GuestUpgradeNetworkId, nil)
+
+		userAuth := fmt.Sprintf("%s@bringyour.com", networkId) // pulled from Testing_CreateNetwork
+		password := "password"                                 // pulled from Testing_CreateNetwork
+		args := model.UpgradeGuestExistingArgs{
+			UserAuth: &userAuth,
+			Password: &password,
+		}
+
+		result, err := model.UpgradeFromGuestExisting(args, clientSession)
+		assert.Equal(t, err, nil)
+		// fmt.Println("error UpgradeFromGuestExisting: ", result.Error.Message)
+		assert.Equal(t, result.Error, nil)
+
+		// fetch the network
+		// it should have the guest upgrade network id
+		network = model.GetNetwork(clientSession)
+		assert.NotEqual(t, network, nil)
+
+		assert.Equal(t, network.GuestUpgradeNetworkId, networkId)
 
 	})
 }
@@ -103,7 +160,7 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 
-		networkCreate := NetworkCreateArgs{
+		networkCreate := model.NetworkCreateArgs{
 			GuestMode: true,
 		}
 
@@ -111,9 +168,9 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
 
-		result, err := NetworkCreate(networkCreate, clientSession)
+		result, err := model.NetworkCreate(networkCreate, clientSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error.Message, AgreeToTerms)
+		assert.Equal(t, result.Error.Message, model.AgreeToTerms)
 	})
 }
 
@@ -126,7 +183,7 @@ func TestNetworkUpdate(t *testing.T) {
 		clientId := server.NewId()
 		networkName := "abcdef"
 
-		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId,
@@ -136,32 +193,32 @@ func TestNetworkUpdate(t *testing.T) {
 
 		// fail
 		// network name unavailable
-		networkUpdateArgs := NetworkUpdateArgs{
+		networkUpdateArgs := model.NetworkUpdateArgs{
 			NetworkName: networkName,
 		}
-		result, err := NetworkUpdate(networkUpdateArgs, sourceSession)
+		result, err := model.NetworkUpdate(networkUpdateArgs, sourceSession)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result.Error, nil)
 
 		// fail
 		// network name should be at least 6 characters
-		networkUpdateArgs = NetworkUpdateArgs{
+		networkUpdateArgs = model.NetworkUpdateArgs{
 			NetworkName: "a",
 		}
-		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
+		result, err = model.NetworkUpdate(networkUpdateArgs, sourceSession)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result.Error, nil)
 
 		// success
 		newName := "uvwxyz"
-		networkUpdateArgs = NetworkUpdateArgs{
+		networkUpdateArgs = model.NetworkUpdateArgs{
 			NetworkName: newName,
 		}
-		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
+		result, err = model.NetworkUpdate(networkUpdateArgs, sourceSession)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Error, nil)
 
-		network := GetNetwork(sourceSession)
+		network := model.GetNetwork(sourceSession)
 		assert.Equal(t, network.NetworkName, newName)
 
 	})

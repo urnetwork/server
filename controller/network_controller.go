@@ -94,6 +94,9 @@ func UpdateNetworkName(
 	return &UpdateNetworkNameResult{}, nil
 }
 
+/**
+ * Upgrades a guest to a new account
+ */
 func UpgradeFromGuest(
 	upgradeGuest model.UpgradeGuestArgs,
 	session *session.ClientSession,
@@ -121,6 +124,32 @@ func UpgradeFromGuest(
 			)
 		}
 
+	}
+
+	return result, err
+
+}
+
+/**
+ * Upgrades a guest to an existing account
+ */
+func UpgradeFromGuestExisting(
+	upgradeGuest model.UpgradeGuestExistingArgs,
+	session *session.ClientSession,
+) (*model.UpgradeGuestExistingResult, error) {
+
+	result, err := model.UpgradeFromGuestExisting(
+		upgradeGuest,
+		session,
+	)
+
+	// if verification required, send it
+	if result.VerificationRequired != nil {
+		verifySend := AuthVerifySendArgs{
+			UserAuth:   result.VerificationRequired.UserAuth,
+			UseNumeric: true,
+		}
+		AuthVerifySend(verifySend, session)
 	}
 
 	return result, err
