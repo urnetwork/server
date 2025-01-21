@@ -779,6 +779,9 @@ func UpgradeGuest(
 	return result, nil
 }
 
+/**
+ * Upgrade guest with existing account
+ */
 type UpgradeGuestExistingArgs struct {
 	UserAuth    *string `json:"user_auth,omitempty"`
 	Password    *string `json:"password,omitempty"`
@@ -906,6 +909,11 @@ func UpgradeFromGuestExisting(
 					Message: loginResult.Error.Message,
 				},
 			}, nil
+		}
+
+		// in this case, we should navigate the user to the network creation view
+		if loginResult.Network == nil {
+			return &UpgradeGuestExistingResult{}, nil
 		}
 
 		network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
