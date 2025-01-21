@@ -887,7 +887,8 @@ func UpgradeFromGuestExisting(
 		 */
 
 		args := AuthLoginArgs{
-			UserAuth: upgradeGuestExisting.UserAuth,
+			AuthJwt:     upgradeGuestExisting.AuthJwt,
+			AuthJwtType: upgradeGuestExisting.AuthJwtType,
 		}
 
 		loginResult, err := AuthLogin(args, session)
