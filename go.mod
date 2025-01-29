@@ -126,8 +126,6 @@ require (
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
 )
 
-replace golang.org/x/sync v0.8.0 => github.com/draganm/sync v0.8.2
-
 replace github.com/urnetwork/connect v0.0.0 => ../connect
 
 replace github.com/urnetwork/protocol v0.0.0 => ../protocol
