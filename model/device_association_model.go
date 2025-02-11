@@ -12,6 +12,7 @@ import (
 
 	// "errors"
 
+	// FIXME remove
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/urnetwork/server"
@@ -39,7 +40,7 @@ type DeviceAddResult struct {
 	Code                  string          `json:"code,omitempty"`
 	DeviceName            string          `json:"device_name,omitempty"`
 	AssociatedNetworkName string          `json:"associated_network_name,omitempty"`
-	ClientId              server.Id    `json:"client_id,omitempty"`
+	ClientId              server.Id       `json:"client_id,omitempty"`
 	DurationMinutes       float64         `json:"duration_minutes,omitempty"`
 	Error                 *DeviceAddError `json:"error,omitempty"`
 }
@@ -267,7 +268,7 @@ func DeviceAdd(
 
 type DeviceCreateShareCodeArgs struct {
 	ClientId   server.Id `json:"client_id"`
-	DeviceName string       `json:"device_name,omitempty"`
+	DeviceName string    `json:"device_name,omitempty"`
 }
 
 type DeviceCreateShareCodeResult struct {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	// FIXME replace with sha with salt
 	"github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
@@ -74,8 +75,8 @@ func FindClientNetwork(
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
 	ClientId    *server.Id `json:"client_id,omitempty"`
-	Description string        `json:"description"`
-	DeviceSpec  string        `json:"device_spec"`
+	Description string     `json:"description"`
+	DeviceSpec  string     `json:"device_spec"`
 }
 
 type AuthNetworkClientResult struct {
@@ -304,13 +305,13 @@ type NetworkClientInfo struct {
 }
 
 type NetworkClientConnection struct {
-	ClientId          server.Id `json:"client_id"`
-	ConnectionId      server.Id `json:"connection_id"`
-	ConnectTime       time.Time    `json:"connect_time"`
-	DisconnectTime    *time.Time   `json:"disconnect_time,omitempty"`
-	ConnectionHost    string       `json:"connection_host"`
-	ConnectionService string       `json:"connection_service"`
-	ConnectionBlock   string       `json:"connection_block"`
+	ClientId          server.Id  `json:"client_id"`
+	ConnectionId      server.Id  `json:"connection_id"`
+	ConnectTime       time.Time  `json:"connect_time"`
+	DisconnectTime    *time.Time `json:"disconnect_time,omitempty"`
+	ConnectionHost    string     `json:"connection_host"`
+	ConnectionService string     `json:"connection_service"`
+	ConnectionBlock   string     `json:"connection_block"`
 }
 
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
@@ -486,9 +487,9 @@ type NetworkClient struct {
 	ClientId    server.Id `json:"client_id"`
 	DeviceId    server.Id `json:"device_id"`
 	NetworkId   server.Id `json:"network_id"`
-	Description string       `json:"description"`
-	DeviceName  string       `json:"device_name"`
-	DeviceSpec  string       `json:"device_spec"`
+	Description string    `json:"description"`
+	DeviceName  string    `json:"device_name"`
+	DeviceSpec  string    `json:"device_spec"`
 
 	CreateTime time.Time `json:"create_time"`
 	AuthTime   time.Time `json:"auth_time"`
@@ -923,10 +924,10 @@ type NetworkClientResident struct {
 	ClientId              server.Id `json:"client_id"`
 	InstanceId            server.Id `json:"instance_id"`
 	ResidentId            server.Id `json:"resident_id"`
-	ResidentHost          string       `json:"resident_host"`
-	ResidentService       string       `json:"resident_service"`
-	ResidentBlock         string       `json:"resident_block"`
-	ResidentInternalPorts []int        `json:"resident_internal_ports"`
+	ResidentHost          string    `json:"resident_host"`
+	ResidentService       string    `json:"resident_service"`
+	ResidentBlock         string    `json:"resident_block"`
+	ResidentInternalPorts []int     `json:"resident_internal_ports"`
 }
 
 func dbGetResidentInTx(
@@ -1311,7 +1312,7 @@ func RemoveResident(
 
 type DeviceSetNameArgs struct {
 	DeviceId   server.Id `json:"client_id"`
-	DeviceName string       `json:"device_name"`
+	DeviceName string    `json:"device_name"`
 }
 
 type DeviceSetNameResult struct {
@@ -1352,8 +1353,8 @@ func DeviceSetName(
 }
 
 type DeviceSetProvideArgs struct {
-	ClientId    server.Id `json:"client_id"`
-	ProvideMode ProvideMode  `json:"provide_mode"`
+	ClientId    server.Id   `json:"client_id"`
+	ProvideMode ProvideMode `json:"provide_mode"`
 }
 
 type DeviceSetProvideResult struct {

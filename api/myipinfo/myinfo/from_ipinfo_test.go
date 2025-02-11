@@ -6,8 +6,9 @@ import (
 	"testing"
 
 	"github.com/ipinfo/go/v2/ipinfo"
-	"github.com/stretchr/testify/require"
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
+
+	"github.com/go-playground/assert/v2"
 )
 
 //go:embed sample_ipinfo_response.json
@@ -17,10 +18,10 @@ func TestFromIPInfo(t *testing.T) {
 
 	ip := &ipinfo.Core{}
 	err := json.Unmarshal(sampleIPInfoResponse, ip)
-	require.NoError(t, err)
+	assert.Equal(t, nil, err)
 
 	mi, err := myinfo.FromIPInfo(ip)
-	require.NoError(t, err)
+	assert.Equal(t, nil, err)
 
 	expected := myinfo.MyInfo{
 		IP: "81.6.15.76",
@@ -52,6 +53,6 @@ func TestFromIPInfo(t *testing.T) {
 		},
 	}
 
-	require.Equal(t, expected, mi)
+	assert.Equal(t, expected, mi)
 
 }
