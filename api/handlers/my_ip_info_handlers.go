@@ -15,8 +15,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-func MyIPInfoOptions(w http.ResponseWriter, r *http.Request) {
-}
 
 type response struct {
 	Info               myinfo.MyInfo              `json:"info"`

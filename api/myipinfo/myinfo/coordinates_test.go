@@ -1,16 +1,22 @@
 package myinfo_test
 
 import (
+	"math"
 	"testing"
 
-	"github.com/stretchr/testify/require"
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
+
+	"github.com/go-playground/assert/v2"
 )
 
 func TestParseCoordinates(t *testing.T) {
 	c, err := myinfo.ParseCoordinates("45.8399,-119.7006")
-	require.NoError(t, err)
+	assert.Equal(t, nil, err)
 
-	require.InDelta(t, 45.8399, c.Latitude, 1e-8)
-	require.Equal(t, -119.7006, c.Longitude, 1e-8)
+	if d := math.Abs(45.8399 - c.Latitude); 1e-8 < d {
+		t.Fatalf("%f<>%f", 45.8399, c.Latitude)
+	}
+	if d := math.Abs(-119.7006 - c.Longitude); 1e-8 < d {
+		t.Fatalf("%f<>%f", -119.7006, c.Longitude)
+	}
 }
