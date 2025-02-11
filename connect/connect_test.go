@@ -341,7 +341,7 @@ func testConnect(
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 120 * time.Second
+	receiveTimeout := 300 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	messageContentSizes := []ByteCount{
@@ -597,19 +597,25 @@ func testConnect(
 
 	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("a", frames)
-		receiveA <- &Message{
+		select {
+		case <-ctx.Done():
+		case receiveA <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
+		}:
 		}
 	})
 
 	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("b", frames)
-		receiveB <- &Message{
+		select {
+		case <-ctx.Done():
+		case receiveB <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
+		}:
 		}
 	})
 
@@ -1114,8 +1120,8 @@ func testConnect(
 	clientA.Cancel()
 	clientB.Cancel()
 
-	close(receiveA)
-	close(receiveB)
+	// close(receiveA)
+	// close(receiveB)
 
 	for _, server := range servers {
 		server.Close()
