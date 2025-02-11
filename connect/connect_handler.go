@@ -12,7 +12,7 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/urnetwork/connect"
-	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/jwt"

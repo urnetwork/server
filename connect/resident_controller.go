@@ -17,7 +17,7 @@ import (
 	"github.com/urnetwork/server/controller"
 
 	// "github.com/urnetwork/connect"
-	"github.com/urnetwork/protocol"
+	"github.com/urnetwork/connect/protocol"
 )
 
 type residentController struct {

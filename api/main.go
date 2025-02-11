@@ -120,7 +120,6 @@ Options:
 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
-		router.NewRoute("OPTIONS", "/my-ip-info", handlers.MyIPInfoOptions),
 	}
 
 	// server.().Printf("%s\n", opts)
