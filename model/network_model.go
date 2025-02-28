@@ -43,15 +43,16 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 }
 
 type NetworkCreateArgs struct {
-	UserName         string  `json:"user_name"`
-	UserAuth         *string `json:"user_auth,omitempty"`
-	AuthJwt          *string `json:"auth_jwt,omitempty"`
-	AuthJwtType      *string `json:"auth_jwt_type,omitempty"`
-	Password         *string `json:"password,omitempty"`
-	NetworkName      string  `json:"network_name"`
-	Terms            bool    `json:"terms"`
-	GuestMode        bool    `json:"guest_mode"`
-	VerifyUseNumeric bool    `json:"verify_use_numeric"`
+	UserName         string     `json:"user_name"`
+	UserAuth         *string    `json:"user_auth,omitempty"`
+	AuthJwt          *string    `json:"auth_jwt,omitempty"`
+	AuthJwtType      *string    `json:"auth_jwt_type,omitempty"`
+	Password         *string    `json:"password,omitempty"`
+	NetworkName      string     `json:"network_name"`
+	Terms            bool       `json:"terms"`
+	GuestMode        bool       `json:"guest_mode"`
+	VerifyUseNumeric bool       `json:"verify_use_numeric"`
+	ReferralCode     *server.Id `json:"referral_code,omitempty"`
 }
 
 type UpgradeGuestArgs struct {

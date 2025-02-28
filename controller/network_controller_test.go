@@ -21,20 +21,32 @@ func TestNetworkCreate(t *testing.T) {
 
 		session := session.Testing_CreateClientSession(ctx, nil)
 
+		referralNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, referralNetworkId, "referralNetwork", server.NewId())
+		referralCode := model.CreateNetworkReferralCode(ctx, referralNetworkId)
+		assert.NotEqual(t, referralCode, nil)
+
 		userAuth := "foo@ur.io"
 		password := "bar123456789Foo!"
+
 		networkCreate := model.NetworkCreateArgs{
-			UserName:    "",
-			UserAuth:    &userAuth,
-			Password:    &password,
-			NetworkName: "foobar",
-			Terms:       true,
-			GuestMode:   false,
+			UserName:     "",
+			UserAuth:     &userAuth,
+			Password:     &password,
+			NetworkName:  "foobar",
+			Terms:        true,
+			GuestMode:    false,
+			ReferralCode: &referralCode.ReferralCode,
 		}
 		result, err := NetworkCreate(networkCreate, session)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Error, nil)
 		assert.NotEqual(t, result.Network, nil)
+
+		// check network referral
+		networkReferral := model.GetNetworkReferralByNetworkId(ctx, result.Network.NetworkId)
+		assert.Equal(t, networkReferral.NetworkId, result.Network.NetworkId)
+		assert.Equal(t, networkReferral.ReferralNetworkId, referralNetworkId)
 
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
 		assert.Equal(t, 1, len(transferBalances))

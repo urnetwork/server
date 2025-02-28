@@ -24,6 +24,15 @@ func NetworkCreate(
 
 	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 
+	if networkCreate.ReferralCode != nil {
+		model.CreateNetworkReferral(
+			session.Ctx,
+			result.Network.NetworkId,
+			networkCreate.ReferralCode,
+		)
+
+	}
+
 	verifyUseNumeric := false
 
 	if networkCreate.VerifyUseNumeric {

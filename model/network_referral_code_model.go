@@ -72,3 +72,31 @@ func GetNetworkReferralCode(ctx context.Context, networkId server.Id) *NetworkRe
 	return networkReferralCode
 
 }
+
+func GetNetworkIdByReferralCode(referralCode *server.Id) server.Id {
+
+	var networkId server.Id
+
+	server.Tx(context.Background(), func(tx server.PgTx) {
+		result, err := tx.Query(
+			context.Background(),
+			`
+						SELECT
+								network_id
+						FROM network_referral_code
+						WHERE
+								referral_code = $1
+				`,
+			referralCode,
+		)
+
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+			}
+		})
+	})
+
+	return networkId
+
+}
