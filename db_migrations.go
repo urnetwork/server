@@ -1610,4 +1610,13 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network ADD COLUMN guest_upgrade_network_id uuid NULL
     `),
+
+	newSqlMigration(`
+        CREATE TABLE network_referral (
+            network_id uuid NOT NULL,
+            referral_network_id uuid NOT NULL,
+
+            PRIMARY KEY (network_id, referral_network_id)
+        )
+    `),
 }
