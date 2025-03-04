@@ -27,8 +27,8 @@ require (
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/connect/protocol v0.0.0
-	golang.org/x/crypto v0.34.0
-	golang.org/x/exp v0.0.0-20250218142911-aa4b98e5adaa
+	golang.org/x/crypto v0.35.0
+	golang.org/x/exp v0.0.0-20250228200357-dead58393ab7
 	golang.org/x/net v0.35.0
 	google.golang.org/protobuf v1.36.5
 	gopkg.in/yaml.v3 v3.0.1
