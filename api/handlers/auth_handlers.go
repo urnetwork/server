@@ -216,9 +216,6 @@ func AppleNotification(w http.ResponseWriter, r *http.Request) {
 		notification.Subtype,
 		notification.NotificationUUID)
 
-	glog.Infoln("[apple] AppAccountToken: %s",
-		notification.AppAccountToken)
-
 	// Process different notification types
 	switch notification.NotificationType {
 	case "SUBSCRIBED":

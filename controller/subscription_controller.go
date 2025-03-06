@@ -929,7 +929,6 @@ type AppleNotificationDecodedPayload struct {
 	Status                int                    `json:"status"`
 	SignedRenewalInfo     string                 `json:"signedRenewalInfo"`
 	SignedTransactionInfo string                 `json:"signedTransactionInfo"`
-	AppAccountToken       string                 `json:"appAccountToken"`
 }
 
 func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
@@ -954,6 +953,16 @@ func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
 		var originalTransactionId string
 		var productId string
 		var expiresDate time.Time
+		var networkId server.Id
+
+		// parse the network id
+		if networkIdStr, ok := transactionInfo["appAccountToken"].(string); ok {
+			networkId, err = server.ParseId(networkIdStr)
+			if err != nil {
+				glog.Errorf("[apple] Failed to parse network ID: %v", err)
+				return
+			}
+		}
 
 		if otid, ok := transactionInfo["originalTransactionId"].(string); ok {
 			originalTransactionId = otid
@@ -967,8 +976,8 @@ func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
 			expiresDate = time.Unix(int64(exp/1000), 0)
 		}
 
-		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Product ID: %s, Expires: %s",
-			originalTransactionId, productId, expiresDate.Format(time.RFC3339))
+		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s",
+			originalTransactionId, networkId, productId, expiresDate.Format(time.RFC3339))
 
 		// fixme: create/update subscription in db
 	} else {
