@@ -906,3 +906,219 @@ func RefreshTransferBalancesPost(
 	ScheduleRefreshTransferBalances(clientSession, tx)
 	return nil
 }
+
+/**
+ * Apple App Store Webhooks
+ */
+
+type AppleNotificationPayload struct {
+	SignedPayload string `json:"signedPayload"`
+}
+
+type AppleNotificationDecodedPayload struct {
+	NotificationType      string                 `json:"notificationType"`
+	Subtype               string                 `json:"subtype"`
+	NotificationUUID      string                 `json:"notificationUUID"`
+	NotificationVersion   string                 `json:"version"`
+	SignedDate            int64                  `json:"signedDate"`
+	Data                  map[string]interface{} `json:"data"` // need to parse this depending on the notification type
+	AppAppleId            int64                  `json:"appAppleId"`
+	BundleId              string                 `json:"bundleId"`
+	BundleVersion         string                 `json:"bundleVersion"`
+	Environment           string                 `json:"environment"`
+	Status                int                    `json:"status"`
+	SignedRenewalInfo     string                 `json:"signedRenewalInfo"`
+	SignedTransactionInfo string                 `json:"signedTransactionInfo"`
+	AppAccountToken       string                 `json:"appAccountToken"`
+}
+
+func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
+	glog.Infof("[apple] New subscription: %+v", notification.Data)
+
+	// Decode the signed renewal info and transaction info
+	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
+	if err != nil {
+		glog.Errorf("[apple] Failed to parse signed info: %v", err)
+		return
+	}
+
+	// Log the decoded information
+	if renewalInfo != nil {
+		glog.Infof("[apple] Renewal Info: %+v", renewalInfo)
+	} else {
+		glog.Infof("[apple] Renewal Info is nil")
+	}
+
+	if transactionInfo != nil {
+		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
+
+		// Extract key subscription details for database update
+		var originalTransactionId string
+		var productId string
+		var expiresDate time.Time
+
+		if otid, ok := transactionInfo["originalTransactionId"].(string); ok {
+			originalTransactionId = otid
+		}
+
+		if pid, ok := transactionInfo["productId"].(string); ok {
+			productId = pid
+		}
+
+		if exp, ok := transactionInfo["expiresDate"].(float64); ok {
+			expiresDate = time.Unix(int64(exp/1000), 0)
+		}
+
+		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Product ID: %s, Expires: %s",
+			originalTransactionId, productId, expiresDate.Format(time.RFC3339))
+
+		// Create or update subscription in database
+		// createSubscription(originalTransactionId, productId, expiresDate)
+	} else {
+		glog.Infof("[apple] Transaction Info: nil")
+	}
+}
+
+func HandleExpiredApple(notification AppleNotificationDecodedPayload) {
+	glog.Infof("[apple] Subscription expired: %+v", notification.Data)
+
+	// Decode the signed renewal info and transaction info
+	_, transactionInfo, err := ParseSignedInfo(notification)
+	if err != nil {
+		glog.Errorf("[apple] Failed to parse signed info: %v", err)
+		return
+	}
+
+	// Extract transaction ID to mark subscription as expired
+	if transactionInfo != nil {
+		if originalTransactionId, ok := transactionInfo["originalTransactionId"].(string); ok {
+			glog.Infof("[apple] Marking subscription expired for transaction: %s", originalTransactionId)
+			// markSubscriptionExpired(originalTransactionId)
+		}
+	}
+}
+
+func HandleRenewalApple(notification AppleNotificationDecodedPayload) {
+	glog.Infof("[apple] Subscription renewed: %+v", notification.Data)
+
+	// Decode the signed renewal info and transaction info
+	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
+	if err != nil {
+		glog.Errorf("[apple] Failed to parse signed info: %v", err)
+		return
+	}
+
+	if renewalInfo != nil {
+		glog.Infof("[apple] Renewal Info: %+v", renewalInfo)
+
+		// Check auto-renewal status
+		if autoRenewStatus, ok := renewalInfo["autoRenewStatus"].(float64); ok {
+			if autoRenewStatus == 1 {
+				glog.Infof("[apple] Auto-renewal is enabled")
+			} else {
+				glog.Infof("[apple] Auto-renewal is disabled")
+			}
+		}
+
+		// Extract other useful fields from renewalInfo
+		if expiryDate, ok := renewalInfo["expirationIntent"].(float64); ok {
+			glog.Infof("[apple] Expiration intent: %v", expiryDate)
+		}
+	} else {
+		glog.Infof("[apple] Renewal Info is nil")
+	}
+
+	if transactionInfo != nil {
+		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
+
+		// Extract transaction details
+		if transactionId, ok := transactionInfo["transactionId"].(string); ok {
+			glog.Infof("[apple] Transaction ID: %s", transactionId)
+		}
+
+		if productId, ok := transactionInfo["productId"].(string); ok {
+			glog.Infof("[apple] Product ID: %s", productId)
+		}
+
+		if purchaseDate, ok := transactionInfo["purchaseDate"].(float64); ok {
+			purchaseDateStr := time.Unix(int64(purchaseDate/1000), 0).Format(time.RFC3339)
+			glog.Infof("[apple] Purchase Date: %s", purchaseDateStr)
+		}
+
+		if expiresDate, ok := transactionInfo["expiresDate"].(float64); ok {
+			expiresDateStr := time.Unix(int64(expiresDate/1000), 0).Format(time.RFC3339)
+			glog.Infof("[apple] Expires Date: %s", expiresDateStr)
+		}
+	} else {
+		glog.Infof("[apple] Transaction Info is nil")
+	}
+
+	// Here you would update your database with the subscription details
+	// UpdateSubscriptionInDatabase(transactionInfo, renewalInfo)
+}
+
+func DecodeJWSPayload(jwsToken string) (map[string]interface{}, error) {
+	// Split the JWS token into its components
+	parts := strings.Split(jwsToken, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid JWS format")
+	}
+
+	// Decode the payload (second part)
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode JWS payload: %v", err)
+	}
+
+	// Parse the payload
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse JWS payload: %v", err)
+	}
+
+	return payload, nil
+}
+
+func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]interface{}, map[string]interface{}, error) {
+	var renewalInfo map[string]interface{}
+	var transactionInfo map[string]interface{}
+	var err error
+
+	// Try using SignedRenewalInfo from top-level field
+	var signedRenewalInfo string
+	if notification.SignedRenewalInfo != "" {
+		signedRenewalInfo = notification.SignedRenewalInfo
+		glog.Infoln("Using top-level SignedRenewalInfo")
+	} else if dataField, ok := notification.Data["signedRenewalInfo"].(string); ok && dataField != "" {
+		signedRenewalInfo = dataField
+		glog.Infoln("Using data.signedRenewalInfo")
+	}
+
+	// Parse signedRenewalInfo if we found it
+	if signedRenewalInfo != "" {
+		renewalInfo, err = DecodeJWSPayload(signedRenewalInfo)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to decode signedRenewalInfo: %v", err)
+		}
+	}
+
+	// Try using SignedTransactionInfo from top-level field
+	var signedTransactionInfo string
+	if notification.SignedTransactionInfo != "" {
+		signedTransactionInfo = notification.SignedTransactionInfo
+		glog.Infoln("Using top-level SignedTransactionInfo")
+	} else if dataField, ok := notification.Data["signedTransactionInfo"].(string); ok && dataField != "" {
+		signedTransactionInfo = dataField
+		glog.Infoln("Using data.signedTransactionInfo")
+	}
+
+	// Parse signedTransactionInfo if we found it
+	if signedTransactionInfo != "" {
+		transactionInfo, err = DecodeJWSPayload(signedTransactionInfo)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to decode signedTransactionInfo: %v", err)
+		}
+	}
+
+	return renewalInfo, transactionInfo, nil
+}
