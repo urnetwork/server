@@ -931,7 +931,7 @@ type AppleNotificationDecodedPayload struct {
 	SignedTransactionInfo string                 `json:"signedTransactionInfo"`
 }
 
-func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
+func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
 	glog.Infof("[apple] New subscription: %+v", notification.Data)
 
 	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
@@ -980,6 +980,18 @@ func HandleSubscribedApple(notification AppleNotificationDecodedPayload) {
 			originalTransactionId, networkId, productId, expiresDate.Format(time.RFC3339))
 
 		// fixme: create/update subscription in db
+
+		subscriptionRenewal := model.SubscriptionRenewal{
+			NetworkId:        networkId,
+			SubscriptionType: model.SubscriptionTypeSupporter,
+			StartTime:        time.Now(),
+			EndTime:          expiresDate.Add(SubscriptionGracePeriod),
+			// todo: we can't get the net revenue from the transaction info
+			// todo: what is purchase token?
+		}
+
+		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
+
 	} else {
 		glog.Infof("[apple] Transaction Info: nil")
 	}

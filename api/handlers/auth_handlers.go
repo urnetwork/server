@@ -219,7 +219,7 @@ func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	// Process different notification types
 	switch notification.NotificationType {
 	case "SUBSCRIBED":
-		controller.HandleSubscribedApple(notification)
+		controller.HandleSubscribedApple(r.Context(), notification)
 	case "EXPIRED":
 		controller.HandleExpiredApple(notification)
 	case "DID_RENEW":
