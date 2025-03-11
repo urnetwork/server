@@ -675,11 +675,13 @@ func PlaySubscriptionRenewal(
 		if sku, ok := skus[skuName]; ok {
 			if sku.Supporter {
 				renewal := &model.SubscriptionRenewal{
-					NetworkId:     playSubscriptionRenewal.NetworkId,
-					StartTime:     startTime,
-					EndTime:       expiryTime.Add(SubscriptionGracePeriod),
-					NetRevenue:    model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
-					PurchaseToken: playSubscriptionRenewal.PurchaseToken,
+					NetworkId:          playSubscriptionRenewal.NetworkId,
+					StartTime:          startTime,
+					EndTime:            expiryTime.Add(SubscriptionGracePeriod),
+					NetRevenue:         model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
+					PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+					SubscriptionType:   model.SubscriptionTypeSupporter,
+					SubscriptionMarket: model.SubscriptionMarketGoogle,
 				}
 				model.AddSubscriptionRenewal(
 					clientSession.Ctx,
@@ -950,7 +952,8 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
 
 		// Extract key subscription details for database update
-		var originalTransactionId string
+		var originalTransactionId string // for the original subscription transaction
+		var appTransactionId string      // for the current subscription transaction
 		var productId string
 		var expiresDate time.Time
 		var networkId server.Id
@@ -968,6 +971,10 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			originalTransactionId = otid
 		}
 
+		if atid, ok := transactionInfo["appTransactionId"].(string); ok {
+			originalTransactionId = atid
+		}
+
 		if pid, ok := transactionInfo["productId"].(string); ok {
 			productId = pid
 		}
@@ -976,18 +983,38 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			expiresDate = time.Unix(int64(exp/1000), 0)
 		}
 
-		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s",
-			originalTransactionId, networkId, productId, expiresDate.Format(time.RFC3339))
+		var priceNanoCents int64
 
-		// fixme: create/update subscription in db
+		if priceFloat, ok := transactionInfo["price"].(float64); ok {
+
+			// webhook price coming back like "4990" for $4.99
+			priceUsd := priceFloat / 1000
+
+			priceNanoCents = model.UsdToNanoCents(priceUsd)
+
+		}
+
+		// fixme: hardcoded fee fraction
+		feeFraction := 0.2
+
+		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
+
+		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s, Net Revenue: %d",
+			originalTransactionId,
+			networkId,
+			productId,
+			expiresDate.Format(time.RFC3339),
+			netRevenue,
+		)
 
 		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:        networkId,
-			SubscriptionType: model.SubscriptionTypeSupporter,
-			StartTime:        time.Now(),
-			EndTime:          expiresDate.Add(SubscriptionGracePeriod),
-			// todo: we can't get the net revenue from the transaction info
-			// todo: what is purchase token?
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          time.Now(),
+			EndTime:            expiresDate.Add(SubscriptionGracePeriod),
+			NetRevenue:         netRevenue,
+			SubscriptionMarket: model.SubscriptionMarketApple,
+			TransactionId:      appTransactionId,
 		}
 
 		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
@@ -1015,8 +1042,12 @@ func HandleExpiredApple(notification AppleNotificationDecodedPayload) {
 
 }
 
-func HandleRenewalApple(notification AppleNotificationDecodedPayload) {
+func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
 	glog.Infof("[apple] Subscription renewed: %+v", notification.Data)
+
+	var networkId server.Id
+	var appTransactionId string
+	var expiresDate time.Time
 
 	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
 	if err != nil {
@@ -1027,6 +1058,10 @@ func HandleRenewalApple(notification AppleNotificationDecodedPayload) {
 	if renewalInfo != nil {
 		glog.Infof("[apple] Renewal Info: %+v", renewalInfo)
 
+		if atid, ok := transactionInfo["appTransactionId"].(string); ok {
+			appTransactionId = atid
+		}
+
 		// Check auto-renewal status
 		if autoRenewStatus, ok := renewalInfo["autoRenewStatus"].(float64); ok {
 			if autoRenewStatus == 1 {
@@ -1036,38 +1071,64 @@ func HandleRenewalApple(notification AppleNotificationDecodedPayload) {
 			}
 		}
 
-		if expiryDate, ok := renewalInfo["expirationIntent"].(float64); ok {
-			glog.Infof("[apple] Expiration intent: %v", expiryDate)
+		if networkIdStr, ok := transactionInfo["appAccountToken"].(string); ok {
+			networkId, err = server.ParseId(networkIdStr)
+			if err != nil {
+				glog.Errorf("[apple] Failed to parse network ID: %v", err)
+				return
+			}
 		}
+
+		// Renewal Info: map[appAccountToken:3f2302cd-5017-48b0-951e-de7a6ac8b5b1 appTransactionId:704286256654469462 autoRenewProductId:supporter autoRenewStatus:1 currency:USD environment:Sandbox originalTransactionId:2000000867822051 productId:supporter recentSubscriptionStartDate:1.741241052e+12 renewalDate:1.741244352e+12 renewalPrice:4990 signedDate:1.741243998255e+12]
+
+		// if subscriptionStartDate, ok := renewalInfo["recentSubscriptionStartDate"].(float64); ok {
+		// 	glog.Infof("[apple] Expiration intent: %v", subscriptionStartDate)
+		// }
+
+		if renewalDate, ok := renewalInfo["renewalDate"].(float64); ok {
+			glog.Infof("[apple] Expiration intent: %v", renewalDate)
+			expiresDate = time.Unix(int64(renewalDate/1000), 0)
+		}
+
+		var priceNanoCents int64
+
+		if priceFloat, ok := transactionInfo["renewalPrice"].(float64); ok {
+
+			// webhook price coming back like "4990" for $4.99
+			priceUsd := priceFloat / 1000
+
+			priceNanoCents = model.UsdToNanoCents(priceUsd)
+
+		}
+
+		// fixme: hardcoded fee fraction
+		feeFraction := 0.2
+
+		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
+
+		glog.Infof("[apple] Subscription details - App Transaction ID: %s, Network ID: %s, Expires: %s, Net Revenue: %d",
+			appTransactionId,
+			networkId,
+			expiresDate.Format(time.RFC3339),
+			netRevenue,
+		)
+
+		subscriptionRenewal := model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          time.Now(),
+			EndTime:            expiresDate.Add(SubscriptionGracePeriod),
+			NetRevenue:         netRevenue,
+			SubscriptionMarket: model.SubscriptionMarketApple,
+			TransactionId:      appTransactionId,
+		}
+
+		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
+
 	} else {
 		glog.Infof("[apple] Renewal Info is nil")
 	}
 
-	if transactionInfo != nil {
-		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
-
-		if transactionId, ok := transactionInfo["transactionId"].(string); ok {
-			glog.Infof("[apple] Transaction ID: %s", transactionId)
-		}
-
-		if productId, ok := transactionInfo["productId"].(string); ok {
-			glog.Infof("[apple] Product ID: %s", productId)
-		}
-
-		if purchaseDate, ok := transactionInfo["purchaseDate"].(float64); ok {
-			purchaseDateStr := time.Unix(int64(purchaseDate/1000), 0).Format(time.RFC3339)
-			glog.Infof("[apple] Purchase Date: %s", purchaseDateStr)
-		}
-
-		if expiresDate, ok := transactionInfo["expiresDate"].(float64); ok {
-			expiresDateStr := time.Unix(int64(expiresDate/1000), 0).Format(time.RFC3339)
-			glog.Infof("[apple] Expires Date: %s", expiresDateStr)
-		}
-	} else {
-		glog.Infof("[apple] Transaction Info is nil")
-	}
-
-	// fixme: update db
 }
 
 func DecodeJWSPayload(jwsToken string) (map[string]interface{}, error) {

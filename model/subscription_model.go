@@ -367,9 +367,9 @@ type RedeemBalanceCodeResult struct {
 
 type RedeemBalanceCodeTransferBalance struct {
 	TransferBalanceId server.Id `json:"transfer_balance_id"`
-	StartTime         time.Time    `json:"start_time"`
-	EndTime           time.Time    `json:"end_time"`
-	BalanceByteCount  ByteCount    `json:"balance_byte_count"`
+	StartTime         time.Time `json:"start_time"`
+	EndTime           time.Time `json:"end_time"`
+	BalanceByteCount  ByteCount `json:"balance_byte_count"`
 }
 
 type RedeemBalanceCodeError struct {
@@ -552,9 +552,9 @@ func CheckBalanceCode(
 type TransferBalance struct {
 	BalanceId             server.Id `json:"balance_id"`
 	NetworkId             server.Id `json:"network_id"`
-	StartTime             time.Time    `json:"start_time"`
-	EndTime               time.Time    `json:"end_time"`
-	StartBalanceByteCount ByteCount    `json:"start_balance_byte_count"`
+	StartTime             time.Time `json:"start_time"`
+	EndTime               time.Time `json:"end_time"`
+	StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
 	// how much money the platform made after subtracting fees
 	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
 	BalanceByteCount ByteCount `json:"balance_byte_count"`
@@ -2329,7 +2329,7 @@ type SubscriptionCreatePaymentIdArgs struct {
 }
 
 type SubscriptionCreatePaymentIdResult struct {
-	SubscriptionPaymentId server.Id                      `json:"subscription_payment_id,omitempty"`
+	SubscriptionPaymentId server.Id                         `json:"subscription_payment_id,omitempty"`
 	Error                 *SubscriptionCreatePaymentIdError `json:"error,omitempty"`
 }
 
@@ -2423,13 +2423,20 @@ type SubscriptionType = string
 
 const SubscriptionTypeSupporter = "supporter"
 
+type SubscriptionMarket = string
+
+const SubscriptionMarketApple = "apple"
+const SubscriptionMarketGoogle = "google"
+
 type SubscriptionRenewal struct {
-	NetworkId        server.Id
-	SubscriptionType SubscriptionType
-	StartTime        time.Time
-	EndTime          time.Time
-	NetRevenue       NanoCents
-	PurchaseToken    string
+	NetworkId          server.Id
+	SubscriptionType   SubscriptionType
+	StartTime          time.Time
+	EndTime            time.Time
+	NetRevenue         NanoCents
+	PurchaseToken      string
+	SubscriptionMarket SubscriptionMarket // google or apple
+	TransactionId      string             // for tracking on Google Play or Apple App Store
 }
 
 func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
@@ -2443,9 +2450,11 @@ func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
 			        start_time,
 			        end_time,
 			        net_revenue_nano_cents,
-			        purchase_token
+			        purchase_token,
+							market,
+							transaction_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				ON CONFLICT (network_id, subscription_type, end_time, start_time) DO UPDATE
 				SET
 					net_revenue_nano_cents = $5,
@@ -2457,6 +2466,8 @@ func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
 			renewal.EndTime,
 			renewal.NetRevenue,
 			renewal.PurchaseToken,
+			renewal.SubscriptionMarket,
+			renewal.TransactionId,
 		))
 	})
 }

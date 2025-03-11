@@ -1619,4 +1619,12 @@ var migrations = []any{
             PRIMARY KEY (network_id, referral_network_id)
         )
     `),
+
+	newSqlMigration(`
+        ALTER TABLE subscription_renewal ADD COLUMN market varchar(64) NULL
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE subscription_renewal ADD COLUMN transaction_id varchar(64) NULL
+    `),
 }
