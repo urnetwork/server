@@ -952,8 +952,8 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
 
 		// Extract key subscription details for database update
-		var originalTransactionId string // for the original subscription transaction
-		var appTransactionId string      // for the current subscription transaction
+		// var originalTransactionId string // for the original subscription transaction
+		var appTransactionId string // for the current subscription transaction
 		var productId string
 		var expiresDate time.Time
 		var networkId server.Id
@@ -967,16 +967,8 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			}
 		}
 
-		if otid, ok := transactionInfo["originalTransactionId"].(string); ok {
-			originalTransactionId = otid
-		}
-
 		if atid, ok := transactionInfo["appTransactionId"].(string); ok {
-			originalTransactionId = atid
-		}
-
-		if pid, ok := transactionInfo["productId"].(string); ok {
-			productId = pid
+			appTransactionId = atid
 		}
 
 		if exp, ok := transactionInfo["expiresDate"].(float64); ok {
@@ -999,8 +991,8 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
 
-		glog.Infof("[apple] Subscription details - Original Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s, Net Revenue: %d",
-			originalTransactionId,
+		glog.Infof("[apple] Subscription details - App Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s, Net Revenue: %d",
+			appTransactionId,
 			networkId,
 			productId,
 			expiresDate.Format(time.RFC3339),
@@ -1040,6 +1032,8 @@ func HandleExpiredApple(notification AppleNotificationDecodedPayload) {
 		}
 	}
 
+	// could send a follow up email to the user?
+
 }
 
 func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
@@ -1062,28 +1056,22 @@ func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecod
 			appTransactionId = atid
 		}
 
-		// Check auto-renewal status
-		if autoRenewStatus, ok := renewalInfo["autoRenewStatus"].(float64); ok {
-			if autoRenewStatus == 1 {
-				glog.Infof("[apple] Auto-renewal is enabled")
-			} else {
-				glog.Infof("[apple] Auto-renewal is disabled")
-			}
-		}
+		// for checking auto renewal status
+		// if autoRenewStatus, ok := renewalInfo["autoRenewStatus"].(float64); ok {
+		// 	if autoRenewStatus == 1 {
+		// 		glog.Infof("[apple] Auto-renewal is enabled")
+		// 	} else {
+		// 		glog.Infof("[apple] Auto-renewal is disabled")
+		// 	}
+		// }
 
-		if networkIdStr, ok := transactionInfo["appAccountToken"].(string); ok {
+		if networkIdStr, ok := renewalInfo["appAccountToken"].(string); ok {
 			networkId, err = server.ParseId(networkIdStr)
 			if err != nil {
 				glog.Errorf("[apple] Failed to parse network ID: %v", err)
 				return
 			}
 		}
-
-		// Renewal Info: map[appAccountToken:3f2302cd-5017-48b0-951e-de7a6ac8b5b1 appTransactionId:704286256654469462 autoRenewProductId:supporter autoRenewStatus:1 currency:USD environment:Sandbox originalTransactionId:2000000867822051 productId:supporter recentSubscriptionStartDate:1.741241052e+12 renewalDate:1.741244352e+12 renewalPrice:4990 signedDate:1.741243998255e+12]
-
-		// if subscriptionStartDate, ok := renewalInfo["recentSubscriptionStartDate"].(float64); ok {
-		// 	glog.Infof("[apple] Expiration intent: %v", subscriptionStartDate)
-		// }
 
 		if renewalDate, ok := renewalInfo["renewalDate"].(float64); ok {
 			glog.Infof("[apple] Expiration intent: %v", renewalDate)
@@ -1092,7 +1080,7 @@ func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecod
 
 		var priceNanoCents int64
 
-		if priceFloat, ok := transactionInfo["renewalPrice"].(float64); ok {
+		if priceFloat, ok := renewalInfo["renewalPrice"].(float64); ok {
 
 			// webhook price coming back like "4990" for $4.99
 			priceUsd := priceFloat / 1000
@@ -1132,19 +1120,19 @@ func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecod
 }
 
 func DecodeJWSPayload(jwsToken string) (map[string]interface{}, error) {
-	// Split the JWS token into its components
+	// split JWS
 	parts := strings.Split(jwsToken, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("invalid JWS format")
 	}
 
-	// Decode the payload (second part)
+	// decode
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode JWS payload: %v", err)
 	}
 
-	// Parse the payload
+	// parse
 	var payload map[string]interface{}
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return nil, fmt.Errorf("failed to parse JWS payload: %v", err)
@@ -1158,7 +1146,6 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 	var transactionInfo map[string]interface{}
 	var err error
 
-	// Try using SignedRenewalInfo from top-level field
 	var signedRenewalInfo string
 	if notification.SignedRenewalInfo != "" {
 		signedRenewalInfo = notification.SignedRenewalInfo
@@ -1168,7 +1155,6 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 		glog.Infoln("Using data.signedRenewalInfo")
 	}
 
-	// Parse signedRenewalInfo if we found it
 	if signedRenewalInfo != "" {
 		renewalInfo, err = DecodeJWSPayload(signedRenewalInfo)
 		if err != nil {
@@ -1176,7 +1162,6 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 		}
 	}
 
-	// Try using SignedTransactionInfo from top-level field
 	var signedTransactionInfo string
 	if notification.SignedTransactionInfo != "" {
 		signedTransactionInfo = notification.SignedTransactionInfo
@@ -1186,7 +1171,6 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 		glog.Infoln("Using data.signedTransactionInfo")
 	}
 
-	// Parse signedTransactionInfo if we found it
 	if signedTransactionInfo != "" {
 		transactionInfo, err = DecodeJWSPayload(signedTransactionInfo)
 		if err != nil {

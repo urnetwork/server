@@ -223,7 +223,7 @@ func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	case "EXPIRED":
 		controller.HandleExpiredApple(notification)
 	case "DID_RENEW":
-		controller.HandleRenewalApple(notification)
+		controller.HandleRenewalApple(r.Context(), notification)
 	default:
 		glog.Infof("[apple] Unhandled notification type: %s", notification.NotificationType)
 	}
