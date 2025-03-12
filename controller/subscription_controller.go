@@ -999,17 +999,22 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			netRevenue,
 		)
 
+		startTime := time.Now()
+		endTime := expiresDate.Add(SubscriptionGracePeriod)
+
 		subscriptionRenewal := model.SubscriptionRenewal{
 			NetworkId:          networkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          time.Now(),
-			EndTime:            expiresDate.Add(SubscriptionGracePeriod),
+			StartTime:          startTime,
+			EndTime:            endTime,
 			NetRevenue:         netRevenue,
 			SubscriptionMarket: model.SubscriptionMarketApple,
 			TransactionId:      appTransactionId,
 		}
 
 		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
+
+		AddRefreshTransferBalance(ctx, networkId)
 
 	} else {
 		glog.Infof("[apple] Transaction Info: nil")
@@ -1112,6 +1117,8 @@ func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecod
 		}
 
 		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
+
+		AddRefreshTransferBalance(ctx, networkId)
 
 	} else {
 		glog.Infof("[apple] Renewal Info is nil")
