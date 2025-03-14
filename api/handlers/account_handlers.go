@@ -17,5 +17,5 @@ func GetNetworkReferralCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func ValidateReferralCode(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(controller.ValidateReferralCode, w, r)
+	router.WrapWithInputNoAuth(controller.ValidateReferralCode, w, r)
 }
