@@ -27,5 +27,13 @@ func TestNetworkReferralCode(t *testing.T) {
 		referralNetworkId := GetNetworkIdByReferralCode(&createdReferralCode.ReferralCode)
 		assert.Equal(t, referralNetworkId, networkId)
 
+		// validity checks
+		invalidReferralCode := server.NewId()
+		isValid := ValidateNetworkReferralCode(ctx, invalidReferralCode)
+		assert.Equal(t, isValid, false)
+
+		isValid = ValidateNetworkReferralCode(ctx, createdReferralCode.ReferralCode)
+		assert.Equal(t, isValid, true)
+
 	})
 }

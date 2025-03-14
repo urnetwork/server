@@ -100,3 +100,29 @@ func GetNetworkIdByReferralCode(referralCode *server.Id) server.Id {
 	return networkId
 
 }
+
+func ValidateNetworkReferralCode(ctx context.Context, referralCode server.Id) bool {
+
+	var exists bool
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+						SELECT
+								1
+						FROM network_referral_code
+						WHERE
+								referral_code = $1
+				`,
+			referralCode,
+		)
+
+		server.WithPgResult(result, err, func() {
+			exists = result.Next()
+		})
+	})
+
+	return exists
+
+}
