@@ -101,7 +101,7 @@ func GetNetworkIdByReferralCode(referralCode *server.Id) server.Id {
 
 }
 
-func ValidateNetworkReferralCode(ctx context.Context, referralCode server.Id) bool {
+func ValidateReferralCode(ctx context.Context, referralCode server.Id) bool {
 
 	var exists bool
 

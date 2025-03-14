@@ -25,15 +25,19 @@ type ValidateNetworkReferralCodeResult struct {
 	IsValid bool `json:"is_valid"`
 }
 
+type ValidateReferralCodeArgs struct {
+	ReferralCode server.Id `json:"referral_code"`
+}
+
 /**
  * When users manually enter a referral code, we want to show users whether it is valid or not.
  */
-func ValidateNetworkReferralCode(
-	referralCode server.Id,
+func ValidateReferralCode(
+	validateReferralCode *ValidateReferralCodeArgs,
 	session *session.ClientSession,
 ) (*ValidateNetworkReferralCodeResult, error) {
 
-	isValid := model.ValidateNetworkReferralCode(session.Ctx, referralCode)
+	isValid := model.ValidateReferralCode(session.Ctx, validateReferralCode.ReferralCode)
 
 	return &ValidateNetworkReferralCodeResult{
 		IsValid: isValid,
