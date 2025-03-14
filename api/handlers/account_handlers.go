@@ -15,3 +15,7 @@ func FeedbackSend(w http.ResponseWriter, r *http.Request) {
 func GetNetworkReferralCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetNetworkReferralCode, w, r)
 }
+
+func ValidateReferralCode(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ValidateNetworkReferralCode, w, r)
+}
