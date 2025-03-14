@@ -29,10 +29,10 @@ func TestNetworkReferralCode(t *testing.T) {
 
 		// validity checks
 		invalidReferralCode := server.NewId()
-		isValid := ValidateNetworkReferralCode(ctx, invalidReferralCode)
+		isValid := ValidateReferralCode(ctx, invalidReferralCode)
 		assert.Equal(t, isValid, false)
 
-		isValid = ValidateNetworkReferralCode(ctx, createdReferralCode.ReferralCode)
+		isValid = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
 		assert.Equal(t, isValid, true)
 
 	})
