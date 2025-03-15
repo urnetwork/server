@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -9,6 +10,7 @@ import (
 type NetworkReferral struct {
 	NetworkId         *server.Id `json:"network_id"`
 	ReferralNetworkId *server.Id `json:"referral_network_id"`
+	CreateTime        time.Time  `json:"create_time"`
 }
 
 func CreateNetworkReferral(
@@ -26,18 +28,22 @@ func CreateNetworkReferral(
 		ReferralNetworkId: &referralNetworkId,
 	}
 
+	createTime := server.NowUtc()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_referral (
 					network_id,
-					referral_network_id
+					referral_network_id,
+					create_time
 				)
-				VALUES ($1, $2)
+				VALUES ($1, $2, $3)
 			`,
 			networkReferral.NetworkId,
 			networkReferral.ReferralNetworkId,
+			createTime,
 		))
 	})
 	return networkReferral
@@ -57,7 +63,8 @@ func GetNetworkReferralByNetworkId(
 			`
 				SELECT
 					network_id,
-					referral_network_id
+					referral_network_id,
+					create_time
 				FROM network_referral
 				WHERE
 					network_id = $1
@@ -71,6 +78,7 @@ func GetNetworkReferralByNetworkId(
 				server.Raise(result.Scan(
 					&networkReferral.NetworkId,
 					&networkReferral.ReferralNetworkId,
+					&networkReferral.CreateTime,
 				))
 			}
 		})
@@ -94,7 +102,8 @@ func GetReferralsByReferralNetworkId(
 			`
 				SELECT
 					network_id,
-					referral_network_id
+					referral_network_id,
+					create_time
 				FROM network_referral
 				WHERE
 					referral_network_id = $1
@@ -108,6 +117,7 @@ func GetReferralsByReferralNetworkId(
 				server.Raise(result.Scan(
 					&networkReferral.NetworkId,
 					&networkReferral.ReferralNetworkId,
+					&networkReferral.CreateTime,
 				))
 				networkReferrals = append(networkReferrals, networkReferral)
 			}
