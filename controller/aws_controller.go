@@ -9,6 +9,7 @@ import (
 	"embed"
 	"fmt"
 	"strings"
+	"sync"
 
 	// "time"
 
@@ -25,6 +26,16 @@ import (
 
 // IMPORTANT this controller is for account messages only
 // marketing messages are sent via a separate channel
+
+type EmailConfig struct {
+	CompanySenderEmail string `yaml:"company_sender_email"`
+}
+
+var CompanySenderEmail = sync.OnceValue(func() *EmailConfig {
+	var email EmailConfig
+	server.Config.RequireSimpleResource("email.yml").UnmarshalYaml(&email)
+	return &email
+})
 
 //go:embed email_templates/*
 var emailTemplates embed.FS
@@ -328,14 +339,14 @@ func sendAccountEmail(emailAddress string, subject string, bodyHtml string, body
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
 
-	// FIXME move to a config file
-	senderEmail := SenderEmail("no-reply@bringyour.com")
+	// note any sender email domain will need to be registed as an identity in SES
+	senderEmail := CompanySenderEmail().CompanySenderEmail
 	for _, sendOpt := range sendOpts {
 		switch v := sendOpt.(type) {
 		case SendAccountEmailSenderEmail:
-			senderEmail = &v
+			senderEmail = v.SenderEmail
 		case *SendAccountEmailSenderEmail:
-			senderEmail = v
+			senderEmail = v.SenderEmail
 		}
 	}
 
@@ -371,7 +382,7 @@ func sendAccountEmail(emailAddress string, subject string, bodyHtml string, body
 				Data:    aws.String(subject),
 			},
 		},
-		Source: aws.String(senderEmail.SenderEmail),
+		Source: aws.String(senderEmail),
 		// Uncomment to use a configuration set
 		//ConfigurationSetName: aws.String(ConfigurationSet),
 	}
