@@ -1627,4 +1627,8 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE subscription_renewal ADD COLUMN transaction_id varchar(64) NULL
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_referral ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
+    `),
 }
