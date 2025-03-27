@@ -1,7 +1,7 @@
 
 include ${BRINGYOUR_HOME}/xops/build.env
 
-all: clean build image
+all: clean build
 
 clean:
 	rm -rf build
@@ -12,7 +12,9 @@ build:
 	env CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 ${GOBUILD} -o build/darwin/arm64/
 	env CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 ${GOBUILD} -o build/darwin/amd64/
 
-image:
+warp_build:
+	$(MAKE) clean
+	$(MAKE) build
 	docker buildx build --progress=plain \
 		--build-arg warp_env=${WARP_ENV} \
 		--platform linux/arm64/v8,linux/amd64 \
