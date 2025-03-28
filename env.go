@@ -315,6 +315,10 @@ func ConfigVersion() (string, error) {
 	if configVersion != "" {
 		return configVersion, nil
 	}
+	// try to use the warp version as the warp config version
+	if version, err := Version(); err == nil {
+		return version, nil
+	}
 	return "", errors.New("WARP_CONFIG_VERSION not set")
 }
 
