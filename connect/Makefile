@@ -24,4 +24,4 @@ warp_build:
 		.
 
 init:
-	go get
+	go get all
