@@ -1,4 +1,4 @@
-module github.com/urnetwork/server
+module github.com/urnetwork/server/v2025
 
 go 1.24.0
 
