@@ -1,0 +1,18 @@
+
+Welcome to URnetwork!
+
+1. your network 2. you are network 3. our network
+
+When I started in 2023, I wanted to replace the shady VPNs of the world with something truly better - undetectable, unblockable, reproducible, free. I wanted everyone to have the experience of sitting in a friend's living room, anywhere in the world, at any time, on the fastest and most private internet connection. No questions asked.
+
+Thanks for joining us on this mission. As we build our apps and launch our labs for better ad blockers and group internet sharing, your feedback and support is what drives us forward. Hearing stories of URnetwork just working is the best part of my day.
+
+Send me a note anytime.
+
+Brien Colwell <brien@ur.io> Founder, URnetwork
+
+Btw, did you know that URnetwork is not only a free VPN, but you get paid to participate? The more decentralized we are, the better the product gets. Just 4% of our users who sign up as supporters power all of the subsidy payments. You can earn more money by running more providers. See our docs.
+
+Copyright {{.CopyrightYear}} BringYour, Inc.
+2261 Market Street #5245, San Francisco, CA 94114, United States
+https://ur.io

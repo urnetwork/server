@@ -1,0 +1,10 @@
+
+{{.Secret}}
+
+You got {{.Balance}} of data!
+
+Add the data to your account at https://app.bringyour.com/account/add-balance?{{.Secret}} or visit https://app.bringyour.com/account/add-balance
+
+Copyright {{.CopyrightYear}} BringYour, Inc.
+2261 Market Street #5245, San Francisco, CA 94114, United States
+https://bringyour.com

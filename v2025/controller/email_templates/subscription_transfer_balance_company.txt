@@ -1,0 +1,12 @@
+
+Let's set up a {{.Balance}} shared data pack for your company.
+
+Can you please reply with the following:
+1. The company domain
+2. A company email address that can be used to verify the request
+
+After we get this set up, anyone who already has or creates a new network associated with a company domain email will automatically get access to the shared data. You can direct your team to contact <support@bringyour.com> for any help.
+
+Copyright {{.CopyrightYear}} BringYour, Inc.
+2261 Market Street #5245, San Francisco, CA 94114, United States
+https://bringyour.com
