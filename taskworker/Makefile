@@ -1,7 +1,7 @@
 
 include ${BRINGYOUR_HOME}/xops/build.env
 
-all: clean build
+all: init clean build
 
 clean:
 	rm -rf build
@@ -22,3 +22,6 @@ warp_build:
 		--no-cache \
 		--push \
 		.
+
+init:
+	go get

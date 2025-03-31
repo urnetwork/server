@@ -1,7 +1,7 @@
 
 include ${BRINGYOUR_HOME}/xops/build.env
 
-all: clean build
+all: init clean build
 
 clean:
 	rm -rf build
@@ -21,3 +21,6 @@ warp_build:
 		-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
 		--push \
 		.
+
+init:
+	go get
