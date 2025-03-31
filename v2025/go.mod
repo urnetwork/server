@@ -1,4 +1,4 @@
-module github.com/urnetwork/server
+module github.com/urnetwork/server/v2025
 
 go 1.24.0
 
@@ -25,8 +25,6 @@ require (
 	github.com/stripe/stripe-go/v76 v76.25.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
-	github.com/urnetwork/connect v0.0.0
-	github.com/urnetwork/connect/protocol v0.0.0
 	golang.org/x/crypto v0.35.0
 	golang.org/x/exp v0.0.0-20250228200357-dead58393ab7
 	golang.org/x/net v0.35.0
@@ -48,12 +46,10 @@ require (
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
+	github.com/urnetwork/connect/protocol/v2025 v2025.3.31-58609749
+	github.com/urnetwork/connect/v2025 v2025.3.31-58609749
 	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
 )
-
-replace github.com/urnetwork/connect => ../connect
-
-replace github.com/urnetwork/connect/protocol => ../connect/protocol
