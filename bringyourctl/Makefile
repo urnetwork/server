@@ -11,4 +11,6 @@ build:
 	env CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o build/darwin/amd64/
 
 init:
+	go clean -cache
+	go clean -modcache
 	go get all
