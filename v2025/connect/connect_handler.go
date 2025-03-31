@@ -11,8 +11,8 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/protocol/v2025"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/jwt"
