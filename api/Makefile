@@ -1,5 +1,5 @@
 
-include ${BRINGYOUR_HOME}/xops/build.env
+GOBUILD=go build -trimpath
 
 all: init clean build
 
@@ -7,7 +7,6 @@ clean:
 	rm -rf build
 
 build:
-	GOBUILD=go build -trimpath
 	env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 ${GOBUILD} -o build/linux/arm64/
 	env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 ${GOBUILD} -o build/linux/amd64/
 	env CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 ${GOBUILD} -o build/darwin/arm64/
