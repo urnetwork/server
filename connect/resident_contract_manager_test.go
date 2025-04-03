@@ -6,8 +6,8 @@ package main
 
 // "github.com/go-playground/assert/v2"
 
-// "github.com/urnetwork/server"
-// "github.com/urnetwork/server/model"
+// "github.com/urnetwork/server/v2025"
+// "github.com/urnetwork/server/v2025/model"
 
 /*
 func TestCreateContract(t *testing.T) { server.DefaultTestEnv().Run(func() {

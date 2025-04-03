@@ -5,8 +5,8 @@ import (
 
 	"github.com/samber/lo"
 
-	"github.com/urnetwork/server/api/myipinfo/landmarks/kmeanspp"
-	"github.com/urnetwork/server/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/v2025/api/myipinfo/landmarks/kmeanspp"
+	"github.com/urnetwork/server/v2025/api/myipinfo/myinfo"
 )
 
 type LandmarkAndRTT struct {

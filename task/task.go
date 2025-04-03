@@ -18,9 +18,9 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 // the task system captures work that needs to be done to advance the platform

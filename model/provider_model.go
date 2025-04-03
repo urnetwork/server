@@ -5,8 +5,8 @@ import (
 
 	mathrand "math/rand"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 type StatsProvidersOverviewArgs struct {

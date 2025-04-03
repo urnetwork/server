@@ -9,12 +9,12 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/session"
 
-	// "github.com/urnetwork/server/ulid"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/search"
+	// "github.com/urnetwork/server/v2025/ulid"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/search"
 )
 
 var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)

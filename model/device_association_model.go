@@ -15,9 +15,9 @@ import (
 	// FIXME remove
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 type CodeType = string

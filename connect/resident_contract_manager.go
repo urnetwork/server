@@ -9,8 +9,8 @@ import (
 
 	// "golang.org/x/exp/maps"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 type residentContractManager struct {

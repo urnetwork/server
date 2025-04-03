@@ -1,8 +1,8 @@
 package controller
 
 import (
-	"github.com/urnetwork/server/session"
-	// "github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025/session"
+	// "github.com/urnetwork/server/v2025/model"
 )
 
 type HelloResult struct {

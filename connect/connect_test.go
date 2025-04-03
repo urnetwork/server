@@ -18,14 +18,14 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/protocol/v2025"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/controller"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/router"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 func TestConnectNoNack(t *testing.T) {

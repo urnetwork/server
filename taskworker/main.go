@@ -12,13 +12,13 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
-	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
-	"github.com/urnetwork/server/taskworker/work"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/controller"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/router"
+	"github.com/urnetwork/server/v2025/session"
+	"github.com/urnetwork/server/v2025/task"
+	"github.com/urnetwork/server/v2025/taskworker/work"
 )
 
 const RemoveTaskTimeout = 90 * 24 * time.Hour
@@ -147,7 +147,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			controller.PlaySubscriptionRenewal,
 			controller.PlaySubscriptionRenewalPost,
 			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",
-			"github.com/urnetwork/server/bringyour/controller.PlaySubscriptionRenewal",
+			"github.com/urnetwork/server/v2025/bringyour/controller.PlaySubscriptionRenewal",
 		),
 		task.NewTaskTargetWithPost(
 			work.BackfillInitialTransferBalance,

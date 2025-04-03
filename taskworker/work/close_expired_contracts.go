@@ -3,10 +3,10 @@ package work
 import (
 	"time"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/session"
+	"github.com/urnetwork/server/v2025/task"
 )
 
 type CloseExpiredContractsArgs struct {

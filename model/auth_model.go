@@ -13,11 +13,11 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/session"
 
-	// "github.com/urnetwork/server/ulid"
-	"github.com/urnetwork/server/jwt"
+	// "github.com/urnetwork/server/v2025/ulid"
+	"github.com/urnetwork/server/v2025/jwt"
 )
 
 // 4 hours

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 var ipInfoConfig = sync.OnceValue(func() map[string]any {

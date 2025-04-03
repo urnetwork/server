@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/urnetwork/server/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/v2025/api/myipinfo/myinfo"
 
 	"github.com/go-playground/assert/v2"
 )

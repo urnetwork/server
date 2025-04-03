@@ -1,8 +1,8 @@
 package controller
 
 import (
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 func TransferStats(session *session.ClientSession) (*model.TransferStats, error) {

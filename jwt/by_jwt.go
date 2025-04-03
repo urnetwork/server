@@ -15,7 +15,7 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
-	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/v2025"
 )
 
 // see https://github.com/golang-jwt/jwt

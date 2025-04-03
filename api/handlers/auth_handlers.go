@@ -14,9 +14,9 @@ import (
 	"github.com/golang/glog"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/v2025/controller"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/router"
 )
 
 func AuthLogin(w http.ResponseWriter, r *http.Request) {

@@ -22,10 +22,10 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/protocol/v2025"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 // note -

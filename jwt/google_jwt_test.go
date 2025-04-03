@@ -8,7 +8,7 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/v2025"
 )
 
 func TestGoogleJwk(t *testing.T) {

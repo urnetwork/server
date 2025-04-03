@@ -3,9 +3,9 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/v2025/controller"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/router"
 )
 
 func NetworkCheck(w http.ResponseWriter, r *http.Request) {

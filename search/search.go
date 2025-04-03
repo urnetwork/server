@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/v2025"
 )
 
 type SearchType string

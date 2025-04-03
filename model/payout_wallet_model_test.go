@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/go-playground/assert/v2"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 func TestPayoutWallet(t *testing.T) {

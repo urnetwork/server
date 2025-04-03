@@ -6,8 +6,8 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 func ConnectNetworkClient(

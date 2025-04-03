@@ -12,11 +12,11 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/protocol/v2025"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 var ControlId = server.Id(connect.ControlId)

@@ -8,11 +8,11 @@ import (
 	"strings"
 
 	"github.com/ipinfo/go/v2/ipinfo"
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/api/myipinfo/landmarks"
-	"github.com/urnetwork/server/api/myipinfo/myinfo"
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/api/myipinfo/landmarks"
+	"github.com/urnetwork/server/v2025/api/myipinfo/myinfo"
+	"github.com/urnetwork/server/v2025/controller"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 

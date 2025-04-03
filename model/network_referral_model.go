@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/v2025"
 )
 
 type NetworkReferral struct {

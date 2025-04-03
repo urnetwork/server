@@ -15,9 +15,9 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/jwt"
-	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/jwt"
+	"github.com/urnetwork/server/v2025/session"
 )
 
 func TestByteCount(t *testing.T) {

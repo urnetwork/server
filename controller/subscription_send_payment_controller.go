@@ -13,10 +13,10 @@ import (
 	"github.com/golang/glog"
 	mathrand "math/rand"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
+	"github.com/urnetwork/server/v2025/session"
+	"github.com/urnetwork/server/v2025/task"
 )
 
 func SchedulePendingPayments(clientSession *session.ClientSession) {

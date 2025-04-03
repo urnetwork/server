@@ -20,8 +20,8 @@ import (
 
 	// "github.com/aws/aws-sdk-go/aws/awserr"
 
-	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/v2025"
+	"github.com/urnetwork/server/v2025/model"
 )
 
 // IMPORTANT this controller is for account messages only

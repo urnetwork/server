@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 
-	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/v2025"
 )
 
 type CircleUC struct {
