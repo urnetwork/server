@@ -7,7 +7,8 @@ import (
 )
 
 type NetworkReferralResult struct {
-	ReferralCode server.Id `json:"referral_code"`
+	ReferralCode   server.Id `json:"referral_code"`
+	TotalReferrals int       `json:"total_referrals"`
 }
 
 func GetNetworkReferralCode(
@@ -15,8 +16,12 @@ func GetNetworkReferralCode(
 ) (*NetworkReferralResult, error) {
 
 	res := model.GetNetworkReferralCode(session.Ctx, session.ByJwt.NetworkId)
+
+	networkReferralsResult := model.GetReferralsByReferralNetworkId(session.Ctx, session.ByJwt.NetworkId)
+
 	return &NetworkReferralResult{
-		ReferralCode: res.ReferralCode,
+		ReferralCode:   res.ReferralCode,
+		TotalReferrals: len(networkReferralsResult),
 	}, nil
 
 }
