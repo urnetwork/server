@@ -11,6 +11,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"reflect"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -617,7 +618,8 @@ func NewTaskTargetWithPost[T any, R any](
 
 func functionName[T any, R any](targetFunction TaskFunction[T, R]) string {
 	targetFunctionName := runtime.FuncForPC(reflect.ValueOf(targetFunction).Pointer()).Name()
-	return targetFunctionName
+	// remove all /vXXXX paths in the canonical module
+	return regexp.MustCompile("/v\\d+").ReplaceAllString(targetFunctionName, "")
 }
 
 func (self *TaskTarget[T, R]) TargetFunctionName() string {
