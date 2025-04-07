@@ -26,10 +26,9 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v2025.4.3-58948734+incompatible
-	github.com/urnetwork/connect/protocol v0.0.0
 	golang.org/x/crypto v0.37.0
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
-	golang.org/x/net v0.38.0
+	golang.org/x/net v0.39.0
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -38,7 +37,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -56,5 +54,3 @@ require (
 )
 
 replace github.com/urnetwork/connect => ../connect
-
-replace github.com/urnetwork/connect/protocol => ../connect/protocol
