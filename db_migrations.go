@@ -1631,4 +1631,6 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_referral ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
     `),
+
+	newCodeMigration(migration_20250402_ReferralCodeToString),
 }

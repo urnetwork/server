@@ -1,14 +1,13 @@
 package controller
 
 import (
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
 type NetworkReferralResult struct {
-	ReferralCode   server.Id `json:"referral_code"`
-	TotalReferrals int       `json:"total_referrals"`
+	ReferralCode   *string `json:"referral_code"`
+	TotalReferrals int     `json:"total_referrals"`
 }
 
 func GetNetworkReferralCode(
@@ -20,7 +19,7 @@ func GetNetworkReferralCode(
 	networkReferralsResult := model.GetReferralsByReferralNetworkId(session.Ctx, session.ByJwt.NetworkId)
 
 	return &NetworkReferralResult{
-		ReferralCode:   res.ReferralCode,
+		ReferralCode:   &res.ReferralCode,
 		TotalReferrals: len(networkReferralsResult),
 	}, nil
 
@@ -31,7 +30,7 @@ type ValidateNetworkReferralCodeResult struct {
 }
 
 type ValidateReferralCodeArgs struct {
-	ReferralCode server.Id `json:"referral_code"`
+	ReferralCode string `json:"referral_code"`
 }
 
 /**

@@ -28,9 +28,8 @@ func NetworkCreate(
 		model.CreateNetworkReferral(
 			session.Ctx,
 			result.Network.NetworkId,
-			networkCreate.ReferralCode,
+			*networkCreate.ReferralCode,
 		)
-
 	}
 
 	verifyUseNumeric := false

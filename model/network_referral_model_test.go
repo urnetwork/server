@@ -19,9 +19,10 @@ func TestNetworkReferral(t *testing.T) {
 
 		// create a network referral code
 		createdReferralCode := CreateNetworkReferralCode(ctx, referralNetworkId)
+		assert.Equal(t, len(createdReferralCode.ReferralCode), 6)
 
 		// create a NetworkA referral
-		createdNetworkReferral := CreateNetworkReferral(ctx, networkAId, &createdReferralCode.ReferralCode)
+		createdNetworkReferral := CreateNetworkReferral(ctx, networkAId, createdReferralCode.ReferralCode)
 		assert.Equal(t, createdNetworkReferral.NetworkId, networkAId)
 		assert.Equal(t, createdNetworkReferral.ReferralNetworkId, referralNetworkId)
 
@@ -32,7 +33,7 @@ func TestNetworkReferral(t *testing.T) {
 
 		// create a NetworkB referral
 		// to test multiple referrals count
-		CreateNetworkReferral(ctx, networkBId, &createdReferralCode.ReferralCode)
+		CreateNetworkReferral(ctx, networkBId, createdReferralCode.ReferralCode)
 
 		// get all referrals by referral network id
 		referrals := GetReferralsByReferralNetworkId(ctx, referralNetworkId)

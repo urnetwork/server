@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	// "time"
 )
 
@@ -11,15 +12,15 @@ func migration_20240124_PopulateDevice(ctx context.Context) {
 		result, err := tx.Query(
 			ctx,
 			`
-                SELECT
-                    client_id,
-                    network_id,
-                    description,
-                    device_spec
-                FROM network_client
-                WHERE
-                    device_id IS NULL
-            `,
+					SELECT
+							client_id,
+							network_id,
+							description,
+							device_spec
+					FROM network_client
+					WHERE
+							device_id IS NULL
+			`,
 		)
 		type Device struct {
 			deviceId   Id
@@ -86,10 +87,10 @@ func migration_20240725_PopulateNetworkReferralCodes(ctx context.Context) {
 		result, err := tx.Query(
 			ctx,
 			`
-                SELECT
-                    network_id
-                FROM network
-            `,
+					SELECT
+							network_id
+					FROM network
+			`,
 		)
 		networkIds := []Id{}
 		WithPgResult(result, err, func() {
@@ -129,4 +130,84 @@ func migration_20240802_AccountPaymentPopulateCircleWalletId(ctx context.Context
 			`,
 		))
 	})
+}
+
+func migration_20250402_ReferralCodeToString(ctx context.Context) {
+
+	Tx(ctx, func(tx PgTx) {
+		RaisePgResult(tx.Exec(
+			ctx,
+			`
+				-- Drop the constraint on the referral_code column
+				ALTER TABLE network_referral_code DROP CONSTRAINT network_referral_code_referral_code_key;
+				
+				-- Drop the referral_code column
+				ALTER TABLE network_referral_code DROP COLUMN referral_code;
+				
+				-- Add the new referral_code column as a varchar
+				ALTER TABLE network_referral_code ADD COLUMN referral_code varchar(32) NOT NULL;
+				
+				-- Add the unique constraint back
+				ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
+			`,
+		))
+
+		result, err := tx.Query(
+			ctx,
+			`
+        SELECT network_id FROM network_referral_code
+      `,
+		)
+		networkIds := []Id{}
+		WithPgResult(result, err, func() {
+			for result.Next() {
+
+				var networkId Id
+
+				Raise(result.Scan(
+					networkId,
+				))
+
+				networkIds = append(
+					networkIds,
+					networkId,
+				)
+			}
+		})
+
+		for _, networkId := range networkIds {
+
+			code := generateAlphanumericCode(6)
+
+			RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_referral_code
+					SET referral_code = $2
+					WHERE network_id = $1
+				`,
+				networkId,
+				code,
+			))
+
+		}
+
+	})
+
+}
+
+func generateAlphanumericCode(length int) string {
+	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	code := make([]byte, length)
+
+	randomBytes := make([]byte, length)
+	if _, err := rand.Read(randomBytes); err != nil {
+		panic(err)
+	}
+
+	for i := range randomBytes {
+		code[i] = charset[randomBytes[i]%byte(len(charset))]
+	}
+
+	return string(code)
 }
