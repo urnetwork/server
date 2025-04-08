@@ -591,6 +591,18 @@ func PlayWebhook(
 					playAuthHeaders,
 				)
 
+				// fire this immediately since we pull current plan from subscription_renewal table
+
+				PlaySubscriptionRenewal(
+					&PlaySubscriptionRenewalArgs{
+						NetworkId:      networkId,
+						PackageName:    rtdnMessage.PackageName,
+						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+					},
+					clientSession,
+				)
+
 				// continually renew as long as the expiry time keeps getting pushed forward
 				// note RTDN messages for renewal may unreliably delivered, so Google
 				// recommends polling their system around the expiry time
