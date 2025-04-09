@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -31,8 +30,7 @@ type ValidateNetworkReferralCodeResult struct {
 }
 
 type ValidateReferralCodeArgs struct {
-	ReferralCode    *server.Id `json:"referral_code"`
-	ReferralCodeStr string     `json:"referral_code_str"`
+	ReferralCode string `json:"referral_code"`
 }
 
 /**
@@ -43,14 +41,7 @@ func ValidateReferralCode(
 	session *session.ClientSession,
 ) (*ValidateNetworkReferralCodeResult, error) {
 
-	var referralCode string
-	if validateReferralCode.ReferralCode != nil {
-		referralCode = validateReferralCode.ReferralCode.String()
-	}
-
-	if validateReferralCode.ReferralCodeStr != "" {
-		referralCode = validateReferralCode.ReferralCodeStr
-	}
+	referralCode := validateReferralCode.ReferralCode
 
 	isValid := model.ValidateReferralCode(session.Ctx, referralCode)
 

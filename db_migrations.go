@@ -1633,28 +1633,34 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        -- create a temp col to hold current values
+        -- drop constraint
+        ALTER TABLE network_referral_code DROP CONSTRAINT IF EXISTS network_referral_code_referral_code_key;
+
+        -- add temp col to hold the string representation of the UUIDs
         ALTER TABLE network_referral_code ADD COLUMN temp_referral_code varchar(64);
-        
-        -- set temp column with string val of uuid
-        UPDATE network_referral_code SET temp_referral_code = referral_code::text;
-        
-        -- drop referral_code constraint
-        ALTER TABLE network_referral_code DROP CONSTRAINT network_referral_code_referral_code_key;
-        
-        -- drop uuid referral_code column
+
+        -- insert strings into temp col
+        UPDATE network_referral_code SET temp_referral_code = referral_code::text WHERE referral_code IS NOT NULL;
+
+        -- drop the old referral_code column
         ALTER TABLE network_referral_code DROP COLUMN referral_code;
-        
-        -- add referral_code as a varchar col
-        ALTER TABLE network_referral_code ADD COLUMN referral_code varchar(64) NOT NULL;
-        
-        -- copy temp values to the new referral_code column
+
+        -- add the new column, allowing null initially
+        ALTER TABLE network_referral_code ADD COLUMN referral_code varchar(64) NULL;
+
+        -- copy values from temporary col
         UPDATE network_referral_code SET referral_code = temp_referral_code;
-        
-        -- drop temp column
+
+        -- drop the temporary column
         ALTER TABLE network_referral_code DROP COLUMN temp_referral_code;
-        
-        -- add contraint
+
+        -- add check constraint to prevent empty strings
+        ALTER TABLE network_referral_code ADD CONSTRAINT check_referral_code_not_empty CHECK (referral_code <> '');
+
+        -- set not null constraint
+        ALTER TABLE network_referral_code ALTER COLUMN referral_code SET NOT NULL;
+
+        -- network constraint
         ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
     `),
 
