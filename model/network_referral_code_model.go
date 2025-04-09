@@ -32,7 +32,8 @@ func CreateNetworkReferralCode(ctx context.Context, networkId server.Id) *Networ
 
 	var networkReferralCode *NetworkReferralCode
 
-	code := generateAlphanumericCode(6)
+	// code := generateAlphanumericCode(6)
+	code := server.NewId().String()
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
