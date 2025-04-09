@@ -10,8 +10,9 @@ import (
 	// "sync"
 	"time"
 
-	"github.com/golang/glog"
 	mathrand "math/rand"
+
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -258,7 +259,7 @@ func advancePayment(
 					PaymentId:          payment.PaymentId,
 					ExplorerBasePath:   *explorerBasePath,
 					TxHash:             tx.TxHash,
-					ReferralCode:       networkReferralCode.ReferralCode.String(),
+					ReferralCode:       networkReferralCode.ReferralCode,
 					Blockchain:         tx.Blockchain,
 					DestinationAddress: tx.DestinationAddress,
 					AmountUsd:          tx.AmountInUSD,
