@@ -18,7 +18,7 @@ require (
 	github.com/nyaruka/phonenumbers v1.6.0
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/pquerna/cachecontrol v0.2.0
-	github.com/prometheus/client_golang v1.21.1
+	github.com/prometheus/client_golang v1.22.0
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/samber/lo v1.49.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -27,7 +27,7 @@ require (
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v2025.4.3-58948734+incompatible
 	golang.org/x/crypto v0.37.0
-	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
+	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0
 	golang.org/x/net v0.39.0
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
