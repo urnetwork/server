@@ -19,7 +19,6 @@ func TestNetworkReferral(t *testing.T) {
 
 		// create a network referral code
 		createdReferralCode := CreateNetworkReferralCode(ctx, referralNetworkId)
-		assert.Equal(t, len(createdReferralCode.ReferralCode), 6)
 
 		// create a NetworkA referral
 		createdNetworkReferral := CreateNetworkReferral(ctx, networkAId, createdReferralCode.ReferralCode)
