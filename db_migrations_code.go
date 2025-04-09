@@ -132,25 +132,9 @@ func migration_20240802_AccountPaymentPopulateCircleWalletId(ctx context.Context
 	})
 }
 
-func migration_20250402_ReferralCodeToString(ctx context.Context) {
+func migration_20250402_ReferralCodeToAlphaNumeric(ctx context.Context) {
 
 	Tx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(
-			ctx,
-			`
-				-- Drop the constraint on the referral_code column
-				ALTER TABLE network_referral_code DROP CONSTRAINT network_referral_code_referral_code_key;
-				
-				-- Drop the referral_code column
-				ALTER TABLE network_referral_code DROP COLUMN referral_code;
-				
-				-- Add the new referral_code column as a varchar
-				ALTER TABLE network_referral_code ADD COLUMN referral_code varchar(32) NOT NULL;
-				
-				-- Add the unique constraint back
-				ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
-			`,
-		))
 
 		result, err := tx.Query(
 			ctx,

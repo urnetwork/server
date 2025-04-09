@@ -1632,5 +1632,31 @@ var migrations = []any{
         ALTER TABLE network_referral ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
     `),
 
-	newCodeMigration(migration_20250402_ReferralCodeToString),
+	newSqlMigration(`
+        -- create a temp col to hold current values
+        ALTER TABLE network_referral_code ADD COLUMN temp_referral_code varchar(64);
+        
+        -- set temp column with string val of uuid
+        UPDATE network_referral_code SET temp_referral_code = referral_code::text;
+        
+        -- drop referral_code constraint
+        ALTER TABLE network_referral_code DROP CONSTRAINT network_referral_code_referral_code_key;
+        
+        -- drop uuid referral_code column
+        ALTER TABLE network_referral_code DROP COLUMN referral_code;
+        
+        -- add referral_code as a varchar col
+        ALTER TABLE network_referral_code ADD COLUMN referral_code varchar(64) NOT NULL;
+        
+        -- copy temp values to the new referral_code column
+        UPDATE network_referral_code SET referral_code = temp_referral_code;
+        
+        -- drop temp column
+        ALTER TABLE network_referral_code DROP COLUMN temp_referral_code;
+        
+        -- add contraint
+        ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
+    `),
+
+	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
 }
