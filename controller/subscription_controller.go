@@ -538,6 +538,9 @@ func PlayWebhook(
 	webhookArgs *PlayWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
+
+	glog.Infof("PlayWebhook hit")
+
 	data, err := base64.StdEncoding.DecodeString(webhookArgs.Message.Data)
 	if err != nil {
 		return nil, err
@@ -592,7 +595,6 @@ func PlayWebhook(
 				)
 
 				// fire this immediately since we pull current plan from subscription_renewal table
-
 				PlaySubscriptionRenewal(
 					&PlaySubscriptionRenewalArgs{
 						NetworkId:      networkId,
@@ -621,6 +623,8 @@ func PlayWebhook(
 		}
 	}
 	// else unknown package, ignore the message
+
+	glog.Infof("returning from PlayWebhook")
 
 	return &PlayWebhookResult{}, nil
 }
@@ -658,6 +662,9 @@ func PlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
+
+	glog.Infof("PlaySubscriptionRenewal hit")
+
 	url := fmt.Sprintf(
 		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
 		playSubscriptionRenewal.PackageName,
@@ -822,6 +829,9 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 }
 
 func VerifyPlayBody(req *http.Request) (io.Reader, error) {
+
+	glog.Infof("VerifyPlayBody hit")
+
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
 	err := verifyPlayAuth(req.Header.Get("Authorization"))
 	if err != nil {
