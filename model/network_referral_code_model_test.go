@@ -18,17 +18,20 @@ func TestNetworkReferralCode(t *testing.T) {
 		createdReferralCode := CreateNetworkReferralCode(ctx, networkId)
 		assert.Equal(t, createdReferralCode.NetworkId, networkId)
 
+		// todo: add this back in when we switch to alphanumeric codes
+		// assert.Equal(t, len(createdReferralCode.ReferralCode), 6)
+
 		// get the network referral code
 		networkReferralCode := GetNetworkReferralCode(ctx, networkId)
 		assert.Equal(t, networkReferralCode.NetworkId, networkId)
 		assert.Equal(t, networkReferralCode.ReferralCode, createdReferralCode.ReferralCode)
 
 		// get the network id by referral code
-		referralNetworkId := GetNetworkIdByReferralCode(&createdReferralCode.ReferralCode)
+		referralNetworkId := GetNetworkIdByReferralCode(createdReferralCode.ReferralCode)
 		assert.Equal(t, referralNetworkId, networkId)
 
 		// validity checks
-		invalidReferralCode := server.NewId()
+		invalidReferralCode := "invalid_referral_code"
 		isValid := ValidateReferralCode(ctx, invalidReferralCode)
 		assert.Equal(t, isValid, false)
 

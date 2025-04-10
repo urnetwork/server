@@ -2,24 +2,44 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
 
 	"github.com/urnetwork/server"
 )
 
 type NetworkReferralCode struct {
 	NetworkId    server.Id
-	ReferralCode server.Id
+	ReferralCode string
+}
+
+func generateAlphanumericCode(length int) string {
+	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	code := make([]byte, length)
+
+	randomBytes := make([]byte, length)
+	if _, err := rand.Read(randomBytes); err != nil {
+		panic(err)
+	}
+
+	for i := range randomBytes {
+		code[i] = charset[randomBytes[i]%byte(len(charset))]
+	}
+
+	return string(code)
 }
 
 func CreateNetworkReferralCode(ctx context.Context, networkId server.Id) *NetworkReferralCode {
 
 	var networkReferralCode *NetworkReferralCode
 
+	// code := generateAlphanumericCode(6)
+	code := server.NewId().String()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		networkReferralCode = &NetworkReferralCode{
 			NetworkId:    networkId,
-			ReferralCode: server.NewId(),
+			ReferralCode: code,
 		}
 
 		server.RaisePgResult(tx.Exec(
@@ -73,9 +93,9 @@ func GetNetworkReferralCode(ctx context.Context, networkId server.Id) *NetworkRe
 
 }
 
-func GetNetworkIdByReferralCode(referralCode *server.Id) server.Id {
+func GetNetworkIdByReferralCode(referralCode string) *server.Id {
 
-	var networkId server.Id
+	var networkId *server.Id = nil
 
 	server.Tx(context.Background(), func(tx server.PgTx) {
 		result, err := tx.Query(
@@ -101,7 +121,7 @@ func GetNetworkIdByReferralCode(referralCode *server.Id) server.Id {
 
 }
 
-func ValidateReferralCode(ctx context.Context, referralCode server.Id) bool {
+func ValidateReferralCode(ctx context.Context, referralCode string) bool {
 
 	var exists bool
 

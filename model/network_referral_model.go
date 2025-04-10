@@ -16,16 +16,20 @@ type NetworkReferral struct {
 func CreateNetworkReferral(
 	ctx context.Context,
 	networkId server.Id,
-	referralCode *server.Id,
+	referralCode string,
 ) *NetworkReferral {
 
 	// find network id by associated referral code
 	referralNetworkId := GetNetworkIdByReferralCode(referralCode)
 
+	if referralNetworkId == nil {
+		return nil
+	}
+
 	// create network referral
 	networkReferral := &NetworkReferral{
 		NetworkId:         &networkId,
-		ReferralNetworkId: &referralNetworkId,
+		ReferralNetworkId: referralNetworkId,
 	}
 
 	createTime := server.NowUtc()
