@@ -149,7 +149,7 @@ func migration_20250402_ReferralCodeToAlphaNumeric(ctx context.Context) {
 				var networkId Id
 
 				Raise(result.Scan(
-					networkId,
+					&networkId,
 				))
 
 				networkIds = append(

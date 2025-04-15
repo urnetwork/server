@@ -1664,5 +1664,7 @@ var migrations = []any{
         ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
     `),
 
+	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
+
 	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
 }
