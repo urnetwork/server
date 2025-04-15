@@ -832,9 +832,33 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 
 	glog.Infof("VerifyPlayBody hit")
 
-	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err := verifyPlayAuth(req.Header.Get("Authorization"))
+	// log the header
+	glog.Infof("Header: %v", req.Header)
+
+	// list all headers
+	for key, values := range req.Header {
+		for _, value := range values {
+			glog.Infof("Header: %s = %s", key, value)
+		}
+	}
+
+	// log entire request
+	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
+		return nil, err
+	}
+	glog.Infof("Body: %s", string(bodyBytes))
+
+	authHeader := req.Header.Get("Authorization")
+	glog.Infof("authHeader: %s", authHeader)
+	if authHeader == "" {
+		return nil, errors.New("missing authorization header")
+	}
+
+	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
+	err = verifyPlayAuth(authHeader)
+	if err != nil {
+		glog.Infof("verifyPlayAuth failed: %v", err)
 		return nil, err
 	}
 
@@ -843,6 +867,9 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 
 func verifyPlayAuth(auth string) error {
 	bearerPrefix := "Bearer "
+
+	glog.Infof("auth is: %f", auth)
+
 	if strings.HasPrefix(auth, bearerPrefix) {
 		jwt := auth[len(bearerPrefix):len(auth)]
 		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
@@ -856,8 +883,11 @@ func verifyPlayAuth(auth string) error {
 		var claims map[string]any
 		err = json.Unmarshal(claimBytes, &claims)
 		if err != nil {
+			glog.Infof("err unmarshaling claims: %v", err)
 			return err
 		}
+
+		glog.Infof("claims: %v", claims)
 
 		if claims["email"] == playPublisherEmail() {
 			return nil
