@@ -25,11 +25,21 @@ func NetworkCreate(
 	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 
 	if networkCreate.ReferralCode != nil {
-		model.CreateNetworkReferral(
+		networkReferral := model.CreateNetworkReferral(
 			session.Ctx,
 			result.Network.NetworkId,
 			*networkCreate.ReferralCode,
 		)
+
+		// note: should we check if the network subscribes before applying points?
+		if networkReferral != nil {
+			model.ApplyNetworkPoints(
+				session.Ctx,
+				*networkReferral.ReferralNetworkId,
+				"referral",
+			)
+		}
+
 	}
 
 	verifyUseNumeric := false

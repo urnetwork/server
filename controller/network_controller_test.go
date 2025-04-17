@@ -29,6 +29,10 @@ func TestNetworkCreate(t *testing.T) {
 		userAuth := "foo@ur.io"
 		password := "bar123456789Foo!"
 
+		// check referral network has no points
+		networkPoints := model.FetchNetworkPoints(ctx, referralNetworkId)
+		assert.Equal(t, len(networkPoints), 0)
+
 		networkCreate := model.NetworkCreateArgs{
 			UserName:     "",
 			UserAuth:     &userAuth,
@@ -42,6 +46,13 @@ func TestNetworkCreate(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Error, nil)
 		assert.NotEqual(t, result.Network, nil)
+
+		// check referral network has points applied
+		networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
+		assert.Equal(t, len(networkPoints), 1)
+		assert.Equal(t, networkPoints[0].NetworkId, referralNetworkId)
+		assert.Equal(t, networkPoints[0].Event, "referral")
+		assert.NotEqual(t, networkPoints[0].PointValue, 0)
 
 		// check network referral
 		networkReferral := model.GetNetworkReferralByNetworkId(ctx, result.Network.NetworkId)

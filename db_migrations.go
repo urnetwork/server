@@ -1666,5 +1666,27 @@ var migrations = []any{
 
 	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
 
-	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
+	newSqlMigration(`
+        CREATE TABLE network_point_event (
+            event varchar(64) NOT NULL,
+            point_value int NOT NULL,
+
+            PRIMARY KEY (event)
+        )
+    `),
+
+	newSqlMigration(`
+        INSERT INTO network_point_event (event, point_value) 
+        VALUES ('referral', 100)
+    `),
+
+	newSqlMigration(`
+    CREATE TABLE network_point (
+        network_id uuid NOT NULL,
+        event varchar(64) NOT NULL,
+        create_time timestamp NOT NULL DEFAULT now(),
+
+        PRIMARY KEY (network_id, event, create_time)
+    )
+`),
 }
