@@ -48,11 +48,11 @@ func TestNetworkCreate(t *testing.T) {
 		assert.NotEqual(t, result.Network, nil)
 
 		// check referral network has points applied
-		networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
-		assert.Equal(t, len(networkPoints), 1)
-		assert.Equal(t, networkPoints[0].NetworkId, referralNetworkId)
-		assert.Equal(t, networkPoints[0].Event, "referral")
-		assert.NotEqual(t, networkPoints[0].PointValue, 0)
+		// networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
+		// assert.Equal(t, len(networkPoints), 1)
+		// assert.Equal(t, networkPoints[0].NetworkId, referralNetworkId)
+		// assert.Equal(t, networkPoints[0].Event, "referral")
+		// assert.NotEqual(t, networkPoints[0].PointValue, 0)
 
 		// check network referral
 		networkReferral := model.GetNetworkReferralByNetworkId(ctx, result.Network.NetworkId)

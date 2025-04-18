@@ -35,7 +35,7 @@ func TestNetworkPoints(t *testing.T) {
 		assert.Equal(t, len(result.NetworkPoints), 0)
 
 		//  apply points
-		model.ApplyNetworkPoints(ctx, networkId, "referral")
+		model.ApplyNetworkPoints(ctx, networkId, "referral", 10)
 
 		// assert network points
 		result, err = controller.GetNetworkPoints(userSession)
@@ -46,10 +46,10 @@ func TestNetworkPoints(t *testing.T) {
 		assert.Equal(t, result.NetworkPoints[0].Event, "referral")
 		assert.NotEqual(t, result.NetworkPoints[0].PointValue, 0)
 		assert.Equal(t, result.NetworkPoints[0].CreateTime.IsZero(), false)
-		assert.NotEqual(t, result.NetworkPoints[0].PointValue, 0)
+		assert.Equal(t, result.NetworkPoints[0].PointValue, 10)
 
 		// increment
-		model.ApplyNetworkPoints(ctx, networkId, "referral")
+		model.ApplyNetworkPoints(ctx, networkId, "referral", 5)
 
 		result, err = controller.GetNetworkPoints(userSession)
 		assert.Equal(t, err, nil)

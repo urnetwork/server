@@ -7,6 +7,22 @@ import (
 	"github.com/urnetwork/server"
 )
 
+type NetworkPointEvent string
+
+/**
+ * Point Events
+ */
+const (
+	NetworkPointEventReferral NetworkPointEvent = "referral"
+)
+
+/**
+ * Point Values
+ */
+const (
+	NetworkPointEventReferralValue = 10
+)
+
 type NetworkPoint struct {
 	NetworkId  server.Id `json:"network_id"`
 	Event      string    `json:"event"`
@@ -14,7 +30,12 @@ type NetworkPoint struct {
 	CreateTime time.Time `json:"create_time"`
 }
 
-func ApplyNetworkPoints(ctx context.Context, networkId server.Id, event string) error {
+func ApplyNetworkPoints(
+	ctx context.Context,
+	networkId server.Id,
+	event NetworkPointEvent,
+	pointValue int,
+) error {
 	// Implement the logic to apply network points here
 	// This is a placeholder implementation
 
@@ -24,12 +45,14 @@ func ApplyNetworkPoints(ctx context.Context, networkId server.Id, event string) 
 			`
 				INSERT INTO network_point (
 						network_id,
-						event
+						event,
+						point_value
 				)
-				VALUES ($1, $2)
+				VALUES ($1, $2, $3)
 			`,
 			networkId,
 			event,
+			pointValue,
 		))
 	})
 
@@ -43,16 +66,14 @@ func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints
 			ctx,
 			`
 				SELECT
-						np.network_id,
-						np.event,
-						np.create_time,
-						npe.point_value
+						network_id,
+						event,
+						point_value,
+						create_time
 				FROM 
-						network_point np
-				JOIN 
-						network_point_event npe ON np.event = npe.event
+						network_point
 				WHERE 
-						np.network_id = $1
+						network_id = $1
 			`,
 			networkId,
 		)
@@ -63,8 +84,8 @@ func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints
 				server.Raise(result.Scan(
 					&networkPoint.NetworkId,
 					&networkPoint.Event,
-					&networkPoint.CreateTime,
 					&networkPoint.PointValue,
+					&networkPoint.CreateTime,
 				))
 				networkPoints = append(networkPoints, networkPoint)
 			}
