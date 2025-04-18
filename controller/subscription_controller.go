@@ -538,6 +538,7 @@ func PlayWebhook(
 	webhookArgs *PlayWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
+
 	data, err := base64.StdEncoding.DecodeString(webhookArgs.Message.Data)
 	if err != nil {
 		return nil, err
@@ -589,6 +590,17 @@ func PlayWebhook(
 					url,
 					[]byte{},
 					playAuthHeaders,
+				)
+
+				// fire this immediately since we pull current plan from subscription_renewal table
+				PlaySubscriptionRenewal(
+					&PlaySubscriptionRenewalArgs{
+						NetworkId:      networkId,
+						PackageName:    rtdnMessage.PackageName,
+						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+					},
+					clientSession,
 				)
 
 				// continually renew as long as the expiry time keeps getting pushed forward
@@ -646,6 +658,7 @@ func PlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
+
 	url := fmt.Sprintf(
 		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
 		playSubscriptionRenewal.PackageName,
@@ -810,17 +823,31 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 }
 
 func VerifyPlayBody(req *http.Request) (io.Reader, error) {
-	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err := verifyPlayAuth(req.Header.Get("Authorization"))
+
+	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	return req.Body, nil
+	authHeader := req.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return nil, errors.New("missing authorization header")
+	}
+
+	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
+	err = verifyPlayAuth(authHeader)
+	if err != nil {
+		glog.Infof("verifyPlayAuth failed: %v", err)
+		return nil, err
+	}
+
+	return bytes.NewReader(bodyBytes), nil
 }
 
 func verifyPlayAuth(auth string) error {
 	bearerPrefix := "Bearer "
+
 	if strings.HasPrefix(auth, bearerPrefix) {
 		jwt := auth[len(bearerPrefix):len(auth)]
 		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
