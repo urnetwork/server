@@ -862,7 +862,7 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 		return nil, err
 	}
 
-	return req.Body, nil
+	return bytes.NewReader(bodyBytes), nil
 }
 
 func verifyPlayAuth(auth string) error {
