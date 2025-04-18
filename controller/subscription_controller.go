@@ -824,13 +824,6 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 
 func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 
-	// list all headers
-	for key, values := range req.Header {
-		for _, value := range values {
-			glog.Infof("Header: %s = %s", key, value)
-		}
-	}
-
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
