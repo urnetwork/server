@@ -115,6 +115,7 @@ Options:
 		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
 		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
+		router.NewRoute("GET", "/account/points", handlers.GetNetworkPoints),
 		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 		router.NewRoute("GET", "/connect", handlers.AuthConnect),
