@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -61,8 +60,6 @@ func ApplyNetworkPoints(
 }
 
 func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints []NetworkPoint) {
-
-	glog.Infof("Fetching network points for network ID: %s", networkId)
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
