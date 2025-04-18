@@ -539,8 +539,6 @@ func PlayWebhook(
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
 
-	glog.Infof("PlayWebhook hit")
-
 	data, err := base64.StdEncoding.DecodeString(webhookArgs.Message.Data)
 	if err != nil {
 		return nil, err
@@ -624,8 +622,6 @@ func PlayWebhook(
 	}
 	// else unknown package, ignore the message
 
-	glog.Infof("returning from PlayWebhook")
-
 	return &PlayWebhookResult{}, nil
 }
 
@@ -662,8 +658,6 @@ func PlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
-
-	glog.Infof("PlaySubscriptionRenewal hit")
 
 	url := fmt.Sprintf(
 		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
@@ -830,11 +824,6 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 
 func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 
-	glog.Infof("VerifyPlayBody hit")
-
-	// log the header
-	glog.Infof("Header: %v", req.Header)
-
 	// list all headers
 	for key, values := range req.Header {
 		for _, value := range values {
@@ -842,15 +831,13 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 		}
 	}
 
-	// log entire request
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
-	glog.Infof("Body: %s", string(bodyBytes))
 
 	authHeader := req.Header.Get("Authorization")
-	glog.Infof("authHeader: %s", authHeader)
+
 	if authHeader == "" {
 		return nil, errors.New("missing authorization header")
 	}
@@ -868,8 +855,6 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 func verifyPlayAuth(auth string) error {
 	bearerPrefix := "Bearer "
 
-	glog.Infof("auth is: %f", auth)
-
 	if strings.HasPrefix(auth, bearerPrefix) {
 		jwt := auth[len(bearerPrefix):len(auth)]
 		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
@@ -883,11 +868,8 @@ func verifyPlayAuth(auth string) error {
 		var claims map[string]any
 		err = json.Unmarshal(claimBytes, &claims)
 		if err != nil {
-			glog.Infof("err unmarshaling claims: %v", err)
 			return err
 		}
-
-		glog.Infof("claims: %v", claims)
 
 		if claims["email"] == playPublisherEmail() {
 			return nil
