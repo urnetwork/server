@@ -12,7 +12,7 @@ import (
 type FeedbackSendArgs struct {
 	Uses      FeedbackSendUses  `json:"uses"`
 	Needs     FeedbackSendNeeds `json:"needs"`
-	StarCount int               `json:"star_coount"`
+	StarCount int               `json:"star_count"`
 }
 type FeedbackSendUses struct {
 	Personal bool `json:"personal"`
