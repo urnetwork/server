@@ -1666,5 +1666,9 @@ var migrations = []any{
 
 	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
 
+	newSqlMigration(
+		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
+	),
+
 	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
 }

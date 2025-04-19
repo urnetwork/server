@@ -10,8 +10,9 @@ import (
 )
 
 type FeedbackSendArgs struct {
-	Uses  FeedbackSendUses  `json:"uses"`
-	Needs FeedbackSendNeeds `json:"needs"`
+	Uses      FeedbackSendUses  `json:"uses"`
+	Needs     FeedbackSendNeeds `json:"needs"`
+	StarCount int               `json:"star_coount"`
 }
 type FeedbackSendUses struct {
 	Personal bool `json:"personal"`
@@ -68,9 +69,10 @@ func FeedbackSend(
 					needs_audit,
 					needs_zero_trust,
 					needs_visualize,
-					needs_other
+					needs_other,
+					star_count
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			`,
 			&feedbackId,
 			&session.ByJwt.NetworkId,
@@ -92,6 +94,7 @@ func FeedbackSend(
 			feedbackSend.Needs.ZeroTrust,
 			feedbackSend.Needs.Visualize,
 			feedbackSend.Needs.Other,
+			feedbackSend.StarCount,
 		)
 		server.Raise(err)
 	})
