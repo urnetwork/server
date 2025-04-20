@@ -580,6 +580,7 @@ func PlayWebhook(
 
 			if sub.PaymentState == 1 && sub.AcknowledgementState == 0 {
 				// Aknowledge
+				// FIXME this appears to be broken
 				url := fmt.Sprintf(
 					"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
 					rtdnMessage.PackageName,
@@ -606,17 +607,19 @@ func PlayWebhook(
 				// continually renew as long as the expiry time keeps getting pushed forward
 				// note RTDN messages for renewal may unreliably delivered, so Google
 				// recommends polling their system around the expiry time
-				task.ScheduleTask(
-					PlaySubscriptionRenewal,
-					&PlaySubscriptionRenewalArgs{
-						NetworkId:      networkId,
-						PackageName:    rtdnMessage.PackageName,
-						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
-						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
-						CheckTime:      time.UnixMilli(sub.requireExpiryTimeMillis()),
-					},
-					clientSession,
-				)
+				server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+					SchedulePlaySubscriptionRenewal(
+						clientSession,
+						tx,
+						&PlaySubscriptionRenewalArgs{
+							NetworkId:      networkId,
+							PackageName:    rtdnMessage.PackageName,
+							SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+							PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+							CheckTime:      time.UnixMilli(sub.requireExpiryTimeMillis()),
+						},
+					)
+				})
 			}
 		}
 	}
@@ -742,7 +745,11 @@ func PlaySubscriptionRenewalPost(
 	tx server.PgTx,
 ) error {
 	if playSubscriptionRenewalResult.Renewed {
-		playSubscriptionRenewal.CheckTime = playSubscriptionRenewalResult.ExpiryTime
+		// FIXME is the expiry time messed up sometimes?
+		playSubscriptionRenewal.CheckTime = server.MaxTime(
+			playSubscriptionRenewalResult.ExpiryTime,
+			server.NowUtc().Add(1*time.Hour),
+		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,

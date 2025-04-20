@@ -540,6 +540,16 @@ func (self *SimpleResource) RequireString(path ...string) string {
 	return value
 }
 
+func (self *SimpleResource) RequireStringList(path ...string) []string {
+	values := []string{}
+	getAll(self.Parse(), path, &values)
+	translatedValues := []string{}
+	for _, value := range values {
+		translatedValues = append(translatedValues, translateString(value))
+	}
+	return translatedValues
+}
+
 func translateString(value string) string {
 	// simple "j2" format
 	// {{ env:XXX }}
@@ -570,6 +580,10 @@ func getAll[T any](obj map[string]any, objPath []string, out *[]T) {
 			switch v := relValue.(type) {
 			case T:
 				values = append(values, v)
+			case []any:
+				for _, value := range v {
+					collect(value, relObjPath)
+				}
 			}
 		} else {
 			switch v := relValue.(type) {
