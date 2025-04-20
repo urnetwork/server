@@ -15,22 +15,27 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
+	"github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 )
 
 // see https://github.com/golang-jwt/jwt
 // see https://golang-jwt.github.io/jwt/usage/create/
 
+var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
+	jwt := server.Vault.RequireSimpleResource("jwt.yml")
+	return jwt.RequireStringList("tls_key_paths")
+})
+
 // the first key (most recent version) is used to sign new JWTs
 var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
+	glog.Infof("[jwt]paths: %s", byJwtTlsKeyPaths())
 	for _, jwtTlsKeyPath := range byJwtTlsKeyPaths() {
 		// `ResourcePaths` returns the version paths in descending order
 		// hence the `paths[0]` will be the most recent version
 		paths, err := server.Vault.ResourcePaths(jwtTlsKeyPath)
-		// FIXME
-		// "tls/bringyour.com/bringyour.com.key"
-		// "tls/ur.network/ur.network.key"
 		if err != nil {
 			panic(err)
 		}
@@ -40,8 +45,15 @@ var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 				panic(err)
 			}
 			block, _ := pem.Decode(bytes)
-			parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
-			keys = append(keys, parseResult.(*rsa.PrivateKey))
+
+			// FIXME support ecdsa
+			if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+				keys = append(keys, key.(*rsa.PrivateKey))
+			} else if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+				keys = append(keys, key)
+			} else {
+				panic(err)
+			}
 		}
 	}
 	return keys
