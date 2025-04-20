@@ -32,29 +32,34 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
 	glog.Infof("[jwt]paths: %s", byJwtTlsKeyPaths())
+	errs := []error{}
 	for _, jwtTlsKeyPath := range byJwtTlsKeyPaths() {
 		// `ResourcePaths` returns the version paths in descending order
 		// hence the `paths[0]` will be the most recent version
 		paths, err := server.Vault.ResourcePaths(jwtTlsKeyPath)
 		if err != nil {
-			panic(err)
-		}
-		for _, path := range paths {
-			bytes, err := os.ReadFile(path)
-			if err != nil {
-				panic(err)
-			}
-			block, _ := pem.Decode(bytes)
+			errs = append(errs, err)
+		} else {
+			for _, path := range paths {
+				bytes, err := os.ReadFile(path)
+				if err != nil {
+					panic(err)
+				}
+				block, _ := pem.Decode(bytes)
 
-			// FIXME support ecdsa
-			if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-				keys = append(keys, key.(*rsa.PrivateKey))
-			} else if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-				keys = append(keys, key)
-			} else {
-				panic(err)
+				// FIXME support ecdsa
+				if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+					keys = append(keys, key.(*rsa.PrivateKey))
+				} else if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+					keys = append(keys, key)
+				} else {
+					errs = append(errs, err)
+				}
 			}
 		}
+	}
+	if len(keys) == 0 {
+		panic(errors.Join(errs...))
 	}
 	return keys
 })
