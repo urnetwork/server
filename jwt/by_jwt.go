@@ -24,20 +24,25 @@ import (
 // the first key (most recent version) is used to sign new JWTs
 var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
-	// `ResourcePaths` returns the version paths in descending order
-	// hence the `paths[0]` will be the most recent version
-	paths, err := server.Vault.ResourcePaths("tls/bringyour.com/bringyour.com.key")
-	if err != nil {
-		panic(err)
-	}
-	for _, path := range paths {
-		bytes, err := os.ReadFile(path)
+	for _, jwtTlsKeyPath := range byJwtTlsKeyPaths() {
+		// `ResourcePaths` returns the version paths in descending order
+		// hence the `paths[0]` will be the most recent version
+		paths, err := server.Vault.ResourcePaths(jwtTlsKeyPath)
+		// FIXME
+		// "tls/bringyour.com/bringyour.com.key"
+		// "tls/ur.network/ur.network.key"
 		if err != nil {
 			panic(err)
 		}
-		block, _ := pem.Decode(bytes)
-		parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
-		keys = append(keys, parseResult.(*rsa.PrivateKey))
+		for _, path := range paths {
+			bytes, err := os.ReadFile(path)
+			if err != nil {
+				panic(err)
+			}
+			block, _ := pem.Decode(bytes)
+			parseResult, _ := x509.ParsePKCS8PrivateKey(block.Bytes)
+			keys = append(keys, parseResult.(*rsa.PrivateKey))
+		}
 	}
 	return keys
 })
@@ -56,13 +61,13 @@ func bySigningKey() *rsa.PrivateKey {
 // A client is always tied to a user.
 type ByJwt struct {
 	NetworkId      server.Id   `json:"network_id,omitempty"`
-	NetworkName    string         `json:"network_name,omitempty"`
+	NetworkName    string      `json:"network_name,omitempty"`
 	UserId         server.Id   `json:"user_id,omitempty"`
-	CreateTime     time.Time      `json:"create_time,omitempty"`
+	CreateTime     time.Time   `json:"create_time,omitempty"`
 	AuthSessionIds []server.Id `json:"auth_session_ids,omitempty"`
 	DeviceId       *server.Id  `json:"device_id,omitempty"`
 	ClientId       *server.Id  `json:"client_id,omitempty"`
-	GuestMode      bool           `json:"guest_mode,omitempty"`
+	GuestMode      bool        `json:"guest_mode,omitempty"`
 }
 
 func NewByJwt(
