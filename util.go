@@ -64,6 +64,14 @@ func MinTime(a time.Time, b time.Time) time.Time {
 	}
 }
 
+func MaxTime(a time.Time, b time.Time) time.Time {
+	if a.Before(b) {
+		return b
+	} else {
+		return a
+	}
+}
+
 func Raise(err error) {
 	if err != nil {
 		panic(err)

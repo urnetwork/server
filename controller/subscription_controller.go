@@ -733,7 +733,10 @@ func PlaySubscriptionRenewalPost(
 ) error {
 	if playSubscriptionRenewalResult.Renewed {
 		// FIXME is the expiry time messed up sometimes?
-		playSubscriptionRenewal.CheckTime = max(playSubscriptionRenewalResult.ExpiryTime, server.NowUtc().Add(1*time.Hour))
+		playSubscriptionRenewal.CheckTime = server.MaxTime(
+			playSubscriptionRenewalResult.ExpiryTime,
+			server.NowUtc().Add(1*time.Hour),
+		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
