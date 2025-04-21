@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 
 go clean -cache
 go clean -modcache
@@ -8,13 +8,13 @@ for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -
         pushd $d
         # highlight source files in this dir
         match="/$(basename $(pwd))/\\S*\.go\|^\\S*_test.go"
-        export WARP_ENV="local"; \
-            export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"; \
-            export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"; \
-            GORACE="log_path=profile/race.out halt_on_error=1" go test -v -race -cpuprofile profile/cpu -memprofile profile/memory -timeout 120m -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
+        export WARP_ENV="local"
+        export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"
+        export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -v -race -cpuprofile profile/cpu -memprofile profile/memory -timeout 120m -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
             # -trace profile/trace -coverprofile profile/cover 
-        if [[ ${PIPESTATUS[0]} != 0 ]]; then
-            exit ${PIPESTATUS[0]}
+        if [[ ${pipestatus[1]} != 0 ]]; then
+            exit ${pipestatus[1]}
         fi
         popd
     fi
