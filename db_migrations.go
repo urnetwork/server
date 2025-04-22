@@ -1665,10 +1665,20 @@ var migrations = []any{
     `),
 
 	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
-
-	newSqlMigration(
+  
+  newSqlMigration(
 		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
 	),
 
-	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
+	newSqlMigration(`
+      CREATE TABLE network_point (
+          network_id uuid NOT NULL,
+          event varchar(64) NOT NULL,
+          point_value int NOT NULL,
+          create_time timestamp NOT NULL DEFAULT now(),
+
+          PRIMARY KEY (network_id, event, create_time)
+      )
+  `),
+
 }
