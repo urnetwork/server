@@ -1670,5 +1670,13 @@ var migrations = []any{
 		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
 	),
 
-	// todo: run migration_20250402_ReferralCodeToAlphaNumeric
+	newSqlMigration(`
+        CREATE TABLE stripe_customer (
+            network_id uuid NOT NULL,
+            customer_id varchar(64) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (network_id, customer_id)
+        )
+    `),
 }

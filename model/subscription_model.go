@@ -2427,6 +2427,7 @@ type SubscriptionMarket = string
 
 const SubscriptionMarketApple = "apple"
 const SubscriptionMarketGoogle = "google"
+const SubscriptionMarketStripe = "stripe"
 
 type SubscriptionRenewal struct {
 	NetworkId          server.Id
@@ -2566,6 +2567,51 @@ func AddRefreshTransferBalanceToAllNetworks(
 					0,
 				)
 				addedTransferBalances[networkId] = balanceByteCount
+			}
+		})
+	})
+	return
+}
+
+func CreateStripeCustomer(
+	ctx context.Context,
+	networkId server.Id,
+	customerId string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO stripe_customer (
+					network_id,
+					customerId
+				)
+				VALUES ($1, $2)
+			`,
+			networkId,
+			customerId,
+		))
+	},
+	)
+}
+
+func GetStripeCustomer(
+	ctx context.Context,
+	customerId string,
+) (networkId server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT network_id
+				FROM stripe_customer
+				WHERE customer_id = $1
+			`,
+			customerId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
 			}
 		})
 	})
