@@ -1246,6 +1246,23 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 	})
 }
 
+func TestStripeUser(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		//  create a stripe customer
+		stripeCustomerId := "ABC123"
+		networkId := server.NewId()
+
+		CreateStripeCustomer(ctx, networkId, stripeCustomerId)
+
+		stripeCustomerNetworkId := GetStripeCustomer(ctx, stripeCustomerId)
+
+		assert.Equal(t, stripeCustomerNetworkId, networkId)
+
+	})
+}
+
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data

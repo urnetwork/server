@@ -2584,7 +2584,7 @@ func CreateStripeCustomer(
 			`
 				INSERT INTO stripe_customer (
 					network_id,
-					customerId
+					customer_id
 				)
 				VALUES ($1, $2)
 			`,
