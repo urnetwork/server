@@ -247,10 +247,16 @@ func StripeWebhook(
 	stripeWebhook *StripeWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe webhook hit: %s", stripeWebhook.Id)
+
 	if stripeWebhook.Type == "checkout.session.completed" {
+
+		glog.Infof("type: checkout.session.completed")
 
 		var checkoutCompleteObject StripeEventCheckoutCompleteObject
 		if err := json.Unmarshal(stripeWebhook.Data.Object, &checkoutCompleteObject); err != nil {
+			glog.Errorf("Failed to parse checkout session: %v", err)
 			return nil, fmt.Errorf("failed to parse invoice: %v", err)
 		}
 
@@ -260,6 +266,8 @@ func StripeWebhook(
 		)
 
 	} else if stripeWebhook.Type == "invoice.paid" {
+
+		glog.Infof("type: invoice.paid")
 
 		var invoiceObject StripeEventInvoiceObject
 		if err := json.Unmarshal(stripeWebhook.Data.Object, &invoiceObject); err != nil {
@@ -277,36 +285,12 @@ func StripeWebhook(
 	return &StripeWebhookResult{}, nil
 }
 
-/**
- * Fetch the subscription from Stripe
- */
-func stripeFetchSubscription(
-	subscriptionId string,
-) (*StripeSubscription, error) {
-	url := fmt.Sprintf(
-		"https://api.stripe.com/v1/subscriptions/%s",
-		subscriptionId,
-	)
-	subscription, err := server.HttpGetRequireStatusOk[*StripeSubscription](
-		url,
-		func(header http.Header) {
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
-		},
-		server.ResponseJsonObject[*StripeSubscription],
-	)
-	if err != nil {
-		glog.Errorf("Failed to fetch subscription: %v", err)
-		return nil, err
-	}
-	// Process the subscription data as needed
-	glog.Infof("Fetched subscription: %v", subscription)
-	return subscription, nil
-}
-
 func stripeHandleCheckoutSessionCompleted(
 	checkoutComplete *StripeEventCheckoutCompleteObject,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe stripeHandleCheckoutSessionCompleted")
 
 	stripeSessionId := checkoutComplete.Id
 
@@ -324,12 +308,14 @@ func stripeHandleCheckoutSessionCompleted(
 		server.ResponseJsonObject[*StripeLineItems],
 	)
 	if err != nil {
+		glog.Errorf("Failed to fetch line items: %v", err)
 		return nil, err
 	}
 
 	purchaseEmail := checkoutComplete.CustomerDetails.Email
 	if purchaseEmail == "" {
-		return nil, errors.New("Missing purchase email to send balance code.")
+		glog.Infof("missing purchase email")
+		return nil, errors.New("missing purchase email to send balance code")
 	}
 
 	skus := stripeSkus()
@@ -337,56 +323,33 @@ func stripeHandleCheckoutSessionCompleted(
 		stripeSku := lineItem.Price.Product
 		if sku, ok := skus[stripeSku]; ok {
 
+			glog.Infof("Stripe stripeHandleCheckoutSessionCompleted")
+
 			if sku.Supporter {
+
+				glog.Infof("Stripe sku is supporter")
 
 				/**
 				 * User is purchasing a subscription
 				 */
 				networkId, err := server.ParseId(checkoutComplete.ClientReferenceId)
 				if err != nil {
+					glog.Infof("Invalid client_reference_id format: %v", err)
 					return nil, fmt.Errorf("Invalid client_reference_id format: %v", err)
 				}
 
-				subscriptionId := checkoutComplete.Subscription
-
-				model.CreateStripeCustomer(
+				/**
+				 * Link the Stripe customer to the network
+				 * Stripe will follow up this call with an `invoice.paid` event
+				 * where we handle associating the subscription with the network
+				 */
+				model.LinkStripeCustomerToNetwork(
 					clientSession.Ctx,
 					networkId,
 					checkoutComplete.Customer,
 				)
 
-				subscription, err := stripeFetchSubscription(subscriptionId)
-				if err != nil {
-					return nil, err
-				}
-
-				if subscription == nil {
-					return nil, fmt.Errorf("no subscription data returned for ID %s", subscriptionId)
-				}
-
-				if len(subscription.Data) == 0 {
-					return nil, fmt.Errorf("subscription has no items in Data array for ID %s", subscriptionId)
-				}
-
-				netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * float64(lineItem.AmountTotal) / 100.0)
-
-				startTime := time.UnixMilli(subscription.Data[0].CurrentPeriodStart)
-				endTime := time.UnixMilli(subscription.Data[0].CurrentPeriodEnd)
-
-				subscriptionRenewal := model.SubscriptionRenewal{
-					NetworkId:          networkId,
-					SubscriptionType:   model.SubscriptionTypeSupporter,
-					StartTime:          startTime,
-					EndTime:            endTime,
-					NetRevenue:         netRevenue,
-					SubscriptionMarket: model.SubscriptionMarketStripe,
-					TransactionId:      checkoutComplete.Id,
-				}
-
-				model.AddSubscriptionRenewal(
-					clientSession.Ctx,
-					&subscriptionRenewal,
-				)
+				glog.Infof("Stripe networkId: %s linked to customer id %s", networkId.String(), checkoutComplete.Customer)
 
 			} else {
 
@@ -435,6 +398,7 @@ func stripeHandleCheckoutSessionCompleted(
 			}
 
 		} else {
+			glog.Infof("Stripe sku not found: %s", stripeSku)
 			return nil, fmt.Errorf("Stripe sku not found: %s", stripeSku)
 		}
 	}
@@ -447,21 +411,31 @@ func stripeHandleInvoicePaid(
 	invoice *StripeEventInvoiceObject,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe stripeHandleInvoicePaid")
+
 	invoiceId := invoice.Id
 
 	total := invoice.Total
 
-	networkId := model.GetStripeCustomer(
+	networkId := model.GetStripeCustomerNetwork(
 		clientSession.Ctx,
 		invoice.Customer,
 	)
 
+	glog.Infof("Stripe networkId: %s", networkId.String())
+	glog.Infof("Stripe customer: %s", invoice.Customer)
+	glog.Infof("Stripe invoice paid: %s", invoiceId)
+	glog.Infof("Stripe total: %d", total)
+
 	feeFraction := 0.3
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(total) / 100.0)
 
+	glog.Infof("net revenue: %d", netRevenue)
+
 	// fixme: use the subscription start and end time https://docs.stripe.com/api/invoices/object
 	startTime := time.Now()
-	endTime := time.Now().Add(30 * 24 * time.Hour) // 30 days
+	endTime := time.Now().Add(31 * 24 * time.Hour).Add(SubscriptionGracePeriod) // 31 days
 
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,

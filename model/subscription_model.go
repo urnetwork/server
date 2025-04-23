@@ -2573,7 +2573,7 @@ func AddRefreshTransferBalanceToAllNetworks(
 	return
 }
 
-func CreateStripeCustomer(
+func LinkStripeCustomerToNetwork(
 	ctx context.Context,
 	networkId server.Id,
 	customerId string,
@@ -2595,7 +2595,7 @@ func CreateStripeCustomer(
 	)
 }
 
-func GetStripeCustomer(
+func GetStripeCustomerNetwork(
 	ctx context.Context,
 	customerId string,
 ) (networkId server.Id) {

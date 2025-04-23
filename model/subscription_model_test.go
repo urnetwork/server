@@ -1254,9 +1254,9 @@ func TestStripeUser(t *testing.T) {
 		stripeCustomerId := "ABC123"
 		networkId := server.NewId()
 
-		CreateStripeCustomer(ctx, networkId, stripeCustomerId)
+		LinkStripeCustomerToNetwork(ctx, networkId, stripeCustomerId)
 
-		stripeCustomerNetworkId := GetStripeCustomer(ctx, stripeCustomerId)
+		stripeCustomerNetworkId := GetStripeCustomerNetwork(ctx, stripeCustomerId)
 
 		assert.Equal(t, stripeCustomerNetworkId, networkId)
 
