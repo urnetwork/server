@@ -1671,12 +1671,23 @@ var migrations = []any{
 	),
 
 	newSqlMigration(`
-        CREATE TABLE stripe_customer (
+      CREATE TABLE network_point (
             network_id uuid NOT NULL,
-            customer_id varchar(64) NOT NULL,
+            event varchar(64) NOT NULL,
+            point_value int NOT NULL,
             create_time timestamp NOT NULL DEFAULT now(),
 
-            PRIMARY KEY (network_id, customer_id)
+            PRIMARY KEY (network_id, event, create_time)
         )
     `),
+
+	newSqlMigration(`
+    CREATE TABLE stripe_customer (
+        network_id uuid NOT NULL,
+        customer_id varchar(64) NOT NULL,
+        create_time timestamp NOT NULL DEFAULT now(),
+
+        PRIMARY KEY (network_id, customer_id)
+    )
+`),
 }

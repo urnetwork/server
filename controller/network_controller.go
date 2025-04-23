@@ -30,6 +30,16 @@ func NetworkCreate(
 			result.Network.NetworkId,
 			*networkCreate.ReferralCode,
 		)
+
+		// note: should we check if the network subscribes before applying points?
+		// if networkReferral != nil {
+		// 	model.ApplyNetworkPoints(
+		// 		session.Ctx,
+		// 		*networkReferral.ReferralNetworkId,
+		// 		"referral",
+		// 	)
+		// }
+
 	}
 
 	verifyUseNumeric := false
