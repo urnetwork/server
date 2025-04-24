@@ -1698,4 +1698,8 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE stripe_customer ADD COLUMN stripe_customer_email text NULL
     `),
+
+	newSqlMigration(`
+        DROP TABLE IF EXISTS stripe_customer
+    `),
 }

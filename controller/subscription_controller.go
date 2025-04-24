@@ -327,34 +327,8 @@ func stripeHandleCheckoutSessionCompleted(
 
 			if sku.Supporter {
 
-				glog.Infof("Stripe sku is supporter")
-
-				/**
-				 * User is purchasing a subscription
-				 */
-				networkId, err := server.ParseId(checkoutComplete.ClientReferenceId)
-				if err != nil {
-					glog.Infof("Invalid client_reference_id format: %v", err)
-					return nil, fmt.Errorf("Invalid client_reference_id format: %v", err)
-				}
-
-				stripeCustomerEmail := checkoutComplete.CustomerDetails.Email
-
-				glog.Infof("Stripe customer email: %s", stripeCustomerEmail)
-
-				/**
-				 * Link the Stripe customer to the network
-				 * Stripe will follow up this call with an `invoice.paid` event
-				 * where we handle associating the subscription with the network
-				 */
-				model.LinkStripeCustomerToNetwork(
-					clientSession.Ctx,
-					networkId,
-					checkoutComplete.Customer,
-					stripeCustomerEmail,
-				)
-
-				glog.Infof("Stripe networkId: %s linked to customer id %s", networkId.String(), checkoutComplete.Customer)
+				// do nothing
+				// handle subscription in `invoid.paid` event
 
 			} else {
 
@@ -420,27 +394,100 @@ func stripeHandleInvoicePaid(
 	glog.Infof("Stripe stripeHandleInvoicePaid")
 
 	invoiceId := invoice.Id
-
 	total := invoice.Total
 
-	networkId := model.GetStripeCustomerNetwork(
-		clientSession.Ctx,
-		invoice.Customer,
+	url := fmt.Sprintf("https://api.stripe.com/v1/invoices/%s?expand[]=subscription", invoiceId)
+	fullInvoice, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[map[string]interface{}],
 	)
+	if err != nil {
+		glog.Errorf("Failed to fetch invoice details: %v", err)
+		return nil, fmt.Errorf("failed to fetch invoice details: %v", err)
+	}
 
-	glog.Infof("Stripe networkId: %s", networkId.String())
-	glog.Infof("Stripe customer: %s", invoice.Customer)
-	glog.Infof("Stripe invoice paid: %s", invoiceId)
-	glog.Infof("Stripe total: %d", total)
+	var subscriptionId string
+	var periodStart int64
+	var periodEnd int64
+	isSubscription := false
+
+	if linesObj, ok := fullInvoice["lines"].(map[string]interface{}); ok {
+		if dataArray, ok := linesObj["data"].([]interface{}); ok && len(dataArray) > 0 {
+
+			if lineItem, ok := dataArray[0].(map[string]interface{}); ok {
+				// Check if this is a subscription line item
+				if itemType, ok := lineItem["type"].(string); ok && itemType == "subscription" {
+					isSubscription = true
+
+					if subId, ok := lineItem["subscription"].(string); ok && subId != "" {
+						subscriptionId = subId
+					}
+
+					// Extract period information
+					if period, ok := lineItem["period"].(map[string]interface{}); ok {
+						if start, ok := period["start"].(float64); ok {
+							periodStart = int64(start)
+						}
+
+						if end, ok := period["end"].(float64); ok {
+							periodEnd = int64(end)
+						}
+					}
+				} else {
+					glog.Infof("Line item is not a subscription type: %s", itemType)
+				}
+			}
+		} else {
+			glog.Infof("No line items found in invoice")
+		}
+	} else {
+		glog.Infof("No lines object found in invoice")
+	}
+
+	if !isSubscription {
+		return &StripeWebhookResult{}, nil
+	}
+
+	if subscriptionId == "" {
+		glog.Infof("Invoice does not have a subscription in its line items")
+		return &StripeWebhookResult{}, nil
+	}
+
+	// Get the checkout session using the subscription ID
+	url = fmt.Sprintf("https://api.stripe.com/v1/checkout/sessions?subscription=%s", subscriptionId)
+	sessionsResp, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[map[string]interface{}],
+	)
+	if err != nil {
+		glog.Errorf("Failed to fetch checkout session: %v", err)
+		return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
+	}
+
+	var networkId server.Id
+	if dataArray, ok := sessionsResp["data"].([]interface{}); ok && len(dataArray) > 0 {
+		if session, ok := dataArray[0].(map[string]interface{}); ok {
+			if clientRefId, ok := session["client_reference_id"].(string); ok {
+				networkId, err = server.ParseId(clientRefId)
+				if err != nil {
+					glog.Infof("Invalid client_reference_id format: %v", err)
+					return &StripeWebhookResult{}, nil
+				}
+			}
+		}
+	}
 
 	feeFraction := 0.3
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(total) / 100.0)
 
-	glog.Infof("net revenue: %d", netRevenue)
-
-	// fixme: use the subscription start and end time https://docs.stripe.com/api/invoices/object
-	startTime := time.Now()
-	endTime := time.Now().Add(31 * 24 * time.Hour).Add(SubscriptionGracePeriod) // 31 days
+	startTime := time.Unix(periodStart, 0)
+	endTime := time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod)
 
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
