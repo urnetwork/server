@@ -1665,20 +1665,41 @@ var migrations = []any{
     `),
 
 	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
-  
-  newSqlMigration(
+
+	newSqlMigration(
 		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
 	),
 
 	newSqlMigration(`
       CREATE TABLE network_point (
-          network_id uuid NOT NULL,
-          event varchar(64) NOT NULL,
-          point_value int NOT NULL,
-          create_time timestamp NOT NULL DEFAULT now(),
+            network_id uuid NOT NULL,
+            event varchar(64) NOT NULL,
+            point_value int NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
 
-          PRIMARY KEY (network_id, event, create_time)
-      )
-  `),
+            PRIMARY KEY (network_id, event, create_time)
+        )
+    `),
 
+	newSqlMigration(`
+        CREATE TABLE stripe_customer (
+            network_id uuid NOT NULL,
+            customer_id varchar(64) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (network_id, customer_id)
+        )
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE stripe_customer ADD CONSTRAINT stripe_customer_id_unique UNIQUE (customer_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE stripe_customer ADD COLUMN stripe_customer_email text NULL
+    `),
+
+	newSqlMigration(`
+        DROP TABLE IF EXISTS stripe_customer
+    `),
 }

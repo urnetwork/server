@@ -184,14 +184,25 @@ type StripeWebhookArgs struct {
 }
 
 type StripeEventData struct {
-	Object *StripeEventDataObject `json:"object"`
+	Object json.RawMessage `json:"object"`
 }
 
-type StripeEventDataObject struct {
-	Id              string                                `json:"id"`
-	AmountTotal     int                                   `json:"amount_total"`
-	CustomerDetails *StripeEventDataObjectCustomerDetails `json:"customer_details"`
-	PaymentStatus   string                                `json:"payment_status"`
+type StripeEventCheckoutCompleteObject struct {
+	Id                string                                `json:"id"`
+	AmountTotal       int                                   `json:"amount_total"`
+	Customer          string                                `json:"customer"`
+	CustomerDetails   *StripeEventDataObjectCustomerDetails `json:"customer_details"`
+	PaymentStatus     string                                `json:"payment_status"`
+	ClientReferenceId string                                `json:"client_reference_id"`
+	Subscription      string                                `json:"subscription"`
+}
+
+type StripeEventInvoiceObject struct {
+	Id          string `json:"id"`
+	Total       int    `json:"total"`
+	PeriodStart int    `json:"period_start"`
+	PeriodEnd   int    `json:"period_end"`
+	Customer    string `json:"customer"`
 }
 
 type StripeEventDataObjectCustomerDetails struct {
@@ -204,6 +215,17 @@ type StripeWebhookResult struct {
 
 type StripeLineItems struct {
 	Data []*StripeLineItem `json:"data"`
+}
+
+type StripeSubscription struct {
+	Id   string                    `json:"id"`
+	Data []*StripeSubscriptionItem `json:"data"`
+}
+
+type StripeSubscriptionItem struct {
+	Id                 string `json:"id"`
+	CurrentPeriodStart int64  `json:"current_period_start"`
+	CurrentPeriodEnd   int64  `json:"current_period_end"`
 }
 
 type StripeLineItem struct {
@@ -225,35 +247,95 @@ func StripeWebhook(
 	stripeWebhook *StripeWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe webhook hit: %s", stripeWebhook.Id)
+
 	if stripeWebhook.Type == "checkout.session.completed" {
-		stripeSessionId := stripeWebhook.Data.Object.Id
 
-		// need to make a second call to get the line items for the order
-		// https://stripe.com/docs/api/checkout/sessions/line_items
-		url := fmt.Sprintf(
-			"https://api.stripe.com/v1/checkout/sessions/%s/line_items",
-			stripeSessionId,
-		)
-		lineItems, err := server.HttpGetRequireStatusOk[*StripeLineItems](
-			url,
-			func(header http.Header) {
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
-			},
-			server.ResponseJsonObject[*StripeLineItems],
-		)
-		if err != nil {
-			return nil, err
+		glog.Infof("type: checkout.session.completed")
+
+		var checkoutCompleteObject StripeEventCheckoutCompleteObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &checkoutCompleteObject); err != nil {
+			glog.Errorf("Failed to parse checkout session: %v", err)
+			return nil, fmt.Errorf("failed to parse invoice: %v", err)
 		}
 
-		purchaseEmail := stripeWebhook.Data.Object.CustomerDetails.Email
-		if purchaseEmail == "" {
-			return nil, errors.New("Missing purchase email to send balance code.")
+		return stripeHandleCheckoutSessionCompleted(
+			&checkoutCompleteObject,
+			clientSession,
+		)
+
+	} else if stripeWebhook.Type == "invoice.paid" {
+
+		glog.Infof("type: invoice.paid")
+
+		var invoiceObject StripeEventInvoiceObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &invoiceObject); err != nil {
+			return nil, fmt.Errorf("failed to parse invoice: %v", err)
 		}
 
-		skus := stripeSkus()
-		for _, lineItem := range lineItems.Data {
-			stripeSku := lineItem.Price.Product
-			if sku, ok := skus[stripeSku]; ok {
+		return stripeHandleInvoicePaid(
+			&invoiceObject,
+			clientSession,
+		)
+
+	}
+	// else ignore the event
+
+	return &StripeWebhookResult{}, nil
+}
+
+func stripeHandleCheckoutSessionCompleted(
+	checkoutComplete *StripeEventCheckoutCompleteObject,
+	clientSession *session.ClientSession,
+) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe stripeHandleCheckoutSessionCompleted")
+
+	stripeSessionId := checkoutComplete.Id
+
+	// need to make a second call to get the line items for the order
+	// https://stripe.com/docs/api/checkout/sessions/line_items
+	url := fmt.Sprintf(
+		"https://api.stripe.com/v1/checkout/sessions/%s/line_items",
+		stripeSessionId,
+	)
+	lineItems, err := server.HttpGetRequireStatusOk[*StripeLineItems](
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[*StripeLineItems],
+	)
+	if err != nil {
+		glog.Errorf("Failed to fetch line items: %v", err)
+		return nil, err
+	}
+
+	purchaseEmail := checkoutComplete.CustomerDetails.Email
+	if purchaseEmail == "" {
+		glog.Infof("missing purchase email")
+		return nil, errors.New("missing purchase email to send balance code")
+	}
+
+	skus := stripeSkus()
+	for _, lineItem := range lineItems.Data {
+		stripeSku := lineItem.Price.Product
+		if sku, ok := skus[stripeSku]; ok {
+
+			glog.Infof("Stripe stripeHandleCheckoutSessionCompleted")
+
+			if sku.Supporter {
+
+				// do nothing
+				// handle subscription in `invoid.paid` event
+
+			} else {
+
+				/**
+				 * Otherwise user is purchasing balance
+				 */
+
 				stripeItemJsonBytes, err := json.Marshal(lineItem)
 				if err != nil {
 					return nil, err
@@ -291,14 +373,138 @@ func StripeWebhook(
 				} else {
 					return nil, fmt.Errorf("Stripe unknown special (%s) for sku: %s", sku.Special, stripeSku)
 				}
-			} else {
-				return nil, fmt.Errorf("Stripe sku not found: %s", stripeSku)
+
+			}
+
+		} else {
+			glog.Infof("Stripe sku not found: %s", stripeSku)
+			return nil, fmt.Errorf("Stripe sku not found: %s", stripeSku)
+		}
+	}
+
+	return &StripeWebhookResult{}, nil
+
+}
+
+func stripeHandleInvoicePaid(
+	invoice *StripeEventInvoiceObject,
+	clientSession *session.ClientSession,
+) (*StripeWebhookResult, error) {
+
+	glog.Infof("Stripe stripeHandleInvoicePaid")
+
+	invoiceId := invoice.Id
+	total := invoice.Total
+
+	url := fmt.Sprintf("https://api.stripe.com/v1/invoices/%s?expand[]=subscription", invoiceId)
+	fullInvoice, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[map[string]interface{}],
+	)
+	if err != nil {
+		glog.Errorf("Failed to fetch invoice details: %v", err)
+		return nil, fmt.Errorf("failed to fetch invoice details: %v", err)
+	}
+
+	var subscriptionId string
+	var periodStart int64
+	var periodEnd int64
+	isSubscription := false
+
+	if linesObj, ok := fullInvoice["lines"].(map[string]interface{}); ok {
+		if dataArray, ok := linesObj["data"].([]interface{}); ok && len(dataArray) > 0 {
+
+			if lineItem, ok := dataArray[0].(map[string]interface{}); ok {
+				// Check if this is a subscription line item
+				if itemType, ok := lineItem["type"].(string); ok && itemType == "subscription" {
+					isSubscription = true
+
+					if subId, ok := lineItem["subscription"].(string); ok && subId != "" {
+						subscriptionId = subId
+					}
+
+					// Extract period information
+					if period, ok := lineItem["period"].(map[string]interface{}); ok {
+						if start, ok := period["start"].(float64); ok {
+							periodStart = int64(start)
+						}
+
+						if end, ok := period["end"].(float64); ok {
+							periodEnd = int64(end)
+						}
+					}
+				} else {
+					glog.Infof("Line item is not a subscription type: %s", itemType)
+				}
+			}
+		} else {
+			glog.Infof("No line items found in invoice")
+		}
+	} else {
+		glog.Infof("No lines object found in invoice")
+	}
+
+	if !isSubscription {
+		return &StripeWebhookResult{}, nil
+	}
+
+	if subscriptionId == "" {
+		glog.Infof("Invoice does not have a subscription in its line items")
+		return &StripeWebhookResult{}, nil
+	}
+
+	// Get the checkout session using the subscription ID
+	url = fmt.Sprintf("https://api.stripe.com/v1/checkout/sessions?subscription=%s", subscriptionId)
+	sessionsResp, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[map[string]interface{}],
+	)
+	if err != nil {
+		glog.Errorf("Failed to fetch checkout session: %v", err)
+		return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
+	}
+
+	var networkId server.Id
+	if dataArray, ok := sessionsResp["data"].([]interface{}); ok && len(dataArray) > 0 {
+		if session, ok := dataArray[0].(map[string]interface{}); ok {
+			if clientRefId, ok := session["client_reference_id"].(string); ok {
+				networkId, err = server.ParseId(clientRefId)
+				if err != nil {
+					glog.Infof("Invalid client_reference_id format: %v", err)
+					return &StripeWebhookResult{}, nil
+				}
 			}
 		}
 	}
-	// else ignore the event
+
+	feeFraction := 0.3
+	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(total) / 100.0)
+
+	startTime := time.Unix(periodStart, 0)
+	endTime := time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod)
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         netRevenue,
+		SubscriptionMarket: model.SubscriptionMarketStripe,
+		TransactionId:      invoiceId,
+	}
+
+	model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
+
+	AddRefreshTransferBalance(clientSession.Ctx, networkId)
 
 	return &StripeWebhookResult{}, nil
+
 }
 
 type CoinbaseWebhookArgs struct {
