@@ -338,6 +338,10 @@ func stripeHandleCheckoutSessionCompleted(
 					return nil, fmt.Errorf("Invalid client_reference_id format: %v", err)
 				}
 
+				stripeCustomerEmail := checkoutComplete.CustomerDetails.Email
+
+				glog.Infof("Stripe customer email: %s", stripeCustomerEmail)
+
 				/**
 				 * Link the Stripe customer to the network
 				 * Stripe will follow up this call with an `invoice.paid` event
@@ -347,6 +351,7 @@ func stripeHandleCheckoutSessionCompleted(
 					clientSession.Ctx,
 					networkId,
 					checkoutComplete.Customer,
+					stripeCustomerEmail,
 				)
 
 				glog.Infof("Stripe networkId: %s linked to customer id %s", networkId.String(), checkoutComplete.Customer)

@@ -1690,4 +1690,12 @@ var migrations = []any{
             PRIMARY KEY (network_id, customer_id)
         )
     `),
+
+	newSqlMigration(`
+        ALTER TABLE stripe_customer ADD CONSTRAINT stripe_customer_id_unique UNIQUE (customer_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE stripe_customer ADD COLUMN stripe_customer_email text NULL
+    `),
 }

@@ -2573,26 +2573,38 @@ func AddRefreshTransferBalanceToAllNetworks(
 	return
 }
 
+type LinkStripeCustomerToNetworkResult struct{}
+
 func LinkStripeCustomerToNetwork(
 	ctx context.Context,
 	networkId server.Id,
 	customerId string,
-) {
+	stripeCustomerEmail string,
+) (err error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		tag, _ := tx.Exec(
 			ctx,
 			`
 				INSERT INTO stripe_customer (
 					network_id,
-					customer_id
+					customer_id,
+					stripe_customer_email
 				)
-				VALUES ($1, $2)
+				VALUES ($1, $2, $3)
+				ON CONFLICT DO NOTHING
 			`,
 			networkId,
 			customerId,
-		))
-	},
-	)
+			stripeCustomerEmail,
+		)
+
+		if tag.RowsAffected() == 0 {
+			err = fmt.Errorf("stripe customer %s already linked to network %s", customerId, networkId.String())
+		}
+
+	})
+
+	return err
 }
 
 func GetStripeCustomerNetwork(

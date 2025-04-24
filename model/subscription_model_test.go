@@ -1252,9 +1252,16 @@ func TestStripeUser(t *testing.T) {
 
 		//  create a stripe customer
 		stripeCustomerId := "ABC123"
+		stripeCustomerEmail := "test@ur.io"
 		networkId := server.NewId()
 
-		LinkStripeCustomerToNetwork(ctx, networkId, stripeCustomerId)
+		err := LinkStripeCustomerToNetwork(ctx, networkId, stripeCustomerId, stripeCustomerEmail)
+		assert.Equal(t, err, nil)
+
+		// customer id should be unique
+		// trying to push another row with the same customer id should fail
+		err = LinkStripeCustomerToNetwork(ctx, networkId, stripeCustomerId, "")
+		assert.NotEqual(t, err, nil)
 
 		stripeCustomerNetworkId := GetStripeCustomerNetwork(ctx, stripeCustomerId)
 
