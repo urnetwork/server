@@ -1702,4 +1702,15 @@ var migrations = []any{
 	newSqlMigration(`
         DROP TABLE IF EXISTS stripe_customer
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_user
+        ADD COLUMN wallet_address text,
+        ADD COLUMN wallet_blockchain text;
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX network_user_wallet_address_unique ON network_user (wallet_address) 
+        WHERE wallet_address IS NOT NULL;
+    `),
 }

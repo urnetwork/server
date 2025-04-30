@@ -43,16 +43,17 @@ func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*Net
 }
 
 type NetworkCreateArgs struct {
-	UserName         string  `json:"user_name"`
-	UserAuth         *string `json:"user_auth,omitempty"`
-	AuthJwt          *string `json:"auth_jwt,omitempty"`
-	AuthJwtType      *string `json:"auth_jwt_type,omitempty"`
-	Password         *string `json:"password,omitempty"`
-	NetworkName      string  `json:"network_name"`
-	Terms            bool    `json:"terms"`
-	GuestMode        bool    `json:"guest_mode"`
-	VerifyUseNumeric bool    `json:"verify_use_numeric"`
-	ReferralCode     *string `json:"referral_code,omitempty"`
+	UserName         string          `json:"user_name"`
+	UserAuth         *string         `json:"user_auth,omitempty"`
+	AuthJwt          *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType      *string         `json:"auth_jwt_type,omitempty"`
+	Password         *string         `json:"password,omitempty"`
+	NetworkName      string          `json:"network_name"`
+	Terms            bool            `json:"terms"`
+	GuestMode        bool            `json:"guest_mode"`
+	VerifyUseNumeric bool            `json:"verify_use_numeric"`
+	ReferralCode     *string         `json:"referral_code,omitempty"`
+	WalletAuth       *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type UpgradeGuestArgs struct {
@@ -422,6 +423,148 @@ func NetworkCreate(
 				return result, nil
 			}
 		}
+	} else if networkCreate.WalletAuth != nil {
+		/**
+		 * User is authenticating with a crypto wallet
+		 */
+
+		isValid, err := verifySolanaSignature(
+			networkCreate.WalletAuth.PublicKey,
+			networkCreate.WalletAuth.Message,
+			networkCreate.WalletAuth.Signature,
+		)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if !isValid {
+			return nil, errors.New("Invalid signature.")
+		}
+
+		created := false
+		var createdNetworkId server.Id
+		var createdUserId server.Id
+
+		server.Tx(session.Ctx, func(tx server.PgTx) {
+			var userId *server.Id
+
+			result, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT user_id FROM network_user WHERE wallet_address = $1
+				`,
+				networkCreate.WalletAuth.PublicKey,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&userId))
+				}
+			})
+
+			if userId != nil {
+				// server.Logger().Printf("User already exists\n")
+				return
+			}
+
+			// server.Logger().Printf("JWT Creating a new network\n")
+
+			created = true
+			createdUserId = server.NewId()
+			createdNetworkId = server.NewId()
+
+			/**
+			 * hard set the blockchain to solana for now
+			 */
+			networkCreate.WalletAuth.Blockchain = "solana"
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network_user
+					(user_id, auth_type, wallet_address, wallet_blockchain)
+					VALUES ($1, $2, $3, $4)
+				`,
+				createdUserId,
+				AuthTypeSolana,
+				networkCreate.WalletAuth.PublicKey,
+				networkCreate.WalletAuth.Blockchain,
+			)
+			if err != nil {
+				panic(err)
+			}
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					INSERT INTO network
+					(network_id, network_name, admin_user_id)
+					VALUES ($1, $2, $3)
+				`,
+				createdNetworkId,
+				networkCreate.NetworkName,
+				createdUserId,
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+		if created {
+			auditNetworkCreate(networkCreate, createdNetworkId, session)
+
+			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+
+			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+			/**
+			 * Create new payout wallet
+			 */
+
+			walletId := CreateAccountWalletExternal(
+				session,
+				&CreateAccountWalletExternalArgs{
+					NetworkId:        createdNetworkId,
+					Blockchain:       "SOL",
+					WalletAddress:    networkCreate.WalletAuth.PublicKey,
+					DefaultTokenType: "USDC",
+				},
+			)
+
+			/**
+			 * Set the payout wallet for the network
+			 */
+			SetPayoutWallet(
+				session.Ctx,
+				createdNetworkId,
+				*walletId,
+			)
+
+			// successful login
+			byJwt := jwt.NewByJwt(
+				createdNetworkId,
+				createdUserId,
+				networkCreate.NetworkName,
+				false,
+			)
+			byJwtSigned := byJwt.Sign()
+			result := &NetworkCreateResult{
+				Network: &NetworkCreateResultNetwork{
+					ByJwt:       &byJwtSigned,
+					NetworkName: networkCreate.NetworkName,
+					NetworkId:   createdNetworkId,
+				},
+				// UserAuth: &authJwt.UserAuth,
+			}
+			return result, nil
+		} else {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Account might already exist. Please log in again.",
+				},
+			}
+			return result, nil
+		}
+
 	}
 
 	return nil, errors.New("Invalid login.")

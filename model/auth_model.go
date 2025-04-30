@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	// "strconv"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
+
+	"github.com/gagliardetto/solana-go"
 
 	// "github.com/urnetwork/server/ulid"
 	"github.com/urnetwork/server/jwt"
@@ -31,6 +34,7 @@ const (
 	AuthTypeGoogle    AuthType = "google"
 	AuthTypeBringYour AuthType = "bringyour"
 	AuthTypeGuest     AuthType = "guest"
+	AuthTypeSolana    AuthType = "solana"
 )
 
 func UserAuthAttempt(
@@ -174,15 +178,24 @@ func maxUserAuthAttemptsError() error {
 	return errors.New("User auth attempts exceeded limits.")
 }
 
+type WalletAuthArgs struct {
+	PublicKey  string `json:"wallet_address,omitempty"`
+	Signature  string `json:"wallet_signature,omitempty"`
+	Message    string `json:"wallet_message,omitempty"`
+	Blockchain string `json:"blockchain,omitempty"`
+}
+
 type AuthLoginArgs struct {
-	UserAuth    *string `json:"user_auth,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type AuthLoginResult struct {
 	UserName    *string                 `json:"user_name,omitempty"`
 	UserAuth    *string                 `json:"user_auth,omitempty"`
+	WalletAuth  *WalletAuthArgs         `json:"wallet_login,omitempty"`
 	AuthAllowed *[]string               `json:"auth_allowed,omitempty"`
 	Error       *AuthLoginResultError   `json:"error,omitempty"`
 	Network     *AuthLoginResultNetwork `json:"network,omitempty"`
@@ -316,9 +329,115 @@ func AuthLogin(
 				return result, nil
 			}
 		}
+	} else if login.WalletAuth != nil {
+		/**
+		 * Handle wallet login
+		 */
+		isValid, err := verifySolanaSignature(
+			login.WalletAuth.PublicKey,
+			login.WalletAuth.Message,
+			login.WalletAuth.Signature,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if !isValid {
+			return nil, errors.New("Invalid signature.")
+		}
+
+		/**
+		 * Check if the user exists associated with this public key
+		 */
+
+		var userId *server.Id
+		var authType string
+		var networkId server.Id
+		var networkName string
+		server.Db(session.Ctx, func(conn server.PgConn) {
+			// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+			result, err := conn.Query(
+				session.Ctx,
+				`
+					SELECT
+						network_user.user_id,
+						network_user.auth_type,
+						network.network_id,
+						network.network_name
+					FROM network_user
+					INNER JOIN network ON network.admin_user_id = network_user.user_id
+					WHERE wallet_address = $1
+				`,
+				login.WalletAuth.PublicKey,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&userId,
+						&authType,
+						&networkId,
+						&networkName,
+					))
+				}
+			})
+		})
+
+		if userId == nil {
+
+			/**
+			 * New wallet user
+			 */
+			return &AuthLoginResult{
+				WalletAuth: login.WalletAuth,
+			}, nil
+
+		} else {
+
+			/**
+			 * Existing wallet user
+			 */
+
+			byJwt := jwt.NewByJwt(
+				networkId,
+				*userId,
+				networkName,
+				false,
+			)
+			result := &AuthLoginResult{
+				Network: &AuthLoginResultNetwork{
+					ByJwt: byJwt.Sign(),
+				},
+			}
+
+			return result, nil
+
+		}
+
 	}
 
 	return nil, errors.New("Invalid login.")
+}
+
+// Function to verify a Solana wallet signature
+func verifySolanaSignature(publicKeyStr string, message string, signatureStr string) (bool, error) {
+	// Parse the public key from string
+	publicKey, err := solana.PublicKeyFromBase58(publicKeyStr)
+	if err != nil {
+		return false, fmt.Errorf("invalid public key: %v", err)
+	}
+
+	// Parse the signature from string
+	signatureBytes, err := base64.StdEncoding.DecodeString(signatureStr)
+	if err != nil {
+		return false, fmt.Errorf("invalid signature encoding: %v", err)
+	}
+
+	// Convert signature bytes to the expected format
+	var signature solana.Signature
+	copy(signature[:], signatureBytes)
+
+	// Verify the signature against the message and public key
+	return solana.SignatureFromBytes(signature[:]).Verify(publicKey, []byte(message)), nil
 }
 
 type AuthLoginWithPasswordArgs struct {

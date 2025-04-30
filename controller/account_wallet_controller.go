@@ -39,6 +39,8 @@ func CreateAccountWalletExternal(
 		return nil, err
 	}
 
+	wallet.NetworkId = session.ByJwt.NetworkId
+
 	if !validationResult.Valid {
 		return nil, ErrInvalidWalletAddress
 	}
