@@ -20,21 +20,22 @@ const (
 )
 
 type AccountWallet struct {
-	WalletId         server.Id `json:"wallet_id"`
-	CircleWalletId   *string      `json:"circle_wallet_id,omitempty"`
-	NetworkId        server.Id `json:"network_id"`
-	WalletType       WalletType   `json:"wallet_type"`
-	Blockchain       string       `json:"blockchain"`
-	WalletAddress    string       `json:"wallet_address"`
-	Active           bool         `json:"active"`
-	DefaultTokenType string       `json:"default_token_type"`
-	CreateTime       time.Time    `json:"create_time"`
+	WalletId         server.Id  `json:"wallet_id"`
+	CircleWalletId   *string    `json:"circle_wallet_id,omitempty"`
+	NetworkId        server.Id  `json:"network_id"`
+	WalletType       WalletType `json:"wallet_type"`
+	Blockchain       string     `json:"blockchain"`
+	WalletAddress    string     `json:"wallet_address"`
+	Active           bool       `json:"active"`
+	DefaultTokenType string     `json:"default_token_type"`
+	CreateTime       time.Time  `json:"create_time"`
 }
 
 type CreateAccountWalletExternalArgs struct {
-	Blockchain       string `json:"blockchain"`
-	WalletAddress    string `json:"wallet_address"`
-	DefaultTokenType string `json:"default_token_type"`
+	NetworkId        server.Id `json:"network_id"`
+	Blockchain       string    `json:"blockchain"`
+	WalletAddress    string    `json:"wallet_address"`
+	DefaultTokenType string    `json:"default_token_type"`
 }
 
 type CreateAccountWalletCircleArgs struct {
@@ -78,7 +79,7 @@ func CreateAccountWalletExternal(
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			`,
 			id,
-			session.ByJwt.NetworkId,
+			createAccountWallet.NetworkId,
 			WalletTypeExternal,
 			createAccountWallet.Blockchain,
 			createAccountWallet.WalletAddress,
