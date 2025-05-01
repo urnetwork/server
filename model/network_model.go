@@ -9,6 +9,7 @@ import (
 
 	// "github.com/golang/glog"
 
+	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 
@@ -90,6 +91,8 @@ func NetworkCreate(
 	session *session.ClientSession,
 ) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
+
+	glog.Infof("Network create hit")
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
@@ -424,6 +427,9 @@ func NetworkCreate(
 			}
 		}
 	} else if networkCreate.WalletAuth != nil {
+
+		glog.Infof("Network create with wallet auth hit")
+
 		/**
 		 * User is authenticating with a crypto wallet
 		 */
@@ -441,6 +447,8 @@ func NetworkCreate(
 		if !isValid {
 			return nil, errors.New("Invalid signature.")
 		}
+
+		glog.Infof("wallet valid")
 
 		created := false
 		var createdNetworkId server.Id
@@ -463,6 +471,7 @@ func NetworkCreate(
 			})
 
 			if userId != nil {
+				glog.Infof("Network user already exists with this wallet address")
 				// server.Logger().Printf("User already exists\n")
 				return
 			}
@@ -510,6 +519,9 @@ func NetworkCreate(
 			}
 		})
 		if created {
+
+			glog.Infof("Network created")
+
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
 			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)

@@ -14,6 +14,7 @@ import (
 
 	// "github.com/golang/glog"
 
+	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 
@@ -214,6 +215,9 @@ func AuthLogin(
 	login AuthLoginArgs,
 	session *session.ClientSession,
 ) (*AuthLoginResult, error) {
+
+	glog.Infof("Auth login hit")
+
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
@@ -330,6 +334,12 @@ func AuthLogin(
 			}
 		}
 	} else if login.WalletAuth != nil {
+
+		glog.Infof("Attempting wallet login")
+		glog.Infof("login wallet pk %s\n", login.WalletAuth.PublicKey)
+		glog.Infof("login wallet sig %s\n", login.WalletAuth.Signature)
+		glog.Infof("login wallet signed message %s\n", login.WalletAuth.Message)
+
 		/**
 		 * Handle wallet login
 		 */
@@ -345,6 +355,8 @@ func AuthLogin(
 		if !isValid {
 			return nil, errors.New("Invalid signature.")
 		}
+
+		glog.Infof("Wallet login verified")
 
 		/**
 		 * Check if the user exists associated with this public key
@@ -384,6 +396,8 @@ func AuthLogin(
 
 		if userId == nil {
 
+			glog.Infof("New wallet user")
+
 			/**
 			 * New wallet user
 			 */
@@ -392,6 +406,8 @@ func AuthLogin(
 			}, nil
 
 		} else {
+
+			glog.Infof("Existing wallet user")
 
 			/**
 			 * Existing wallet user
