@@ -46,7 +46,7 @@ import (
 // IMPORTANT: if you change this number, you must also change the schema
 const BlockSizeSeconds = 300
 
-var DefaultMaxTime = 120 * time.Second
+var DefaultMaxTime = 10 * time.Minute
 var ReleaseTimeout = 30 * time.Second
 var RescheduleTimeout = 60 * time.Second
 
