@@ -491,13 +491,14 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network_user
-					(user_id, auth_type, wallet_address, wallet_blockchain)
-					VALUES ($1, $2, $3, $4)
+					(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
+					VALUES ($1, $2, $3, $4, $5)
 				`,
 				createdUserId,
 				AuthTypeSolana,
 				networkCreate.WalletAuth.PublicKey,
 				networkCreate.WalletAuth.Blockchain,
+				networkCreate.UserName,
 			)
 			if err != nil {
 				panic(err)
