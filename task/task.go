@@ -997,6 +997,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 	go func() {
 		defer close(done)
 		for _, task := range tasks {
+			// update legacy function names
+			finishedTask.FunctionName = updateFunctionName(finishedTask.FunctionName)
+
 			if target, ok := self.targets[task.FunctionName]; ok {
 				runStartTime := server.NowUtc()
 				if result, runPost, err := target.Run(self.ctx, task); err == nil {
