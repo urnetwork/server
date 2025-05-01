@@ -622,6 +622,11 @@ func functionName[T any, R any](targetFunction TaskFunction[T, R]) string {
 	return regexp.MustCompile("/v\\d+").ReplaceAllString(targetFunctionName, "")
 }
 
+func updateFunctionName(targetFunctionName string) string {
+	// remove all /vXXXX paths in the canonical module
+	return regexp.MustCompile("/v\\d+").ReplaceAllString(targetFunctionName, "")
+}
+
 func (self *TaskTarget[T, R]) TargetFunctionName() string {
 	return self.targetFunctionName
 }
@@ -811,6 +816,9 @@ func (self *TaskWorker) RunPost(
 		returnErr = errors.New("Finished task not found.")
 		return
 	}
+
+	// update legacy function names
+	finishedTask.FunctionName = updateFunctionName(finishedTask.FunctionName)
 
 	if target, ok := self.targets[finishedTask.FunctionName]; ok {
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
