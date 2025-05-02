@@ -56,11 +56,13 @@ func Payout(
 	clientSession *session.ClientSession,
 ) (*SchedulePayoutResult, error) {
 	err := controller.SendPayments(clientSession)
-	success := err == nil
+	if err != nil {
+		return nil, err
+	}
 
 	return &SchedulePayoutResult{
-		Success: success,
-	}, err
+		Success: true,
+	}, nil
 }
 
 func PayoutPost(
