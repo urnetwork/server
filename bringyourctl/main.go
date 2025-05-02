@@ -61,6 +61,7 @@ Usage:
     bringyourctl contracts close-expired
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl task ls
+    bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
 
 Options:
@@ -180,6 +181,8 @@ Options:
 	} else if task, _ := opts.Bool("task"); task {
 		if ls, _ := opts.Bool("ls"); ls {
 			taskLs(opts)
+		} else if rm, _ := opts.Bool("rm"); rm {
+			taskRm(opts)
 		}
 	} else if auth, _ := opts.Bool("auth"); auth {
 		if login, _ := opts.Bool("login"); login {
@@ -791,6 +794,14 @@ func taskLs(opts docopt.Opts) {
 		}
 	}
 
+}
+
+func taskRm(opts docopt.Opts) {
+	ctx := context.Background()
+	taskIdStr, _ := opts.String("<task_id>")
+	taskId := server.RequireParseId(taskIdStr)
+
+	task.RemovePendingTask(ctx, taskId)
 }
 
 func authLogin(opts docopt.Opts) {

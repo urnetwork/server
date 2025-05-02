@@ -41,17 +41,17 @@ func SendPayments(clientSession *session.ClientSession) error {
 	for networkId, payment := range plan.NetworkPayments {
 		if payment.WalletId == nil {
 			userAuth, err := model.GetUserAuth(clientSession.Ctx, networkId)
-			if err != nil {
-				return err
+			if err == nil {
+				awsMessageSender := GetAWSMessageSender()
+				// TODO handler error
+
+				awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
+					PaymentId: payment.PaymentId,
+					AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(payment.Payout)),
+				})
+			} else {
+				glog.Warningf("[%s]Missing user auth. Cannot send missing wallet notice.", networkId)
 			}
-
-			awsMessageSender := GetAWSMessageSender()
-			// TODO handler error
-
-			awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
-				PaymentId: payment.PaymentId,
-				AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(payment.Payout)),
-			})
 		}
 	}
 
