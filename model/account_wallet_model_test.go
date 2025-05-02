@@ -26,6 +26,7 @@ func TestAccountWallet(t *testing.T) {
 			Blockchain:       "Polygon",
 			WalletAddress:    "0x0",
 			DefaultTokenType: "USDC",
+			NetworkId:        networkId,
 		}
 
 		walletId := CreateAccountWalletExternal(session, args)
