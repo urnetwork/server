@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 
+	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/exp/maps"
 
 	"github.com/docopt/docopt-go"
 
@@ -773,8 +776,14 @@ func taskLs(opts docopt.Opts) {
 	taskIds := task.ListPendingTasks(ctx)
 	tasks := task.GetTasks(ctx, taskIds...)
 
+	orderedTaskIds := maps.Keys(tasks)
+	slices.SortFunc(orderedTaskIds, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+
 	fmt.Printf("%d pending tasks:\n", len(tasks))
-	for taskId, task := range tasks {
+	for _, taskId := range orderedTaskIds {
+		task := tasks[taskId]
 		if task.RescheduleError != "" {
 			fmt.Printf("  %s %s: rescheduled err = %s\n", taskId, task.FunctionName, task.RescheduleError)
 		} else {
