@@ -485,6 +485,20 @@ func ListFinishedTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
+// FIXME update pending task
+func RemovePendingTask(ctx context.Context, taskId server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM pending_task
+				WHERE task_id = $1
+			`,
+			taskId,
+		))
+	})
+}
+
 // removed finished tasks older than `minTime` where the post was successfully run
 func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount int64) {
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -691,6 +705,9 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	result, returnErr = self.targetFunction(args, clientSession)
 	if returnErr != nil {
+		if timeout {
+			returnErr = errors.Join(errors.New("Timeout"), returnErr)
+		}
 		return
 	}
 	if timeout {

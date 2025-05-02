@@ -60,7 +60,7 @@ func Payout(
 
 	return &SchedulePayoutResult{
 		Success: success,
-	}, nil
+	}, err
 }
 
 func PayoutPost(
