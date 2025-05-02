@@ -12,6 +12,7 @@ gpt/gpt
 connect/connect
 connect/connect.test
 connect/profile
+main
 
 temp/*
 

@@ -674,7 +674,10 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	go func() {
 		select {
 		case <-clientSession.Ctx.Done():
-		case <-time.After(time.Duration(task.RunMaxTimeSeconds) * time.Second):
+		case <-time.After(max(
+			time.Duration(task.RunMaxTimeSeconds)*time.Second,
+			DefaultMaxTime,
+		)):
 			timeout = true
 		}
 		clientSession.Cancel()
@@ -747,7 +750,10 @@ func (self *TaskTarget[T, R]) RunPost(
 	go func() {
 		select {
 		case <-clientSession.Ctx.Done():
-		case <-time.After(time.Duration(finishedTask.RunMaxTimeSeconds) * time.Second):
+		case <-time.After(max(
+			time.Duration(finishedTask.RunMaxTimeSeconds)*time.Second,
+			DefaultMaxTime,
+		)):
 			timeout = true
 		}
 		clientSession.Cancel()
@@ -761,6 +767,9 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	returnErr = self.postFunction(args, result, clientSession, tx)
 	if returnErr != nil {
+		if timeout {
+			returnErr = errors.Join(errors.New("Timeout"), returnErr)
+		}
 		return
 	}
 	if timeout {
