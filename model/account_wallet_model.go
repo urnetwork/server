@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/golang/glog"
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -384,5 +385,38 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 	})
 
 	return result
+
+}
+
+func FindDuplicateWallets(
+	session *session.ClientSession,
+) {
+
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		// First get the wallet_addresses that have duplicates
+		result, err := conn.Query(
+			session.Ctx,
+			`
+				SELECT wallet_id, network_id, wallet_address
+				FROM account_wallet
+				WHERE network_id = $1
+				GROUP BY wallet_address
+				HAVING COUNT(*) > 1
+				`,
+			session.ByJwt.NetworkId,
+		)
+
+		duplicateAddresses := []string{}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				server.Raise(result.Scan(&address))
+				duplicateAddresses = append(duplicateAddresses, address)
+			}
+		})
+
+		glog.Infof("duplicate address count is %d", len(duplicateAddresses))
+
+	})
 
 }
