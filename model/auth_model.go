@@ -40,22 +40,23 @@ const (
 func UserAuthAttempt(
 	userAuth *string,
 	session *session.ClientSession,
-) (server.Id, bool) {
+) (userAuthAttemptId server.Id, success bool) {
 	// insert attempt with success false
 	// select attempts by userAuth in past 1 hour
 	// select attempts by clientIp in past 1 hour
 	// if more than 10 failed in any, return false
 
-	attemptLookbackCount := 100
 	// 1 hour
-	attemptLookbackSeconds := 60 * 60
-	attemptFailedCountThreshold := 100
-
-	userAuthAttemptId := server.NewId()
+	attemptLookbackSeconds := 1 * time.Hour / time.Second
+	attemptFailedCountThreshold := 10
 
 	clientIp, clientPort := session.ClientIpPort()
 
+	// FIXME use ip hash
 	server.Tx(session.Ctx, func(tx server.PgTx) {
+
+		userAuthAttemptId = server.NewId()
+
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -69,90 +70,96 @@ func UserAuthAttempt(
 			clientPort,
 			false,
 		))
-	})
 
-	type UserAuthAttemptResult struct {
-		attemptTime time.Time
-		success     bool
-	}
-
-	parseAttempts := func(result server.PgResult) []UserAuthAttemptResult {
-		attempts := []UserAuthAttemptResult{}
-		for result.Next() {
-			var attempt UserAuthAttemptResult
-			server.Raise(result.Scan(
-				&attempt.attemptTime,
-				&attempt.success,
-			))
-			attempts = append(attempts, attempt)
+		type UserAuthAttemptResult struct {
+			attemptTime time.Time
+			success     bool
 		}
-		return attempts
-	}
 
-	passesThreshold := func(attempts []UserAuthAttemptResult) bool {
-		failedCount := 0
-		for i := 0; i < len(attempts); i += 1 {
-			if !attempts[i].success {
-				failedCount += 1
+		parseAttempts := func(result server.PgResult) []UserAuthAttemptResult {
+			attempts := []UserAuthAttemptResult{}
+			for result.Next() {
+				var attempt UserAuthAttemptResult
+				server.Raise(result.Scan(
+					&attempt.attemptTime,
+					&attempt.success,
+				))
+				attempts = append(attempts, attempt)
 			}
+			return attempts
 		}
-		return failedCount <= attemptFailedCountThreshold
-	}
 
-	if userAuth != nil {
-		// lookback by user auth
-		var attempts []UserAuthAttemptResult
-		server.Db(session.Ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
+		passesThreshold := func(attempts []UserAuthAttemptResult) bool {
+			failedCount := 0
+			for i := 0; i < len(attempts); i += 1 {
+				if !attempts[i].success {
+					failedCount += 1
+				}
+			}
+			return failedCount < attemptFailedCountThreshold
+		}
+
+		if userAuth != nil {
+			// lookback by user auth
+			var attempts []UserAuthAttemptResult
+			result, err := tx.Query(
 				session.Ctx,
 				`
 					SELECT 
 						attempt_time,
 						success
 					FROM user_auth_attempt
-					WHERE user_auth = $1 AND now() - INTERVAL '1 seconds' * $2 <= attempt_time
+					WHERE 
+						user_auth = $1 AND
+						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
+						success = false
 					ORDER BY attempt_time DESC
 					LIMIT $3
 				`,
 				userAuth,
 				attemptLookbackSeconds,
-				attemptLookbackCount,
+				attemptFailedCountThreshold,
 			)
 			server.WithPgResult(result, err, func() {
 				attempts = parseAttempts(result)
 			})
-		})
-		if !passesThreshold(attempts) {
-			return userAuthAttemptId, false
+			if !passesThreshold(attempts) {
+				success = false
+				return
+			}
 		}
-	}
 
-	var attempts []UserAuthAttemptResult
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+		var attempts []UserAuthAttemptResult
+		result, err := tx.Query(
 			session.Ctx,
 			`
 				SELECT 
 					attempt_time,
 					success
 				FROM user_auth_attempt
-				WHERE client_ip = $1 AND now() - INTERVAL '1 seconds' * $2 <= attempt_time
+				WHERE 
+					client_ip = $1 AND
+					now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
+					success = false
 				ORDER BY attempt_time DESC
 				LIMIT $3
 			`,
 			clientIp,
 			attemptLookbackSeconds,
-			attemptLookbackCount,
+			attemptFailedCountThreshold,
 		)
 		server.WithPgResult(result, err, func() {
 			attempts = parseAttempts(result)
 		})
-	})
-	if !passesThreshold(attempts) {
-		return userAuthAttemptId, false
-	}
+		if !passesThreshold(attempts) {
+			success = false
+			return
+		}
 
-	return userAuthAttemptId, true
+		success = true
+		return
+	})
+	return
 }
 
 func SetUserAuthAttemptSuccess(
