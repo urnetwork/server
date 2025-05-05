@@ -42,12 +42,11 @@ func UserAuthAttempt(
 	session *session.ClientSession,
 ) (userAuthAttemptId server.Id, success bool) {
 	// insert attempt with success false
-	// select attempts by userAuth in past 1 hour
-	// select attempts by clientIp in past 1 hour
+	// select attempts by userAuth in past 5 minutes
+	// select attempts by clientIp in past 5 minutes
 	// if more than 10 failed in any, return false
 
-	// 1 hour
-	attemptLookbackSeconds := 1 * time.Hour / time.Second
+	attemptLookbackSeconds := 5 * time.Minute / time.Second
 	attemptFailedCountThreshold := 10
 
 	clientIp, clientPort := session.ClientIpPort()
