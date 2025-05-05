@@ -42,12 +42,45 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, args.DefaultTokenType, fetchWallet.DefaultTokenType)
 		assert.Equal(t, fetchWallet.CircleWalletId, nil)
 
+		/**
+		 * Try and insert the same wallet address with network id
+		 * It should return the same wallet id as before
+		 */
+
+		walletId2 := CreateAccountWalletExternal(session, args)
+		assert.Equal(t, walletId, walletId2)
+
+		// remove wallet (set account wallet as active = false)
+		// we also clear the payout wallet if it matches
+		SetPayoutWallet(ctx, networkId, *walletId)
+
+		result := RemoveWallet(*walletId, session)
+		assert.Equal(t, result.Success, true)
+		assert.Equal(t, result.Error, nil)
+
+		payoutWalletId := GetPayoutWalletId(ctx, networkId)
+		assert.Equal(t, payoutWalletId, nil)
+
+		// try and fetch the wallet again
+		// should be marked as inactive
+		fetchWallet = GetAccountWallet(ctx, *walletId)
+		assert.Equal(t, fetchWallet.Active, false)
+
+		// Create a new wallet with the same address and network id
+		walletId2 = CreateAccountWalletExternal(session, args)
+		assert.Equal(t, walletId, walletId2)
+
+		// fetch the wallet again
+		// active should be reset to true
+		fetchWallet = GetAccountWallet(ctx, *walletId)
+		assert.Equal(t, fetchWallet.Active, true)
+
 		// test with setting a CircleWalletId
 		circleWalletId := server.NewId().String()
 		circleArgs := &CreateAccountWalletCircleArgs{
 			NetworkId:        networkId,
 			Blockchain:       "Polygon",
-			WalletAddress:    "0x0",
+			WalletAddress:    "0x1",
 			DefaultTokenType: "USDC",
 			CircleWalletId:   circleWalletId,
 		}
@@ -68,17 +101,6 @@ func TestAccountWallet(t *testing.T) {
 		fakeId := server.NewId()
 		fetchWallet = GetAccountWallet(ctx, fakeId)
 		assert.Equal(t, fetchWallet, nil)
-
-		// remove wallet (set account wallet as active = false)
-		// we also clear the payout wallet if it matches
-		SetPayoutWallet(ctx, networkId, *walletId)
-
-		result := RemoveWallet(*walletId, session)
-		assert.Equal(t, result.Success, true)
-		assert.Equal(t, result.Error, nil)
-
-		payoutWalletId := GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, payoutWalletId, nil)
 
 	})
 }

@@ -82,7 +82,7 @@ func TestAccountWallet(t *testing.T) {
 
 		wallet2 := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "MATIC",
-			WalletAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415756",
+			WalletAddress: "0x6BC3631A507BD9f664998F4E7B039353Ce415757",
 		}
 
 		_, err = CreateAccountWalletExternal(wallet2, ownerSession)

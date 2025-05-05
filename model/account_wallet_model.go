@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/golang/glog"
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -54,30 +55,62 @@ func CreateAccountWalletExternal(
 	session *session.ClientSession,
 	createAccountWallet *CreateAccountWalletExternalArgs,
 ) *server.Id {
-
 	var walletId *server.Id
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-
 		id := server.NewId()
 		active := true
 		createTime := server.NowUtc()
 
-		_, err := tx.Exec(
+		// First try to find an existing wallet with the same network_id and wallet_address
+		var existingWalletId server.Id
+		existingRow := tx.QueryRow(
 			session.Ctx,
 			`
-				INSERT INTO account_wallet (
-						wallet_id,
-						network_id,
-						wallet_type,
-						blockchain,
-						wallet_address,
-						active,
-						default_token_type,
-						create_time
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			`,
+							SELECT wallet_id
+							FROM account_wallet
+							WHERE network_id = $1 AND wallet_address = $2
+					`,
+			createAccountWallet.NetworkId,
+			createAccountWallet.WalletAddress,
+		)
+
+		err := existingRow.Scan(&existingWalletId)
+		if err == nil {
+
+			glog.Infof("!!! Found existing wallet %s for address %s", existingWalletId, createAccountWallet.WalletAddress)
+
+			// Found an existing wallet - update active = true
+			_ = server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+									UPDATE account_wallet
+									SET active = true
+									WHERE wallet_id = $1 AND NOT active
+							`,
+				existingWalletId,
+			))
+
+			walletId = &existingWalletId
+			return
+		}
+
+		// No existing wallet found, create a new one
+		_, err = tx.Exec(
+			session.Ctx,
+			`
+							INSERT INTO account_wallet (
+									wallet_id,
+									network_id,
+									wallet_type,
+									blockchain,
+									wallet_address,
+									active,
+									default_token_type,
+									create_time
+							)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					`,
 			id,
 			createAccountWallet.NetworkId,
 			WalletTypeExternal,
@@ -384,5 +417,51 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 	})
 
 	return result
+
+}
+
+type DuplicateWalletsResult struct {
+	Wallets []*DuplicateWallet `json:"wallets"`
+}
+
+type DuplicateWallet struct {
+	WalletAddress string
+	Wallets       []*AccountWallet
+}
+
+func LogDuplicateWallets(
+	session *session.ClientSession,
+) {
+
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		// First get all wallet_addresses that have duplicates
+		addressResult, addressErr := conn.Query(
+			session.Ctx,
+			`
+			SELECT network_id, wallet_address
+			FROM account_wallet
+			GROUP BY network_id, wallet_address
+			HAVING COUNT(*) > 1
+			`,
+		)
+
+		type NetworkAddressPair struct {
+			NetworkId     server.Id
+			WalletAddress string
+		}
+
+		duplicatePairs := []NetworkAddressPair{}
+		server.WithPgResult(addressResult, addressErr, func() {
+			for addressResult.Next() {
+				var pair NetworkAddressPair
+				server.Raise(addressResult.Scan(&pair.NetworkId, &pair.WalletAddress))
+				duplicatePairs = append(duplicatePairs, pair)
+				glog.Infof("duplicate address %s on network %s", pair.WalletAddress, pair.NetworkId)
+			}
+		})
+
+		glog.Infof("Found %d network/address pairs with duplicates", len(duplicatePairs))
+
+	})
 
 }

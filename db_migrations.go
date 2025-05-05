@@ -1713,4 +1713,10 @@ var migrations = []any{
         CREATE UNIQUE INDEX network_user_wallet_address_unique ON network_user (wallet_address) 
         WHERE wallet_address IS NOT NULL;
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_wallet 
+        ADD CONSTRAINT unique_network_wallet_address 
+        UNIQUE (network_id, wallet_address);
+    `),
 }
