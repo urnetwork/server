@@ -63,7 +63,6 @@ Usage:
     bringyourctl task ls
     bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
-		bringyourctl wallet-duplicates
 
 Options:
     -h --help     Show this screen.
@@ -189,8 +188,6 @@ Options:
 		if login, _ := opts.Bool("login"); login {
 			authLogin(opts)
 		}
-	} else if walletDuplicates, _ := opts.Bool("wallet-duplicates"); walletDuplicates {
-		findAccountWalletDupes(opts)
 	} else {
 		fmt.Println(usage)
 	}
@@ -828,14 +825,4 @@ func authLogin(opts docopt.Opts) {
 
 	fmt.Printf("RESULT: %+v\n", authCodeLoginResult)
 
-}
-
-func findAccountWalletDupes(docopt.Opts) {
-	ctx := context.Background()
-
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-
-	model.LogDuplicateWallets(
-		clientSession,
-	)
 }
