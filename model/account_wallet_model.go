@@ -429,7 +429,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
  */
 func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		tag, err := tx.Exec(
+		_, err := tx.Exec(
 			session.Ctx,
 			`
 				UPDATE account_wallet
