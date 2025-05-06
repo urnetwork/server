@@ -119,7 +119,7 @@ type VerifySeekerNftHolderArgs struct {
 func VerifySeekerNftHolder(
 	verify *VerifySeekerNftHolderArgs,
 	session *session.ClientSession,
-) *VerifySeekerNftHolderResult {
+) (*VerifySeekerNftHolderResult, error) {
 
 	isValid, err := model.VerifySolanaSignature(
 		verify.PublicKey,
@@ -133,7 +133,7 @@ func VerifySeekerNftHolder(
 			Error: &VerifySeekerNftHolderError{
 				Message: fmt.Sprintf("Error verifying signature %s", err.Error()),
 			},
-		}
+		}, err
 	}
 	if !isValid {
 		return &VerifySeekerNftHolderResult{
@@ -141,7 +141,7 @@ func VerifySeekerNftHolder(
 			Error: &VerifySeekerNftHolderError{
 				Message: "Invalid signature",
 			},
-		}
+		}, nil
 	}
 
 	result, returnErr := heliusSearchAssets(verify.PublicKey)
@@ -152,7 +152,7 @@ func VerifySeekerNftHolder(
 			Error: &VerifySeekerNftHolderError{
 				Message: "Error fetching assets by owner",
 			},
-		}
+		}, returnErr
 	}
 
 	isHolder := isSeekerNftHolder(result.Result.Items)
@@ -163,14 +163,14 @@ func VerifySeekerNftHolder(
 			Error: &VerifySeekerNftHolderError{
 				Message: "Wallet is not a holder of the Seeker NFT",
 			},
-		}
+		}, nil
 	}
 
 	model.MarkWalletSeekerHolder(verify.PublicKey, session)
 
 	return &VerifySeekerNftHolderResult{
 		Success: true,
-	}
+	}, nil
 }
 
 func isSeekerNftHolder(

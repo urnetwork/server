@@ -113,6 +113,7 @@ Options:
 		router.NewRoute("POST", "/account/wallet", handlers.CreateAccountWallet),
 		router.NewRoute("GET", "/account/wallets", handlers.GetAccountWallets),
 		router.NewRoute("POST", "/account/wallets/remove", handlers.RemoveWallet),
+		router.NewRoute("POST", "/account/wallets/verify-seeker", handlers.VerifyHoldingSeekerToken),
 		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
 		router.NewRoute("GET", "/account/points", handlers.GetNetworkPoints),
