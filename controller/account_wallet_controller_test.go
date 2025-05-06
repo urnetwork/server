@@ -145,3 +145,30 @@ func TestAccountWallet(t *testing.T) {
 
 	})
 }
+
+func TestSeekerNFTVerification(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		holderPublicKey := "7EJRHALxHtZ2VtTPPexeriLffGc2GzyL8SZGGTnQmffg"
+		nonHolderPublicKey := "D8e7nNaqdkMymmD3uNLp1KB2Y9K7PUdYYXrRXauvn94N"
+
+		/**
+		 * Verify Seeker NFT Holder
+		 */
+		result, err := heliusSearchAssets(holderPublicKey)
+		assert.Equal(t, err, nil)
+
+		isHolder := isSeekerNftHolder(result.Result.Items)
+		assert.Equal(t, isHolder, true)
+
+		/**
+		 * Verify non Seeker NFT Holder
+		 */
+
+		result, err = heliusSearchAssets(nonHolderPublicKey)
+		assert.Equal(t, err, nil)
+		isHolder = isSeekerNftHolder(result.Result.Items)
+		assert.Equal(t, isHolder, false)
+
+	})
+}

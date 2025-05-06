@@ -430,7 +430,7 @@ func NetworkCreate(
 		 * User is authenticating with a crypto wallet
 		 */
 
-		isValid, err := verifySolanaSignature(
+		isValid, err := VerifySolanaSignature(
 			networkCreate.WalletAuth.PublicKey,
 			networkCreate.WalletAuth.Message,
 			networkCreate.WalletAuth.Signature,
@@ -441,7 +441,7 @@ func NetworkCreate(
 		}
 
 		if !isValid {
-			return nil, errors.New("Invalid signature.")
+			return nil, errors.New("invalid signature")
 		}
 
 		created := false

@@ -30,6 +30,7 @@ type AccountWallet struct {
 	Active           bool       `json:"active"`
 	DefaultTokenType string     `json:"default_token_type"`
 	CreateTime       time.Time  `json:"create_time"`
+	HasSeekerToken   bool       `json:"has_seeker_token"`
 }
 
 type CreateAccountWalletExternalArgs struct {
@@ -203,7 +204,8 @@ func dbGetAccountWallet(ctx context.Context, conn server.PgConn, walletId server
 					active,
 					default_token_type,
 					create_time,
-					circle_wallet_id
+					circle_wallet_id,
+					has_seeker_token
 			FROM account_wallet
 			WHERE
 					wallet_id = $1
@@ -235,7 +237,8 @@ func GetAccountWalletByCircleId(ctx context.Context, circleWalletId string) *Acc
 					active,
 					default_token_type,
 					create_time,
-					circle_wallet_id
+					circle_wallet_id,
+					has_seeker_token
 			FROM account_wallet
 			WHERE
 					circle_wallet_id = $1
@@ -263,6 +266,7 @@ func scanAccountWallet(result pgx.Rows, wallet *AccountWallet) {
 		&wallet.DefaultTokenType,
 		&wallet.CreateTime,
 		&wallet.CircleWalletId,
+		&wallet.HasSeekerToken,
 	))
 }
 
@@ -420,48 +424,25 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 
 }
 
-type DuplicateWalletsResult struct {
-	Wallets []*DuplicateWallet `json:"wallets"`
-}
-
-type DuplicateWallet struct {
-	WalletAddress string
-	Wallets       []*AccountWallet
-}
-
-func LogDuplicateWallets(
-	session *session.ClientSession,
-) {
-
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		// First get all wallet_addresses that have duplicates
-		addressResult, addressErr := conn.Query(
+/**
+ * If the wallet holds a Seeker NFT, we increase points earned
+ */
+func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) {
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		_, err := tx.Exec(
 			session.Ctx,
 			`
-			SELECT network_id, wallet_address
-			FROM account_wallet
-			GROUP BY network_id, wallet_address
-			HAVING COUNT(*) > 1
+				UPDATE account_wallet
+				SET 
+					has_seeker_token = true
+				WHERE 
+					wallet_address = $1 AND network_id = $2
 			`,
+			walletAddress,
+			session.ByJwt.NetworkId,
 		)
-
-		type NetworkAddressPair struct {
-			NetworkId     server.Id
-			WalletAddress string
+		if err != nil {
+			glog.Errorf("Error marking wallet as seeker holder: %v", err)
 		}
-
-		duplicatePairs := []NetworkAddressPair{}
-		server.WithPgResult(addressResult, addressErr, func() {
-			for addressResult.Next() {
-				var pair NetworkAddressPair
-				server.Raise(addressResult.Scan(&pair.NetworkId, &pair.WalletAddress))
-				duplicatePairs = append(duplicatePairs, pair)
-				glog.Infof("duplicate address %s on network %s", pair.WalletAddress, pair.NetworkId)
-			}
-		})
-
-		glog.Infof("Found %d network/address pairs with duplicates", len(duplicatePairs))
-
 	})
-
 }

@@ -41,6 +41,12 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, args.WalletAddress, fetchWallet.WalletAddress)
 		assert.Equal(t, args.DefaultTokenType, fetchWallet.DefaultTokenType)
 		assert.Equal(t, fetchWallet.CircleWalletId, nil)
+		assert.Equal(t, fetchWallet.HasSeekerToken, false)
+
+		// mark wallet as having a seeker token
+		MarkWalletSeekerHolder(fetchWallet.WalletAddress, session)
+		fetchWallet = GetAccountWallet(ctx, *walletId)
+		assert.Equal(t, fetchWallet.HasSeekerToken, true)
 
 		/**
 		 * Try and insert the same wallet address with network id
@@ -96,6 +102,7 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, circleArgs.WalletAddress, fetchWallet.WalletAddress)
 		assert.Equal(t, circleArgs.DefaultTokenType, fetchWallet.DefaultTokenType)
 		assert.Equal(t, fetchWallet.CircleWalletId, circleWalletId)
+		assert.Equal(t, fetchWallet.HasSeekerToken, false)
 
 		// try and fetch incorrect id
 		fakeId := server.NewId()
