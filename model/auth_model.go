@@ -341,7 +341,7 @@ func AuthLogin(
 		/**
 		 * Handle wallet login
 		 */
-		isValid, err := verifySolanaSignature(
+		isValid, err := VerifySolanaSignature(
 			login.WalletAuth.PublicKey,
 			login.WalletAuth.Message,
 			login.WalletAuth.Signature,
@@ -427,7 +427,7 @@ func AuthLogin(
 }
 
 // Function to verify a Solana wallet signature
-func verifySolanaSignature(publicKeyStr string, message string, signatureStr string) (bool, error) {
+func VerifySolanaSignature(publicKeyStr string, message string, signatureStr string) (bool, error) {
 	// Parse the public key from string
 	publicKey, err := solana.PublicKeyFromBase58(publicKeyStr)
 	if err != nil {

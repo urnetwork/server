@@ -1,10 +1,14 @@
 package controller
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -81,4 +85,152 @@ func RemoveWallet(args *model.RemoveWalletArgs, session *session.ClientSession) 
 	}
 
 	return model.RemoveWallet(id, session), nil
+}
+
+/**
+ * Seeker NFT Holder verification
+ */
+
+type HeliusAsset struct {
+	Id string `json:"id"`
+}
+
+type HeliusSearchAssetsResult struct {
+	Result struct {
+		Items []HeliusAsset `json:"items"`
+	} `json:"result"`
+}
+
+type VerifySeekerNftHolderError struct {
+	Message string `json:"message"`
+}
+
+type VerifySeekerNftHolderResult struct {
+	Success bool                        `json:"success"`
+	Error   *VerifySeekerNftHolderError `json:"error,omitempty"`
+}
+
+type VerifySeekerNftHolderArgs struct {
+	PublicKey string `json:"wallet_address,omitempty"`
+	Signature string `json:"wallet_signature,omitempty"`
+	Message   string `json:"wallet_message,omitempty"`
+}
+
+func VerifySeekerNftHolder(
+	verify *VerifySeekerNftHolderArgs,
+	session *session.ClientSession,
+) *VerifySeekerNftHolderResult {
+
+	isValid, err := model.VerifySolanaSignature(
+		verify.PublicKey,
+		verify.Message,
+		verify.Signature,
+	)
+
+	if err != nil {
+		return &VerifySeekerNftHolderResult{
+			Success: false,
+			Error: &VerifySeekerNftHolderError{
+				Message: fmt.Sprintf("Error verifying signature %s", err.Error()),
+			},
+		}
+	}
+	if !isValid {
+		return &VerifySeekerNftHolderResult{
+			Success: false,
+			Error: &VerifySeekerNftHolderError{
+				Message: "Invalid signature",
+			},
+		}
+	}
+
+	result, returnErr := heliusSearchAssets(verify.PublicKey)
+
+	if returnErr != nil {
+		return &VerifySeekerNftHolderResult{
+			Success: false,
+			Error: &VerifySeekerNftHolderError{
+				Message: "Error fetching assets by owner",
+			},
+		}
+	}
+
+	isHolder := isSeekerNftHolder(result.Result.Items)
+
+	if !isHolder {
+		return &VerifySeekerNftHolderResult{
+			Success: false,
+			Error: &VerifySeekerNftHolderError{
+				Message: "Wallet is not a holder of the Seeker NFT",
+			},
+		}
+	}
+
+	return &VerifySeekerNftHolderResult{
+		Success: true,
+	}
+}
+
+func isSeekerNftHolder(
+	items []HeliusAsset,
+) bool {
+	seekerNftAddress := "2DMMamkkxQ6zDMBtkFp8KH7FoWzBMBA1CGTYwom4QH6Z"
+	isHolder := false
+
+	for _, item := range items {
+		if item.Id == seekerNftAddress {
+			isHolder = true
+			break
+		}
+
+	}
+
+	return isHolder
+}
+
+var heliusConfig = sync.OnceValue(func() map[string]any {
+	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
+	return c["helius"].(map[string]any)
+})
+
+func heliusSearchAssets(
+	publicKey string,
+) (*HeliusSearchAssetsResult, error) {
+
+	id := server.NewId()
+
+	apiKey := heliusConfig()["api_key"].(string)
+
+	url := fmt.Sprintf(
+		"https://mainnet.helius-rpc.com/?api-key=%s",
+		apiKey,
+	)
+
+	return server.HttpPostRequireStatusOk(
+		url,
+		map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"method":  "searchAssets",
+			"params": map[string]any{
+				"ownerAddress": publicKey,
+				"tokenType":    "fungible",
+			},
+		},
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+		},
+		func(response *http.Response, responseBodyBytes []byte) (*HeliusSearchAssetsResult, error) {
+
+			var heliusResp HeliusSearchAssetsResult
+			if err := json.Unmarshal(responseBodyBytes, &heliusResp); err != nil {
+				glog.Infof("error unmarshalling response: %s", err.Error())
+
+				return nil, err
+			}
+
+			return &heliusResp, nil
+		},
+	)
+
 }
