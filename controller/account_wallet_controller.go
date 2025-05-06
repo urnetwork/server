@@ -166,6 +166,8 @@ func VerifySeekerNftHolder(
 		}
 	}
 
+	model.MarkWalletSeekerHolder(verify.PublicKey, session)
+
 	return &VerifySeekerNftHolderResult{
 		Success: true,
 	}

@@ -1719,4 +1719,9 @@ var migrations = []any{
         ADD CONSTRAINT unique_network_wallet_address 
         UNIQUE (network_id, wallet_address);
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_wallet 
+        ADD COLUMN has_seeker_token boolean NOT NULL DEFAULT false;
+    `),
 }

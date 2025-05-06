@@ -30,6 +30,7 @@ type AccountWallet struct {
 	Active           bool       `json:"active"`
 	DefaultTokenType string     `json:"default_token_type"`
 	CreateTime       time.Time  `json:"create_time"`
+	HasSeekerToken   bool       `json:"has_seeker_token"`
 }
 
 type CreateAccountWalletExternalArgs struct {
@@ -203,7 +204,8 @@ func dbGetAccountWallet(ctx context.Context, conn server.PgConn, walletId server
 					active,
 					default_token_type,
 					create_time,
-					circle_wallet_id
+					circle_wallet_id,
+					has_seeker_token
 			FROM account_wallet
 			WHERE
 					wallet_id = $1
@@ -235,7 +237,8 @@ func GetAccountWalletByCircleId(ctx context.Context, circleWalletId string) *Acc
 					active,
 					default_token_type,
 					create_time,
-					circle_wallet_id
+					circle_wallet_id,
+					has_seeker_token
 			FROM account_wallet
 			WHERE
 					circle_wallet_id = $1
@@ -263,6 +266,7 @@ func scanAccountWallet(result pgx.Rows, wallet *AccountWallet) {
 		&wallet.DefaultTokenType,
 		&wallet.CreateTime,
 		&wallet.CircleWalletId,
+		&wallet.HasSeekerToken,
 	))
 }
 
@@ -418,4 +422,27 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 
 	return result
 
+}
+
+/**
+ * If the wallet holds a Seeker NFT, we increase points earned
+ */
+func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) {
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			session.Ctx,
+			`
+				UPDATE account_wallet
+				SET 
+					has_seeker_token = true
+				WHERE 
+					wallet_address = $1 AND network_id = $2
+			`,
+			walletAddress,
+			session.ByJwt.NetworkId,
+		)
+		if err != nil {
+			glog.Errorf("Error marking wallet as seeker holder: %v", err)
+		}
+	})
 }
