@@ -199,7 +199,11 @@ func TestGetNetworkProvideStats(t *testing.T) {
 
 		// mark plan items as complete
 		for _, payment := range plan.NetworkPayments {
+			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			RemovePaymentRecord(ctx, payment.PaymentId)
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
 
@@ -393,7 +397,11 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		subsidyPaidByteCount := paidByteCount
 
 		for _, payment := range paymentPlan.NetworkPayments {
+			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			RemovePaymentRecord(ctx, payment.PaymentId)
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+
 			CompletePayment(ctx, payment.PaymentId, "")
 		}
 
@@ -452,7 +460,11 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		subsidyPaidByteCount = paidByteCount - subsidyPaidByteCount
 
 		for _, payment := range paymentPlan.NetworkPayments {
+			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			RemovePaymentRecord(ctx, payment.PaymentId)
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+
 			CompletePayment(ctx, payment.PaymentId, "")
 			UpdatePaymentWallet(ctx, payment.PaymentId)
 		}

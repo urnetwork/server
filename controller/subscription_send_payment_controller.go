@@ -227,9 +227,17 @@ func advancePayment(
 			// check later
 			return
 
-		case "DENIED", "FAILED", "CANCELLED":
-
+		case "DENIED", "FAILED":
 			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId.String(), status)
+			// remove the payment record so it can be recreated
+			model.RemovePaymentRecord(
+				clientSession.Ctx,
+				payment.PaymentId,
+			)
+			return
+
+		case "CANCELLED":
+			canceled = true
 			return
 
 		case "COMPLETE":
