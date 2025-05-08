@@ -17,6 +17,8 @@ import (
 	"github.com/go-playground/assert/v2"
 )
 
+// FIXME add counting quic stream through nginx
+
 func TestPpNginx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
