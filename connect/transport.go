@@ -48,6 +48,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	}
 }
 
+// FIXME rename TransportServer
 type ConnectHandler struct {
 	ctx       context.Context
 	handlerId server.Id
@@ -79,6 +80,13 @@ var connectedGauge = prometheus.NewGauge(
 
 func init() {
 	prometheus.MustRegister(connectedGauge)
+}
+
+func run() {
+	go self.runH1()
+	go self.runH3()
+
+	// FIXME wait for close
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +259,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					if err := ws.WriteMessage(websocket.BinaryMessage, message); err != nil {
-						// note that for websocket a dealine timeout cannot be recovered
+						// note that for websocket a deadline timeout cannot be recovered
 						return
 					}
 					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
@@ -280,4 +288,20 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	} else {
 		c()
 	}
+}
+
+// note warp currently does not load balance h3 at nginx
+// it passes the quic stream to exactly one service (connect)
+// all tls is handled by this server
+
+func runH3() {
+	conn, err := listenUDP(addr)
+	if err != nil {
+		return nil, err
+	}
+	return (&Transport{
+		Conn:        NewPpPacketConn(conn, DefaultWarpQuicPpSettings()),
+		createdConn: true,
+		isSingleUse: true,
+	}).Listen(tlsConf, config)
 }
