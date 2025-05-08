@@ -48,7 +48,6 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	}
 }
 
-
 // FIXME rename TransportServer
 type ConnectHandler struct {
 	ctx       context.Context
@@ -83,15 +82,12 @@ func init() {
 	prometheus.MustRegister(connectedGauge)
 }
 
-
 func run() {
 	go self.runH1()
 	go self.runH3()
 
 	// FIXME wait for close
 }
-
-
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
@@ -294,7 +290,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 // note warp currently does not load balance h3 at nginx
 // it passes the quic stream to exactly one service (connect)
 // all tls is handled by this server
@@ -305,11 +300,8 @@ func runH3() {
 		return nil, err
 	}
 	return (&Transport{
-		Conn:        NewProxyProtocolPacketConn(conn),
+		Conn:        NewPpPacketConn(conn, DefaultWarpQuicPpSettings()),
 		createdConn: true,
 		isSingleUse: true,
 	}).Listen(tlsConf, config)
 }
-
-
-
