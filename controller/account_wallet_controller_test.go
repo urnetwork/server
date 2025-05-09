@@ -149,16 +149,33 @@ func TestAccountWallet(t *testing.T) {
 func TestSeekerNFTVerification(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 
-		holderPublicKey := "7EJRHALxHtZ2VtTPPexeriLffGc2GzyL8SZGGTnQmffg"
+		sagaHolderPublicKey := "FhWtLQZ7Fefy6Mp7Yp9CnFgQjfw6N4a3Y8r5qw888DkB"
+		seekerHolderPublicKey := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
 		nonHolderPublicKey := "D8e7nNaqdkMymmD3uNLp1KB2Y9K7PUdYYXrRXauvn94N"
+
+		/**
+		 * Verify Saga NFT Holder
+		 */
+		result, err := heliusSearchAssets(sagaHolderPublicKey)
+		assert.Equal(t, err, nil)
+		isHolder := isSagaNftHolder(result.Result.Items)
+		assert.Equal(t, isHolder, true)
+
+		/**
+		 * Verify non Saga NFT Holder
+		 */
+		result, err = heliusSearchAssets(nonHolderPublicKey)
+		assert.Equal(t, err, nil)
+		isHolder = isSagaNftHolder(result.Result.Items)
+		assert.Equal(t, isHolder, false)
 
 		/**
 		 * Verify Seeker NFT Holder
 		 */
-		result, err := heliusSearchAssets(holderPublicKey)
+		result, err = heliusSearchAssets(seekerHolderPublicKey)
 		assert.Equal(t, err, nil)
 
-		isHolder := isSeekerNftHolder(result.Result.Items)
+		isHolder = isSeekerNftHolder(result.Result.Items)
 		assert.Equal(t, isHolder, true)
 
 		/**
