@@ -188,7 +188,6 @@ func isSeekerNftHolder(
 
 	for _, item := range items {
 		if item.Id == seekerNftAddress {
-			glog.Infof("found seeker nft holder")
 			isHolder = true
 			break
 		}
@@ -206,16 +205,16 @@ func isSagaNftHolder(
 	isHolder := false
 	for _, item := range items {
 
-		if isHolder {
-			break
-		}
-
 		for _, grouping := range item.Grouping {
 
 			if grouping.GroupKey == "collection" && grouping.GroupValue == sagaNftAddress {
 				isHolder = true
 				break
 			}
+		}
+
+		if isHolder {
+			break
 		}
 
 	}
