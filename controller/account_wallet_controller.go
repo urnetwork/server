@@ -91,8 +91,14 @@ func RemoveWallet(args *model.RemoveWalletArgs, session *session.ClientSession) 
  * Seeker NFT Holder verification
  */
 
+type HeliusAssetItemGrouping struct {
+	GroupKey   string `json:"group_key"`
+	GroupValue string `json:"group_value"`
+}
+
 type HeliusAsset struct {
-	Id string `json:"id"`
+	Id       string                    `json:"id"`
+	Grouping []HeliusAssetItemGrouping `json:"grouping"`
 }
 
 type HeliusSearchAssetsResult struct {
@@ -155,13 +161,14 @@ func VerifySeekerNftHolder(
 		}, returnErr
 	}
 
-	isHolder := isSeekerNftHolder(result.Result.Items)
+	isSeekerHolder := isSeekerNftHolder(result.Result.Items)
+	isSagaHolder := isSagaNftHolder(result.Result.Items)
 
-	if !isHolder {
+	if !isSeekerHolder && !isSagaHolder {
 		return &VerifySeekerNftHolderResult{
 			Success: false,
 			Error: &VerifySeekerNftHolderError{
-				Message: "Wallet is not a holder of the Seeker NFT",
+				Message: "Wallet is not a holder of the Seeker or Saga Genesis tokens",
 			},
 		}, nil
 	}
@@ -181,6 +188,7 @@ func isSeekerNftHolder(
 
 	for _, item := range items {
 		if item.Id == seekerNftAddress {
+			glog.Infof("found seeker nft holder")
 			isHolder = true
 			break
 		}
@@ -188,6 +196,32 @@ func isSeekerNftHolder(
 	}
 
 	return isHolder
+}
+
+func isSagaNftHolder(
+	items []HeliusAsset,
+) bool {
+	sagaNftAddress := "46pcSL5gmjBrPqGKFaLbbCmR6iVuLJbnQy13hAe7s6CC"
+
+	isHolder := false
+	for _, item := range items {
+
+		if isHolder {
+			break
+		}
+
+		for _, grouping := range item.Grouping {
+
+			if grouping.GroupKey == "collection" && grouping.GroupValue == sagaNftAddress {
+				isHolder = true
+				break
+			}
+		}
+
+	}
+
+	return isHolder
+
 }
 
 var heliusConfig = sync.OnceValue(func() map[string]any {
@@ -216,7 +250,7 @@ func heliusSearchAssets(
 			"method":  "searchAssets",
 			"params": map[string]any{
 				"ownerAddress": publicKey,
-				"tokenType":    "fungible",
+				"tokenType":    "all",
 			},
 		},
 		func(header http.Header) {
