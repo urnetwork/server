@@ -9,7 +9,7 @@ require (
 	github.com/go-jose/go-jose/v3 v3.0.4
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
-	github.com/golang/glog v1.2.4
+	github.com/golang/glog v1.2.5
 	github.com/gorilla/websocket v1.5.3
 	github.com/ipinfo/go/v2 v2.10.0
 	github.com/jackc/pgerrcode v0.0.0-20240316143900-6e2875d9b438
@@ -26,9 +26,9 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v2025.4.3-58948734+incompatible
-	golang.org/x/crypto v0.37.0
-	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0
-	golang.org/x/net v0.39.0
+	golang.org/x/crypto v0.38.0
+	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
+	golang.org/x/net v0.40.0
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -55,7 +55,7 @@ require (
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
-	golang.org/x/term v0.31.0 // indirect
+	golang.org/x/term v0.32.0 // indirect
 )
 
 require (
@@ -73,9 +73,9 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.63.0 // indirect
 	github.com/prometheus/procfs v0.16.0 // indirect
-	golang.org/x/sync v0.13.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
+	golang.org/x/sync v0.14.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.25.0 // indirect
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
 )
 
