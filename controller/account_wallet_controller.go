@@ -150,19 +150,30 @@ func VerifySeekerNftHolder(
 		}, nil
 	}
 
-	result, returnErr := heliusSearchAssets(verify.PublicKey)
+	fungibleResult, returnErr := heliusSearchAssetsFungible(verify.PublicKey)
 
 	if returnErr != nil {
 		return &VerifySeekerNftHolderResult{
 			Success: false,
 			Error: &VerifySeekerNftHolderError{
-				Message: "Error fetching assets by owner",
+				Message: "Error fetching fungible assets by owner",
 			},
 		}, returnErr
 	}
 
-	isSeekerHolder := isSeekerNftHolder(result.Result.Items)
-	isSagaHolder := isSagaNftHolder(result.Result.Items)
+	sagaResult, returnErr := heliusSearchAssetsSaga(verify.PublicKey)
+
+	if returnErr != nil {
+		return &VerifySeekerNftHolderResult{
+			Success: false,
+			Error: &VerifySeekerNftHolderError{
+				Message: "Error fetching saga assets by owner",
+			},
+		}, returnErr
+	}
+
+	isSeekerHolder := isSeekerNftHolder(fungibleResult.Result.Items)
+	isSagaHolder := isSagaNftHolder(sagaResult.Result.Items)
 
 	if !isSeekerHolder && !isSagaHolder {
 		return &VerifySeekerNftHolderResult{
@@ -228,7 +239,7 @@ var heliusConfig = sync.OnceValue(func() map[string]any {
 	return c["helius"].(map[string]any)
 })
 
-func heliusSearchAssets(
+func heliusSearchAssetsFungible(
 	publicKey string,
 ) (*HeliusSearchAssetsResult, error) {
 
@@ -249,7 +260,54 @@ func heliusSearchAssets(
 			"method":  "searchAssets",
 			"params": map[string]any{
 				"ownerAddress": publicKey,
-				"tokenType":    "all",
+				"tokenType":    "fungible",
+			},
+		},
+		func(header http.Header) {
+			header.Add("Accept", "application/json")
+		},
+		func(response *http.Response, responseBodyBytes []byte) (*HeliusSearchAssetsResult, error) {
+
+			var heliusResp HeliusSearchAssetsResult
+			if err := json.Unmarshal(responseBodyBytes, &heliusResp); err != nil {
+				glog.Infof("error unmarshalling response: %s", err.Error())
+
+				return nil, err
+			}
+
+			return &heliusResp, nil
+		},
+	)
+
+}
+
+func heliusSearchAssetsSaga(
+	publicKey string,
+) (*HeliusSearchAssetsResult, error) {
+
+	id := server.NewId()
+
+	apiKey := heliusConfig()["api_key"].(string)
+
+	url := fmt.Sprintf(
+		"https://mainnet.helius-rpc.com/?api-key=%s",
+		apiKey,
+	)
+
+	return server.HttpPostRequireStatusOk(
+		url,
+		map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"method":  "searchAssets",
+			"params": map[string]any{
+				"ownerAddress": publicKey,
+				"grouping": []string{
+					"collection",
+					"46pcSL5gmjBrPqGKFaLbbCmR6iVuLJbnQy13hAe7s6CC", // Genesis Token Collection NFT Address
+				},
+				"page":  1, // Starts at 1
+				"limit": 1000,
 			},
 		},
 		func(header http.Header) {
