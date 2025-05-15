@@ -929,10 +929,11 @@ func UpgradeGuest(
  * Upgrade guest with existing account
  */
 type UpgradeGuestExistingArgs struct {
-	UserAuth    *string `json:"user_auth,omitempty"`
-	Password    *string `json:"password,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type UpgradeGuestExistingError struct {
@@ -1040,51 +1041,17 @@ func UpgradeFromGuestExisting(
 			AuthJwtType: upgradeGuestExisting.AuthJwtType,
 		}
 
-		loginResult, err := AuthLogin(args, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Invalid login",
-				},
-			}, nil
+		return handleAuthLoginUpgrade(args, session)
+
+	}
+
+	if upgradeGuestExisting.WalletAuth != nil {
+
+		args := AuthLoginArgs{
+			WalletAuth: upgradeGuestExisting.WalletAuth,
 		}
 
-		if loginResult.Error != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: loginResult.Error.Message,
-				},
-			}, nil
-		}
-
-		// in this case, we should navigate the user to the network creation view
-		if loginResult.Network == nil {
-			return &UpgradeGuestExistingResult{}, nil
-		}
-
-		network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error parsing network token",
-				},
-			}, nil
-		}
-
-		err = markUpgradedNetworkId(network.NetworkId, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error marking upgraded network id",
-				},
-			}, nil
-		}
-
-		return &UpgradeGuestExistingResult{
-			Network: &UpgradeGuestExistingResultNetwork{
-				ByJwt: &loginResult.Network.ByJwt,
-			},
-		}, nil
+		return handleAuthLoginUpgrade(args, session)
 
 	}
 
@@ -1094,6 +1061,57 @@ func UpgradeFromGuestExisting(
 		},
 	}, nil
 
+}
+
+func handleAuthLoginUpgrade(
+	args AuthLoginArgs,
+	session *session.ClientSession,
+) (*UpgradeGuestExistingResult, error) {
+	loginResult, err := AuthLogin(args, session)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Invalid login",
+			},
+		}, nil
+	}
+
+	if loginResult.Error != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: loginResult.Error.Message,
+			},
+		}, nil
+	}
+
+	// in this case, we should navigate the user to the network creation view
+	if loginResult.Network == nil {
+		return &UpgradeGuestExistingResult{}, nil
+	}
+
+	network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Error parsing network token",
+			},
+		}, nil
+	}
+
+	err = markUpgradedNetworkId(network.NetworkId, session)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Error marking upgraded network id",
+			},
+		}, nil
+	}
+
+	return &UpgradeGuestExistingResult{
+		Network: &UpgradeGuestExistingResultNetwork{
+			ByJwt: &loginResult.Network.ByJwt,
+		},
+	}, nil
 }
 
 func markUpgradedNetworkId(
