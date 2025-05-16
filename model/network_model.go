@@ -58,11 +58,12 @@ type NetworkCreateArgs struct {
 }
 
 type UpgradeGuestArgs struct {
-	NetworkName string  `json:"network_name"`
-	UserAuth    *string `json:"user_auth,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	Password    *string `json:"password,omitempty"`
+	NetworkName string          `json:"network_name"`
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type NetworkCreateResult struct {
@@ -901,6 +902,72 @@ func UpgradeGuest(
 
 			}
 
+		} else if upgradeGuest.WalletAuth != nil {
+			/**
+			 * Upgrade from guest from wallet
+			 */
+			var userId *server.Id
+
+			userCheck, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT user_id FROM network_user WHERE wallet_address = $1
+				`,
+				upgradeGuest.WalletAuth.PublicKey,
+			)
+			server.WithPgResult(userCheck, err, func() {
+				if userCheck.Next() {
+					server.Raise(userCheck.Scan(&userId))
+				}
+			})
+
+			if userId != nil {
+				result = &UpgradeGuestResult{
+					Error: &UpgradeGuestError{
+						Message: "User already exists",
+					},
+				}
+				return
+			}
+
+			/**
+			 * Update network user from guest
+			 */
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+								UPDATE network_user
+								SET
+										wallet_address = $2,
+										wallet_blockchain = $3,
+										auth_type = $4
+	
+								WHERE
+										user_id = $1
+						`,
+				session.ByJwt.UserId,
+				upgradeGuest.WalletAuth.PublicKey,
+				AuthTypeSolana,
+				AuthTypeSolana,
+			))
+
+			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+			byJwt := jwt.NewByJwt(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				networkName,
+				false,
+			)
+			byJwtSigned := byJwt.Sign()
+
+			result = &UpgradeGuestResult{
+				Network: &UpgradeGuestNetwork{
+					ByJwt: &byJwtSigned,
+				},
+				// UserAuth: &normalJwtUserAuth,
+			}
+
 		}
 
 		/**
@@ -929,10 +996,11 @@ func UpgradeGuest(
  * Upgrade guest with existing account
  */
 type UpgradeGuestExistingArgs struct {
-	UserAuth    *string `json:"user_auth,omitempty"`
-	Password    *string `json:"password,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type UpgradeGuestExistingError struct {
@@ -1040,51 +1108,17 @@ func UpgradeFromGuestExisting(
 			AuthJwtType: upgradeGuestExisting.AuthJwtType,
 		}
 
-		loginResult, err := AuthLogin(args, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Invalid login",
-				},
-			}, nil
+		return handleAuthLoginUpgrade(args, session)
+
+	}
+
+	if upgradeGuestExisting.WalletAuth != nil {
+
+		args := AuthLoginArgs{
+			WalletAuth: upgradeGuestExisting.WalletAuth,
 		}
 
-		if loginResult.Error != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: loginResult.Error.Message,
-				},
-			}, nil
-		}
-
-		// in this case, we should navigate the user to the network creation view
-		if loginResult.Network == nil {
-			return &UpgradeGuestExistingResult{}, nil
-		}
-
-		network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error parsing network token",
-				},
-			}, nil
-		}
-
-		err = markUpgradedNetworkId(network.NetworkId, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error marking upgraded network id",
-				},
-			}, nil
-		}
-
-		return &UpgradeGuestExistingResult{
-			Network: &UpgradeGuestExistingResultNetwork{
-				ByJwt: &loginResult.Network.ByJwt,
-			},
-		}, nil
+		return handleAuthLoginUpgrade(args, session)
 
 	}
 
@@ -1094,6 +1128,57 @@ func UpgradeFromGuestExisting(
 		},
 	}, nil
 
+}
+
+func handleAuthLoginUpgrade(
+	args AuthLoginArgs,
+	session *session.ClientSession,
+) (*UpgradeGuestExistingResult, error) {
+	loginResult, err := AuthLogin(args, session)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Invalid login",
+			},
+		}, nil
+	}
+
+	if loginResult.Error != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: loginResult.Error.Message,
+			},
+		}, nil
+	}
+
+	// in this case, we should navigate the user to the network creation view
+	if loginResult.Network == nil {
+		return &UpgradeGuestExistingResult{}, nil
+	}
+
+	network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Error parsing network token",
+			},
+		}, nil
+	}
+
+	err = markUpgradedNetworkId(network.NetworkId, session)
+	if err != nil {
+		return &UpgradeGuestExistingResult{
+			Error: &UpgradeGuestExistingError{
+				Message: "Error marking upgraded network id",
+			},
+		}, nil
+	}
+
+	return &UpgradeGuestExistingResult{
+		Network: &UpgradeGuestExistingResultNetwork{
+			ByJwt: &loginResult.Network.ByJwt,
+		},
+	}, nil
 }
 
 func markUpgradedNetworkId(
@@ -1206,6 +1291,42 @@ func Testing_CreateNetwork(
 	})
 
 	return
+}
+
+func Testing_CreateNetworkByWallet(
+	ctx context.Context,
+	networkId server.Id,
+	networkName string,
+	adminUserId server.Id,
+	publicKey string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network (network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			networkId,
+			networkName,
+			adminUserId,
+		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			adminUserId,
+			"test",
+			AuthTypeSolana,
+			true,
+			publicKey,
+			AuthTypeSolana,
+		))
+	})
+
 }
 
 func Testing_CreateGuestNetwork(
