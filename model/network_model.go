@@ -58,11 +58,12 @@ type NetworkCreateArgs struct {
 }
 
 type UpgradeGuestArgs struct {
-	NetworkName string  `json:"network_name"`
-	UserAuth    *string `json:"user_auth,omitempty"`
-	AuthJwt     *string `json:"auth_jwt,omitempty"`
-	AuthJwtType *string `json:"auth_jwt_type,omitempty"`
-	Password    *string `json:"password,omitempty"`
+	NetworkName string          `json:"network_name"`
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
 type NetworkCreateResult struct {
@@ -901,6 +902,72 @@ func UpgradeGuest(
 
 			}
 
+		} else if upgradeGuest.WalletAuth != nil {
+			/**
+			 * Upgrade from guest from wallet
+			 */
+			var userId *server.Id
+
+			userCheck, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT user_id FROM network_user WHERE wallet_address = $1
+				`,
+				upgradeGuest.WalletAuth.PublicKey,
+			)
+			server.WithPgResult(userCheck, err, func() {
+				if userCheck.Next() {
+					server.Raise(userCheck.Scan(&userId))
+				}
+			})
+
+			if userId != nil {
+				result = &UpgradeGuestResult{
+					Error: &UpgradeGuestError{
+						Message: "User already exists",
+					},
+				}
+				return
+			}
+
+			/**
+			 * Update network user from guest
+			 */
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+								UPDATE network_user
+								SET
+										wallet_address = $2,
+										wallet_blockchain = $3,
+										auth_type = $4
+	
+								WHERE
+										user_id = $1
+						`,
+				session.ByJwt.UserId,
+				upgradeGuest.WalletAuth.PublicKey,
+				AuthTypeSolana,
+				AuthTypeSolana,
+			))
+
+			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+			byJwt := jwt.NewByJwt(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				networkName,
+				false,
+			)
+			byJwtSigned := byJwt.Sign()
+
+			result = &UpgradeGuestResult{
+				Network: &UpgradeGuestNetwork{
+					ByJwt: &byJwtSigned,
+				},
+				// UserAuth: &normalJwtUserAuth,
+			}
+
 		}
 
 		/**
@@ -1224,6 +1291,42 @@ func Testing_CreateNetwork(
 	})
 
 	return
+}
+
+func Testing_CreateNetworkByWallet(
+	ctx context.Context,
+	networkId server.Id,
+	networkName string,
+	adminUserId server.Id,
+	publicKey string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network (network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			networkId,
+			networkName,
+			adminUserId,
+		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			adminUserId,
+			"test",
+			AuthTypeSolana,
+			true,
+			publicKey,
+			AuthTypeSolana,
+		))
+	})
+
 }
 
 func Testing_CreateGuestNetwork(
