@@ -784,6 +784,17 @@ func PlayWebhook(
 				return nil, err
 			}
 
+			// fire this immediately since we pull current plan from subscription_renewal table
+			PlaySubscriptionRenewal(
+				&PlaySubscriptionRenewalArgs{
+					NetworkId:      networkId,
+					PackageName:    rtdnMessage.PackageName,
+					SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+					PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+				},
+				clientSession,
+			)
+
 			if sub.PaymentState == 1 && sub.AcknowledgementState == 0 {
 				// Aknowledge
 				// FIXME this appears to be broken
@@ -797,17 +808,6 @@ func PlayWebhook(
 					url,
 					[]byte{},
 					playAuthHeaders,
-				)
-
-				// fire this immediately since we pull current plan from subscription_renewal table
-				PlaySubscriptionRenewal(
-					&PlaySubscriptionRenewalArgs{
-						NetworkId:      networkId,
-						PackageName:    rtdnMessage.PackageName,
-						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
-						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
-					},
-					clientSession,
 				)
 
 				// continually renew as long as the expiry time keeps getting pushed forward
