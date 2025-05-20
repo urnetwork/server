@@ -99,10 +99,26 @@ func TestLeaderboard(t *testing.T) {
 		_, err = PlanPayments(ctx)
 		assert.Equal(t, err, nil)
 
+		/**
+		 * check leaderboard stats
+		 */
 		leaderboardStats, err := GetLeaderboard(ctx)
+
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(leaderboardStats), 2)
-		assert.Equal(t, leaderboardStats[1].NetMiBCount > leaderboardStats[0].NetMiBCount, true)
+		assert.Equal(t, leaderboardStats[0].NetworkId, networkIdB.String())
+		assert.Equal(t, leaderboardStats[1].NetworkId, networkIdA.String())
+
+		/**
+		 * Get individual network ranking
+		 */
+		networkRanking, err := GetNetworkLeaderboardRanking(clientSessionB)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkRanking.LeaderboardRank, 1)
+
+		networkRanking, err = GetNetworkLeaderboardRanking(clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkRanking.LeaderboardRank, 2)
 
 		/**
 		 * Set network A leaderboard to private

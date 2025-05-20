@@ -5,6 +5,9 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+/**
+ * Leaderboard
+ */
 type GetLeaderboardArgs struct {
 }
 
@@ -40,6 +43,11 @@ func GetLeaderboardStats(
 
 }
 
+/**
+ * Network leaderboard public settings
+ * Users can opt in or out of having their network displayed on the leaderboard
+ */
+
 type SetLeaderboardArgs struct {
 	IsPublic bool `json:"is_public"`
 }
@@ -67,5 +75,40 @@ func SetNetworkLeaderboardRankingPublic(
 	}
 
 	return &SetLeaderboardResult{}, nil
+
+}
+
+/**
+ * Network ranking
+ */
+
+type GetNetworkRankingArgs struct {
+}
+
+type GetNetworkRankingResult struct {
+	NetworkRanking model.NetworkRanking    `json:"network_ranking"`
+	Error          *GetNetworkRankingError `json:"error,omitempty"`
+}
+type GetNetworkRankingError struct {
+	Message string `json:"message"`
+}
+
+func GetNetworkLeaderboardRanking(
+	args *GetNetworkRankingArgs,
+	session *session.ClientSession,
+) (*GetNetworkRankingResult, error) {
+
+	networkRanking, err := model.GetNetworkLeaderboardRanking(session)
+	if err != nil {
+		return &GetNetworkRankingResult{
+			Error: &GetNetworkRankingError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	return &GetNetworkRankingResult{
+		NetworkRanking: networkRanking,
+	}, nil
 
 }
