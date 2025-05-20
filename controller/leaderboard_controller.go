@@ -24,7 +24,7 @@ func GetLeaderboardStats(
 		}, nil
 	}
 
-	earners, err := model.GetTopEarners(session.Ctx)
+	earners, err := model.GetLeaderboard(session.Ctx)
 	if err != nil {
 		return &model.LeaderboardResult{
 			Error: &model.TopEarnersError{

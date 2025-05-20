@@ -23,7 +23,7 @@ type TopEarnersError struct {
 	Message string `json:"message"`
 }
 
-func GetTopEarners(ctx context.Context) (earners []Earner, queryErr error) {
+func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -62,7 +62,11 @@ func GetTopEarners(ctx context.Context) (earners []Earner, queryErr error) {
 
 			for result.Next() {
 				var earner Earner
-				server.Raise(result.Scan(&earner))
+				server.Raise(result.Scan(
+					&earner.NetworkId,
+					&earner.NetMiBCount,
+					&earner.NetworkName,
+				))
 				earners = append(earners, earner)
 			}
 		})
@@ -128,8 +132,8 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 }
 
 func SetNetworkLeaderboardPublic(isPublic bool, session *session.ClientSession) (err error) {
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		_, err = conn.Exec(
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		_ = server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network
@@ -138,7 +142,7 @@ func SetNetworkLeaderboardPublic(isPublic bool, session *session.ClientSession) 
 		`,
 			isPublic,
 			session.ByJwt.NetworkId,
-		)
+		))
 	})
 
 	return err
