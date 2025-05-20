@@ -49,6 +49,7 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 				) t
 
 				INNER JOIN network ON network.network_id = t.network_id
+				WHERE network.leaderboard_public = true
 				;
 		`,
 		)
