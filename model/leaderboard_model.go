@@ -87,9 +87,8 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 }
 
 type NetworkRanking struct {
-	NetworkId       string `json:"network_id"`
-	NetMiBCount     int    `json:"net_mib_count"`
-	LeaderboardRank int    `json:"leaderboard_rank"`
+	NetMiBCount     int `json:"net_mib_count"`
+	LeaderboardRank int `json:"leaderboard_rank"`
 }
 
 func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
@@ -98,7 +97,6 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 			session.Ctx,
 			`
 				SELECT
-						t.network_id,
 						t.net_mib_count,
 						t.leaderboard_rank
 				FROM (
@@ -128,7 +126,6 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 			if result.Next() {
 
 				server.Raise(result.Scan(
-					&networkRanking.NetworkId,
 					&networkRanking.NetMiBCount,
 					&networkRanking.LeaderboardRank,
 				))

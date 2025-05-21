@@ -12,7 +12,7 @@ func GetLeaderboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetLeaderboardNetworkRanking(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(controller.GetNetworkLeaderboardRanking, w, r)
+	router.WrapRequireAuth(controller.GetNetworkLeaderboardRanking, w, r)
 }
 
 func SetNetworkLeaderboardPublic(w http.ResponseWriter, r *http.Request) {

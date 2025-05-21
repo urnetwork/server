@@ -77,7 +77,7 @@ Options:
 		router.NewRoute("POST", "/network/create-provider-spec", handlers.NetworkCreateProviderSpec),
 		router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
 		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
-		router.NewRoute("POST", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
+		router.NewRoute("GET", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
 		router.NewRoute("POST", "/network/ranking-visibility", handlers.SetNetworkLeaderboardPublic),
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),

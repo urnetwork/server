@@ -11,8 +11,6 @@ import (
 type GetLeaderboardArgs struct {
 }
 
-type GetLeaderboardResult struct{}
-
 func GetLeaderboard(
 	args *GetLeaderboardArgs,
 	session *session.ClientSession,
@@ -38,42 +36,39 @@ func GetLeaderboard(
  * Users can opt in or out of having their network displayed on the leaderboard
  */
 
-type SetLeaderboardArgs struct {
+type SetNetworkRankingPublicArgs struct {
 	IsPublic bool `json:"is_public"`
 }
 
-type SetLeaderboardResult struct {
-	Error *SetLeaderboardError `json:"error,omitempty"`
+type SetNetworkRankingPublicResult struct {
+	Error *SetNetworkRankingPublicError `json:"error,omitempty"`
 }
 
-type SetLeaderboardError struct {
+type SetNetworkRankingPublicError struct {
 	Message string `json:"message"`
 }
 
 func SetNetworkLeaderboardRankingPublic(
-	args SetLeaderboardArgs,
+	args SetNetworkRankingPublicArgs,
 	session *session.ClientSession,
-) (*SetLeaderboardResult, error) {
+) (*SetNetworkRankingPublicResult, error) {
 
 	err := model.SetNetworkLeaderboardPublic(args.IsPublic, session)
 	if err != nil {
-		return &SetLeaderboardResult{
-			Error: &SetLeaderboardError{
+		return &SetNetworkRankingPublicResult{
+			Error: &SetNetworkRankingPublicError{
 				Message: err.Error(),
 			},
 		}, nil
 	}
 
-	return &SetLeaderboardResult{}, nil
+	return &SetNetworkRankingPublicResult{}, nil
 
 }
 
 /**
  * Network ranking
  */
-
-type GetNetworkRankingArgs struct {
-}
 
 type GetNetworkRankingResult struct {
 	NetworkRanking model.NetworkRanking    `json:"network_ranking"`
@@ -84,7 +79,6 @@ type GetNetworkRankingError struct {
 }
 
 func GetNetworkLeaderboardRanking(
-	args *GetNetworkRankingArgs,
 	session *session.ClientSession,
 ) (*GetNetworkRankingResult, error) {
 
