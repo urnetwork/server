@@ -15,9 +15,8 @@ type Earner struct {
 }
 
 type LeaderboardResult struct {
-	Earners        []Earner         `json:"earners"`
-	NetworkRanking NetworkRanking   `json:"network_ranking"`
-	Error          *TopEarnersError `json:"error,omitempty"`
+	Earners []Earner         `json:"earners"`
+	Error   *TopEarnersError `json:"error,omitempty"`
 }
 
 type TopEarnersError struct {

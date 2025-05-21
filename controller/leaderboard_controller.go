@@ -13,19 +13,10 @@ type GetLeaderboardArgs struct {
 
 type GetLeaderboardResult struct{}
 
-func GetLeaderboardStats(
+func GetLeaderboard(
 	args *GetLeaderboardArgs,
 	session *session.ClientSession,
 ) (*model.LeaderboardResult, error) {
-
-	networkRanking, err := model.GetNetworkLeaderboardRanking(session)
-	if err != nil {
-		return &model.LeaderboardResult{
-			Error: &model.TopEarnersError{
-				Message: err.Error(),
-			},
-		}, nil
-	}
 
 	earners, err := model.GetLeaderboard(session.Ctx)
 	if err != nil {
@@ -37,8 +28,7 @@ func GetLeaderboardStats(
 	}
 
 	return &model.LeaderboardResult{
-		Earners:        earners,
-		NetworkRanking: networkRanking,
+		Earners: earners,
 	}, nil
 
 }
