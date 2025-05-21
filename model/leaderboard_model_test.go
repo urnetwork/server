@@ -128,8 +128,9 @@ func TestLeaderboard(t *testing.T) {
 
 		leaderboardStats, err = GetLeaderboard(ctx)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(leaderboardStats), 1)
-		assert.Equal(t, leaderboardStats[0].NetworkId, networkIdB.String())
+		assert.Equal(t, len(leaderboardStats), 2)
+		assert.Equal(t, leaderboardStats[1].NetworkId, "")
+		assert.Equal(t, leaderboardStats[1].NetworkId, "")
 
 	})
 }

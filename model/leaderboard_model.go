@@ -11,6 +11,7 @@ type Earner struct {
 	NetworkId   string `json:"network_id"`
 	NetworkName string `json:"network_name"`
 	NetMiBCount int    `json:"net_mib_count"`
+	IsPublic    bool   `json:"is_public"`
 }
 
 type LeaderboardResult struct {
@@ -32,7 +33,8 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 				SELECT
 						t.network_id,
 						t.net_mib_count,
-						network.network_name
+						network.network_name,
+						network.leaderboard_public
 
 				FROM (SELECT account_payment.network_id,
 										SUM(account_payment.payout_byte_count) / (1024 * 1024) AS net_mib_count
@@ -49,7 +51,6 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 				) t
 
 				INNER JOIN network ON network.network_id = t.network_id
-				WHERE network.leaderboard_public = true
 				ORDER BY t.net_mib_count DESC
 				;
 		`,
@@ -68,7 +69,14 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 					&earner.NetworkId,
 					&earner.NetMiBCount,
 					&earner.NetworkName,
+					&earner.IsPublic,
 				))
+
+				if !earner.IsPublic {
+					earner.NetworkId = ""
+					earner.NetworkName = ""
+				}
+
 				earners = append(earners, earner)
 			}
 		})
