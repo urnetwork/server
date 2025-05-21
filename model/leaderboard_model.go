@@ -8,10 +8,10 @@ import (
 )
 
 type Earner struct {
-	NetworkId   string `json:"network_id"`
-	NetworkName string `json:"network_name"`
-	NetMiBCount int    `json:"net_mib_count"`
-	IsPublic    bool   `json:"is_public"`
+	NetworkId   string  `json:"network_id"`
+	NetworkName string  `json:"network_name"`
+	NetMiBCount float32 `json:"net_mib_count"`
+	IsPublic    bool    `json:"is_public"`
 }
 
 type LeaderboardResult struct {
