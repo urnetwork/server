@@ -23,6 +23,9 @@ type TopEarnersError struct {
 	Message string `json:"message"`
 }
 
+/**
+ * Gets an ordered list of the top earners
+ */
 func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -87,10 +90,13 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 }
 
 type NetworkRanking struct {
-	NetMiBCount     int `json:"net_mib_count"`
-	LeaderboardRank int `json:"leaderboard_rank"`
+	NetMiBCount     float32 `json:"net_mib_count"`
+	LeaderboardRank int     `json:"leaderboard_rank"`
 }
 
+/**
+ * Gets the ranking for the session network
+ */
 func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
 	server.Db(session.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -137,6 +143,9 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 	return networkRanking, queryErr
 }
 
+/**
+ * A network can opt into having their network displayed on the leaderboard
+ */
 func SetNetworkLeaderboardPublic(isPublic bool, session *session.ClientSession) (err error) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		_ = server.RaisePgResult(tx.Exec(
