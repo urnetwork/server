@@ -90,8 +90,9 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 }
 
 type NetworkRanking struct {
-	NetMiBCount     float32 `json:"net_mib_count"`
-	LeaderboardRank int     `json:"leaderboard_rank"`
+	NetMiBCount       float32 `json:"net_mib_count"`
+	LeaderboardRank   int     `json:"leaderboard_rank"`
+	LeaderboardPublic bool    `json:"leaderboard_public"`
 }
 
 /**
@@ -102,10 +103,11 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 		result, err := conn.Query(
 			session.Ctx,
 			`
-				SELECT
-						t.net_mib_count,
-						t.leaderboard_rank
-				FROM (
+			SELECT
+					t.net_mib_count,
+					t.leaderboard_rank,
+					network.leaderboard_public
+			FROM (
 					SELECT account_payment.network_id,
 											sum(account_payment.payout_byte_count) / (1024 * 1024)                   AS net_mib_count,
 											row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
@@ -116,8 +118,9 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 														ORDER BY end_time DESC
 														LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
 								GROUP BY account_payment.network_id
-				) t
-				WHERE t.network_id = $1;
+			) t
+			INNER JOIN network ON network.network_id = t.network_id
+			WHERE t.network_id = $1;
 		`,
 			session.ByJwt.NetworkId,
 		)
@@ -134,6 +137,7 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 				server.Raise(result.Scan(
 					&networkRanking.NetMiBCount,
 					&networkRanking.LeaderboardRank,
+					&networkRanking.LeaderboardPublic,
 				))
 			}
 		})

@@ -115,10 +115,12 @@ func TestLeaderboard(t *testing.T) {
 		networkRanking, err := GetNetworkLeaderboardRanking(clientSessionB)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, networkRanking.LeaderboardRank, 1)
+		assert.Equal(t, networkRanking.LeaderboardPublic, true)
 
 		networkRanking, err = GetNetworkLeaderboardRanking(clientSessionA)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, networkRanking.LeaderboardRank, 2)
+		assert.Equal(t, networkRanking.LeaderboardPublic, true)
 
 		/**
 		 * Set network A leaderboard to private
@@ -131,6 +133,14 @@ func TestLeaderboard(t *testing.T) {
 		assert.Equal(t, len(leaderboardStats), 2)
 		assert.Equal(t, leaderboardStats[1].NetworkId, "")
 		assert.Equal(t, leaderboardStats[1].NetworkId, "")
+
+		/**
+		* LeaderboardPublic should be set to false
+		 */
+		networkRanking, err = GetNetworkLeaderboardRanking(clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, networkRanking.LeaderboardRank, 2)
+		assert.Equal(t, networkRanking.LeaderboardPublic, false)
 
 	})
 }
