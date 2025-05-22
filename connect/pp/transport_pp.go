@@ -24,7 +24,7 @@ import (
 
 const PpMaxHeaderSize = 2048
 
-func DefaultWarpQuicPpSettings() *PpSettings {
+func DefaultWarpPpSettings() *PpSettings {
 	return &PpSettings{
 		MaxPacketSize: 1500,
 		ProxyTimeout:  45 * time.Second,

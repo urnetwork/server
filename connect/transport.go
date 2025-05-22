@@ -83,17 +83,16 @@ func init() {
 }
 
 func run() {
-	go self.runH1()
 	go self.runH3()
+	go self.runH3Dns()
 
 	// FIXME wait for close
 }
 
+
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
-	defer func() {
-		connectedGauge.Sub(1)
-	}()
+	defer connectedGauge.Sub(1)
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
@@ -111,6 +110,20 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// enforce the message size limit on messages in
 	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
+
+	// FIXME check the headers. If all the auth headers are present, do not read the auth message
+	// FIXME
+
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", self.auth.ByJwt))
+			header.Add("X-UR-AppVersion", self.auth.AppVersion)
+			header.Add("X-UR-InstanceId", self.auth.InstanceId.String())
+
+	var auth *protocol.Auth
+
+
+	var byJwt Jwt
+	var instanceId Id
+
 
 	ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 	messageType, authFrameBytes, err := ws.ReadMessage()
@@ -192,6 +205,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if !model.IsNetworkClientConnected(handleCtx, connectionId) {
+					// client kicked off
 					return
 				}
 			}
@@ -294,14 +308,210 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 // it passes the quic stream to exactly one service (connect)
 // all tls is handled by this server
 
+
+// FIXME set up port 53 pt also
+
 func runH3() {
 	conn, err := listenUDP(addr)
 	if err != nil {
 		return nil, err
 	}
-	return (&Transport{
-		Conn:        NewPpPacketConn(conn, DefaultWarpQuicPpSettings()),
+	earlyListener, err := (&Transport{
+		Conn:        NewPpPacketConn(conn, DefaultWarpPpSettings()),
 		createdConn: true,
 		isSingleUse: true,
-	}).Listen(tlsConf, config)
+	}).ListenEarly(tlsConf, config)
+	listenQuic(ctx, earlyListener)
 }
+
+func runH3Dns() {
+	conn, err := listenUDP(addr)
+	if err != nil {
+		return nil, err
+	}
+	earlyListener, err := (&Transport{
+		Conn:        connect.NewPacketTranslation(ctx, PtModeListen53, NewPpPacketConn(conn, DefaultWarpPpSettings())),
+		createdConn: true,
+		isSingleUse: true,
+	}).ListenEarly(tlsConf, config)
+	listenQuic(ctx, earlyListener)
+}
+
+func listenQuic(ctx context.Context, earlyListener) {
+	for {
+		earlyConn, err := earlyListener.Accept(ctx)
+
+		go connectQuic(ctx, earlyConn)
+	}
+}
+
+func connectQuic(addr net.Addr, earlyConn quic.EarlyConnection) {
+
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	defer handleCancel()
+
+
+	stream, err := earlyConn.AcceptStream(handleCtx)
+
+
+
+	framer := NewFramer(MAX)
+
+	authFrameBytes, err := framer.Read(stream, self.settings.ReadTimeout)
+	if err != nil {
+		return
+	}
+
+	message, err := connect.DecodeFrame(authFrameBytes)
+	if err != nil {
+		return
+	}
+	auth, ok := message.(*protocol.Auth)
+	if !ok {
+		return
+	}
+
+	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
+	if err != nil {
+		return
+	}
+
+	if byJwt.ClientId == nil {
+		return
+	}
+
+	clientId := *byJwt.ClientId
+
+	instanceId, err := server.IdFromBytes(auth.InstanceId)
+	if err != nil {
+		return
+	}
+
+	// verify the client is still part of the network
+	// this will fail for example if the client has been removed
+	client := model.GetNetworkClient(handleCtx, clientId)
+	if client == nil || client.NetworkId != byJwt.NetworkId {
+		// server.Logger("ERROR HB\n")
+		return
+	}
+
+	err := framer.Write(stream, authFrameBytes, self.settings.WriteTimeout)
+
+	if err != nil {
+		// server.Logger("TIMEOUT HC\n")
+		return
+	}
+
+	// find the client ip:port from the addr
+	clientAddress := addr.String()
+
+	c := func() {
+		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
+		defer model.DisconnectNetworkClient(self.ctx, connectionId)
+
+		go server.HandleError(func() {
+			// disconnect the client if the model marks the connection closed
+			defer handleCancel()
+
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-time.After(self.settings.SyncConnectionTimeout):
+				}
+
+				if !model.IsNetworkClientConnected(handleCtx, connectionId) {
+					// client kicked off
+					return
+				}
+			}
+		}, handleCancel)
+
+		residentTransport := NewResidentTransport(
+			handleCtx,
+			self.exchange,
+			clientId,
+			instanceId,
+		)
+		go func() {
+			defer handleCancel()
+			server.HandleError(residentTransport.Run)
+			// close is done in the write
+		}()
+
+		go server.HandleError(func() {
+			defer func() {
+				handleCancel()
+				residentTransport.Close()
+			}()
+
+			for {
+				message, err := framer.Read(stream, self.settings.ReadTimeout)
+				if err != nil {
+					return
+				}
+
+				if 0 == len(message) {
+					// ping
+					continue
+				}
+
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-residentTransport.Done():
+				                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               	return
+				case residentTransport.send <- message:
+					glog.V(2).Infof("[rtr] <-%s\n", clientId.String())
+				case <-time.After(self.settings.ReadTimeout):
+				}
+			}
+		}, handleCancel)
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-residentTransport.Done():
+					return
+				case message, ok := <-residentTransport.receive:
+					if !ok {
+						return
+					}
+
+					err := framer.Write(stream, message, self.settings.WriteTimeout)
+					if err != nil {
+						return
+					}
+					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
+				case <-time.After(self.settings.PingTimeout):
+					err := framer.Write(stream, make([]byte, 0), self.settings.WriteTimeout)
+					if err != nil {
+						return
+					}
+				}
+			}
+		}, handleCancel)
+
+		select {
+		case <-handleCtx.Done():
+			return
+		case <-residentTransport.Done():
+			return
+		}
+	}
+	if glog.V(2) {
+		server.Trace(
+			fmt.Sprintf("[rt]connect %s", clientId.String()),
+			c,
+		)
+	} else {
+		c()
+	}
+
+
+}
+
