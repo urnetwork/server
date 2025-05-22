@@ -21,7 +21,6 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-
 type GetNetworkAccountPaymentsError struct {
 	Message string `json:"message"`
 }
@@ -47,7 +46,9 @@ func GetNetworkAccountPayments(session *session.ClientSession) (*GetNetworkAccou
 	}, nil
 }
 
-
+func TransferStats(session *session.ClientSession) (*model.TransferStats, error) {
+	return model.GetTransferStats(session.Ctx, session.ByJwt.NetworkId), nil
+}
 
 func SchedulePendingPayments(clientSession *session.ClientSession) {
 	pendingPayments := model.GetPendingPayments(clientSession.Ctx)
