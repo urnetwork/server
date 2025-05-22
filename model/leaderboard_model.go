@@ -23,6 +23,9 @@ type TopEarnersError struct {
 	Message string `json:"message"`
 }
 
+/**
+ * Gets an ordered list of the top earners
+ */
 func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -87,19 +90,24 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 }
 
 type NetworkRanking struct {
-	NetMiBCount     int `json:"net_mib_count"`
-	LeaderboardRank int `json:"leaderboard_rank"`
+	NetMiBCount       float32 `json:"net_mib_count"`
+	LeaderboardRank   int     `json:"leaderboard_rank"`
+	LeaderboardPublic bool    `json:"leaderboard_public"`
 }
 
+/**
+ * Gets the ranking for the session network
+ */
 func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
 	server.Db(session.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`
-				SELECT
-						t.net_mib_count,
-						t.leaderboard_rank
-				FROM (
+			SELECT
+					t.net_mib_count,
+					t.leaderboard_rank,
+					network.leaderboard_public
+			FROM (
 					SELECT account_payment.network_id,
 											sum(account_payment.payout_byte_count) / (1024 * 1024)                   AS net_mib_count,
 											row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
@@ -110,8 +118,9 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 														ORDER BY end_time DESC
 														LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
 								GROUP BY account_payment.network_id
-				) t
-				WHERE t.network_id = $1;
+			) t
+			INNER JOIN network ON network.network_id = t.network_id
+			WHERE t.network_id = $1;
 		`,
 			session.ByJwt.NetworkId,
 		)
@@ -128,6 +137,7 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 				server.Raise(result.Scan(
 					&networkRanking.NetMiBCount,
 					&networkRanking.LeaderboardRank,
+					&networkRanking.LeaderboardPublic,
 				))
 			}
 		})
@@ -137,6 +147,9 @@ func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRankin
 	return networkRanking, queryErr
 }
 
+/**
+ * A network can opt into having their network displayed on the leaderboard
+ */
 func SetNetworkLeaderboardPublic(isPublic bool, session *session.ClientSession) (err error) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		_ = server.RaisePgResult(tx.Exec(
