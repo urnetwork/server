@@ -112,8 +112,6 @@ func ProcessPendingPayouts(
 	processPending *ProcessPendingPayoutsArgs,
 	clientSession *session.ClientSession,
 ) (*ProcessPendingPayoutsResult, error) {
-	// send a continuous verification code message to a bunch of popular email providers
-
 	controller.SchedulePendingPayments(clientSession)
 
 	return &ProcessPendingPayoutsResult{}, nil

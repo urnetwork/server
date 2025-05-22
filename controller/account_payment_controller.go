@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	// "errors"
 
 	// "sync"
 	"time"
@@ -19,6 +20,34 @@ import (
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
+
+
+type GetNetworkAccountPaymentsError struct {
+	Message string `json:"message"`
+}
+
+type GetNetworkAccountPaymentsResult struct {
+	AccountPayments []*model.AccountPayment         `json:"account_payments,omitempty"`
+	Error           *GetNetworkAccountPaymentsError `json:"error,omitempty"`
+}
+
+func GetNetworkAccountPayments(session *session.ClientSession) (*GetNetworkAccountPaymentsResult, error) {
+	networkAccountPayments, err := model.GetNetworkPayments(session)
+
+	if err != nil {
+		return &GetNetworkAccountPaymentsResult{
+			Error: &GetNetworkAccountPaymentsError{
+				Message: err.Error(),
+			},
+		}, err
+	}
+
+	return &GetNetworkAccountPaymentsResult{
+		AccountPayments: networkAccountPayments,
+	}, nil
+}
+
+
 
 func SchedulePendingPayments(clientSession *session.ClientSession) {
 	pendingPayments := model.GetPendingPayments(clientSession.Ctx)
@@ -161,7 +190,7 @@ func AdvancePayment(
 		return &AdvancePaymentResult{
 			Complete: false,
 			Canceled: false,
-		}, fmt.Errorf("Wallet not set.")
+		}, nil
 	}
 
 	complete, canceled, err := advancePayment(payment, clientSession)
@@ -177,7 +206,7 @@ func AdvancePaymentPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if !advancePaymentResult.Complete && !advancePaymentResult.Canceled {
+	if !advancePaymentResult.Canceled && !advancePaymentResult.Complete {
 		// keep checking on the payment until it is completed or canceled
 		ScheduleAdvancePayment(advancePaymentArgs, clientSession, tx)
 	}
@@ -212,7 +241,7 @@ func advancePayment(
 		// get the status of the transaction
 		txResult, err := circleClient.GetTransaction(*payment.PaymentRecord)
 		if err != nil {
-			returnErr = err
+			returnErr = fmt.Errorf("[%s]Payment transaction error = %s", payment.PaymentId, err)
 			return
 		}
 
@@ -228,7 +257,7 @@ func advancePayment(
 			return
 
 		case "DENIED", "FAILED":
-			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId.String(), status)
+			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId, status)
 			// remove the payment record so it can be recreated
 			model.RemovePaymentRecord(
 				clientSession.Ctx,
@@ -237,6 +266,7 @@ func advancePayment(
 			return
 
 		case "CANCELLED":
+			model.CancelPayment(clientSession.Ctx, payment.PaymentId)
 			canceled = true
 			return
 
@@ -248,10 +278,11 @@ func advancePayment(
 				payment.PaymentId,
 				string(txResponseBodyBytes), // STU_TODO: check this
 			)
+			complete = true
 
 			userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
 			if err != nil {
-				returnErr = err
+				returnErr = fmt.Errorf("[%s]Payment auth error = %s", payment.PaymentId, err)
 				return
 			}
 
@@ -275,13 +306,12 @@ func advancePayment(
 				})
 			}
 
-			complete = true
 			return
 
 		default:
 			returnErr = fmt.Errorf(
 				"[%s]unknown status = %s",
-				payment.PaymentId.String(),
+				payment.PaymentId,
 				status,
 			)
 			return
@@ -295,7 +325,7 @@ func advancePayment(
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, *payment.WalletId)
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
-			returnErr = err
+			returnErr = fmt.Errorf("[%s]Payment wallet error = %s", payment.PaymentId, err)
 			return
 		}
 
@@ -307,7 +337,7 @@ func advancePayment(
 			formattedBlockchain,
 		)
 		if err != nil {
-			returnErr = err
+			returnErr = fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
 			return
 		}
 
@@ -319,7 +349,7 @@ func advancePayment(
 
 		feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
 		if err != nil {
-			returnErr = err
+			returnErr = fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
 			return
 		}
 
@@ -331,6 +361,8 @@ func advancePayment(
 			// in a new (larger) payment. Otherwise, we will likely keep failing due
 			// to the payment not being large enough to cover the transfer fee.
 			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
+
+			model.CancelPayment(clientSession.Ctx, payment.PaymentId)
 			canceled = true
 			return
 		}
@@ -343,7 +375,7 @@ func advancePayment(
 		)
 		if err != nil {
 			auditAccountPayment(clientSession, payment.PaymentId, err)
-			returnErr = err
+			returnErr = fmt.Errorf("[%s]Payment create transaction error = %s", payment.PaymentId, err)
 			return
 		}
 
