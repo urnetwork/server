@@ -561,12 +561,12 @@ func listPendingPayouts(opts docopt.Opts) {
 		fmt.Println("No pending payouts")
 		return
 	}
-	fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
-	fmt.Println(strings.Repeat("-", 56))
+	fmt.Printf("%-40s %-40s %-16s\n", "Payment ID", "Wallet ID", "Payout Amount")
+	fmt.Println(strings.Repeat("-", 98))
 
 	for _, payout := range payouts {
-		payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payout.Payout))
-		fmt.Printf("%-40s %-16s\n", payout.WalletId, payoutUsd)
+		payoutUsd := fmt.Sprintf("%.4f", model.NanoCentsToUsd(payout.Payout))
+		fmt.Printf("%-40s %-40s %-16s\n", payout.PaymentId, payout.WalletId, payoutUsd)
 	}
 
 }

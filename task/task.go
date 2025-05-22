@@ -194,7 +194,10 @@ func ScheduleTaskInTx[T any, R any](
 		        claim_time,
 		        release_time
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-			ON CONFLICT (run_once_key) DO NOTHING
+			ON CONFLICT (run_once_key) DO UPDATE SET
+				run_at = LEAST(pending_task.run_at, $6),
+				run_priority = LEAST(pending_task.run_priority, $8),
+				run_max_time_seconds = LEAST(pending_task.run_max_time_seconds, $9)
 		`,
 		taskId,
 		taskTarget.TargetFunctionName(),
