@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/prometheus/client_golang/prometheus"
+	quic "github.com/quic-go/quic-go"
 
 	"github.com/golang/glog"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -24,7 +28,6 @@ import (
 // all connections from the same client will eventually terminate at the same resident,
 // where each connection will be a `connect.Transport` and traffic will be distributed across the transports
 
-
 var connectedGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -36,15 +39,6 @@ var connectedGauge = prometheus.NewGauge(
 
 func init() {
 	prometheus.MustRegister(connectedGauge)
-}
-
-
-type ConnectHandlerSettings struct {
-	PingTimeout                     time.Duration
-	WriteTimeout                    time.Duration
-	ReadTimeout                     time.Duration
-	SyncConnectionTimeout           time.Duration
-	MaximumExchangeMessageByteCount ByteCount
 }
 
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
@@ -60,13 +54,26 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// there is a global limit on the size per message
 		// messages above this size will be ignored from clients and the exchange
 		MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
+
+		QuicConnectTimeout:   2 * time.Second,
+		QuicHandshakeTimeout: 2 * time.Second,
 	}
+}
+
+type ConnectHandlerSettings struct {
+	PingTimeout                     time.Duration
+	WriteTimeout                    time.Duration
+	ReadTimeout                     time.Duration
+	SyncConnectionTimeout           time.Duration
+	MaximumExchangeMessageByteCount ByteCount
+	QuicConnectTimeout              time.Duration
+	QuicHandshakeTimeout            time.Duration
 }
 
 // FIXME rename TransportServer
 type ConnectHandler struct {
 	ctx       context.Context
-	cancel context.CancelFunc
+	cancel    context.CancelFunc
 	handlerId server.Id
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
@@ -77,11 +84,11 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 }
 
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
-	cancelCtx, cqncel := context.WithCancel(ctx)
+	cancelCtx, cancel := context.WithCancel(ctx)
 
 	h := &ConnectHandler{
 		ctx:       cancelCtx,
-		cancel: cancel,
+		cancel:    cancel,
 		handlerId: handlerId,
 		exchange:  exchange,
 		settings:  settings,
@@ -93,16 +100,15 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 }
 
 func (self *ConnectHandler) run() {
-	defer self.close()
+	defer self.cancel()
 
 	go self.runH3()
 	go self.runH3Dns()
 
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 	}
 }
-
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
@@ -127,20 +133,20 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// attemp to parse the auth message from the header
 	// if that fails, expect the auth message as the first message
-	auth := func()(*protocol.Auth) {
-		headerAuth := header.Get("Authorization")
-		headerAppVersion := header.Get("X-UR-AppVersion")
-		headerInstanceId := header.Get("X-UR-InstanceId")
-		
+	auth := func() *protocol.Auth {
+		headerAuth := r.Header.Get("Authorization")
+		headerAppVersion := r.Header.Get("X-UR-AppVersion")
+		headerInstanceId := r.Header.Get("X-UR-InstanceId")
+
 		bearerPrefix := "Bearer "
 
-		if strings.HasPrefix(authStr, bearerPrefix) {
-			jwt := auth[len(bearerPrefix):len(auth)]
+		if strings.HasPrefix(headerAuth, bearerPrefix) {
+			jwt := headerAuth[len(bearerPrefix):]
 
 			instanceId, err := server.ParseId(headerInstanceId)
 			if err != nil {
 				return &protocol.Auth{
-					Jwt: jwt,
+					ByJwt:      jwt,
 					InstanceId: instanceId.Bytes(),
 					AppVersion: headerAppVersion,
 				}
@@ -148,8 +154,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		return nil
-	}
-	
+	}()
+
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 		messageType, authFrameBytes, err := ws.ReadMessage()
@@ -168,6 +174,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		var ok bool
 		auth, ok = message.(*protocol.Auth)
 		if !ok {
+			return
+		}
+
+		// echo the auth message on successful auth
+		ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+		err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
+		if err != nil {
+			// server.Logger("TIMEOUT HC\n")
 			return
 		}
 	}
@@ -193,14 +207,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	client := model.GetNetworkClient(handleCtx, clientId)
 	if client == nil || client.NetworkId != byJwt.NetworkId {
 		// server.Logger("ERROR HB\n")
-		return
-	}
-
-	// echo the auth message on successful auth
-	ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	err = ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
-	if err != nil {
-		// server.Logger("TIMEOUT HC\n")
 		return
 	}
 
@@ -337,25 +343,35 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 // all tls is handled by this server
 
 func (self *ConnectHandler) runH3() {
-	return self.listenQuic(
+	self.listenQuic(
 		443,
-		func(packetConn net.PacketConn)(net.PacketConn) {
-			return NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+		func(packetConn net.PacketConn) (net.PacketConn, error) {
+			return NewPpPacketConn(packetConn, DefaultWarpPpSettings()), nil
 		},
 	)
 }
 
 func (self *ConnectHandler) runH3Dns() {
-	return self.listenQuic(
+	self.listenQuic(
 		53,
-		func(packetConn net.PacketConn)(net.PacketConn) {
-			return connect.NewPacketTranslation(self.ctx, PtModeListen53, NewPpPacketConn(packetConn, DefaultWarpPpSettings()))
+		func(packetConn net.PacketConn) (net.PacketConn, error) {
+			ptSettings := connect.DefaultPacketTranslationSettings()
+			// FIXME read from config
+			ptSettings.DnsTlds = [][]byte{}
+			return connect.NewPacketTranslation(
+				self.ctx,
+				connect.PacketTranslationModeDecode53,
+				NewPpPacketConn(packetConn, DefaultWarpPpSettings()),
+				ptSettings,
+			)
 		},
 	)
 }
 
-func (self *ConnectHandler) listenQuic(port net.UDPPort, connTransform func(net.PacketConn)(net.PacketConn)) {
-	defer self.handleCancel()
+func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketConn) (net.PacketConn, error)) {
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+
+	defer handleCancel()
 
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
@@ -380,35 +396,37 @@ func (self *ConnectHandler) listenQuic(port net.UDPPort, connTransform func(net.
 			// 	Certificates: []tls.Certificate{cert},
 			// }, err
 
+			// FIXME read keys
 			return nil, nil
 		},
 	}
 
-
 	serverAddr := &net.UDPAddr{
-		IP: net.IPv4zero,
+		IP:   net.IPv4zero,
 		Port: port,
 	}
-
 
 	serverConn, err := net.ListenUDP("udp", serverAddr)
 	if err != nil {
 		return
 	}
-	packetConn := connTransform(serverConn)
+	packetConn, err := connTransform(serverConn)
+	if err != nil {
+		return
+	}
 	defer packetConn.Close()
-	earlyListener, err := (&Transport{
-		Conn:        packetConn,
+	earlyListener, err := (&quic.Transport{
+		Conn: packetConn,
 		// createdConn: true,
 		// isSingleUse: true,
-	}).ListenEarly(tlsConf, quicConfig)
+	}).ListenEarly(tlsConfig, quicConfig)
 	defer earlyListener.Close()
 
 	go func() {
-		defer handleCancel
+		defer handleCancel()
 
 		for {
-			earlyConn, err := earlyListener.Accept(ctx)
+			earlyConn, err := earlyListener.Accept(handleCtx)
 			if err != nil {
 				return
 			}
@@ -418,7 +436,7 @@ func (self *ConnectHandler) listenQuic(port net.UDPPort, connTransform func(net.
 	}()
 
 	select {
-	case <- self.ctx.Done():
+	case <-handleCtx.Done():
 	}
 }
 
@@ -427,14 +445,11 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
-
 	stream, err := earlyConn.AcceptStream(handleCtx)
 
+	framer := connect.NewFramer(connect.DefaultFramerSettings())
 
-
-	framer := NewFramer(MAX)
-
-	authFrameBytes, err := framer.Read(stream, self.settings.ReadTimeout)
+	authFrameBytes, err := framer.ReadWithTimeout(stream, self.settings.ReadTimeout)
 	if err != nil {
 		return
 	}
@@ -472,7 +487,7 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 		return
 	}
 
-	err := framer.Write(stream, authFrameBytes, self.settings.WriteTimeout)
+	err = framer.WriteWithTimeout(stream, authFrameBytes, self.settings.WriteTimeout)
 
 	if err != nil {
 		// server.Logger("TIMEOUT HC\n")
@@ -523,7 +538,7 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 			}()
 
 			for {
-				message, err := framer.Read(stream, self.settings.ReadTimeout)
+				message, err := framer.ReadWithTimeout(stream, self.settings.ReadTimeout)
 				if err != nil {
 					return
 				}
@@ -537,7 +552,7 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 				case <-handleCtx.Done():
 					return
 				case <-residentTransport.Done():
-				                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               	return
+					return
 				case residentTransport.send <- message:
 					glog.V(2).Infof("[rtr] <-%s\n", clientId.String())
 				case <-time.After(self.settings.ReadTimeout):
@@ -559,13 +574,13 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 						return
 					}
 
-					err := framer.Write(stream, message, self.settings.WriteTimeout)
+					err := framer.WriteWithTimeout(stream, message, self.settings.WriteTimeout)
 					if err != nil {
 						return
 					}
 					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
 				case <-time.After(self.settings.PingTimeout):
-					err := framer.Write(stream, make([]byte, 0), self.settings.WriteTimeout)
+					err := framer.WriteWithTimeout(stream, make([]byte, 0), self.settings.WriteTimeout)
 					if err != nil {
 						return
 					}
@@ -589,6 +604,4 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 		c()
 	}
 
-
 }
-

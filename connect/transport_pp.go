@@ -205,7 +205,7 @@ func (self *PpPacketConn) Close() error {
 func (self *PpPacketConn) SetReadBuffer(bytes int) error {
 	conn, ok := self.conn.(interface{ SetReadBuffer(int) error })
 	if !ok {
-		return fmt.Errorf("Set read buffer not supporter on underlying packet conn: %T", self.packetConn)
+		return fmt.Errorf("Set read buffer not supporter on underlying packet conn: %T", self.conn)
 	}
 	return conn.SetReadBuffer(PpMaxHeaderSize + bytes)
 }
@@ -213,7 +213,7 @@ func (self *PpPacketConn) SetReadBuffer(bytes int) error {
 func (self *PpPacketConn) SetWriteBuffer(bytes int) error {
 	conn, ok := self.conn.(interface{ SetWriteBuffer(int) error })
 	if !ok {
-		return fmt.Errorf("Set write buffer not supporter on underlying packet conn: %T", self.packetConn)
+		return fmt.Errorf("Set write buffer not supporter on underlying packet conn: %T", self.conn)
 	}
 	return conn.SetWriteBuffer(bytes)
 }
