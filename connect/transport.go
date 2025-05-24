@@ -24,6 +24,21 @@ import (
 // all connections from the same client will eventually terminate at the same resident,
 // where each connection will be a `connect.Transport` and traffic will be distributed across the transports
 
+
+var connectedGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connected_clients",
+		Help:      "Number of connected clients",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(connectedGauge)
+}
+
+
 type ConnectHandlerSettings struct {
 	PingTimeout                     time.Duration
 	WriteTimeout                    time.Duration
@@ -51,6 +66,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 // FIXME rename TransportServer
 type ConnectHandler struct {
 	ctx       context.Context
+	cancel context.CancelFunc
 	handlerId server.Id
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
@@ -61,32 +77,30 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 }
 
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
-	return &ConnectHandler{
-		ctx:       ctx,
+	cancelCtx, cqncel := context.WithCancel(ctx)
+
+	h := &ConnectHandler{
+		ctx:       cancelCtx,
+		cancel: cancel,
 		handlerId: handlerId,
 		exchange:  exchange,
 		settings:  settings,
 	}
+
+	go h.run()
+
+	return h
 }
 
-var connectedGauge = prometheus.NewGauge(
-	prometheus.GaugeOpts{
-		Namespace: "urnetwork",
-		Subsystem: "connect",
-		Name:      "connected_clients",
-		Help:      "Number of connected clients",
-	},
-)
+func (self *ConnectHandler) run() {
+	defer self.close()
 
-func init() {
-	prometheus.MustRegister(connectedGauge)
-}
-
-func run() {
 	go self.runH3()
 	go self.runH3Dns()
 
-	// FIXME wait for close
+	select {
+	case <- self.ctx.Done():
+	}
 }
 
 
@@ -111,37 +125,51 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// enforce the message size limit on messages in
 	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
 
-	// FIXME check the headers. If all the auth headers are present, do not read the auth message
-	// FIXME
+	// attemp to parse the auth message from the header
+	// if that fails, expect the auth message as the first message
+	auth := func()(*protocol.Auth) {
+		headerAuth := header.Get("Authorization")
+		headerAppVersion := header.Get("X-UR-AppVersion")
+		headerInstanceId := header.Get("X-UR-InstanceId")
+		
+		bearerPrefix := "Bearer "
 
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", self.auth.ByJwt))
-			header.Add("X-UR-AppVersion", self.auth.AppVersion)
-			header.Add("X-UR-InstanceId", self.auth.InstanceId.String())
+		if strings.HasPrefix(authStr, bearerPrefix) {
+			jwt := auth[len(bearerPrefix):len(auth)]
 
-	var auth *protocol.Auth
+			instanceId, err := server.ParseId(headerInstanceId)
+			if err != nil {
+				return &protocol.Auth{
+					Jwt: jwt,
+					InstanceId: instanceId.Bytes(),
+					AppVersion: headerAppVersion,
+				}
+			}
+		}
 
-
-	var byJwt Jwt
-	var instanceId Id
-
-
-	ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-	messageType, authFrameBytes, err := ws.ReadMessage()
-	if err != nil {
-		// server.Logger("TIMEOUT HA\n")
-		return
+		return nil
 	}
-	if messageType != websocket.BinaryMessage {
-		return
-	}
+	
+	if auth == nil {
+		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+		messageType, authFrameBytes, err := ws.ReadMessage()
+		if err != nil {
+			// server.Logger("TIMEOUT HA\n")
+			return
+		}
+		if messageType != websocket.BinaryMessage {
+			return
+		}
 
-	message, err := connect.DecodeFrame(authFrameBytes)
-	if err != nil {
-		return
-	}
-	auth, ok := message.(*protocol.Auth)
-	if !ok {
-		return
+		message, err := connect.DecodeFrame(authFrameBytes)
+		if err != nil {
+			return
+		}
+		var ok bool
+		auth, ok = message.(*protocol.Auth)
+		if !ok {
+			return
+		}
 	}
 
 	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
@@ -308,44 +336,93 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 // it passes the quic stream to exactly one service (connect)
 // all tls is handled by this server
 
+func (self *ConnectHandler) runH3() {
+	return self.listenQuic(
+		443,
+		func(packetConn net.PacketConn)(net.PacketConn) {
+			return NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+		},
+	)
+}
 
-// FIXME set up port 53 pt also
+func (self *ConnectHandler) runH3Dns() {
+	return self.listenQuic(
+		53,
+		func(packetConn net.PacketConn)(net.PacketConn) {
+			return connect.NewPacketTranslation(self.ctx, PtModeListen53, NewPpPacketConn(packetConn, DefaultWarpPpSettings()))
+		},
+	)
+}
 
-func runH3() {
-	conn, err := listenUDP(addr)
+func (self *ConnectHandler) listenQuic(port net.UDPPort, connTransform func(net.PacketConn)(net.PacketConn)) {
+	defer self.handleCancel()
+
+	quicConfig := &quic.Config{
+		HandshakeIdleTimeout: self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
+		MaxIdleTimeout:       self.settings.PingTimeout * 2,
+		KeepAlivePeriod:      0,
+		Allow0RTT:            true,
+	}
+
+	tlsConfig := &tls.Config{
+		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// FIXME read keys from config
+			// certPemBytes, keyPemBytes, err := selfSign(
+			// 	[]string{clientHello.ServerName},
+			// 	clientHello.ServerName,
+			// 	180*24*time.Hour,
+			// 	180*24*time.Hour,
+			// )
+			// assert.Equal(t, err, nil)
+			// // X509KeyPair
+			// cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
+			// return &tls.Config{
+			// 	Certificates: []tls.Certificate{cert},
+			// }, err
+
+			return nil, nil
+		},
+	}
+
+
+	serverAddr := &net.UDPAddr{
+		IP: net.IPv4zero,
+		Port: port,
+	}
+
+
+	serverConn, err := net.ListenUDP("udp", serverAddr)
 	if err != nil {
-		return nil, err
+		return
 	}
+	packetConn := connTransform(serverConn)
+	defer packetConn.Close()
 	earlyListener, err := (&Transport{
-		Conn:        NewPpPacketConn(conn, DefaultWarpPpSettings()),
-		createdConn: true,
-		isSingleUse: true,
-	}).ListenEarly(tlsConf, config)
-	listenQuic(ctx, earlyListener)
-}
+		Conn:        packetConn,
+		// createdConn: true,
+		// isSingleUse: true,
+	}).ListenEarly(tlsConf, quicConfig)
+	defer earlyListener.Close()
 
-func runH3Dns() {
-	conn, err := listenUDP(addr)
-	if err != nil {
-		return nil, err
-	}
-	earlyListener, err := (&Transport{
-		Conn:        connect.NewPacketTranslation(ctx, PtModeListen53, NewPpPacketConn(conn, DefaultWarpPpSettings())),
-		createdConn: true,
-		isSingleUse: true,
-	}).ListenEarly(tlsConf, config)
-	listenQuic(ctx, earlyListener)
-}
+	go func() {
+		defer handleCancel
 
-func listenQuic(ctx context.Context, earlyListener) {
-	for {
-		earlyConn, err := earlyListener.Accept(ctx)
+		for {
+			earlyConn, err := earlyListener.Accept(ctx)
+			if err != nil {
+				return
+			}
 
-		go connectQuic(ctx, earlyConn)
+			go self.connectQuic(earlyConn)
+		}
+	}()
+
+	select {
+	case <- self.ctx.Done():
 	}
 }
 
-func connectQuic(addr net.Addr, earlyConn quic.EarlyConnection) {
+func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
@@ -403,7 +480,7 @@ func connectQuic(addr net.Addr, earlyConn quic.EarlyConnection) {
 	}
 
 	// find the client ip:port from the addr
-	clientAddress := addr.String()
+	clientAddress := earlyConn.RemoteAddr().String()
 
 	c := func() {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
