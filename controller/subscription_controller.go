@@ -745,13 +745,17 @@ func PlayWebhook(
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
 
+	glog.Infof("Play webhook hit: %s", webhookArgs.Message.Data)
+
 	data, err := base64.StdEncoding.DecodeString(webhookArgs.Message.Data)
 	if err != nil {
+		glog.Errorf("Failed to decode Play RTDN message: %v", err)
 		return nil, err
 	}
 	var rtdnMessage *PlayRtdnMessage
 	err = json.Unmarshal(data, &rtdnMessage)
 	if err != nil {
+		glog.Errorf("Failed to parse Play RTDN message: %v", err)
 		return nil, err
 	}
 
@@ -769,18 +773,22 @@ func PlayWebhook(
 				server.ResponseJsonObject[*PlaySubscription],
 			)
 			if err != nil {
+				glog.Errorf("Failed to fetch Play subscription: %v", err)
 				return nil, err
 			}
 
 			glog.Infof("[sub]google play sub: %v\n", sub)
+			glog.Infof("ObfuscatedExternalAccountId is %s", sub.ObfuscatedExternalAccountId)
 
 			subscriptionPaymentId, err := server.ParseId(sub.ObfuscatedExternalAccountId)
 			if err != nil {
+				glog.Errorf("Google Play subscription malformed obfuscated external account id: %s", sub.ObfuscatedExternalAccountId)
 				return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ObfuscatedExternalAccountId, err)
 			}
 
 			networkId, err := model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, subscriptionPaymentId)
 			if err != nil {
+				glog.Errorf("Google Play subscription payment id not found: %s", subscriptionPaymentId)
 				return nil, err
 			}
 
@@ -804,11 +812,15 @@ func PlayWebhook(
 					rtdnMessage.SubscriptionNotification.SubscriptionId,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 				)
-				server.HttpPostRawRequireStatusOk(
+				_, err := server.HttpPostRawRequireStatusOk(
 					url,
 					[]byte{},
 					playAuthHeaders,
 				)
+				if err != nil {
+					glog.Errorf("Failed to acknowledge Play subscription: %v", err)
+					// return nil, fmt.Errorf("failed to acknowledge Play subscription: %v", err)
+				}
 
 				// continually renew as long as the expiry time keeps getting pushed forward
 				// note RTDN messages for renewal may unreliably delivered, so Google
@@ -826,8 +838,18 @@ func PlayWebhook(
 						},
 					)
 				})
+			} else {
+				glog.Infof("Play webhook for subscription notification: %s, payment state: %d, acknowledgement state: %d",
+					rtdnMessage.SubscriptionNotification.PurchaseToken,
+					sub.PaymentState,
+					sub.AcknowledgementState,
+				)
 			}
+		} else {
+			glog.Infof("Play webhook for unknown subscription notification: %s", rtdnMessage.PackageName)
 		}
+	} else {
+		glog.Infof("Play webhook for unknown package: %s", rtdnMessage.PackageName)
 	}
 	// else unknown package, ignore the message
 
@@ -868,6 +890,8 @@ func PlaySubscriptionRenewal(
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
 
+	glog.Infof("Play subscription renewal hit: %s", playSubscriptionRenewal.PurchaseToken)
+
 	url := fmt.Sprintf(
 		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
 		playSubscriptionRenewal.PackageName,
@@ -896,6 +920,9 @@ func PlaySubscriptionRenewal(
 		skuName := playSubscriptionRenewal.SubscriptionId
 		if sku, ok := skus[skuName]; ok {
 			if sku.Supporter {
+
+				glog.Infof("Play subscription renewl: is supporter")
+
 				renewal := &model.SubscriptionRenewal{
 					NetworkId:          playSubscriptionRenewal.NetworkId,
 					StartTime:          startTime,
@@ -912,6 +939,9 @@ func PlaySubscriptionRenewal(
 				AddRefreshTransferBalance(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 			} else {
+
+				glog.Infof("Play subscription renewl: is not supporter")
+
 				transferBalance := &model.TransferBalance{
 					NetworkId:             playSubscriptionRenewal.NetworkId,
 					StartTime:             startTime,
@@ -927,6 +957,13 @@ func PlaySubscriptionRenewal(
 				)
 			}
 		} else {
+
+			glog.Infof("Play subscription renewal: %s, expiry time: %s, sku not found: %s",
+				playSubscriptionRenewal.PurchaseToken,
+				expiryTime.Format(time.RFC3339),
+				skuName,
+			)
+
 			return nil, fmt.Errorf("Play sku not found: %s", skuName)
 		}
 
@@ -935,6 +972,12 @@ func PlaySubscriptionRenewal(
 			Renewed:    true,
 		}, nil
 	} else {
+
+		glog.Infof("Play subscription renewal: error getting overlapping transfer balances: %s, expiry time: %s, transfer balance already exists",
+			playSubscriptionRenewal.PurchaseToken,
+			expiryTime.Format(time.RFC3339),
+		)
+
 		// a transfer balance was already for the current expiry time
 		// hence, the subscription has not been extended/renewed
 		return &PlaySubscriptionRenewalResult{
@@ -1037,14 +1080,18 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 
 func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 
+	glog.Infof("Verifying Play body")
+
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
+		glog.Errorf("Failed to read body: %v", err)
 		return nil, err
 	}
 
 	authHeader := req.Header.Get("Authorization")
 
 	if authHeader == "" {
+		glog.Errorf("Missing Authorization header")
 		return nil, errors.New("missing authorization header")
 	}
 
@@ -1054,6 +1101,8 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 		glog.Infof("verifyPlayAuth failed: %v", err)
 		return nil, err
 	}
+
+	glog.Infof("Play body verified successfully")
 
 	return bytes.NewReader(bodyBytes), nil
 }
