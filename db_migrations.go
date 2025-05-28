@@ -1729,4 +1729,8 @@ var migrations = []any{
         ALTER TABLE network 
         ADD COLUMN leaderboard_public boolean NOT NULL DEFAULT false;
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_point RENAME TO account_point
+    `),
 }
