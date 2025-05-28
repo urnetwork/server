@@ -30,7 +30,7 @@ func TestNetworkCreate(t *testing.T) {
 		password := "bar123456789Foo!"
 
 		// check referral network has no points
-		networkPoints := model.FetchNetworkPoints(ctx, referralNetworkId)
+		networkPoints := model.FetchAccountPoints(ctx, referralNetworkId)
 		assert.Equal(t, len(networkPoints), 0)
 
 		networkCreate := model.NetworkCreateArgs{

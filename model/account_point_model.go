@@ -7,33 +7,33 @@ import (
 	"github.com/urnetwork/server"
 )
 
-type NetworkPointEvent string
+type AccountPointEvent string
 
 /**
  * Point Events
  */
 const (
-	NetworkPointEventReferral NetworkPointEvent = "referral"
+	AccountPointEventReferral AccountPointEvent = "referral"
 )
 
 /**
  * Point Values
  */
 const (
-	NetworkPointEventReferralValue = 10
+	AccountPointEventReferralValue = 10
 )
 
-type NetworkPoint struct {
+type AccountPoint struct {
 	NetworkId  server.Id `json:"network_id"`
 	Event      string    `json:"event"`
 	PointValue int       `json:"point_value"`
 	CreateTime time.Time `json:"create_time"`
 }
 
-func ApplyNetworkPoints(
+func ApplyAccountPoints(
 	ctx context.Context,
 	networkId server.Id,
-	event NetworkPointEvent,
+	event AccountPointEvent,
 	pointValue int,
 ) error {
 	// Implement the logic to apply network points here
@@ -43,7 +43,7 @@ func ApplyNetworkPoints(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_point (
+				INSERT INTO account_point (
 						network_id,
 						event,
 						point_value
@@ -59,7 +59,7 @@ func ApplyNetworkPoints(
 	return nil
 }
 
-func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints []NetworkPoint) {
+func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints []AccountPoint) {
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -71,7 +71,7 @@ func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints
 						point_value,
 						create_time
 				FROM 
-						network_point
+						account_point
 				WHERE 
 						network_id = $1
 			`,
@@ -80,17 +80,17 @@ func FetchNetworkPoints(ctx context.Context, networkId server.Id) (networkPoints
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 
-				networkPoint := NetworkPoint{}
+				accountPoint := AccountPoint{}
 				server.Raise(result.Scan(
-					&networkPoint.NetworkId,
-					&networkPoint.Event,
-					&networkPoint.PointValue,
-					&networkPoint.CreateTime,
+					&accountPoint.NetworkId,
+					&accountPoint.Event,
+					&accountPoint.PointValue,
+					&accountPoint.CreateTime,
 				))
-				networkPoints = append(networkPoints, networkPoint)
+				accountPoints = append(accountPoints, accountPoint)
 			}
 		})
 	})
 
-	return networkPoints
+	return accountPoints
 }
