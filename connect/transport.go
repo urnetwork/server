@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -70,7 +71,6 @@ type ConnectHandlerSettings struct {
 	QuicHandshakeTimeout            time.Duration
 }
 
-// FIXME rename TransportServer
 type ConnectHandler struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -380,24 +380,40 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		Allow0RTT:            true,
 	}
 
+	// type clientConfig struct {
+	// 	tlsConfig *tls.Config
+	// 	err error
+	// }
+	// clientConfigs := map[string]*clientConfig{}
+
 	tlsConfig := &tls.Config{
 		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// FIXME read keys from config
-			// certPemBytes, keyPemBytes, err := selfSign(
-			// 	[]string{clientHello.ServerName},
-			// 	clientHello.ServerName,
-			// 	180*24*time.Hour,
-			// 	180*24*time.Hour,
-			// )
-			// assert.Equal(t, err, nil)
-			// // X509KeyPair
-			// cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
-			// return &tls.Config{
-			// 	Certificates: []tls.Certificate{cert},
-			// }, err
+			// FIXME apply white list
 
-			// FIXME read keys
-			return nil, nil
+			certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.crt", clientHello.ServerName, clientHello.ServerName))
+			if err != nil {
+				return nil, err
+			}
+			keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.key", clientHello.ServerName, clientHello.ServerName))
+			if err != nil {
+				return nil, err
+			}
+
+			certPemBytes, err := os.ReadFile(certPaths[0])
+			if err != nil {
+				return nil, err
+			}
+			keyPemBytes, err := os.ReadFile(keyPaths[0])
+			if err != nil {
+				return nil, err
+			}
+
+			cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
+			tlsConfig := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			}
+
+			return tlsConfig, err
 		},
 	}
 
@@ -449,7 +465,8 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 
 	framer := connect.NewFramer(connect.DefaultFramerSettings())
 
-	authFrameBytes, err := framer.ReadWithTimeout(stream, self.settings.ReadTimeout)
+	stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+	authFrameBytes, err := framer.Read(stream)
 	if err != nil {
 		return
 	}
@@ -487,7 +504,8 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 		return
 	}
 
-	err = framer.WriteWithTimeout(stream, authFrameBytes, self.settings.WriteTimeout)
+	stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	err = framer.Write(stream, authFrameBytes)
 
 	if err != nil {
 		// server.Logger("TIMEOUT HC\n")
@@ -538,7 +556,8 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 			}()
 
 			for {
-				message, err := framer.ReadWithTimeout(stream, self.settings.ReadTimeout)
+				stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+				message, err := framer.Read(stream)
 				if err != nil {
 					return
 				}
@@ -574,13 +593,15 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 						return
 					}
 
-					err := framer.WriteWithTimeout(stream, message, self.settings.WriteTimeout)
+					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+					err := framer.Write(stream, message)
 					if err != nil {
 						return
 					}
 					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
 				case <-time.After(self.settings.PingTimeout):
-					err := framer.WriteWithTimeout(stream, make([]byte, 0), self.settings.WriteTimeout)
+					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+					err := framer.Write(stream, make([]byte, 0))
 					if err != nil {
 						return
 					}

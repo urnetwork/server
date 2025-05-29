@@ -189,7 +189,7 @@ func CreateContract(
 			result := &protocol.CreateContractResult{
 				Error: &contractError,
 			}
-			frame := connect.RequireToFrame(result)
+			frame := connect.RequireToFrame(result, connect.DefaultProtocolVersion)
 			// self.client.Send(frame, connect.Id(self.clientId), nil)
 			return []*protocol.Frame{frame}, nil
 		}
@@ -204,7 +204,7 @@ func CreateContract(
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
 		}
-		frame := connect.RequireToFrame(result)
+		frame := connect.RequireToFrame(result, connect.DefaultProtocolVersion)
 		// self.client.Send(frame, connect.Id(self.clientId), nil)
 		return []*protocol.Frame{frame}, nil
 	}
@@ -218,7 +218,7 @@ func CreateContract(
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
 		}
-		frame := connect.RequireToFrame(result)
+		frame := connect.RequireToFrame(result, connect.DefaultProtocolVersion)
 		// self.client.Send(frame, connect.Id(self.clientId), nil)
 		return []*protocol.Frame{frame}, nil
 	}
@@ -242,7 +242,7 @@ func CreateContract(
 			ProvideMode:         protocol.ProvideMode(provideMode),
 		},
 	}
-	frame := connect.RequireToFrame(result)
+	frame := connect.RequireToFrame(result, connect.DefaultProtocolVersion)
 	// self.client.Send(frame, connect.Id(self.clientId), nil)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
 	return []*protocol.Frame{frame}, nil
