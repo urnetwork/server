@@ -13,20 +13,21 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/ipinfo/go/v2 v2.10.0
 	github.com/jackc/pgerrcode v0.0.0-20240316143900-6e2875d9b438
-	github.com/jackc/pgx/v5 v5.7.4
+	github.com/jackc/pgx/v5 v5.7.5
 	github.com/mailgun/proxyproto v1.0.0
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/nyaruka/phonenumbers v1.6.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.22.0
-	github.com/redis/go-redis/v9 v9.7.3
+	github.com/quic-go/quic-go v0.52.0
+	github.com/redis/go-redis/v9 v9.9.0
 	github.com/samber/lo v1.49.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v76 v76.25.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
-	github.com/urnetwork/connect v2025.4.3-58948734+incompatible
+	github.com/urnetwork/connect v0.0.0
 	golang.org/x/crypto v0.38.0
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6
 	golang.org/x/net v0.40.0
@@ -55,7 +56,6 @@ require (
 	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/onsi/ginkgo/v2 v2.23.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/quic-go/quic-go v0.52.0 // indirect
 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
 	go.mongodb.org/mongo-driver v1.12.2 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
