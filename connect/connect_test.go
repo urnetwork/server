@@ -812,7 +812,7 @@ func testConnect(
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
-								}),
+								}, connect.DefaultProtocolVersion),
 								connect.DestinationId(connect.Id(clientIdB)),
 								nil,
 								-1,
@@ -827,7 +827,7 @@ func testConnect(
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
-							}),
+							}, connect.DefaultProtocolVersion),
 							connect.DestinationId(connect.Id(clientIdB)),
 							func(err error) {
 								ackA <- err
@@ -974,7 +974,7 @@ func testConnect(
 									MessageIndex: uint32(i*nackM + j),
 									MessageCount: uint32(0),
 									Content:      messageContent,
-								}),
+								}, connect.DefaultProtocolVersion),
 								connect.DestinationId(connect.Id(clientIdA)),
 								nil,
 								-1,
@@ -993,7 +993,7 @@ func testConnect(
 								MessageIndex: uint32(i),
 								MessageCount: uint32(burstSize),
 								Content:      messageContent,
-							}),
+							}, connect.DefaultProtocolVersion),
 							connect.DestinationId(connect.Id(clientIdA)),
 							func(err error) {
 								ackB <- err
