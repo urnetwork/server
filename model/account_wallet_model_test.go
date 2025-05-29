@@ -81,12 +81,30 @@ func TestAccountWallet(t *testing.T) {
 		fetchWallet = GetAccountWallet(ctx, *walletId)
 		assert.Equal(t, fetchWallet.Active, true)
 
+		/**
+		 * Associate a wallet with a seeker token that is not yet in the db
+		 * This should create a new wallet with the same address and network id
+		 * and set the has_seeker_token to true
+		 */
+		seekerHolderAddress := "0x1"
+		err := MarkWalletSeekerHolder(seekerHolderAddress, session)
+		assert.Equal(t, err, nil)
+		accountWallets := GetActiveAccountWallets(session)
+		assert.Equal(t, len(accountWallets.Wallets), 2)
+		assert.Equal(t, accountWallets.Wallets[1].WalletAddress, seekerHolderAddress)
+		assert.Equal(t, accountWallets.Wallets[1].NetworkId, networkId)
+		assert.Equal(t, accountWallets.Wallets[1].HasSeekerToken, true)
+		assert.Equal(t, accountWallets.Wallets[1].WalletType, WalletTypeExternal)
+		assert.Equal(t, accountWallets.Wallets[1].CircleWalletId, nil)
+		assert.Equal(t, accountWallets.Wallets[1].Active, true)
+		assert.Equal(t, accountWallets.Wallets[1].Blockchain, SOL.String())
+
 		// test with setting a CircleWalletId
 		circleWalletId := server.NewId().String()
 		circleArgs := &CreateAccountWalletCircleArgs{
 			NetworkId:        networkId,
 			Blockchain:       "Polygon",
-			WalletAddress:    "0x1",
+			WalletAddress:    "0x2",
 			DefaultTokenType: "USDC",
 			CircleWalletId:   circleWalletId,
 		}

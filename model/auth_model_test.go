@@ -111,5 +111,26 @@ func TestAuthCode(t *testing.T) {
 	})
 }
 
+func TestVerifySolanaSignature(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
+		message := "Welcome to URnetwork"
+
+		isValid, err := VerifySolanaSignature(pk, message, signature)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, isValid, true)
+
+		// now test with an invalid signature
+		invalidSignature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw"
+
+		isValid, err = VerifySolanaSignature(pk, message, invalidSignature)
+		assert.NotEqual(t, err, nil)
+		assert.Equal(t, isValid, false)
+
+	})
+}
+
 // FIXME test concurrent redeem
 // FIXME test expire all auth

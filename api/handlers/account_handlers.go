@@ -20,6 +20,6 @@ func ValidateReferralCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.ValidateReferralCode, w, r)
 }
 
-func GetNetworkPoints(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.GetNetworkPoints, w, r)
+func GetAccountPoints(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetAccountPoints, w, r)
 }

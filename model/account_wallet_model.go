@@ -336,7 +336,8 @@ func GetActiveAccountWallets(session *session.ClientSession) *GetAccountWalletsR
 						active,
 						default_token_type,
 						create_time,
-						circle_wallet_id
+						circle_wallet_id,
+						has_seeker_token
 					FROM account_wallet
 					WHERE
 							active = true AND
@@ -361,6 +362,7 @@ func GetActiveAccountWallets(session *session.ClientSession) *GetAccountWalletsR
 						&wallet.DefaultTokenType,
 						&wallet.CreateTime,
 						&wallet.CircleWalletId,
+						&wallet.HasSeekerToken,
 					),
 				)
 
@@ -427,9 +429,9 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 /**
  * If the wallet holds a Seeker NFT, we increase points earned
  */
-func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) {
+func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) (err error) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
+		tag, err := tx.Exec(
 			session.Ctx,
 			`
 				UPDATE account_wallet
@@ -443,6 +445,46 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 		)
 		if err != nil {
 			glog.Errorf("Error marking wallet as seeker holder: %v", err)
+			return
+		}
+
+		if tag.RowsAffected() == 0 {
+			/**
+			 * No rows updated, create a new wallet
+			 */
+			id := server.NewId()
+			active := true
+			createTime := server.NowUtc()
+
+			_, err = tx.Exec(
+				session.Ctx,
+				`
+					 INSERT INTO account_wallet (
+							 wallet_id,
+							 network_id,
+							 wallet_type,
+							 blockchain,
+							 wallet_address,
+							 active,
+							 default_token_type,
+							 create_time,
+							 has_seeker_token
+					 )
+					 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				 `,
+				id,
+				session.ByJwt.NetworkId,
+				WalletTypeExternal,
+				SOL.String(),
+				walletAddress,
+				active,
+				"USDC",
+				createTime,
+				true,
+			)
+
 		}
 	})
+
+	return err
 }

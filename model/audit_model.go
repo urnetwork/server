@@ -1008,7 +1008,8 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 	case *AuditContractEvent:
 		AddAuditContractEvent(ctx, v)
 	default:
-		panic(fmt.Sprintf("Event type not recognized: %T", v))
+		// panic(fmt.Sprintf("Event type not recognized: %T", v))
+		glog.Warningf("[audit]event type not recognized: %T", v)
 	}
 }
 

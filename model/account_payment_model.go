@@ -998,6 +998,31 @@ func SetPaymentRecord(
 	return
 }
 
+func RemovePaymentRecord(
+	ctx context.Context,
+	paymentId server.Id,
+) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                UPDATE account_payment
+                SET
+                    payment_record = NULL
+                WHERE
+                    payment_id = $1 AND
+                    NOT completed AND NOT canceled
+            `,
+			paymentId,
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = fmt.Errorf("Invalid payment.")
+			return
+		}
+	})
+	return
+}
+
 func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt string) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(

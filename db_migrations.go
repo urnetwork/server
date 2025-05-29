@@ -1724,4 +1724,13 @@ var migrations = []any{
         ALTER TABLE account_wallet 
         ADD COLUMN has_seeker_token boolean NOT NULL DEFAULT false;
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network 
+        ADD COLUMN leaderboard_public boolean NOT NULL DEFAULT false;
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_point RENAME TO account_point
+    `),
 }

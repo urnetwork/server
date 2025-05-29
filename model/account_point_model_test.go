@@ -15,20 +15,20 @@ func TestNetworkPoints(t *testing.T) {
 		ctx := context.Background()
 		networkId := server.NewId()
 
-		err := model.ApplyNetworkPoints(ctx, networkId, model.NetworkPointEventReferral, 10)
+		err := model.ApplyAccountPoints(ctx, networkId, model.AccountPointEventReferral, 10)
 		assert.Equal(t, err, nil)
 
-		networkPoints := model.FetchNetworkPoints(ctx, networkId)
+		networkPoints := model.FetchAccountPoints(ctx, networkId)
 		assert.NotEqual(t, networkPoints, nil)
 		assert.Equal(t, len(networkPoints), 1)
 		assert.Equal(t, networkPoints[0].NetworkId, networkId)
 		assert.Equal(t, networkPoints[0].Event, "referral")
 		assert.NotEqual(t, networkPoints[0].PointValue, 0)
 
-		err = model.ApplyNetworkPoints(ctx, networkId, model.NetworkPointEventReferral, 5)
+		err = model.ApplyAccountPoints(ctx, networkId, model.AccountPointEventReferral, 5)
 		assert.Equal(t, err, nil)
 
-		networkPoints = model.FetchNetworkPoints(ctx, networkId)
+		networkPoints = model.FetchAccountPoints(ctx, networkId)
 		assert.Equal(t, len(networkPoints), 2)
 
 		totalPoints := 0
