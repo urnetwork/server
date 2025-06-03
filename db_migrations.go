@@ -1733,4 +1733,14 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_point RENAME TO account_point
     `),
+
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep
+        ADD COLUMN payout_account_points double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment
+        ADD COLUMN payout_account_points double precision NOT NULL DEFAULT 0
+    `),
 }

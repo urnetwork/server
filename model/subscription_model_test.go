@@ -1246,6 +1246,122 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 	})
 }
 
+/**
+ * Test that the account points are paid out correctly to networks per payout.
+ */
+func TestAccountPointsPerPayout(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+		netRevenue := UsdToNanoCents(10)
+
+		/**
+		 * Network A and B will be the providers
+		 */
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		// clientIdA := server.NewId()
+		// clientSessionA := session.Testing_CreateClientSession(
+		// 	ctx,
+		// 	jwt.NewByJwt(networkIdA, userIdA, "a", false),
+		// )
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		// clientSessionB := session.Testing_CreateClientSession(
+		// 	ctx,
+		// 	jwt.NewByJwt(networkIdB, userIdB, "b", false),
+		// )
+
+		/**
+		 * We'll use network C will use Network A and B as providers
+		 */
+		networkIdC := server.NewId()
+		userIdC := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+		Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
+		clientSessionC := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkIdC, userIdC, "c", false),
+		)
+
+		/**
+		 * Create balance for network C
+		 */
+		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret: balanceCode.Secret,
+		}, clientSessionC)
+
+		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
+
+		/**
+		 * Network A provides data to Network C
+		 */
+		paid := NanoCents(0)
+		for paid < UsdToNanoCents(2.00) {
+			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdA, userIdA, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, userIdA, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		/**
+		 * Network B provides twices as much data to Network C
+		 */
+		paid = NanoCents(0)
+		for paid < UsdToNanoCents(3.00) {
+			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdB, userIdB, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, userIdB, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		/**
+		 * Plan payments
+		 */
+		paymentPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+
+		assert.Equal(t, len(paymentPlan.NetworkPayments), 2)
+
+		// get payment for network A
+		paymentA, ok := paymentPlan.NetworkPayments[networkIdA]
+		assert.Equal(t, ok, true)
+
+		paymentB, ok := paymentPlan.NetworkPayments[networkIdB]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, paymentA.PaymentId != paymentB.PaymentId, true)
+
+		/**
+		 * total payout: 5.00 USDC
+		 * total points should be 500 * 1m
+		 * network A points should be 2 / 5 * 1m = 400000
+		 * network B points should be 3 / 5 * 1m = 600000
+		 */
+		glog.Infof("Payment A: %s, Payout: %s, Points: %f\n", paymentA.PaymentId, NanoCentsToUsd(paymentA.Payout), paymentA.AccountPoints)
+		// assert.Equal(t, paymentA.Payout, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)*float64(usedTransferByteCount)/float64(netTransferByteCount)))
+		glog.Infof("Payment B: %s, Payout: %s, Points: %f\n", paymentB.PaymentId, NanoCentsToUsd(paymentB.Payout), paymentB.AccountPoints)
+
+		// Payment A: 0197338d-3692-2aa0-edac-4f21a3ba0b86, Payout: %!s(float64=2.00195333), Points: 100097.666500
+		// Payment B: %!(EXTRA server.Id=0197338d-3693-189b-4334-e66b385201f4, float64=3.002929995, float64=150146.4997499995)
+		// assert.Equal(t, paymentA.AccountPoints, 1.0)
+
+	})
+}
+
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data

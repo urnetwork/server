@@ -1597,11 +1597,15 @@ func settleEscrowInTx(
 			payout := NanoCents(math.Round(
 				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
 			))
+
+			accountPoints := float64(payout) / float64(netRevenue) * 1_000_000
+
 			netPayout += payout
 			sweepPayouts[balanceId] = sweepPayout{
 				payoutByteCount: payoutByteCount,
 				returnByteCount: returnByteCount,
 				payout:          payout,
+				accountPoints:   accountPoints,
 			}
 			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
 		}
@@ -1670,7 +1674,7 @@ func settleEscrowInTx(
 	server.CreateTempJoinTableInTx(
 		ctx,
 		tx,
-		"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
+		"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint, payout_account_points double precision)",
 		sweepPayouts,
 	)
 
@@ -1714,14 +1718,16 @@ func settleEscrowInTx(
                 balance_id,
                 network_id,
                 payout_byte_count,
-                payout_net_revenue_nano_cents
+                payout_net_revenue_nano_cents,
+								payout_account_points
             )
             SELECT
                 $1 AS contract_id,
                 sweep_payout.balance_id,
                 $2 AS network_id,
                 sweep_payout.payout_byte_count,
-                sweep_payout.payout_net_revenue_nano_cents
+                sweep_payout.payout_net_revenue_nano_cents,
+								sweep_payout.payout_account_points
             FROM sweep_payout
 
             WHERE
@@ -1769,11 +1775,17 @@ type sweepPayout struct {
 	payoutByteCount ByteCount
 	returnByteCount ByteCount
 	payout          NanoCents
+	accountPoints   float64
 }
 
 // `server.ComplexValue`
 func (self *sweepPayout) Values() []any {
-	return []any{self.payoutByteCount, self.returnByteCount, self.payout}
+	return []any{
+		self.payoutByteCount,
+		self.returnByteCount,
+		self.payout,
+		self.accountPoints,
+	}
 }
 
 func SetContractDispute(ctx context.Context, contractId server.Id, dispute bool) {
