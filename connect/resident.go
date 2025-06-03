@@ -1788,5 +1788,11 @@ func isAck(transferFrameBytes []byte) bool {
 		// bad protobuf
 		return false
 	}
-	return filteredTransferFrameWithFrame.Frame.MessageType == protocol.MessageType_TransferAck
+	if filteredTransferFrameWithFrame.Frame != nil {
+		return filteredTransferFrameWithFrame.Frame.MessageType == protocol.MessageType_TransferAck
+	}
+	if filteredTransferFrameWithFrame.MessageType != nil {
+		return *filteredTransferFrameWithFrame.MessageType == protocol.MessageType_TransferAck
+	}
+	return false
 }

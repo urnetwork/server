@@ -807,12 +807,16 @@ func testConnect(
 							}
 						}
 						for j := 0; j < nackM; j += 1 {
-							_, err := clientA.SendWithTimeoutDetailed(
-								connect.RequireToFrame(&protocol.SimpleMessage{
-									MessageIndex: uint32(i*nackM + j),
-									MessageCount: uint32(0),
-									Content:      messageContent,
-								}),
+							frame, err := connect.ToFrame(&protocol.SimpleMessage{
+								MessageIndex: uint32(i*nackM + j),
+								MessageCount: uint32(0),
+								Content:      messageContent,
+							}, connect.DefaultProtocolVersion)
+							if err != nil {
+								panic(err)
+							}
+							_, err = clientA.SendWithTimeoutDetailed(
+								frame,
 								connect.DestinationId(connect.Id(clientIdB)),
 								nil,
 								-1,
@@ -822,12 +826,16 @@ func testConnect(
 								panic(fmt.Errorf("Could not send = %v", err))
 							}
 						}
-						_, err := clientA.SendWithTimeoutDetailed(
-							connect.RequireToFrame(&protocol.SimpleMessage{
-								MessageIndex: uint32(i),
-								MessageCount: uint32(burstSize),
-								Content:      messageContent,
-							}),
+						frame, err := connect.ToFrame(&protocol.SimpleMessage{
+							MessageIndex: uint32(i),
+							MessageCount: uint32(burstSize),
+							Content:      messageContent,
+						}, connect.DefaultProtocolVersion)
+						if err != nil {
+							panic(err)
+						}
+						_, err = clientA.SendWithTimeoutDetailed(
+							frame,
 							connect.DestinationId(connect.Id(clientIdB)),
 							func(err error) {
 								ackA <- err
@@ -851,7 +859,11 @@ func testConnect(
 
 							// check in order
 							for _, frame := range message.frames {
-								switch v := connect.RequireFromFrame(frame).(type) {
+								m, err := connect.FromFrame(frame)
+								if err != nil {
+									panic(err)
+								}
+								switch v := m.(type) {
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
@@ -880,7 +892,11 @@ func testConnect(
 
 						// check in order
 						for _, frame := range message.frames {
-							switch v := connect.RequireFromFrame(frame).(type) {
+							m, err := connect.FromFrame(frame)
+							if err != nil {
+								panic(err)
+							}
+							switch v := m.(type) {
 							case *protocol.SimpleMessage:
 								if 0 < v.MessageCount {
 									t.Fatal("Unexpected ack message.")
@@ -969,12 +985,16 @@ func testConnect(
 								opts = append(opts, connect.CompanionContract())
 							}
 
-							_, err := clientB.SendWithTimeoutDetailed(
-								connect.RequireToFrame(&protocol.SimpleMessage{
-									MessageIndex: uint32(i*nackM + j),
-									MessageCount: uint32(0),
-									Content:      messageContent,
-								}),
+							frame, err := connect.ToFrame(&protocol.SimpleMessage{
+								MessageIndex: uint32(i*nackM + j),
+								MessageCount: uint32(0),
+								Content:      messageContent,
+							}, connect.DefaultProtocolVersion)
+							if err != nil {
+								panic(err)
+							}
+							_, err = clientB.SendWithTimeoutDetailed(
+								frame,
 								connect.DestinationId(connect.Id(clientIdA)),
 								nil,
 								-1,
@@ -988,12 +1008,16 @@ func testConnect(
 						if contractTest == contractTestAsymmetric {
 							opts = append(opts, connect.CompanionContract())
 						}
-						_, err := clientB.SendWithTimeoutDetailed(
-							connect.RequireToFrame(&protocol.SimpleMessage{
-								MessageIndex: uint32(i),
-								MessageCount: uint32(burstSize),
-								Content:      messageContent,
-							}),
+						frame, err := connect.ToFrame(&protocol.SimpleMessage{
+							MessageIndex: uint32(i),
+							MessageCount: uint32(burstSize),
+							Content:      messageContent,
+						}, connect.DefaultProtocolVersion)
+						if err != nil {
+							panic(err)
+						}
+						_, err = clientB.SendWithTimeoutDetailed(
+							frame,
 							connect.DestinationId(connect.Id(clientIdA)),
 							func(err error) {
 								ackB <- err
@@ -1020,7 +1044,11 @@ func testConnect(
 
 							// check in order
 							for _, frame := range message.frames {
-								switch v := connect.RequireFromFrame(frame).(type) {
+								m, err := connect.FromFrame(frame)
+								if err != nil {
+									panic(err)
+								}
+								switch v := m.(type) {
 								case *protocol.SimpleMessage:
 									if 0 < v.MessageCount {
 										assert.Equal(t, uint32(burstSize), v.MessageCount)
@@ -1049,7 +1077,11 @@ func testConnect(
 
 						// check in order
 						for _, frame := range message.frames {
-							switch v := connect.RequireFromFrame(frame).(type) {
+							m, err := connect.FromFrame(frame)
+							if err != nil {
+								panic(err)
+							}
+							switch v := m.(type) {
 							case *protocol.SimpleMessage:
 								if 0 < v.MessageCount {
 									t.Fatal("Unexpected ack message.")
