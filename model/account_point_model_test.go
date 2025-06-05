@@ -58,10 +58,10 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		networkIdA := server.NewId()
 		userIdA := server.NewId()
 		// clientIdA := server.NewId()
-		// clientSessionA := session.Testing_CreateClientSession(
-		// 	ctx,
-		// 	jwt.NewByJwt(networkIdA, userIdA, "a", false),
-		// )
+		clientSessionA := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkIdA, userIdA, "a", false),
+		)
 
 		networkIdB := server.NewId()
 		userIdB := server.NewId()
@@ -134,6 +134,14 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(accountPoints), 0)
 
 		/**
+		 * Set network A as Seeker holder
+		 */
+		// creates a new wallet and marks it as seeker holder
+		seekerHolderAddress := "0x1"
+		err = model.MarkWalletSeekerHolder(seekerHolderAddress, clientSessionA)
+		assert.Equal(t, err, nil)
+
+		/**
 		 * Plan payments
 		 */
 		paymentPlan, err := model.PlanPayments(ctx)
@@ -152,6 +160,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * total payout: 5.00 USDC
 		 * total points should be 500 * 1m
 		 * network A points should be 2 / 5 * 1m = 400000
+		 * network A is a Seeker holder, so it gets x2 points
 		 * network B points should be 3 / 5 * 1m = 600000
 		 */
 
@@ -159,7 +168,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(networkPointsA), 1)
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsA[0].PointValue, 400_000)
+		assert.Equal(t, networkPointsA[0].PointValue, int(400_000*model.SeekerHolderMultiplier))
 		networkPointsB := model.FetchAccountPoints(ctx, networkIdB)
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)

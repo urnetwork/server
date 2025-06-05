@@ -319,7 +319,7 @@ type SubsidyPayment struct {
 	NetPayout                NanoCents
 }
 
-const seekerHolderMultiplier = 2.0
+const SeekerHolderMultiplier = 2.0
 
 // plan, manually check out and add balance to funding account, then complete
 // minimum net_revenue_nano_cents to include in a payout
@@ -536,7 +536,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
 
 				if seekerHolderNetworkIds[payment.NetworkId] {
-					accountPoints = accountPoints * seekerHolderMultiplier
+					accountPoints = accountPoints * SeekerHolderMultiplier
 				}
 
 				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, accountPoints)
