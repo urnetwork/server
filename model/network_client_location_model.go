@@ -1900,7 +1900,7 @@ func FindProviders2(
 	clientScores := map[server.Id]*clientScore{}
 	scoreScale := 10
 	intermediaryScore := 5
-	duplicateClientAddressScore := 2
+	duplicateClientAddressScore := 10
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		locationIds := map[server.Id]bool{}
