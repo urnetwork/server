@@ -319,6 +319,8 @@ type SubsidyPayment struct {
 	NetPayout                NanoCents
 }
 
+const seekerHolderMultiplier = 2.0
+
 // plan, manually check out and add balance to funding account, then complete
 // minimum net_revenue_nano_cents to include in a payout
 // all of the returned payments are tagged with the same payment_plan_id
@@ -337,6 +339,8 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		// escrow ids -> payment id
 		escrowPaymentIds := map[EscrowId]server.Id{}
+
+		seekerHolderNetworkIds := getAllSeekerHolders(ctx)
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -363,22 +367,22 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		result, err := tx.Query(
 			ctx,
 			`
-            SELECT
-            	transfer_escrow_sweep.network_id,
-                transfer_escrow_sweep.contract_id,
-                transfer_escrow_sweep.balance_id,
-                transfer_escrow_sweep.payout_byte_count,
-                transfer_escrow_sweep.payout_net_revenue_nano_cents,
-                transfer_escrow_sweep.sweep_time
+				SELECT
+					transfer_escrow_sweep.network_id,
+					transfer_escrow_sweep.contract_id,
+					transfer_escrow_sweep.balance_id,
+					transfer_escrow_sweep.payout_byte_count,
+					transfer_escrow_sweep.payout_net_revenue_nano_cents,
+					transfer_escrow_sweep.sweep_time
 
-            FROM transfer_escrow_sweep
+				FROM transfer_escrow_sweep
 
-            INNER JOIN temp_account_payment ON
-                temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
-                temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
+				INNER JOIN temp_account_payment ON
+						temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
+						temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
 
-            FOR UPDATE
-            `,
+				FOR UPDATE
+      `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -528,8 +532,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
 
-				// payment.AccountPoints = PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// todo: this could be done in the batch update
 				accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+
+				if seekerHolderNetworkIds[payment.NetworkId] {
+					accountPoints = accountPoints * seekerHolderMultiplier
+				}
+
 				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, accountPoints)
 
 				batch.Queue(
