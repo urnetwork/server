@@ -340,6 +340,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// escrow ids -> payment id
 		escrowPaymentIds := map[EscrowId]server.Id{}
 
+		// networkId -> referralNetworkId
+		referralNetworks := map[server.Id]server.Id{}
+
 		seekerHolderNetworkIds := getAllSeekerHolders(ctx)
 
 		server.RaisePgResult(tx.Exec(
@@ -369,6 +372,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			`
 				SELECT
 					transfer_escrow_sweep.network_id,
+					network_referral.referral_network_id,
 					transfer_escrow_sweep.contract_id,
 					transfer_escrow_sweep.balance_id,
 					transfer_escrow_sweep.payout_byte_count,
@@ -377,16 +381,20 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 				FROM transfer_escrow_sweep
 
+				LEFT JOIN network_referral
+          ON transfer_escrow_sweep.network_id = network_referral.network_id
+
 				INNER JOIN temp_account_payment ON
 						temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
 						temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
 
-				FOR UPDATE
+				FOR UPDATE OF transfer_escrow_sweep
       `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId server.Id
+				var referralNetworkId *server.Id
 				var contractId server.Id
 				var balanceId server.Id
 				var payoutByteCount ByteCount
@@ -395,6 +403,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				// var walletId *server.Id
 				server.Raise(result.Scan(
 					&networkId,
+					&referralNetworkId,
 					&contractId,
 					&balanceId,
 					&payoutByteCount,
@@ -402,6 +411,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					&sweepTime,
 					// &walletId,
 				))
+
+				/**
+				 * Assign the network referral, if a referring network exists
+				 */
+				if referralNetworkId != nil && *referralNetworkId != networkId {
+					referralNetworks[networkId] = *referralNetworkId
+				}
 
 				payment, ok := networkPayments[networkId]
 				if !ok {
@@ -540,6 +556,19 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				}
 
 				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, accountPoints)
+
+				/**
+				 * Apply bonus points to parent referral network
+				 */
+				referrerId, ok := referralNetworks[payment.NetworkId]
+				if ok {
+					parentReferralNetworkId := referralNetworks[referrerId]
+					if parentReferralNetworkId != payment.NetworkId {
+						// todo: special event type for this?
+						parentReferralPoints := NanoPoints(float64(accountPoints) * 0.25)
+						ApplyAccountPoints(ctx, parentReferralNetworkId, AccountPointEventPayout, parentReferralPoints)
+					}
+				}
 
 				batch.Queue(
 					`
