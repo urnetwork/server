@@ -141,6 +141,18 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
 
+type NanoPoints = int64
+
+func PointsToNanoPoints(points float64) NanoPoints {
+	// 1 point = 1_000_000 nano points
+	return NanoPoints(math.Round(float64(points) * 1_000_000))
+}
+
+func NanoPointsToPoints(nanoPoints NanoPoints) int64 {
+	// 1 point = 100 nano points
+	return int64(math.Round(float64(nanoPoints) / 1_000_000))
+}
+
 // 12 months
 const BalanceCodeDuration = 365 * 24 * time.Hour
 
@@ -1598,14 +1610,11 @@ func settleEscrowInTx(
 				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
 			))
 
-			accountPoints := float64(payout) / float64(netRevenue) * 1_000_000
-
 			netPayout += payout
 			sweepPayouts[balanceId] = sweepPayout{
 				payoutByteCount: payoutByteCount,
 				returnByteCount: returnByteCount,
 				payout:          payout,
-				accountPoints:   accountPoints,
 			}
 			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
 		}
@@ -1674,7 +1683,7 @@ func settleEscrowInTx(
 	server.CreateTempJoinTableInTx(
 		ctx,
 		tx,
-		"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint, payout_account_points double precision)",
+		"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
 		sweepPayouts,
 	)
 
@@ -1718,16 +1727,14 @@ func settleEscrowInTx(
                 balance_id,
                 network_id,
                 payout_byte_count,
-                payout_net_revenue_nano_cents,
-								payout_account_points
+                payout_net_revenue_nano_cents
             )
             SELECT
                 $1 AS contract_id,
                 sweep_payout.balance_id,
                 $2 AS network_id,
                 sweep_payout.payout_byte_count,
-                sweep_payout.payout_net_revenue_nano_cents,
-								sweep_payout.payout_account_points
+                sweep_payout.payout_net_revenue_nano_cents
             FROM sweep_payout
 
             WHERE
@@ -1775,7 +1782,6 @@ type sweepPayout struct {
 	payoutByteCount ByteCount
 	returnByteCount ByteCount
 	payout          NanoCents
-	accountPoints   float64
 }
 
 // `server.ComplexValue`
@@ -1784,7 +1790,6 @@ func (self *sweepPayout) Values() []any {
 		self.payoutByteCount,
 		self.returnByteCount,
 		self.payout,
-		self.accountPoints,
 	}
 }
 

@@ -70,7 +70,7 @@ type AccountPayment struct {
 	NetworkId       server.Id  `json:"network_id"`
 	PayoutByteCount ByteCount  `json:"payout_byte_count"`
 	Payout          NanoCents  `json:"payout_nano_cents"`
-	AccountPoints   float64    `json:"account_points"`
+	AccountPoints   NanoPoints `json:"account_points"`
 	SubsidyPayout   NanoCents  `json:"subsidy_payout_nano_cents"`
 	MinSweepTime    time.Time  `json:"min_sweep_time"`
 	CreateTime      time.Time  `json:"create_time"`
@@ -369,8 +369,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
                 transfer_escrow_sweep.balance_id,
                 transfer_escrow_sweep.payout_byte_count,
                 transfer_escrow_sweep.payout_net_revenue_nano_cents,
-                transfer_escrow_sweep.sweep_time,
-								transfer_escrow_sweep.payout_account_points
+                transfer_escrow_sweep.sweep_time
 
             FROM transfer_escrow_sweep
 
@@ -389,7 +388,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				var payoutByteCount ByteCount
 				var payoutNetRevenue NanoCents
 				var sweepTime time.Time
-				var payoutAccountPoints float64
 				// var walletId *server.Id
 				server.Raise(result.Scan(
 					&networkId,
@@ -398,7 +396,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					&payoutByteCount,
 					&payoutNetRevenue,
 					&sweepTime,
-					&payoutAccountPoints,
 					// &walletId,
 				))
 
@@ -416,7 +413,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				}
 				payment.PayoutByteCount += payoutByteCount
 				payment.Payout += payoutNetRevenue
-				payment.AccountPoints += payoutAccountPoints
 
 				if payment.MinSweepTime.IsZero() {
 					payment.MinSweepTime = sweepTime
@@ -483,11 +479,19 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
 		networkIdsToRemove := []server.Id{}
+
+		totalPayout := NanoCents(0)
+
 		payoutExpirationTime := server.NowUtc().Add(-subsidyConfig.WalletPayoutTimeout())
 		for networkId, payment := range networkPayments {
 			// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
 			if payment.Payout < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
 				networkIdsToRemove = append(networkIdsToRemove, networkId)
+			} else {
+				// this payment will be included in the plan
+				// note that the `MinSweepTime` is not used for the subsidy payment,
+				// but it is used to determine the minimum sweep time for the payment
+				totalPayout += payment.Payout
 			}
 		}
 		removedSubsidyNetPayout := NanoCents(0)
@@ -523,22 +527,25 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
+
+				payment.AccountPoints = PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+
 				batch.Queue(
 					`
-                        INSERT INTO account_payment (
-                            payment_id,
-                            payment_plan_id,
-                            network_id,
-                            wallet_id,
-                            payout_byte_count,
-                            payout_nano_cents,
-														payout_account_points,
-                            subsidy_payout_nano_cents,
-                            min_sweep_time,
-                            create_time
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                    `,
+							INSERT INTO account_payment (
+									payment_id,
+									payment_plan_id,
+									network_id,
+									wallet_id,
+									payout_byte_count,
+									payout_nano_cents,
+									payout_account_points,
+									subsidy_payout_nano_cents,
+									min_sweep_time,
+									create_time
+							)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+					`,
 					payment.PaymentId,
 					payment.PaymentPlanId,
 					payment.NetworkId,
