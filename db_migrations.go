@@ -1735,7 +1735,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        ALTER TABLE account_payment
-        ADD COLUMN payout_account_points bigint NOT NULL DEFAULT 0
+        ALTER TABLE account_point
+        ALTER COLUMN point_value TYPE bigint
     `),
 }

@@ -70,10 +70,10 @@ type AccountPayment struct {
 	NetworkId       server.Id  `json:"network_id"`
 	PayoutByteCount ByteCount  `json:"payout_byte_count"`
 	Payout          NanoCents  `json:"payout_nano_cents"`
-	AccountPoints   NanoPoints `json:"account_points"`
-	SubsidyPayout   NanoCents  `json:"subsidy_payout_nano_cents"`
-	MinSweepTime    time.Time  `json:"min_sweep_time"`
-	CreateTime      time.Time  `json:"create_time"`
+	// AccountPoints   NanoPoints `json:"account_points"`
+	SubsidyPayout NanoCents `json:"subsidy_payout_nano_cents"`
+	MinSweepTime  time.Time `json:"min_sweep_time"`
+	CreateTime    time.Time `json:"create_time"`
 
 	PaymentRecord  *string    `json:"payment_record"`
 	TokenType      *string    `json:"token_type"`
@@ -528,7 +528,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
 
-				payment.AccountPoints = PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// payment.AccountPoints = PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, accountPoints)
 
 				batch.Queue(
 					`
@@ -539,12 +541,11 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 									wallet_id,
 									payout_byte_count,
 									payout_nano_cents,
-									payout_account_points,
 									subsidy_payout_nano_cents,
 									min_sweep_time,
 									create_time
 							)
-							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 					`,
 					payment.PaymentId,
 					payment.PaymentPlanId,
@@ -552,7 +553,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.WalletId,
 					payment.PayoutByteCount,
 					payment.Payout,
-					payment.AccountPoints,
+					// payment.AccountPoints,
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
