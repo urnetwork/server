@@ -449,6 +449,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			}
 		})
 
+		// log the network referral map
+		glog.Infof("[plan]network referrals count: %d\n", len(referralNetworks))
+		for networkId, referralNetworkId := range referralNetworks {
+			glog.Infof("[plan]network %s referred by %s\n", networkId, referralNetworkId)
+		}
+
 		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentPlanId, networkPayments)
 		if err != nil {
 			returnErr = err
@@ -545,11 +551,32 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			))
 		}
 
+		totalPayoutAccountPoints := NanoPoints(0)
+
+		// get total points
+		for _, payment := range networkPayments {
+			totalPayoutAccountPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+		}
+
+		// this is the total number of points allocated per payout
+		// should this factor in how frequent the payouts are?
+		_ = PointsToNanoPoints(float64(1_000_000))
+
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
 
 				// todo: this could be done in the batch update
+				// accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
+				// totalAccountPointsEarned := scaledAccountPoints
+
+				// if seekerHolderNetworkIds[payment.NetworkId] {
+				// 	totalAccountPointsEarned = scaledAccountPoints * SeekerHolderMultiplier
+				// }
+
 				accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
+				// totalAccountPointsEarned := scaledAccountPoints
 
 				if seekerHolderNetworkIds[payment.NetworkId] {
 					accountPoints = accountPoints * SeekerHolderMultiplier
@@ -560,14 +587,18 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				/**
 				 * Apply bonus points to parent referral network
 				 */
-				referrerId, ok := referralNetworks[payment.NetworkId]
+				parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
 				if ok {
-					parentReferralNetworkId := referralNetworks[referrerId]
 					if parentReferralNetworkId != payment.NetworkId {
 						// todo: special event type for this?
+
+						glog.Infof("[plan]applying referral points for %s to %s\n", payment.NetworkId, parentReferralNetworkId)
+
 						parentReferralPoints := NanoPoints(float64(accountPoints) * 0.25)
 						ApplyAccountPoints(ctx, parentReferralNetworkId, AccountPointEventPayout, parentReferralPoints)
 					}
+				} else {
+					glog.Infof("[plan]no referral network for %s\n", payment.NetworkId)
 				}
 
 				batch.Queue(

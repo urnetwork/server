@@ -76,13 +76,28 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		networkIdC := server.NewId()
 		userIdC := server.NewId()
 
+		/**
+		 * Network D will be the parent referring network for Network A
+		 */
+		networkIdD := server.NewId()
+		userIdD := server.NewId()
+
 		model.Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		model.Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 		model.Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
+		model.Testing_CreateNetwork(ctx, networkIdD, "d", userIdD)
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
 			jwt.NewByJwt(networkIdC, userIdC, "c", false),
 		)
+
+		/**
+		 * Create referral from network D to network A
+		 */
+		createdReferralCode := model.CreateNetworkReferralCode(ctx, networkIdD)
+		createdNetworkReferral := model.CreateNetworkReferral(ctx, networkIdA, createdReferralCode.ReferralCode)
+		assert.Equal(t, createdNetworkReferral.NetworkId, networkIdA)
+		assert.Equal(t, createdNetworkReferral.ReferralNetworkId, networkIdD)
 
 		/**
 		 * Create balance for network C
@@ -158,10 +173,12 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		/**
 		 * total payout: 5.00 USDC
-		 * total points should be 500 * 1m
+		 * 1m points per month (payout?) (1m / sum(accountPoints)) * ((payout / totalPayout) * 1m)
 		 * network A points should be 2 / 5 * 1m = 400000
 		 * network A is a Seeker holder, so it gets x2 points
 		 * network B points should be 3 / 5 * 1m = 600000
+		 * network D, the referring network, should get a bonus of +25% of network A points
+		 * network D points should be 400000 * 0.25 * seeker_holder_multipler (x2) = 200000
 		 */
 
 		networkPointsA := model.FetchAccountPoints(ctx, networkIdA)
@@ -169,11 +186,18 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsA[0].PointValue, int(400_000*model.SeekerHolderMultiplier))
+
 		networkPointsB := model.FetchAccountPoints(ctx, networkIdB)
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
 		assert.Equal(t, networkPointsB[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsB[0].PointValue, 600_000)
+
+		networkPointsD := model.FetchAccountPoints(ctx, networkIdD)
+		assert.Equal(t, len(networkPointsD), 1)
+		assert.Equal(t, networkPointsD[0].NetworkId, networkIdD)
+		assert.Equal(t, networkPointsD[0].Event, string(model.AccountPointEventPayout))
+		assert.Equal(t, networkPointsD[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
 
 	})
 }
