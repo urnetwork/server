@@ -65,10 +65,6 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		networkIdB := server.NewId()
 		userIdB := server.NewId()
-		// clientSessionB := session.Testing_CreateClientSession(
-		// 	ctx,
-		// 	jwt.NewByJwt(networkIdB, userIdB, "b", false),
-		// )
 
 		/**
 		 * We'll use network C will use Network A and B as providers
@@ -82,14 +78,62 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		networkIdD := server.NewId()
 		userIdD := server.NewId()
 
+		/**
+		 * Network E and F will be child networks of Network A
+		 */
+		networkIdE := server.NewId()
+		userIdE := server.NewId()
+		networkIdF := server.NewId()
+		userIdF := server.NewId()
+
+		/**
+		 * Network G will be a child network of Network E
+		 * Used to test recursive child payouts
+		 */
+		networkIdG := server.NewId()
+		userIdG := server.NewId()
+
+		/**
+		 * Network H will be a child of Network B
+		 */
+		networkIdH := server.NewId()
+		userIdH := server.NewId()
+
 		model.Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
 		model.Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 		model.Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
 		model.Testing_CreateNetwork(ctx, networkIdD, "d", userIdD)
+		model.Testing_CreateNetwork(ctx, networkIdE, "e", userIdE)
+		model.Testing_CreateNetwork(ctx, networkIdF, "f", userIdF)
+		model.Testing_CreateNetwork(ctx, networkIdG, "g", userIdG)
+		model.Testing_CreateNetwork(ctx, networkIdH, "h", userIdH)
+
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
 			jwt.NewByJwt(networkIdC, userIdC, "c", false),
 		)
+
+		/*
+		   Network Referral Tree:
+
+		           D
+		           |
+		           A
+		          / \
+		         E   F
+		         |
+		         G
+
+		       B
+		       |
+		       H
+
+		   Legend:
+		   - D refers A
+		   - A refers E and F
+		   - E refers G
+		   - B refers H
+		*/
 
 		/**
 		 * Create referral from network D to network A
@@ -98,6 +142,33 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		createdNetworkReferral := model.CreateNetworkReferral(ctx, networkIdA, createdReferralCode.ReferralCode)
 		assert.Equal(t, createdNetworkReferral.NetworkId, networkIdA)
 		assert.Equal(t, createdNetworkReferral.ReferralNetworkId, networkIdD)
+
+		/**
+		 * Create referral from network A to network E, F
+		 */
+		createdReferralCode = model.CreateNetworkReferralCode(ctx, networkIdA)
+		createdNetworkReferralE := model.CreateNetworkReferral(ctx, networkIdE, createdReferralCode.ReferralCode)
+		assert.Equal(t, createdNetworkReferralE.NetworkId, networkIdE)
+		assert.Equal(t, createdNetworkReferralE.ReferralNetworkId, networkIdA)
+		createdNetworkReferralF := model.CreateNetworkReferral(ctx, networkIdF, createdReferralCode.ReferralCode)
+		assert.Equal(t, createdNetworkReferralF.NetworkId, networkIdF)
+		assert.Equal(t, createdNetworkReferralF.ReferralNetworkId, networkIdA)
+
+		/**
+		 * Network E creates a referral to network G
+		 */
+		createdReferralCode = model.CreateNetworkReferralCode(ctx, networkIdE)
+		createdNetworkReferralG := model.CreateNetworkReferral(ctx, networkIdG, createdReferralCode.ReferralCode)
+		assert.Equal(t, createdNetworkReferralG.NetworkId, networkIdG)
+		assert.Equal(t, createdNetworkReferralG.ReferralNetworkId, networkIdE)
+
+		/**
+		 * Network B creates a referral to network H
+		 */
+		createdReferralCode = model.CreateNetworkReferralCode(ctx, networkIdB)
+		createdNetworkReferralH := model.CreateNetworkReferral(ctx, networkIdH, createdReferralCode.ReferralCode)
+		assert.Equal(t, createdNetworkReferralH.NetworkId, networkIdH)
+		assert.Equal(t, createdNetworkReferralH.ReferralNetworkId, networkIdB)
 
 		/**
 		 * Create balance for network C
@@ -181,23 +252,73 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * network D points should be 400000 * 0.25 * seeker_holder_multipler (x2) = 200000
 		 */
 
+		/**
+		 * Provider Network A points
+		 * 2 / 5 * 1_000_000 = 400_000
+		 * Since it is a Seeker holder, it gets x2 points
+		 */
 		networkPointsA := model.FetchAccountPoints(ctx, networkIdA)
 		assert.Equal(t, len(networkPointsA), 1)
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsA[0].PointValue, int(400_000*model.SeekerHolderMultiplier))
 
+		/**
+		 * Provider Network B points
+		 * 3 / 5 * 1_000_000 = 600_000
+		 * Network B is not a Seeker holder, so it gets the normal points
+		 * No parent or child referrals
+		 */
 		networkPointsB := model.FetchAccountPoints(ctx, networkIdB)
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
 		assert.Equal(t, networkPointsB[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsB[0].PointValue, 600_000)
 
+		/**
+		 * Network D should get a bonus of 25% of network A points
+		 * 200_000 points, since it is a Seeker holder, it gets x2 points
+		 */
 		networkPointsD := model.FetchAccountPoints(ctx, networkIdD)
 		assert.Equal(t, len(networkPointsD), 1)
 		assert.Equal(t, networkPointsD[0].NetworkId, networkIdD)
 		assert.Equal(t, networkPointsD[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsD[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
 
+		/**
+		 * Network E should get 400_000 * 0.25 * 2 = 200_000 points
+		 */
+		networkPointsE := model.FetchAccountPoints(ctx, networkIdE)
+		assert.Equal(t, len(networkPointsE), 1)
+		assert.Equal(t, networkPointsE[0].NetworkId, networkIdE)
+		assert.Equal(t, networkPointsE[0].Event, string(model.AccountPointEventPayout))
+		assert.Equal(t, networkPointsE[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
+
+		/**
+		 * Network F should get 400_000 * 0.25 = 100_000 points * seeker_holder_multiplier (x2) = 200_000 points
+		 */
+		networkPointsF := model.FetchAccountPoints(ctx, networkIdF)
+		assert.Equal(t, len(networkPointsF), 1)
+		assert.Equal(t, networkPointsF[0].NetworkId, networkIdF)
+		assert.Equal(t, networkPointsF[0].Event, string(model.AccountPointEventPayout))
+		assert.Equal(t, networkPointsF[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
+
+		/**
+		 * Network G should get 400_000 * 0.125 = 50_000 points * seeker_holder_multiplier (x2) = 100_000 points
+		 */
+		networkPointsG := model.FetchAccountPoints(ctx, networkIdG)
+		assert.Equal(t, len(networkPointsG), 1)
+		assert.Equal(t, networkPointsG[0].NetworkId, networkIdG)
+		assert.Equal(t, networkPointsG[0].Event, string(model.AccountPointEventPayout))
+		assert.Equal(t, networkPointsG[0].PointValue, int(50_000*model.SeekerHolderMultiplier))
+
+		/**
+		 * Network H should get 600_000 * 0.25 = 150_000 points
+		 */
+		networkPointsH := model.FetchAccountPoints(ctx, networkIdH)
+		assert.Equal(t, len(networkPointsH), 1)
+		assert.Equal(t, networkPointsH[0].NetworkId, networkIdH)
+		assert.Equal(t, networkPointsH[0].Event, string(model.AccountPointEventPayout))
+		assert.Equal(t, networkPointsH[0].PointValue, 150_000)
 	})
 }

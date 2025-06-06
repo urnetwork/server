@@ -25,6 +25,8 @@ type SubsidyConfig struct {
 	MinPayoutUsd                              float64 `yaml:"min_payout_usd"`
 	ActiveUserByteCountThresholdHumanReadable string  `yaml:"active_user_byte_count_threshold"`
 	MaxPayoutUsdPerPaidUser                   float64 `yaml:"max_payout_usd_per_paid_user"`
+	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
+	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
 
 	MinWalletPayoutUsd float64 `yaml:"min_wallet_payout_usd"`
 
@@ -343,6 +345,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// networkId -> referralNetworkId
 		referralNetworks := map[server.Id]server.Id{}
 
+		// network_id -> list of child referral networks
+		networkReferrals := GetNetworkReferralsMap(ctx)
+
 		seekerHolderNetworkIds := getAllSeekerHolders(ctx)
 
 		server.RaisePgResult(tx.Exec(
@@ -560,6 +565,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		// this is the total number of points allocated per payout
 		// should this factor in how frequent the payouts are?
+		// todo: should be moved into config
 		_ = PointsToNanoPoints(float64(1_000_000))
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
@@ -588,18 +594,28 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				 * Apply bonus points to parent referral network
 				 */
 				parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
+
 				if ok {
 					if parentReferralNetworkId != payment.NetworkId {
 						// todo: special event type for this?
 
-						glog.Infof("[plan]applying referral points for %s to %s\n", payment.NetworkId, parentReferralNetworkId)
+						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountPoints)
 
-						parentReferralPoints := NanoPoints(float64(accountPoints) * 0.25)
+						parentReferralPoints := NanoPoints(float64(accountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 						ApplyAccountPoints(ctx, parentReferralNetworkId, AccountPointEventPayout, parentReferralPoints)
 					}
-				} else {
-					glog.Infof("[plan]no referral network for %s\n", payment.NetworkId)
 				}
+
+				/**
+				 * Apply bonus points to child referral networks
+				 */
+				payoutChildrenReferralNetworks(
+					ctx,
+					accountPoints,
+					EnvSubsidyConfig().ReferralChildPayoutFraction,
+					payment.NetworkId,
+					networkReferrals,
+				)
 
 				batch.Queue(
 					`
@@ -659,6 +675,51 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	}, server.TxReadCommitted)
 
 	return
+}
+
+func payoutChildrenReferralNetworks(
+	ctx context.Context,
+	basePayoutAmount NanoPoints,
+	payoutFraction float64,
+	networkId server.Id,
+	networkReferrals map[server.Id][]server.Id,
+) {
+
+	glog.Infof("[plan]payout referral network %s has %d referrals with fraction %f\n",
+		networkId,
+		len(networkReferrals[networkId]),
+		payoutFraction,
+	)
+
+	if len(networkReferrals[networkId]) == 0 {
+		return
+	}
+
+	childPayoutAmount := NanoPoints(float64(basePayoutAmount) * payoutFraction)
+	if childPayoutAmount <= 0 {
+		return
+	}
+
+	for _, childNetworkId := range networkReferrals[networkId] {
+
+		glog.Infof("[plan]payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
+
+		err := ApplyAccountPoints(ctx, childNetworkId, AccountPointEventPayout, childPayoutAmount)
+		if err != nil {
+			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
+		}
+
+		// recursively payout to child referral networks
+		payoutChildrenReferralNetworks(
+			ctx,
+			basePayoutAmount,
+			payoutFraction*0.5, // reduce the payout fraction for each level of referral
+			childNetworkId,
+			networkReferrals,
+		)
+
+	}
+
 }
 
 // this assumes the table `temp_account_payment` exists in the transaction
