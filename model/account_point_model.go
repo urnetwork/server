@@ -13,7 +13,9 @@ type AccountPointEvent string
  * Point Events
  */
 const (
-	AccountPointEventReferral AccountPointEvent = "referral"
+	AccountPointEventReferral     AccountPointEvent = "referral"
+	AccountPointEventPayout       AccountPointEvent = "payout"
+	AccountPointSeekerPayoutBonus AccountPointEvent = "seeker_payout_bonus"
 )
 
 /**
@@ -34,7 +36,7 @@ func ApplyAccountPoints(
 	ctx context.Context,
 	networkId server.Id,
 	event AccountPointEvent,
-	pointValue int,
+	pointValue NanoPoints,
 ) error {
 	// Implement the logic to apply network points here
 	// This is a placeholder implementation

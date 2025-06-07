@@ -488,3 +488,31 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 
 	return err
 }
+
+func getAllSeekerHolders(ctx context.Context) map[server.Id]bool {
+	seekerHolders := map[server.Id]bool{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network_id
+				FROM account_wallet
+				WHERE has_seeker_token = true
+			`,
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId server.Id
+				server.Raise(result.Scan(&networkId))
+				if !seekerHolders[networkId] {
+					seekerHolders[networkId] = true
+				}
+			}
+		})
+	})
+
+	return seekerHolders
+}

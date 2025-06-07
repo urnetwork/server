@@ -1733,4 +1733,9 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_point RENAME TO account_point
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_point
+        ALTER COLUMN point_value TYPE bigint
+    `),
 }
