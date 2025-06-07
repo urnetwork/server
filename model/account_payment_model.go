@@ -27,6 +27,7 @@ type SubsidyConfig struct {
 	MaxPayoutUsdPerPaidUser                   float64 `yaml:"max_payout_usd_per_paid_user"`
 	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
 	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
+	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
 
 	MinWalletPayoutUsd float64 `yaml:"min_wallet_payout_usd"`
 
@@ -556,17 +557,25 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			))
 		}
 
-		totalPayoutAccountPoints := NanoPoints(0)
+		totalPayoutAccountNanoPoints := NanoPoints(0)
 
 		// get total points
 		for _, payment := range networkPayments {
-			totalPayoutAccountPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+			totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
 		}
 
-		// this is the total number of points allocated per payout
-		// should this factor in how frequent the payouts are?
-		// todo: should be moved into config
-		_ = PointsToNanoPoints(float64(1_000_000))
+		// // this is the total number of points allocated per payout
+		// // should this factor in how frequent the payouts are?
+		// // todo: should be moved into config
+		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+
+		// pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints)) / 1_000_000
+		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
+		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
+			totalPayout,
+			totalPayoutAccountNanoPoints,
+			pointsScaleFactor,
+		)
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
@@ -580,15 +589,25 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				// 	totalAccountPointsEarned = scaledAccountPoints * SeekerHolderMultiplier
 				// }
 
-				accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
 				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
 				// totalAccountPointsEarned := scaledAccountPoints
 
-				if seekerHolderNetworkIds[payment.NetworkId] {
-					accountPoints = accountPoints * SeekerHolderMultiplier
-				}
+				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
+				glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
+					payment.NetworkId,
+					scaledAccountPoints,
+					payment.Payout,
+				)
 
-				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, accountPoints)
+				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, scaledAccountPoints)
+
+				if seekerHolderNetworkIds[payment.NetworkId] {
+					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
+					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
+					ApplyAccountPoints(ctx, payment.NetworkId, AccountPointSeekerPayoutBonus, seekerBonus)
+				}
 
 				/**
 				 * Apply bonus points to parent referral network
@@ -599,9 +618,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					if parentReferralNetworkId != payment.NetworkId {
 						// todo: special event type for this?
 
-						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountPoints)
+						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
 
-						parentReferralPoints := NanoPoints(float64(accountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
+						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 						ApplyAccountPoints(ctx, parentReferralNetworkId, AccountPointEventPayout, parentReferralPoints)
 					}
 				}
@@ -611,7 +630,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				 */
 				payoutChildrenReferralNetworks(
 					ctx,
-					accountPoints,
+					scaledAccountPoints,
 					EnvSubsidyConfig().ReferralChildPayoutFraction,
 					payment.NetworkId,
 					networkReferrals,

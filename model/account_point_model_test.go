@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/go-playground/assert/v2"
+	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -244,12 +245,11 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		/**
 		 * total payout: 5.00 USDC
-		 * 1m points per month (payout?) (1m / sum(accountPoints)) * ((payout / totalPayout) * 1m)
-		 * network A points should be 2 / 5 * 1m = 400000
+		 * ppp = 250_000 points per payout
+		 * (ppp / sum(accountPoints)) * ((payout / totalPayout) * 1m)
+		 * network A points should be 2 / 5 * ppp = 100_000 points
 		 * network A is a Seeker holder, so it gets x2 points
-		 * network B points should be 3 / 5 * 1m = 600000
-		 * network D, the referring network, should get a bonus of +25% of network A points
-		 * network D points should be 400000 * 0.25 * seeker_holder_multipler (x2) = 200000
+		 * network B points should be 3 / 5 * ppp = 150_000 points
 		 */
 
 		/**
@@ -258,10 +258,26 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * Since it is a Seeker holder, it gets x2 points
 		 */
 		networkPointsA := model.FetchAccountPoints(ctx, networkIdA)
-		assert.Equal(t, len(networkPointsA), 1)
+		networkPointsB := model.FetchAccountPoints(ctx, networkIdB)
+
+		glog.Infof("Network A nano points: %+v", networkPointsA[0].PointValue)
+		glog.Infof("Network B nano points: %+v", networkPointsB[0].PointValue)
+
+		/**
+		 * Assert Network A + Network B points add up to 250_000
+		 */
+		totalPoints := networkPointsA[0].PointValue + networkPointsB[0].PointValue
+		assert.Equal(t, model.NanoPoints(totalPoints), model.PointsToNanoPoints(float64(model.EnvSubsidyConfig().AccountPointsPerPayout)))
+
+		expectedPointsA := int(model.PointsToNanoPoints(float64(100_000)))
+
+		assert.Equal(t, len(networkPointsA), 2)
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsA[0].PointValue, int(400_000*model.SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsA[0].PointValue, expectedPointsA)
+		assert.Equal(t, networkPointsA[1].NetworkId, networkIdA)
+		assert.Equal(t, networkPointsA[1].Event, string(model.AccountPointSeekerPayoutBonus))
+		assert.Equal(t, networkPointsA[1].PointValue, expectedPointsA*model.SeekerHolderMultiplier-expectedPointsA)
 
 		/**
 		 * Provider Network B points
@@ -269,11 +285,11 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * Network B is not a Seeker holder, so it gets the normal points
 		 * No parent or child referrals
 		 */
-		networkPointsB := model.FetchAccountPoints(ctx, networkIdB)
+		expectedPointsB := int(model.PointsToNanoPoints(float64(150_000)))
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
 		assert.Equal(t, networkPointsB[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsB[0].PointValue, 600_000)
+		assert.Equal(t, networkPointsB[0].PointValue, expectedPointsB)
 
 		/**
 		 * Network D should get a bonus of 25% of network A points
@@ -283,42 +299,45 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(networkPointsD), 1)
 		assert.Equal(t, networkPointsD[0].NetworkId, networkIdD)
 		assert.Equal(t, networkPointsD[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsD[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsD[0].PointValue, int(float64(expectedPointsA)*0.25*model.SeekerHolderMultiplier))
 
 		/**
-		 * Network E should get 400_000 * 0.25 * 2 = 200_000 points
+		 * Network A child Network E should get expectedPointsA (150_000) * 0.25 * seeker multiplier = 75_000 points
 		 */
+		expectedPointsE := int(float64(expectedPointsA) * 0.25 * model.SeekerHolderMultiplier)
+		glog.Infof("Expected points E: %d", expectedPointsE)
 		networkPointsE := model.FetchAccountPoints(ctx, networkIdE)
 		assert.Equal(t, len(networkPointsE), 1)
 		assert.Equal(t, networkPointsE[0].NetworkId, networkIdE)
 		assert.Equal(t, networkPointsE[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsE[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsE[0].PointValue, expectedPointsE)
 
 		/**
-		 * Network F should get 400_000 * 0.25 = 100_000 points * seeker_holder_multiplier (x2) = 200_000 points
+		 * Network A child Network F should get expectedPointsA * 0.25 * seeker multiplier = 75_000 points
 		 */
 		networkPointsF := model.FetchAccountPoints(ctx, networkIdF)
 		assert.Equal(t, len(networkPointsF), 1)
 		assert.Equal(t, networkPointsF[0].NetworkId, networkIdF)
 		assert.Equal(t, networkPointsF[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsF[0].PointValue, int(100_000*model.SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsE[0].PointValue, int(float64(expectedPointsA)*0.25*model.SeekerHolderMultiplier))
 
 		/**
-		 * Network G should get 400_000 * 0.125 = 50_000 points * seeker_holder_multiplier (x2) = 100_000 points
+		 * Network E child Network G should get expectedPointsA * seeker multipler * 0.125
 		 */
+		expectedPointsG := int(float64(expectedPointsA) * model.SeekerHolderMultiplier * 0.125)
 		networkPointsG := model.FetchAccountPoints(ctx, networkIdG)
 		assert.Equal(t, len(networkPointsG), 1)
 		assert.Equal(t, networkPointsG[0].NetworkId, networkIdG)
 		assert.Equal(t, networkPointsG[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsG[0].PointValue, int(50_000*model.SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsG[0].PointValue, expectedPointsG)
 
 		/**
-		 * Network H should get 600_000 * 0.25 = 150_000 points
+		 * Network H should get expectedPointsB * 0.25 = 150_000 * 0.25 points = 37_500 points
 		 */
 		networkPointsH := model.FetchAccountPoints(ctx, networkIdH)
 		assert.Equal(t, len(networkPointsH), 1)
 		assert.Equal(t, networkPointsH[0].NetworkId, networkIdH)
 		assert.Equal(t, networkPointsH[0].Event, string(model.AccountPointEventPayout))
-		assert.Equal(t, networkPointsH[0].PointValue, 150_000)
+		assert.Equal(t, networkPointsH[0].PointValue, int(float64(expectedPointsB)*0.25))
 	})
 }

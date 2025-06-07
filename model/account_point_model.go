@@ -13,8 +13,9 @@ type AccountPointEvent string
  * Point Events
  */
 const (
-	AccountPointEventReferral AccountPointEvent = "referral"
-	AccountPointEventPayout   AccountPointEvent = "payout"
+	AccountPointEventReferral     AccountPointEvent = "referral"
+	AccountPointEventPayout       AccountPointEvent = "payout"
+	AccountPointSeekerPayoutBonus AccountPointEvent = "seeker_payout_bonus"
 )
 
 /**
