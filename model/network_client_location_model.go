@@ -1891,16 +1891,19 @@ func FindProviders2(
 	}
 
 	type clientScore struct {
-		netTypeScore      int
-		priority          int
+		netTypeScore int
+		priority     int
+		// FIXME do prefix hashing, so store the /28, /20 prefixes for ipv4 and /60, /48 for ipv6
 		clientAddressHash string
+		cityLocationId    Id
 	}
 
 	// score 0 is best
 	clientScores := map[server.Id]*clientScore{}
 	scoreScale := 10
 	intermediaryScore := 5
-	duplicateClientAddressScore := 10
+	duplicateClientAddressScore := 5
+	duplicateCityScore := 2
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		locationIds := map[server.Id]bool{}
@@ -1939,7 +1942,8 @@ func FindProviders2(
 
                     network_client_location.client_id,
                     network_client_location.net_type_score,
-                    network_client_connection.client_address_hash
+                    network_client_connection.client_address_hash,
+                    network_client_location.city_location_id
 
                 FROM network_client_location
 
@@ -1966,16 +1970,19 @@ func FindProviders2(
 					var clientId server.Id
 					var netTypeScore int
 					var clientAddressHash []byte
+					var cityLocationId server.Id
 					server.Raise(result.Scan(
 						&clientId,
 						&netTypeScore,
 						&clientAddressHash,
+						&cityLocationId,
 					))
 					priority := mathrand.Int()
 					clientScores[clientId] = &clientScore{
 						netTypeScore:      scoreScale * netTypeScore,
 						priority:          priority,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
+						cityLocationId:    cityLocationId,
 					}
 				}
 			})
@@ -1996,7 +2003,8 @@ func FindProviders2(
 
                         network_client_location.client_id,
                         network_client_location.net_type_score,
-                        network_client_connection.client_address_hash
+                        network_client_connection.client_address_hash,
+                        network_client_location.city_location_id
 
                     FROM network_client_location
 
@@ -2035,16 +2043,19 @@ func FindProviders2(
 					var clientId server.Id
 					var netTypeScore int
 					var clientAddressHash []byte
+					var cityLocationId server.Id
 					server.Raise(result.Scan(
 						&clientId,
 						&netTypeScore,
 						&clientAddressHash,
+						&cityLocationId,
 					))
 					priority := mathrand.Int()
 					clientScores[clientId] = &clientScore{
 						netTypeScore:      scoreScale * netTypeScore,
 						priority:          priority,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
+						cityLocationId:    cityLocationId,
 					}
 				}
 			})
@@ -2053,16 +2064,19 @@ func FindProviders2(
 
 	// distribute providers based on client address hash
 	// deprioritize providers with the same client address hash as those excluded or included
+	// FIXME we should be using prefix hases here
 	clientAddressHashCounts := map[string]int{}
+	clientCityCounts := map[server.Id]int{}
 
 	for _, clientId := range findProviders2.ExcludeClientIds {
 		if clientScore, ok := clientScores[clientId]; ok {
 			clientAddressHashCounts[clientScore.clientAddressHash] += 1
+			clientCityCounts[clientScore.cityLocationId] += 1
 			delete(clientScores, clientId)
 		}
 	}
 	// the final hop is excluded
-	// intermediaries have net score incremented by scale/2
+	// intermediaries have net score incremented
 	for _, destination := range findProviders2.ExcludeDestinations {
 		for _, clientId := range destination[:len(destination)-1] {
 			if clientScore, ok := clientScores[clientId]; ok {
@@ -2073,16 +2087,25 @@ func FindProviders2(
 	}
 
 	clientIds := maps.Keys(clientScores)
-	mathrand.Shuffle(len(clientIds), func(i int, j int) {
-		clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+	// mathrand.Shuffle(len(clientIds), func(i int, j int) {
+	// 	clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
+	// })
+	connect.WeightedShuffleFunc(clientIds, func(clientId Id) float32 {
+		clientScore := clientScores[clientId]
+		return clientScore.netTypeScore
 	})
+	slices.Reverse(clientIds)
 
 	for _, clientId := range clientIds {
 		clientScore := clientScores[clientId]
-		// adjust the score based on the number of ip hashes seen before
-		count := clientAddressHashCounts[clientScore.clientAddressHash]
-		clientAddressHashCounts[clientScore.clientAddressHash] = count + 1
-		clientScore.netTypeScore += count * duplicateClientAddressScore
+		// adjust the score based on the number of the same ip hash seen before
+		ipCount := clientAddressHashCounts[clientScore.clientAddressHash]
+		clientAddressHashCounts[clientScore.clientAddressHash] = ipCount + 1
+		clientScore.netTypeScore += ipCount * duplicateClientAddressScore
+		// adjust the score based on the number of the same city seen before
+		cityCount := clientCityCounts[clientScore.cityLocationId]
+		clientCityCounts[clientScore.cityLocationId] = cityCount + 1
+		clientScore.netTypeScore += cityCount * duplicateCityScore
 	}
 
 	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
