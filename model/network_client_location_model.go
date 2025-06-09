@@ -18,6 +18,7 @@ import (
 
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/search"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/session"
 )
 
@@ -1895,7 +1896,7 @@ func FindProviders2(
 		priority     int
 		// FIXME do prefix hashing, so store the /28, /20 prefixes for ipv4 and /60, /48 for ipv6
 		clientAddressHash string
-		cityLocationId    Id
+		cityLocationId    server.Id
 	}
 
 	// score 0 is best
@@ -2090,9 +2091,9 @@ func FindProviders2(
 	// mathrand.Shuffle(len(clientIds), func(i int, j int) {
 	// 	clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 	// })
-	connect.WeightedShuffleFunc(clientIds, func(clientId Id) float32 {
+	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
-		return clientScore.netTypeScore
+		return float32(clientScore.netTypeScore)
 	})
 	slices.Reverse(clientIds)
 
