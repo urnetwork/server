@@ -44,6 +44,10 @@ func CreateNetworkReferral(
 					create_time
 				)
 				VALUES ($1, $2, $3)
+				ON CONFLICT (network_id)
+				DO UPDATE SET
+				    referral_network_id = EXCLUDED.referral_network_id,
+				    create_time = EXCLUDED.create_time;
 			`,
 			networkReferral.NetworkId,
 			networkReferral.ReferralNetworkId,
