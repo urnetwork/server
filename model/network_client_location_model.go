@@ -1793,11 +1793,17 @@ type ProviderSpec struct {
 	BestAvailable   *bool      `json:"best_available,omitempty"`
 }
 
+const (
+	RankModeQuality string = "quality"
+	RankModeSpeed   string = "speed"
+)
+
 type FindProviders2Args struct {
 	Specs               []*ProviderSpec `json:"specs"`
 	Count               int             `json:"count"`
 	ExcludeClientIds    []server.Id     `json:"exclude_client_ids"`
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
+	RankMode            string          `json:"rank_mode"`
 }
 
 type FindProviders2Result struct {
@@ -1807,6 +1813,7 @@ type FindProviders2Result struct {
 type FindProvidersProvider struct {
 	ClientId                server.Id `json:"client_id"`
 	EstimatedBytesPerSecond int       `json:"estimated_bytes_per_second"`
+	Tier                    int       `json:"tier"`
 }
 
 func findLocationGroupByNameInTx(
@@ -1890,6 +1897,9 @@ func FindProviders2(
 	if findProviders2.Count <= 0 {
 		findProviders2.Count = 10
 	}
+	if findProviders2.RankMode == "" {
+		findProviders2.RankMode = RankModeQuality
+	}
 
 	type clientScore struct {
 		netTypeScore int
@@ -1897,6 +1907,7 @@ func FindProviders2(
 		// FIXME do prefix hashing, so store the /28, /20 prefixes for ipv4 and /60, /48 for ipv6
 		clientAddressHash string
 		cityLocationId    server.Id
+		tier              int
 	}
 
 	// score 0 is best
@@ -1943,6 +1954,7 @@ func FindProviders2(
 
                     network_client_location.client_id,
                     network_client_location.net_type_score,
+                    network_client_location.net_type_score_speed,
                     network_client_connection.client_address_hash,
                     network_client_location.city_location_id
 
@@ -1970,21 +1982,31 @@ func FindProviders2(
 				for result.Next() {
 					var clientId server.Id
 					var netTypeScore int
+					var netTypeScoreSpeed int
 					var clientAddressHash []byte
 					var cityLocationId server.Id
 					server.Raise(result.Scan(
 						&clientId,
 						&netTypeScore,
+						&netTypeScoreSpeed,
 						&clientAddressHash,
 						&cityLocationId,
 					))
 					priority := mathrand.Int()
-					clientScores[clientId] = &clientScore{
-						netTypeScore:      scoreScale * netTypeScore,
+					clientScore := &clientScore{
 						priority:          priority,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
 						cityLocationId:    cityLocationId,
 					}
+					switch findProviders2.RankMode {
+					case RankModeSpeed:
+						clientScore.tier = netTypeScoreSpeed
+						clientScore.netTypeScore = scoreScale * netTypeScoreSpeed
+					default:
+						clientScore.tier = netTypeScore
+						clientScore.netTypeScore = scoreScale * netTypeScore
+					}
+					clientScores[clientId] = clientScore
 				}
 			})
 		}
@@ -2004,6 +2026,7 @@ func FindProviders2(
 
                         network_client_location.client_id,
                         network_client_location.net_type_score,
+                        network_client_location.net_type_score_speed,
                         network_client_connection.client_address_hash,
                         network_client_location.city_location_id
 
@@ -2043,21 +2066,31 @@ func FindProviders2(
 				for result.Next() {
 					var clientId server.Id
 					var netTypeScore int
+					var netTypeScoreSpeed int
 					var clientAddressHash []byte
 					var cityLocationId server.Id
 					server.Raise(result.Scan(
 						&clientId,
 						&netTypeScore,
+						&netTypeScoreSpeed,
 						&clientAddressHash,
 						&cityLocationId,
 					))
 					priority := mathrand.Int()
-					clientScores[clientId] = &clientScore{
-						netTypeScore:      scoreScale * netTypeScore,
+					clientScore := &clientScore{
 						priority:          priority,
 						clientAddressHash: hex.EncodeToString(clientAddressHash),
 						cityLocationId:    cityLocationId,
 					}
+					switch findProviders2.RankMode {
+					case RankModeSpeed:
+						clientScore.tier = netTypeScoreSpeed
+						clientScore.netTypeScore = scoreScale * netTypeScoreSpeed
+					default:
+						clientScore.tier = netTypeScore
+						clientScore.netTypeScore = scoreScale * netTypeScore
+					}
+					clientScores[clientId] = clientScore
 				}
 			})
 		}
@@ -2129,10 +2162,12 @@ func FindProviders2(
 
 	providers := []*FindProvidersProvider{}
 	for _, clientId := range clientIds {
+		clientScore := clientScores[clientId]
 		provider := &FindProvidersProvider{
 			ClientId: clientId,
 			// TODO
 			EstimatedBytesPerSecond: 0,
+			Tier:                    clientScore.tier,
 		}
 		providers = append(providers, provider)
 	}
