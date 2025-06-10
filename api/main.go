@@ -119,6 +119,7 @@ Options:
 		router.NewRoute("POST", "/account/wallets/verify-seeker", handlers.VerifyHoldingSeekerToken),
 		router.NewRoute("GET", "/account/payments", handlers.GetAccountPayments),
 		router.NewRoute("GET", "/account/referral-code", handlers.GetNetworkReferralCode),
+		router.NewRoute("GET", "/account/referral-network", handlers.GetReferralNetwork),
 		router.NewRoute("POST", "/account/set-referral", handlers.SetNetworkReferral),
 		router.NewRoute("GET", "/account/points", handlers.GetAccountPoints),
 		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),

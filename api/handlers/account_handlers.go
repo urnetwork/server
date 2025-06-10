@@ -27,3 +27,7 @@ func GetAccountPoints(w http.ResponseWriter, r *http.Request) {
 func SetNetworkReferral(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.SetNetworkReferral, w, r)
 }
+
+func GetReferralNetwork(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetReferralNetwork, w, r)
+}

@@ -56,24 +56,22 @@ func SetNetworkReferral(
  * Get the referral network for the current network.
  */
 
-type ReferralNetwork struct{}
-
 type GetNetworkReferralError struct {
 	Message string `json:"message"`
 }
 
 type GetNetworkReferralResult struct {
-	Network *ReferralNetwork         `json:"network,omitempty"`
+	Network *model.ReferralNetwork   `json:"network,omitempty"`
 	Error   *GetNetworkReferralError `json:"error,omitempty"`
 }
 
-func GetNetworkReferral(
+func GetReferralNetwork(
 	session *session.ClientSession,
 ) (*GetNetworkReferralResult, error) {
 
-	networkReferral := model.GetNetworkReferralByNetworkId(session.Ctx, session.ByJwt.NetworkId)
+	referralNetwork := model.GetReferralNetworkByChildNetworkId(session.Ctx, session.ByJwt.NetworkId)
 
-	if networkReferral == nil {
+	if referralNetwork == nil {
 		return &GetNetworkReferralResult{
 			Error: &GetNetworkReferralError{
 				Message: "No referral network found",
@@ -82,6 +80,6 @@ func GetNetworkReferral(
 	}
 
 	return &GetNetworkReferralResult{
-		Network: &ReferralNetwork{},
+		Network: referralNetwork,
 	}, nil
 }

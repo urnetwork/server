@@ -55,9 +55,8 @@ func TestNetworkCreate(t *testing.T) {
 		// assert.NotEqual(t, networkPoints[0].PointValue, 0)
 
 		// check network referral
-		networkReferral := model.GetNetworkReferralByNetworkId(ctx, result.Network.NetworkId)
-		assert.Equal(t, networkReferral.NetworkId, result.Network.NetworkId)
-		assert.Equal(t, networkReferral.ReferralNetworkId, referralNetworkId)
+		networkReferral := model.GetReferralNetworkByChildNetworkId(ctx, result.Network.NetworkId)
+		assert.Equal(t, networkReferral.Id, referralNetworkId)
 
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
 		assert.Equal(t, 1, len(transferBalances))

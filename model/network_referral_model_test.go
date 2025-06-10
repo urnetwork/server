@@ -17,6 +17,11 @@ func TestNetworkReferral(t *testing.T) {
 		networkAId := server.NewId()
 		networkBId := server.NewId()
 
+		// create networks
+		Testing_CreateNetwork(ctx, referralNetworkId, "referral", referralNetworkId)
+		Testing_CreateNetwork(ctx, networkAId, "a", networkAId)
+		Testing_CreateNetwork(ctx, networkBId, "b", networkBId)
+
 		// create a network referral code
 		createdReferralCode := CreateNetworkReferralCode(ctx, referralNetworkId)
 		createReferralCodeNetworkB := CreateNetworkReferralCode(ctx, networkBId)
@@ -27,9 +32,9 @@ func TestNetworkReferral(t *testing.T) {
 		assert.Equal(t, createdNetworkReferral.ReferralNetworkId, referralNetworkId)
 
 		// get the network referral by network id
-		referralNetwork := GetNetworkReferralByNetworkId(ctx, networkAId)
-		assert.Equal(t, referralNetwork.NetworkId, networkAId)
-		assert.Equal(t, referralNetwork.ReferralNetworkId, referralNetworkId)
+		referralNetwork := GetReferralNetworkByChildNetworkId(ctx, networkAId)
+		// assert.Equal(t, referralNetwork.NetworkId, networkAId)
+		assert.Equal(t, referralNetwork.Id, referralNetworkId)
 
 		// create a NetworkB referral
 		// to test multiple referrals count
@@ -44,8 +49,8 @@ func TestNetworkReferral(t *testing.T) {
 		// users can update their referral code
 
 		CreateNetworkReferral(ctx, networkAId, createReferralCodeNetworkB.ReferralCode)
-		referralNetwork = GetNetworkReferralByNetworkId(ctx, networkAId)
-		assert.Equal(t, referralNetwork.ReferralNetworkId, createReferralCodeNetworkB.NetworkId)
+		referralNetwork = GetReferralNetworkByChildNetworkId(ctx, networkAId)
+		assert.Equal(t, referralNetwork.Id, createReferralCodeNetworkB.NetworkId)
 
 	})
 }
