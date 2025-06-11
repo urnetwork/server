@@ -1738,4 +1738,16 @@ var migrations = []any{
 		ALTER TABLE network_referral DROP CONSTRAINT network_referral_pkey;
 		ALTER TABLE network_referral ADD PRIMARY KEY (network_id);
 	`),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+                1 + 
+                net_type_vpn + 
+                net_type_proxy +
+                net_type_tor + 
+                net_type_relay 
+                - net_type_hosting
+            ) STORED
+    `),
 }
