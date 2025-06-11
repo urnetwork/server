@@ -26,3 +26,6 @@ done
 
 # store default.pgo
 # https://go.dev/doc/pgo
+
+
+# go test -short

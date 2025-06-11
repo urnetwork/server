@@ -128,7 +128,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ControlMinTimeout:   5 * time.Millisecond,
 
 		ExchangeConnectTimeout:                5 * time.Second,
-		ExchangePingTimeout:                   connectionHandlerSettings.PingTimeout,
+		ExchangePingTimeout:                   connectionHandlerSettings.MinPingTimeout,
 		ExchangeReadTimeout:                   connectionHandlerSettings.ReadTimeout,
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,

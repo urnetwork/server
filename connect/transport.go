@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
+	// "os"
 	"strings"
 	"time"
 
@@ -45,7 +45,8 @@ func init() {
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
-		PingTimeout:           platformTransportSettings.PingTimeout,
+		MinPingTimeout:        platformTransportSettings.PingTimeout,
+		PingTrackerCount:      4,
 		WriteTimeout:          platformTransportSettings.WriteTimeout,
 		ReadTimeout:           platformTransportSettings.ReadTimeout,
 		SyncConnectionTimeout: 60 * time.Second,
@@ -62,7 +63,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
-	PingTimeout                     time.Duration
+	MinPingTimeout                  time.Duration
+	PingTrackerCount                int
 	WriteTimeout                    time.Duration
 	ReadTimeout                     time.Duration
 	SyncConnectionTimeout           time.Duration
@@ -77,6 +79,8 @@ type ConnectHandler struct {
 	handlerId server.Id
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
+
+	transportTls *TransportTls
 }
 
 func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
@@ -86,12 +90,19 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	transportTls, err := NewTransportTlsFromConfig()
+	if err != nil {
+		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
+		transportTls = NewTransportTls(map[string]bool{})
+	}
+
 	h := &ConnectHandler{
-		ctx:       cancelCtx,
-		cancel:    cancel,
-		handlerId: handlerId,
-		exchange:  exchange,
-		settings:  settings,
+		ctx:          cancelCtx,
+		cancel:       cancel,
+		handlerId:    handlerId,
+		exchange:     exchange,
+		settings:     settings,
+		transportTls: transportTls,
 	}
 
 	go h.run()
@@ -257,6 +268,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// close is done in the write
 		}()
 
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+
 		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
@@ -274,8 +287,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case websocket.BinaryMessage:
 					if 0 == len(message) {
 						// ping
+						pingTracker.ReceivePing()
 						continue
 					}
+
+					pingTracker.Receive()
 
 					select {
 					case <-handleCtx.Done():
@@ -311,7 +327,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
-				case <-time.After(self.settings.PingTimeout):
+				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
 						// note that for websocket a dealine timeout cannot be recovered
@@ -375,7 +391,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
-		MaxIdleTimeout:       self.settings.PingTimeout * 2,
+		MaxIdleTimeout:       self.settings.MinPingTimeout * 2,
 		KeepAlivePeriod:      0,
 		Allow0RTT:            true,
 	}
@@ -387,34 +403,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	// clientConfigs := map[string]*clientConfig{}
 
 	tlsConfig := &tls.Config{
-		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// FIXME apply white list
-
-			certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.crt", clientHello.ServerName, clientHello.ServerName))
-			if err != nil {
-				return nil, err
-			}
-			keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.key", clientHello.ServerName, clientHello.ServerName))
-			if err != nil {
-				return nil, err
-			}
-
-			certPemBytes, err := os.ReadFile(certPaths[0])
-			if err != nil {
-				return nil, err
-			}
-			keyPemBytes, err := os.ReadFile(keyPaths[0])
-			if err != nil {
-				return nil, err
-			}
-
-			cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
-			tlsConfig := &tls.Config{
-				Certificates: []tls.Certificate{cert},
-			}
-
-			return tlsConfig, err
-		},
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
 	serverAddr := &net.UDPAddr{
@@ -549,6 +538,8 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 			// close is done in the write
 		}()
 
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+
 		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
@@ -564,8 +555,11 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 
 				if 0 == len(message) {
 					// ping
+					pingTracker.ReceivePing()
 					continue
 				}
+
+				pingTracker.Receive()
 
 				select {
 				case <-handleCtx.Done():
@@ -599,7 +593,7 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 						return
 					}
 					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
-				case <-time.After(self.settings.PingTimeout):
+				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, make([]byte, 0))
 					if err != nil {
