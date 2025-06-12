@@ -125,6 +125,35 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
 
+	// attemp to parse the auth message from the header
+	// if that fails, expect the auth message as the first message
+	auth := func() *protocol.Auth {
+		glog.V(2).Infof("[c]header: %v\n", r.Header)
+
+		headerAuth := r.Header.Get("Authorization")
+		headerAppVersion := r.Header.Get("X-UR-AppVersion")
+		headerInstanceId := r.Header.Get("X-UR-InstanceId")
+
+		bearerPrefix := "Bearer "
+
+		if strings.HasPrefix(headerAuth, bearerPrefix) {
+			jwt := headerAuth[len(bearerPrefix):]
+
+			instanceId, err := server.ParseId(headerInstanceId)
+			if err == nil {
+				return &protocol.Auth{
+					ByJwt:      jwt,
+					InstanceId: instanceId.Bytes(),
+					AppVersion: headerAppVersion,
+				}
+			} else {
+				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
+			}
+		}
+
+		return nil
+	}()
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
@@ -141,31 +170,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// enforce the message size limit on messages in
 	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
-
-	// attemp to parse the auth message from the header
-	// if that fails, expect the auth message as the first message
-	auth := func() *protocol.Auth {
-		headerAuth := r.Header.Get("Authorization")
-		headerAppVersion := r.Header.Get("X-UR-AppVersion")
-		headerInstanceId := r.Header.Get("X-UR-InstanceId")
-
-		bearerPrefix := "Bearer "
-
-		if strings.HasPrefix(headerAuth, bearerPrefix) {
-			jwt := headerAuth[len(bearerPrefix):]
-
-			instanceId, err := server.ParseId(headerInstanceId)
-			if err != nil {
-				return &protocol.Auth{
-					ByJwt:      jwt,
-					InstanceId: instanceId.Bytes(),
-					AppVersion: headerAppVersion,
-				}
-			}
-		}
-
-		return nil
-	}()
 
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
