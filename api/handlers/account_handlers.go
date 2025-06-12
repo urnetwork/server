@@ -31,3 +31,7 @@ func SetNetworkReferral(w http.ResponseWriter, r *http.Request) {
 func GetReferralNetwork(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetReferralNetwork, w, r)
 }
+
+func UnlinkReferralNetwork(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.UnlinkReferralNetwork, w, r)
+}

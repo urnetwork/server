@@ -83,3 +83,16 @@ func GetReferralNetwork(
 		Network: referralNetwork,
 	}, nil
 }
+
+/**
+ * Unlink parent network referral
+ */
+
+type UnlinkReferralNetworkResult struct{}
+
+func UnlinkReferralNetwork(
+	session *session.ClientSession,
+) (*UnlinkReferralNetworkResult, error) {
+	model.UnlinkReferralNetwork(session.Ctx, session.ByJwt.NetworkId)
+	return &UnlinkReferralNetworkResult{}, nil
+}
