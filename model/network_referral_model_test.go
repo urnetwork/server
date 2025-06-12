@@ -52,5 +52,12 @@ func TestNetworkReferral(t *testing.T) {
 		referralNetwork = GetReferralNetworkByChildNetworkId(ctx, networkAId)
 		assert.Equal(t, referralNetwork.Id, createReferralCodeNetworkB.NetworkId)
 
+		// remove referral code
+		UnlinkReferralNetwork(ctx, networkAId)
+		referrals = GetReferralsByReferralNetworkId(ctx, referralNetworkId)
+		assert.Equal(t, len(referrals), 1)
+		referralNetwork = GetReferralNetworkByChildNetworkId(ctx, networkAId)
+		assert.Equal(t, referralNetwork, nil)
+
 	})
 }

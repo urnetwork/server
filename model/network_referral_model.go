@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -19,10 +20,16 @@ func CreateNetworkReferral(
 	referralCode string,
 ) *NetworkReferral {
 
+	referralCode = strings.ToUpper(referralCode)
+
 	// find network id by associated referral code
 	referralNetworkId := GetNetworkIdByReferralCode(referralCode)
 
 	if referralNetworkId == nil {
+		return nil
+	}
+
+	if referralNetworkId == &networkId {
 		return nil
 	}
 
@@ -103,6 +110,28 @@ func GetReferralNetworkByChildNetworkId(
 	})
 
 	return referralNetwork
+
+}
+
+/**
+ * Removes parent network referral
+ */
+func UnlinkReferralNetwork(
+	ctx context.Context,
+	networkId server.Id,
+) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_referral
+				WHERE
+					network_id = $1
+			`,
+			networkId,
+		))
+	})
 
 }
 

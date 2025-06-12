@@ -61,5 +61,12 @@ func TestNetworkReferral(t *testing.T) {
 		assert.Equal(t, networkCReferral.Id, networkBId)
 		assert.Equal(t, networkCReferral.Name, "b")
 
+		/**
+		 * Remove the referral code for network C
+		 */
+		controller.UnlinkReferralNetwork(networkCSession)
+		networkCReferral = model.GetReferralNetworkByChildNetworkId(ctx, networkCId)
+		assert.Equal(t, networkCReferral, nil)
+
 	})
 }
