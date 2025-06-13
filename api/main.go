@@ -129,6 +129,8 @@ Options:
 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
+		router.NewRoute("GET", "/earn/([^/]+)", handlers.GetEarnDatetime),
+		router.NewRoute("GET", "/earn/([^/]+)/payout", handlers.GetEarnDatetimePayout),
 	}
 
 	// server.().Printf("%s\n", opts)
