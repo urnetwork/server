@@ -391,8 +391,14 @@ func testConnect(
 		routes[host] = "127.0.0.1"
 	}
 
+	// FIXME server quic tls to create a temp cert
+	// FIXME client tls to trust self signed cert
 	createServer := func(exchange *Exchange, port int) *http.Server {
-		connectHandler := NewConnectHandlerWithDefaults(ctx, server.NewId(), exchange)
+		settings := DefaultConnectHandlerSettings()
+		settings.EnableTlsSelfSign = true
+		settings.ListenH3Port = port + 443
+		settings.ListenDnsPort = port + 53
+		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
@@ -442,10 +448,10 @@ func testConnect(
 		go server.ListenAndServe()
 	}
 
-	randServer := func() string {
+	randServer := func() (string, int) {
 		ports := maps.Values(hostPorts)
 		port := ports[mathrand.Intn(len(ports))]
-		return fmt.Sprintf("ws://127.0.0.1:%d", port)
+		return fmt.Sprintf("ws://127.0.0.1:%d", port), port
 	}
 
 	maxMessageContentSize := ByteCount(0)
@@ -560,7 +566,20 @@ func testConnect(
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
+		host, port := randServer()
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.QuicTlsConfig.InsecureSkipVerify = true
+		settings.H3Port = port + 443
+		settings.DnsPort = port + 53
+		transportA := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			clientStrategyA,
+			clientA.RouteManager(),
+			host,
+			authA,
+			connect.TransportModeH1,
+			settings,
+		)
 		transportAs = append(transportAs, transportA)
 		// go transportA.Run(clientA.RouteManager())
 	}
@@ -576,7 +595,20 @@ func testConnect(
 
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
+		host, port := randServer()
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.QuicTlsConfig.InsecureSkipVerify = true
+		settings.H3Port = port + 443
+		settings.DnsPort = port + 53
+		transportB := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			clientStrategyB,
+			clientB.RouteManager(),
+			host,
+			authB,
+			connect.TransportModeH1,
+			settings,
+		)
 		transportBs = append(transportBs, transportB)
 		// go transportB.Run(clientB.RouteManager())
 	}
@@ -785,7 +817,20 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport a\n")
-						transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
+						host, port := randServer()
+						settings := connect.DefaultPlatformTransportSettings()
+						settings.QuicTlsConfig.InsecureSkipVerify = true
+						settings.H3Port = port + 443
+						settings.DnsPort = port + 53
+						transportA := connect.NewPlatformTransportWithTargetMode(
+							ctx,
+							clientStrategyA,
+							clientA.RouteManager(),
+							host,
+							authA,
+							connect.TransportModeH1,
+							settings,
+						)
 						transportAs = append(transportAs, transportA)
 						// go transportA.Run(clientA.RouteManager())
 					}
@@ -956,7 +1001,20 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport b\n")
-						transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
+						host, port := randServer()
+						settings := connect.DefaultPlatformTransportSettings()
+						settings.QuicTlsConfig.InsecureSkipVerify = true
+						settings.H3Port = port + 443
+						settings.DnsPort = port + 53
+						transportB := connect.NewPlatformTransportWithTargetMode(
+							ctx,
+							clientStrategyB,
+							clientB.RouteManager(),
+							host,
+							authB,
+							connect.TransportModeH1,
+							settings,
+						)
 						transportBs = append(transportBs, transportB)
 						// go transportB.Run(clientB.RouteManager())
 					}

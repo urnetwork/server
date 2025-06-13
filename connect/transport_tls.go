@@ -1,11 +1,27 @@
 package main
 
 import (
-	"crypto/tls"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"time"
+
+	"math/big"
+	"net"
+
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/tls"
+
+	// "crypto/elliptic"
+	// "crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
+	// "crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 
 	"github.com/urnetwork/server"
 )
@@ -14,14 +30,15 @@ import (
 // load keys for the host names
 
 type TransportTls struct {
-	allowedHosts map[string]bool
+	enableSelfSign bool
+	allowedHosts   map[string]bool
 
 	stateLock sync.Mutex
 
 	tlsConfigs map[string]*tls.Config
 }
 
-func NewTransportTlsFromConfig() (*TransportTls, error) {
+func NewTransportTlsFromConfig(enableSelfSign bool) (*TransportTls, error) {
 	r, err := server.Config.SimpleResource("connect.yml")
 	if err != nil {
 		return nil, err
@@ -34,13 +51,14 @@ func NewTransportTlsFromConfig() (*TransportTls, error) {
 		allowedHosts[allowedHostAny.(string)] = true
 	}
 
-	return NewTransportTls(allowedHosts), nil
+	return NewTransportTls(enableSelfSign, allowedHosts), nil
 }
 
-func NewTransportTls(allowedHosts map[string]bool) *TransportTls {
+func NewTransportTls(enableSelfSign bool, allowedHosts map[string]bool) *TransportTls {
 	return &TransportTls{
-		allowedHosts: allowedHosts,
-		tlsConfigs:   map[string]*tls.Config{},
+		enableSelfSign: enableSelfSign,
+		allowedHosts:   allowedHosts,
+		tlsConfigs:     map[string]*tls.Config{},
 	}
 }
 
@@ -62,10 +80,40 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 		return &tlsConfigCopy, nil
 	}
 
+	selfSigned := func() (*tls.Config, error) {
+		organizationName := hostName
+		validFrom := 180 * 24 * time.Hour
+		validFor := 180 * 24 * time.Hour
+		certPemBytes, keyPemBytes, err := selfSign(
+			[]string{hostName},
+			organizationName,
+			validFrom,
+			validFor,
+		)
+		if err != nil {
+			return nil, err
+		}
+		// X509KeyPair
+		cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+
+		self.tlsConfigs[hostName] = tlsConfig
+		// make  acopy
+		tlsConfigCopy := *tlsConfig
+		return &tlsConfigCopy, nil
+	}
+
 	if !self.allowedHosts[hostName] {
 		baseName := strings.SplitN(hostName, ".", 2)[1]
 		if !self.allowedHosts[fmt.Sprintf("*.%s", baseName)] {
-			return nil, fmt.Errorf("Server name \"%s\" not allowed.", hostName)
+			if self.enableSelfSign {
+				return selfSigned()
+			} else {
+				return nil, fmt.Errorf("Server name \"%s\" not allowed.", hostName)
+			}
 		}
 	}
 
@@ -105,9 +153,14 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	if !ok {
 		certPath, keyPath, ok = findWildcard()
 		if !ok {
-			// add a missing entry to avoid future lookups
-			self.tlsConfigs[hostName] = nil
-			return nil, fmt.Errorf("Missing lookup key for server name \"%s\".", hostName)
+
+			if self.enableSelfSign {
+				return selfSigned()
+			} else {
+				// add a missing entry to avoid future lookups
+				self.tlsConfigs[hostName] = nil
+				return nil, fmt.Errorf("Missing lookup key for server name \"%s\".", hostName)
+			}
 		}
 	}
 
@@ -132,4 +185,97 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	// make  acopy
 	tlsConfigCopy := *tlsConfig
 	return &tlsConfigCopy, nil
+}
+
+func selfSign(
+	hosts []string,
+	organization string,
+	validFrom time.Duration,
+	validFor time.Duration,
+) (
+	certPemBytes []byte,
+	keyPemBytes []byte,
+	returnErr error,
+) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	// priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
+	publicKey := func() any {
+		switch k := any(privateKey).(type) {
+		case *rsa.PrivateKey:
+			return &k.PublicKey
+		case *ecdsa.PrivateKey:
+			return &k.PublicKey
+		case ed25519.PrivateKey:
+			return k.Public().(ed25519.PublicKey)
+		default:
+			return nil
+		}
+	}()
+
+	// ECDSA, ED25519 and RSA subject keys should have the DigitalSignature
+	// KeyUsage bits set in the x509.Certificate template
+	keyUsage := x509.KeyUsageDigitalSignature
+	// Only RSA subject keys should have the KeyEncipherment KeyUsage bits set. In
+	// the context of TLS this KeyUsage is particular to RSA key exchange and
+	// authentication.
+	if _, isRSA := any(privateKey).(*rsa.PrivateKey); isRSA {
+		keyUsage |= x509.KeyUsageKeyEncipherment
+	}
+
+	notBefore := time.Now().Add(-validFrom)
+	notAfter := notBefore.Add(validFor)
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		// log.Fatalf("Failed to generate serial number: %v", err)
+		returnErr = err
+		return
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{organization},
+		},
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, h)
+		}
+	}
+
+	// we hope the client is using tls1.3 which hides the self signed cert
+	template.IsCA = true
+	template.KeyUsage |= x509.KeyUsageCertSign
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, publicKey, privateKey)
+	if err != nil {
+		returnErr = err
+		return
+	}
+	certPemBytes = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		returnErr = err
+		return
+	}
+	keyPemBytes = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
+
+	return
 }

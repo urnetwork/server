@@ -61,6 +61,10 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 		QuicConnectTimeout:   2 * time.Second,
 		QuicHandshakeTimeout: 2 * time.Second,
+
+		ListenH3Port:      443,
+		ListenDnsPort:     53,
+		EnableTlsSelfSign: false,
 	}
 }
 
@@ -73,6 +77,9 @@ type ConnectHandlerSettings struct {
 	MaximumExchangeMessageByteCount ByteCount
 	QuicConnectTimeout              time.Duration
 	QuicHandshakeTimeout            time.Duration
+	ListenH3Port                    int
+	ListenDnsPort                   int
+	EnableTlsSelfSign               bool
 }
 
 type ConnectHandler struct {
@@ -92,10 +99,10 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	transportTls, err := NewTransportTlsFromConfig()
+	transportTls, err := NewTransportTlsFromConfig(settings.EnableTlsSelfSign)
 	if err != nil {
 		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
-		transportTls = NewTransportTls(map[string]bool{})
+		transportTls = NewTransportTls(false, map[string]bool{})
 	}
 
 	h := &ConnectHandler{
@@ -366,7 +373,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 func (self *ConnectHandler) runH3() {
 	self.listenQuic(
-		443,
+		self.settings.ListenH3Port,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			return NewPpPacketConn(packetConn, DefaultWarpPpSettings()), nil
 		},
@@ -375,7 +382,7 @@ func (self *ConnectHandler) runH3() {
 
 func (self *ConnectHandler) runH3Dns() {
 	self.listenQuic(
-		53,
+		self.settings.ListenDnsPort,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			ptSettings := connect.DefaultPacketTranslationSettings()
 			// FIXME read from config
