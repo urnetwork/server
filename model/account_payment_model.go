@@ -343,13 +343,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// escrow ids -> payment id
 		escrowPaymentIds := map[EscrowId]server.Id{}
 
-		// networkId -> referralNetworkId
+		// networkId -> parent referralNetworkId
 		referralNetworks := map[server.Id]server.Id{}
 
 		// network_id -> list of child referral networks
 		networkReferrals := GetNetworkReferralsMap(ctx)
 
-		seekerHolderNetworkIds := getAllSeekerHolders(ctx)
+		seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
 		server.RaisePgResult(tx.Exec(
 			ctx,

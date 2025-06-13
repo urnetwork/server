@@ -139,8 +139,8 @@ func migration_20250402_ReferralCodeToAlphaNumeric(ctx context.Context) {
 		result, err := tx.Query(
 			ctx,
 			`
-        SELECT network_id FROM network_referral_code
-      `,
+	        SELECT network_id FROM network_referral_code
+			`,
 		)
 		networkIds := []Id{}
 		WithPgResult(result, err, func() {

@@ -100,7 +100,7 @@ func TestAccountWallet(t *testing.T) {
 		assert.Equal(t, accountWallets.Wallets[1].Blockchain, SOL.String())
 
 		// get all seeker holders
-		seekerHolders := getAllSeekerHolders(ctx)
+		seekerHolders := GetAllSeekerHolders(ctx)
 		assert.Equal(t, len(seekerHolders), 1)
 		assert.Equal(t, seekerHolders[networkId], true)
 

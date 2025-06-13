@@ -400,9 +400,9 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 			session.Ctx,
 			`
 				UPDATE account_wallet
-				SET 
+				SET
 						active = $1
-				WHERE 
+				WHERE
 						wallet_id = $2 AND
 						network_id = $3
 			`,
@@ -435,9 +435,9 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 			session.Ctx,
 			`
 				UPDATE account_wallet
-				SET 
+				SET
 					has_seeker_token = true
-				WHERE 
+				WHERE
 					wallet_address = $1 AND network_id = $2
 			`,
 			walletAddress,
@@ -489,7 +489,7 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 	return err
 }
 
-func getAllSeekerHolders(ctx context.Context) map[server.Id]bool {
+func GetAllSeekerHolders(ctx context.Context) map[server.Id]bool {
 	seekerHolders := map[server.Id]bool{}
 
 	server.Db(ctx, func(conn server.PgConn) {
