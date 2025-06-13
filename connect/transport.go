@@ -45,7 +45,9 @@ func init() {
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
-		MinPingTimeout:        platformTransportSettings.PingTimeout,
+		// use the min value from older version of the client
+		// `platformTransportSettings.PingTimeout`
+		MinPingTimeout:        1 * time.Second,
 		PingTrackerCount:      4,
 		WriteTimeout:          platformTransportSettings.WriteTimeout,
 		ReadTimeout:           platformTransportSettings.ReadTimeout,
