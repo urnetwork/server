@@ -23,3 +23,15 @@ func ValidateReferralCode(w http.ResponseWriter, r *http.Request) {
 func GetAccountPoints(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetAccountPoints, w, r)
 }
+
+func SetNetworkReferral(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SetNetworkReferral, w, r)
+}
+
+func GetReferralNetwork(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetReferralNetwork, w, r)
+}
+
+func UnlinkReferralNetwork(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.UnlinkReferralNetwork, w, r)
+}

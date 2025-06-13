@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"crypto/rand"
+	"strings"
 
 	"github.com/urnetwork/server"
 )
@@ -96,6 +97,8 @@ func GetNetworkIdByReferralCode(referralCode string) *server.Id {
 
 	var networkId *server.Id = nil
 
+	referralCode = strings.ToUpper(referralCode)
+
 	server.Tx(context.Background(), func(tx server.PgTx) {
 		result, err := tx.Query(
 			context.Background(),
@@ -123,6 +126,8 @@ func GetNetworkIdByReferralCode(referralCode string) *server.Id {
 func ValidateReferralCode(ctx context.Context, referralCode string) bool {
 
 	var exists bool
+
+	referralCode = strings.ToUpper(referralCode)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, err := tx.Query(

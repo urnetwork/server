@@ -361,7 +361,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
             SELECT
                 transfer_escrow_sweep.contract_id,
                 transfer_escrow_sweep.balance_id
-                
+
             FROM transfer_escrow_sweep
 
             LEFT JOIN account_payment ON
@@ -600,13 +600,31 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.Payout,
 				)
 
-				ApplyAccountPoints(ctx, payment.NetworkId, AccountPointEventPayout, scaledAccountPoints)
+				accountPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:     payment.NetworkId,
+					Event:         AccountPointEventPayout,
+					PointValue:    scaledAccountPoints,
+					PaymentPlanId: &payment.PaymentPlanId,
+				}
+
+				ApplyAccountPoints(
+					ctx,
+					accountPointsArgs,
+				)
 
 				if seekerHolderNetworkIds[payment.NetworkId] {
 					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
 					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
 					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
-					ApplyAccountPoints(ctx, payment.NetworkId, AccountPointSeekerPayoutBonus, seekerBonus)
+
+					accountPointsArgs = ApplyAccountPointsArgs{
+						NetworkId:     payment.NetworkId,
+						Event:         AccountPointEventPayoutMultiplier,
+						PointValue:    seekerBonus,
+						PaymentPlanId: &payment.PaymentPlanId,
+					}
+
+					ApplyAccountPoints(ctx, accountPointsArgs)
 				}
 
 				/**
@@ -616,12 +634,20 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 				if ok {
 					if parentReferralNetworkId != payment.NetworkId {
-						// todo: special event type for this?
 
 						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
 
 						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
-						ApplyAccountPoints(ctx, parentReferralNetworkId, AccountPointEventPayout, parentReferralPoints)
+
+						accountPointsArgs = ApplyAccountPointsArgs{
+							NetworkId:       parentReferralNetworkId,
+							Event:           AccountPointEventPayoutLinkedAccount,
+							PointValue:      parentReferralPoints,
+							PaymentPlanId:   &payment.PaymentPlanId,
+							LinkedNetworkId: &payment.NetworkId,
+						}
+
+						ApplyAccountPoints(ctx, accountPointsArgs)
 					}
 				}
 
@@ -634,6 +660,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					EnvSubsidyConfig().ReferralChildPayoutFraction,
 					payment.NetworkId,
 					networkReferrals,
+					payment.PaymentPlanId,
 				)
 
 				batch.Queue(
@@ -702,6 +729,7 @@ func payoutChildrenReferralNetworks(
 	payoutFraction float64,
 	networkId server.Id,
 	networkReferrals map[server.Id][]server.Id,
+	paymentPlanId server.Id,
 ) {
 
 	glog.Infof("[plan]payout referral network %s has %d referrals with fraction %f\n",
@@ -723,7 +751,15 @@ func payoutChildrenReferralNetworks(
 
 		glog.Infof("[plan]payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
 
-		err := ApplyAccountPoints(ctx, childNetworkId, AccountPointEventPayout, childPayoutAmount)
+		args := ApplyAccountPointsArgs{
+			NetworkId:       childNetworkId,
+			Event:           AccountPointEventPayoutLinkedAccount,
+			PointValue:      childPayoutAmount,
+			LinkedNetworkId: &networkId,
+			PaymentPlanId:   &paymentPlanId,
+		}
+
+		err := ApplyAccountPoints(ctx, args)
 		if err != nil {
 			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
 		}
@@ -735,6 +771,7 @@ func payoutChildrenReferralNetworks(
 			payoutFraction*0.5, // reduce the payout fraction for each level of referral
 			childNetworkId,
 			networkReferrals,
+			paymentPlanId,
 		)
 
 	}
@@ -883,7 +920,7 @@ func planSubsidyPaymentInTx(
 
         INNER JOIN transfer_contract ON
         	transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-    
+
         `,
 	)
 	server.WithPgResult(result, err, func() {
@@ -1315,7 +1352,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_wallet.wallet_id = account_payment.wallet_id
 
             WHERE
-                account_payment.network_id = $1 AND 
+                account_payment.network_id = $1 AND
                 canceled = false
         `,
 			session.ByJwt.NetworkId,
@@ -1384,13 +1421,13 @@ func GetTransferStats(
 			ctx,
 			`
 				SELECT
-					coalesce(SUM(CASE 
-							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count 
-							ELSE 0 
+					coalesce(SUM(CASE
+							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count
+							ELSE 0
 						END), 0) as paid_bytes_provided,
-					coalesce(SUM(CASE 
+					coalesce(SUM(CASE
 							WHEN account_payment.payment_id IS NULL OR account_payment.canceled = true THEN transfer_escrow_sweep.payout_byte_count
-							ELSE 0 
+							ELSE 0
 						END), 0) as unpaid_bytes_provided
 				FROM
 					transfer_escrow_sweep

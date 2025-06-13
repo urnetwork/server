@@ -13,30 +13,31 @@ type AccountPointEvent string
  * Point Events
  */
 const (
-	AccountPointEventReferral     AccountPointEvent = "referral"
-	AccountPointEventPayout       AccountPointEvent = "payout"
-	AccountPointSeekerPayoutBonus AccountPointEvent = "seeker_payout_bonus"
-)
-
-/**
- * Point Values
- */
-const (
-	AccountPointEventReferralValue = 10
+	AccountPointEventPayout              AccountPointEvent = "payout"
+	AccountPointEventPayoutLinkedAccount AccountPointEvent = "payout_linked_account"
+	AccountPointEventPayoutMultiplier    AccountPointEvent = "payout_multiplier"
 )
 
 type AccountPoint struct {
-	NetworkId  server.Id `json:"network_id"`
-	Event      string    `json:"event"`
-	PointValue int       `json:"point_value"`
-	CreateTime time.Time `json:"create_time"`
+	NetworkId       server.Id  `json:"network_id"`
+	Event           string     `json:"event"`
+	PointValue      int        `json:"point_value"`
+	PaymentPlanId   *server.Id `json:"payment_plan_id,omitempty"`
+	LinkedNetworkId *server.Id `json:"linked_network_id,omitempty"`
+	CreateTime      time.Time  `json:"create_time"`
+}
+
+type ApplyAccountPointsArgs struct {
+	NetworkId       server.Id
+	Event           AccountPointEvent
+	PointValue      NanoPoints
+	PaymentPlanId   *server.Id
+	LinkedNetworkId *server.Id
 }
 
 func ApplyAccountPoints(
 	ctx context.Context,
-	networkId server.Id,
-	event AccountPointEvent,
-	pointValue NanoPoints,
+	args ApplyAccountPointsArgs,
 ) error {
 	// Implement the logic to apply network points here
 	// This is a placeholder implementation
@@ -48,13 +49,17 @@ func ApplyAccountPoints(
 				INSERT INTO account_point (
 						network_id,
 						event,
-						point_value
+						point_value,
+						payment_plan_id,
+						linked_network_id
 				)
-				VALUES ($1, $2, $3)
+				VALUES ($1, $2, $3, $4, $5)
 			`,
-			networkId,
-			event,
-			pointValue,
+			args.NetworkId,
+			args.Event,
+			args.PointValue,
+			args.PaymentPlanId,
+			args.LinkedNetworkId,
 		))
 	})
 
@@ -71,10 +76,12 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 						network_id,
 						event,
 						point_value,
+						payment_plan_id,
+						linked_network_id,
 						create_time
-				FROM 
+				FROM
 						account_point
-				WHERE 
+				WHERE
 						network_id = $1
 			`,
 			networkId,
@@ -87,6 +94,8 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 					&accountPoint.NetworkId,
 					&accountPoint.Event,
 					&accountPoint.PointValue,
+					&accountPoint.PaymentPlanId,
+					&accountPoint.LinkedNetworkId,
 					&accountPoint.CreateTime,
 				))
 				accountPoints = append(accountPoints, accountPoint)

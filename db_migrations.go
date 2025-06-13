@@ -369,7 +369,7 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE search_value (
             realm varchar(16) NOT NULL,
-            value_id uuid NOT NULL, 
+            value_id uuid NOT NULL,
             value varchar(1024) NOT NULL,
             alias int NOT NULL DEFAULT 0,
 
@@ -505,7 +505,7 @@ var migrations = []any{
             ip_address varchar(64) NOT NULL,
             lookup_time timestamp NOT NULL DEFAULT now(),
             result_json text NOT NULL,
-            
+
             PRIMARY KEY (ip_address, lookup_time)
         )
     `),
@@ -701,9 +701,9 @@ var migrations = []any{
             contract_id uuid NOT NULL,
             balance_id uuid NOT NULL,
             balance_byte_count bigint NOT NULL,
-            
+
             escrow_date timestamp NOT NULL DEFAULT now(),
-            
+
             settled bool NOT NULL DEFAULT false,
             settle_time timestamp NULL,
             payout_byte_count bigint NULL,
@@ -820,7 +820,7 @@ var migrations = []any{
             token_type varchar(16) NULL,
             token_amount double precision NULL,
             payment_time timestamp NULL,
-            
+
             payment_receipt text NULL,
             completed bool NOT NULL DEFAULT false,
             complete_time timestamp NULL,
@@ -891,7 +891,7 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE search_value (
             realm varchar(32) NOT NULL,
-            value_id uuid NOT NULL, 
+            value_id uuid NOT NULL,
             value_variant int NOT NULL,
             value varchar(1024) NOT NULL,
             alias int NOT NULL DEFAULT 0,
@@ -1041,7 +1041,7 @@ var migrations = []any{
 
             network_id uuid NOT NULL,
             user_id uuid NOT NULL,
-            
+
             PRIMARY KEY (auth_session_id)
         )
     `),
@@ -1082,7 +1082,7 @@ var migrations = []any{
             service_user varchar(256) NOT NULL,
 
             PRIMARY KEY (privacy_agent_request_id)
-        ) 
+        )
     `),
 
 	// ALTERED create_time timestamp with time zone -> timestamp
@@ -1124,7 +1124,7 @@ var migrations = []any{
         CREATE TABLE latest_complete_privacy_policy (
             service_name varchar(256) NOT NULL,
             privacy_policy_id uuid NOT NULL,
-            
+
             PRIMARY KEY (service_name)
         )
     `),
@@ -1146,7 +1146,7 @@ var migrations = []any{
             device_name varchar(256) NOT NULL,
             device_spec varchar(64) NOT NULL,
             create_time timestamp with time zone NOT NULL DEFAULT now(),
-            
+
             PRIMARY KEY(device_id)
         )
     `),
@@ -1494,7 +1494,7 @@ var migrations = []any{
             payment_id uuid NOT NULL,
             event_type varchar(64) NOT NULL,
             event_details text NULL,
-    
+
             PRIMARY KEY (event_id)
         )
     `),
@@ -1514,9 +1514,9 @@ var migrations = []any{
             ADD COLUMN net_type_relay smallint NOT NULL DEFAULT 0,
             ADD COLUMN net_type_hosting smallint NOT NULL DEFAULT 0,
             ADD COLUMN net_type_score smallint GENERATED ALWAYS AS (
-                net_type_vpn + 
+                net_type_vpn +
                 net_type_proxy +
-                net_type_tor + 
+                net_type_tor +
                 net_type_relay +
                 net_type_hosting
             ) STORED
@@ -1710,23 +1710,23 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE UNIQUE INDEX network_user_wallet_address_unique ON network_user (wallet_address) 
+        CREATE UNIQUE INDEX network_user_wallet_address_unique ON network_user (wallet_address)
         WHERE wallet_address IS NOT NULL;
     `),
 
 	newSqlMigration(`
-        ALTER TABLE account_wallet 
-        ADD CONSTRAINT unique_network_wallet_address 
+        ALTER TABLE account_wallet
+        ADD CONSTRAINT unique_network_wallet_address
         UNIQUE (network_id, wallet_address);
     `),
 
 	newSqlMigration(`
-        ALTER TABLE account_wallet 
+        ALTER TABLE account_wallet
         ADD COLUMN has_seeker_token boolean NOT NULL DEFAULT false;
     `),
 
 	newSqlMigration(`
-        ALTER TABLE network 
+        ALTER TABLE network
         ADD COLUMN leaderboard_public boolean NOT NULL DEFAULT false;
     `),
 
@@ -1735,7 +1735,26 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        ALTER TABLE account_point
-        ALTER COLUMN point_value TYPE bigint
+		ALTER TABLE network_referral DROP CONSTRAINT network_referral_pkey;
+		ALTER TABLE network_referral ADD PRIMARY KEY (network_id);
+	`),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+                1 +
+                net_type_vpn +
+                net_type_proxy +
+                net_type_tor +
+                net_type_relay
+                - net_type_hosting
+            ) STORED
     `),
+
+	newSqlMigration(`
+		ALTER TABLE account_point
+	    ALTER COLUMN point_value TYPE bigint,
+	    ADD COLUMN payment_plan_id uuid NULL,
+	    ADD COLUMN linked_network_id uuid NULL;
+	`),
 }
