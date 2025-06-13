@@ -25,6 +25,9 @@ type SubsidyConfig struct {
 	MinPayoutUsd                              float64 `yaml:"min_payout_usd"`
 	ActiveUserByteCountThresholdHumanReadable string  `yaml:"active_user_byte_count_threshold"`
 	MaxPayoutUsdPerPaidUser                   float64 `yaml:"max_payout_usd_per_paid_user"`
+	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
+	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
+	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
 
 	MinWalletPayoutUsd float64 `yaml:"min_wallet_payout_usd"`
 
@@ -70,9 +73,10 @@ type AccountPayment struct {
 	NetworkId       server.Id  `json:"network_id"`
 	PayoutByteCount ByteCount  `json:"payout_byte_count"`
 	Payout          NanoCents  `json:"payout_nano_cents"`
-	SubsidyPayout   NanoCents  `json:"subsidy_payout_nano_cents"`
-	MinSweepTime    time.Time  `json:"min_sweep_time"`
-	CreateTime      time.Time  `json:"create_time"`
+	// AccountPoints   NanoPoints `json:"account_points"`
+	SubsidyPayout NanoCents `json:"subsidy_payout_nano_cents"`
+	MinSweepTime  time.Time `json:"min_sweep_time"`
+	CreateTime    time.Time `json:"create_time"`
 
 	PaymentRecord  *string    `json:"payment_record"`
 	TokenType      *string    `json:"token_type"`
@@ -318,6 +322,8 @@ type SubsidyPayment struct {
 	NetPayout                NanoCents
 }
 
+const SeekerHolderMultiplier = 2.0
+
 // plan, manually check out and add balance to funding account, then complete
 // minimum net_revenue_nano_cents to include in a payout
 // all of the returned payments are tagged with the same payment_plan_id
@@ -337,6 +343,14 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// escrow ids -> payment id
 		escrowPaymentIds := map[EscrowId]server.Id{}
 
+		// networkId -> parent referralNetworkId
+		referralNetworks := map[server.Id]server.Id{}
+
+		// network_id -> list of child referral networks
+		networkReferrals := GetNetworkReferralsMap(ctx)
+
+		seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -347,7 +361,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
             SELECT
                 transfer_escrow_sweep.contract_id,
                 transfer_escrow_sweep.balance_id
-                
+
             FROM transfer_escrow_sweep
 
             LEFT JOIN account_payment ON
@@ -362,26 +376,31 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		result, err := tx.Query(
 			ctx,
 			`
-            SELECT
-            	transfer_escrow_sweep.network_id,
-                transfer_escrow_sweep.contract_id,
-                transfer_escrow_sweep.balance_id,
-                transfer_escrow_sweep.payout_byte_count,
-                transfer_escrow_sweep.payout_net_revenue_nano_cents,
-                transfer_escrow_sweep.sweep_time
+				SELECT
+					transfer_escrow_sweep.network_id,
+					network_referral.referral_network_id,
+					transfer_escrow_sweep.contract_id,
+					transfer_escrow_sweep.balance_id,
+					transfer_escrow_sweep.payout_byte_count,
+					transfer_escrow_sweep.payout_net_revenue_nano_cents,
+					transfer_escrow_sweep.sweep_time
 
-            FROM transfer_escrow_sweep
+				FROM transfer_escrow_sweep
 
-            INNER JOIN temp_account_payment ON
-                temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
-                temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
+				LEFT JOIN network_referral
+          ON transfer_escrow_sweep.network_id = network_referral.network_id
 
-            FOR UPDATE
-            `,
+				INNER JOIN temp_account_payment ON
+						temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
+						temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
+
+				FOR UPDATE OF transfer_escrow_sweep
+      `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId server.Id
+				var referralNetworkId *server.Id
 				var contractId server.Id
 				var balanceId server.Id
 				var payoutByteCount ByteCount
@@ -390,6 +409,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				// var walletId *server.Id
 				server.Raise(result.Scan(
 					&networkId,
+					&referralNetworkId,
 					&contractId,
 					&balanceId,
 					&payoutByteCount,
@@ -397,6 +417,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					&sweepTime,
 					// &walletId,
 				))
+
+				/**
+				 * Assign the network referral, if a referring network exists
+				 */
+				if referralNetworkId != nil && *referralNetworkId != networkId {
+					referralNetworks[networkId] = *referralNetworkId
+				}
 
 				payment, ok := networkPayments[networkId]
 				if !ok {
@@ -427,6 +454,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				networkEscrowIds[networkId] = append(networkEscrowIds[networkId], &escrowId)
 			}
 		})
+
+		// log the network referral map
+		glog.Infof("[plan]network referrals count: %d\n", len(referralNetworks))
+		for networkId, referralNetworkId := range referralNetworks {
+			glog.Infof("[plan]network %s referred by %s\n", networkId, referralNetworkId)
+		}
 
 		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentPlanId, networkPayments)
 		if err != nil {
@@ -478,11 +511,19 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
 		networkIdsToRemove := []server.Id{}
+
+		totalPayout := NanoCents(0)
+
 		payoutExpirationTime := server.NowUtc().Add(-subsidyConfig.WalletPayoutTimeout())
 		for networkId, payment := range networkPayments {
 			// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
 			if payment.Payout < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
 				networkIdsToRemove = append(networkIdsToRemove, networkId)
+			} else {
+				// this payment will be included in the plan
+				// note that the `MinSweepTime` is not used for the subsidy payment,
+				// but it is used to determine the minimum sweep time for the payment
+				totalPayout += payment.Payout
 			}
 		}
 		removedSubsidyNetPayout := NanoCents(0)
@@ -516,29 +557,134 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			))
 		}
 
+		totalPayoutAccountNanoPoints := NanoPoints(0)
+
+		// get total points
+		for _, payment := range networkPayments {
+			totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+		}
+
+		// // this is the total number of points allocated per payout
+		// // should this factor in how frequent the payouts are?
+		// // todo: should be moved into config
+		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+
+		// pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints)) / 1_000_000
+		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
+		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
+			totalPayout,
+			totalPayoutAccountNanoPoints,
+			pointsScaleFactor,
+		)
+
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
+
+				// todo: this could be done in the batch update
+				// accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
+				// totalAccountPointsEarned := scaledAccountPoints
+
+				// if seekerHolderNetworkIds[payment.NetworkId] {
+				// 	totalAccountPointsEarned = scaledAccountPoints * SeekerHolderMultiplier
+				// }
+
+				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
+				// totalAccountPointsEarned := scaledAccountPoints
+
+				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
+				glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
+					payment.NetworkId,
+					scaledAccountPoints,
+					payment.Payout,
+				)
+
+				accountPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:     payment.NetworkId,
+					Event:         AccountPointEventPayout,
+					PointValue:    scaledAccountPoints,
+					PaymentPlanId: &payment.PaymentPlanId,
+				}
+
+				ApplyAccountPoints(
+					ctx,
+					accountPointsArgs,
+				)
+
+				if seekerHolderNetworkIds[payment.NetworkId] {
+					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
+					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
+
+					accountPointsArgs = ApplyAccountPointsArgs{
+						NetworkId:     payment.NetworkId,
+						Event:         AccountPointEventPayoutMultiplier,
+						PointValue:    seekerBonus,
+						PaymentPlanId: &payment.PaymentPlanId,
+					}
+
+					ApplyAccountPoints(ctx, accountPointsArgs)
+				}
+
+				/**
+				 * Apply bonus points to parent referral network
+				 */
+				parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
+
+				if ok {
+					if parentReferralNetworkId != payment.NetworkId {
+
+						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
+
+						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
+
+						accountPointsArgs = ApplyAccountPointsArgs{
+							NetworkId:       parentReferralNetworkId,
+							Event:           AccountPointEventPayoutLinkedAccount,
+							PointValue:      parentReferralPoints,
+							PaymentPlanId:   &payment.PaymentPlanId,
+							LinkedNetworkId: &payment.NetworkId,
+						}
+
+						ApplyAccountPoints(ctx, accountPointsArgs)
+					}
+				}
+
+				/**
+				 * Apply bonus points to child referral networks
+				 */
+				payoutChildrenReferralNetworks(
+					ctx,
+					scaledAccountPoints,
+					EnvSubsidyConfig().ReferralChildPayoutFraction,
+					payment.NetworkId,
+					networkReferrals,
+					payment.PaymentPlanId,
+				)
+
 				batch.Queue(
 					`
-                        INSERT INTO account_payment (
-                            payment_id,
-                            payment_plan_id,
-                            network_id,
-                            wallet_id,
-                            payout_byte_count,
-                            payout_nano_cents,
-                            subsidy_payout_nano_cents,
-                            min_sweep_time,
-                            create_time
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    `,
+							INSERT INTO account_payment (
+									payment_id,
+									payment_plan_id,
+									network_id,
+									wallet_id,
+									payout_byte_count,
+									payout_nano_cents,
+									subsidy_payout_nano_cents,
+									min_sweep_time,
+									create_time
+							)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+					`,
 					payment.PaymentId,
 					payment.PaymentPlanId,
 					payment.NetworkId,
 					payment.WalletId,
 					payment.PayoutByteCount,
 					payment.Payout,
+					// payment.AccountPoints,
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
@@ -575,6 +721,61 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	}, server.TxReadCommitted)
 
 	return
+}
+
+func payoutChildrenReferralNetworks(
+	ctx context.Context,
+	basePayoutAmount NanoPoints,
+	payoutFraction float64,
+	networkId server.Id,
+	networkReferrals map[server.Id][]server.Id,
+	paymentPlanId server.Id,
+) {
+
+	glog.Infof("[plan]payout referral network %s has %d referrals with fraction %f\n",
+		networkId,
+		len(networkReferrals[networkId]),
+		payoutFraction,
+	)
+
+	if len(networkReferrals[networkId]) == 0 {
+		return
+	}
+
+	childPayoutAmount := NanoPoints(float64(basePayoutAmount) * payoutFraction)
+	if childPayoutAmount <= 0 {
+		return
+	}
+
+	for _, childNetworkId := range networkReferrals[networkId] {
+
+		glog.Infof("[plan]payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
+
+		args := ApplyAccountPointsArgs{
+			NetworkId:       childNetworkId,
+			Event:           AccountPointEventPayoutLinkedAccount,
+			PointValue:      childPayoutAmount,
+			LinkedNetworkId: &networkId,
+			PaymentPlanId:   &paymentPlanId,
+		}
+
+		err := ApplyAccountPoints(ctx, args)
+		if err != nil {
+			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
+		}
+
+		// recursively payout to child referral networks
+		payoutChildrenReferralNetworks(
+			ctx,
+			basePayoutAmount,
+			payoutFraction*0.5, // reduce the payout fraction for each level of referral
+			childNetworkId,
+			networkReferrals,
+			paymentPlanId,
+		)
+
+	}
+
 }
 
 // this assumes the table `temp_account_payment` exists in the transaction
@@ -719,7 +920,7 @@ func planSubsidyPaymentInTx(
 
         INNER JOIN transfer_contract ON
         	transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-    
+
         `,
 	)
 	server.WithPgResult(result, err, func() {
@@ -1151,7 +1352,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_wallet.wallet_id = account_payment.wallet_id
 
             WHERE
-                account_payment.network_id = $1 AND 
+                account_payment.network_id = $1 AND
                 canceled = false
         `,
 			session.ByJwt.NetworkId,
@@ -1220,13 +1421,13 @@ func GetTransferStats(
 			ctx,
 			`
 				SELECT
-					coalesce(SUM(CASE 
-							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count 
-							ELSE 0 
+					coalesce(SUM(CASE
+							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count
+							ELSE 0
 						END), 0) as paid_bytes_provided,
-					coalesce(SUM(CASE 
+					coalesce(SUM(CASE
 							WHEN account_payment.payment_id IS NULL OR account_payment.canceled = true THEN transfer_escrow_sweep.payout_byte_count
-							ELSE 0 
+							ELSE 0
 						END), 0) as unpaid_bytes_provided
 				FROM
 					transfer_escrow_sweep

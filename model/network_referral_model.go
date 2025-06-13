@@ -174,3 +174,31 @@ func GetReferralsByReferralNetworkId(
 	return networkReferrals
 
 }
+
+// todo - testme
+func GetNetworkReferralsMap(
+	ctx context.Context,
+) map[server.Id][]server.Id {
+
+	networkReferrals := map[server.Id][]server.Id{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT network_id, referral_network_id FROM network_referral`,
+		)
+		if err != nil {
+			return
+		}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId, referralNetworkId server.Id
+				server.Raise(result.Scan(&networkId, &referralNetworkId))
+				networkReferrals[referralNetworkId] = append(networkReferrals[referralNetworkId], networkId)
+			}
+		})
+	})
+
+	return networkReferrals
+
+}

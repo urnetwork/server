@@ -141,6 +141,18 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
 
+type NanoPoints = int64
+
+func PointsToNanoPoints(points float64) NanoPoints {
+	// 1 point = 1_000_000 nano points
+	return NanoPoints(math.Round(float64(points) * 1_000_000))
+}
+
+func NanoPointsToPoints(nanoPoints NanoPoints) int64 {
+	// 1 point = 100 nano points
+	return int64(math.Round(float64(nanoPoints) / 1_000_000))
+}
+
 // 12 months
 const BalanceCodeDuration = 365 * 24 * time.Hour
 
@@ -1597,6 +1609,7 @@ func settleEscrowInTx(
 			payout := NanoCents(math.Round(
 				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
 			))
+
 			netPayout += payout
 			sweepPayouts[balanceId] = sweepPayout{
 				payoutByteCount: payoutByteCount,
@@ -1773,7 +1786,11 @@ type sweepPayout struct {
 
 // `server.ComplexValue`
 func (self *sweepPayout) Values() []any {
-	return []any{self.payoutByteCount, self.returnByteCount, self.payout}
+	return []any{
+		self.payoutByteCount,
+		self.returnByteCount,
+		self.payout,
+	}
 }
 
 func SetContractDispute(ctx context.Context, contractId server.Id, dispute bool) {

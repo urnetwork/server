@@ -63,6 +63,7 @@ Usage:
     bringyourctl task ls
     bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
+    bringyourctl account-points populate
 
 Options:
     -h --help     Show this screen.
@@ -187,6 +188,10 @@ Options:
 	} else if auth, _ := opts.Bool("auth"); auth {
 		if login, _ := opts.Bool("login"); login {
 			authLogin(opts)
+		}
+	} else if accountPoints, _ := opts.Bool("account-points"); accountPoints {
+		if populate, _ := opts.Bool("populate"); populate {
+			accountPointsPopulate(opts)
 		}
 	} else {
 		fmt.Println(usage)
@@ -825,4 +830,9 @@ func authLogin(opts docopt.Opts) {
 
 	fmt.Printf("RESULT: %+v\n", authCodeLoginResult)
 
+}
+
+func accountPointsPopulate(opts docopt.Opts) {
+	ctx := context.Background()
+	model.PopulateAccountPoints(ctx)
 }
