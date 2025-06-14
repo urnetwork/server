@@ -484,6 +484,14 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) error {
 		return err
 	}
 
+	// FIXME
+	/*
+		if self.apiHostNames[earlyConn.ConnectionState.TLS.ServerName] {
+			// pass off the stream to the internal api server
+			return self.apiServer.OfferAccept(stream)
+		}
+	*/
+
 	framer := connect.NewFramer(self.settings.FramerSettings)
 
 	stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
