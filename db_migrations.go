@@ -1750,4 +1750,12 @@ var migrations = []any{
                 - net_type_hosting
             ) STORED
     `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection__connected_client_id ON network_client_connection (connected, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX provide_key_provide_mode_client_id ON provide_key (provide_mode, client_id)
+    `),
 }

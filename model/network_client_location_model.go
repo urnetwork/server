@@ -1266,12 +1266,14 @@ func FindProviderLocations(
                 FROM network_client_location
 
                 INNER JOIN provide_key ON
-                    provide_key.client_id = network_client_location.client_id AND
-                    provide_key.provide_mode = $1
+                    provide_key.provide_mode = $1 AND
+                    provide_key.client_id = network_client_location.client_id
+                    
 
                 INNER JOIN network_client_connection ON
-                    network_client_connection.connection_id = network_client_location.connection_id AND
-                    network_client_connection.connected = true
+                    network_client_connection.connected = true AND
+                    network_client_connection.connection_id = network_client_location.connection_id
+                    
 
                 LEFT JOIN find_location_ids find_location_ids_city ON
                     find_location_ids_city.location_id = network_client_location.city_location_id
