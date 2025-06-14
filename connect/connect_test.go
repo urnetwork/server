@@ -112,13 +112,62 @@ func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
 // the nack object must align with the contract it was sent under
 // see the notes on how contracts work for acks in connect/transfer
 
-func TestConnect(t *testing.T) {
+func TestConnectH1(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
-		fmt.Printf("[progress]start TestConnect\n")
+		fmt.Printf("[progress]start TestConnect[h1]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
 				enableTransportReform: true,
 				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+			})
+	})
+}
+
+func TestConnectAuto(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect[auto]\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeAuto,
+			})
+	})
+}
+
+func TestConnectH3(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect[h3]\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
+			})
+	})
+}
+
+func TestConnectDns(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect[dns]\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3Dns,
+			})
+	})
+}
+
+func TestConnectDnsPump(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnect[dnspump]\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3DnsPump,
 			})
 	})
 }
@@ -145,14 +194,28 @@ func TestConnectWithAsymmetricContracts(t *testing.T) {
 	})
 }
 
-func TestConnectWithChaos(t *testing.T) {
+func TestConnectWithChaosH1(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
-		fmt.Printf("[progress]start TestConnectWithChaos\n")
+		fmt.Printf("[progress]start TestConnectWithChaos[h1]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
 				enableChaos:           true,
 				enableTransportReform: true,
 				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+			})
+	})
+}
+
+func TestConnectWithChaosH3(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaos[h3]\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
 			})
 	})
 }
@@ -316,6 +379,7 @@ type testConnectConfig struct {
 	enableTransportReform bool
 	enableNack            bool
 	enableNewInstance     bool
+	transportMode         connect.TransportMode
 }
 
 // this test that two clients can communicate via the connect server
@@ -332,6 +396,11 @@ func testConnect(
 		return
 	}
 
+	if config.transportMode == "" {
+		config.transportMode = connect.TransportModeH1
+	}
+	fmt.Printf("[transport mode]%s\n", config.transportMode)
+
 	type Message struct {
 		sourceId    connect.Id
 		frames      []*protocol.Frame
@@ -344,27 +413,41 @@ func testConnect(
 	receiveTimeout := 300 * time.Second
 
 	// larger values test the send queue and receive queue sizes
-	messageContentSizes := []ByteCount{
-		4 * 1024,
-		128 * 1024,
-		1024 * 1024,
-	}
-
-	transportCount := 6
-	burstM := 6
+	var messageContentSizes []ByteCount
+	transportCount := 1
+	burstM := 1
 	newInstanceM := 0
-	if config.enableNewInstance {
-		newInstanceM = 4
-	}
 	nackM := 0
-	if config.enableNack {
-		nackM = 6
-	}
 
 	nackDroppedByteCount := ByteCount(0)
 	pauseTimeout := 200 * time.Millisecond
 	sequenceIdleTimeout := 100 * time.Millisecond
 	minResendInterval := 10 * time.Millisecond
+
+	// switch config.transportMode {
+	// case connect.TransportModeH1, connect.TransportModeH3:
+	messageContentSizes = []ByteCount{
+		1024,
+		2048,
+		4 * 1024,
+		// 128 * 1024,
+		// 1024 * 1024,
+	}
+	transportCount = 6
+	burstM = 6
+	if config.enableNewInstance {
+		newInstanceM = 4
+	}
+	if config.enableNack {
+		nackM = 6
+	}
+	// default:
+	// 	messageContentSizes = []ByteCount{
+	// 		1024,
+	// 	}
+	// 	// sequenceIdleTimeout = 1 * time.Second
+	// 	// minResendInterval = 1 * time.Second
+	// }
 
 	// note the receiver idle timeout must be sufficiently large
 	// or else retransmits might be delivered multiple times
@@ -391,8 +474,19 @@ func testConnect(
 		routes[host] = "127.0.0.1"
 	}
 
+	// FIXME server quic tls to create a temp cert
+	// FIXME client tls to trust self signed cert
 	createServer := func(exchange *Exchange, port int) *http.Server {
-		connectHandler := NewConnectHandlerWithDefaults(ctx, server.NewId(), exchange)
+		fmt.Printf("create server :%d\n", port)
+		settings := DefaultConnectHandlerSettings()
+		// settings.EnableTlsSelfSign = true
+		settings.ListenH3Port = port + 443
+		settings.ListenDnsPort = port + 53
+		settings.EnableProxyProtocol = false
+		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		settings.TransportTlsSettings.EnableSelfSign = true
+		settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
@@ -414,7 +508,7 @@ func testConnect(
 	servers := map[string]*http.Server{}
 	for i := 0; i < 10; i += 1 {
 		host := fmt.Sprintf("host%d", i)
-		port := 8080 + 1
+		port := 8080 + i
 		hostPorts[host] = port
 
 		hostToServicePorts := map[int]int{
@@ -425,6 +519,7 @@ func testConnect(
 		settings.ExchangeBufferSize = 0
 		settings.ResidentIdleTimeout = sequenceIdleTimeout
 		settings.ForwardIdleTimeout = sequenceIdleTimeout
+		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
 		if config.enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.05
 		}
@@ -442,10 +537,10 @@ func testConnect(
 		go server.ListenAndServe()
 	}
 
-	randServer := func() string {
+	randServer := func() (string, int) {
 		ports := maps.Values(hostPorts)
 		port := ports[mathrand.Intn(len(ports))]
-		return fmt.Sprintf("ws://127.0.0.1:%d", port)
+		return fmt.Sprintf("ws://127.0.0.1:%d", port), port
 	}
 
 	maxMessageContentSize := ByteCount(0)
@@ -560,7 +655,21 @@ func testConnect(
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
+		host, port := randServer()
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.QuicTlsConfig.InsecureSkipVerify = true
+		settings.H3Port = port + 443
+		settings.DnsPort = port + 53
+		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		transportA := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			clientStrategyA,
+			clientA.RouteManager(),
+			host,
+			authA,
+			config.transportMode,
+			settings,
+		)
 		transportAs = append(transportAs, transportA)
 		// go transportA.Run(clientA.RouteManager())
 	}
@@ -576,7 +685,21 @@ func testConnect(
 
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
+		host, port := randServer()
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.QuicTlsConfig.InsecureSkipVerify = true
+		settings.H3Port = port + 443
+		settings.DnsPort = port + 53
+		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		transportB := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			clientStrategyB,
+			clientB.RouteManager(),
+			host,
+			authB,
+			config.transportMode,
+			settings,
+		)
 		transportBs = append(transportBs, transportB)
 		// go transportB.Run(clientB.RouteManager())
 	}
@@ -785,7 +908,21 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport a\n")
-						transportA := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyA, clientA.RouteManager(), randServer(), authA)
+						host, port := randServer()
+						settings := connect.DefaultPlatformTransportSettings()
+						settings.QuicTlsConfig.InsecureSkipVerify = true
+						settings.H3Port = port + 443
+						settings.DnsPort = port + 53
+						settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+						transportA := connect.NewPlatformTransportWithTargetMode(
+							ctx,
+							clientStrategyA,
+							clientA.RouteManager(),
+							host,
+							authA,
+							config.transportMode,
+							settings,
+						)
 						transportAs = append(transportAs, transportA)
 						// go transportA.Run(clientA.RouteManager())
 					}
@@ -798,7 +935,7 @@ func testConnect(
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
-						if i == burstSize/2 {
+						if 0 < i && i == burstSize/2 {
 							fmt.Printf("pause\n")
 							select {
 							case <-ctx.Done():
@@ -956,7 +1093,21 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport b\n")
-						transportB := connect.NewPlatformTransportWithDefaults(ctx, clientStrategyB, clientB.RouteManager(), randServer(), authB)
+						host, port := randServer()
+						settings := connect.DefaultPlatformTransportSettings()
+						settings.QuicTlsConfig.InsecureSkipVerify = true
+						settings.H3Port = port + 443
+						settings.DnsPort = port + 53
+						settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+						transportB := connect.NewPlatformTransportWithTargetMode(
+							ctx,
+							clientStrategyB,
+							clientB.RouteManager(),
+							host,
+							authB,
+							config.transportMode,
+							settings,
+						)
 						transportBs = append(transportBs, transportB)
 						// go transportB.Run(clientB.RouteManager())
 					}
@@ -969,7 +1120,7 @@ func testConnect(
 
 				go func() {
 					for i := 0; i < burstSize; i += 1 {
-						if i == burstSize/2 {
+						if 0 < i && i == burstSize/2 {
 							fmt.Printf("pause\n")
 							select {
 							case <-ctx.Done():

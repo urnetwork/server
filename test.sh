@@ -1,21 +1,18 @@
 #!/usr/bin/env zsh
 
-go clean -cache
-go clean -modcache
-
 for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
-    if [[ $1 == "" || $1 == `basename $d` ]]; then
+    # if [[ $1 == "" || $1 == `basename $d` ]]; then
         pushd $d
         # highlight source files in this dir
         match="/$(basename $(pwd))/\\S*\.go\|^\\S*_test.go"
         export WARP_ENV="local"
         export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"
         export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
-        go test -v -short | grep --color=always -e "^" -e "$match"
+        go test -v "$@" | grep --color=always -e "^" -e "$match"
         if [[ ${pipestatus[1]} != 0 ]]; then
             exit ${pipestatus[1]}
         fi
         popd
-    fi
+    # fi
 done
 # stdbuf -i0 -o0 -e0 
