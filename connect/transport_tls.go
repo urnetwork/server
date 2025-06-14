@@ -23,22 +23,36 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 
+	"github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 )
 
 // read tls host names from config
 // load keys for the host names
 
+func DefaultTransportTlsSettings() *TransportTlsSettings {
+	return &TransportTlsSettings{
+		EnableSelfSign: false,
+	}
+}
+
+type TransportTlsSettings struct {
+	EnableSelfSign  bool
+	DefaultHostName string
+}
+
 type TransportTls struct {
-	enableSelfSign bool
-	allowedHosts   map[string]bool
+	allowedHosts map[string]bool
+
+	settings *TransportTlsSettings
 
 	stateLock sync.Mutex
 
 	tlsConfigs map[string]*tls.Config
 }
 
-func NewTransportTlsFromConfig(enableSelfSign bool) (*TransportTls, error) {
+func NewTransportTlsFromConfig(settings *TransportTlsSettings) (*TransportTls, error) {
 	r, err := server.Config.SimpleResource("connect.yml")
 	if err != nil {
 		return nil, err
@@ -51,25 +65,30 @@ func NewTransportTlsFromConfig(enableSelfSign bool) (*TransportTls, error) {
 		allowedHosts[allowedHostAny.(string)] = true
 	}
 
-	return NewTransportTls(enableSelfSign, allowedHosts), nil
+	return NewTransportTls(allowedHosts, settings), nil
 }
 
-func NewTransportTls(enableSelfSign bool, allowedHosts map[string]bool) *TransportTls {
+func NewTransportTls(allowedHosts map[string]bool, settings *TransportTlsSettings) *TransportTls {
 	return &TransportTls{
-		enableSelfSign: enableSelfSign,
-		allowedHosts:   allowedHosts,
-		tlsConfigs:     map[string]*tls.Config{},
+		allowedHosts: allowedHosts,
+		tlsConfigs:   map[string]*tls.Config{},
+		settings:     settings,
 	}
 }
 
 func (self *TransportTls) GetTlsConfigForClient(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	hostName := clientHello.ServerName
+	if hostName == "" {
+		hostName = self.settings.DefaultHostName
+	}
 	return self.GetTlsConfig(hostName)
 }
 
 func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+
+	glog.V(2).Infof("[tls]try %s\n", hostName)
 
 	if tlsConfig, ok := self.tlsConfigs[hostName]; ok {
 		if tlsConfig == nil {
@@ -107,9 +126,12 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	}
 
 	if !self.allowedHosts[hostName] {
-		baseName := strings.SplitN(hostName, ".", 2)[1]
-		if !self.allowedHosts[fmt.Sprintf("*.%s", baseName)] {
-			if self.enableSelfSign {
+		baseName, ok := baseName(hostName)
+		if ok {
+			ok = self.allowedHosts[fmt.Sprintf("*.%s", baseName)]
+		}
+		if !ok {
+			if self.settings.EnableSelfSign {
 				return selfSigned()
 			} else {
 				return nil, fmt.Errorf("Server name \"%s\" not allowed.", hostName)
@@ -132,8 +154,8 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 		return
 	}
 
-	findWildcard := func() (certPath string, keyPath string, ok bool) {
-		baseName := strings.SplitN(hostName, ".", 2)[1]
+	findWildcard := func(baseName string) (certPath string, keyPath string, ok bool) {
+		// baseName := strings.SplitN(hostName, ".", 2)[1]
 
 		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/tls/star.%s/star.%s.crt", baseName, baseName))
 		if err != nil {
@@ -151,10 +173,12 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 
 	certPath, keyPath, ok := findExplicit()
 	if !ok {
-		certPath, keyPath, ok = findWildcard()
+		baseName, ok := baseName(hostName)
+		if ok {
+			certPath, keyPath, ok = findWildcard(baseName)
+		}
 		if !ok {
-
-			if self.enableSelfSign {
+			if self.settings.EnableSelfSign {
 				return selfSigned()
 			} else {
 				// add a missing entry to avoid future lookups
@@ -278,4 +302,16 @@ func selfSign(
 	keyPemBytes = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
 
 	return
+}
+
+func baseName(hostName string) (string, bool) {
+	glog.V(2).Infof("[tls]base name %s\n", hostName)
+	if net.ParseIP(hostName) != nil {
+		return "", false
+	}
+	parts := strings.SplitN(hostName, ".", 2)
+	if len(parts) < 2 {
+		return "", false
+	}
+	return parts[1], true
 }

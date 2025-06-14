@@ -12,7 +12,10 @@ func TestTransportTls(t *testing.T) {
 
 	// get various certs that should exist
 
-	transportTls, err := NewTransportTlsFromConfig(false)
+	settings := &TransportTlsSettings{
+		EnableSelfSign: false,
+	}
+	transportTls, err := NewTransportTlsFromConfig(settings)
 	assert.Equal(t, err, nil)
 
 	tlsConfig, err := transportTls.GetTlsConfig("ur.network")
@@ -39,7 +42,10 @@ func TestTransportTls(t *testing.T) {
 
 func TestTransportTlsSelfSign(t *testing.T) {
 
-	transportTls, err := NewTransportTlsFromConfig(true)
+	settings := &TransportTlsSettings{
+		EnableSelfSign: true,
+	}
+	transportTls, err := NewTransportTlsFromConfig(settings)
 	assert.Equal(t, err, nil)
 
 	tlsConfig, err := transportTls.GetTlsConfig("ur.network")
