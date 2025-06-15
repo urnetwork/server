@@ -795,6 +795,23 @@ func DeleteDisconnectedNetworkClients(ctx context.Context, timeout time.Duration
 			`,
 			server.NowUtc().Add(-timeout),
 		))
+
+		// clean up network_client_location
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_location
+			USING (
+			    SELECT
+			        network_client_location.connection_id
+			    FROM network_client_location
+			    LEFT JOIN network_client_connection ON
+			        network_client_connection.connection_id = network_client_location.connection_id
+			    WHERE network_client_connection.connection_id IS NULL
+			) t
+			WHERE network_client_location.connection_id = t.connection_id
+			`,
+		))
 	})
 }
 

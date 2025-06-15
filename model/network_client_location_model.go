@@ -1268,12 +1268,10 @@ func FindProviderLocations(
                 INNER JOIN provide_key ON
                     provide_key.provide_mode = $1 AND
                     provide_key.client_id = network_client_location.client_id
-                    
 
                 INNER JOIN network_client_connection ON
                     network_client_connection.connected = true AND
                     network_client_connection.connection_id = network_client_location.connection_id
-                    
 
                 LEFT JOIN find_location_ids find_location_ids_city ON
                     find_location_ids_city.location_id = network_client_location.city_location_id
@@ -1435,18 +1433,43 @@ func GetProviderLocations(
                 FROM network_client_location
 
                 INNER JOIN provide_key ON
-                    provide_key.client_id = network_client_location.client_id AND
-                    provide_key.provide_mode = $1
+                    provide_key.provide_mode = $1 AND
+                    provide_key.client_id = network_client_location.client_id
 
                 INNER JOIN network_client_connection ON
-                    network_client_connection.connection_id = network_client_location.connection_id AND
-                    network_client_connection.connected = true
+	                network_client_connection.connected = true AND
+                    network_client_connection.connection_id = network_client_location.connection_id
 
                 GROUP BY
                     network_client_location.city_location_id,
                     network_client_location.region_location_id,
                     network_client_location.country_location_id
             `,
+			// `
+			//     SELECT
+
+			// 	    COUNT(DISTINCT network_client_location.client_id) AS client_count,
+			// 	    network_client_location.city_location_id,
+			// 	    network_client_location.region_location_id,
+			// 	    network_client_location.country_location_id
+
+			// 	FROM network_client_connection
+
+			// 	INNER JOIN provide_key ON
+			// 	        provide_key.provide_mode = $1 AND
+			// 	        provide_key.client_id = network_client_connection.client_id
+
+			// 	INNER JOIN network_client_location ON
+			// 	    network_client_location.connection_id = network_client_connection.connection_id
+
+			// 	WHERE
+			// 	    network_client_connection.connected = true
+
+			// 	GROUP BY
+			// 	    network_client_location.city_location_id,
+			// 	    network_client_location.region_location_id,
+			// 	    network_client_location.country_location_id
+			// `,
 			ProvideModePublic,
 		)
 		providerCount := map[server.Id]int{}
@@ -1963,19 +1986,17 @@ func FindProviders2(
                 FROM network_client_location
 
                 INNER JOIN provide_key ON
-                    provide_key.client_id = network_client_location.client_id AND
-                    provide_key.provide_mode = $1
-
+	                provide_key.provide_mode = $1 AND
+                    provide_key.client_id = network_client_location.client_id
+                    
                 INNER JOIN network_client_connection ON
+                	network_client_connection.connected = true AND
                     network_client_connection.connection_id = network_client_location.connection_id
 
                 INNER JOIN temp_location_ids ON 
                     temp_location_ids.location_id = network_client_location.city_location_id OR
                     temp_location_ids.location_id = network_client_location.region_location_id OR
                     temp_location_ids.location_id = network_client_location.country_location_id
-
-                WHERE
-                    network_client_connection.connected = true
 
                 `,
 				ProvideModePublic,
@@ -2035,10 +2056,11 @@ func FindProviders2(
                     FROM network_client_location
 
                     INNER JOIN provide_key ON
-                        provide_key.client_id = network_client_location.client_id AND
-                        provide_key.provide_mode = $1
+                    	provide_key.provide_mode = $1 AND
+                        provide_key.client_id = network_client_location.client_id
 
                     INNER JOIN network_client_connection ON
+	                    network_client_connection.connected = true AND
                         network_client_connection.connection_id = network_client_location.connection_id
 
                     LEFT JOIN location_group_member location_group_member_city ON
@@ -2056,11 +2078,9 @@ func FindProviders2(
                         temp_location_group_ids.location_group_id = location_group_member_country.location_group_id
 
                     WHERE
-                        network_client_connection.connected = true AND (
-                            location_group_member_city.location_id IS NOT NULL OR
-                            location_group_member_region.location_id IS NOT NULL OR
-                            location_group_member_country.location_id IS NOT NULL
-                        )
+                        location_group_member_city.location_id IS NOT NULL OR
+                        location_group_member_region.location_id IS NOT NULL OR
+                        location_group_member_country.location_id IS NOT NULL
                 `,
 				ProvideModePublic,
 			)
@@ -2210,18 +2230,17 @@ func GetProvidersForLocation(ctx context.Context, locationId server.Id) []server
             FROM network_client_location
 
             INNER JOIN provide_key ON
-                provide_key.client_id = network_client_location.client_id AND
-                provide_key.provide_mode = $1
+	            provide_key.provide_mode = $1 AND
+                provide_key.client_id = network_client_location.client_id
 
             INNER JOIN network_client_connection ON
+	            network_client_connection.connected = true AND
                 network_client_connection.connection_id = network_client_location.connection_id
 
             WHERE
-                network_client_connection.connected = true AND (
-                    network_client_location.city_location_id = $2 OR
-                    network_client_location.region_location_id = $2 OR
-                    network_client_location.country_location_id = $2
-                )
+                network_client_location.city_location_id = $2 OR
+                network_client_location.region_location_id = $2 OR
+                network_client_location.country_location_id = $2
             `,
 			ProvideModePublic,
 			locationId,
@@ -2253,10 +2272,11 @@ func GetProvidersForLocationGroup(
                 FROM network_client_location
 
                 INNER JOIN provide_key ON
-                    provide_key.client_id = network_client_location.client_id AND
-                    provide_key.provide_mode = $1
+	                provide_key.provide_mode = $1 AND
+                    provide_key.client_id = network_client_location.client_id
 
                 INNER JOIN network_client_connection ON
+	                network_client_connection.connected = true AND
                     network_client_connection.connection_id = network_client_location.connection_id
 
                 LEFT JOIN location_group_member location_group_member_city ON
@@ -2272,11 +2292,9 @@ func GetProvidersForLocationGroup(
                     location_group_member_country.location_id = network_client_location.country_location_id
 
                 WHERE
-                    network_client_connection.connected = true AND (
-                        location_group_member_city.location_id IS NOT NULL OR
-                        location_group_member_region.location_id IS NOT NULL OR
-                        location_group_member_country.location_id IS NOT NULL
-                    )
+                    location_group_member_city.location_id IS NOT NULL OR
+                    location_group_member_region.location_id IS NOT NULL OR
+                    location_group_member_country.location_id IS NOT NULL
             `,
 			ProvideModePublic,
 			locationGroupId,

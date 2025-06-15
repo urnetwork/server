@@ -59,7 +59,7 @@ func ScheduleDeleteDisconnectedNetworkClients(clientSession *session.ClientSessi
 		&DeleteDisconnectedNetworkClientsArgs{},
 		clientSession,
 		task.RunOnce("delete_disconnected_network_clients"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
+		task.RunAt(time.Now().Add(15*time.Second)),
 	)
 }
 
