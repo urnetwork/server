@@ -1758,4 +1758,12 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX provide_key_provide_mode_client_id ON provide_key (provide_mode, client_id)
     `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_location_client_id ON network_client_location (client_id)
+    `),
+
+	newSqlMigration(`
+        ALTER INDEX network_client_connection__connected_client_id RENAME TO network_client_connection_connected_client_id
+    `),
 }
