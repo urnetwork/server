@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"os"
 	"syscall"
-	"time"
+	// "time"
 
 	"github.com/docopt/docopt-go"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/push"
+	// "github.com/prometheus/client_golang/prometheus"
+	// "github.com/prometheus/client_golang/prometheus/push"
 
 	"github.com/golang/glog"
 
