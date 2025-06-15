@@ -326,11 +326,13 @@ func (self *Exchange) NominateLocalResident(
 				}
 
 				pollResident := func() bool {
-					currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, clientId, instanceId)
-					if err != nil {
-						return false
-					}
-					return residentId == currentResidentId
+					return server.HandleErrorWithReturn(func() bool {
+						currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, clientId, instanceId)
+						if err != nil {
+							return false
+						}
+						return residentId == currentResidentId
+					})
 				}
 
 				if !pollResident() {
@@ -1102,11 +1104,13 @@ func (self *ResidentTransport) Run() {
 				c := func() {
 					// TODO the current test would be more efficient as a model notification instead of polling
 					handle(exchangeConnection, func() bool {
-						currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, self.clientId, self.instanceId)
-						if err != nil {
-							return false
-						}
-						return resident.ResidentId == currentResidentId
+						return server.HandleErrorWithReturn(func() bool {
+							currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, self.clientId, self.instanceId)
+							if err != nil {
+								return false
+							}
+							return resident.ResidentId == currentResidentId
+						})
 					})
 				}
 				if glog.V(2) {

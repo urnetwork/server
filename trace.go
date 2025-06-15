@@ -67,6 +67,13 @@ func HandleError(do func(), handlers ...any) (r any) {
 	return
 }
 
+func HandleErrorWithReturn[R any](do func() R) (result R) {
+	HandleError(func() {
+		result = do()
+	})
+	return
+}
+
 func ErrorJson(err any, stack []byte) string {
 	stackLines := []string{}
 	for _, line := range strings.Split(string(stack), "\n") {
