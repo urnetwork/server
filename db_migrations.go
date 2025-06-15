@@ -1766,4 +1766,22 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER INDEX network_client_connection__connected_client_id RENAME TO network_client_connection_connected_client_id
     `),
+
+	// for some reason this index is not in the main db
+	// there might have been a bad migration at some point in the past
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_admin_user_id
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_admin_user_id ON network (admin_user_id, network_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX account_payment_network_id_canceled ON account_payment (network_id, canceled)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_connected_connection_id ON network_client_connection (connected, connection_id)
+    `),
 }
