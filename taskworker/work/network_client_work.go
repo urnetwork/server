@@ -68,7 +68,7 @@ func DeleteDisconnectedNetworkClients(
 	clientSession *session.ClientSession,
 ) (*DeleteDisconnectedNetworkClientsResult, error) {
 	// keep disconnected records around for a little while to help debug
-	model.DeleteDisconnectedNetworkClients(clientSession.Ctx, 24*time.Hour)
+	model.DeleteDisconnectedNetworkClients(clientSession.Ctx, 5*time.Minute)
 	return &DeleteDisconnectedNetworkClientsResult{}, nil
 }
 
