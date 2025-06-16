@@ -50,7 +50,9 @@ const BlockSizeSeconds = 300
 
 var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second
-var RescheduleTimeout = 60 * time.Second
+
+// the reschedule time is uniformly chosen on [0, t] so the expected mean will be t/2
+var RescheduleTimeout = 2 * BlockSizeSeconds * time.Second
 
 type TaskPriority = int
 
@@ -107,10 +109,11 @@ func ScheduleTask[T any, R any](
 	args T,
 	clientSession *session.ClientSession,
 	opts ...any,
-) {
+) (taskId server.Id) {
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
+		taskId = ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
 	})
+	return
 }
 
 func ScheduleTaskInTx[T any, R any](
@@ -119,7 +122,7 @@ func ScheduleTaskInTx[T any, R any](
 	args T,
 	clientSession *session.ClientSession,
 	opts ...any,
-) {
+) (taskId server.Id) {
 	taskTarget := NewTaskTarget(taskFunction)
 
 	argsJson, err := json.Marshal(args)
@@ -178,7 +181,7 @@ func ScheduleTaskInTx[T any, R any](
 
 	claimTime := time.Time{}
 
-	taskId := server.NewId()
+	taskId = server.NewId()
 
 	server.RaisePgResult(tx.Exec(
 		clientSession.Ctx,
@@ -212,6 +215,7 @@ func ScheduleTaskInTx[T any, R any](
 		maxTimeSeconds,
 		claimTime,
 	))
+	return
 }
 
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
@@ -987,13 +991,13 @@ func (self *TaskWorker) EvalTasks(n int) (
 		return
 	}
 
+	evalCtx, evalCancel := context.WithCancel(self.ctx)
+	defer evalCancel()
+
 	for _, task := range tasks {
 		// update legacy function names
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
-
-	taskCtx, taskCancel := context.WithCancel(self.ctx)
-	defer taskCancel()
 
 	type Finished struct {
 		runStartTime time.Time
@@ -1006,18 +1010,37 @@ func (self *TaskWorker) EvalTasks(n int) (
 	rescheduledTasks := map[server.Id]error{}
 	postRescheduledTasks := map[server.Id]error{}
 
+	taskCtx, taskCancel := context.WithCancel(evalCtx)
+
 	go func() {
 		defer taskCancel()
+
 		for _, task := range tasks {
 			if target, ok := self.targets[task.FunctionName]; ok {
-				glog.Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
+				glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
 				runStartTime := server.NowUtc()
-				result, runPost, err := target.Run(self.ctx, task)
+				var result any
+				var runPost func(server.PgTx) error
+				var err error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
+							switch v := r.(type) {
+							case error:
+								err = v
+							default:
+								err = fmt.Errorf("%s", r)
+							}
+						}
+					}()
+					result, runPost, err = target.Run(evalCtx, task)
+				}()
 				runEndTime := server.NowUtc()
 				elapsedSeconds := float32(runEndTime.Sub(runStartTime)/time.Millisecond) / 1000
 				if err == nil {
 					if resultJson, err := json.Marshal(result); err == nil {
-						glog.Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, string(resultJson))
+						glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, string(resultJson))
 						finishedTasks[task.TaskId] = &Finished{
 							runStartTime: runStartTime,
 							runEndTime:   runEndTime,
@@ -1041,23 +1064,28 @@ func (self *TaskWorker) EvalTasks(n int) (
 		}
 	}()
 
-	wait := func() {
+	func() {
 		defer taskCancel()
+
 		startTime := time.Now()
 		for {
 			select {
 			case <-taskCtx.Done():
 				return
 			case <-time.After(ReleaseTimeout / 3):
+				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
+				if 10 <= elapsedSeconds {
+					for _, task := range tasks {
+						glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson)
+					}
+				}
+
 				server.Tx(self.ctx, func(tx server.PgTx) {
 					server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
 						claimTime := server.NowUtc()
 						releaseTime := claimTime.Add(ReleaseTimeout)
 
-						elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
-
 						for _, task := range tasks {
-							glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson)
 							batch.Queue(
 								`
 									UPDATE pending_task
@@ -1075,8 +1103,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				})
 			}
 		}
-	}
-	wait()
+	}()
 
 	for _, task := range tasks {
 		_, rescheduled := rescheduledTasks[task.TaskId]
@@ -1148,6 +1175,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 			for taskId, err := range rescheduledTasks {
 				now := server.NowUtc()
+				rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
 				batch.Queue(
 					`
 						UPDATE pending_task
@@ -1159,7 +1187,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					`,
 					taskId,
 					err.Error(),
-					now.Add(RescheduleTimeout),
+					rescheduleTime,
 					now,
 				)
 			}
@@ -1187,6 +1215,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				// re-run the post
 				func() {
 					now := server.NowUtc()
+					rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
 					task := tasks[taskId]
 					clientSession, err := task.ClientSession(self.ctx)
 					if err != nil {
@@ -1198,7 +1227,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 						self.RunPost,
 						&RunPostArgs{TaskId: taskId},
 						clientSession,
-						RunAt(now.Add(RescheduleTimeout)),
+						RunAt(rescheduleTime),
 					)
 				}()
 			}
