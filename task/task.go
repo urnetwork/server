@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -46,7 +48,7 @@ import (
 // IMPORTANT: if you change this number, you must also change the schema
 const BlockSizeSeconds = 300
 
-var DefaultMaxTime = 10 * time.Minute
+var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second
 var RescheduleTimeout = 60 * time.Second
 
@@ -800,6 +802,13 @@ func (self *TaskTarget[T, R]) RunPost(
 	return
 }
 
+type RunPostArgs struct {
+	TaskId server.Id `json:"task_id"`
+}
+
+type RunPostResult struct {
+}
+
 type TaskWorker struct {
 	ctx     context.Context
 	targets map[string]Target
@@ -825,13 +834,6 @@ func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 			self.targets[alternateFunctionNames] = taskTarget
 		}
 	}
-}
-
-type RunPostArgs struct {
-	TaskId server.Id `json:"task_id"`
-}
-
-type RunPostResult struct {
 }
 
 // runs the post function for a finished taskId
@@ -903,41 +905,17 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		result, err := tx.Query(
 			self.ctx,
 			`
-				SELECT
-					task_id,
-					run_priority
-				FROM (
-				    SELECT
-				    	task_id,
-				    	run_priority
-				    FROM pending_task
-				    WHERE
-				        run_at_block < $2 AND
-				        run_at <= $1 AND
-				        release_time <= $1
-				    ORDER BY run_at_block ASC, run_priority ASC
-				    LIMIT $3
-				    FOR UPDATE SKIP LOCKED
-				) a
-
-				UNION ALL
-
-				SELECT
-					b.task_id,
-					b.run_priority
-				FROM (
-				    SELECT
-				    	task_id,
-				    	run_priority
-				    FROM pending_task
-				    WHERE
-				        run_at_block = $2 AND
-				        run_at <= $1 AND
-				        release_time <= $1
-				    ORDER BY run_priority ASC
-				    LIMIT $3
-				    FOR UPDATE SKIP LOCKED
-				) b
+			    SELECT
+			    	task_id,
+			    	run_priority
+			    FROM pending_task
+			    WHERE
+			        run_at_block <= $2 AND
+			        run_at <= $1 AND
+			        release_time <= $1
+			    ORDER BY run_at_block DESC, run_priority ASC
+			    LIMIT $3
+			    FOR UPDATE SKIP LOCKED
 		    `,
 			now,
 			nowBlock,
@@ -1001,7 +979,6 @@ func (self *TaskWorker) EvalTasks(n int) (
 	returnErr error,
 ) {
 	tasks, err := self.takeTasks(n)
-
 	if err != nil {
 		returnErr = err
 		return
@@ -1015,7 +992,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
 
-	done := make(chan struct{})
+	taskCtx, taskCancel := context.WithCancel(self.ctx)
+	defer taskCancel()
 
 	type Finished struct {
 		runStartTime time.Time
@@ -1029,13 +1007,17 @@ func (self *TaskWorker) EvalTasks(n int) (
 	postRescheduledTasks := map[server.Id]error{}
 
 	go func() {
-		defer close(done)
+		defer taskCancel()
 		for _, task := range tasks {
 			if target, ok := self.targets[task.FunctionName]; ok {
+				glog.Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
 				runStartTime := server.NowUtc()
-				if result, runPost, err := target.Run(self.ctx, task); err == nil {
-					runEndTime := server.NowUtc()
+				result, runPost, err := target.Run(self.ctx, task)
+				runEndTime := server.NowUtc()
+				elapsedSeconds := float32(runEndTime.Sub(runStartTime)/time.Millisecond) / 1000
+				if err == nil {
 					if resultJson, err := json.Marshal(result); err == nil {
+						glog.Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, string(resultJson))
 						finishedTasks[task.TaskId] = &Finished{
 							runStartTime: runStartTime,
 							runEndTime:   runEndTime,
@@ -1044,46 +1026,57 @@ func (self *TaskWorker) EvalTasks(n int) (
 						}
 					} else {
 						// error with converting result to json
+						glog.Infof("[%s]eval save error(%.2fs) (reschedule) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, err)
 						rescheduledTasks[task.TaskId] = err
 					}
 				} else {
+					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, err)
 					rescheduledTasks[task.TaskId] = err
 				}
 			} else {
-				rescheduledTasks[task.TaskId] = fmt.Errorf("Target not found (%s).", task.FunctionName)
+				err := fmt.Errorf("Target not found (%s).", task.FunctionName)
+				glog.Infof("[%s]eval not found (reschedule) %s(%s) = %s\n", task.TaskId, task.FunctionName, task.ArgsJson, err)
+				rescheduledTasks[task.TaskId] = err
 			}
 		}
 	}()
 
-Wait:
-	for {
-		select {
-		case <-done:
-			break Wait
-		case <-time.After(ReleaseTimeout / 3):
-			server.Tx(self.ctx, func(tx server.PgTx) {
-				server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
-					claimTime := server.NowUtc()
-					releaseTime := claimTime.Add(ReleaseTimeout)
+	wait := func() {
+		defer taskCancel()
+		startTime := time.Now()
+		for {
+			select {
+			case <-taskCtx.Done():
+				return
+			case <-time.After(ReleaseTimeout / 3):
+				server.Tx(self.ctx, func(tx server.PgTx) {
+					server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
+						claimTime := server.NowUtc()
+						releaseTime := claimTime.Add(ReleaseTimeout)
 
-					for _, task := range tasks {
-						batch.Queue(
-							`
-								UPDATE pending_task
-								SET
-									claim_time = $2,
-									release_time = $3
-								WHERE task_id = $1
-							`,
-							task.TaskId,
-							claimTime,
-							releaseTime,
-						)
-					}
+						elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
+
+						for _, task := range tasks {
+							glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson)
+							batch.Queue(
+								`
+									UPDATE pending_task
+									SET
+										claim_time = $2,
+										release_time = $3
+									WHERE task_id = $1
+								`,
+								task.TaskId,
+								claimTime,
+								releaseTime,
+							)
+						}
+					})
 				})
-			})
+			}
 		}
 	}
+	wait()
 
 	for _, task := range tasks {
 		_, rescheduled := rescheduledTasks[task.TaskId]

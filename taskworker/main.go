@@ -21,7 +21,7 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-const RemoveTaskTimeout = 90 * 24 * time.Hour
+const RemoveTaskTimeout = 15 * 24 * time.Hour
 const RetryTimeoutAfterError = 30 * time.Second
 const PollTimeout = 1 * time.Second
 
@@ -194,6 +194,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 }
 
 func evalTasks(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) {
+	emptyCount := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,11 +211,17 @@ func evalTasks(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) 
 			case <-time.After(RetryTimeoutAfterError):
 			}
 		} else if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 {
+			emptyCount += 1
+			if emptyCount%30 == 0 {
+				glog.Infof("[taskworker]take(0)\n")
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(PollTimeout):
 			}
+		} else {
+			emptyCount = 0
 		}
 	}
 }
