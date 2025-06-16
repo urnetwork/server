@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -15,6 +17,9 @@ func GetNetworkReferralCode(
 ) (*NetworkReferralResult, error) {
 
 	res := model.GetNetworkReferralCode(session.Ctx, session.ByJwt.NetworkId)
+	if res == nil {
+		return nil, fmt.Errorf("Missing referral code.")
+	}
 
 	networkReferralsResult := model.GetReferralsByReferralNetworkId(session.Ctx, session.ByJwt.NetworkId)
 
