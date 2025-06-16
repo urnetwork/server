@@ -1420,82 +1420,43 @@ func GetProviderLocations(
 	locationResults := map[server.Id]*LocationResult{}
 	locationGroupResults := map[server.Id]*LocationGroupResult{}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			session.Ctx,
 			`
-                SELECT
-                    COUNT(DISTINCT network_client_location.client_id) AS client_count,
-                    network_client_location.city_location_id,
-                    network_client_location.region_location_id,
-                    network_client_location.country_location_id
-
-                FROM network_client_location
-
-                INNER JOIN provide_key ON
-                    provide_key.provide_mode = $1 AND
-                    provide_key.client_id = network_client_location.client_id
-
-                INNER JOIN network_client_connection ON
-	                network_client_connection.connected = true AND
-                    network_client_connection.connection_id = network_client_location.connection_id
-
-                GROUP BY
-                    network_client_location.city_location_id,
-                    network_client_location.region_location_id,
-                    network_client_location.country_location_id
-            `,
-			ProvideModePublic,
-		)
-		providerCount := map[server.Id]int{}
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientCount int
-				var cityLocationId *server.Id
-				var regionLocationId *server.Id
-				var countryLocationId *server.Id
-
-				server.Raise(result.Scan(
-					&clientCount,
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
-				))
-
-				if cityLocationId != nil {
-					providerCount[*cityLocationId] += clientCount
-				}
-				if regionLocationId != nil {
-					providerCount[*regionLocationId] += clientCount
-				}
-				if countryLocationId != nil {
-					providerCount[*countryLocationId] += clientCount
-				}
-			}
-		})
-
-		server.CreateTempJoinTableInTx(
-			session.Ctx,
-			tx,
-			"result_location_ids(location_id uuid -> client_count int)",
-			providerCount,
-		)
-		result, err = tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    location.location_id,
+            	SELECT
+					location.location_id,
                     location.location_type,
                     location.location_name,
                     location.city_location_id,
                     location.region_location_id,
                     location.country_location_id,
                     location.country_code,
-                    result_location_ids.client_count
-                FROM location
-                INNER JOIN result_location_ids ON
-                    result_location_ids.location_id = location.location_id
-            `,
+                    t.client_count
+
+				FROM (
+	                SELECT
+	                    network_client_location.country_location_id AS location_id,
+	                    COUNT(DISTINCT network_client_connection.client_id) AS client_count
+
+	                FROM network_client_connection
+
+	                INNER JOIN provide_key ON
+	                    provide_key.provide_mode = $1 AND
+	                    provide_key.client_id = network_client_connection.client_id
+
+	                INNER JOIN network_client_location ON
+	                    network_client_location.connection_id = network_client_connection.connection_id
+
+                    WHERE
+                        network_client_connection.connected = true
+	                GROUP BY
+	                    network_client_location.country_location_id
+	            ) t
+
+	            INNER JOIN location ON location.location_id = t.location_id
+	        `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1514,24 +1475,14 @@ func GetProviderLocations(
 			}
 		})
 
-		result, err = tx.Query(
+		result, err = conn.Query(
 			session.Ctx,
 			`
                 SELECT
                     location_group.location_group_id,
                     location_group.location_group_name,
-                    location_group.promoted,
-                    t.client_count
+                    location_group.promoted
                 FROM location_group
-                INNER JOIN (
-                    SELECT
-                        location_group_member.location_group_id,
-                        SUM(result_location_ids.client_count) AS client_count
-                    FROM location_group_member
-                    INNER JOIN result_location_ids ON
-                        result_location_ids.location_id = location_group_member.location_id
-                    GROUP BY location_group_member.location_group_id
-                ) t ON t.location_group_id = location_group.location_group_id
             `,
 		)
 		server.WithPgResult(result, err, func() {
@@ -1541,7 +1492,7 @@ func GetProviderLocations(
 					&locationGroupResult.LocationGroupId,
 					&locationGroupResult.Name,
 					&locationGroupResult.Promoted,
-					&locationGroupResult.ProviderCount,
+					// &locationGroupResult.ProviderCount,
 				))
 				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
 			}
