@@ -24,7 +24,9 @@ func IsDoneError(r any) bool {
 		case "Done", "Done.":
 			return true
 		// pgx
-		case "context canceled", "timeout: context already done: context canceled":
+		case "context canceled",
+			"timeout: context already done: context canceled",
+			"failed to deallocate cached statement(s): conn closed":
 			return true
 		default:
 			return false
