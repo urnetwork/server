@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
+	// "os"
 	"strings"
 	"time"
 
@@ -45,7 +45,10 @@ func init() {
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 	platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
-		PingTimeout:           platformTransportSettings.PingTimeout,
+		// use the min value from older version of the client
+		// `platformTransportSettings.PingTimeout`
+		MinPingTimeout:        1 * time.Second,
+		PingTrackerCount:      4,
 		WriteTimeout:          platformTransportSettings.WriteTimeout,
 		ReadTimeout:           platformTransportSettings.ReadTimeout,
 		SyncConnectionTimeout: 60 * time.Second,
@@ -58,17 +61,29 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 		QuicConnectTimeout:   2 * time.Second,
 		QuicHandshakeTimeout: 2 * time.Second,
+
+		ListenH3Port:         443,
+		ListenDnsPort:        53,
+		EnableProxyProtocol:  true,
+		FramerSettings:       connect.DefaultFramerSettings(),
+		TransportTlsSettings: DefaultTransportTlsSettings(),
 	}
 }
 
 type ConnectHandlerSettings struct {
-	PingTimeout                     time.Duration
+	MinPingTimeout                  time.Duration
+	PingTrackerCount                int
 	WriteTimeout                    time.Duration
 	ReadTimeout                     time.Duration
 	SyncConnectionTimeout           time.Duration
 	MaximumExchangeMessageByteCount ByteCount
 	QuicConnectTimeout              time.Duration
 	QuicHandshakeTimeout            time.Duration
+	ListenH3Port                    int
+	ListenDnsPort                   int
+	EnableProxyProtocol             bool
+	FramerSettings                  *connect.FramerSettings
+	TransportTlsSettings            *TransportTlsSettings
 }
 
 type ConnectHandler struct {
@@ -77,6 +92,8 @@ type ConnectHandler struct {
 	handlerId server.Id
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
+
+	transportTls *TransportTls
 }
 
 func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
@@ -86,12 +103,19 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	transportTls, err := NewTransportTlsFromConfig(settings.TransportTlsSettings)
+	if err != nil {
+		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
+		transportTls = NewTransportTls(map[string]bool{}, DefaultTransportTlsSettings())
+	}
+
 	h := &ConnectHandler{
-		ctx:       cancelCtx,
-		cancel:    cancel,
-		handlerId: handlerId,
-		exchange:  exchange,
-		settings:  settings,
+		ctx:          cancelCtx,
+		cancel:       cancel,
+		handlerId:    handlerId,
+		exchange:     exchange,
+		settings:     settings,
+		transportTls: transportTls,
 	}
 
 	go h.run()
@@ -114,6 +138,35 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
 
+	// attemp to parse the auth message from the header
+	// if that fails, expect the auth message as the first message
+	auth := func() *protocol.Auth {
+		glog.V(2).Infof("[c]header: %v\n", r.Header)
+
+		headerAuth := r.Header.Get("Authorization")
+		headerAppVersion := r.Header.Get("X-UR-AppVersion")
+		headerInstanceId := r.Header.Get("X-UR-InstanceId")
+
+		bearerPrefix := "Bearer "
+
+		if strings.HasPrefix(headerAuth, bearerPrefix) {
+			jwt := headerAuth[len(bearerPrefix):]
+
+			instanceId, err := server.ParseId(headerInstanceId)
+			if err == nil {
+				return &protocol.Auth{
+					ByJwt:      jwt,
+					InstanceId: instanceId.Bytes(),
+					AppVersion: headerAppVersion,
+				}
+			} else {
+				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
+			}
+		}
+
+		return nil
+	}()
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
@@ -130,31 +183,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// enforce the message size limit on messages in
 	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
-
-	// attemp to parse the auth message from the header
-	// if that fails, expect the auth message as the first message
-	auth := func() *protocol.Auth {
-		headerAuth := r.Header.Get("Authorization")
-		headerAppVersion := r.Header.Get("X-UR-AppVersion")
-		headerInstanceId := r.Header.Get("X-UR-InstanceId")
-
-		bearerPrefix := "Bearer "
-
-		if strings.HasPrefix(headerAuth, bearerPrefix) {
-			jwt := headerAuth[len(bearerPrefix):]
-
-			instanceId, err := server.ParseId(headerInstanceId)
-			if err != nil {
-				return &protocol.Auth{
-					ByJwt:      jwt,
-					InstanceId: instanceId.Bytes(),
-					AppVersion: headerAppVersion,
-				}
-			}
-		}
-
-		return nil
-	}()
 
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
@@ -225,7 +253,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	c := func() {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
-		defer model.DisconnectNetworkClient(self.ctx, connectionId)
+		defer server.HandleError(func() {
+			model.DisconnectNetworkClient(self.ctx, connectionId)
+		})
 
 		go server.HandleError(func() {
 			// disconnect the client if the model marks the connection closed
@@ -257,6 +287,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// close is done in the write
 		}()
 
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+
 		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
@@ -274,8 +306,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case websocket.BinaryMessage:
 					if 0 == len(message) {
 						// ping
+						pingTracker.ReceivePing()
 						continue
 					}
+
+					pingTracker.Receive()
 
 					select {
 					case <-handleCtx.Done():
@@ -310,8 +345,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						// note that for websocket a deadline timeout cannot be recovered
 						return
 					}
-					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
-				case <-time.After(self.settings.PingTimeout):
+					glog.V(2).Infof("[ts] ->%s\n", clientId.String())
+				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					if err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0)); err != nil {
 						// note that for websocket a dealine timeout cannot be recovered
@@ -330,7 +365,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	if glog.V(2) {
 		server.Trace(
-			fmt.Sprintf("[rt]connect %s", clientId.String()),
+			fmt.Sprintf("[t]connect %s", clientId.String()),
 			c,
 		)
 	} else {
@@ -344,24 +379,30 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 func (self *ConnectHandler) runH3() {
 	self.listenQuic(
-		443,
+		self.settings.ListenH3Port,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
-			return NewPpPacketConn(packetConn, DefaultWarpPpSettings()), nil
+			if self.settings.EnableProxyProtocol {
+				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+			}
+			return packetConn, nil
 		},
 	)
 }
 
 func (self *ConnectHandler) runH3Dns() {
 	self.listenQuic(
-		53,
+		self.settings.ListenDnsPort,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
+			if self.settings.EnableProxyProtocol {
+				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+			}
 			ptSettings := connect.DefaultPacketTranslationSettings()
 			// FIXME read from config
-			ptSettings.DnsTlds = [][]byte{}
+			ptSettings.DnsTlds = [][]byte{[]byte("ur.xyz.")}
 			return connect.NewPacketTranslation(
 				self.ctx,
 				connect.PacketTranslationModeDecode53,
-				NewPpPacketConn(packetConn, DefaultWarpPpSettings()),
+				packetConn,
 				ptSettings,
 			)
 		},
@@ -375,7 +416,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
-		MaxIdleTimeout:       self.settings.PingTimeout * 2,
+		MaxIdleTimeout:       self.settings.MinPingTimeout * 2,
 		KeepAlivePeriod:      0,
 		Allow0RTT:            true,
 	}
@@ -387,35 +428,10 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	// clientConfigs := map[string]*clientConfig{}
 
 	tlsConfig := &tls.Config{
-		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			// FIXME apply white list
-
-			certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.crt", clientHello.ServerName, clientHello.ServerName))
-			if err != nil {
-				return nil, err
-			}
-			keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/%s/%s.key", clientHello.ServerName, clientHello.ServerName))
-			if err != nil {
-				return nil, err
-			}
-
-			certPemBytes, err := os.ReadFile(certPaths[0])
-			if err != nil {
-				return nil, err
-			}
-			keyPemBytes, err := os.ReadFile(keyPaths[0])
-			if err != nil {
-				return nil, err
-			}
-
-			cert, err := tls.X509KeyPair(certPemBytes, keyPemBytes)
-			tlsConfig := &tls.Config{
-				Certificates: []tls.Certificate{cert},
-			}
-
-			return tlsConfig, err
-		},
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
+
+	glog.V(2).Infof("[c]h3 listen :%d\n", port)
 
 	serverAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
@@ -438,62 +454,75 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	}).ListenEarly(tlsConfig, quicConfig)
 	defer earlyListener.Close()
 
-	go func() {
-		defer handleCancel()
-
-		for {
-			earlyConn, err := earlyListener.Accept(handleCtx)
-			if err != nil {
-				return
-			}
-
-			go self.connectQuic(earlyConn)
+	for {
+		glog.V(2).Infof("[c]h3 wait to accept connection :%d\n", port)
+		earlyConn, err := earlyListener.Accept(handleCtx)
+		if err != nil {
+			glog.Infof("[c]h3 accept connection :%d err = %s\n", port, err)
+			return
 		}
-	}()
 
-	select {
-	case <-handleCtx.Done():
+		glog.V(2).Infof("[c]h3 accept connection :%d\n", port)
+		go func() {
+			err := self.connectQuic(earlyConn)
+			if err != nil {
+				glog.V(2).Infof("[c]h3 connection exited :%d err = %s\n", port, err)
+			} else {
+				glog.V(2).Infof("[c]h3 connection exited :%d\n", port)
+			}
+		}()
 	}
 }
 
-func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
+func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) error {
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
 	stream, err := earlyConn.AcceptStream(handleCtx)
+	if err != nil {
+		return err
+	}
 
-	framer := connect.NewFramer(connect.DefaultFramerSettings())
+	// FIXME
+	/*
+		if self.apiHostNames[earlyConn.ConnectionState.TLS.ServerName] {
+			// pass off the stream to the internal api server
+			return self.apiServer.OfferAccept(stream)
+		}
+	*/
+
+	framer := connect.NewFramer(self.settings.FramerSettings)
 
 	stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 	authFrameBytes, err := framer.Read(stream)
 	if err != nil {
-		return
+		return err
 	}
 
 	message, err := connect.DecodeFrame(authFrameBytes)
 	if err != nil {
-		return
+		return err
 	}
 	auth, ok := message.(*protocol.Auth)
 	if !ok {
-		return
+		return err
 	}
 
 	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
 	if err != nil {
-		return
+		return err
 	}
 
 	if byJwt.ClientId == nil {
-		return
+		return fmt.Errorf("Missing client id.")
 	}
 
 	clientId := *byJwt.ClientId
 
 	instanceId, err := server.IdFromBytes(auth.InstanceId)
 	if err != nil {
-		return
+		return err
 	}
 
 	// verify the client is still part of the network
@@ -501,15 +530,14 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 	client := model.GetNetworkClient(handleCtx, clientId)
 	if client == nil || client.NetworkId != byJwt.NetworkId {
 		// server.Logger("ERROR HB\n")
-		return
+		return fmt.Errorf("Client id is not part of network.")
 	}
 
 	stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err = framer.Write(stream, authFrameBytes)
-
 	if err != nil {
 		// server.Logger("TIMEOUT HC\n")
-		return
+		return err
 	}
 
 	// find the client ip:port from the addr
@@ -517,7 +545,9 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 
 	c := func() {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
-		defer model.DisconnectNetworkClient(self.ctx, connectionId)
+		defer server.HandleError(func() {
+			model.DisconnectNetworkClient(self.ctx, connectionId)
+		})
 
 		go server.HandleError(func() {
 			// disconnect the client if the model marks the connection closed
@@ -549,6 +579,8 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 			// close is done in the write
 		}()
 
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+
 		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
@@ -559,13 +591,17 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 				stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 				message, err := framer.Read(stream)
 				if err != nil {
+					glog.V(2).Infof("[tr]h3 err = %s\n", err)
 					return
 				}
 
 				if 0 == len(message) {
 					// ping
+					pingTracker.ReceivePing()
 					continue
 				}
+
+				pingTracker.Receive()
 
 				select {
 				case <-handleCtx.Done():
@@ -596,13 +632,15 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, message)
 					if err != nil {
+						glog.V(2).Infof("[ts]h3 err = %s\n", err)
 						return
 					}
-					glog.V(2).Infof("[rts] ->%s\n", clientId.String())
-				case <-time.After(self.settings.PingTimeout):
+					glog.V(2).Infof("[ts] ->%s\n", clientId.String())
+				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, make([]byte, 0))
 					if err != nil {
+						glog.Infof("[ts]err = %s\n", err)
 						return
 					}
 				}
@@ -624,5 +662,5 @@ func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) {
 	} else {
 		c()
 	}
-
+	return nil
 }

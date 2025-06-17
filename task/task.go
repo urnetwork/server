@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -46,9 +48,11 @@ import (
 // IMPORTANT: if you change this number, you must also change the schema
 const BlockSizeSeconds = 300
 
-var DefaultMaxTime = 10 * time.Minute
+var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second
-var RescheduleTimeout = 60 * time.Second
+
+// the reschedule time is uniformly chosen on [0, t] so the expected mean will be t/2
+var RescheduleTimeout = 2 * BlockSizeSeconds * time.Second
 
 type TaskPriority = int
 
@@ -105,10 +109,11 @@ func ScheduleTask[T any, R any](
 	args T,
 	clientSession *session.ClientSession,
 	opts ...any,
-) {
+) (taskId server.Id) {
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
+		taskId = ScheduleTaskInTx[T, R](tx, taskFunction, args, clientSession, opts...)
 	})
+	return
 }
 
 func ScheduleTaskInTx[T any, R any](
@@ -117,7 +122,7 @@ func ScheduleTaskInTx[T any, R any](
 	args T,
 	clientSession *session.ClientSession,
 	opts ...any,
-) {
+) (taskId server.Id) {
 	taskTarget := NewTaskTarget(taskFunction)
 
 	argsJson, err := json.Marshal(args)
@@ -176,7 +181,7 @@ func ScheduleTaskInTx[T any, R any](
 
 	claimTime := time.Time{}
 
-	taskId := server.NewId()
+	taskId = server.NewId()
 
 	server.RaisePgResult(tx.Exec(
 		clientSession.Ctx,
@@ -210,6 +215,7 @@ func ScheduleTaskInTx[T any, R any](
 		maxTimeSeconds,
 		claimTime,
 	))
+	return
 }
 
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
@@ -800,6 +806,13 @@ func (self *TaskTarget[T, R]) RunPost(
 	return
 }
 
+type RunPostArgs struct {
+	TaskId server.Id `json:"task_id"`
+}
+
+type RunPostResult struct {
+}
+
 type TaskWorker struct {
 	ctx     context.Context
 	targets map[string]Target
@@ -825,13 +838,6 @@ func (self *TaskWorker) AddTargets(taskTargets ...Target) {
 			self.targets[alternateFunctionNames] = taskTarget
 		}
 	}
-}
-
-type RunPostArgs struct {
-	TaskId server.Id `json:"task_id"`
-}
-
-type RunPostResult struct {
 }
 
 // runs the post function for a finished taskId
@@ -903,41 +909,17 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		result, err := tx.Query(
 			self.ctx,
 			`
-				SELECT
-					task_id,
-					run_priority
-				FROM (
-				    SELECT
-				    	task_id,
-				    	run_priority
-				    FROM pending_task
-				    WHERE
-				        run_at_block < $2 AND
-				        run_at <= $1 AND
-				        release_time <= $1
-				    ORDER BY run_at_block ASC, run_priority ASC
-				    LIMIT $3
-				    FOR UPDATE SKIP LOCKED
-				) a
-
-				UNION ALL
-
-				SELECT
-					b.task_id,
-					b.run_priority
-				FROM (
-				    SELECT
-				    	task_id,
-				    	run_priority
-				    FROM pending_task
-				    WHERE
-				        run_at_block = $2 AND
-				        run_at <= $1 AND
-				        release_time <= $1
-				    ORDER BY run_priority ASC
-				    LIMIT $3
-				    FOR UPDATE SKIP LOCKED
-				) b
+			    SELECT
+			    	task_id,
+			    	run_priority
+			    FROM pending_task
+			    WHERE
+			        run_at_block <= $2 AND
+			        run_at <= $1 AND
+			        release_time <= $1
+			    ORDER BY run_at_block DESC, run_priority ASC
+			    LIMIT $3
+			    FOR UPDATE SKIP LOCKED
 		    `,
 			now,
 			nowBlock,
@@ -1001,7 +983,6 @@ func (self *TaskWorker) EvalTasks(n int) (
 	returnErr error,
 ) {
 	tasks, err := self.takeTasks(n)
-
 	if err != nil {
 		returnErr = err
 		return
@@ -1010,80 +991,141 @@ func (self *TaskWorker) EvalTasks(n int) (
 		return
 	}
 
+	evalCtx, evalCancel := context.WithCancel(self.ctx)
+	defer evalCancel()
+
 	for _, task := range tasks {
 		// update legacy function names
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
 
-	done := make(chan struct{})
-
-	type Finished struct {
+	type finished struct {
 		runStartTime time.Time
 		runEndTime   time.Time
 		resultJson   string
 		runPost      func(server.PgTx) error
 	}
 
-	finishedTasks := map[server.Id]*Finished{}
-	rescheduledTasks := map[server.Id]error{}
-	postRescheduledTasks := map[server.Id]error{}
+	type result struct {
+		task *Task
+		err  error
+		finished
+	}
+
+	taskCtx, taskCancel := context.WithCancel(evalCtx)
+	results := make(chan *result)
 
 	go func() {
-		defer close(done)
+		defer func() {
+			taskCancel()
+			close(results)
+		}()
+
 		for _, task := range tasks {
+			r := &result{
+				task: task,
+				finished: finished{
+					runStartTime: server.NowUtc(),
+				},
+			}
 			if target, ok := self.targets[task.FunctionName]; ok {
-				runStartTime := server.NowUtc()
-				if result, runPost, err := target.Run(self.ctx, task); err == nil {
-					runEndTime := server.NowUtc()
-					if resultJson, err := json.Marshal(result); err == nil {
-						finishedTasks[task.TaskId] = &Finished{
-							runStartTime: runStartTime,
-							runEndTime:   runEndTime,
-							resultJson:   string(resultJson),
-							runPost:      runPost,
+				glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
+				r.runStartTime = server.NowUtc()
+				var result any
+				var err error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
+							switch v := r.(type) {
+							case error:
+								err = v
+							default:
+								err = fmt.Errorf("%s", r)
+							}
 						}
-					} else {
-						// error with converting result to json
-						rescheduledTasks[task.TaskId] = err
+					}()
+					result, r.runPost, err = target.Run(evalCtx, task)
+				}()
+
+				if err == nil {
+					var resultJsonBytes []byte
+					resultJsonBytes, err = json.Marshal(result)
+					if err == nil {
+						r.resultJson = string(resultJsonBytes)
 					}
-				} else {
-					rescheduledTasks[task.TaskId] = err
 				}
+				r.err = err
 			} else {
-				rescheduledTasks[task.TaskId] = fmt.Errorf("Target not found (%s).", task.FunctionName)
+				r.err = fmt.Errorf("Target not found (%s).", task.FunctionName)
+			}
+
+			r.runEndTime = server.NowUtc()
+			select {
+			case results <- r:
+			case <-taskCtx.Done():
+				return
 			}
 		}
 	}()
 
-Wait:
-	for {
-		select {
-		case <-done:
-			break Wait
-		case <-time.After(ReleaseTimeout / 3):
-			server.Tx(self.ctx, func(tx server.PgTx) {
-				server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
-					claimTime := server.NowUtc()
-					releaseTime := claimTime.Add(ReleaseTimeout)
+	finishedTasks := map[server.Id]*finished{}
+	rescheduledTasks := map[server.Id]error{}
+	postRescheduledTasks := map[server.Id]error{}
 
+	func() {
+		defer taskCancel()
+
+		startTime := time.Now()
+		for {
+			select {
+			case <-taskCtx.Done():
+				return
+			case r, ok := <-results:
+				if !ok {
+					return
+				}
+				elapsedSeconds := float32(r.runEndTime.Sub(r.runStartTime)/time.Millisecond) / 1000
+				if r.err == nil {
+					glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, string(r.resultJson))
+					finishedTasks[r.task.TaskId] = &r.finished
+				} else {
+					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, r.err)
+					rescheduledTasks[r.task.TaskId] = r.err
+				}
+
+			case <-time.After(ReleaseTimeout / 3):
+				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
+				if 10 <= elapsedSeconds {
 					for _, task := range tasks {
-						batch.Queue(
-							`
-								UPDATE pending_task
-								SET
-									claim_time = $2,
-									release_time = $3
-								WHERE task_id = $1
-							`,
-							task.TaskId,
-							claimTime,
-							releaseTime,
-						)
+						glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson)
 					}
+				}
+
+				server.Tx(self.ctx, func(tx server.PgTx) {
+					server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
+						claimTime := server.NowUtc()
+						releaseTime := claimTime.Add(ReleaseTimeout)
+
+						for _, task := range tasks {
+							batch.Queue(
+								`
+									UPDATE pending_task
+									SET
+										claim_time = $2,
+										release_time = $3
+									WHERE task_id = $1
+								`,
+								task.TaskId,
+								claimTime,
+								releaseTime,
+							)
+						}
+					})
 				})
-			})
+			}
 		}
-	}
+	}()
 
 	for _, task := range tasks {
 		_, rescheduled := rescheduledTasks[task.TaskId]
@@ -1155,6 +1197,7 @@ Wait:
 
 			for taskId, err := range rescheduledTasks {
 				now := server.NowUtc()
+				rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
 				batch.Queue(
 					`
 						UPDATE pending_task
@@ -1166,7 +1209,7 @@ Wait:
 					`,
 					taskId,
 					err.Error(),
-					now.Add(RescheduleTimeout),
+					rescheduleTime,
 					now,
 				)
 			}
@@ -1194,6 +1237,7 @@ Wait:
 				// re-run the post
 				func() {
 					now := server.NowUtc()
+					rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
 					task := tasks[taskId]
 					clientSession, err := task.ClientSession(self.ctx)
 					if err != nil {
@@ -1205,7 +1249,7 @@ Wait:
 						self.RunPost,
 						&RunPostArgs{TaskId: taskId},
 						clientSession,
-						RunAt(now.Add(RescheduleTimeout)),
+						RunAt(rescheduleTime),
 					)
 				}()
 			}
