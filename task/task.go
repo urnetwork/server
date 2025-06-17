@@ -999,28 +999,39 @@ func (self *TaskWorker) EvalTasks(n int) (
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
 
-	type Finished struct {
+	type finished struct {
 		runStartTime time.Time
 		runEndTime   time.Time
 		resultJson   string
 		runPost      func(server.PgTx) error
 	}
 
-	finishedTasks := map[server.Id]*Finished{}
-	rescheduledTasks := map[server.Id]error{}
-	postRescheduledTasks := map[server.Id]error{}
+	type result struct {
+		task *Task
+		err  error
+		finished
+	}
 
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
+	results := make(chan *result)
 
 	go func() {
-		defer taskCancel()
+		defer func() {
+			taskCancel()
+			close(results)
+		}()
 
 		for _, task := range tasks {
+			r := &result{
+				task: task,
+				finished: finished{
+					runStartTime: server.NowUtc(),
+				},
+			}
 			if target, ok := self.targets[task.FunctionName]; ok {
 				glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
-				runStartTime := server.NowUtc()
+				r.runStartTime = server.NowUtc()
 				var result any
-				var runPost func(server.PgTx) error
 				var err error
 				func() {
 					defer func() {
@@ -1034,35 +1045,33 @@ func (self *TaskWorker) EvalTasks(n int) (
 							}
 						}
 					}()
-					result, runPost, err = target.Run(evalCtx, task)
+					result, r.runPost, err = target.Run(evalCtx, task)
 				}()
-				runEndTime := server.NowUtc()
-				elapsedSeconds := float32(runEndTime.Sub(runStartTime)/time.Millisecond) / 1000
+
 				if err == nil {
-					if resultJson, err := json.Marshal(result); err == nil {
-						glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, string(resultJson))
-						finishedTasks[task.TaskId] = &Finished{
-							runStartTime: runStartTime,
-							runEndTime:   runEndTime,
-							resultJson:   string(resultJson),
-							runPost:      runPost,
-						}
-					} else {
-						// error with converting result to json
-						glog.Infof("[%s]eval save error(%.2fs) (reschedule) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, err)
-						rescheduledTasks[task.TaskId] = err
+					var resultJsonBytes []byte
+					resultJsonBytes, err = json.Marshal(result)
+					if err == nil {
+						r.resultJson = string(resultJsonBytes)
 					}
-				} else {
-					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson, err)
-					rescheduledTasks[task.TaskId] = err
 				}
+				r.err = err
 			} else {
-				err := fmt.Errorf("Target not found (%s).", task.FunctionName)
-				glog.Infof("[%s]eval not found (reschedule) %s(%s) = %s\n", task.TaskId, task.FunctionName, task.ArgsJson, err)
-				rescheduledTasks[task.TaskId] = err
+				r.err = fmt.Errorf("Target not found (%s).", task.FunctionName)
+			}
+
+			r.runEndTime = server.NowUtc()
+			select {
+			case results <- r:
+			case <-taskCtx.Done():
+				return
 			}
 		}
 	}()
+
+	finishedTasks := map[server.Id]*finished{}
+	rescheduledTasks := map[server.Id]error{}
+	postRescheduledTasks := map[server.Id]error{}
 
 	func() {
 		defer taskCancel()
@@ -1072,6 +1081,19 @@ func (self *TaskWorker) EvalTasks(n int) (
 			select {
 			case <-taskCtx.Done():
 				return
+			case r, ok := <-results:
+				if !ok {
+					return
+				}
+				elapsedSeconds := float32(r.runEndTime.Sub(r.runStartTime)/time.Millisecond) / 1000
+				if r.err == nil {
+					glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, string(r.resultJson))
+					finishedTasks[r.task.TaskId] = &r.finished
+				} else {
+					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, r.err)
+					rescheduledTasks[r.task.TaskId] = r.err
+				}
+
 			case <-time.After(ReleaseTimeout / 3):
 				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
 				if 10 <= elapsedSeconds {
