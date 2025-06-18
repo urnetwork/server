@@ -1790,4 +1790,8 @@ var migrations = []any{
 	    ADD COLUMN payment_plan_id uuid NULL,
 	    ADD COLUMN linked_network_id uuid NULL;
 	`),
+	newSqlMigration(`
+		ALTER TABLE account_point
+		ADD COLUMN account_payment_id uuid NULL;
+	`),
 }

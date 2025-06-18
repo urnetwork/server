@@ -23,28 +23,28 @@ const (
 )
 
 type AccountPoint struct {
-	NetworkId       server.Id  `json:"network_id"`
-	Event           string     `json:"event"`
-	PointValue      int        `json:"point_value"`
-	PaymentPlanId   *server.Id `json:"payment_plan_id,omitempty"`
-	LinkedNetworkId *server.Id `json:"linked_network_id,omitempty"`
-	CreateTime      time.Time  `json:"create_time"`
+	NetworkId        server.Id  `json:"network_id"`
+	Event            string     `json:"event"`
+	PointValue       int        `json:"point_value"`
+	PaymentPlanId    *server.Id `json:"payment_plan_id,omitempty"`
+	AccountPaymentId *server.Id `json:"account_payment_id,omitempty"`
+	LinkedNetworkId  *server.Id `json:"linked_network_id,omitempty"`
+	CreateTime       time.Time  `json:"create_time"`
 }
 
 type ApplyAccountPointsArgs struct {
-	NetworkId       server.Id
-	Event           AccountPointEvent
-	PointValue      NanoPoints
-	PaymentPlanId   *server.Id
-	LinkedNetworkId *server.Id
+	NetworkId        server.Id
+	Event            AccountPointEvent
+	PointValue       NanoPoints
+	AccountPaymentId *server.Id
+	PaymentPlanId    *server.Id
+	LinkedNetworkId  *server.Id
 }
 
 func ApplyAccountPoints(
 	ctx context.Context,
 	args ApplyAccountPointsArgs,
 ) error {
-	// Implement the logic to apply network points here
-	// This is a placeholder implementation
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -55,15 +55,17 @@ func ApplyAccountPoints(
 						event,
 						point_value,
 						payment_plan_id,
-						linked_network_id
+						linked_network_id,
+						account_payment_id
 				)
-				VALUES ($1, $2, $3, $4, $5)
+				VALUES ($1, $2, $3, $4, $5, $6)
 			`,
 			args.NetworkId,
 			args.Event,
 			args.PointValue,
 			args.PaymentPlanId,
 			args.LinkedNetworkId,
+			args.AccountPaymentId,
 		))
 	})
 
@@ -80,6 +82,7 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 						network_id,
 						event,
 						point_value,
+						account_payment_id,
 						payment_plan_id,
 						linked_network_id,
 						create_time
@@ -98,6 +101,7 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 					&accountPoint.NetworkId,
 					&accountPoint.Event,
 					&accountPoint.PointValue,
+					&accountPoint.AccountPaymentId,
 					&accountPoint.PaymentPlanId,
 					&accountPoint.LinkedNetworkId,
 					&accountPoint.CreateTime,
@@ -564,6 +568,7 @@ func PopulateAccountPoints(ctx context.Context) {
 					payment.NetworkId,
 					networkReferrals,
 					payment.PaymentPlanId,
+					payment.PaymentId,
 					nil,
 				)
 

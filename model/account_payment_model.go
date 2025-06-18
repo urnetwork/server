@@ -580,18 +580,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
 
-				// todo: this could be done in the batch update
-				// accountPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
-				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
-				// totalAccountPointsEarned := scaledAccountPoints
-
-				// if seekerHolderNetworkIds[payment.NetworkId] {
-				// 	totalAccountPointsEarned = scaledAccountPoints * SeekerHolderMultiplier
-				// }
-
 				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
-				// scaledAccountPoints := (pointsPerPayout / totalPayoutAccountPoints) * accountPoints
-				// totalAccountPointsEarned := scaledAccountPoints
 
 				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
 				glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
@@ -601,10 +590,11 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				)
 
 				accountPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:     payment.NetworkId,
-					Event:         AccountPointEventPayout,
-					PointValue:    scaledAccountPoints,
-					PaymentPlanId: &payment.PaymentPlanId,
+					NetworkId:        payment.NetworkId,
+					Event:            AccountPointEventPayout,
+					PointValue:       scaledAccountPoints,
+					PaymentPlanId:    &payment.PaymentPlanId,
+					AccountPaymentId: &payment.PaymentId,
 				}
 
 				ApplyAccountPoints(
@@ -618,10 +608,11 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
 					accountPointsArgs = ApplyAccountPointsArgs{
-						NetworkId:     payment.NetworkId,
-						Event:         AccountPointEventPayoutMultiplier,
-						PointValue:    seekerBonus,
-						PaymentPlanId: &payment.PaymentPlanId,
+						NetworkId:        payment.NetworkId,
+						Event:            AccountPointEventPayoutMultiplier,
+						PointValue:       seekerBonus,
+						PaymentPlanId:    &payment.PaymentPlanId,
+						AccountPaymentId: &payment.PaymentId,
 					}
 
 					ApplyAccountPoints(ctx, accountPointsArgs)
@@ -640,11 +631,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 
 						accountPointsArgs = ApplyAccountPointsArgs{
-							NetworkId:       parentReferralNetworkId,
-							Event:           AccountPointEventPayoutLinkedAccount,
-							PointValue:      parentReferralPoints,
-							PaymentPlanId:   &payment.PaymentPlanId,
-							LinkedNetworkId: &payment.NetworkId,
+							NetworkId:        parentReferralNetworkId,
+							Event:            AccountPointEventPayoutLinkedAccount,
+							PointValue:       parentReferralPoints,
+							PaymentPlanId:    &payment.PaymentPlanId,
+							LinkedNetworkId:  &payment.NetworkId,
+							AccountPaymentId: &payment.PaymentId,
 						}
 
 						ApplyAccountPoints(ctx, accountPointsArgs)
@@ -661,6 +653,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.NetworkId,
 					networkReferrals,
 					payment.PaymentPlanId,
+					payment.PaymentId,
 					nil,
 				)
 
@@ -731,6 +724,7 @@ func payoutChildrenReferralNetworks(
 	networkId server.Id,
 	networkReferrals map[server.Id][]server.Id,
 	paymentPlanId server.Id,
+	accountPaymentId server.Id,
 	accountPointsReports []AccountPointReport,
 ) []AccountPointReport {
 
@@ -754,11 +748,12 @@ func payoutChildrenReferralNetworks(
 		glog.Infof("[plan]payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
 
 		args := ApplyAccountPointsArgs{
-			NetworkId:       childNetworkId,
-			Event:           AccountPointEventPayoutLinkedAccount,
-			PointValue:      childPayoutAmount,
-			LinkedNetworkId: &networkId,
-			PaymentPlanId:   &paymentPlanId,
+			NetworkId:        childNetworkId,
+			Event:            AccountPointEventPayoutLinkedAccount,
+			PointValue:       childPayoutAmount,
+			LinkedNetworkId:  &networkId,
+			PaymentPlanId:    &paymentPlanId,
+			AccountPaymentId: &accountPaymentId,
 		}
 
 		err := ApplyAccountPoints(ctx, args)
@@ -782,6 +777,7 @@ func payoutChildrenReferralNetworks(
 			childNetworkId,
 			networkReferrals,
 			paymentPlanId,
+			accountPaymentId,
 			accountPointsReports,
 		)
 
