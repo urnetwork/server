@@ -661,6 +661,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.NetworkId,
 					networkReferrals,
 					payment.PaymentPlanId,
+					nil,
 				)
 
 				batch.Queue(
@@ -730,7 +731,8 @@ func payoutChildrenReferralNetworks(
 	networkId server.Id,
 	networkReferrals map[server.Id][]server.Id,
 	paymentPlanId server.Id,
-) {
+	accountPointsReports []AccountPointReport,
+) []AccountPointReport {
 
 	glog.Infof("[plan]payout referral network %s has %d referrals with fraction %f\n",
 		networkId,
@@ -739,12 +741,12 @@ func payoutChildrenReferralNetworks(
 	)
 
 	if len(networkReferrals[networkId]) == 0 {
-		return
+		return accountPointsReports
 	}
 
 	childPayoutAmount := NanoPoints(float64(basePayoutAmount) * payoutFraction)
 	if childPayoutAmount <= 0 {
-		return
+		return accountPointsReports
 	}
 
 	for _, childNetworkId := range networkReferrals[networkId] {
@@ -764,6 +766,14 @@ func payoutChildrenReferralNetworks(
 			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
 		}
 
+		accountPointsReports = append(accountPointsReports, AccountPointReport{
+			NetworkId:         childNetworkId,
+			Event:             string(AccountPointEventPayoutLinkedAccount),
+			ScaledNanoPoints:  childPayoutAmount,
+			ReferralNetworkId: &networkId,
+			// PaymentPlanId:   &paymentPlanId,
+		})
+
 		// recursively payout to child referral networks
 		payoutChildrenReferralNetworks(
 			ctx,
@@ -772,9 +782,14 @@ func payoutChildrenReferralNetworks(
 			childNetworkId,
 			networkReferrals,
 			paymentPlanId,
+			accountPointsReports,
 		)
 
+		// accountPointsReports = append(accountPointsReports, reports...)
+
 	}
+
+	return accountPointsReports
 
 }
 
