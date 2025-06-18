@@ -249,10 +249,10 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(paymentPlan.NetworkPayments), 2)
 
 		// get payment for network A
-		_, ok := paymentPlan.NetworkPayments[networkIdA]
+		paymentNetworkA, ok := paymentPlan.NetworkPayments[networkIdA]
 		assert.Equal(t, ok, true)
 
-		_, ok = paymentPlan.NetworkPayments[networkIdB]
+		paymentNetworkB, ok := paymentPlan.NetworkPayments[networkIdB]
 		assert.Equal(t, ok, true)
 
 		/**
@@ -284,12 +284,14 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[0].Event, string(model.AccountPointEventPayout))
 		assert.Equal(t, networkPointsA[0].PointValue, expectedPointsA)
+		assert.Equal(t, networkPointsA[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 		assert.Equal(t, networkPointsA[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsA[0].LinkedNetworkId, nil)
 		assert.Equal(t, networkPointsA[1].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[1].Event, string(model.AccountPointEventPayoutMultiplier))
 		assert.Equal(t, networkPointsA[1].PointValue, expectedPointsA*model.SeekerHolderMultiplier-expectedPointsA)
 		assert.Equal(t, networkPointsA[1].PaymentPlanId, &paymentPlan.PaymentPlanId)
+		assert.Equal(t, networkPointsA[1].AccountPaymentId, &paymentNetworkA.PaymentId)
 		assert.Equal(t, networkPointsA[1].LinkedNetworkId, nil)
 
 		/**
@@ -305,6 +307,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsB[0].PointValue, expectedPointsB)
 		assert.Equal(t, networkPointsB[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsB[0].LinkedNetworkId, nil)
+		assert.Equal(t, networkPointsB[0].AccountPaymentId, &paymentNetworkB.PaymentId)
 
 		/**
 		 * Network D should get a bonus of 25% of network A points
@@ -317,6 +320,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsD[0].PointValue, int(float64(expectedPointsA)*0.25*model.SeekerHolderMultiplier))
 		assert.Equal(t, networkPointsD[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsD[0].LinkedNetworkId, networkIdA)
+		assert.Equal(t, networkPointsD[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
 		 * Network A child Network E should get expectedPointsA (150_000) * 0.25 * seeker multiplier = 75_000 points
@@ -330,6 +334,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsE[0].PointValue, expectedPointsE)
 		assert.Equal(t, networkPointsE[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsE[0].LinkedNetworkId, networkIdA)
+		assert.Equal(t, networkPointsE[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
 		 * Network A child Network F should get expectedPointsA * 0.25 * seeker multiplier = 75_000 points
@@ -341,6 +346,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsF[0].PointValue, int(float64(expectedPointsA)*0.25*model.SeekerHolderMultiplier))
 		assert.Equal(t, networkPointsF[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsF[0].LinkedNetworkId, networkIdA)
+		assert.Equal(t, networkPointsF[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
 		 * Network E child Network G should get expectedPointsA * seeker multipler * 0.125
@@ -353,6 +359,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsG[0].PointValue, expectedPointsG)
 		assert.Equal(t, networkPointsG[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsG[0].LinkedNetworkId, networkIdE)
+		assert.Equal(t, networkPointsG[0].AccountPaymentId, &paymentNetworkA.PaymentId)
 
 		/**
 		 * Network H should get expectedPointsB * 0.25 = 150_000 * 0.25 points = 37_500 points
@@ -364,5 +371,6 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsH[0].PointValue, int(float64(expectedPointsB)*0.25))
 		assert.Equal(t, networkPointsH[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsH[0].LinkedNetworkId, networkIdB)
+		assert.Equal(t, networkPointsH[0].AccountPaymentId, &paymentNetworkB.PaymentId)
 	})
 }
