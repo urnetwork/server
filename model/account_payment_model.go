@@ -655,6 +655,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.PaymentPlanId,
 					payment.PaymentId,
 					nil,
+					0,
 				)
 
 				batch.Queue(
@@ -726,7 +727,11 @@ func payoutChildrenReferralNetworks(
 	paymentPlanId server.Id,
 	accountPaymentId server.Id,
 	accountPointsReports []AccountPointReport,
+	depth int,
 ) []AccountPointReport {
+
+	glog.Infof("payout recursion depth is: %d", depth)
+	glog.Infof("report count is: %d", len(accountPointsReports))
 
 	glog.Infof("[plan]payout referral network %s has %d referrals with fraction %f\n",
 		networkId,
@@ -735,17 +740,19 @@ func payoutChildrenReferralNetworks(
 	)
 
 	if len(networkReferrals[networkId]) == 0 {
+		glog.Infof("[plan]payout referral network %s has no referrals, skipping\n", networkId)
 		return accountPointsReports
 	}
 
 	childPayoutAmount := NanoPoints(float64(basePayoutAmount) * payoutFraction)
 	if childPayoutAmount <= 0 {
+		glog.Infof("[plan]payout referral network %s with 0 points, skipping\n", networkId)
 		return accountPointsReports
 	}
 
 	for _, childNetworkId := range networkReferrals[networkId] {
 
-		glog.Infof("[plan]payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
+		glog.Infof("[plan]child payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
 
 		args := ApplyAccountPointsArgs{
 			NetworkId:        childNetworkId,
@@ -770,7 +777,7 @@ func payoutChildrenReferralNetworks(
 		})
 
 		// recursively payout to child referral networks
-		payoutChildrenReferralNetworks(
+		reports := payoutChildrenReferralNetworks(
 			ctx,
 			basePayoutAmount,
 			payoutFraction*0.5, // reduce the payout fraction for each level of referral
@@ -778,10 +785,11 @@ func payoutChildrenReferralNetworks(
 			networkReferrals,
 			paymentPlanId,
 			accountPaymentId,
-			accountPointsReports,
+			[]AccountPointReport{},
+			depth+1,
 		)
 
-		// accountPointsReports = append(accountPointsReports, reports...)
+		accountPointsReports = append(accountPointsReports, reports...)
 
 	}
 

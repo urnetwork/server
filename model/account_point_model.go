@@ -126,11 +126,13 @@ type AccountPointReport struct {
 }
 
 type PlanPointsPayoutReport struct {
-	TotalPayoutCount      int64                `json:"total_payout_count"`
-	TotalPayoutNanoCents  int64                `json:"total_payout_nano_cents"`
-	TotalPayoutNanoPoints NanoPoints           `json:"total_payout_nano_points"`
-	ScaleFactor           float64              `json:"scale_factor"`
-	AccountPoints         []AccountPointReport `json:"account_points"`
+	TotalPayoutCount              int64                `json:"total_payout_count"`
+	TotalPayoutNanoCents          int64                `json:"total_payout_nano_cents"`
+	TotalUnscaledPayoutNanoPoints NanoPoints           `json:"total_unscaled_payout_nano_points"`
+	TotalScaledPayoutNanoPoints   NanoPoints           `json:"total_scaled_nano_points,omitempty"`
+	TotalBonusNanoPoints          NanoPoints           `json:"total_bonus_nano_points,omitempty"`
+	ScaleFactor                   float64              `json:"scale_factor"`
+	AccountPoints                 []AccountPointReport `json:"account_points"`
 }
 
 func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
@@ -151,6 +153,8 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 	totalPayoutCount := int64(0)
 	totalPayoutNanoCents := int64(0)
 	totalPayoutUnscaledNanoPoints := NanoPoints(0)
+	totalScaledNanoPoints := NanoPoints(0)
+	totalBonusNanoPoints := NanoPoints(0)
 	scaleFactor := float64(0.0)
 	accountPointReports := []AccountPointReport{}
 
@@ -168,11 +172,12 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 				network_referral.referral_network_id
 			FROM account_payment
 			LEFT JOIN network_referral ON account_payment.network_id = network_referral.network_id
-			WHERE account_payment.create_time > '2025-05-15 00:00:00'
+			WHERE account_payment.payment_plan_id = $1
 				AND account_payment.completed = true
 				AND account_payment.payout_nano_cents > 0
-				AND account_payment.cancelled = false
+				AND account_payment.canceled = false
 			`,
+			planId,
 		)
 
 		server.WithPgResult(result, err, func() {
@@ -211,52 +216,20 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			}
 		})
 
-		// report.TotalPayoutCount = totalPayoutCount
-
-		// totalPayoutNanoCents := int64(0)
-		// totalPayoutAccountNanoPoints := NanoPoints(0)
-
-		// for _, accountPayment := range accountPayments {
-		// 	// glog.Infof("Payment Plan ID: %s has $d payments", paymentPlanId, len(accountPayments))
-
-		// 	totalPayoutNanoCents += accountPayment.Payout
-
-		// }
-
-		/**
-		 * Calculate total payout for the payment plan
-		 */
-		// for _, accountPayment := range accountPayments {
-		// 	totalPayoutNanoCents += accountPayment.Payout
-		// }
-
-		glog.Infof("[plan]total payout is %d nano cents\n", totalPayoutNanoCents)
-
-		// totalPayoutAccountNanoPoints := NanoPoints(0)
-
 		for _, accountPayment := range accountPayments {
-			// get total points
-			// for _, payment := range accountPayments {
 			totalPayoutUnscaledNanoPoints += PointsToNanoPoints(float64(accountPayment.Payout) / float64(totalPayoutNanoCents))
-			// }
 		}
 
-		glog.Infof("[plan]total payout account nano points %d\n", totalPayoutUnscaledNanoPoints)
-
 		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
-		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutUnscaledNanoPoints))
+		scaleFactor = (float64(nanoPointsPerPayout) / float64(totalPayoutUnscaledNanoPoints))
 
-		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
-			totalPayoutNanoCents,
-			totalPayoutUnscaledNanoPoints,
-			pointsScaleFactor,
-		)
+		for i, payment := range accountPayments {
 
-		for _, payment := range accountPayments {
+			glog.Infof("%d/%d ------------", i, len(accountPayments))
 
 			accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayoutNanoCents))
 
-			scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
+			scaledAccountPoints := NanoPoints(scaleFactor * float64(accountNanoPoints))
 			glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
 				payment.NetworkId,
 				scaledAccountPoints,
@@ -264,11 +237,14 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			)
 
 			accountPointsArgs := ApplyAccountPointsArgs{
-				NetworkId:     payment.NetworkId,
-				Event:         AccountPointEventPayout,
-				PointValue:    scaledAccountPoints,
-				PaymentPlanId: &payment.PaymentPlanId,
+				NetworkId:        payment.NetworkId,
+				Event:            AccountPointEventPayout,
+				PointValue:       scaledAccountPoints,
+				PaymentPlanId:    &payment.PaymentPlanId,
+				AccountPaymentId: &payment.PaymentId,
 			}
+
+			totalScaledNanoPoints += scaledAccountPoints
 
 			ApplyAccountPoints(
 				ctx,
@@ -312,6 +288,8 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 					Event: string(AccountPointEventPayoutMultiplier),
 					// ReferralNetworkId: referralNetworks[payment.NetworkId],
 				})
+
+				totalBonusNanoPoints += seekerBonus
 			}
 
 			/**
@@ -346,8 +324,12 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 						ReferralNetworkId: &payment.NetworkId,
 					})
 
+					totalBonusNanoPoints += parentReferralPoints
+
 				}
 			}
+
+			glog.Infof("About to apply bonuses to child networks")
 
 			/**
 			 * Apply bonus points to child referral networks
@@ -359,21 +341,33 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 				payment.NetworkId,
 				networkReferrals,
 				payment.PaymentPlanId,
-				accountPointReports,
+				payment.PaymentId,
+				[]AccountPointReport{},
+				0,
 			)
 
-			accountPointReports = append(accountPointReports, reports...)
+			for _, report := range reports {
+				totalBonusNanoPoints += report.ScaledNanoPoints
+			}
 
+			glog.Infof("Applied bonuses to child networks, got %d reports", len(reports))
+
+			accountPointReports = append(accountPointReports, reports...)
+			glog.Infof("Appended %d reports to accountPointReports", len(reports))
+
+			glog.Infof("------------")
 		}
 
 	})
 
 	report := PlanPointsPayoutReport{
-		TotalPayoutCount:      totalPayoutCount,
-		TotalPayoutNanoCents:  totalPayoutNanoCents,
-		TotalPayoutNanoPoints: totalPayoutUnscaledNanoPoints,
-		ScaleFactor:           scaleFactor,
-		AccountPoints:         accountPointReports,
+		TotalPayoutCount:              totalPayoutCount,
+		TotalPayoutNanoCents:          totalPayoutNanoCents,
+		TotalScaledPayoutNanoPoints:   totalScaledNanoPoints,
+		TotalUnscaledPayoutNanoPoints: totalPayoutUnscaledNanoPoints,
+		TotalBonusNanoPoints:          totalBonusNanoPoints,
+		ScaleFactor:                   scaleFactor,
+		AccountPoints:                 accountPointReports,
 	}
 
 	// Write the PlanPointsPayoutReport to a JSON file
@@ -570,6 +564,7 @@ func PopulateAccountPoints(ctx context.Context) {
 					payment.PaymentPlanId,
 					payment.PaymentId,
 					nil,
+					0,
 				)
 
 			}
