@@ -1742,11 +1742,11 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_client_location
             ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
-                1 + 
-                net_type_vpn + 
+                1 +
+                net_type_vpn +
                 net_type_proxy +
-                net_type_tor + 
-                net_type_relay 
+                net_type_tor +
+                net_type_relay
                 - net_type_hosting
             ) STORED
     `),
@@ -1784,4 +1784,10 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX network_client_connection_connected_connection_id ON network_client_connection (connected, connection_id)
     `),
+	newSqlMigration(`
+		ALTER TABLE account_point
+	    ALTER COLUMN point_value TYPE bigint,
+	    ADD COLUMN payment_plan_id uuid NULL,
+	    ADD COLUMN linked_network_id uuid NULL;
+	`),
 }

@@ -400,9 +400,9 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 			session.Ctx,
 			`
 				UPDATE account_wallet
-				SET 
+				SET
 						active = $1
-				WHERE 
+				WHERE
 						wallet_id = $2 AND
 						network_id = $3
 			`,
@@ -435,9 +435,9 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 			session.Ctx,
 			`
 				UPDATE account_wallet
-				SET 
+				SET
 					has_seeker_token = true
-				WHERE 
+				WHERE
 					wallet_address = $1 AND network_id = $2
 			`,
 			walletAddress,
@@ -487,4 +487,32 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 	})
 
 	return err
+}
+
+func GetAllSeekerHolders(ctx context.Context) map[server.Id]bool {
+	seekerHolders := map[server.Id]bool{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network_id
+				FROM account_wallet
+				WHERE has_seeker_token = true
+			`,
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId server.Id
+				server.Raise(result.Scan(&networkId))
+				if !seekerHolders[networkId] {
+					seekerHolders[networkId] = true
+				}
+			}
+		})
+	})
+
+	return seekerHolders
 }

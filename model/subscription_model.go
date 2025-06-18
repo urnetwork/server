@@ -141,6 +141,18 @@ func NanoCentsToUsd(nanoCents NanoCents) float64 {
 	return float64(nanoCents) / float64(1000000000)
 }
 
+type NanoPoints = int64
+
+// 1 point = 1_000_000 nano points
+
+func PointsToNanoPoints(points float64) NanoPoints {
+	return NanoPoints(math.Round(float64(points) * 1_000_000))
+}
+
+func NanoPointsToPoints(nanoPoints NanoPoints) float64 {
+	return math.Round(float64(nanoPoints) / 1_000_000)
+}
+
 // 12 months
 const BalanceCodeDuration = 365 * 24 * time.Hour
 
@@ -384,7 +396,7 @@ func RedeemBalanceCode(
 		result, err := tx.Query(
 			session.Ctx,
 			`
-                SELECT 
+                SELECT
                     balance_code_id,
                     start_time,
                     end_time,
@@ -501,7 +513,7 @@ func CheckBalanceCode(
 		result, err := tx.Query(
 			session.Ctx,
 			`
-                SELECT 
+                SELECT
                     balance_code_id,
                     start_time,
                     end_time,
@@ -725,10 +737,10 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []serve
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT 
+                SELECT
                     network.network_id
                 FROM network
-                
+
                 LEFT JOIN transfer_balance ON transfer_balance.network_id = network.network_id
 
                 GROUP BY (network.network_id)
@@ -1113,7 +1125,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 			ctx,
 			`
                 SELECT
-                    
+
                     transfer_contract.contract_id,
                     transfer_contract.transfer_byte_count,
                     transfer_contract.priority
@@ -1597,6 +1609,7 @@ func settleEscrowInTx(
 			payout := NanoCents(math.Round(
 				ProviderRevenueShare * float64(netRevenue) * float64(payoutByteCount) / float64(startBalanceByteCount),
 			))
+
 			netPayout += payout
 			sweepPayouts[balanceId] = sweepPayout{
 				payoutByteCount: payoutByteCount,
@@ -1773,7 +1786,11 @@ type sweepPayout struct {
 
 // `server.ComplexValue`
 func (self *sweepPayout) Values() []any {
-	return []any{self.payoutByteCount, self.returnByteCount, self.payout}
+	return []any{
+		self.payoutByteCount,
+		self.returnByteCount,
+		self.payout,
+	}
 }
 
 func SetContractDispute(ctx context.Context, contractId server.Id, dispute bool) {
@@ -2004,7 +2021,7 @@ func GetOpenContractIdsForSourceOrDestination(
                     contract_close.checkpoint
                 FROM transfer_contract
 
-                LEFT JOIN contract_close ON 
+                LEFT JOIN contract_close ON
                     contract_close.contract_id = transfer_contract.contract_id
 
                 WHERE
@@ -2089,7 +2106,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
                     transfer_contract.contract_id,
                     transfer_contract.source_id,
                     transfer_contract.destination_id,
-                    
+
                     source_contract_close.close_time AS source_close_time,
                     source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
                     source_contract_close.checkpoint AS source_checkpoint,
@@ -2097,9 +2114,9 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
                     destination_contract_close.close_time AS destination_close_time,
                     destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
                     destination_contract_close.checkpoint AS destination_checkpoint
-                    
+
                 FROM transfer_contract
-                    
+
                 LEFT JOIN contract_close source_contract_close ON
                     source_contract_close.contract_id = transfer_contract.contract_id AND
                     source_contract_close.party = $1
@@ -2483,11 +2500,11 @@ func HasSubscriptionRenewal(
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT 
+				SELECT
 					 COUNT(*) AS subscription_renewal_count
 				FROM subscription_renewal
 				WHERE
-					network_id = $1 AND 
+					network_id = $1 AND
 					subscription_type = $2 AND
 					start_time <= $3 AND
 					$3 < end_time
@@ -2524,7 +2541,7 @@ func AddRefreshTransferBalanceToAllNetworks(
 					network.network_id,
 					(subscription_renewal.network_id IS NOT NULL) AS supporter
 				FROM network
-				
+
 				LEFT JOIN subscription_renewal ON
 					subscription_renewal.network_id = network.network_id AND
 					subscription_renewal.subscription_type = $1 AND
