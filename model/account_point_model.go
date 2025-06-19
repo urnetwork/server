@@ -271,10 +271,11 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 				glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
 				accountPointsArgs = ApplyAccountPointsArgs{
-					NetworkId:     payment.NetworkId,
-					Event:         AccountPointEventPayoutMultiplier,
-					PointValue:    seekerBonus,
-					PaymentPlanId: &payment.PaymentPlanId,
+					NetworkId:        payment.NetworkId,
+					Event:            AccountPointEventPayoutMultiplier,
+					PointValue:       seekerBonus,
+					PaymentPlanId:    &payment.PaymentPlanId,
+					AccountPaymentId: &payment.PaymentId,
 				}
 
 				ApplyAccountPoints(ctx, accountPointsArgs)
@@ -305,11 +306,12 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 					parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 
 					accountPointsArgs = ApplyAccountPointsArgs{
-						NetworkId:       parentReferralNetworkId,
-						Event:           AccountPointEventPayoutLinkedAccount,
-						PointValue:      parentReferralPoints,
-						PaymentPlanId:   &payment.PaymentPlanId,
-						LinkedNetworkId: &payment.NetworkId,
+						NetworkId:        parentReferralNetworkId,
+						Event:            AccountPointEventPayoutLinkedAccount,
+						PointValue:       parentReferralPoints,
+						PaymentPlanId:    &payment.PaymentPlanId,
+						LinkedNetworkId:  &payment.NetworkId,
+						AccountPaymentId: &payment.PaymentId,
 					}
 
 					ApplyAccountPoints(ctx, accountPointsArgs)
@@ -334,6 +336,7 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			/**
 			 * Apply bonus points to child referral networks
 			 */
+			visited := make(map[server.Id]struct{})
 			reports := payoutChildrenReferralNetworks(
 				ctx,
 				scaledAccountPoints,
@@ -341,9 +344,10 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 				payment.NetworkId,
 				networkReferrals,
 				payment.PaymentPlanId,
-				payment.PaymentId,
+				&payment.PaymentId,
 				[]AccountPointReport{},
 				0,
+				visited,
 			)
 
 			for _, report := range reports {
@@ -353,7 +357,6 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			glog.Infof("Applied bonuses to child networks, got %d reports", len(reports))
 
 			accountPointReports = append(accountPointReports, reports...)
-			glog.Infof("Appended %d reports to accountPointReports", len(reports))
 
 			glog.Infof("------------")
 		}
@@ -555,6 +558,7 @@ func PopulateAccountPoints(ctx context.Context) {
 				/**
 				 * Apply bonus points to child referral networks
 				 */
+				visited := make(map[server.Id]struct{})
 				payoutChildrenReferralNetworks(
 					ctx,
 					scaledAccountPoints,
@@ -562,9 +566,10 @@ func PopulateAccountPoints(ctx context.Context) {
 					payment.NetworkId,
 					networkReferrals,
 					payment.PaymentPlanId,
-					payment.PaymentId,
+					&payment.PaymentId,
 					nil,
 					0,
+					visited,
 				)
 
 			}
