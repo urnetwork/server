@@ -2,6 +2,9 @@ package model
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/golang/glog"
@@ -111,13 +114,32 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 	return accountPoints
 }
 
-/**
- * To be run once to populate points from May 2025
- * Delete after running
- */
-func PopulateAccountPoints(ctx context.Context) {
+type AccountPointReport struct {
+	NetworkId          server.Id  `json:"network_id"`
+	PaymentId          server.Id  `json:"payment_id"`
+	NanoCents          int64      `json:"nano_cents"`
+	UnscaledNanoPoints NanoPoints `json:"unscaled_nano_points"`
+	ScaledNanoPoints   NanoPoints `json:"nano_points"`
+	ByteCount          int64      `json:"byte_count"`
+	Event              string     `json:"event"`
+	ReferralNetworkId  *server.Id `json:"referral_network_id,omitempty"`
+}
 
-	paymentPlanMap := map[server.Id][]AccountPayment{}
+type PlanPointsPayoutReport struct {
+	TotalPayoutCount              int64                `json:"total_payout_count"`
+	TotalPayoutNanoCents          int64                `json:"total_payout_nano_cents"`
+	TotalUnscaledPayoutNanoPoints NanoPoints           `json:"total_unscaled_payout_nano_points"`
+	TotalScaledPayoutNanoPoints   NanoPoints           `json:"total_scaled_nano_points,omitempty"`
+	TotalBonusNanoPoints          NanoPoints           `json:"total_bonus_nano_points,omitempty"`
+	ScaleFactor                   float64              `json:"scale_factor"`
+	AccountPoints                 []AccountPointReport `json:"account_points"`
+}
+
+func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
+
+	// paymentPlanMap := map[server.Id][]AccountPayment{}
+
+	accountPayments := []AccountPayment{}
 
 	// network_id -> list of child referral networks
 	networkReferrals := GetNetworkReferralsMap(ctx)
@@ -127,6 +149,14 @@ func PopulateAccountPoints(ctx context.Context) {
 
 	// seeker or saga holders
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
+
+	totalPayoutCount := int64(0)
+	totalPayoutNanoCents := int64(0)
+	totalPayoutUnscaledNanoPoints := NanoPoints(0)
+	totalScaledNanoPoints := NanoPoints(0)
+	totalBonusNanoPoints := NanoPoints(0)
+	scaleFactor := float64(0.0)
+	accountPointReports := []AccountPointReport{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
@@ -142,11 +172,12 @@ func PopulateAccountPoints(ctx context.Context) {
 				network_referral.referral_network_id
 			FROM account_payment
 			LEFT JOIN network_referral ON account_payment.network_id = network_referral.network_id
-			WHERE account_payment.create_time > '2025-05-15 00:00:00'
+			WHERE account_payment.payment_plan_id = $1
 				AND account_payment.completed = true
 				AND account_payment.payout_nano_cents > 0
-				AND account_payment.cancelled = false
+				AND account_payment.canceled = false
 			`,
+			planId,
 		)
 
 		server.WithPgResult(result, err, func() {
@@ -167,7 +198,9 @@ func PopulateAccountPoints(ctx context.Context) {
 				/**
 				 * Map payments to their payment plans
 				 */
-				paymentPlanMap[accountPayment.PaymentPlanId] = append(paymentPlanMap[accountPayment.PaymentPlanId], accountPayment)
+				// paymentPlanMap[accountPayment.PaymentPlanId] = append(paymentPlanMap[accountPayment.PaymentPlanId], accountPayment)
+
+				accountPayments = append(accountPayments, accountPayment)
 
 				/**
 				 * Network parent referral mapping
@@ -176,123 +209,183 @@ func PopulateAccountPoints(ctx context.Context) {
 					referralNetworks[accountPayment.NetworkId] = *referralNetworkId
 				}
 
+				totalPayoutNanoCents += accountPayment.Payout
+
+				totalPayoutCount++
+
 			}
 		})
 
-		for paymentPlanId, accountPayments := range paymentPlanMap {
-			glog.Infof("Payment Plan ID: %s has $d payments", paymentPlanId, len(accountPayments))
+		for _, accountPayment := range accountPayments {
+			totalPayoutUnscaledNanoPoints += PointsToNanoPoints(float64(accountPayment.Payout) / float64(totalPayoutNanoCents))
+		}
 
-			totalPayoutNanoCents := int64(0)
+		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+		scaleFactor = (float64(nanoPointsPerPayout) / float64(totalPayoutUnscaledNanoPoints))
 
-			/**
-			 * Calculate total payout for the payment plan
-			 */
-			for _, accountPayment := range accountPayments {
-				totalPayoutNanoCents += accountPayment.Payout
-			}
+		for i, payment := range accountPayments {
 
-			glog.Infof("[plan]total payout for payment plan %s is %d nano cents\n", paymentPlanId, totalPayoutNanoCents)
+			glog.Infof("%d/%d ------------", i, len(accountPayments))
 
-			totalPayoutAccountNanoPoints := NanoPoints(0)
+			accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayoutNanoCents))
 
-			// get total points
-			for _, payment := range accountPayments {
-				totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayoutNanoCents))
-			}
-
-			glog.Infof("[plan]total payout account nano points %d\n", totalPayoutAccountNanoPoints)
-
-			nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
-			pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
-
-			glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
-				totalPayoutNanoCents,
-				totalPayoutAccountNanoPoints,
-				pointsScaleFactor,
+			scaledAccountPoints := NanoPoints(scaleFactor * float64(accountNanoPoints))
+			glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
+				payment.NetworkId,
+				scaledAccountPoints,
+				payment.Payout,
 			)
 
-			for _, payment := range accountPayments {
+			accountPointsArgs := ApplyAccountPointsArgs{
+				NetworkId:        payment.NetworkId,
+				Event:            AccountPointEventPayout,
+				PointValue:       scaledAccountPoints,
+				PaymentPlanId:    &payment.PaymentPlanId,
+				AccountPaymentId: &payment.PaymentId,
+			}
 
-				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayoutNanoCents))
+			totalScaledNanoPoints += scaledAccountPoints
 
-				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
-				glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
-					payment.NetworkId,
-					scaledAccountPoints,
-					payment.Payout,
-				)
+			ApplyAccountPoints(
+				ctx,
+				accountPointsArgs,
+			)
 
-				accountPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:     payment.NetworkId,
-					Event:         AccountPointEventPayout,
-					PointValue:    scaledAccountPoints,
-					PaymentPlanId: &payment.PaymentPlanId,
+			accountPointReports = append(accountPointReports, AccountPointReport{
+				NetworkId:          payment.NetworkId,
+				PaymentId:          payment.PaymentId,
+				NanoCents:          payment.Payout,
+				UnscaledNanoPoints: accountNanoPoints,
+				ScaledNanoPoints:   scaledAccountPoints,
+				ByteCount:          payment.PayoutByteCount,
+				Event:              string(AccountPointEventPayout),
+				// ReferralNetworkId: referralNetworks[payment.NetworkId],
+			})
+
+			/**
+			 * Check seeker multipler
+			 */
+			if seekerHolderNetworkIds[payment.NetworkId] {
+				seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
+				scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+				glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
+
+				accountPointsArgs = ApplyAccountPointsArgs{
+					NetworkId:        payment.NetworkId,
+					Event:            AccountPointEventPayoutMultiplier,
+					PointValue:       seekerBonus,
+					PaymentPlanId:    &payment.PaymentPlanId,
+					AccountPaymentId: &payment.PaymentId,
 				}
 
-				ApplyAccountPoints(
-					ctx,
-					accountPointsArgs,
-				)
+				ApplyAccountPoints(ctx, accountPointsArgs)
 
-				/**
-				 * Check seeker multipler
-				 */
-				if seekerHolderNetworkIds[payment.NetworkId] {
-					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
-					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
-					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
+				accountPointReports = append(accountPointReports, AccountPointReport{
+					NetworkId: payment.NetworkId,
+					PaymentId: payment.PaymentId,
+					// NanoCents:  payment.Payout,
+					ScaledNanoPoints: seekerBonus,
+					// ByteCount:  payment.PayoutByteCount,
+					Event: string(AccountPointEventPayoutMultiplier),
+					// ReferralNetworkId: referralNetworks[payment.NetworkId],
+				})
+
+				totalBonusNanoPoints += seekerBonus
+			}
+
+			/**
+			 * Apply bonus points to parent referral network
+			 */
+			parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
+
+			if ok {
+				if parentReferralNetworkId != payment.NetworkId {
+
+					glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
+
+					parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 
 					accountPointsArgs = ApplyAccountPointsArgs{
-						NetworkId:     payment.NetworkId,
-						Event:         AccountPointEventPayoutMultiplier,
-						PointValue:    seekerBonus,
-						PaymentPlanId: &payment.PaymentPlanId,
+						NetworkId:        parentReferralNetworkId,
+						Event:            AccountPointEventPayoutLinkedAccount,
+						PointValue:       parentReferralPoints,
+						PaymentPlanId:    &payment.PaymentPlanId,
+						LinkedNetworkId:  &payment.NetworkId,
+						AccountPaymentId: &payment.PaymentId,
 					}
 
 					ApplyAccountPoints(ctx, accountPointsArgs)
+
+					accountPointReports = append(accountPointReports, AccountPointReport{
+						NetworkId: parentReferralNetworkId,
+						PaymentId: payment.PaymentId,
+						// NanoCents:  payment.Payout,
+						ScaledNanoPoints: parentReferralPoints,
+						// ByteCount:  payment.PayoutByteCount,
+						Event:             string(AccountPointEventPayoutLinkedAccount),
+						ReferralNetworkId: &payment.NetworkId,
+					})
+
+					totalBonusNanoPoints += parentReferralPoints
+
 				}
-
-				/**
-				 * Apply bonus points to parent referral network
-				 */
-				parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
-
-				if ok {
-					if parentReferralNetworkId != payment.NetworkId {
-
-						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
-
-						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
-
-						accountPointsArgs = ApplyAccountPointsArgs{
-							NetworkId:       parentReferralNetworkId,
-							Event:           AccountPointEventPayoutLinkedAccount,
-							PointValue:      parentReferralPoints,
-							PaymentPlanId:   &payment.PaymentPlanId,
-							LinkedNetworkId: &payment.NetworkId,
-						}
-
-						ApplyAccountPoints(ctx, accountPointsArgs)
-					}
-				}
-
-				/**
-				 * Apply bonus points to child referral networks
-				 */
-				payoutChildrenReferralNetworks(
-					ctx,
-					scaledAccountPoints,
-					EnvSubsidyConfig().ReferralChildPayoutFraction,
-					payment.NetworkId,
-					networkReferrals,
-					payment.PaymentPlanId,
-					payment.PaymentId,
-				)
-
 			}
 
+			glog.Infof("About to apply bonuses to child networks")
+
+			/**
+			 * Apply bonus points to child referral networks
+			 */
+			visited := make(map[server.Id]struct{})
+			reports := payoutChildrenReferralNetworks(
+				ctx,
+				scaledAccountPoints,
+				EnvSubsidyConfig().ReferralChildPayoutFraction,
+				payment.NetworkId,
+				networkReferrals,
+				payment.PaymentPlanId,
+				&payment.PaymentId,
+				[]AccountPointReport{},
+				0,
+				visited,
+			)
+
+			for _, report := range reports {
+				totalBonusNanoPoints += report.ScaledNanoPoints
+			}
+
+			glog.Infof("Applied bonuses to child networks, got %d reports", len(reports))
+
+			accountPointReports = append(accountPointReports, reports...)
+
+			glog.Infof("------------")
 		}
 
 	})
 
+	report := PlanPointsPayoutReport{
+		TotalPayoutCount:              totalPayoutCount,
+		TotalPayoutNanoCents:          totalPayoutNanoCents,
+		TotalScaledPayoutNanoPoints:   totalScaledNanoPoints,
+		TotalUnscaledPayoutNanoPoints: totalPayoutUnscaledNanoPoints,
+		TotalBonusNanoPoints:          totalBonusNanoPoints,
+		ScaleFactor:                   scaleFactor,
+		AccountPoints:                 accountPointReports,
+	}
+
+	// Write the PlanPointsPayoutReport to a JSON file
+	jsonData, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		glog.Errorf("Failed to marshal PlanPointsPayoutReport to JSON: %v", err)
+		return
+	}
+
+	filename := fmt.Sprintf("plan_points_payout_report_%s.json", planId)
+	err = os.WriteFile(filename, jsonData, 0644)
+	if err != nil {
+		glog.Errorf("Failed to write PlanPointsPayoutReport to file %s: %v", filename, err)
+		return
+	}
+
+	glog.Infof("Successfully wrote PlanPointsPayoutReport to %s", filename)
 }

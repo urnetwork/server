@@ -834,5 +834,17 @@ func authLogin(opts docopt.Opts) {
 
 func accountPointsPopulate(opts docopt.Opts) {
 	ctx := context.Background()
-	model.PopulateAccountPoints(ctx)
+
+	// Payment Plans since 5/1
+	// [] 0197760f-b8c5-b2f3-b932-47689f9bb6eb
+	// [] 019747af-e95b-73b8-61bd-217edd39ff34
+	// [] 019728d3-d5a2-25eb-40f4-e50b326637cf
+	// [] 0196f54a-2c73-3645-8b91-b25efe9c0792
+	// [] 0196d13d-a58c-dd9f-611b-ea4384015ddf
+	// [] 0196a80a-c8cf-74c7-1e20-d7c72958de80
+	// [] 01968d61-7a3c-b3a9-41c3-810bce4be30f
+
+	planId := server.RequireParseId("01968d61-7a3c-b3a9-41c3-810bce4be30f")
+
+	model.PopulatePlanAccountPoints(ctx, planId)
 }
