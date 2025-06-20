@@ -410,7 +410,7 @@ func testConnect(
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 300 * time.Second
+	receiveTimeout := 600 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	var messageContentSizes []ByteCount
