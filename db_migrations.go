@@ -1794,4 +1794,8 @@ var migrations = []any{
 		ALTER TABLE account_point
 		ADD COLUMN account_payment_id uuid NULL;
 	`),
+	newSqlMigration(`
+		ALTER TABLE account_payment
+		ADD COLUMN tx_hash TEXT NULL
+	`),
 }

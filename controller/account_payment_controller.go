@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
 	// "errors"
 
 	// "sync"
@@ -273,11 +274,14 @@ func advancePayment(
 
 		case "COMPLETE":
 
+			glog.Infof("marking payment as complete with tx hash: %s", tx.TxHash)
+
 			// mark the payment complete in our DB
 			model.CompletePayment(
 				clientSession.Ctx,
 				payment.PaymentId,
-				string(txResponseBodyBytes), // STU_TODO: check this
+				string(txResponseBodyBytes),
+				tx.TxHash,
 			)
 			complete = true
 

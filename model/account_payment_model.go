@@ -84,6 +84,8 @@ type AccountPayment struct {
 	PaymentTime    *time.Time `json:"payment_time"`
 	PaymentReceipt *string    `json:"payment_receipt"`
 	WalletAddress  *string    `json:"wallet_address"`
+	Blockchain     *string    `json:"blockchain,omitempty"`
+	TxHash         *string    `json:"tx_hash,omitempty"`
 
 	Completed    bool       `json:"completed"`
 	CompleteTime *time.Time `json:"complete_time"`
@@ -121,13 +123,15 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
                 account_payment.payment_record,
                 account_payment.token_type,
                 account_payment.token_amount,
+                account_payment.blockchain,
+                account_payment.tx_hash,
                 account_payment.payment_time,
                 account_payment.payment_receipt,
                 account_payment.completed,
                 account_payment.complete_time,
                 account_payment.canceled,
                 account_payment.cancel_time,
-								account_wallet.wallet_address
+				account_wallet.wallet_address
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -166,6 +170,8 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.PaymentRecord,
 				&payment.TokenType,
 				&payment.TokenAmount,
+				&payment.Blockchain,
+				&payment.TxHash,
 				&payment.PaymentTime,
 				&payment.PaymentReceipt,
 				&payment.Completed,
@@ -175,6 +181,12 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 
 				&payment.WalletAddress,
 			))
+
+			if payment.TxHash != nil {
+				glog.Infof("getPayment txHash is %s", *payment.TxHash)
+			} else {
+				glog.Infof("getPayment txHash is nil")
+			}
 		}
 	})
 
@@ -482,7 +494,8 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			`
 			SELECT
 				temp_payment_network_ids.network_id,
-				account_wallet.wallet_id
+				account_wallet.wallet_id,
+				account_wallet.blockchain
 			FROM temp_payment_network_ids
 
 		    LEFT JOIN payout_wallet ON
@@ -497,13 +510,16 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			for result.Next() {
 				var networkId server.Id
 				var walletId *server.Id
+				var blockchain *string
 				server.Raise(result.Scan(
 					&networkId,
 					&walletId,
+					&blockchain,
 				))
 
 				if payment, ok := networkPayments[networkId]; ok {
 					payment.WalletId = walletId
+					payment.Blockchain = blockchain
 				}
 			}
 		})
@@ -671,9 +687,10 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 									payout_nano_cents,
 									subsidy_payout_nano_cents,
 									min_sweep_time,
-									create_time
+									create_time,
+									blockchain
 							)
-							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					`,
 					payment.PaymentId,
 					payment.PaymentPlanId,
@@ -681,10 +698,10 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.WalletId,
 					payment.PayoutByteCount,
 					payment.Payout,
-					// payment.AccountPoints,
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
+					payment.Blockchain,
 				)
 			}
 		})
@@ -1254,7 +1271,15 @@ func RemovePaymentRecord(
 	return
 }
 
-func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt string) (returnErr error) {
+func CompletePayment(
+	ctx context.Context,
+	paymentId server.Id,
+	paymentReceipt string,
+	txHash string,
+) (returnErr error) {
+
+	glog.Infof("Completing payment %s with receipt %s and tx hash %s", paymentId, paymentReceipt, txHash)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1263,7 +1288,8 @@ func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt st
                 SET
                     payment_receipt = $2,
                     completed = true,
-                    complete_time = $3
+                    complete_time = $3,
+                    tx_hash = $4
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
@@ -1271,6 +1297,7 @@ func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt st
 			paymentId,
 			paymentReceipt,
 			server.NowUtc(),
+			txHash,
 		))
 		if tag.RowsAffected() != 1 {
 			returnErr = fmt.Errorf("Invalid payment.")

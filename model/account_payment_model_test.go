@@ -109,6 +109,7 @@ func TestCancelAccountPayment(t *testing.T) {
 			payment, err := GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, payment.Canceled, true)
+			assert.Equal(t, payment.Blockchain, "MATIC")
 			assert.NotEqual(t, payment.CancelTime, nil)
 		}
 
