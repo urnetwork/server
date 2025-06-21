@@ -274,8 +274,6 @@ func advancePayment(
 
 		case "COMPLETE":
 
-			glog.Infof("marking payment as complete with tx hash: %s", tx.TxHash)
-
 			// mark the payment complete in our DB
 			model.CompletePayment(
 				clientSession.Ctx,

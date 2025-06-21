@@ -181,11 +181,6 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.Blockchain,
 			))
 
-			if payment.TxHash != nil {
-				glog.Infof("getPayment txHash is %s", *payment.TxHash)
-			} else {
-				glog.Infof("getPayment txHash is nil")
-			}
 		}
 	})
 
@@ -1270,8 +1265,6 @@ func CompletePayment(
 	paymentReceipt string,
 	txHash string,
 ) (returnErr error) {
-
-	glog.Infof("Completing payment %s with receipt %s and tx hash %s", paymentId, paymentReceipt, txHash)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
