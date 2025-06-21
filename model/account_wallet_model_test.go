@@ -23,7 +23,7 @@ func TestAccountWallet(t *testing.T) {
 		})
 
 		args := &CreateAccountWalletExternalArgs{
-			Blockchain:       "Polygon",
+			Blockchain:       "MATIC",
 			WalletAddress:    "0x0",
 			DefaultTokenType: "USDC",
 			NetworkId:        networkId,
@@ -108,7 +108,7 @@ func TestAccountWallet(t *testing.T) {
 		circleWalletId := server.NewId().String()
 		circleArgs := &CreateAccountWalletCircleArgs{
 			NetworkId:        networkId,
-			Blockchain:       "Polygon",
+			Blockchain:       "MATIC",
 			WalletAddress:    "0x2",
 			DefaultTokenType: "USDC",
 			CircleWalletId:   circleWalletId,

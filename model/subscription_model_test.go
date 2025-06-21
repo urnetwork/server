@@ -195,6 +195,8 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
 		assert.Equal(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
 
+		mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
@@ -223,7 +225,7 @@ func TestEscrow(t *testing.T) {
 
 		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		// check that the payment is recorded
@@ -273,7 +275,7 @@ func TestEscrow(t *testing.T) {
 
 		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		// check that the payment is recorded
@@ -471,9 +473,11 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []server.Id{sourceNetworkId})
 
+		mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
 		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		// check that the payment is recorded
@@ -538,7 +542,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		for _, payment := range paymentPlan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		// check that the payment is recorded

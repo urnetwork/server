@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
 	// "errors"
 
 	// "sync"
@@ -277,7 +278,8 @@ func advancePayment(
 			model.CompletePayment(
 				clientSession.Ctx,
 				payment.PaymentId,
-				string(txResponseBodyBytes), // STU_TODO: check this
+				string(txResponseBodyBytes),
+				tx.TxHash,
 			)
 			complete = true
 

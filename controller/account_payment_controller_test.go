@@ -161,6 +161,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
+			assert.Equal(t, paymentRecord.Blockchain, "MATIC")
 
 			// payoutAmount (in USD) - fee (in USD) = token amount
 			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout)-*feeInUSDC, float64(*paymentRecord.TokenAmount))
@@ -182,6 +183,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, int64(0), accountBalance.Balance.PaidByteCount)
 		}
 
+		mockTxHash := "0x1234567890abcdef"
+
 		// set coinbase mock to return a completed status
 		mockCircleClient = &mockCircleApiClient{
 			GetTransactionFunc: func(transactionId string) (*GetTransactionResult, error) {
@@ -190,11 +193,13 @@ func TestSubscriptionSendPayment(t *testing.T) {
 						State:      "COMPLETE",
 						Id:         transactionId,
 						Blockchain: "MATIC",
+						TxHash:     mockTxHash,
 					},
 					ResponseBodyBytes: []byte(
 						fmt.Sprintf(
-							`{"id":"%s","state":"COMPLETED","blockchain":"MATIC"}`,
+							`{"id":"%s","state":"COMPLETED","blockchain":"MATIC","tx_hash":%s}`,
 							sendPaymentTransactionId,
+							mockTxHash,
 						),
 					),
 				}
@@ -218,6 +223,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.Completed, true)
+			assert.Equal(t, paymentRecord.TxHash, mockTxHash)
+			assert.Equal(t, paymentRecord.Blockchain, "MATIC")
 
 			// check that the account balance has been updated
 			accountBalance := model.GetAccountBalance(destinationSession)
