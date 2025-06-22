@@ -109,6 +109,7 @@ func TestCancelAccountPayment(t *testing.T) {
 			payment, err := GetPayment(ctx, payment.PaymentId)
 			assert.Equal(t, err, nil)
 			assert.Equal(t, payment.Canceled, true)
+			assert.Equal(t, payment.Blockchain, "MATIC")
 			assert.NotEqual(t, payment.CancelTime, nil)
 		}
 
@@ -204,7 +205,9 @@ func TestGetNetworkProvideStats(t *testing.T) {
 			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 
-			CompletePayment(ctx, payment.PaymentId, "")
+			mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
@@ -396,13 +399,15 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		assert.Equal(t, subsidyPayment.NetPayoutByteCountUnpaid, ByteCount(0))
 		subsidyPaidByteCount := paidByteCount
 
+		mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
 		for _, payment := range paymentPlan.NetworkPayments {
 			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
 		// check that the payment is recorded
@@ -465,7 +470,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 			RemovePaymentRecord(ctx, payment.PaymentId)
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 
-			CompletePayment(ctx, payment.PaymentId, "")
+			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 			UpdatePaymentWallet(ctx, payment.PaymentId)
 		}
 

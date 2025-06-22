@@ -84,6 +84,8 @@ type AccountPayment struct {
 	PaymentTime    *time.Time `json:"payment_time"`
 	PaymentReceipt *string    `json:"payment_receipt"`
 	WalletAddress  *string    `json:"wallet_address"`
+	Blockchain     *string    `json:"blockchain,omitempty"`
+	TxHash         *string    `json:"tx_hash,omitempty"`
 
 	Completed    bool       `json:"completed"`
 	CompleteTime *time.Time `json:"complete_time"`
@@ -121,13 +123,15 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
                 account_payment.payment_record,
                 account_payment.token_type,
                 account_payment.token_amount,
+                account_payment.tx_hash,
                 account_payment.payment_time,
                 account_payment.payment_receipt,
                 account_payment.completed,
                 account_payment.complete_time,
                 account_payment.canceled,
                 account_payment.cancel_time,
-								account_wallet.wallet_address
+				account_wallet.wallet_address,
+				account_wallet.blockchain
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -166,15 +170,17 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.PaymentRecord,
 				&payment.TokenType,
 				&payment.TokenAmount,
+				&payment.TxHash,
 				&payment.PaymentTime,
 				&payment.PaymentReceipt,
 				&payment.Completed,
 				&payment.CompleteTime,
 				&payment.Canceled,
 				&payment.CancelTime,
-
 				&payment.WalletAddress,
+				&payment.Blockchain,
 			))
+
 		}
 	})
 
@@ -681,7 +687,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.WalletId,
 					payment.PayoutByteCount,
 					payment.Payout,
-					// payment.AccountPoints,
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
@@ -1254,7 +1259,13 @@ func RemovePaymentRecord(
 	return
 }
 
-func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt string) (returnErr error) {
+func CompletePayment(
+	ctx context.Context,
+	paymentId server.Id,
+	paymentReceipt string,
+	txHash string,
+) (returnErr error) {
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1263,7 +1274,8 @@ func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt st
                 SET
                     payment_receipt = $2,
                     completed = true,
-                    complete_time = $3
+                    complete_time = $3,
+                    tx_hash = $4
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
@@ -1271,6 +1283,7 @@ func CompletePayment(ctx context.Context, paymentId server.Id, paymentReceipt st
 			paymentId,
 			paymentReceipt,
 			server.NowUtc(),
+			txHash,
 		))
 		if tag.RowsAffected() != 1 {
 			returnErr = fmt.Errorf("Invalid payment.")
@@ -1367,6 +1380,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.min_sweep_time,
                 account_payment.create_time,
                 account_payment.payment_record,
+                account_payment.tx_hash,
                 account_payment.token_type,
                 account_payment.token_amount,
                 account_payment.payment_time,
@@ -1375,7 +1389,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.complete_time,
                 account_payment.canceled,
                 account_payment.cancel_time,
-				account_wallet.wallet_address
+				account_wallet.wallet_address,
+				account_wallet.blockchain
             FROM account_payment
 
             LEFT JOIN account_wallet ON
@@ -1404,6 +1419,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.MinSweepTime,
 					&payment.CreateTime,
 					&payment.PaymentRecord,
+					&payment.TxHash,
 					&payment.TokenType,
 					&payment.TokenAmount,
 					&payment.PaymentTime,
@@ -1413,6 +1429,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.Canceled,
 					&payment.CancelTime,
 					&payment.WalletAddress,
+					&payment.Blockchain,
 				))
 
 				networkPayments = append(networkPayments, payment)
