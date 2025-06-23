@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -432,4 +433,89 @@ func generateEntitySecretCipher(hexEncodedEntitySecret string) ([]byte, error) {
 	}
 
 	return cipher, nil
+}
+
+type PopulateTxHashRow struct {
+	PaymentId      server.Id `json:"payment_id"`
+	TxHash         string    `json:"tx_hash"`
+	PaymentReceipt string    `json:"payment_receipt"`
+}
+
+/**
+ * remove this after tx hashes are populating when payments are created
+ */
+func PopulateTxHashes(ctx context.Context) {
+
+	var rows []PopulateTxHashRow
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					payment_id,
+					payment_receipt
+				FROM
+					account_payment
+				WHERE completed = true
+			`,
+		)
+
+		server.WithPgResult(result, err, func() {
+
+			for result.Next() {
+
+				// transferStats = &TransferStats{}
+				row := PopulateTxHashRow{}
+
+				server.Raise(
+					result.Scan(
+						&row.PaymentId,
+						&row.PaymentReceipt,
+					),
+				)
+
+				var resp CircleResponse[CircleTransactionResult]
+				err := json.Unmarshal([]byte(row.PaymentReceipt), &resp)
+				if err != nil {
+					// handle error
+					glog.Infof("%s -> %s", row.PaymentId, err.Error())
+					continue
+				}
+
+				if resp.Data.Transaction.TxHash == "" {
+					glog.Infof("[circlec]no tx hash for payment %s", row.PaymentId)
+					glog.Infof("%s -> empty string", row.PaymentId)
+					continue
+				}
+
+				row.TxHash = resp.Data.Transaction.TxHash
+
+				rows = append(rows, row)
+
+			}
+		})
+
+		glog.Infof("updating %d rows", len(rows))
+
+		for i, row := range rows {
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE account_payment
+				SET
+					tx_hash = $1
+			    WHERE payment_id = $2
+				`,
+				row.TxHash,
+				row.PaymentId,
+			))
+
+			glog.Infof("[%d/%d] %s -> %s", i, len(rows), row.PaymentId, row.TxHash)
+
+		}
+
+	})
+
 }

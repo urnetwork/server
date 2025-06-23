@@ -55,6 +55,7 @@ Usage:
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
     bringyourctl payouts plan [--send]
+    bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
@@ -160,6 +161,8 @@ Options:
 			planPayouts(opts)
 		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
 			payoutPlanApplyBonus(opts)
+		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
+			populateTxHashes()
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if send, _ := opts.Bool("transfer"); send {
@@ -847,4 +850,10 @@ func accountPointsPopulate(opts docopt.Opts) {
 	planIdStr, _ := opts.String("--plan_id")
 	planId := server.RequireParseId(planIdStr)
 	model.PopulatePlanAccountPoints(ctx, planId)
+}
+
+// remove this after we check next payout correctly populates tx hashes
+func populateTxHashes() {
+	ctx := context.Background()
+	controller.PopulateTxHashes(ctx)
 }
