@@ -457,7 +457,7 @@ func PopulateTxHashes(ctx context.Context) {
 					payment_receipt
 				FROM
 					account_payment
-				WHERE completed = true
+				WHERE completed = true AND tx_hash IS NULL
 			`,
 		)
 
@@ -512,7 +512,7 @@ func PopulateTxHashes(ctx context.Context) {
 				row.PaymentId,
 			))
 
-			glog.Infof("[%d/%d] %s -> %s", i, len(rows), row.PaymentId, row.TxHash)
+			glog.Infof("[%d/%d] %s -> %s", i+1, len(rows), row.PaymentId, row.TxHash)
 
 		}
 
