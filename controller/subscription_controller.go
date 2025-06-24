@@ -50,6 +50,7 @@ type Skus struct {
 type Sku struct {
 	// the fees on the payment amount
 	FeeFraction                   float64 `yaml:"fee_fraction"`
+	PriceAmountUsd                float64 `yaml:"price_amount_usd,omitempty"`
 	BalanceByteCountHumanReadable string  `yaml:"balance_byte_count"`
 	Special                       string  `yaml:"special"`
 	Supporter                     bool    `yaml:"supporter"`
@@ -695,36 +696,67 @@ type PlaySubscriptionNotification struct {
 	SubscriptionId   string `json:"subscriptionId"`
 }
 
-// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions
+// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
 type PlaySubscription struct {
-	StartTimeMillis             string `json:"startTimeMillis"`
-	ExpiryTimeMillis            string `json:"expiryTimeMillis"`
-	AutoRenewing                bool   `json:"autoRenewing"`
-	PriceCurrencyCode           string `json:"priceCurrencyCode"`
-	PriceAmountMicros           string `json:"priceAmountMicros"`
-	CountryCode                 string `json:"countryCode"`
-	DeveloperPayload            string `json:"developerPayload"`
-	PaymentState                int    `json:"paymentState"`
-	OrderId                     string `json:"orderId"`
-	AcknowledgementState        int    `json:"acknowledgementState"`
-	Kind                        string `json:"kind"`
-	ObfuscatedExternalAccountId string `json:"obfuscatedExternalAccountId"`
+	LineItems []*PlaySubscriptionPurchaseLineItem `json:"lineItems"`
+	StartTime string                              `json:"startTime"`
+	// values:
+	// - SUBSCRIPTION_STATE_UNSPECIFIED
+	// - SUBSCRIPTION_STATE_PENDING
+	// - SUBSCRIPTION_STATE_ACTIVE
+	// - SUBSCRIPTION_STATE_PAUSED
+	// - SUBSCRIPTION_STATE_IN_GRACE_PERIOD
+	// - SUBSCRIPTION_STATE_ON_HOLD
+	// - SUBSCRIPTION_STATE_CANCELED
+	// - SUBSCRIPTION_STATE_EXPIRED
+	// - SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED
+	SubscriptionState string `json:"subscriptionState"`
+	// values:
+	// - ACKNOWLEDGEMENT_STATE_UNSPECIFIED
+	// - ACKNOWLEDGEMENT_STATE_PENDING
+	// - ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED
+	AcknowledgementState       string                          `json:"acknowledgementState"`
+	ExternalAccountIdentifiers *PlayExternalAccountIdentifiers `json:"externalAccountIdentifiers"`
+	SubscribeWithGoogleInfo    *PlaySubscribeWithGoogleInfo    `json:"subscribeWithGoogleInfo,omitempty"`
 }
 
-func (self *PlaySubscription) requireStartTimeMillis() int64 {
-	i, err := strconv.ParseInt(self.StartTimeMillis, 10, 64)
+func (self *PlaySubscription) ParseStartTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, self.StartTime)
+}
+
+func (self *PlaySubscription) RequireStartTime() time.Time {
+	t, err := self.ParseStartTime()
 	if err != nil {
 		panic(err)
 	}
-	return i
+	return t
 }
 
-func (self *PlaySubscription) requireExpiryTimeMillis() int64 {
-	i, err := strconv.ParseInt(self.ExpiryTimeMillis, 10, 64)
+type PlayExternalAccountIdentifiers struct {
+	ExternalAccountId           string `json:"externalAccountId,omitempty"`
+	ObfuscatedExternalAccountId string `json:"obfuscatedExternalAccountId,omitempty"`
+	ObfuscatedExternalProfileId string `json:"obfuscatedExternalProfileId,omitempty"`
+}
+
+type PlaySubscribeWithGoogleInfo struct {
+	EmailAddress string `json:"emailAddress,omitempty"`
+}
+
+type PlaySubscriptionPurchaseLineItem struct {
+	ProductId  string `json:"productId"`
+	ExpiryTime string `json:"expiryTime"`
+}
+
+func (self *PlaySubscriptionPurchaseLineItem) ParseExpiryTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, self.ExpiryTime)
+}
+
+func (self *PlaySubscriptionPurchaseLineItem) RequireExpiryTime() time.Time {
+	t, err := self.ParseExpiryTime()
 	if err != nil {
 		panic(err)
 	}
-	return i
+	return t
 }
 
 type PlayWebhookArgs struct {
@@ -756,11 +788,13 @@ func PlayWebhook(
 	}
 
 	if rtdnMessage.PackageName == playPackageName() {
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions/acknowledge
 		if rtdnMessage.SubscriptionNotification != nil {
 			url := fmt.Sprintf(
-				"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
+				"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
 				rtdnMessage.PackageName,
-				rtdnMessage.SubscriptionNotification.SubscriptionId,
 				rtdnMessage.SubscriptionNotification.PurchaseToken,
 			)
 			sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
@@ -769,19 +803,50 @@ func PlayWebhook(
 				server.ResponseJsonObject[*PlaySubscription],
 			)
 			if err != nil {
-				return nil, err
+				if v, ok := err.(*server.HttpStatusError); ok {
+					switch v.StatusCode {
+					// Gone
+					case 410:
+						return &PlayWebhookResult{}, nil
+					default:
+						return nil, err
+					}
+				} else {
+					return nil, err
+				}
 			}
 
 			glog.Infof("[sub]google play sub: %v\n", sub)
 
-			subscriptionPaymentId, err := server.ParseId(sub.ObfuscatedExternalAccountId)
-			if err != nil {
-				return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ObfuscatedExternalAccountId, err)
+			var networkId server.Id
+			if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
+				networkId, err = server.ParseId(sub.ExternalAccountIdentifiers.ExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ExternalAccountId, err)
+				}
+			} else if sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId != "" {
+				networkIdOrSubscriptionPaymentId, err := server.ParseId(sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId, err)
+				}
+				networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+				if err != nil {
+					// the obfuscated account id is just a plain network id
+					networkId = networkIdOrSubscriptionPaymentId
+				}
+			} else {
+				return nil, fmt.Errorf("Google Play subscription missing external account id and obfuscated external account id")
 			}
 
-			networkId, err := model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, subscriptionPaymentId)
-			if err != nil {
-				return nil, err
+			if len(sub.LineItems) == 0 {
+				return nil, fmt.Errorf("Google play cannot not renew subscription with zero line items (%s)", rtdnMessage.SubscriptionNotification.PurchaseToken)
+			}
+
+			minExpiryTime := sub.LineItems[0].RequireExpiryTime()
+			for _, item := range sub.LineItems[1:] {
+				if item.RequireExpiryTime().Before(minExpiryTime) {
+					minExpiryTime = item.RequireExpiryTime()
+				}
 			}
 
 			// fire this immediately since we pull current plan from subscription_renewal table
@@ -795,9 +860,16 @@ func PlayWebhook(
 				clientSession,
 			)
 
-			if sub.PaymentState == 1 && sub.AcknowledgementState == 0 {
+			acknowledgeAndCheckRenewal := false
+			switch sub.SubscriptionState {
+			case "SUBSCRIPTION_STATE_PENDING",
+				"SUBSCRIPTION_STATE_ACTIVE",
+				"SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
+				acknowledgeAndCheckRenewal = true
+			}
+
+			if acknowledgeAndCheckRenewal {
 				// Aknowledge
-				// FIXME this appears to be broken
 				url := fmt.Sprintf(
 					"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
 					rtdnMessage.PackageName,
@@ -822,7 +894,7 @@ func PlayWebhook(
 							PackageName:    rtdnMessage.PackageName,
 							SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
 							PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
-							CheckTime:      time.UnixMilli(sub.requireExpiryTimeMillis()),
+							CheckTime:      minExpiryTime,
 						},
 					)
 				})
@@ -844,6 +916,7 @@ type PlaySubscriptionRenewalArgs struct {
 }
 
 type PlaySubscriptionRenewalResult struct {
+	Canceled   bool      `json:"canceled"`
 	ExpiryTime time.Time `json:"expiry_time"`
 	Renewed    bool      `json:"renewed"`
 }
@@ -869,9 +942,8 @@ func PlaySubscriptionRenewal(
 ) (*PlaySubscriptionRenewalResult, error) {
 
 	url := fmt.Sprintf(
-		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s",
+		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
 		playSubscriptionRenewal.PackageName,
-		playSubscriptionRenewal.SubscriptionId,
 		playSubscriptionRenewal.PurchaseToken,
 	)
 	sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
@@ -880,68 +952,114 @@ func PlaySubscriptionRenewal(
 		server.ResponseJsonObject[*PlaySubscription],
 	)
 	if err != nil {
-		return nil, err
+		if v, ok := err.(*server.HttpStatusError); ok {
+			switch v.StatusCode {
+			// Gone
+			case 410:
+				return &PlaySubscriptionRenewalResult{
+					Canceled: true,
+				}, nil
+			default:
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
-	expiryTime := time.UnixMilli(sub.requireExpiryTimeMillis())
-	startTime := time.UnixMilli(sub.requireStartTimeMillis())
+	if len(sub.LineItems) == 0 {
+		return nil, fmt.Errorf("Google play cannot not renew subscription with zero line items (%s)", playSubscriptionRenewal.PurchaseToken)
+	}
 
-	priceAmountMicros, err := strconv.ParseFloat(sub.PriceAmountMicros, 64)
+	maxExpiryTime := sub.LineItems[0].RequireExpiryTime()
+	minExpiryTime := maxExpiryTime
+	for _, item := range sub.LineItems[1:] {
+		if maxExpiryTime.Before(item.RequireExpiryTime()) {
+			maxExpiryTime = item.RequireExpiryTime()
+		} else if item.RequireExpiryTime().Before(minExpiryTime) {
+			minExpiryTime = item.RequireExpiryTime()
+		}
+	}
+	for _, item := range sub.LineItems[1:] {
+		if maxExpiryTime.Before(item.RequireExpiryTime()) {
+			maxExpiryTime = item.RequireExpiryTime()
+		}
+	}
+	startTime, err := sub.ParseStartTime()
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, expiryTime); err != nil {
-		skus := playSkus()
-		skuName := playSubscriptionRenewal.SubscriptionId
-		if sku, ok := skus[skuName]; ok {
-			if sku.Supporter {
-				renewal := &model.SubscriptionRenewal{
-					NetworkId:          playSubscriptionRenewal.NetworkId,
-					StartTime:          startTime,
-					EndTime:            expiryTime.Add(SubscriptionGracePeriod),
-					NetRevenue:         model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
-					PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
-					SubscriptionType:   model.SubscriptionTypeSupporter,
-					SubscriptionMarket: model.SubscriptionMarketGoogle,
-				}
-				model.AddSubscriptionRenewal(
-					clientSession.Ctx,
-					renewal,
-				)
-				AddRefreshTransferBalance(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+	active := false
+	canceled := false
+	switch sub.SubscriptionState {
+	case "SUBSCRIPTION_STATE_ACTIVE":
+		active = true
+	case "SUBSCRIPTION_STATE_CANCELED",
+		"SUBSCRIPTION_STATE_EXPIRED":
+		canceled = true
+	}
 
-			} else {
-				transferBalance := &model.TransferBalance{
-					NetworkId:             playSubscriptionRenewal.NetworkId,
-					StartTime:             startTime,
-					EndTime:               expiryTime.Add(SubscriptionGracePeriod),
-					StartBalanceByteCount: sku.BalanceByteCount(),
-					NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * priceAmountMicros / float64(1000*1000)),
-					BalanceByteCount:      sku.BalanceByteCount(),
-					PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
-				}
-				model.AddTransferBalance(
-					clientSession.Ctx,
-					transferBalance,
-				)
-			}
-		} else {
-			return nil, fmt.Errorf("Play sku not found: %s", skuName)
-		}
-
+	if canceled {
 		return &PlaySubscriptionRenewalResult{
-			ExpiryTime: expiryTime,
-			Renewed:    true,
-		}, nil
-	} else {
-		// a transfer balance was already for the current expiry time
-		// hence, the subscription has not been extended/renewed
-		return &PlaySubscriptionRenewalResult{
-			ExpiryTime: expiryTime,
-			Renewed:    false,
+			Canceled: true,
 		}, nil
 	}
+
+	if active {
+		if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
+			skus := playSkus()
+			skuName := playSubscriptionRenewal.SubscriptionId
+			if sku, ok := skus[skuName]; ok {
+				if sku.Supporter {
+					renewal := &model.SubscriptionRenewal{
+						NetworkId:          playSubscriptionRenewal.NetworkId,
+						StartTime:          startTime,
+						EndTime:            maxExpiryTime.Add(SubscriptionGracePeriod),
+						NetRevenue:         model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+						SubscriptionType:   model.SubscriptionTypeSupporter,
+						SubscriptionMarket: model.SubscriptionMarketGoogle,
+					}
+					model.AddSubscriptionRenewal(
+						clientSession.Ctx,
+						renewal,
+					)
+					AddRefreshTransferBalance(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+
+				} else {
+					transferBalance := &model.TransferBalance{
+						NetworkId:             playSubscriptionRenewal.NetworkId,
+						StartTime:             startTime,
+						EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
+						StartBalanceByteCount: sku.BalanceByteCount(),
+						NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						BalanceByteCount:      sku.BalanceByteCount(),
+						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+					}
+					model.AddTransferBalance(
+						clientSession.Ctx,
+						transferBalance,
+					)
+				}
+			} else {
+				return nil, fmt.Errorf("Play sku not found: %s", skuName)
+			}
+
+			return &PlaySubscriptionRenewalResult{
+				ExpiryTime: minExpiryTime,
+				Renewed:    true,
+			}, nil
+		}
+	}
+
+	// not active or
+	// a transfer balance was already for the current expiry time
+	// hence, the subscription has not been extended/renewed
+	return &PlaySubscriptionRenewalResult{
+		ExpiryTime: minExpiryTime,
+		Renewed:    false,
+	}, nil
 }
 
 func PlaySubscriptionRenewalPost(
@@ -950,6 +1068,10 @@ func PlaySubscriptionRenewalPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if playSubscriptionRenewalResult.Canceled {
+		return nil
+	}
+
 	if playSubscriptionRenewalResult.Renewed {
 		// FIXME is the expiry time messed up sometimes?
 		playSubscriptionRenewal.CheckTime = server.MaxTime(
@@ -982,6 +1104,7 @@ func PlaySubscriptionRenewalPost(
 			&SubscriptionEndedTemplate{},
 		)
 	}
+
 	return nil
 }
 

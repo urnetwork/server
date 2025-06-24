@@ -230,7 +230,22 @@ func HttpResponseRequireStatusOk[R any](responseCallback ResponseCallback[R]) Re
 		if 200 <= response.StatusCode && response.StatusCode < 300 {
 			return responseCallback(response, responseBodyBytes)
 		}
+		err := &HttpStatusError{
+			StatusCode:   response.StatusCode,
+			Status:       response.Status,
+			ResponseBody: string(responseBodyBytes),
+		}
 		var empty R
-		return empty, fmt.Errorf("Bad status: %s %s", response.Status, string(responseBodyBytes))
+		return empty, err
 	}
+}
+
+type HttpStatusError struct {
+	StatusCode   int
+	Status       string
+	ResponseBody string
+}
+
+func (self *HttpStatusError) Error() string {
+	return fmt.Sprintf("Bad status: %s %s", self.Status, self.ResponseBody)
 }
