@@ -849,17 +849,6 @@ func PlayWebhook(
 				}
 			}
 
-			// fire this immediately since we pull current plan from subscription_renewal table
-			PlaySubscriptionRenewal(
-				&PlaySubscriptionRenewalArgs{
-					NetworkId:      networkId,
-					PackageName:    rtdnMessage.PackageName,
-					SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
-					PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
-				},
-				clientSession,
-			)
-
 			acknowledgeAndCheckRenewal := true
 			switch sub.SubscriptionState {
 			case "SUBSCRIPTION_STATE_CANCELED",
@@ -880,6 +869,17 @@ func PlayWebhook(
 					url,
 					[]byte{},
 					playAuthHeaders,
+				)
+
+				// fire this immediately since we pull current plan from subscription_renewal table
+				PlaySubscriptionRenewal(
+					&PlaySubscriptionRenewalArgs{
+						NetworkId:      networkId,
+						PackageName:    rtdnMessage.PackageName,
+						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+					},
+					clientSession,
 				)
 
 				// continually renew as long as the expiry time keeps getting pushed forward
