@@ -71,9 +71,11 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 								server.ErrorJson(r, debug.Stack()),
 							)
 						}
-						// note the connection might be hijacked in this case
-						// do not respond to the user because we don't know the upgrade state
-						// http.Error(w, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
+						func() {
+							// note the connection might be hijacked in this case
+							defer recover()
+							http.Error(w, "Error. Please email support@ur.io for help.", http.StatusInternalServerError)
+						}()
 					}
 				}()
 				route.handler(w, r.WithContext(ctx))
