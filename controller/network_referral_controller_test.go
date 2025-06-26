@@ -26,6 +26,7 @@ func TestNetworkReferral(t *testing.T) {
 
 		referralCodeA := model.CreateNetworkReferralCode(ctx, networkAId)
 		referralCodeB := model.CreateNetworkReferralCode(ctx, networkBId)
+		referralCodeC := model.CreateNetworkReferralCode(ctx, networkCId)
 
 		networkCSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkCId,
@@ -67,6 +68,16 @@ func TestNetworkReferral(t *testing.T) {
 		controller.UnlinkReferralNetwork(networkCSession)
 		networkCReferral = model.GetReferralNetworkByChildNetworkId(ctx, networkCId)
 		assert.Equal(t, networkCReferral, nil)
+
+		/**
+		 * User should not be able to set their own referral code
+		 */
+		args = controller.SetNetworkReferralArgs{
+			ReferralCode: referralCodeC.ReferralCode,
+		}
+		result, err = controller.SetNetworkReferral(&args, networkCSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.Error, nil)
 
 	})
 }

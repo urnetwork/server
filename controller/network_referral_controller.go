@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"strings"
+
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -30,6 +32,24 @@ func SetNetworkReferral(
 		return &SetNetworkReferralResult{
 			Error: &SetNetworkReferralError{
 				Message: "Invalid referral code",
+			},
+		}, nil
+	}
+
+	networkReferralCode := model.GetNetworkReferralCode(session.Ctx, session.ByJwt.NetworkId)
+	if networkReferralCode == nil {
+		return &SetNetworkReferralResult{
+			Error: &SetNetworkReferralError{
+				Message: "No referral code found for the current network",
+			},
+		}, nil
+
+	}
+
+	if strings.ToUpper(networkReferralCode.ReferralCode) == strings.ToUpper(setNetworkReferral.ReferralCode) {
+		return &SetNetworkReferralResult{
+			Error: &SetNetworkReferralError{
+				Message: "Cannot set the same referral code as the current network",
 			},
 		}, nil
 	}
