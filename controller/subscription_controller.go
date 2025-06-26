@@ -860,12 +860,12 @@ func PlayWebhook(
 				clientSession,
 			)
 
-			acknowledgeAndCheckRenewal := false
+			acknowledgeAndCheckRenewal := true
 			switch sub.SubscriptionState {
-			case "SUBSCRIPTION_STATE_PENDING",
-				"SUBSCRIPTION_STATE_ACTIVE",
-				"SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
-				acknowledgeAndCheckRenewal = true
+			case "SUBSCRIPTION_STATE_CANCELED",
+				"SUBSCRIPTION_STATE_EXPIRED",
+				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
+				acknowledgeAndCheckRenewal = false
 			}
 
 			if acknowledgeAndCheckRenewal {
