@@ -990,11 +990,12 @@ func AuthPasswordSet(
 	return result, nil
 }
 
-const ActiveAuthCodeLimitPerNetwork = 100
+const ActiveAuthCodeLimitPerNetwork = 500
 const DefaultAuthCodeDuration = 1 * time.Minute
 const AuthCodeMaxDuration = 24 * time.Hour
 const DefaultAuthCodeUses = 1
-const AuthCodeMaxUses = 4
+
+// const AuthCodeMaxUses = 4
 
 type AuthCodeCreateArgs struct {
 	DurationMinutes float64 `json:"duration_minutes,omitempty"`
