@@ -46,7 +46,7 @@ import (
 
 // IMPORTANT: this is hard coded into the `db_migrations`
 // IMPORTANT: if you change this number, you must also change the schema
-const BlockSizeSeconds = 300
+const BlockSizeSeconds = 60
 
 var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second
@@ -57,8 +57,8 @@ var RescheduleTimeout = 2 * BlockSizeSeconds * time.Second
 type TaskPriority = int
 
 const (
-	TaskPriorityFastest TaskPriority = 0
-	TaskPrioritySlowest TaskPriority = 20
+	TaskPriorityFastest TaskPriority = 20
+	TaskPrioritySlowest TaskPriority = 0
 )
 
 type TaskFunction[T any, R any] func(T, *session.ClientSession) (R, error)
@@ -914,14 +914,11 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 			    	run_priority
 			    FROM pending_task
 			    WHERE
-			        run_at_block <= $2 AND
-			        run_at <= $1 AND
-			        release_time <= $1
-			    ORDER BY run_at_block DESC, run_priority ASC
-			    LIMIT $3
+			        available_block <= $1
+			    ORDER BY available_block DESC, run_priority DESC
+			    LIMIT $2
 			    FOR UPDATE SKIP LOCKED
 		    `,
-			now,
 			nowBlock,
 			n,
 		)
