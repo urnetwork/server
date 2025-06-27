@@ -15,7 +15,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-
 type response struct {
 	Info               myinfo.MyInfo              `json:"info"`
 	ExpectedRTTs       []landmarks.LandmarkAndRTT `json:"landmarks"`
@@ -104,15 +103,21 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if myInfo == nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	isIPV6 := strings.Contains(addressOnly, ":")
 
 	var landmarksAndRTTs []landmarks.LandmarkAndRTT
 
-	if isIPV6 {
-		landmarksAndRTTs = landmarks.CurrentLandmarks.V6.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
-	} else {
-		landmarksAndRTTs = landmarks.CurrentLandmarks.V4.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
+	if myInfo.Location != nil && myInfo.Location.Coordinates != nil {
+		if isIPV6 {
+			landmarksAndRTTs = landmarks.CurrentLandmarks.V6.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
+		} else {
+			landmarksAndRTTs = landmarks.CurrentLandmarks.V4.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
+		}
 	}
 
 	respStruct := response{

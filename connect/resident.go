@@ -120,7 +120,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		// this must match the warp `settings.yml` for the environment
 		StartInternalPort: 5080,
 
-		MaxConcurrentForwardsPerResident: 256,
+		MaxConcurrentForwardsPerResident: 1024,
 
 		ResidentIdleTimeout: 60 * time.Minute,
 		ForwardIdleTimeout:  60 * time.Minute,
