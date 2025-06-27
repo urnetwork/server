@@ -20,13 +20,12 @@ import (
 
 func IsDoneError(r any) bool {
 	isDoneMessage := func(message string) bool {
-		switch message {
-		case "Done", "Done.":
+		switch {
+		case strings.HasPrefix(message, "Done"):
 			return true
 		// pgx
-		case "context canceled",
-			"timeout: context already done: context canceled",
-			"failed to deallocate cached statement(s): conn closed":
+		case strings.Contains(message, "context canceled"),
+			strings.HasPrefix(message, "failed to deallocate cached statement(s)"):
 			return true
 		default:
 			return false

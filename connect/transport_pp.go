@@ -26,14 +26,16 @@ const PpMaxHeaderSize = 2048
 
 func DefaultWarpPpSettings() *PpSettings {
 	return &PpSettings{
-		MaxPacketSize: 1500,
-		ProxyTimeout:  45 * time.Second,
+		MaxPacketSize:     1500,
+		ProxyTimeout:      45 * time.Second,
+		MaxDiscardPackets: 10,
 	}
 }
 
 type PpSettings struct {
-	MaxPacketSize int
-	ProxyTimeout  time.Duration
+	MaxPacketSize     int
+	ProxyTimeout      time.Duration
+	MaxDiscardPackets int
 }
 
 // implements `net.PacketConn`
@@ -66,79 +68,86 @@ func NewPpPacketConn(conn net.PacketConn, settings *PpSettings) *PpPacketConn {
 func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	buffer := self.readBuffer
 
-	n, addr, err = self.conn.ReadFrom(buffer)
-	if err != nil {
-		return
-	}
-
-	// the packet may contain a proxy protocol header at any time
-	// if the last packet from addr was > proxy timeout,
-	// we can trust that the header is from our proxy and the protocol header is used
-	// otherwise the header is discarded because we can't tell if header is from our proxy or the user
-	h, header, ppErr := parsePpHeader(buffer[0:n])
-	if ppErr != nil {
-		err = ppErr
-		return
-	}
-
-	// fmt.Printf("parse pp %d %v\n", h, header)
-
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		now := time.Now()
-		expireTime := now.Add(-self.settings.ProxyTimeout)
-		for 0 < self.proxyQueue.Len() && self.proxyQueue.PeekFirst().lastUpdateTime.Before(expireTime) {
-			self.proxyQueue.RemoveFirst()
+	for range self.settings.MaxDiscardPackets + 1 {
+		n, addr, err = self.conn.ReadFrom(buffer)
+		if err != nil {
+			return
 		}
 
-		s := self.proxyQueue.GetByProxyAddr(addr.(*net.UDPAddr).AddrPort())
-		if s == nil {
-			if h == 0 {
-				err = fmt.Errorf("proxy protocol header required but not found")
-				return
-			}
-
-			var realAddr *net.UDPAddr
-			switch v := header.Source.(type) {
-			case *net.UDPAddr:
-				realAddr = v
-			case *net.TCPAddr:
-				realAddr = &net.UDPAddr{
-					IP:   v.IP,
-					Port: v.Port,
-					Zone: v.Zone,
-				}
-			}
-			realAddrPort := realAddr.AddrPort()
-			s = &proxyState{
-				proxyAddr:      addr,
-				proxyAddrPort:  addr.(*net.UDPAddr).AddrPort(),
-				realAddr:       realAddr,
-				realAddrPort:   realAddrPort,
-				lastUpdateTime: now,
-			}
-			self.proxyQueue.Add(s)
-
-			buffer = buffer[h:n]
-			n -= h
+		// the packet may contain a proxy protocol header at any time
+		// if the last packet from addr was > proxy timeout,
+		// we can trust that the header is from our proxy and the protocol header is used
+		// otherwise the header is discarded because we can't tell if header is from our proxy or the user
+		h, header, ppErr := parsePpHeader(buffer[0:n])
+		if ppErr != nil {
+			// not a pp packet
+			err = ppErr
 		} else {
-			self.proxyQueue.Update(s, now)
+			// fmt.Printf("parse pp %d %v\n", h, header)
 
-			// *important* the header can be either from our proxy or the user
-			//             do not use or store the header value. Just discard it.
-			if 0 < h {
-				buffer = buffer[h:n]
-				n -= h
-			}
-			// else this is the common case - no proxy protocol
-			// note if the input buffer was over-allocated,
-			// we could ready directly into the output buffer for the common case
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+
+				now := time.Now()
+				expireTime := now.Add(-self.settings.ProxyTimeout)
+				for 0 < self.proxyQueue.Len() && self.proxyQueue.PeekFirst().lastUpdateTime.Before(expireTime) {
+					self.proxyQueue.RemoveFirst()
+				}
+
+				s := self.proxyQueue.GetByProxyAddr(addr.(*net.UDPAddr).AddrPort())
+				if s == nil {
+					if h == 0 {
+						// not a pp packet
+						err = fmt.Errorf("proxy protocol header required but not found")
+						return
+					}
+
+					var realAddr *net.UDPAddr
+					switch v := header.Source.(type) {
+					case *net.UDPAddr:
+						realAddr = v
+					case *net.TCPAddr:
+						realAddr = &net.UDPAddr{
+							IP:   v.IP,
+							Port: v.Port,
+							Zone: v.Zone,
+						}
+					}
+					realAddrPort := realAddr.AddrPort()
+					s = &proxyState{
+						proxyAddr:      addr,
+						proxyAddrPort:  addr.(*net.UDPAddr).AddrPort(),
+						realAddr:       realAddr,
+						realAddrPort:   realAddrPort,
+						lastUpdateTime: now,
+					}
+					self.proxyQueue.Add(s)
+
+					buffer = buffer[h:n]
+					n -= h
+				} else {
+					self.proxyQueue.Update(s, now)
+
+					// *important* the header can be either from our proxy or the user
+					//             do not use or store the header value. Just discard it.
+					if 0 < h {
+						buffer = buffer[h:n]
+						n -= h
+					}
+					// else this is the common case - no proxy protocol
+					// note if the input buffer was over-allocated,
+					// we could ready directly into the output buffer for the common case
+				}
+
+				addr = s.realAddr
+			}()
 		}
 
-		addr = s.realAddr
-	}()
+		if err == nil {
+			break
+		}
+	}
 
 	if err != nil {
 		return
