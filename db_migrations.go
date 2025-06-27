@@ -1811,7 +1811,7 @@ var migrations = []any{
 
 	newSqlMigration(`
         ALTER TABLE pending_task
-        ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (extract(epoch from run_at) / 60) ELSE (1 + (extract(epoch from release_time) / 60)) END) STORED
+        ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (1 + (extract(epoch from run_at) / 60)) ELSE (1 + (extract(epoch from release_time) / 60)) END) STORED
     `),
 
 	newSqlMigration(`
