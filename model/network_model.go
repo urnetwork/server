@@ -9,6 +9,7 @@ import (
 
 	// "github.com/golang/glog"
 
+	goaway "github.com/TwiN/go-away"
 	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -199,6 +200,8 @@ func NetworkCreate(
 		return result, nil
 	}
 
+	containsProfanity := goaway.IsProfane(networkCreate.NetworkName)
+
 	if networkCreate.UserAuth != nil {
 		// user is creating a network via email/phone + pass
 		// validate the user does not exist
@@ -284,12 +287,13 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network
-					(network_id, network_name, admin_user_id)
-					VALUES ($1, $2, $3)
+					(network_id, network_name, admin_user_id, contains_profanity)
+					VALUES ($1, $2, $3, $4)
 				`,
 				createdNetworkId,
 				networkCreate.NetworkName,
 				createdUserId,
+				containsProfanity,
 			)
 			server.Raise(err)
 		})
@@ -381,12 +385,13 @@ func NetworkCreate(
 					session.Ctx,
 					`
 						INSERT INTO network
-						(network_id, network_name, admin_user_id)
-						VALUES ($1, $2, $3)
+						(network_id, network_name, admin_user_id, contains_profanity)
+						VALUES ($1, $2, $3, $4)
 					`,
 					createdNetworkId,
 					networkCreate.NetworkName,
 					createdUserId,
+					containsProfanity,
 				)
 				if err != nil {
 					panic(err)
@@ -500,12 +505,13 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network
-					(network_id, network_name, admin_user_id)
-					VALUES ($1, $2, $3)
+					(network_id, network_name, admin_user_id, contains_profanity)
+					VALUES ($1, $2, $3, $4)
 				`,
 				createdNetworkId,
 				networkCreate.NetworkName,
 				createdUserId,
+				containsProfanity,
 			)
 			if err != nil {
 				panic(err)
@@ -803,7 +809,7 @@ func UpgradeGuest(
 										user_auth = $3,
 										password_hash = $4,
 										password_salt = $5
-	
+
 								WHERE
 										user_id = $1
 						`,
@@ -873,7 +879,7 @@ func UpgradeGuest(
 										auth_type = $2,
 										user_auth = $3,
 										auth_jwt = $4
-	
+
 								WHERE
 										user_id = $1
 						`,
@@ -941,7 +947,7 @@ func UpgradeGuest(
 										wallet_address = $2,
 										wallet_blockchain = $3,
 										auth_type = $4
-	
+
 								WHERE
 										user_id = $1
 						`,
@@ -1191,9 +1197,9 @@ func markUpgradedNetworkId(
 			session.Ctx,
 			`
 				UPDATE network
-				SET 
+				SET
 						guest_upgrade_network_id = $1
-				WHERE 
+				WHERE
 						network_id = $2
 			`,
 			upgradedNetworkId,
@@ -1207,6 +1213,7 @@ func markUpgradedNetworkId(
 type Network struct {
 	NetworkId             *server.Id `json:"network_id"`
 	NetworkName           string     `json:"network_name"`
+	ContainsProfanity     bool       `json:"contains_profanity"`
 	AdminUserId           *server.Id `json:"admin_user_id"`
 	GuestUpgradeNetworkId *server.Id `json:"guest_upgrade_network_id"`
 }
@@ -1225,8 +1232,9 @@ func GetNetwork(
 				network_id,
 				network_name,
 				admin_user_id,
-				guest_upgrade_network_id
-			FROM network 
+				guest_upgrade_network_id,
+				contains_profanity
+			FROM network
 			WHERE network_id = $1
 		`,
 			session.ByJwt.NetworkId,
@@ -1241,6 +1249,7 @@ func GetNetwork(
 					&network.NetworkName,
 					&network.AdminUserId,
 					&network.GuestUpgradeNetworkId,
+					&network.ContainsProfanity,
 				))
 			}
 		})
@@ -1262,16 +1271,19 @@ func Testing_CreateNetwork(
 	passwordSalt := createPasswordSalt()
 	passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
+	containsProfanity := goaway.IsProfane(networkName)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network (network_id, network_name, admin_user_id)
-				VALUES ($1, $2, $3)
+				INSERT INTO network (network_id, network_name, admin_user_id, contains_profanity)
+				VALUES ($1, $2, $3, $4)
 			`,
 			networkId,
 			networkName,
 			adminUserId,
+			containsProfanity,
 		))
 
 		server.RaisePgResult(tx.Exec(

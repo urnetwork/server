@@ -1798,4 +1798,8 @@ var migrations = []any{
 		ALTER TABLE account_payment
 		ADD COLUMN tx_hash TEXT NULL
 	`),
+	newSqlMigration(`
+		ALTER TABLE network
+		ADD COLUMN contains_profanity BOOLEAN NOT NULL DEFAULT false
+	`),
 }
