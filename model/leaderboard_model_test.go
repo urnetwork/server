@@ -41,7 +41,7 @@ func TestLeaderboard(t *testing.T) {
 		networkIdC := server.NewId()
 		userIdC := server.NewId()
 
-		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdA, "shit_contains_profanity", userIdA)
 		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
 		Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
 		clientSessionC := session.Testing_CreateClientSession(
@@ -108,6 +108,12 @@ func TestLeaderboard(t *testing.T) {
 		assert.Equal(t, len(leaderboardStats), 2)
 		assert.Equal(t, leaderboardStats[0].NetworkId, networkIdB.String())
 		assert.Equal(t, leaderboardStats[1].NetworkId, networkIdA.String())
+
+		// profanity check
+		// network B does not contain profanity
+		assert.Equal(t, leaderboardStats[0].ContainsProfanity, false)
+		// network A contains profanity
+		assert.Equal(t, leaderboardStats[1].ContainsProfanity, true)
 
 		/**
 		 * Get individual network ranking

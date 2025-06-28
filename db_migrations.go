@@ -1817,4 +1817,8 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX pending_task_available_block ON pending_task (available_block, run_priority, task_id)
     `),
+	newSqlMigration(`
+		ALTER TABLE network
+		ADD COLUMN contains_profanity BOOLEAN NOT NULL DEFAULT false
+	`),
 }
