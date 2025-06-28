@@ -20,52 +20,14 @@ var ipInfoConfig = sync.OnceValue(func() map[string]any {
 	return c["ipinfo"].(map[string]any)
 })
 
-const LocationLookupResultExpiration = 24 * time.Hour
+const LocationLookupResultExpiration = 30 * 24 * time.Hour
+
+// FIXME use lite? curl https://api.ipinfo.io/lite/8.8.8.8?token=0c3390b39605e0
 
 func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *model.ConnectionLocationScores, error) {
-	earliestResultTime := server.NowUtc().Add(-LocationLookupResultExpiration)
-
-	var resultJson []byte
-	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
-		resultJson = []byte(resultJsonStr)
-		resultJson = server.AttemptCompactJson(resultJson)
-	} else {
-		req, err := http.NewRequest(
-			"GET",
-			fmt.Sprintf("https://ipinfo.io/%s/json", ipStr),
-			nil,
-		)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		token := ipInfoConfig()["access_token"].(string)
-		// server.Logger().Printf("Ipinfo token: %s", token)
-
-		// tokenBase64 := base64.StdEncoding.EncodeToString([]byte(token))
-
-		req.Header.Add(
-			"Authorization",
-			fmt.Sprintf("Bearer %s", token),
-		)
-
-		client := server.DefaultHttpClient()
-
-		res, err := client.Do(req)
-		if err != nil {
-			return nil, nil, err
-		}
-		defer res.Body.Close()
-
-		resultJson, err = io.ReadAll(res.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		resultJson = server.AttemptCompactJson(resultJson)
-
-		// server.Logger().Printf("Got ipinfo result %s", string(resultJson))
-
-		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
+	resultJson, err := GetIPInfo(ctx, ipStr)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// server.Logger().Printf("Got ipinfo result %s", string(resultJson))
@@ -86,7 +48,7 @@ func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *mode
 	*/
 
 	var ipInfoResult IpInfoResult
-	err := json.Unmarshal(resultJson, &ipInfoResult)
+	err = json.Unmarshal(resultJson, &ipInfoResult)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -163,6 +125,7 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
+	resultJson = server.AttemptCompactJson(resultJson)
 
 	model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
 

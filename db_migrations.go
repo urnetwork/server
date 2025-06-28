@@ -1256,7 +1256,7 @@ var migrations = []any{
 
 	newCodeMigration(migration_20240124_PopulateDevice),
 
-	// the run_at_block size is 5 minutes = 300 seconds
+	// ALTERED the run_at_block size is 1 minute = 60 seconds
 	// extract(epoch ...) is epoch in seconds
 	// https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
 	newSqlMigration(`
@@ -1798,6 +1798,25 @@ var migrations = []any{
 		ALTER TABLE account_payment
 		ADD COLUMN tx_hash TEXT NULL
 	`),
+
+	newSqlMigration(`
+        DROP INDEX pending_task_run_at_block
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE pending_task
+        DROP COLUMN run_at_block,
+        ADD COLUMN run_at_block bigint GENERATED ALWAYS AS (extract(epoch from run_at) / 60) STORED
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE pending_task
+        ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (1 + (extract(epoch from run_at) / 60)) ELSE (1 + (extract(epoch from release_time) / 60)) END) STORED
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX pending_task_available_block ON pending_task (available_block, run_priority, task_id)
+    `),
 	newSqlMigration(`
 		ALTER TABLE network
 		ADD COLUMN contains_profanity BOOLEAN NOT NULL DEFAULT false

@@ -27,6 +27,7 @@ func ConnectNetworkClient(
 	return connectionId
 }
 
+// FIXME only do this when the client is a provider
 func setConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
