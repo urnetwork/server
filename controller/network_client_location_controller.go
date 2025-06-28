@@ -105,11 +105,17 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 		/**
 		 * Check if cached JSON is an invalid response
 		 */
+		rateLimited := false
 		if err := json.Unmarshal(resultJson, &errResp); err == nil && errResp.Status == 429 {
-			return nil, fmt.Errorf("rate limit exceeded: %s", errResp.Error.Message)
+			rateLimited = true
 		}
 
-		return resultJson, nil
+		/**
+		 * If not rate limited, return the cached response
+		 */
+		if !rateLimited {
+			return resultJson, nil
+		}
 	}
 
 	req, err := http.NewRequest(
