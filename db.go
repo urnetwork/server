@@ -73,9 +73,10 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
 		options := map[string]string{
-			"sslmode":                       "disable",
-			"pool_max_conns":                strconv.Itoa(32),
-			"pool_min_conns":                strconv.Itoa(4),
+			"sslmode": "disable",
+			// FIXME perf move to config
+			"pool_max_conns":                strconv.Itoa(256),
+			"pool_min_conns":                strconv.Itoa(32),
 			"pool_max_conn_lifetime":        "8h",
 			"pool_max_conn_lifetime_jitter": "1h",
 			"pool_max_conn_idle_time":       "60s",
@@ -844,4 +845,19 @@ func parseSpec(spec string) (columnNames []string, pgTypes []string) {
 	}
 
 	return
+}
+
+func DbMaintenance(ctx context.Context) {
+	Tx(ctx, func(tx PgTx) {
+
+		RaisePgResult(tx.Exec(
+			ctx,
+			`VACUUM ANALYZE`,
+		))
+
+		RaisePgResult(tx.Exec(
+			ctx,
+			`VACUUM FULL`,
+		))
+	})
 }
