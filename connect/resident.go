@@ -107,7 +107,7 @@ type ExchangeChaosSettings struct {
 
 func DefaultExchangeSettings() *ExchangeSettings {
 	connectionHandlerSettings := DefaultConnectHandlerSettings()
-	exchangeResidentWaitTimeout := 5 * time.Second
+	exchangeResidentWaitTimeout := 15 * time.Second
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
 
@@ -136,7 +136,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeConnectionResidentPollTimeout: 30 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
-		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 8,
+		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 4,
 
 		ForwardEnforceActiveContracts: false,
 
