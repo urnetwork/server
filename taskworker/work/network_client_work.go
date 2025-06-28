@@ -7,7 +7,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 
-	// "github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/session"
 )
 
@@ -46,38 +46,75 @@ func CloseExpiredNetworkClientHandlersPost(
 	return nil
 }
 
-type DeleteDisconnectedNetworkClientsArgs struct {
+type RemoveDisconnectedNetworkClientsArgs struct {
 }
 
-type DeleteDisconnectedNetworkClientsResult struct {
+type RemoveDisconnectedNetworkClientsResult struct {
 }
 
-func ScheduleDeleteDisconnectedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
+func ScheduleRemoveDisconnectedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
-		DeleteDisconnectedNetworkClients,
-		&DeleteDisconnectedNetworkClientsArgs{},
+		RemoveDisconnectedNetworkClients,
+		&RemoveDisconnectedNetworkClientsArgs{},
 		clientSession,
+		// legacy key
 		task.RunOnce("delete_disconnected_network_clients"),
-		task.RunAt(time.Now().Add(15*time.Second)),
+		task.RunAt(time.Now().Add(5*time.Minute)),
 	)
 }
 
-func DeleteDisconnectedNetworkClients(
-	deleteDisconnectedNetworkClients *DeleteDisconnectedNetworkClientsArgs,
+func RemoveDisconnectedNetworkClients(
+	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
 	clientSession *session.ClientSession,
-) (*DeleteDisconnectedNetworkClientsResult, error) {
-	// keep disconnected records around for a little while to help debug
-	model.DeleteDisconnectedNetworkClients(clientSession.Ctx, 5*time.Minute)
-	return &DeleteDisconnectedNetworkClientsResult{}, nil
+) (*RemoveDisconnectedNetworkClientsResult, error) {
+	minTime := time.Now().Add(-7 * 24 * time.Hour)
+	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minTime)
+	return &RemoveDisconnectedNetworkClientsResult{}, nil
 }
 
-func DeleteDisconnectedNetworkClientsPost(
-	deleteDisconnectedNetworkClients *DeleteDisconnectedNetworkClientsArgs,
-	deleteDisconnectedNetworkClientsResult *DeleteDisconnectedNetworkClientsResult,
+func RemoveDisconnectedNetworkClientsPost(
+	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
+	removeDisconnectedNetworkClientsResult *RemoveDisconnectedNetworkClientsResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
+	ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
+	return nil
+}
+
+type RemoveLocationLookupResultsArgs struct {
+}
+
+type RemoveLocationLookupResultsResult struct {
+}
+
+func ScheduleRemoveLocationLookupResults(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveLocationLookupResults,
+		&RemoveLocationLookupResultsArgs{},
+		clientSession,
+		task.RunOnce("remove_lookup_results"),
+		task.RunAt(time.Now().Add(30*time.Minute)),
+	)
+}
+
+func RemoveLocationLookupResults(
+	removeLocationLookupResults *RemoveLocationLookupResultsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveLocationLookupResultsResult, error) {
+	minTime := time.Now().Add(-controller.LocationLookupResultExpiration)
+	model.RemoveLocationLookupResults(clientSession.Ctx, minTime)
+	return &RemoveLocationLookupResultsResult{}, nil
+}
+
+func RemoveLocationLookupResultsPost(
+	removeLocationLookupResults *RemoveLocationLookupResultsArgs,
+	removeLocationLookupResultsResult *RemoveLocationLookupResultsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveLocationLookupResults(clientSession, tx)
 	return nil
 }

@@ -2589,3 +2589,89 @@ func AddRefreshTransferBalanceToAllNetworks(
 	})
 	return
 }
+
+func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		// remove completed transfer contracts
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_contract
+			    USING transfer_escrow_sweep,    account_payment
+			WHERE
+			    transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
+			    account_payment.payment_id = transfer_escrow_sweep.payment_id AND
+			    account_payment.completed AND complete_time <= $1
+			`,
+			minTime.UTC(),
+		))
+
+		// remove closed transfer contracts that do not have a corresponding sweep
+		// these are the result of some db corruption and we cannot recover them
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_contract
+			USING (
+				SELECT transfer_contract.contract_id FROM transfer_contract
+				LEFT JOIN transfer_escrow_sweep ON transfer_escrow_sweep.contract_id = transfer_contract.contract_id
+				WHERE
+					transfer_contract.create_time < $1 AND
+					transfer_contract.open = false AND
+					transfer_escrow_sweep.contract_id IS NULL
+			) t
+			WHERE transfer_contract.contract_id = t.contract_id
+			`,
+			minTime.UTC(),
+		))
+
+		// (cascade) remove contract close where the transfer contract no longer exists
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM contract_close
+			USING (
+				SELECT contract_close.contract_id
+		    	FROM contract_close
+		        	LEFT JOIN transfer_contract ON transfer_contract.contract_id = contract_close.contract_id
+				WHERE transfer_contract.contract_id IS NULL
+			) t
+			WHERE contract_close.contract_id = t.contract_id
+			`,
+			minTime.UTC(),
+		))
+
+		// (cascade) remove contract escrow where the transfer contract no longer exists
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_escrow
+			USING (
+				SELECT transfer_escrow.contract_id
+	       		FROM transfer_escrow
+					LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow.contract_id
+				WHERE transfer_contract.contract_id IS NULL
+			) t
+			WHERE transfer_escrow.contract_id = t.contract_id
+			`,
+			minTime.UTC(),
+		))
+
+		// (cascade) remove contract escrow sweep where the transfer contract no longer exists
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_escrow_sweep
+			USING (
+				SELECT transfer_escrow_sweep.contract_id
+			   	FROM transfer_escrow_sweep
+			    	LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow_sweep.contract_id
+			    WHERE transfer_contract.contract_id IS NULL
+			) t
+			WHERE transfer_escrow_sweep.contract_id = t.contract_id;
+			`,
+			minTime.UTC(),
+		))
+	})
+}

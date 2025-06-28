@@ -49,3 +49,46 @@ func BackfillInitialTransferBalancePost(
 ) error {
 	return nil
 }
+
+type RemoveCompletedContractsArgs struct {
+}
+
+type RemoveCompletedContractsResult struct {
+}
+
+func ScheduleRemoveCompletedContracts(clientSession *session.ClientSession, tx server.PgTx) {
+	runAt := func() time.Time {
+		now := time.Now().UTC()
+		year, month, day := now.Date()
+		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
+	}()
+
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveCompletedContracts,
+		&RemoveCompletedContractsArgs{},
+		clientSession,
+		task.RunOnce("remove_completed_contracts"),
+		task.RunAt(runAt),
+		task.MaxTime(2*time.Hour),
+	)
+}
+
+func RemoveCompletedContracts(
+	removeCompletedContracts *RemoveCompletedContractsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveCompletedContractsResult, error) {
+	minTime := time.Now().Add(-7 * 24 * time.Hour)
+	model.RemoveCompletedContracts(clientSession.Ctx, minTime)
+	return &RemoveCompletedContractsResult{}, nil
+}
+
+func RemoveCompletedContractsPost(
+	removeCompletedContracts *RemoveCompletedContractsArgs,
+	removeCompletedContractsResult *RemoveCompletedContractsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveCompletedContracts(clientSession, tx)
+	return nil
+}

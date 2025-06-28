@@ -100,8 +100,20 @@ type RunPriorityOption struct {
 	Priority TaskPriority
 }
 
+func Priority(priority TaskPriority) *RunPriorityOption {
+	return &RunPriorityOption{
+		Priority: priority,
+	}
+}
+
 type RunMaxTimeOption struct {
 	MaxTime time.Duration
+}
+
+func MaxTime(maxTime time.Duration) *RunMaxTimeOption {
+	return &RunMaxTimeOption{
+		MaxTime: maxTime,
+	}
 }
 
 func ScheduleTask[T any, R any](

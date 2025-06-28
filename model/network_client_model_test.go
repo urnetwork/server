@@ -43,7 +43,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		DeleteDisconnectedNetworkClients(ctx, time.Duration(0))
+		RemoveDisconnectedNetworkClients(ctx, time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -82,7 +82,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 
 		time.Sleep(1 * time.Second)
 
-		DeleteDisconnectedNetworkClients(ctx, time.Duration(0))
+		RemoveDisconnectedNetworkClients(ctx, time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -119,7 +119,7 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		connected = IsNetworkClientConnected(ctx, connectionId)
 		assert.Equal(t, connected, false)
 
-		DeleteDisconnectedNetworkClients(ctx, time.Duration(0))
+		RemoveDisconnectedNetworkClients(ctx, time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
