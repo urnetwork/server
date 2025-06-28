@@ -784,7 +784,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 	return disconnectErr
 }
 
-func DeleteDisconnectedNetworkClients(ctx context.Context, timeout time.Duration) {
+func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -793,10 +793,10 @@ func DeleteDisconnectedNetworkClients(ctx context.Context, timeout time.Duration
 				WHERE
 					disconnect_time < $1
 			`,
-			server.NowUtc().Add(-timeout),
+			minTime.UTC(),
 		))
 
-		// clean up network_client_location
+		// (cascade) clean up network_client_location
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -812,6 +812,64 @@ func DeleteDisconnectedNetworkClients(ctx context.Context, timeout time.Duration
 			WHERE network_client_location.connection_id = t.connection_id
 			`,
 		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client
+			WHERE network_client.create_time < $1 AND active = false
+			`,
+			minTime.UTC(),
+		))
+
+		// FIXME perf only do this when the client can recover correctly
+		// remove network clients without a connection
+		// important: the app will need to create a new client id for these clients when it notices the existing jwt fails
+		// server.RaisePgResult(tx.Exec(
+		// 	ctx,
+		// 	`
+		// 	DELETE FROM network_client
+		// 	USING (
+		// 		SELECT network_client.client_id
+		// 		FROM network_client
+		// 	    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
+		// 		WHERE network_client.create_time < $1 AND network_client_connection.client_id IS NULL
+		// 	) t
+		// 	WHERE network_client.client_id = t.client_id
+		// 	`,
+		// 	minTime.UTC(),
+		// ))
+
+		// (cascade) remove provide keys without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM provide_key
+			USING (
+				SELECT provide_key.client_id
+			    FROM provide_key
+			    	LEFT JOIN network_client ON network_client.client_id = provide_key.client_id
+			    WHERE network_client.client_id IS NULL
+			) t
+			WHERE provide_key.client_id = t.client_id
+			`,
+		))
+
+		// (cascade) remove devices without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM device
+			USING (
+				SELECT device.device_id
+		       	FROM device
+					LEFT JOIN network_client ON network_client.device_id = device.device_id
+		      	WHERE network_client.device_id IS NULL
+		    ) t
+			WHERE device.device_id = t.device_id
+			`,
+		))
+
 	})
 }
 

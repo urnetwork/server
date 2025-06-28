@@ -2313,3 +2313,20 @@ func SetIpLocationLookupResult(
 		server.Raise(err)
 	})
 }
+
+func RemoveLocationLookupResults(
+	ctx context.Context,
+	minTime time.Time,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		_, err := tx.Exec(
+			ctx,
+			`
+                DELETE FROM ip_location_lookup
+                WHERE lookup_time < $1
+            `,
+			minTime.UTC(),
+		)
+		server.Raise(err)
+	})
+}

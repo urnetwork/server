@@ -21,7 +21,7 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-const RemoveTaskTimeout = 15 * 24 * time.Hour
+const RemoveTaskTimeout = 24 * time.Hour
 const RetryTimeoutAfterError = 30 * time.Second
 const PollTimeout = 1 * time.Second
 
@@ -103,7 +103,7 @@ func initTasks(ctx context.Context) {
 		work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleCloseExpiredContracts(clientSession, tx)
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
-		work.ScheduleDeleteDisconnectedNetworkClients(clientSession, tx)
+		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
 		ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		model.ScheduleIndexSearchLocations(clientSession, tx)
@@ -170,9 +170,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			"bringyour.com/service/taskworker/work.CloseExpiredNetworkClientHandlers",
 		),
 		task.NewTaskTargetWithPost(
-			work.DeleteDisconnectedNetworkClients,
-			work.DeleteDisconnectedNetworkClientsPost,
+			work.RemoveDisconnectedNetworkClients,
+			work.RemoveDisconnectedNetworkClientsPost,
 			"bringyour.com/service/taskworker/work.DeleteDisconnectedNetworkClients",
+			"github.com/urnetwork/server/taskworker/work/DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
 			model.IndexSearchLocations,

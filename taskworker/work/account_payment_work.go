@@ -33,12 +33,7 @@ func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 			return time.Date(year, month, 22, 0, 0, 0, 0, time.UTC)
 		} else {
 			// else run on the 1st of next month
-			month += 1
-			if 12 < month {
-				month -= 12
-				year += 1
-			}
-			return time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+			return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
 		}
 	}()
 	task.ScheduleTaskInTx(

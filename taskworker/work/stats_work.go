@@ -28,7 +28,10 @@ func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 	)
 }
 
-func ExportStats(exportStats *ExportStatsArgs, clientSession *session.ClientSession) (*ExportStatsResult, error) {
+func ExportStats(
+	exportStats *ExportStatsArgs,
+	clientSession *session.ClientSession,
+) (*ExportStatsResult, error) {
 	stats := model.ComputeStats90(clientSession.Ctx)
 	model.ExportStats(clientSession.Ctx, stats)
 	return &ExportStatsResult{}, nil
