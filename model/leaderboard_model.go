@@ -8,10 +8,11 @@ import (
 )
 
 type Earner struct {
-	NetworkId   string  `json:"network_id"`
-	NetworkName string  `json:"network_name"`
-	NetMiBCount float32 `json:"net_mib_count"`
-	IsPublic    bool    `json:"is_public"`
+	NetworkId         string  `json:"network_id"`
+	NetworkName       string  `json:"network_name"`
+	NetMiBCount       float32 `json:"net_mib_count"`
+	IsPublic          bool    `json:"is_public"`
+	ContainsProfanity bool    `json:"contains_profanity"` // network name contains profanity
 }
 
 type LeaderboardResult struct {
@@ -36,7 +37,8 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 						t.network_id,
 						t.net_mib_count,
 						network.network_name,
-						network.leaderboard_public
+						network.leaderboard_public,
+						network.contains_profanity
 
 				FROM (SELECT account_payment.network_id,
 										SUM(account_payment.payout_byte_count) / (1024 * 1024) AS net_mib_count
@@ -72,6 +74,7 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 					&earner.NetMiBCount,
 					&earner.NetworkName,
 					&earner.IsPublic,
+					&earner.ContainsProfanity,
 				))
 
 				if !earner.IsPublic {

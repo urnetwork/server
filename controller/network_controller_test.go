@@ -47,12 +47,22 @@ func TestNetworkCreate(t *testing.T) {
 		assert.Equal(t, result.Error, nil)
 		assert.NotEqual(t, result.Network, nil)
 
+		// session.ByJwt.NetworkId = result.Network.NetworkId
+		session.ByJwt = &jwt.ByJwt{
+			NetworkId: result.Network.NetworkId,
+		}
+
 		// check referral network has points applied
 		// networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
 		// assert.Equal(t, len(networkPoints), 1)
 		// assert.Equal(t, networkPoints[0].NetworkId, referralNetworkId)
 		// assert.Equal(t, networkPoints[0].Event, "referral")
 		// assert.NotEqual(t, networkPoints[0].PointValue, 0)
+		//
+		// network name should not contain profanity
+		network := model.GetNetwork(session)
+		assert.NotEqual(t, network, nil)
+		assert.Equal(t, network.ContainsProfanity, false)
 
 		// check network referral
 		networkReferral := model.GetReferralNetworkByChildNetworkId(ctx, result.Network.NetworkId)
@@ -64,6 +74,44 @@ func TestNetworkCreate(t *testing.T) {
 		assert.Equal(t, transferBalance.BalanceByteCount, RefreshFreeTransferBalance)
 		assert.Equal(t, !transferBalance.StartTime.After(time.Now()), true)
 		assert.Equal(t, time.Now().Before(transferBalance.EndTime), true)
+	})
+}
+
+func TestNetworkCreateWithProfanity(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		session := session.Testing_CreateClientSession(ctx, nil)
+
+		referralNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, referralNetworkId, "referralNetwork", server.NewId())
+
+		userAuth := "foo@ur.io"
+		password := "bar123456789Foo!"
+		referralCode := ""
+
+		networkCreate := model.NetworkCreateArgs{
+			UserName:     "",
+			UserAuth:     &userAuth,
+			Password:     &password,
+			NetworkName:  "shitty", // must be at least 6 characters
+			Terms:        true,
+			GuestMode:    false,
+			ReferralCode: &referralCode,
+		}
+		result, err := NetworkCreate(networkCreate, session)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.Network, nil)
+
+		session.ByJwt = &jwt.ByJwt{
+			NetworkId: result.Network.NetworkId,
+		}
+
+		// check network contains profanity
+		network := model.GetNetwork(session)
+		assert.NotEqual(t, network, nil)
+		assert.Equal(t, network.ContainsProfanity, true)
 	})
 }
 
