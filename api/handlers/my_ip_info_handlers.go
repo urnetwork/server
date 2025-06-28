@@ -103,10 +103,6 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if myInfo == nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	isIPV6 := strings.Contains(addressOnly, ":")
 
