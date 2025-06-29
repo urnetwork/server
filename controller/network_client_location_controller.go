@@ -96,14 +96,13 @@ type IpInfoErrorResponse struct {
 func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 	earliestResultTime := server.NowUtc().Add(-LocationLookupResultExpiration)
 
-	var errResp IpInfoErrorResponse
-
 	var resultJson []byte
 	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
 		resultJson = []byte(resultJsonStr)
 
-		if err := json.Unmarshal(resultJson, &errResp); err != nil || errResp.Status == 0 {
-			// not an error
+		var errResp IpInfoErrorResponse
+		err := json.Unmarshal(resultJson, &errResp)
+		if err == nil && errResp.Status == 0 {
 			return resultJson, nil
 		}
 	}
@@ -141,15 +140,18 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
 
-	if err := json.Unmarshal(resultJson, &errResp); err == nil && errResp.Status != 0 {
-		return nil, fmt.Errorf("response error (%d): %s", errResp.Status, errResp.Error.Message)
+	var errResp IpInfoErrorResponse
+	err = json.Unmarshal(resultJson, &errResp)
+	if err == nil && errResp.Status == 0 {
+		resultJson = server.AttemptCompactJson(resultJson)
+
+		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
+
+		return resultJson, nil
 	}
 
-	resultJson = server.AttemptCompactJson(resultJson)
+	return nil, fmt.Errorf("response error (%d): %s", errResp.Status, errResp.Error.Message)
 
-	model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
-
-	return resultJson, nil
 }
 
 type IpInfoResult struct {

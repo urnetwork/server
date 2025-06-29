@@ -4,7 +4,7 @@ import (
 	"context"
 	// "strings"
 
-	// "github.com/golang/glog"
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -21,24 +21,68 @@ func ConnectNetworkClient(
 
 	if ipStr, _, err := server.ParseClientAddress(clientAddress); err == nil {
 		go server.HandleError(func() {
-			setConnectionLocation(ctx, connectionId, ipStr)
+			SetConnectionLocation(ctx, connectionId, ipStr)
 		})
 	}
 	return connectionId
 }
 
-// FIXME only do this when the client is a provider
-func setConnectionLocation(
+func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
 	ipStr string,
-) {
+) error {
 	location, connectionLocationScores, err := GetLocationForIp(ctx, ipStr)
 	if err != nil {
 		// server.Logger().Printf("Get ip for location error: %s", err)
-		return
+		glog.Infof("[ncc][%s]Could not find client location. Skipping. err = %s %s\n", connectionId, err, ipStr)
+		return err
 	}
 
 	model.CreateLocation(ctx, location)
 	model.SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+	return nil
+}
+
+func SetMissingConnectionLocations(ctx context.Context) {
+	connectionIpStrs := map[server.Id]string{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+				    network_client_connection.connection_id,
+				    network_client_connection.client_address
+				FROM network_client_connection
+				
+				LEFT JOIN network_client_location ON network_client_location.connection_id = network_client_connection.connection_id
+				
+				WHERE
+					network_client_connection.connected AND
+					network_client_location.connection_id IS NULL
+			`,
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var connectionId server.Id
+				var clientAddress string
+				server.Raise(result.Scan(
+					&connectionId,
+					&clientAddress,
+				))
+				host, _, err := server.ParseClientAddress(clientAddress)
+				if err == nil {
+					connectionIpStrs[connectionId] = host
+				} else {
+					glog.Infof("[ncc][%s]Could not parse client address. Skipping.\n", connectionId)
+				}
+			}
+		})
+	})
+
+	for connectionId, ipStr := range connectionIpStrs {
+		SetConnectionLocation(ctx, connectionId, ipStr)
+	}
 }
