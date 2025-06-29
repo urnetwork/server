@@ -868,5 +868,7 @@ func populateTxHashes() {
 func fixClientConnections(opts docopt.Opts) {
 	ctx := context.Background()
 
-	controller.SetMissingConnectionLocations(ctx)
+	minTime := time.Now().Add(-30 * time.Second)
+
+	controller.SetMissingConnectionLocations(ctx, minTime)
 }

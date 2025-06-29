@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	// "strings"
+	"time"
 
 	"github.com/golang/glog"
 
@@ -44,7 +45,7 @@ func SetConnectionLocation(
 	return nil
 }
 
-func SetMissingConnectionLocations(ctx context.Context) {
+func SetMissingConnectionLocations(ctx context.Context, minTime time.Time) {
 	connectionIpStrs := map[server.Id]string{}
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -59,9 +60,11 @@ func SetMissingConnectionLocations(ctx context.Context) {
 				LEFT JOIN network_client_location ON network_client_location.connection_id = network_client_connection.connection_id
 				
 				WHERE
+					network_client_connection.connect_time < $1 AND
 					network_client_connection.connected AND
 					network_client_location.connection_id IS NULL
 			`,
+			minTime,
 		)
 
 		server.WithPgResult(result, err, func() {

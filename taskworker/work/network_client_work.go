@@ -140,7 +140,8 @@ func SetMissingConnectionLocations(
 	setMissingConnectionLocations *SetMissingConnectionLocationsArgs,
 	clientSession *session.ClientSession,
 ) (*SetMissingConnectionLocationsResult, error) {
-	controller.SetMissingConnectionLocations(clientSession.Ctx)
+	minTime := time.Now().Add(-30 * time.Second)
+	controller.SetMissingConnectionLocations(clientSession.Ctx, minTime)
 	return &SetMissingConnectionLocationsResult{}, nil
 }
 
