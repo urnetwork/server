@@ -118,3 +118,38 @@ func RemoveLocationLookupResultsPost(
 	ScheduleRemoveLocationLookupResults(clientSession, tx)
 	return nil
 }
+
+type SetMissingConnectionLocationsArgs struct {
+}
+
+type SetMissingConnectionLocationsResult struct {
+}
+
+func ScheduleSetMissingConnectionLocations(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		SetMissingConnectionLocations,
+		&SetMissingConnectionLocationsArgs{},
+		clientSession,
+		task.RunOnce("set_missing_connection_locations"),
+		task.RunAt(time.Now().Add(30*time.Minute)),
+	)
+}
+
+func SetMissingConnectionLocations(
+	setMissingConnectionLocations *SetMissingConnectionLocationsArgs,
+	clientSession *session.ClientSession,
+) (*SetMissingConnectionLocationsResult, error) {
+	controller.SetMissingConnectionLocations(clientSession.Ctx)
+	return &SetMissingConnectionLocationsResult{}, nil
+}
+
+func SetMissingConnectionLocationsPost(
+	setMissingConnectionLocations *SetMissingConnectionLocationsArgs,
+	setMissingConnectionLocationsResult *SetMissingConnectionLocationsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleSetMissingConnectionLocations(clientSession, tx)
+	return nil
+}

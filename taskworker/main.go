@@ -108,6 +108,10 @@ func initTasks(ctx context.Context) {
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		model.ScheduleIndexSearchLocations(clientSession, tx)
 		controller.ScheduleRefreshTransferBalances(clientSession, tx)
+		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
+		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
+		work.ScheduleRemoveCompletedContracts(clientSession, tx)
+		work.ScheduleDbMaintenance(clientSession, tx)
 	})
 }
 
