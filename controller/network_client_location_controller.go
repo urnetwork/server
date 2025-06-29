@@ -102,18 +102,8 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
 		resultJson = []byte(resultJsonStr)
 
-		/**
-		 * Check if cached JSON is an invalid response
-		 */
-		rateLimited := false
-		if err := json.Unmarshal(resultJson, &errResp); err == nil && errResp.Status == 429 {
-			rateLimited = true
-		}
-
-		/**
-		 * If not rate limited, return the cached response
-		 */
-		if !rateLimited {
+		if err := json.Unmarshal(resultJson, &errResp); err != nil || errResp.Status == 0 {
+			// not an error
 			return resultJson, nil
 		}
 	}
@@ -151,11 +141,8 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
 
-	/**
-	 * check if the response indicates a rate limit error
-	 */
-	if err := json.Unmarshal(resultJson, &errResp); err == nil && errResp.Status == 429 {
-		return nil, fmt.Errorf("rate limit exceeded: %s", errResp.Error.Message)
+	if err := json.Unmarshal(resultJson, &errResp); err == nil && errResp.Status != 0 {
+		return nil, fmt.Errorf("response error (%d): %s", errResp.Status, errResp.Error.Message)
 	}
 
 	resultJson = server.AttemptCompactJson(resultJson)
