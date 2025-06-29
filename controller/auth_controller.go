@@ -182,7 +182,7 @@ func AuthVerify(
 	session *session.ClientSession,
 ) (*model.AuthVerifyResult, error) {
 	result, err := model.AuthVerify(verify, session)
-	if result.Network != nil {
+	if err == nil && result.Network != nil {
 		awsMessageSender := GetAWSMessageSender()
 		awsMessageSender.SendAccountMessageTemplate(
 			verify.UserAuth,
