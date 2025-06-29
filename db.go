@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
-	"strconv"
+	// "strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,14 +69,15 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// Logger().Printf("Db init\n")
 
 		dbKeys := Vault.RequireSimpleResource("pg.yml")
+		dbConfigKeys := Config.RequireSimpleResource("db.yml")
 
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
 		options := map[string]string{
 			"sslmode": "disable",
 			// FIXME perf move to config
-			"pool_max_conns":                strconv.Itoa(256),
-			"pool_min_conns":                strconv.Itoa(32),
+			"pool_max_conns":                fmt.Sprintf("%d", dbConfigKeys.RequireInt("max_connections")),
+			"pool_min_conns":                fmt.Sprintf("%d", dbConfigKeys.RequireInt("min_connections")),
 			"pool_max_conn_lifetime":        "8h",
 			"pool_max_conn_lifetime_jitter": "1h",
 			"pool_max_conn_idle_time":       "60s",
