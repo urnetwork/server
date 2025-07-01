@@ -36,7 +36,7 @@ func SetConnectionLocation(
 	location, connectionLocationScores, err := GetLocationForIp(ctx, ipStr)
 	if err != nil {
 		// server.Logger().Printf("Get ip for location error: %s", err)
-		glog.Infof("[ncc][%s]Could not find client location. Skipping. err = %s %s\n", connectionId, err, ipStr)
+		glog.Infof("[ncc][%s]Could not find client location. Skipping. err = %s\n", connectionId, err)
 		return err
 	}
 
