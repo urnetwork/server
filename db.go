@@ -71,20 +71,32 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		dbKeys := Vault.RequireSimpleResource("pg.yml")
 		dbConfigKeys := Config.RequireSimpleResource("db.yml")
 
+		minConnections := dbConfigKeys.RequireInt("min_connections")
+		maxConnections := dbConfigKeys.RequireInt("max_connections")
+		if service, err := Service(); err == nil && service != "" {
+			if serviceMinConnections := dbConfigKeys.Int(service, "min_connections"); 0 < len(serviceMinConnections) {
+				minConnections = serviceMinConnections[0]
+			}
+			if serviceMaxConnections := dbConfigKeys.Int(service, "max_connections"); 0 < len(serviceMaxConnections) {
+				maxConnections = serviceMaxConnections[0]
+			}
+		}
+
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
 		options := map[string]string{
 			"sslmode": "disable",
 			// FIXME perf move to config
-			"pool_max_conns":                fmt.Sprintf("%d", dbConfigKeys.RequireInt("max_connections")),
-			"pool_min_conns":                fmt.Sprintf("%d", dbConfigKeys.RequireInt("min_connections")),
-			"pool_max_conn_lifetime":        "8h",
-			"pool_max_conn_lifetime_jitter": "1h",
-			"pool_max_conn_idle_time":       "60s",
-			"pool_health_check_period":      "1h",
+			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
+			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
+			"pool_max_conn_lifetime":        "1h",
+			"pool_max_conn_lifetime_jitter": "15m",
+			"pool_max_conn_idle_time":       "15m",
+			"pool_health_check_period":      "1m",
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
 			"default_transaction_read_only": "on",
 		}
+		glog.Infof("[db]options = %s\n", options)
 		optionsPairs := []string{}
 		for key, value := range options {
 			optionsPairs = append(optionsPairs, fmt.Sprintf("%s=%s", key, value))

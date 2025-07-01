@@ -519,8 +519,7 @@ func (self *SimpleResource) UnmarshalYaml(value any) {
 }
 
 func (self *SimpleResource) RequireInt(path ...string) int {
-	values := []int{}
-	getAll(self.Parse(), path, &values)
+	values := self.Int(path...)
 	if len(values) != 1 {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
@@ -529,18 +528,23 @@ func (self *SimpleResource) RequireInt(path ...string) int {
 	return value
 }
 
-func (self *SimpleResource) RequireString(path ...string) string {
-	values := []string{}
+func (self *SimpleResource) Int(path ...string) []int {
+	values := []int{}
 	getAll(self.Parse(), path, &values)
+	return values
+}
+
+func (self *SimpleResource) RequireString(path ...string) string {
+	values := self.String(path...)
 	if len(values) != 1 {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
-	value := translateString(values[0])
+	value := values[0]
 	glog.Infof("[env]%s[%s] = %s\n", self.path, strings.Join(path, " "), value)
 	return value
 }
 
-func (self *SimpleResource) RequireStringList(path ...string) []string {
+func (self *SimpleResource) String(path ...string) []string {
 	values := []string{}
 	getAll(self.Parse(), path, &values)
 	translatedValues := []string{}
@@ -548,6 +552,14 @@ func (self *SimpleResource) RequireStringList(path ...string) []string {
 		translatedValues = append(translatedValues, translateString(value))
 	}
 	return translatedValues
+}
+
+func (self *SimpleResource) RequireStringList(path ...string) []string {
+	return self.StringList(path...)
+}
+
+func (self *SimpleResource) StringList(path ...string) []string {
+	return self.String(path...)
 }
 
 func translateString(value string) string {
