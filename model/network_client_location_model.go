@@ -1844,10 +1844,9 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
-	// set a reasonable default count
-	if findProviders2.Count <= 0 {
-		findProviders2.Count = 10
-	}
+	// use a min block size to reduce db activity
+	findProviders2.Count = max(findProviders2.Count, 8)
+
 	if findProviders2.RankMode == "" {
 		findProviders2.RankMode = RankModeQuality
 	}
