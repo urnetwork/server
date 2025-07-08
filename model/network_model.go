@@ -21,6 +21,8 @@ import (
 
 var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
 
+const MinPasswordLength = 6
+
 type NetworkCheckArgs struct {
 	NetworkName string `json:"network_name"`
 }
@@ -282,6 +284,17 @@ func NetworkCreate(
 				passwordSalt,
 			)
 			server.Raise(err)
+
+			// insert into network_user_auth_password
+			AddUserAuth(
+				&AddUserAuthArgs{
+					UserId:       createdUserId,
+					UserAuth:     userAuth,
+					PasswordHash: passwordHash,
+					PasswordSalt: passwordSalt,
+				},
+				session,
+			)
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -1271,7 +1284,13 @@ type AddAuthMethod struct {
 	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
-type AddAuthMethodResult struct{}
+type AddAuthMethodResult struct {
+	Error *AddAuthMethodError `json:"error,omitempty"`
+}
+
+type AddAuthMethodError struct {
+	Message string `json:"message"`
+}
 
 func AddAuth(
 	authArgs AddAuthMethod,
@@ -1284,12 +1303,28 @@ func AddAuth(
 		 */
 
 		// todo - check if userAuth is email or phone
+		//
+		if !passwordValid(*authArgs.Password) {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: fmt.Sprintf("Password must have at least %d characters", MinPasswordLength),
+				},
+			}, nil
+		}
+
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(*authArgs.Password), passwordSalt)
 
 		AddUserAuth(
-			authArgs.UserAuth,
-			*authArgs.Password,
+			&AddUserAuthArgs{
+				UserId:       session.ByJwt.UserId,
+				UserAuth:     authArgs.UserAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
 			session,
 		)
+
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
 		// user is adding a social login auth method
@@ -1311,13 +1346,20 @@ func AddAuth(
 	return nil, nil
 }
 
+type AddUserAuthArgs struct {
+	UserId   server.Id
+	UserAuth *string
+	// password string,
+	PasswordHash []byte
+	PasswordSalt []byte
+}
+
 func AddUserAuth(
-	userAuth *string,
-	password string,
+	args *AddUserAuthArgs,
 	session *session.ClientSession,
 ) (returnErr *error) {
 
-	userAuth, userAuthType := NormalUserAuthV1(userAuth)
+	userAuth, userAuthType := NormalUserAuthV1(args.UserAuth)
 
 	// TODO - if they have authed through SSO, mark them as verified
 
@@ -1334,7 +1376,7 @@ func AddUserAuth(
 			FROM network_user_auth_password
 			WHERE user_id = $1 AND auth_type = $2
 		`,
-			session.ByJwt.UserId,
+			args.UserId,
 			userAuthType,
 		)
 		if queryErr != nil {
@@ -1359,14 +1401,14 @@ func AddUserAuth(
 		/**
 		 * No record exists with this auth type, create a new one
 		 */
-		if !passwordValid(password) {
-			passwordErr := errors.New("Network name must have at least 5 characters")
-			returnErr = &passwordErr
-			return
-		}
+		// if !passwordValid(password) {
+		// 	passwordErr := errors.New("Network name must have at least 5 characters")
+		// 	returnErr = &passwordErr
+		// 	return
+		// }
 
-		passwordSalt := createPasswordSalt()
-		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+		// passwordSalt := createPasswordSalt()
+		// passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
 		_, dbErr := tx.Exec(
 			session.Ctx,
@@ -1375,11 +1417,11 @@ func AddUserAuth(
 				(user_id, user_auth, auth_type, password_salt, password_hash)
 				VALUES ($1, $2, $3, $4, $5)
 			`,
-			session.ByJwt.UserId,
+			args.UserId,
 			userAuth,
 			userAuthType,
-			passwordSalt,
-			passwordHash,
+			args.PasswordSalt,
+			args.PasswordHash,
 		)
 		server.Raise(dbErr)
 	})
@@ -1478,7 +1520,7 @@ func AddWalletAuth(
  * todo - better password validation
  */
 func passwordValid(password string) bool {
-	if len(password) < 5 {
+	if len(password) < MinPasswordLength {
 		return false
 	}
 	return true
