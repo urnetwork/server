@@ -1259,6 +1259,236 @@ func GetNetwork(
 	return network
 }
 
+/**
+ * Add an authentication method to a network user
+ * Allows user to add an email, phone, password, sso, or wallet authentication method
+ */
+type AddAuthMethod struct {
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
+}
+
+type AddAuthMethodResult struct{}
+
+func AddAuth(
+	authArgs AddAuthMethod,
+	session *session.ClientSession,
+) (*AddAuthMethodResult, error) {
+
+	if authArgs.UserAuth != nil && authArgs.Password != nil {
+		/**
+		 * user is adding an email/phone + password auth method
+		 */
+
+		// todo - check if userAuth is email or phone
+
+		AddUserAuth(
+			authArgs.UserAuth,
+			*authArgs.Password,
+			session,
+		)
+		return &AddAuthMethodResult{}, nil
+	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
+		// user is adding a social login auth method
+		addSsoAuth(
+			*authArgs.AuthJwt,
+			*authArgs.AuthJwtType,
+			session,
+		)
+		return &AddAuthMethodResult{}, nil
+	} else if authArgs.WalletAuth != nil {
+		// user is adding a wallet auth method
+		AddWalletAuth(
+			*authArgs.WalletAuth,
+			session,
+		)
+		return &AddAuthMethodResult{}, nil
+	}
+
+	return nil, nil
+}
+
+func AddUserAuth(
+	userAuth *string,
+	password string,
+	session *session.ClientSession,
+) (returnErr *error) {
+
+	userAuth, userAuthType := NormalUserAuthV1(userAuth)
+
+	// TODO - if they have authed through SSO, mark them as verified
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+
+		/**
+		 * Check if the userauth already exists
+		 */
+		result, queryErr := tx.Query(
+			session.Ctx,
+			`
+			SELECT
+				auth_type
+			FROM network_user_auth_password
+			WHERE user_id = $1 AND auth_type = $2
+		`,
+			session.ByJwt.UserId,
+			userAuthType,
+		)
+		if queryErr != nil {
+			returnErr = &queryErr
+			return
+		}
+
+		exists := false
+
+		server.WithPgResult(result, queryErr, func() {
+			if result.Next() {
+				exists = true
+			}
+		})
+
+		if exists {
+			err := fmt.Errorf("User exists with auth type %s", userAuthType)
+			returnErr = &err
+			return
+		}
+
+		/**
+		 * No record exists with this auth type, create a new one
+		 */
+		if !passwordValid(password) {
+			passwordErr := errors.New("Network name must have at least 5 characters")
+			returnErr = &passwordErr
+			return
+		}
+
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+		_, dbErr := tx.Exec(
+			session.Ctx,
+			`
+				INSERT INTO network_user_auth_password
+				(user_id, user_auth, auth_type, password_salt, password_hash)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			session.ByJwt.UserId,
+			userAuth,
+			userAuthType,
+			passwordSalt,
+			passwordHash,
+		)
+		server.Raise(dbErr)
+	})
+
+	return
+}
+
+/**
+ * Allow different SSO auth methods
+ */
+func addSsoAuth(
+	authJwt string,
+	authJwtType string,
+	session *session.ClientSession,
+) error {
+
+	parsedAuthJwt, err := ParseAuthJwt(authJwt, AuthType(authJwtType))
+
+	if err != nil {
+		return fmt.Errorf("error parsing auth jwt: %s", err.Error())
+	}
+
+	if parsedAuthJwt == nil {
+		return errors.New("parsed auth jwt is nil")
+	}
+
+	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		_, err = tx.Exec(
+			session.Ctx,
+			`
+			INSERT INTO network_user_auth_sso
+			(user_id, auth_type, user_auth, auth_jwt)
+			VALUES ($1, $2, $3, $4)
+		`,
+			session.ByJwt.UserId,
+			parsedAuthJwt.AuthType,
+			normalJwtUserAuth,
+			authJwt,
+		)
+		server.Raise(err)
+	})
+
+	return nil
+
+}
+
+/**
+ * Currently only allowing 1 wallet auth per user
+ * We can expand on this if needed
+ */
+func AddWalletAuth(
+	walletAuth WalletAuthArgs,
+	session *session.ClientSession,
+) error {
+
+	isValid, err := VerifySolanaSignature(
+		walletAuth.PublicKey,
+		walletAuth.Message,
+		walletAuth.Signature,
+	)
+	if err != nil {
+		return err
+	}
+	if !isValid {
+		return errors.New("invalid signature")
+	}
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+
+		_, dbErr := tx.Exec(
+			session.Ctx,
+			`
+				INSERT INTO network_user_auth_wallet
+				(user_id, wallet_address, blockchain)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (user_id)
+				DO UPDATE SET
+					wallet_address = $2,
+					blockchain = $3,
+					create_time = now();
+			`,
+			session.ByJwt.UserId,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		)
+		server.Raise(dbErr)
+
+	})
+
+	return nil
+}
+
+/**
+ * todo - better password validation
+ */
+func passwordValid(password string) bool {
+	if len(password) < 5 {
+		return false
+	}
+	return true
+}
+
+/**
+ * ===
+ * Testing util functions
+ * ===
+ */
 func Testing_CreateNetwork(
 	ctx context.Context,
 	networkId server.Id,
@@ -1374,3 +1604,29 @@ func Testing_CreateGuestNetwork(
 	})
 
 }
+
+// network_user
+// --------------
+// user_id
+// user_name
+// verified
+//
+// network_user_auth_sso
+// -------------
+// user_id
+// auth_type // google, apple, etc
+// jwt
+//
+// network_user_auth_wallet
+// -------------
+// user_id
+// wallet_address
+// blockchain
+//
+// network_user_auth_password
+// ------------
+// user_id
+// user_auth // email or phone number
+// auth_type // email or phone
+// password_hash
+// password_salt

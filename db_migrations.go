@@ -1821,4 +1821,40 @@ var migrations = []any{
 		ALTER TABLE network
 		ADD COLUMN contains_profanity BOOLEAN NOT NULL DEFAULT false
 	`),
+	newSqlMigration(`
+		CREATE TABLE network_user_auth_sso
+		(
+			user_id uuid NOT NULL,
+			auth_type varchar(32) NOT NULL,
+			auth_jwt text NOT NULL,
+			user_auth varchar(256) NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (user_id, auth_type)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_user_auth_password
+		(
+			user_id uuid NOT NULL,
+			user_auth varchar(256) NOT NULL,
+			auth_type varchar(32) NOT NULL,
+			password_hash bytea NULL,
+            password_salt bytea NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (user_id, auth_type)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE network_user_auth_wallet
+		(
+			user_id uuid NOT NULL,
+			wallet_address text NOT NULL,
+			blockchain varchar(32) NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (user_id)
+		)
+	`),
 }

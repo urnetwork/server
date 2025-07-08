@@ -3,6 +3,7 @@ module github.com/urnetwork/server
 go 1.24.0
 
 require (
+	github.com/TwiN/go-away v1.6.16
 	github.com/aws/aws-sdk-go v1.55.6
 	github.com/coreos/go-semver v0.3.1
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
@@ -37,7 +38,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
-	github.com/TwiN/go-away v1.6.16 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fatih/color v1.9.0 // indirect

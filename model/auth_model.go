@@ -104,11 +104,11 @@ func UserAuthAttempt(
 			result, err := tx.Query(
 				session.Ctx,
 				`
-					SELECT 
+					SELECT
 						attempt_time,
 						success
 					FROM user_auth_attempt
-					WHERE 
+					WHERE
 						user_auth = $1 AND
 						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
 						success = false
@@ -132,11 +132,11 @@ func UserAuthAttempt(
 		result, err := tx.Query(
 			session.Ctx,
 			`
-				SELECT 
+				SELECT
 					attempt_time,
 					success
 				FROM user_auth_attempt
-				WHERE 
+				WHERE
 					client_ip = $1 AND
 					now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
 					success = false
@@ -636,7 +636,7 @@ func AuthVerify(
 					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_verify ON
-					user_auth_verify.user_id = network_user.user_id AND 
+					user_auth_verify.user_id = network_user.user_id AND
 					user_auth_verify.verify_code = $1 AND
 					used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
@@ -929,7 +929,7 @@ func AuthPasswordSet(
 					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_reset ON
-					user_auth_reset.user_id = network_user.user_id AND 
+					user_auth_reset.user_id = network_user.user_id AND
 					user_auth_reset.reset_code = $1 AND
 					used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_reset.reset_time

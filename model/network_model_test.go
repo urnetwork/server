@@ -345,3 +345,95 @@ func TestNetworkUpdate(t *testing.T) {
 
 	})
 }
+
+func TestAddUserAuthPassword(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		networkName := "abcdef"
+
+		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		userAuth := "hello@ur.io"
+		password := "abcdefg1234567"
+
+		err := model.AddUserAuth(
+			&userAuth,
+			password,
+			session,
+		)
+		assert.Equal(t, err, nil)
+
+		/**
+		 * Trying to add another email to the same user should fail
+		 */
+		userAuth = "hello@ur.io"
+		password = "abcdefg1234567"
+
+		err = model.AddUserAuth(
+			&userAuth,
+			password,
+			session,
+		)
+		assert.NotEqual(t, err, nil)
+
+		/**
+		 * But adding a phone number should work
+		 */
+		userAuth = "1234567890"
+		password = "abcdefg1234567"
+
+		err = model.AddUserAuth(
+			&userAuth,
+			password,
+			session,
+		)
+		assert.Equal(t, err, nil)
+
+		// todo - fetch user auths and make sure the user auth was added
+
+	})
+}
+
+func TestAddUserAuthWallet(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		networkName := "abcdef"
+
+		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+
+		args := model.WalletAuthArgs{
+			PublicKey:  pk,
+			Signature:  "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw==",
+			Message:    "Welcome to URnetwork",
+			Blockchain: "solana",
+		}
+
+		err := model.AddWalletAuth(args, session)
+		assert.Equal(t, err, nil)
+
+		// todo - fetch user auths and make sure the wallet auth was added
+
+	})
+}
