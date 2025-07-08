@@ -269,6 +269,7 @@ func NetworkCreate(
 			passwordSalt := createPasswordSalt()
 			passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
 
+			// todo - cleanup network_user once UIs are updated
 			_, err = tx.Exec(
 				session.Ctx,
 				`
@@ -286,7 +287,7 @@ func NetworkCreate(
 			server.Raise(err)
 
 			// insert into network_user_auth_password
-			AddUserAuth(
+			addUserAuth(
 				&AddUserAuthArgs{
 					UserId:       createdUserId,
 					UserAuth:     userAuth,
@@ -393,6 +394,13 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
+
+				// insert into network_user_auth_sso
+				addSsoAuth(
+					*networkCreate.AuthJwt,
+					authJwt.AuthType,
+					session,
+				)
 
 				_, err = tx.Exec(
 					session.Ctx,
@@ -513,6 +521,17 @@ func NetworkCreate(
 			if err != nil {
 				panic(err)
 			}
+
+			// insert into network_user_auth_wallet
+			AddWalletAuth(
+				WalletAuthArgs{
+					PublicKey:  networkCreate.WalletAuth.PublicKey,
+					Blockchain: networkCreate.WalletAuth.Blockchain,
+					Message:    networkCreate.WalletAuth.Message,
+					Signature:  networkCreate.WalletAuth.Signature,
+				},
+				session,
+			)
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -1315,7 +1334,7 @@ func AddAuth(
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*authArgs.Password), passwordSalt)
 
-		AddUserAuth(
+		addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       session.ByJwt.UserId,
 				UserAuth:     authArgs.UserAuth,
@@ -1354,7 +1373,7 @@ type AddUserAuthArgs struct {
 	PasswordSalt []byte
 }
 
-func AddUserAuth(
+func addUserAuth(
 	args *AddUserAuthArgs,
 	session *session.ClientSession,
 ) (returnErr *error) {

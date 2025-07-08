@@ -368,7 +368,7 @@ func TestAddUserAuthPassword(t *testing.T) {
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
-		err := AddUserAuth(
+		err := addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       userId,
 				UserAuth:     &userAuth,
@@ -384,7 +384,7 @@ func TestAddUserAuthPassword(t *testing.T) {
 		 */
 		userAuth = "hello@ur.io"
 
-		err = AddUserAuth(
+		err = addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       userId,
 				UserAuth:     &userAuth,
@@ -400,7 +400,7 @@ func TestAddUserAuthPassword(t *testing.T) {
 		 */
 		userAuth = "1234567890"
 
-		err = AddUserAuth(
+		err = addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       userId,
 				UserAuth:     &userAuth,
