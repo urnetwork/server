@@ -3,10 +3,13 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkUser(t *testing.T) {
@@ -50,6 +53,121 @@ func TestNetworkUser(t *testing.T) {
 		assert.Equal(t, networkUser.Verified, false)
 		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
 		assert.Equal(t, networkUser.NetworkName, guestNetworkName)
+
+	})
+}
+
+func TestAddUserAuthPassword(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		networkName := "abcdef"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		userAuth := "hello@ur.io"
+		password := "abcdefg1234567"
+
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+		err := addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &userAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			session,
+		)
+		assert.Equal(t, err, nil)
+
+		/**
+		 * Trying to add another email to the same user should fail
+		 */
+		userAuth = "hello@ur.io"
+
+		err = addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &userAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			session,
+		)
+		assert.NotEqual(t, err, nil)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, networkUser.UserAuths[0].UserAuth, userAuth)
+		assert.Equal(t, networkUser.UserAuths[0].AuthType, UserAuthTypeEmail)
+
+		/**
+		 * But adding a phone number should work
+		 */
+		userAuth = "1234567890"
+
+		err = addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &userAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			session,
+		)
+		assert.Equal(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 2)
+		assert.Equal(t, strings.Contains(networkUser.UserAuths[1].UserAuth, userAuth), true) // adds "+1" to phone number, so doing a string check
+		assert.Equal(t, networkUser.UserAuths[1].AuthType, UserAuthTypePhone)
+
+	})
+}
+
+func TestAddUserAuthWallet(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		networkName := "abcdef"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+
+		args := WalletAuthArgs{
+			PublicKey:  pk,
+			Signature:  "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw==",
+			Message:    "Welcome to URnetwork",
+			Blockchain: "solana",
+		}
+
+		err := addWalletAuth(args, session)
+		assert.Equal(t, err, nil)
+
+		// todo - fetch user auths and make sure the wallet auth was added
 
 	})
 }
