@@ -167,7 +167,33 @@ func TestAddUserAuthWallet(t *testing.T) {
 		err := addWalletAuth(args, session)
 		assert.Equal(t, err, nil)
 
-		// todo - fetch user auths and make sure the wallet auth was added
+		/**
+		 * Make sure it's being populated whe we fetch the network user
+		 */
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.WalletAuths), 1)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
+
+		/**
+		 * Overwrite the wallet auth with a different public key
+		 */
+		pk = "26acoTqfWANX72SUvcTdPkDXdZXYCcHbRDLkFThViPLk"
+
+		args = WalletAuthArgs{
+			PublicKey:  pk,
+			Signature:  "xQLllMyvXMb6zAp0DWOsViESau6WL/OPeT1nKmyD+OD8yjfxf5TY5AmfiO4edykSgbnFRhTKjjM9cLoPAFXMCw==",
+			Message:    "Welcome to URnetwork",
+			Blockchain: "solana",
+		}
+
+		err = addWalletAuth(args, session)
+		assert.Equal(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.WalletAuths), 1)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
 
 	})
 }
