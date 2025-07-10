@@ -1841,6 +1841,7 @@ var migrations = []any{
 			auth_type varchar(32) NOT NULL,
 			password_hash bytea NULL,
             password_salt bytea NULL,
+            verified bool NOT NULL DEFAULT false,
 			create_time timestamp NOT NULL DEFAULT now(),
 
 			PRIMARY KEY (user_id, auth_type)

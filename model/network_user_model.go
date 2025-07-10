@@ -23,19 +23,23 @@ type NetworkUser struct {
 }
 
 type NetworkUserUserAuth struct {
-	UserAuth string       `json:"user_auth,omitempty"`
-	AuthType UserAuthType `json:"auth_type"`
+	UserAuth     string       `json:"user_auth,omitempty"`
+	AuthType     UserAuthType `json:"auth_type"`
+	PasswordHash []byte       `json:"-"`
+	PasswordSalt []byte       `json:"-"`
 }
 
 type NetworkUserSsoAuth struct {
-	AuthType UserAuthType `json:"auth_type"`
-	AuthJwt  string       `json:"auth_jwt"`
-	UserAuth *string      `json:"user_auth,omitempty"`
+	UserId   *server.Id  `json:"user_id,omitempty"`
+	AuthType SsoAuthType `json:"auth_type"`
+	AuthJwt  string      `json:"auth_jwt"`
+	UserAuth *string     `json:"user_auth,omitempty"`
 }
 
 type NetworkUserWalletAuth struct {
-	WalletAddress *string `json:"wallet_address,omitempty"`
-	Blockchain    string  `json:"blockchain"`
+	UserId        *server.Id `json:"user_id,omitempty"`
+	WalletAddress *string    `json:"wallet_address,omitempty"`
+	Blockchain    string     `json:"blockchain"`
 }
 
 func GetNetworkUser(
@@ -162,23 +166,31 @@ func AddAuth(
 				PasswordHash: passwordHash,
 				PasswordSalt: passwordSalt,
 			},
-			session,
+			session.Ctx,
 		)
 
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
 		// user is adding a social login auth method
+
 		addSsoAuth(
-			*authArgs.AuthJwt,
-			*authArgs.AuthJwtType,
-			session,
+			&AddSsoAuthArgs{
+				AuthJwt:     *authArgs.AuthJwt,
+				AuthJwtType: SsoAuthType(*authArgs.AuthJwtType),
+				UserId:      session.ByJwt.UserId,
+			},
+			session.Ctx,
 		)
+
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.WalletAuth != nil {
 		// user is adding a wallet auth method
 		addWalletAuth(
-			*authArgs.WalletAuth,
-			session,
+			&AddWalletAuthArgs{
+				WalletAuth: authArgs.WalletAuth,
+				UserId:     session.ByJwt.UserId,
+			},
+			session.Ctx,
 		)
 		return &AddAuthMethodResult{}, nil
 	}
@@ -192,24 +204,25 @@ type AddUserAuthArgs struct {
 	// password string,
 	PasswordHash []byte
 	PasswordSalt []byte
+	Verified     bool
 }
 
 func addUserAuth(
 	args *AddUserAuthArgs,
-	session *session.ClientSession,
+	ctx context.Context,
 ) (returnErr *error) {
 
 	userAuth, userAuthType := NormalUserAuthV1(args.UserAuth)
 
 	// TODO - if they have authed through SSO, mark them as verified
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(ctx, func(tx server.PgTx) {
 
 		/**
 		 * Check if the userauth already exists
 		 */
 		result, queryErr := tx.Query(
-			session.Ctx,
+			ctx,
 			`
 			SELECT
 				auth_type
@@ -251,17 +264,18 @@ func addUserAuth(
 		// passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
 		_, dbErr := tx.Exec(
-			session.Ctx,
+			ctx,
 			`
 				INSERT INTO network_user_auth_password
-				(user_id, user_auth, auth_type, password_salt, password_hash)
-				VALUES ($1, $2, $3, $4, $5)
+				(user_id, user_auth, auth_type, password_salt, password_hash, verified)
+				VALUES ($1, $2, $3, $4, $5, $6)
 			`,
 			args.UserId,
 			userAuth,
 			userAuthType,
 			args.PasswordSalt,
 			args.PasswordHash,
+			args.Verified,
 		)
 		server.Raise(dbErr)
 	})
@@ -283,7 +297,9 @@ func getUserAuths(
 			`
 			SELECT
 				user_auth,
-				auth_type
+				auth_type,
+				password_hash,
+				password_salt
 			FROM network_user_auth_password
 			WHERE user_id = $1
 		`,
@@ -299,6 +315,8 @@ func getUserAuths(
 				server.Raise(result.Scan(
 					&userAuth.UserAuth,
 					&userAuth.AuthType,
+					&userAuth.PasswordHash,
+					&userAuth.PasswordSalt,
 				))
 				userAuths = append(userAuths, userAuth)
 			}
@@ -313,13 +331,19 @@ func getUserAuths(
 /**
  * Allow different SSO auth methods
  */
+
+type AddSsoAuthArgs struct {
+	AuthJwt     string      `json:"auth_jwt"`
+	AuthJwtType SsoAuthType `json:"auth_jwt_type"`
+	UserId      server.Id   `json:"user_id"`
+}
+
 func addSsoAuth(
-	authJwt string,
-	authJwtType string,
-	session *session.ClientSession,
+	args *AddSsoAuthArgs,
+	ctx context.Context,
 ) error {
 
-	parsedAuthJwt, err := ParseAuthJwt(authJwt, AuthType(authJwtType))
+	parsedAuthJwt, err := ParseAuthJwt(args.AuthJwt, AuthType(args.AuthJwtType))
 
 	if err != nil {
 		return fmt.Errorf("error parsing auth jwt: %s", err.Error())
@@ -331,18 +355,18 @@ func addSsoAuth(
 
 	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(ctx, func(tx server.PgTx) {
 		_, err = tx.Exec(
-			session.Ctx,
+			ctx,
 			`
 			INSERT INTO network_user_auth_sso
 			(user_id, auth_type, user_auth, auth_jwt)
 			VALUES ($1, $2, $3, $4)
 		`,
-			session.ByJwt.UserId,
+			args.UserId,
 			parsedAuthJwt.AuthType,
 			normalJwtUserAuth,
-			authJwt,
+			args.AuthJwt,
 		)
 		server.Raise(err)
 	})
@@ -352,7 +376,7 @@ func addSsoAuth(
 }
 
 /**
- * Get all SSO auths for a user
+ * Get all SSO auths for a user by user ID
  */
 func getSsoAuths(
 	ctx context.Context,
@@ -397,13 +421,65 @@ func getSsoAuths(
 }
 
 /**
+ * Get SSO auths by user auth
+ */
+func getSsoAuthsByUserAuth(
+	ctx context.Context,
+	userAuth string,
+) ([]NetworkUserSsoAuth, error) {
+
+	var ssoAuths []NetworkUserSsoAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					auth_type,
+					auth_jwt,
+					user_auth
+				FROM network_user_auth_sso
+				WHERE user_auth = $1
+			`,
+			userAuth,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				ssoAuth := NetworkUserSsoAuth{}
+				server.Raise(result.Scan(
+					&ssoAuth.AuthType,
+					&ssoAuth.AuthJwt,
+					&ssoAuth.UserAuth,
+				))
+				ssoAuths = append(ssoAuths, ssoAuth)
+			}
+		})
+
+	})
+
+	return ssoAuths, nil
+}
+
+/**
  * Currently only allowing 1 wallet auth per user
  * We can expand on this if needed
  */
+type AddWalletAuthArgs struct {
+	UserId     server.Id       `json:"user_id"`
+	WalletAuth *WalletAuthArgs `json:"wallet_auth"`
+}
+
 func addWalletAuth(
-	walletAuth WalletAuthArgs,
-	session *session.ClientSession,
+	addWalletAuth *AddWalletAuthArgs,
+	ctx context.Context,
 ) error {
+
+	walletAuth := addWalletAuth.WalletAuth
 
 	isValid, err := VerifySolanaSignature(
 		walletAuth.PublicKey,
@@ -417,10 +493,10 @@ func addWalletAuth(
 		return errors.New("invalid signature")
 	}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(ctx, func(tx server.PgTx) {
 
 		_, dbErr := tx.Exec(
-			session.Ctx,
+			ctx,
 			`
 				INSERT INTO network_user_auth_wallet
 				(user_id, wallet_address, blockchain)
@@ -431,7 +507,7 @@ func addWalletAuth(
 					blockchain = $3,
 					create_time = now();
 			`,
-			session.ByJwt.UserId,
+			addWalletAuth.UserId,
 			walletAuth.PublicKey,
 			walletAuth.Blockchain,
 		)
@@ -470,6 +546,48 @@ func getWalletAuths(
 			for result.Next() {
 				walletAuth := NetworkUserWalletAuth{}
 				server.Raise(result.Scan(
+					&walletAuth.WalletAddress,
+					&walletAuth.Blockchain,
+				))
+				walletAuths = append(walletAuths, walletAuth)
+			}
+		})
+
+	})
+
+	return walletAuths, nil
+}
+
+func getWalletAuthsByAddress(
+	ctx context.Context,
+	walletAddress string,
+) ([]NetworkUserWalletAuth, error) {
+
+	var walletAuths []NetworkUserWalletAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					user_id,
+					wallet_address,
+					blockchain
+				FROM network_user_auth_wallet
+				WHERE wallet_address = $1
+			`,
+			walletAddress,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				walletAuth := NetworkUserWalletAuth{}
+				server.Raise(result.Scan(
+					&walletAuth.UserId,
 					&walletAuth.WalletAddress,
 					&walletAuth.Blockchain,
 				))

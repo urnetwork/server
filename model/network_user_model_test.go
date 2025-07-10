@@ -63,22 +63,22 @@ func TestAddUserAuthPassword(t *testing.T) {
 
 		networkId := server.NewId()
 		userId := server.NewId()
-		clientId := server.NewId()
+		// clientId := server.NewId()
 		networkName := "abcdef"
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId: networkId,
-			ClientId:  &clientId,
-			UserId:    userId,
-		})
+		// userAuth := "hello@ur.io"
 
-		userAuth := "hello@ur.io"
 		password := "abcdefg1234567"
-
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+		/**
+		 * Testing_CreateNetwork creates a user auth
+		 * Trying to add another email to the same user should fail
+		 */
+		userAuth := "hello@ur.io"
 
 		err := addUserAuth(
 			&AddUserAuthArgs{
@@ -87,30 +87,13 @@ func TestAddUserAuthPassword(t *testing.T) {
 				PasswordHash: passwordHash,
 				PasswordSalt: passwordSalt,
 			},
-			session,
-		)
-		assert.Equal(t, err, nil)
-
-		/**
-		 * Trying to add another email to the same user should fail
-		 */
-		userAuth = "hello@ur.io"
-
-		err = addUserAuth(
-			&AddUserAuthArgs{
-				UserId:       userId,
-				UserAuth:     &userAuth,
-				PasswordHash: passwordHash,
-				PasswordSalt: passwordSalt,
-			},
-			session,
+			ctx,
 		)
 		assert.NotEqual(t, err, nil)
 
 		networkUser := GetNetworkUser(ctx, userId)
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, networkUser.UserAuths[0].UserAuth, userAuth)
 		assert.Equal(t, networkUser.UserAuths[0].AuthType, UserAuthTypeEmail)
 
 		/**
@@ -125,7 +108,7 @@ func TestAddUserAuthPassword(t *testing.T) {
 				PasswordHash: passwordHash,
 				PasswordSalt: passwordSalt,
 			},
-			session,
+			ctx,
 		)
 		assert.Equal(t, err, nil)
 
@@ -164,7 +147,13 @@ func TestAddUserAuthWallet(t *testing.T) {
 			Blockchain: "solana",
 		}
 
-		err := addWalletAuth(args, session)
+		err := addWalletAuth(
+			&AddWalletAuthArgs{
+				WalletAuth: &args,
+				UserId:     userId,
+			},
+			session.Ctx,
+		)
 		assert.Equal(t, err, nil)
 
 		/**
@@ -187,7 +176,13 @@ func TestAddUserAuthWallet(t *testing.T) {
 			Blockchain: "solana",
 		}
 
-		err = addWalletAuth(args, session)
+		err = addWalletAuth(
+			&AddWalletAuthArgs{
+				WalletAuth: &args,
+				UserId:     userId,
+			},
+			ctx,
+		)
 		assert.Equal(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)

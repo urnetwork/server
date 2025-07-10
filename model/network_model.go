@@ -294,7 +294,7 @@ func NetworkCreate(
 					PasswordHash: passwordHash,
 					PasswordSalt: passwordSalt,
 				},
-				session,
+				session.Ctx,
 			)
 
 			_, err = tx.Exec(
@@ -397,9 +397,12 @@ func NetworkCreate(
 
 				// insert into network_user_auth_sso
 				addSsoAuth(
-					*networkCreate.AuthJwt,
-					authJwt.AuthType,
-					session,
+					&AddSsoAuthArgs{
+						UserId:      createdUserId,
+						AuthJwt:     *networkCreate.AuthJwt,
+						AuthJwtType: SsoAuthType(*networkCreate.AuthJwtType),
+					},
+					session.Ctx,
 				)
 
 				_, err = tx.Exec(
@@ -524,13 +527,16 @@ func NetworkCreate(
 
 			// insert into network_user_auth_wallet
 			addWalletAuth(
-				WalletAuthArgs{
-					PublicKey:  networkCreate.WalletAuth.PublicKey,
-					Blockchain: networkCreate.WalletAuth.Blockchain,
-					Message:    networkCreate.WalletAuth.Message,
-					Signature:  networkCreate.WalletAuth.Signature,
+				&AddWalletAuthArgs{
+					WalletAuth: &WalletAuthArgs{
+						PublicKey:  networkCreate.WalletAuth.PublicKey,
+						Blockchain: networkCreate.WalletAuth.Blockchain,
+						Message:    networkCreate.WalletAuth.Message,
+						Signature:  networkCreate.WalletAuth.Signature,
+					},
+					UserId: createdUserId,
 				},
-				session,
+				session.Ctx,
 			)
 
 			_, err = tx.Exec(
@@ -1347,6 +1353,16 @@ func Testing_CreateNetwork(
 			passwordHash,
 			passwordSalt,
 		))
+
+		addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       adminUserId,
+				UserAuth:     &userAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+				Verified:     true,
+			}, ctx,
+		)
 	})
 
 	return
@@ -1358,6 +1374,8 @@ func Testing_CreateNetworkByWallet(
 	networkName string,
 	adminUserId server.Id,
 	publicKey string,
+	signature string,
+	message string,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -1384,6 +1402,19 @@ func Testing_CreateNetworkByWallet(
 			publicKey,
 			AuthTypeSolana,
 		))
+
+		addWalletAuth(
+			&AddWalletAuthArgs{
+				WalletAuth: &WalletAuthArgs{
+					PublicKey:  publicKey,
+					Signature:  signature,
+					Message:    message,
+					Blockchain: AuthTypeSolana,
+				},
+				UserId: adminUserId,
+			},
+			ctx,
+		)
 	})
 
 }
@@ -1418,6 +1449,7 @@ func Testing_CreateGuestNetwork(
 			AuthTypeGuest,
 			false,
 		))
+
 	})
 
 }

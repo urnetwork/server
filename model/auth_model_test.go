@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	// "time"
@@ -128,6 +129,31 @@ func TestVerifySolanaSignature(t *testing.T) {
 		isValid, err = VerifySolanaSignature(pk, message, invalidSignature)
 		assert.NotEqual(t, err, nil)
 		assert.Equal(t, isValid, false)
+
+	})
+}
+
+func TestAuthLogin(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "test"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		userAuth := fmt.Sprintf("%s@bringyour.com", networkId)
+		// password := "password"
+
+		result, err := loginUserAuth(&userAuth, ctx)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+		assert.Equal(t, result.UserAuth, userAuth)
+		assert.NotEqual(t, result.AuthAllowed, nil)
+		assert.Equal(t, len(*result.AuthAllowed), 1)
+		authAllowed := (*result.AuthAllowed)[0]
+		assert.Equal(t, UserAuthType(authAllowed), UserAuthTypeEmail)
 
 	})
 }

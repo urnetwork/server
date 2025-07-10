@@ -162,6 +162,8 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		userId := server.NewId()
 		networkName := "abcdef"
 		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		message := "Welcome to URnetwork"
+		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
 
 		Testing_CreateNetworkByWallet(
 			ctx,
@@ -169,6 +171,8 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 			networkName,
 			userId,
 			pk,
+			signature,
+			message,
 		)
 
 		guestNetworkId := server.NewId()
@@ -197,13 +201,14 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		args := UpgradeGuestExistingArgs{
 			WalletAuth: &WalletAuthArgs{
 				PublicKey:  pk,
-				Signature:  "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw==",
-				Message:    "Welcome to URnetwork",
-				Blockchain: "solana",
+				Signature:  signature,
+				Message:    message,
+				Blockchain: AuthTypeSolana,
 			},
 		}
 
 		result, err := UpgradeFromGuestExisting(args, clientSession)
+
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Error, nil)
 
