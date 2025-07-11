@@ -133,7 +133,7 @@ func TestVerifySolanaSignature(t *testing.T) {
 	})
 }
 
-func TestAuthLogin(t *testing.T) {
+func TestUserAuthLogin(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 
@@ -154,6 +154,44 @@ func TestAuthLogin(t *testing.T) {
 		assert.Equal(t, len(*result.AuthAllowed), 1)
 		authAllowed := (*result.AuthAllowed)[0]
 		assert.Equal(t, UserAuthType(authAllowed), UserAuthTypeEmail)
+
+		// login via SSO should work, as long as the userAuth for both are the same
+
+	})
+}
+
+func TestLoginWithWallet(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "test"
+
+		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
+		message := "Welcome to URnetwork"
+
+		Testing_CreateNetworkByWallet(
+			ctx,
+			networkId,
+			networkName,
+			userId,
+			pk,
+			signature,
+			message,
+		)
+
+		result, err := handleLoginWallet(&WalletAuthArgs{
+			PublicKey:  pk,
+			Signature:  signature,
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+		}, ctx)
+
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+		assert.NotEqual(t, result.Network.ByJwt, nil)
 
 	})
 }
