@@ -73,12 +73,40 @@ func (self *safePgPool) open() *pgxpool.Pool {
 
 		minConnections := dbConfigKeys.RequireInt("min_connections")
 		maxConnections := dbConfigKeys.RequireInt("max_connections")
+		healthCheckPeriod := "1s"
+		connectionMaxLifetime := "1h"
+		connectionMaxLifetimeJitter := "15m"
+		connectionMaxIdleTime := "5m"
+		if healthCheckPeriods := dbConfigKeys.String("health_check_period"); 0 < len(healthCheckPeriods) {
+			healthCheckPeriod = healthCheckPeriods[0]
+		}
+		if connectionMaxLifetimes := dbConfigKeys.String("conn_max_lifetime"); 0 < len(connectionMaxLifetimes) {
+			connectionMaxLifetime = connectionMaxLifetimes[0]
+		}
+		if connectionMaxLifetimeJitters := dbConfigKeys.String("conn_max_lifetime_jitter"); 0 < len(connectionMaxLifetimeJitters) {
+			connectionMaxLifetimeJitter = connectionMaxLifetimeJitters[0]
+		}
+		if connectionMaxIdleTimes := dbConfigKeys.String("conn_max_idle_time"); 0 < len(connectionMaxIdleTimes) {
+			connectionMaxIdleTime = connectionMaxIdleTimes[0]
+		}
 		if service, err := Service(); err == nil && service != "" {
 			if serviceMinConnections := dbConfigKeys.Int(service, "min_connections"); 0 < len(serviceMinConnections) {
 				minConnections = serviceMinConnections[0]
 			}
 			if serviceMaxConnections := dbConfigKeys.Int(service, "max_connections"); 0 < len(serviceMaxConnections) {
 				maxConnections = serviceMaxConnections[0]
+			}
+			if healthCheckPeriods := dbConfigKeys.String(service, "health_check_period"); 0 < len(healthCheckPeriods) {
+				healthCheckPeriod = healthCheckPeriods[0]
+			}
+			if connectionMaxLifetimes := dbConfigKeys.String(service, "conn_max_lifetime"); 0 < len(connectionMaxLifetimes) {
+				connectionMaxLifetime = connectionMaxLifetimes[0]
+			}
+			if connectionMaxLifetimeJitters := dbConfigKeys.String(service, "conn_max_lifetime_jitter"); 0 < len(connectionMaxLifetimeJitters) {
+				connectionMaxLifetimeJitter = connectionMaxLifetimeJitters[0]
+			}
+			if connectionMaxIdleTimes := dbConfigKeys.String(service, "conn_max_idle_time"); 0 < len(connectionMaxIdleTimes) {
+				connectionMaxIdleTime = connectionMaxIdleTimes[0]
 			}
 		}
 
@@ -89,10 +117,10 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			// FIXME perf move to config
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
-			"pool_max_conn_lifetime":        "1h",
-			"pool_max_conn_lifetime_jitter": "15m",
-			"pool_max_conn_idle_time":       "15m",
-			"pool_health_check_period":      "1m",
+			"pool_max_conn_lifetime":        connectionMaxLifetime,
+			"pool_max_conn_lifetime_jitter": connectionMaxLifetimeJitter,
+			"pool_max_conn_idle_time":       connectionMaxIdleTime,
+			"pool_health_check_period":      healthCheckPeriod,
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
 			"default_transaction_read_only": "on",
 		}
