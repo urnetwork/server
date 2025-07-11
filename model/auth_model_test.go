@@ -144,7 +144,6 @@ func TestUserAuthLogin(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		userAuth := fmt.Sprintf("%s@bringyour.com", networkId)
-		// password := "password"
 
 		result, err := loginUserAuth(&userAuth, ctx)
 		assert.Equal(t, err, nil)
@@ -155,7 +154,39 @@ func TestUserAuthLogin(t *testing.T) {
 		authAllowed := (*result.AuthAllowed)[0]
 		assert.Equal(t, UserAuthType(authAllowed), UserAuthTypeEmail)
 
-		// login via SSO should work, as long as the userAuth for both are the same
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, len(networkUser.SsoAuths), 0)
+
+		/**
+		 * Login with SSO with same userAuth should work
+		 */
+		parsedAuthJwt := AuthJwt{
+			AuthType: SsoAuthTypeGoogle,
+			UserAuth: userAuth,
+			UserName: "",
+		}
+		useAuthAttemptId := server.NewId()
+
+		result, err = handleLoginParsedAuthJwt(
+			&HandleLoginParsedAuthJwtArgs{
+				AuthJwt: parsedAuthJwt,
+				// AuthJwtType:       SsoAuthTypeGoogle,
+				AuthJwtStr:        "",
+				UserAuthAttemptId: useAuthAttemptId,
+			},
+			ctx,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+		assert.NotEqual(t, result.Network.ByJwt, nil)
+
+		// the login should have created a SSO auth
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
 
 	})
 }
@@ -192,6 +223,85 @@ func TestLoginWithWallet(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result, nil)
 		assert.NotEqual(t, result.Network.ByJwt, nil)
+
+	})
+}
+
+// test social logins
+func TestSocialLogin(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		useAuthAttemptId := server.NewId()
+
+		email := "hello@bringyour.com"
+
+		parsedAuthJwt := AuthJwt{
+			AuthType: SsoAuthTypeGoogle,
+			UserAuth: email,
+			UserName: "",
+		}
+
+		Testing_CreateNetworkSso(
+			networkId,
+			userId,
+			parsedAuthJwt,
+			ctx,
+		)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 0)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
+
+		// login
+		result, err := handleLoginParsedAuthJwt(
+			&HandleLoginParsedAuthJwtArgs{
+				AuthJwt: parsedAuthJwt,
+				// AuthJwtType:       SsoAuthTypeGoogle,
+				AuthJwtStr:        "",
+				UserAuthAttemptId: useAuthAttemptId,
+			},
+			ctx,
+		)
+
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+		assert.NotEqual(t, result.Network.ByJwt, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 0)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
+
+		// logging in with an Apple SSO auth should work too
+		parsedAuthJwt = AuthJwt{
+			AuthType: SsoAuthTypeApple,
+			UserAuth: email,
+			UserName: "",
+		}
+		result, err = handleLoginParsedAuthJwt(
+			&HandleLoginParsedAuthJwtArgs{
+				AuthJwt: parsedAuthJwt,
+				// AuthJwtType:       SsoAuthTypeApple,
+				AuthJwtStr:        "",
+				UserAuthAttemptId: useAuthAttemptId,
+			},
+			ctx,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+
+		/**
+		 * Should now have 2 SSO auths
+		 */
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 0)
+		assert.Equal(t, len(networkUser.SsoAuths), 2)
 
 	})
 }

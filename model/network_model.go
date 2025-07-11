@@ -398,9 +398,10 @@ func NetworkCreate(
 				// insert into network_user_auth_sso
 				addSsoAuth(
 					&AddSsoAuthArgs{
-						UserId:      createdUserId,
-						AuthJwt:     *networkCreate.AuthJwt,
-						AuthJwtType: SsoAuthType(*networkCreate.AuthJwtType),
+						UserId:        createdUserId,
+						AuthJwt:       *networkCreate.AuthJwt,
+						ParsedAuthJwt: *authJwt,
+						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
 					},
 					session.Ctx,
 				)
@@ -1454,28 +1455,46 @@ func Testing_CreateGuestNetwork(
 
 }
 
-// network_user
-// --------------
-// user_id
-// user_name
-// verified
-//
-// network_user_auth_sso
-// -------------
-// user_id
-// auth_type // google, apple, etc
-// jwt
-//
-// network_user_auth_wallet
-// -------------
-// user_id
-// wallet_address
-// blockchain
-//
-// network_user_auth_password
-// ------------
-// user_id
-// user_auth // email or phone number
-// auth_type // email or phone
-// password_hash
-// password_salt
+func Testing_CreateNetworkSso(
+	networkId server.Id,
+	userId server.Id,
+	authJwt AuthJwt,
+	// authJwtType SsoAuthType,
+	ctx context.Context,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network (network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			networkId,
+			"network_name",
+			userId,
+		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+				VALUES ($1, $2, $3, $4)
+			`,
+			userId,
+			"user_name",
+			AuthTypeGoogle,
+			true,
+		))
+
+		addSsoAuth(
+			&AddSsoAuthArgs{
+				ParsedAuthJwt: authJwt,
+				AuthJwt:       "",
+				AuthJwtType:   authJwt.AuthType,
+				UserId:        userId,
+			},
+			ctx,
+		)
+	})
+
+}

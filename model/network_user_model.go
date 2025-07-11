@@ -173,11 +173,30 @@ func AddAuth(
 	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
 		// user is adding a social login auth method
 
+		parsedAuthJwt, err := ParseAuthJwt(*authArgs.AuthJwt, AuthType(*authArgs.AuthJwtType))
+
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: fmt.Sprintf("Error parsing auth jwt: %s", err.Error()),
+				},
+			}, nil
+		}
+
+		if parsedAuthJwt == nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: fmt.Sprintf("Parsed auth jwt is nil for auth type %s", *authArgs.AuthJwtType),
+				},
+			}, nil
+		}
+
 		addSsoAuth(
 			&AddSsoAuthArgs{
-				AuthJwt:     *authArgs.AuthJwt,
-				AuthJwtType: SsoAuthType(*authArgs.AuthJwtType),
-				UserId:      session.ByJwt.UserId,
+				ParsedAuthJwt: *parsedAuthJwt,
+				AuthJwtType:   SsoAuthType(*authArgs.AuthJwtType),
+				AuthJwt:       *authArgs.AuthJwt,
+				UserId:        session.ByJwt.UserId,
 			},
 			session.Ctx,
 		)
@@ -333,9 +352,10 @@ func getUserAuths(
  */
 
 type AddSsoAuthArgs struct {
-	AuthJwt     string      `json:"auth_jwt"`
-	AuthJwtType SsoAuthType `json:"auth_jwt_type"`
-	UserId      server.Id   `json:"user_id"`
+	ParsedAuthJwt AuthJwt     `json:"auth_jwt"`
+	AuthJwt       string      `json:"auth_jwt_str"`
+	AuthJwtType   SsoAuthType `json:"auth_jwt_type"`
+	UserId        server.Id   `json:"user_id"`
 }
 
 func addSsoAuth(
@@ -343,20 +363,12 @@ func addSsoAuth(
 	ctx context.Context,
 ) error {
 
-	parsedAuthJwt, err := ParseAuthJwt(args.AuthJwt, AuthType(args.AuthJwtType))
-
-	if err != nil {
-		return fmt.Errorf("error parsing auth jwt: %s", err.Error())
-	}
-
-	if parsedAuthJwt == nil {
-		return errors.New("parsed auth jwt is nil")
-	}
+	parsedAuthJwt := args.ParsedAuthJwt
 
 	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err = tx.Exec(
+		_, err := tx.Exec(
 			ctx,
 			`
 			INSERT INTO network_user_auth_sso
@@ -391,6 +403,7 @@ func getSsoAuths(
 			ctx,
 			`
 			SELECT
+				user_id,
 				auth_type,
 				auth_jwt,
 				user_auth
@@ -407,6 +420,7 @@ func getSsoAuths(
 			for result.Next() {
 				ssoAuth := NetworkUserSsoAuth{}
 				server.Raise(result.Scan(
+					&ssoAuth.UserId,
 					&ssoAuth.AuthType,
 					&ssoAuth.AuthJwt,
 					&ssoAuth.UserAuth,
@@ -436,6 +450,7 @@ func getSsoAuthsByUserAuth(
 			ctx,
 			`
 				SELECT
+					user_id,
 					auth_type,
 					auth_jwt,
 					user_auth
@@ -452,6 +467,7 @@ func getSsoAuthsByUserAuth(
 			for result.Next() {
 				ssoAuth := NetworkUserSsoAuth{}
 				server.Raise(result.Scan(
+					&ssoAuth.UserId,
 					&ssoAuth.AuthType,
 					&ssoAuth.AuthJwt,
 					&ssoAuth.UserAuth,

@@ -261,161 +261,15 @@ func AuthLogin(
 
 		if authJwt != nil {
 
-			var userId *server.Id
-			// var authType string
-			var networkId server.Id
-			var networkName string
-
-			ssoExists := false
-			userAuthExists := false
-			userAuthEmailVerified := false
-
-			/**
-			 * get sso auths
-			 */
-			ssoAuths, err := getSsoAuthsByUserAuth(session.Ctx, authJwt.UserAuth)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get SSO auths: %w", err)
-			}
-			if len(ssoAuths) > 0 {
-				ssoExists = true
-				userId = ssoAuths[0].UserId
-			}
-
-			/**
-			 * check if userAuth exists with this email in network_user_auth_password
-			 */
-			server.Db(session.Ctx, func(conn server.PgConn) {
-				// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-				result, err := conn.Query(
-					session.Ctx,
-					`
-							SELECT
-								user_id,
-								verified
-							FROM network_user_auth_password
-							WHERE user_auth = $1
-						`,
-					authJwt.UserAuth,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						var id *server.Id
-						verified := false
-						server.Raise(result.Scan(
-							&id,
-							&verified,
-						))
-						userAuthExists = true
-						userAuthEmailVerified = verified
-
-						if id != nil {
-							userId = id
-						}
-					}
-				})
-			})
-
-			if userId == nil {
-				// new user - direct to create network
-				return &AuthLoginResult{
-					UserName: &authJwt.UserName,
-				}, nil
-			}
-
-			server.Db(session.Ctx, func(conn server.PgConn) {
-				// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-				result, err := conn.Query(
-					session.Ctx,
-					`
-						SELECT
-							network_user.user_id,
-							network.network_id,
-							network.network_name
-						FROM network_user
-						INNER JOIN network ON network.admin_user_id = network_user.user_id
-						WHERE user_id = $1
-					`,
-					userId,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						server.Raise(result.Scan(
-							&userId,
-							&networkId,
-							&networkName,
-						))
-					}
-				})
-			})
-
-			if &networkId == nil || &networkName == nil {
-				/**
-				 * This scenario should not happen
-				 * If a user has a child network_user auth added, the parent network_user row should always exist
-				 */
-				return nil, fmt.Errorf("network not found for user %s", *userId)
-			}
-
-			if !userAuthEmailVerified && userAuthExists && ssoExists {
-				// todo - mark userauth as verified
-			}
-
-			if !ssoExists && !userAuthExists {
-				/**
-				 * this generally would only happen for guest users
-				 * users signing in with SSO would usually have SSO or user auth
-				 * no user auth exists, create a new user
-				 */
-				return &AuthLoginResult{
-					UserName: &authJwt.UserName,
-				}, nil
-			}
-
-			/**
-			 * check for matching sso auth types
-			 */
-			var matchingSso *NetworkUserSsoAuth
-			for _, ssoAuth := range ssoAuths {
-				if ssoAuth.AuthType == authJwt.AuthType {
-					matchingSso = &ssoAuth
-					break
-				}
-			}
-
-			if matchingSso == nil {
-				/**
-				 * User is logging in with an SSO that does not exist
-				 * but user has a different SSO
-				 * add the new SSO auth
-				 */
-				addSsoAuth(
-					&AddSsoAuthArgs{
-						AuthJwt:     *login.AuthJwt,
-						AuthJwtType: SsoAuthType(*login.AuthJwtType),
-						UserId:      *userId,
-					},
-					session.Ctx,
-				)
-			}
-
-			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
-
-			isGuestMode := false
-
-			// successful login
-			byJwt := jwt.NewByJwt(
-				networkId,
-				*userId,
-				networkName,
-				isGuestMode,
-			)
-			result := &AuthLoginResult{
-				Network: &AuthLoginResultNetwork{
-					ByJwt: byJwt.Sign(),
+			return handleLoginParsedAuthJwt(
+				&HandleLoginParsedAuthJwtArgs{
+					AuthJwt: *authJwt,
+					// AuthJwtType:       SsoAuthType(*login.AuthJwtType),
+					AuthJwtStr:        *login.AuthJwt,
+					UserAuthAttemptId: userAuthAttemptId,
 				},
-			}
-			return result, nil
+				session.Ctx,
+			)
 
 		}
 	} else if login.WalletAuth != nil {
@@ -520,6 +374,181 @@ func loginUserAuth(
 		}
 		return result, nil
 	}
+}
+
+type HandleLoginParsedAuthJwtArgs struct {
+	AuthJwt           AuthJwt
+	AuthJwtStr        string
+	UserAuthAttemptId server.Id
+}
+
+func handleLoginParsedAuthJwt(
+	args *HandleLoginParsedAuthJwtArgs,
+	ctx context.Context,
+) (*AuthLoginResult, error) {
+
+	var authJwt = args.AuthJwt
+
+	var userId *server.Id
+	var networkId server.Id
+	var networkName string
+
+	ssoExists := false
+	userAuthExists := false
+	userAuthEmailVerified := false
+
+	/**
+	 * get sso auths
+	 */
+	ssoAuths, err := getSsoAuthsByUserAuth(ctx, authJwt.UserAuth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSO auths: %w", err)
+	}
+	if len(ssoAuths) > 0 {
+		ssoExists = true
+		userId = ssoAuths[0].UserId
+	}
+
+	/**
+	 * check if userAuth exists with this email in network_user_auth_password
+	 */
+	server.Db(ctx, func(conn server.PgConn) {
+		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+		result, err := conn.Query(
+			ctx,
+			`
+					SELECT
+						user_id,
+						verified
+					FROM network_user_auth_password
+					WHERE user_auth = $1
+				`,
+			authJwt.UserAuth,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var id *server.Id
+				verified := false
+				server.Raise(result.Scan(
+					&id,
+					&verified,
+				))
+				userAuthExists = true
+				userAuthEmailVerified = verified
+
+				if id != nil {
+					glog.Infof("setting user id inside of user auth as %s", id.String())
+					userId = id
+				}
+			}
+		})
+	})
+
+	if userId == nil {
+
+		// new user - direct to create network
+		return &AuthLoginResult{
+			UserName: &authJwt.UserName,
+		}, nil
+	}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network_user.user_id,
+					network.network_id,
+					network.network_name
+				FROM network_user
+				INNER JOIN network ON network.admin_user_id = network_user.user_id
+				WHERE user_id = $1
+			`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(
+					&userId,
+					&networkId,
+					&networkName,
+				))
+			}
+		})
+	})
+
+	if &networkId == nil || &networkName == nil {
+
+		/**
+		 * This scenario should not happen
+		 * If a user has a child network_user auth added, the parent network_user row should always exist
+		 */
+		return nil, fmt.Errorf("network not found for user %s", *userId)
+	}
+
+	if !userAuthEmailVerified && userAuthExists && ssoExists {
+		// todo - mark userauth as verified
+	}
+
+	if !ssoExists && !userAuthExists {
+
+		/**
+		 * this generally would only happen for guest users
+		 * users signing in with SSO would usually have SSO or user auth
+		 * no user auth exists, create a new user
+		 */
+		return &AuthLoginResult{
+			UserName: &authJwt.UserName,
+		}, nil
+	}
+
+	/**
+	 * check for matching sso auth types
+	 */
+	var matchingSso *NetworkUserSsoAuth
+	for _, ssoAuth := range ssoAuths {
+		if ssoAuth.AuthType == authJwt.AuthType {
+			matchingSso = &ssoAuth
+			break
+		}
+	}
+
+	if matchingSso == nil {
+
+		/**
+		 * User is logging in with an SSO that does not exist
+		 * but user has a different SSO
+		 * add the new SSO auth
+		 */
+		addSsoAuth(
+			&AddSsoAuthArgs{
+				ParsedAuthJwt: args.AuthJwt,
+				AuthJwt:       args.AuthJwtStr,
+				AuthJwtType:   args.AuthJwt.AuthType,
+				UserId:        *userId,
+			},
+			ctx,
+		)
+	}
+
+	SetUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId, true)
+
+	isGuestMode := false
+
+	// successful login
+	byJwt := jwt.NewByJwt(
+		networkId,
+		*userId,
+		networkName,
+		isGuestMode,
+	)
+	result := &AuthLoginResult{
+		Network: &AuthLoginResultNetwork{
+			ByJwt: byJwt.Sign(),
+		},
+	}
+	return result, nil
 }
 
 func handleLoginWallet(
