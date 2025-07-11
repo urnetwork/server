@@ -868,9 +868,9 @@ func DbMaintenance(ctx context.Context) {
 			`VACUUM ANALYZE`,
 		))
 
-		RaisePgResult(tx.Exec(
-			ctx,
-			`VACUUM FULL`,
-		))
+		// RaisePgResult(tx.Exec(
+		// 	ctx,
+		// 	`VACUUM FULL`,
+		// ))
 	})
 }
