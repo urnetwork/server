@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	// "time"
-
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
@@ -260,8 +258,7 @@ func TestSocialLogin(t *testing.T) {
 		// login
 		result, err := handleLoginParsedAuthJwt(
 			&HandleLoginParsedAuthJwtArgs{
-				AuthJwt: parsedAuthJwt,
-				// AuthJwtType:       SsoAuthTypeGoogle,
+				AuthJwt:           parsedAuthJwt,
 				AuthJwtStr:        "",
 				UserAuthAttemptId: useAuthAttemptId,
 			},
@@ -285,8 +282,7 @@ func TestSocialLogin(t *testing.T) {
 		}
 		result, err = handleLoginParsedAuthJwt(
 			&HandleLoginParsedAuthJwtArgs{
-				AuthJwt: parsedAuthJwt,
-				// AuthJwtType:       SsoAuthTypeApple,
+				AuthJwt:           parsedAuthJwt,
 				AuthJwtStr:        "",
 				UserAuthAttemptId: useAuthAttemptId,
 			},
@@ -302,6 +298,195 @@ func TestSocialLogin(t *testing.T) {
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, len(networkUser.UserAuths), 0)
 		assert.Equal(t, len(networkUser.SsoAuths), 2)
+
+	})
+}
+
+func TestAddingSsoToDifferentNetworksShouldFail(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		walletNetworkId := server.NewId()
+		walletNetworkUserId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "network_a", userId)
+
+		email := fmt.Sprintf("%s@bringyour.com", networkId)
+
+		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
+		message := "Welcome to URnetwork"
+
+		Testing_CreateNetworkByWallet(ctx, walletNetworkId, "wallet_network", walletNetworkUserId, pk, signature, message)
+
+		/**
+		 * adding SSO to wallet_network with email associated with network_a should fail
+		 */
+		parsedAuthJwt := AuthJwt{
+			AuthType: SsoAuthTypeApple,
+			UserAuth: email,
+			UserName: "",
+		}
+
+		err := addSsoAuth(&AddSsoAuthArgs{
+			ParsedAuthJwt: parsedAuthJwt,
+			AuthJwt:       "",
+			AuthJwtType:   SsoAuthTypeGoogle,
+			UserId:        walletNetworkUserId,
+		}, ctx)
+		assert.NotEqual(t, err, nil)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, len(networkUser.SsoAuths), 0)
+		assert.Equal(t, len(networkUser.WalletAuths), 0)
+
+		walletNetworkUser := GetNetworkUser(ctx, walletNetworkUserId)
+		assert.NotEqual(t, walletNetworkUser, nil)
+		assert.Equal(t, len(walletNetworkUser.UserAuths), 0)
+		assert.Equal(t, len(walletNetworkUser.SsoAuths), 0)
+		assert.Equal(t, len(walletNetworkUser.WalletAuths), 1)
+
+		/**
+		 * add a SSO to the email network should work
+		 */
+		err = addSsoAuth(&AddSsoAuthArgs{
+			ParsedAuthJwt: parsedAuthJwt,
+			AuthJwt:       "",
+			AuthJwtType:   SsoAuthTypeGoogle,
+			UserId:        userId,
+		}, ctx)
+		assert.Equal(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		assert.Equal(t, len(networkUser.WalletAuths), 0)
+
+	})
+}
+
+func TestAddingSameSsoToNetworkShouldFail(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "network_a", userId)
+
+		email := fmt.Sprintf("%s@bringyour.com", networkId)
+
+		parsedAuthJwt := AuthJwt{
+			AuthType: SsoAuthTypeApple,
+			UserAuth: email,
+			UserName: "",
+		}
+
+		addSsoAuthArgs := &AddSsoAuthArgs{
+			ParsedAuthJwt: parsedAuthJwt,
+			AuthJwt:       "",
+			AuthJwtType:   SsoAuthTypeGoogle,
+			UserId:        userId,
+		}
+
+		err := addSsoAuth(addSsoAuthArgs, ctx)
+		assert.Equal(t, err, nil)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		assert.Equal(t, len(networkUser.WalletAuths), 0)
+
+		/**
+		 * Trying to add the same SSO auth again should fail
+		 */
+		err = addSsoAuth(addSsoAuthArgs, ctx)
+		assert.NotEqual(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.Equal(t, len(networkUser.SsoAuths), 1)
+
+	})
+}
+
+func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "network_a", userId)
+
+		email := fmt.Sprintf("%s@bringyour.com", networkId)
+		password := "password123"
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+
+		/**
+		 * Trying to add the same user auth again should fail
+		 */
+		args := &AddUserAuthArgs{
+			UserId:       userId,
+			UserAuth:     &email,
+			PasswordHash: passwordHash,
+			PasswordSalt: passwordSalt,
+			Verified:     true,
+		}
+
+		err := addUserAuth(args, ctx)
+		assert.NotEqual(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+
+		/**
+		 * But adding a phone user auth should work
+		 */
+		phoneNumber := "16097370000"
+		args = &AddUserAuthArgs{
+			UserId:       userId,
+			UserAuth:     &phoneNumber,
+			PasswordHash: passwordHash,
+			PasswordSalt: passwordSalt,
+			Verified:     true,
+		}
+
+		err = addUserAuth(args, ctx)
+		assert.Equal(t, err, nil)
+
+		networkUser = GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 2)
+
+		/**
+		 * Adding an existing user auth to a different network should fail
+		 */
+		userId2 := server.NewId()
+		args = &AddUserAuthArgs{
+			UserId:       userId2,
+			UserAuth:     &phoneNumber,
+			PasswordHash: passwordHash,
+			PasswordSalt: passwordSalt,
+			Verified:     true,
+		}
+
+		err = addUserAuth(args, ctx)
+		assert.NotEqual(t, err, nil)
 
 	})
 }

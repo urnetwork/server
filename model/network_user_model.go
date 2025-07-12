@@ -229,18 +229,59 @@ type AddUserAuthArgs struct {
 func addUserAuth(
 	args *AddUserAuthArgs,
 	ctx context.Context,
-) (returnErr *error) {
+) (returnErr error) {
 
 	userAuth, userAuthType := NormalUserAuthV1(args.UserAuth)
+
+	if userAuth == nil {
+		returnErr = fmt.Errorf("user_auth is required")
+		return
+	}
 
 	// TODO - if they have authed through SSO, mark them as verified
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		/**
-		 * Check if the userauth already exists
+		 * Check if this user_auth is already associated with a different user
 		 */
 		result, queryErr := tx.Query(
+			ctx,
+			`
+			SELECT COUNT(*)
+			FROM (
+			    SELECT 1
+			    FROM network_user_auth_sso
+			    WHERE user_auth = $1 AND user_id <> $2
+
+			    UNION
+
+			    SELECT 1
+			    FROM network_user_auth_password
+			    WHERE user_auth = $1 AND user_id <> $2
+			) different_users
+			`,
+			userAuth,
+			args.UserId,
+		)
+
+		conflictCount := 0
+
+		server.WithPgResult(result, queryErr, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&conflictCount))
+			}
+		})
+
+		if conflictCount > 0 {
+			returnErr = fmt.Errorf("user_auth %s already exists for a different user", *userAuth)
+			return
+		}
+
+		/**
+		 * Check if this type of userauth already exists for the user
+		 */
+		result, queryErr = tx.Query(
 			ctx,
 			`
 			SELECT
@@ -252,7 +293,7 @@ func addUserAuth(
 			userAuthType,
 		)
 		if queryErr != nil {
-			returnErr = &queryErr
+			returnErr = queryErr
 			return
 		}
 
@@ -266,21 +307,13 @@ func addUserAuth(
 
 		if exists {
 			err := fmt.Errorf("User exists with auth type %s", userAuthType)
-			returnErr = &err
+			returnErr = err
 			return
 		}
 
 		/**
 		 * No record exists with this auth type, create a new one
 		 */
-		// if !passwordValid(password) {
-		// 	passwordErr := errors.New("Network name must have at least 5 characters")
-		// 	returnErr = &passwordErr
-		// 	return
-		// }
-
-		// passwordSalt := createPasswordSalt()
-		// passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
 		_, dbErr := tx.Exec(
 			ctx,
@@ -361,29 +394,83 @@ type AddSsoAuthArgs struct {
 func addSsoAuth(
 	args *AddSsoAuthArgs,
 	ctx context.Context,
-) error {
+) (returnErr error) {
 
 	parsedAuthJwt := args.ParsedAuthJwt
 
 	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
+
+		/**
+		 * first, check if the user_auth is already associated with a different user
+		 */
+		query, err := tx.Query(
+			ctx,
+			`
+			SELECT COUNT(*)
+		    FROM (
+		        SELECT user_id
+		        FROM network_user_auth_sso
+		        WHERE user_auth = $1 AND user_id <> $2
+
+		        UNION
+
+		        SELECT user_id
+		        FROM network_user_auth_password
+		        WHERE user_auth = $1 AND user_id <> $2
+		    ) different_users
+			`,
+			parsedAuthJwt.UserAuth,
+			args.UserId,
+		)
+
+		if err != nil {
+			glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
+			returnErr = err
+			return
+		}
+
+		conflictCount := 0
+
+		server.WithPgResult(query, err, func() {
+			if query.Next() {
+				server.Raise(query.Scan(&conflictCount))
+			}
+		})
+
+		if conflictCount > 0 {
+			returnErr = fmt.Errorf("user_auth %s already exists for a different user", parsedAuthJwt.UserAuth)
+			return
+		}
+
+		/**
+		 * No conflicts, insert the new SSO auth
+		 */
+
+		result, err := tx.Exec(
 			ctx,
 			`
 			INSERT INTO network_user_auth_sso
 			(user_id, auth_type, user_auth, auth_jwt)
 			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (user_id, auth_type) DO NOTHING;
 		`,
 			args.UserId,
 			parsedAuthJwt.AuthType,
 			normalJwtUserAuth,
 			args.AuthJwt,
 		)
-		server.Raise(err)
+
+		if result.RowsAffected() <= 0 {
+			// If no rows were affected, it means the user_id and auth_type already exist
+			returnErr = fmt.Errorf("SSO auth for user_id %s and auth_type %s already exists", args.UserId, parsedAuthJwt.AuthType)
+			return
+		}
+
 	})
 
-	return nil
+	return returnErr
 
 }
 
