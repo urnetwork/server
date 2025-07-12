@@ -829,7 +829,7 @@ func createTransferEscrowInTx(
                 active = true AND
                 start_time <= $2 AND $2 < end_time
 
-            ORDER BY paid DESC, end_time ASC
+            ORDER BY end_time
 
             FOR UPDATE
         `,
