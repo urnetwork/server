@@ -1829,4 +1829,12 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX transfer_balance_network_id_active_end_time
     `),
+
+	newSqlMigration(`
+        CREATE INDEX transfer_balance_network_id_active_end_time ON transfer_balance (network_id, active, end_time)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX transfer_balance_network_id_active_paid_end_time
+    `),
 }
