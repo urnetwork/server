@@ -2593,6 +2593,17 @@ func AddRefreshTransferBalanceToAllNetworks(
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 
+		// remove completed transfer balances
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_balance
+			WHERE 
+				end_time <= $1
+			`,
+			minTime.UTC(),
+		))
+
 		// remove completed transfer contracts
 		server.RaisePgResult(tx.Exec(
 			ctx,
