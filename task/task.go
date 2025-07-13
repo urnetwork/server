@@ -906,8 +906,7 @@ func (self *TaskWorker) RunPostPost(
 // takes the n next available tasks and makes an initial claim
 func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 	// select from the backlog as well as the current block
-	// choose the top N by priority
-	// this makes sure the current block doesn't get starved by the backlog
+	// run the current block first so that the current block doesn't get starved by the backlog
 
 	var taskIds []server.Id
 

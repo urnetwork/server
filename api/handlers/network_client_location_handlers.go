@@ -2,13 +2,18 @@ package handlers
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 )
 
 func NetworkGetProviderLocations(w http.ResponseWriter, r *http.Request) {
-	router.WrapNoAuth(model.GetProviderLocations, w, r)
+	router.WrapNoAuth(router.Cache(
+		model.GetProviderLocations,
+		"api_network_get_provider_locations",
+		time.Second,
+	), w, r)
 }
 
 func NetworkFindProviderLocations(w http.ResponseWriter, r *http.Request) {
