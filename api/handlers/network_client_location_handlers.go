@@ -12,7 +12,7 @@ func NetworkGetProviderLocations(w http.ResponseWriter, r *http.Request) {
 	router.WrapNoAuth(router.Cache(
 		model.GetProviderLocations,
 		"api_network_get_provider_locations",
-		time.Second,
+		5*time.Second,
 	), w, r)
 }
 
