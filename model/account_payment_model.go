@@ -1468,36 +1468,57 @@ func GetTransferStats(
 			ctx,
 			`
 				SELECT
-					coalesce(SUM(CASE
-							WHEN account_payment.payment_id IS NOT NULL AND account_payment.canceled = false THEN transfer_escrow_sweep.payout_byte_count
-							ELSE 0
-						END), 0) as paid_bytes_provided,
-					coalesce(SUM(CASE
-							WHEN account_payment.payment_id IS NULL OR account_payment.canceled = true THEN transfer_escrow_sweep.payout_byte_count
-							ELSE 0
-						END), 0) as unpaid_bytes_provided
-				FROM
-					transfer_escrow_sweep
-				LEFT JOIN account_payment
-					ON transfer_escrow_sweep.payment_id = account_payment.payment_id
+					0 AS paid_bytes_provided,
+					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
+				FROM transfer_escrow_sweep
+
 				WHERE
-					transfer_escrow_sweep.network_id = $1
+					transfer_escrow_sweep.network_id = $1 AND
+					transfer_escrow_sweep.payment_id IS NULL
+
+				UNION ALL
+
+				SELECT
+					0 AS paid_bytes_provided,
+					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided				
+				FROM account_payment
+
+				INNER JOIN transfer_escrow_sweep ON
+                        transfer_escrow_sweep.payment_id = account_payment.payment_id
+
+				WHERE
+					account_payment.network_id = $1 AND
+					account_payment.canceled
+
+				UNION ALL
+
+				SELECT
+					COALESCE(SUM(account_payment.payout_byte_count), 0) AS paid_bytes_provided,
+					0 AS unpaid_bytes_provided
+				FROM account_payment
+				WHERE
+					account_payment.network_id = $1
 			`,
 			networkId,
 		)
 
 		server.WithPgResult(result, err, func() {
+			transferStats = &TransferStats{}
 
-			if result.Next() {
+			for result.Next() {
 
-				transferStats = &TransferStats{}
+				var paidBytesProvided ByteCount
+				var unpaidBytesProvided ByteCount
 
 				server.Raise(
 					result.Scan(
-						&transferStats.PaidBytesProvided,
-						&transferStats.UnpaidBytesProvided,
+						&paidBytesProvided,
+						&unpaidBytesProvided,
 					),
 				)
+
+				transferStats.PaidBytesProvided += paidBytesProvided
+				transferStats.UnpaidBytesProvided += unpaidBytesProvided
 			}
 		})
 	})
