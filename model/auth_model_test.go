@@ -84,7 +84,6 @@ func TestResetPassword(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result.NetworkId, nil)
 
-		// userAuths := getUserAuths(ctx, userId)
 		userAuths, err := getUserAuths(userId, ctx)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(userAuths), 2)

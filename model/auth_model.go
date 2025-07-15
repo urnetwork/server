@@ -907,7 +907,7 @@ func AuthVerify(
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_user
+				UPDATE network_user_auth_password
 				SET verified = true
 				WHERE user_id = $1
 			`,
