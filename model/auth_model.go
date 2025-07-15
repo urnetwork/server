@@ -1196,7 +1196,7 @@ func AuthPasswordSet(
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_user
+				UPDATE network_user_auth_password
 				SET password_hash = $1, password_salt = $2
 				WHERE user_id = $3
 			`,

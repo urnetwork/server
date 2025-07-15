@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -42,6 +43,27 @@ func TestResetPassword(t *testing.T) {
 		byJwt := jwt.NewByJwt(networkId, userId, networkName, guestMode)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
+		// add a phone user auth to the network user
+		phone := "16097370000"
+		password := "password"
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+
+		addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &phone,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+				Verified:     true,
+			},
+			ctx,
+		)
+
+		networkUser := GetNetworkUser(ctx, userId)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 2)
+
 		passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
 			AuthPasswordResetCreateCodeArgs{
 				UserAuth: testingUserAuth,
@@ -50,14 +72,27 @@ func TestResetPassword(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 
-		_, err = AuthPasswordSet(
+		newPassword := "testagain"
+
+		result, err := AuthPasswordSet(
 			AuthPasswordSetArgs{
 				ResetCode: *passwordResetCreateCodeResult.ResetCode,
-				Password:  "testagain",
+				Password:  newPassword,
 			},
 			clientSession,
 		)
 		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result.NetworkId, nil)
+
+		// userAuths := getUserAuths(ctx, userId)
+		userAuths, err := getUserAuths(userId, ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(userAuths), 2)
+
+		for _, userAuth := range userAuths {
+			loginPasswordHash := computePasswordHashV1([]byte(newPassword), userAuth.PasswordSalt)
+			assert.Equal(t, bytes.Equal(userAuth.PasswordHash, loginPasswordHash), true)
+		}
 
 	})
 }
