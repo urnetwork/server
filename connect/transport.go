@@ -474,7 +474,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	}
 }
 
-func (self *ConnectHandler) connectQuic(earlyConn quic.EarlyConnection) error {
+func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()

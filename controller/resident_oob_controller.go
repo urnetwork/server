@@ -24,7 +24,7 @@ var ControlId = server.Id(connect.ControlId)
 var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()
 	return max(
-		model.ByteCount(32*1024),
+		settings.ContractManagerSettings.StandardContractTransferByteCount,
 		settings.SendBufferSettings.MinMessageByteCount,
 		settings.ReceiveBufferSettings.MinMessageByteCount,
 	)

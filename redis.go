@@ -31,6 +31,49 @@ func (self *safeRedisClient) open() *redis.Client {
 
 	if self.client == nil {
 		redisKeys := Vault.RequireSimpleResource("redis.yml")
+		redisConfigKeys := Config.RequireSimpleResource("redis.yml")
+
+		minConnections := redisConfigKeys.RequireInt("min_connections")
+		maxConnections := redisConfigKeys.RequireInt("max_connections")
+		maxRetries := 32
+		connectionMaxLifetime := "1h"
+		connectionMaxIdleTime := "5m"
+		if allMaxRetries := redisConfigKeys.Int("max_retries"); 0 < len(allMaxRetries) {
+			maxRetries = allMaxRetries[0]
+		}
+		if connectionMaxLifetimes := redisConfigKeys.String("conn_max_lifetime"); 0 < len(connectionMaxLifetimes) {
+			connectionMaxLifetime = connectionMaxLifetimes[0]
+		}
+		if connectionMaxIdleTimes := redisConfigKeys.String("conn_max_idle_time"); 0 < len(connectionMaxIdleTimes) {
+			connectionMaxIdleTime = connectionMaxIdleTimes[0]
+		}
+		if service, err := Service(); err == nil && service != "" {
+			if serviceMinConnections := redisConfigKeys.Int(service, "min_connections"); 0 < len(serviceMinConnections) {
+				minConnections = serviceMinConnections[0]
+			}
+			if serviceMaxConnections := redisConfigKeys.Int(service, "max_connections"); 0 < len(serviceMaxConnections) {
+				maxConnections = serviceMaxConnections[0]
+			}
+			if allMaxRetries := redisConfigKeys.Int(service, "max_retries"); 0 < len(allMaxRetries) {
+				maxRetries = allMaxRetries[0]
+			}
+			if connectionMaxLifetimes := redisConfigKeys.String(service, "conn_max_lifetime"); 0 < len(connectionMaxLifetimes) {
+				connectionMaxLifetime = connectionMaxLifetimes[0]
+			}
+			if connectionMaxIdleTimes := redisConfigKeys.String(service, "conn_max_idle_time"); 0 < len(connectionMaxIdleTimes) {
+				connectionMaxIdleTime = connectionMaxIdleTimes[0]
+			}
+		}
+
+		connectionMaxLifetimeDuration, err := time.ParseDuration(connectionMaxLifetime)
+		if err != nil {
+			panic(err)
+		}
+
+		connectionMaxIdleTimeDuration, err := time.ParseDuration(connectionMaxIdleTime)
+		if err != nil {
+			panic(err)
+		}
 
 		// see https://github.com/redis/go-redis/blob/master/options.go#L31
 		options := &redis.Options{
@@ -40,11 +83,11 @@ func (self *safeRedisClient) open() *redis.Client {
 			// Addr: "192.168.208.135:6379",
 			// Password: "",
 			// DB: 0,
-			MaxRetries:      32,
-			MinIdleConns:    4,
-			MaxIdleConns:    32,
-			ConnMaxLifetime: 0,
-			ConnMaxIdleTime: 60 * time.Second,
+			MaxRetries:      maxRetries,
+			MinIdleConns:    minConnections,
+			MaxIdleConns:    maxConnections,
+			ConnMaxLifetime: connectionMaxLifetimeDuration,
+			ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 			// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 			// see https://uptrace.dev/blog/golang-context-timeout.html
 			ContextTimeoutEnabled: false,

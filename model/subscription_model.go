@@ -813,28 +813,28 @@ func createTransferEscrowInTx(
 	// if not enough, error
 	balanceEscrows := map[server.Id]*escrow{}
 
-	// order balances by paid first, end date ascending
-	// take from the earlier before the later
-	// note: postgres boolean ascending order is false, true
+	now := server.NowUtc()
+
 	result, err := tx.Query(
 		ctx,
 		`
             SELECT
                 balance_id,
                 paid,
-                balance_byte_count
+                balance_byte_count,
+                start_time
             FROM transfer_balance
             WHERE
                 network_id = $1 AND
                 active = true AND
-                start_time <= $2 AND $2 < end_time
+                $2 < end_time
 
-            ORDER BY paid DESC, end_time ASC
+            ORDER BY end_time
 
             FOR UPDATE
         `,
 		payerNetworkId,
-		server.NowUtc(),
+		now,
 	)
 	netEscrowBalanceByteCount := ByteCount(0)
 	server.WithPgResult(result, err, func() {
@@ -842,20 +842,25 @@ func createTransferEscrowInTx(
 			var balanceId server.Id
 			var paid bool
 			var balanceByteCount ByteCount
+			var startTime time.Time
 			server.Raise(result.Scan(
 				&balanceId,
 				&paid,
 				&balanceByteCount,
+				&startTime,
 			))
-			escrowBalanceByteCount := min(contractTransferByteCount-netEscrowBalanceByteCount, balanceByteCount)
-			balanceEscrows[balanceId] = &escrow{
-				balanceId:        balanceId,
-				paid:             paid,
-				balanceByteCount: escrowBalanceByteCount,
-			}
-			netEscrowBalanceByteCount += escrowBalanceByteCount
-			if contractTransferByteCount <= netEscrowBalanceByteCount {
-				break
+			if startTime.Before(now) {
+				escrowBalanceByteCount := min(contractTransferByteCount-netEscrowBalanceByteCount, balanceByteCount)
+				balanceEscrows[balanceId] = &escrow{
+					balanceId:        balanceId,
+					paid:             paid,
+					balanceByteCount: escrowBalanceByteCount,
+				}
+				netEscrowBalanceByteCount += escrowBalanceByteCount
+				if contractTransferByteCount <= netEscrowBalanceByteCount {
+					// we have enough balances for this escrow
+					break
+				}
 			}
 		}
 	})
@@ -2592,6 +2597,17 @@ func AddRefreshTransferBalanceToAllNetworks(
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
+
+		// remove completed transfer balances
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM transfer_balance
+			WHERE 
+				end_time <= $1
+			`,
+			minTime.UTC(),
+		))
 
 		// remove completed transfer contracts
 		server.RaisePgResult(tx.Exec(
