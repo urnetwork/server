@@ -23,7 +23,7 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx serv
 		&CloseExpiredContractsArgs{},
 		clientSession,
 		task.RunOnce("close_expired_contracts"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
+		task.RunAt(time.Now().Add(5*time.Minute)),
 	)
 }
 
@@ -31,7 +31,8 @@ func CloseExpiredContracts(
 	closeExpiredContracts *CloseExpiredContractsArgs,
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
-	err := model.ForceCloseOpenContractIds(clientSession.Ctx, 1*time.Hour)
+	minTime := server.NowUtc().Add(-15 * time.Minute)
+	err := model.ForceCloseOpenContractIds(clientSession.Ctx, minTime)
 
 	return &CloseExpiredContractsResult{}, err
 }

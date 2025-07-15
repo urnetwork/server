@@ -19,7 +19,7 @@ type SchedulePayoutResult struct {
 
 func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 	runAt := func() time.Time {
-		now := time.Now().UTC()
+		now := server.NowUtc()
 		year, month, day := now.Date()
 
 		if day < 7 {
