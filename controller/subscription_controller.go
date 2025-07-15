@@ -34,7 +34,8 @@ const InitialTransferBalance = 32 * model.Gib
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
 const RefreshTransferBalanceDuration = 30 * time.Hour
-const RefreshTransferBalanceTimeout = 24 * time.Hour
+
+// const RefreshTransferBalanceTimeout = 24 * time.Hour
 
 const RefreshSupporterTransferBalance = 600 * model.Gib
 const RefreshFreeTransferBalance = 60 * model.Gib
@@ -1234,13 +1235,16 @@ type RefreshTransferBalancesResult struct {
 }
 
 func ScheduleRefreshTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	year, month, day := server.NowUtc().Date()
+	runAt := time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
 	task.ScheduleTaskInTx(
 		tx,
 		RefreshTransferBalances,
 		&RefreshTransferBalancesArgs{},
 		clientSession,
 		task.RunOnce("refresh_transfer_balances"),
-		task.RunAt(server.NowUtc().Add(RefreshTransferBalanceTimeout)),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
 	)
 }
 

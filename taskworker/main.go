@@ -100,7 +100,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
-		work.SchedulePopulateAccountWallets(clientSession, tx)
+		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleCloseExpiredContracts(clientSession, tx)
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)

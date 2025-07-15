@@ -2086,7 +2086,7 @@ func GetOpenContractIdsForSourceOrDestination(
 // - no closes
 // - single close
 // - one or more checkpoints
-func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error {
+func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 	type OpenContract struct {
 		contractId    server.Id
 		sourceId      server.Id
@@ -2132,14 +2132,12 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 
                 WHERE
                     transfer_contract.open AND
-                    transfer_contract.create_time <= $3 AND
-                    (source_contract_close.close_time IS NULL OR source_contract_close.close_time <= $3) AND
-                    (destination_contract_close.close_time IS NULL OR destination_contract_close.close_time <= $3)
+                    transfer_contract.create_time <= $3
 
             `,
 			ContractPartySource,
 			ContractPartyDestination,
-			server.NowUtc().Add(-timeout),
+			minTime,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2618,7 +2616,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			WHERE
 			    transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
 			    account_payment.payment_id = transfer_escrow_sweep.payment_id AND
-			    account_payment.completed AND complete_time <= $1
+			    account_payment.completed AND account_payment.complete_time <= $1
 			`,
 			minTime.UTC(),
 		))
