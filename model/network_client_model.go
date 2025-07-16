@@ -871,6 +871,21 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
+		// (cascade) remove residents without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_resident
+			USING (
+				SELECT network_client_resident.client_id
+		       	FROM network_client_resident
+					LEFT JOIN network_client ON network_client.client_id = network_client_resident.client_id
+		      	WHERE network_client.client_id IS NULL
+		    ) t
+			WHERE network_client_resident.client_id = t.client_id
+			`,
+		))
+
 	})
 }
 
