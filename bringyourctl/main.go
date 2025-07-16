@@ -732,7 +732,7 @@ func adminWalletTransfer(opts docopt.Opts) {
 func closeExpiredContracts() {
 	ctx := context.Background()
 
-	err := model.ForceCloseOpenContractIds(ctx, 1*time.Hour)
+	err := model.ForceCloseOpenContractIds(ctx, time.Now().Add(-1*time.Hour))
 	if err != nil {
 		panic(err)
 	}
