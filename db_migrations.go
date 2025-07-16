@@ -1837,4 +1837,41 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX transfer_balance_network_id_active_paid_end_time
     `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_client_address_hash_connected
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_connected_client_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_connected_connection_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_disconnect_time
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_network_id_create_time_client_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_resident_host_port
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS pending_task_release_time
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_balance_purchase_token
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_open_destination_id
+    `),
 }
