@@ -791,6 +791,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`
 				DELETE FROM network_client_connection
 				WHERE
+					connected = false AND
 					disconnect_time < $1
 			`,
 			minTime.UTC(),

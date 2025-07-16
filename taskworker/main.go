@@ -95,6 +95,7 @@ func initTasks(ctx context.Context) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
+		// **important** make sure the required functions are loaded in `initTaskWorker`
 		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
@@ -192,6 +193,22 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			controller.AdvancePayment,
 			controller.AdvancePaymentPost,
 			"bringyour.com/bringyour/controller.AdvancePayment",
+		),
+		task.NewTaskTargetWithPost(
+			work.SetMissingConnectionLocations,
+			work.SetMissingConnectionLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveLocationLookupResults,
+			work.RemoveLocationLookupResultsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveCompletedContracts,
+			work.RemoveCompletedContractsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.DbMaintenance,
+			work.DbMaintenancePost,
 		),
 	)
 
