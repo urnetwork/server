@@ -2137,7 +2137,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
             `,
 			ContractPartySource,
 			ContractPartyDestination,
-			minTime,
+			minTime.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
