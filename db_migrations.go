@@ -1584,7 +1584,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        ALTER TABLE  network_client_connection ADD client_address_hash BYTEA NULL
+        ALTER TABLE network_client_connection ADD client_address_hash BYTEA NULL
     `),
 
 	newSqlMigration(`
@@ -1874,4 +1874,39 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS transfer_contract_open_destination_id
     `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_client_id ON network_client_connection (connected, client_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_connection_id ON network_client_connection (connected, connection_id)
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connected_client_id
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_disconnect_time_connection_id ON network_client_connection (disconnect_time, connection_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_resident_host ON network_client_resident (resident_host, resident_id)
+    `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX network_client_connection_disconnect_time_connection_id
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection
+        ALTER COLUMN client_address SET DEFAULT '',
+        ADD COLUMN client_address_port int NOT NULL DEFAULT 0
+    `),
+
+	// FIXME run this later
+	//  ALTER TABLE network_client_connection
+	// DROP client_address
+
 }

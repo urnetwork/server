@@ -26,7 +26,7 @@ func TestCache(t *testing.T) {
 				Message: "hello!",
 			}, nil
 		}
-		f := Cache(impl, "cache_test", 1*time.Second)
+		f := CacheNoAuth(impl, "cache_test", 1*time.Second)
 
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 

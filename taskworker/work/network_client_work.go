@@ -126,22 +126,14 @@ type SetMissingConnectionLocationsResult struct {
 }
 
 func ScheduleSetMissingConnectionLocations(clientSession *session.ClientSession, tx server.PgTx) {
-	task.ScheduleTaskInTx(
-		tx,
-		SetMissingConnectionLocations,
-		&SetMissingConnectionLocationsArgs{},
-		clientSession,
-		task.RunOnce("set_missing_connection_locations"),
-		task.RunAt(time.Now().Add(30*time.Minute)),
-	)
+	// nothing to do
 }
 
 func SetMissingConnectionLocations(
 	setMissingConnectionLocations *SetMissingConnectionLocationsArgs,
 	clientSession *session.ClientSession,
 ) (*SetMissingConnectionLocationsResult, error) {
-	minTime := time.Now().Add(-30 * time.Second)
-	controller.SetMissingConnectionLocations(clientSession.Ctx, minTime)
+	// nothing to do
 	return &SetMissingConnectionLocationsResult{}, nil
 }
 
@@ -151,6 +143,5 @@ func SetMissingConnectionLocationsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleSetMissingConnectionLocations(clientSession, tx)
 	return nil
 }

@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
-	"net"
+	// "net"
 	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/ipinfo/go/v2/ipinfo"
-	"github.com/urnetwork/server"
+	// "github.com/urnetwork/server"
 	"github.com/urnetwork/server/api/myipinfo/landmarks"
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
 	"github.com/urnetwork/server/controller"
@@ -27,42 +27,19 @@ var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
 
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 
-	remoteAddr := r.Header.Get("X-UR-Forwarded-For")
+	clientAddress := r.Header.Get("X-UR-Forwarded-For")
 
-	if remoteAddr == "" {
-		remoteAddr = r.Header.Get("X-Forwarded-For")
+	if clientAddress == "" {
+		clientAddress = r.Header.Get("X-Forwarded-For")
 	}
 
-	if remoteAddr == "" {
-		remoteAddr = r.RemoteAddr
+	if clientAddress == "" {
+		clientAddress = r.RemoteAddr
 	}
 
-	columnCount := strings.Count(remoteAddr, ":")
-	bracketCount := strings.Count(remoteAddr, "[")
+	clientIp, _, err := model.SplitClientAddress(clientAddress)
 
-	var addressOnly string
-
-	// if the address is malformed, extract the address from the address:port string
-	if columnCount > 1 && bracketCount == 0 {
-		groups := malformedIPV6WithPort.FindStringSubmatch(remoteAddr)
-
-		if len(groups) > 1 {
-			addressOnly = groups[1]
-		}
-
-	} else {
-		var err error
-		addressOnly, _, err = net.SplitHostPort(remoteAddr)
-		if err != nil {
-			if strings.Contains(err.Error(), "missing port in address") {
-				addressOnly = remoteAddr
-			} else {
-				server.Raise(err)
-			}
-		}
-	}
-
-	ipInfoRaw, err := controller.GetIPInfo(r.Context(), addressOnly)
+	ipInfoRaw, err := controller.GetIPInfo(r.Context(), clientIp)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -104,7 +81,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isIPV6 := strings.Contains(addressOnly, ":")
+	isIPV6 := strings.Contains(clientIp, ":")
 
 	var landmarksAndRTTs []landmarks.LandmarkAndRTT
 
@@ -119,7 +96,9 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	respStruct := response{
 		Info:               myInfo,
 		ExpectedRTTs:       landmarksAndRTTs,
-		ConnectedToNetwork: model.IsAddressConnectedToNetwork(r.Context(), addressOnly),
+		ConnectedToNetwork: false,
+		// FIXME
+		//model.IsAddressConnectedToNetwork(r.Context(), addressOnly),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

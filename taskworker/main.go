@@ -113,6 +113,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx)
+		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 	})
 }
 
@@ -209,6 +210,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.DbMaintenance,
 			work.DbMaintenancePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.WarmNetworkGetProviderLocations,
+			work.WarmNetworkGetProviderLocationsPost,
 		),
 	)
 

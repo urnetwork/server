@@ -106,6 +106,9 @@ Options:
 	// 	}()
 	// }
 
+	// rateLimitHandler := NewConnectionHandlerRateLimitWithDefaults(quitEvent.Ctx, handlerId)
+	// defer rateLimitHandler.Close()
+
 	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler); err != nil {
 		glog.Errorf("[connect]close = %s\n", err)

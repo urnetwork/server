@@ -2,18 +2,20 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 
 	// "bytes"
 	"fmt"
 	"time"
 
-	// FIXME replace with sha with salt
-	"github.com/twmb/murmur3"
+	// "github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
 	"github.com/urnetwork/server"
@@ -26,6 +28,12 @@ const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
 
 // const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
+
+var clientIpHashPepper = sync.OnceValue(func() []byte {
+	clientKeys := server.Vault.RequireSimpleResource("client.yml")
+	pepper := clientKeys.RequireString("client_ip_hash_pepper")
+	return []byte(pepper)
+})
 
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
@@ -632,19 +640,13 @@ func SetProvide(
 	})
 }
 
+/*
 func IsAddressConnectedToNetwork(
 	ctx context.Context,
 	clientAddress string,
 ) bool {
-
-	parsedAddr, err := netip.ParseAddr(clientAddress)
+	addressHash, err := ClientAddressHash(clientAddress)
 	server.Raise(err)
-
-	mh := murmur3.New128()
-	_, err = mh.Write(parsedAddr.AsSlice())
-	server.Raise(err)
-
-	addressHash := mh.Sum(nil)
 
 	var connected bool
 
@@ -667,10 +669,55 @@ func IsAddressConnectedToNetwork(
 	return connected
 
 }
+*/
+
+func ClientIpHash(clientIp string) ([]byte, error) {
+	parsedAddr, err := netip.ParseAddr(clientIp)
+	if err != nil {
+		return nil, err
+	}
+
+	h := sha256.New()
+	h.Write(parsedAddr.AsSlice())
+	h.Write(clientIpHashPepper())
+	clientIpHash := h.Sum(nil)
+	return clientIpHash, nil
+}
+
+func SplitClientAddress(clientAddress string) (host string, port int, err error) {
+	columnCount := strings.Count(clientAddress, ":")
+	bracketCount := strings.Count(clientAddress, "[")
+
+	var portStr string
+	if 1 < columnCount && bracketCount == 0 {
+		// malformed ipv6. extract the address from the address:port string
+		groups := malformedIPV6WithPort.FindStringSubmatch(clientAddress)
+		if len(groups) != 3 {
+			err = fmt.Errorf("Could not split malformed ipv6 client address.")
+		} else {
+			host = groups[1]
+			portStr = groups[2]
+		}
+	} else {
+		host, portStr, err = net.SplitHostPort(clientAddress)
+	}
+	if err != nil {
+		// the client address might be just an ip
+		_, parsedErr := netip.ParseAddr(clientAddress)
+		if parsedErr == nil {
+			host = clientAddress
+			port = 0
+			err = nil
+		}
+		return
+	}
+	port, err = strconv.Atoi(portStr)
+	return
+}
 
 // matches the first group to the IPV6 address when the input is <ipv6>:<port>
 // example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
-var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
+var malformedIPV6WithPort = regexp.MustCompile(`^(.+):(\d+)$`)
 
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
@@ -696,33 +743,12 @@ func ConnectNetworkClient(
 		service, _ := server.Service()
 		block, _ := server.Block()
 
-		columnCount := strings.Count(clientAddress, ":")
-		bracketCount := strings.Count(clientAddress, "[")
-
-		var addressOnly string
-
-		// if the address is malformed, extract the address from the address:port string
-		if columnCount > 1 && bracketCount == 0 {
-			groups := malformedIPV6WithPort.FindStringSubmatch(clientAddress)
-
-			if len(groups) > 1 {
-				addressOnly = groups[1]
-			}
-
-		} else {
-			var err error
-			addressOnly, _, err = net.SplitHostPort(clientAddress)
-			server.Raise(err)
-		}
-
-		parsedAddr, err := netip.ParseAddr(addressOnly)
+		var clientIp string
+		clientIp, clientPort, err := SplitClientAddress(clientAddress)
 		server.Raise(err)
 
-		mh := murmur3.New128()
-		_, err = mh.Write(parsedAddr.AsSlice())
+		clientIpHash, err := ClientIpHash(clientIp)
 		server.Raise(err)
-
-		addressHash := mh.Sum(nil)
 
 		_, err = tx.Exec(
 			ctx,
@@ -734,8 +760,8 @@ func ConnectNetworkClient(
 					connection_host,
 					connection_service,
 					connection_block,
-					client_address,
 					client_address_hash,
+					client_address_port,
 					handler_id
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -746,8 +772,8 @@ func ConnectNetworkClient(
 			host,
 			service,
 			block,
-			clientAddress,
-			addressHash,
+			clientIpHash,
+			clientPort,
 			handlerId,
 		)
 		server.Raise(err)
@@ -985,26 +1011,49 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duratio
 	})
 }
 
-func IsNetworkClientConnected(ctx context.Context, connectionId server.Id) bool {
-	connected := false
+type NetworkClientConnectionStatus struct {
+	Connected    bool
+	ClientExists bool
+}
+
+func (self *NetworkClientConnectionStatus) Err() error {
+	if !self.Connected {
+		return fmt.Errorf("force disconnected")
+	}
+	if !self.ClientExists {
+		return fmt.Errorf("client does not exist")
+	}
+	return nil
+}
+
+func GetNetworkClientConnectionStatus(ctx context.Context, connectionId server.Id) *NetworkClientConnectionStatus {
+	status := &NetworkClientConnectionStatus{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT connected FROM network_client_connection
-				WHERE connection_id = $1
+				SELECT
+					network_client_connection.connected,
+					network_client.client_id IS NOT NULL AS client_exists
+				FROM network_client_connection
+				LEFT JOIN network_client ON
+					network_client.client_id = network_client_connection.client_id
+				WHERE network_client_connection.connection_id = $1
 			`,
 			connectionId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&connected))
+				server.Raise(result.Scan(
+					&status.Connected,
+					&status.ClientExists,
+				))
 			}
 		})
 	})
 
-	return connected
+	return status
 }
 
 // the resident is a transport client that runs on the platform on behalf of a client
