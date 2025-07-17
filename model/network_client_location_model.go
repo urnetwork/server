@@ -2071,6 +2071,7 @@ func FindProviders2(
 	// mathrand.Shuffle(len(clientIds), func(i int, j int) {
 	// 	clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 	// })
+	// FIXME change this to an initial reliability shuffle
 	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
 		return float32(clientScore.netTypeScore)

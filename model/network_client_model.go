@@ -2,19 +2,20 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net"
 	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	// "bytes"
 	"fmt"
 	"time"
 
-	// FIXME replace with sha with salt
-	"github.com/twmb/murmur3"
+	// "github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
 	"github.com/urnetwork/server"
@@ -27,6 +28,12 @@ const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
 
 // const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
+
+var clientIpHashPepper = sync.OnceValue(func() []byte {
+	clientKeys := server.Vault.RequireSimpleResource("client.yml")
+	pepper := clientKeys.RequireString("client_ip_hash_pepper")
+	return []byte(pepper)
+})
 
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
@@ -670,14 +677,11 @@ func ClientIpHash(clientIp string) ([]byte, error) {
 		return nil, err
 	}
 
-	mh := murmur3.New128()
-	_, err = mh.Write(parsedAddr.AsSlice())
-	if err != nil {
-		return nil, err
-	}
-
-	addressHash := mh.Sum(nil)
-	return addressHash, nil
+	h := sha256.New()
+	h.Write(parsedAddr.AsSlice())
+	h.Write(clientIpHashPepper())
+	clientIpHash := h.Sum(nil)
+	return clientIpHash, nil
 }
 
 func SplitClientAddress(clientAddress string) (host string, port int, err error) {
@@ -740,7 +744,7 @@ func ConnectNetworkClient(
 		block, _ := server.Block()
 
 		var clientIp string
-		clientIp, _, err := SplitClientAddress(clientAddress)
+		clientIp, clientPort, err := SplitClientAddress(clientAddress)
 		server.Raise(err)
 
 		clientIpHash, err := ClientIpHash(clientIp)
@@ -756,8 +760,8 @@ func ConnectNetworkClient(
 					connection_host,
 					connection_service,
 					connection_block,
-					client_address,
 					client_address_hash,
+					client_address_port,
 					handler_id
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -768,9 +772,8 @@ func ConnectNetworkClient(
 			host,
 			service,
 			block,
-			clientAddress,
 			clientIpHash,
-			// FIXME store clientPort also
+			clientPort,
 			handlerId,
 		)
 		server.Raise(err)
