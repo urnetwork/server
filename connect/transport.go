@@ -251,6 +251,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		clientAddress = r.RemoteAddr
 	}
 
+	err = ConnectionRateLimit(handleCtx, clientAddress)
+	if err != nil {
+		glog.Infof("[t]rate limit err = %s\n", err)
+		return
+	}
+
 	c := func() {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
 		defer server.HandleError(func() {
@@ -268,8 +274,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case <-time.After(self.settings.SyncConnectionTimeout):
 				}
 
-				if !model.IsNetworkClientConnected(handleCtx, connectionId) {
-					// client kicked off
+				if err := model.GetNetworkClientConnectionStatus(handleCtx, connectionId).Err(); err != nil {
+					glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
 					return
 				}
 			}
@@ -543,6 +549,12 @@ func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
 	// find the client ip:port from the addr
 	clientAddress := earlyConn.RemoteAddr().String()
 
+	err = ConnectionRateLimit(handleCtx, clientAddress)
+	if err != nil {
+		glog.Infof("[t]rate limit err = %s\n", err)
+		return err
+	}
+
 	c := func() {
 		connectionId := controller.ConnectNetworkClient(handleCtx, clientId, clientAddress, self.handlerId)
 		defer server.HandleError(func() {
@@ -560,8 +572,8 @@ func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
 				case <-time.After(self.settings.SyncConnectionTimeout):
 				}
 
-				if !model.IsNetworkClientConnected(handleCtx, connectionId) {
-					// client kicked off
+				if err := model.GetNetworkClientConnectionStatus(handleCtx, connectionId).Err(); err != nil {
+					glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
 					return
 				}
 			}

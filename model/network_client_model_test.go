@@ -31,12 +31,12 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		select {
@@ -72,12 +72,12 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 
 		time.Sleep(1 * time.Second)
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		time.Sleep(1 * time.Second)
@@ -110,13 +110,13 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
 		err := DisconnectNetworkClient(ctx, connectionId)
 		assert.Equal(t, err, nil)
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		RemoveDisconnectedNetworkClients(ctx, time.Now())

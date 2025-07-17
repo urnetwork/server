@@ -1874,4 +1874,14 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS transfer_contract_open_destination_id
     `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_client_id ON network_client_connection (connected, client_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_connection_id ON network_client_connection (connected, connection_id)
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connected_client_id
+    `),
 }
