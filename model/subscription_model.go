@@ -2548,7 +2548,9 @@ func AddRefreshTransferBalanceToAllNetworks(
 			`
 				SELECT
 					network.network_id,
-					subscription_renewal.net_revenue_nano_cents
+					subscription_renewal.net_revenue_nano_cents,
+					subscription_renewal.start_time,
+					subscription_renewal.end_time
 				FROM network
 
 				LEFT JOIN subscription_renewal ON
@@ -2564,16 +2566,21 @@ func AddRefreshTransferBalanceToAllNetworks(
 			for result.Next() {
 				var networkId server.Id
 				var netRevenueNanoCents *NanoCents
+				var supporterStartTime *time.Time
+				var supporterEndTime *time.Time
 				server.Raise(result.Scan(
 					&networkId,
 					&netRevenueNanoCents,
+					&supporterStartTime,
+					&supporterEndTime,
 				))
 				status := supporterStatus{
 					supporter: false,
 				}
 				if netRevenueNanoCents != nil {
+					supportDurationFraction := float64(endTime.Sub(startTime)/time.Second) / float64(supporterEndTime.Sub(*supporterStartTime)/time.Second)
 					status.supporter = true
-					status.netRevenueNanoCents = *netRevenueNanoCents
+					status.netRevenueNanoCents = NanoCents(supportDurationFraction * float64(*netRevenueNanoCents))
 				}
 				networkSupporterStatuses[networkId] = status
 			}
@@ -2591,15 +2598,17 @@ func AddRefreshTransferBalanceToAllNetworks(
 		                    end_time,
 		                    start_balance_byte_count,
 		                    net_revenue_nano_cents,
+		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $5)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5)
 		            `,
 					server.NewId(),
 					networkId,
 					startTime,
 					endTime,
 					balanceByteCount,
+					0,
 					status.netRevenueNanoCents,
 				)
 				addedTransferBalances[networkId] = balanceByteCount
