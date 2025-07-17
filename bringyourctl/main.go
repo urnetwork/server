@@ -65,7 +65,6 @@ Usage:
     bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
     bringyourctl account-points populate --plan_id=<plan_id>
-    bringyourctl client connection fix
 
 Options:
     -h --help     Show this screen.
@@ -197,12 +196,12 @@ Options:
 		if populate, _ := opts.Bool("populate"); populate {
 			accountPointsPopulate(opts)
 		}
-	} else if accountPoints, _ := opts.Bool("client"); accountPoints {
-		if populate, _ := opts.Bool("connection"); populate {
-			if fix, _ := opts.Bool("fix"); fix {
-				fixClientConnections(opts)
-			}
-		}
+		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
+		// 	if populate, _ := opts.Bool("connection"); populate {
+		// 		if fix, _ := opts.Bool("fix"); fix {
+		// 			fixClientConnections(opts)
+		// 		}
+		// 	}
 	} else {
 		fmt.Println(usage)
 	}
@@ -865,10 +864,10 @@ func populateTxHashes() {
 	controller.PopulateTxHashes(ctx)
 }
 
-func fixClientConnections(opts docopt.Opts) {
-	ctx := context.Background()
+// func fixClientConnections(opts docopt.Opts) {
+// 	ctx := context.Background()
 
-	minTime := time.Now().Add(-30 * time.Second)
+// 	minTime := time.Now().Add(-30 * time.Second)
 
-	controller.SetMissingConnectionLocations(ctx, minTime)
-}
+// 	controller.SetMissingConnectionLocations(ctx, minTime)
+// }

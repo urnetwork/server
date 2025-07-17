@@ -1885,10 +1885,10 @@ var migrations = []any{
         DROP INDEX IF EXISTS network_client_connected_client_id
     `),
 	newSqlMigration(`
-        CREATE INDEX network_client_connection_disconnect_time_connection_id ON network_client_connection (disconnect_time, connection_id)
+        CREATE INDEX IF NOT EXISTS network_client_connection_disconnect_time_connection_id ON network_client_connection (disconnect_time, connection_id)
     `),
 	newSqlMigration(`
-        CREATE INDEX network_client_resident_host ON network_client_resident (resident_host, resident_id)
+        CREATE INDEX IF NOT EXISTS network_client_resident_host ON network_client_resident (resident_host, resident_id)
     `),
 
 	// clean up unused index
