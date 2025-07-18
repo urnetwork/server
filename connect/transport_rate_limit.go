@@ -9,7 +9,8 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
+	// "github.com/urnetwork/server/model"
 )
 
 func DefaultConnectionRateLimitSettings() *ConnectionRateLimitSettings {
@@ -57,11 +58,11 @@ func NewConnectionRateLimit(
 	handlerId server.Id,
 	settings *ConnectionRateLimitSettings,
 ) (*ConnectionRateLimit, error) {
-	clientIp, _, err := model.SplitClientAddress(clientAddress)
+	clientIp, _, err := session.SplitClientAddress(clientAddress)
 	if err != nil {
 		return nil, err
 	}
-	clientIpHash, err := model.ClientIpHash(clientIp)
+	clientIpHash, err := session.ClientIpHash(clientIp)
 	if err != nil {
 		return nil, err
 	}

@@ -2,14 +2,14 @@ package model
 
 import (
 	"context"
-	"crypto/sha256"
+	// "crypto/sha256"
 	"errors"
-	"net"
-	"net/netip"
-	"regexp"
-	"strconv"
-	"strings"
-	"sync"
+	// "net"
+	// "net/netip"
+	// "regexp"
+	// "strconv"
+	// "strings"
+	// "sync"
 
 	// "bytes"
 	"fmt"
@@ -28,12 +28,6 @@ const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
 
 // const LimitClientIdsPer24Hours = 1024
 const LimitClientIdsPerNetwork = 128
-
-var clientIpHashPepper = sync.OnceValue(func() []byte {
-	clientKeys := server.Vault.RequireSimpleResource("client.yml")
-	pepper := clientKeys.RequireString("client_ip_hash_pepper")
-	return []byte(pepper)
-})
 
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
@@ -640,22 +634,24 @@ func SetProvide(
 	})
 }
 
-/*
-func IsAddressConnectedToNetwork(
+func IsIpConnectedToNetwork(
 	ctx context.Context,
-	clientAddress string,
+	clientIp string,
 ) bool {
-	addressHash, err := ClientAddressHash(clientAddress)
-	server.Raise(err)
+	addressHash, err := session.ClientIpHash(clientIp)
+	if err != nil {
+		return false
+	}
 
-	var connected bool
+	connected := false
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT count(*) > 0 FROM network_client_connection
+				SELECT true FROM network_client_connection
 				WHERE client_address_hash = $1 AND connected
+				LIMIT 1
 			`,
 			addressHash,
 		)
@@ -669,55 +665,6 @@ func IsAddressConnectedToNetwork(
 	return connected
 
 }
-*/
-
-func ClientIpHash(clientIp string) ([]byte, error) {
-	parsedAddr, err := netip.ParseAddr(clientIp)
-	if err != nil {
-		return nil, err
-	}
-
-	h := sha256.New()
-	h.Write(parsedAddr.AsSlice())
-	h.Write(clientIpHashPepper())
-	clientIpHash := h.Sum(nil)
-	return clientIpHash, nil
-}
-
-func SplitClientAddress(clientAddress string) (host string, port int, err error) {
-	columnCount := strings.Count(clientAddress, ":")
-	bracketCount := strings.Count(clientAddress, "[")
-
-	var portStr string
-	if 1 < columnCount && bracketCount == 0 {
-		// malformed ipv6. extract the address from the address:port string
-		groups := malformedIPV6WithPort.FindStringSubmatch(clientAddress)
-		if len(groups) != 3 {
-			err = fmt.Errorf("Could not split malformed ipv6 client address.")
-		} else {
-			host = groups[1]
-			portStr = groups[2]
-		}
-	} else {
-		host, portStr, err = net.SplitHostPort(clientAddress)
-	}
-	if err != nil {
-		// the client address might be just an ip
-		_, parsedErr := netip.ParseAddr(clientAddress)
-		if parsedErr == nil {
-			host = clientAddress
-			port = 0
-			err = nil
-		}
-		return
-	}
-	port, err = strconv.Atoi(portStr)
-	return
-}
-
-// matches the first group to the IPV6 address when the input is <ipv6>:<port>
-// example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
-var malformedIPV6WithPort = regexp.MustCompile(`^(.+):(\d+)$`)
 
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
@@ -744,10 +691,10 @@ func ConnectNetworkClient(
 		block, _ := server.Block()
 
 		var clientIp string
-		clientIp, clientPort, err := SplitClientAddress(clientAddress)
+		clientIp, clientPort, err := session.SplitClientAddress(clientAddress)
 		server.Raise(err)
 
-		clientIpHash, err := ClientIpHash(clientIp)
+		clientIpHash, err := session.ClientIpHash(clientIp)
 		server.Raise(err)
 
 		_, err = tx.Exec(

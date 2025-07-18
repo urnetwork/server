@@ -48,3 +48,39 @@ func RemoveExpiredAuthCodesPost(
 	ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 	return nil
 }
+
+type RemoveExpiredAuthAttemptsArgs struct {
+}
+
+type RemoveExpiredAuthAttemptsResult struct {
+}
+
+func ScheduleRemoveExpiredAuthAttempts(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveExpiredAuthAttempts,
+		&RemoveExpiredAuthAttemptsArgs{},
+		clientSession,
+		task.RunOnce("remove_expired_auth_attempts"),
+		task.RunAt(time.Now().Add(1*time.Hour)),
+	)
+}
+
+func RemoveExpiredAuthAttempts(
+	removeExpiredAuthCodes *RemoveExpiredAuthAttemptsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveExpiredAuthAttemptsResult, error) {
+	minTime := server.NowUtc().Add(-24 * time.Hour)
+	model.RemoveExpiredAuthAttempts(clientSession.Ctx, minTime)
+	return &RemoveExpiredAuthAttemptsResult{}, nil
+}
+
+func RemoveExpiredAuthAttemptsPost(
+	removeExpiredAuthAttempts *RemoveExpiredAuthAttemptsArgs,
+	removeExpiredAuthAttemptsResult *RemoveExpiredAuthAttemptsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
+	return nil
+}

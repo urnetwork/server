@@ -114,6 +114,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
+		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 	})
 }
 
@@ -214,6 +215,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.WarmNetworkGetProviderLocations,
 			work.WarmNetworkGetProviderLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredAuthAttempts,
+			work.RemoveExpiredAuthAttemptsPost,
 		),
 	)
 

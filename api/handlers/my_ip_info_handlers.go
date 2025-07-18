@@ -13,6 +13,7 @@ import (
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 type response struct {
@@ -37,7 +38,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		clientAddress = r.RemoteAddr
 	}
 
-	clientIp, _, err := model.SplitClientAddress(clientAddress)
+	clientIp, _, err := session.SplitClientAddress(clientAddress)
 
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), clientIp)
 	if err != nil {
@@ -96,9 +97,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	respStruct := response{
 		Info:               myInfo,
 		ExpectedRTTs:       landmarksAndRTTs,
-		ConnectedToNetwork: false,
-		// FIXME
-		//model.IsAddressConnectedToNetwork(r.Context(), addressOnly),
+		ConnectedToNetwork: model.IsIpConnectedToNetwork(r.Context(), clientIp),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

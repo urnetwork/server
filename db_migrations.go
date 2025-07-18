@@ -1913,4 +1913,28 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS transfer_contract_open_create_time ON transfer_contract (open, create_time, contract_id)
     `),
+
+	newSqlMigration(`
+        ALTER TABLE user_auth_attempt
+        ADD COLUMN client_address_hash BYTEA,
+        ADD COLUMN client_address_port int NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_attempt_client_address_hash_client_port_attempt_time ON user_auth_attempt (client_address_hash, client_address_port, attempt_time)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX user_auth_attempt_client_address
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE user_auth_attempt
+        DROP COLUMN client_ip,
+        DROP COLUMN client_port
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)
+    `),
 }
