@@ -115,7 +115,7 @@ func ApplyDbMigrations(ctx context.Context) {
 
 // style: use varchar not ENUM
 // style: in queries with two+ tables, use fully qualified column names
-
+// FIXME perf: CREATE INDEX should always use CONCURRENTLY - we need to use raw connections for the sql, and the db to mark raw connections as not read only
 var migrations = []any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
 	//  'provider_offline',
@@ -1905,8 +1905,12 @@ var migrations = []any{
         ADD COLUMN client_address_port int NOT NULL DEFAULT 0
     `),
 
-	// FIXME run this later
-	//  ALTER TABLE network_client_connection
-	// DROP client_address
+	newSqlMigration(`
+        ALTER TABLE network_client_connection
+        DROP COLUMN client_address
+    `),
 
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_create_time ON transfer_contract (open, create_time, contract_id)
+    `),
 }

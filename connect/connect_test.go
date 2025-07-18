@@ -487,7 +487,8 @@ func testConnect(
 		settings.TransportTlsSettings.EnableSelfSign = true
 		settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
 		settings.ConnectionAnnounceTimeout = 0
-		settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
+		// settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
+		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
 
 		routes := []*router.Route{

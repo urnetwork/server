@@ -166,15 +166,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		&self.settings.ConnectionRateLimitSettings,
 	)
 	if err != nil {
-		glog.Infof("[t]rate limit err = %s\n", err)
+		glog.Infof("[t]rate limit init err = %s\n", err)
 		return
 	}
-	err = rateLimit.Connect()
+	err, disconnect := rateLimit.Connect()
+	defer disconnect()
 	if err != nil {
 		glog.Infof("[t]rate limit err = %s\n", err)
 		return
 	}
-	defer rateLimit.Disconnect()
 
 	// attemp to parse the auth message from the header
 	// if that fails, expect the auth message as the first message
@@ -511,15 +511,15 @@ func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
 		&self.settings.ConnectionRateLimitSettings,
 	)
 	if err != nil {
-		glog.Infof("[t]rate limit err = %s\n", err)
+		glog.Infof("[t]rate limit init err = %s\n", err)
 		return err
 	}
-	err = rateLimit.Connect()
+	err, disconnect := rateLimit.Connect()
+	defer disconnect()
 	if err != nil {
 		glog.Infof("[t]rate limit err = %s\n", err)
 		return err
 	}
-	defer rateLimit.Disconnect()
 
 	stream, err := earlyConn.AcceptStream(handleCtx)
 	if err != nil {

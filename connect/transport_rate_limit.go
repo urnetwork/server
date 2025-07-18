@@ -12,20 +12,13 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-func burstKey(clientIpHashHex string, timeBlock int64) string {
-	return fmt.Sprintf("connect_burst_%s_%d", clientIpHashHex, timeBlock)
-}
-
-func totalKey(handlerId server.Id, clientIpHashHex string) string {
-	return fmt.Sprintf("connect_total_%s_%s", handlerId, clientIpHashHex)
-}
-
 func DefaultConnectionRateLimitSettings() *ConnectionRateLimitSettings {
 	return &ConnectionRateLimitSettings{
 		BurstDuration:           60 * time.Second,
-		BurstConnectionCount:    60,
+		BurstConnectionCount:    200,
 		BurstConnectionDelay:    500 * time.Millisecond,
-		MaxTotalConnectionCount: 40,
+		MaxTotalConnectionCount: 200,
+		TotalConnectionDelay:    30 * time.Second,
 		TotalExpiration:         7 * 24 * time.Hour,
 	}
 }
@@ -39,58 +32,9 @@ type ConnectionRateLimitSettings struct {
 
 	// max total connections per ip
 	MaxTotalConnectionCount int
+	TotalConnectionDelay    time.Duration
 	TotalExpiration         time.Duration
 }
-
-// type ConnectionHandlerRateLimit struct {
-// 	ctx context.Context
-// 	cancel context.CancelFunc
-// 	handlerId server.Id
-// 	settings *ConnectionRateLimitSettings
-// }
-
-// func NewConnectionHandlerRateLimitWithDefaults(
-// 	ctx context.Context,
-// 	handlerId server.Id,
-// ) *ConnectionHandlerRateLimit {
-// 	return NewConnectionHandlerRateLimit(ctx, handlerId, DefaultConnectionRateLimitSettings())
-// }
-
-// func NewConnectionHandlerRateLimit(
-// 	ctx context.Context,
-// 	handlerId server.Id,
-// 	settings *ConnectionRateLimitSettings,
-// ) *ConnectionHandlerRateLimit {
-// 	cancelCtx, cancel := context.WithCancel(ctx)
-// 	return &ConnectionHandlerRateLimit{
-// 		ctx: cancelCtx,
-// 		cancel: cancel,
-// 		handlerId: handlerId,
-// 		settings: settings,
-// 	}
-// }
-
-// func (self *ConnectionHandlerRateLimit) run() {
-// 	// keep extending the handler rate limit total expiration
-
-// 	totalKey := totalKey(self.handlerId, self.clientIpHashHex)
-
-// 	for {
-// 		select {
-// 		case <- self.ctx.Done():
-// 			return
-// 		case <- time.After(self.settings.TotalExpiration / 4):
-// 		}
-
-// 		server.Redis(ctx, func(r server.RedisClient) {
-// 			r.Expire(ctx, totalKey, self.settings.TotalExpiration).Err()
-// 		})
-// 	}
-// }
-
-// func (self *ConnectionHandlerRateLimit) Close() {
-// 	self.cancel()
-// }
 
 type ConnectionRateLimit struct {
 	ctx             context.Context
@@ -131,16 +75,38 @@ func NewConnectionRateLimit(
 	}, nil
 }
 
-func (self *ConnectionRateLimit) Connect() error {
-	now := server.NowUtc()
-
-	burstKey := burstKey(
+// *important* disconnect must always be called, even if there is a rate limit error
+func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
+	burstKey := fmt.Sprintf(
+		"connect_burst_%s_%d",
 		self.clientIpHashHex,
-		now.Unix()/int64(self.settings.BurstDuration/time.Second),
+		time.Now().Unix()/int64(self.settings.BurstDuration/time.Second),
 	)
-	totalKey := totalKey(self.handlerId, self.clientIpHashHex)
+	totalKey := fmt.Sprintf(
+		"connect_total_%s_%s",
+		self.handlerId,
+		self.clientIpHashHex,
+	)
 
-	var err error
+	totalIncremented := false
+	disconnect = func() {
+		// note use an uncanceled context for cleanup
+		cleanupCtx := context.Background()
+
+		if totalIncremented {
+			var err error
+			var totalCount int64
+			server.Redis(cleanupCtx, func(r server.RedisClient) {
+				totalCount, err = r.Decr(cleanupCtx, totalKey).Result()
+			})
+			if err != nil {
+				glog.Errorf("[t][%s]total could not decrement err = %s\n", self.clientIpHashHex, err)
+			} else {
+				glog.V(1).Infof("[t][%s]total -1 @%d\n", self.clientIpHashHex, totalCount)
+			}
+		}
+	}
+
 	var burstCount int64
 	var totalCount int64
 	server.Redis(self.ctx, func(r server.RedisClient) {
@@ -151,45 +117,49 @@ func (self *ConnectionRateLimit) Connect() error {
 		if burstCount == 1 {
 			// FIXME put this in an atomic lua script
 			// for now it doesnt matter if a few keys linger
-			err = r.Expire(self.ctx, burstKey, self.settings.BurstDuration).Err()
+			r.Expire(self.ctx, burstKey, self.settings.BurstDuration).Err()
 		}
 		totalCount, err = r.Incr(self.ctx, totalKey).Result()
 		if err != nil {
 			return
 		}
+		totalIncremented = true
 		if totalCount == 1 {
 			// FIXME put this in an atomic lua script
 			// for now it doesnt matter if a few keys linger
-			err = r.Expire(self.ctx, totalKey, self.settings.TotalExpiration).Err()
+			r.Expire(self.ctx, totalKey, self.settings.TotalExpiration).Err()
 		}
 	})
 	if err != nil {
-		return err
+		return
 	}
 
+	glog.V(1).Infof("[t][%s]total +1 @%d\n", self.clientIpHashHex, totalCount)
+
 	if int64(self.settings.MaxTotalConnectionCount) < totalCount {
-		return fmt.Errorf("Total connection count exceeded.")
+		delay := self.settings.TotalConnectionDelay
+		glog.Infof("[t][%s]total rate limit @%d (+%2.fs delay)\n", self.clientIpHashHex, totalCount, float64(delay/time.Millisecond)/1000.0)
+		select {
+		case <-self.ctx.Done():
+			err = fmt.Errorf("Done.")
+		case <-time.After(delay):
+		}
+		return
+		err = fmt.Errorf("Total connection count exceeded.")
+		return
 	}
 
 	if int64(self.settings.BurstConnectionCount) < burstCount {
 		// delay connections above the burst limit
 		delay := time.Duration(burstCount-int64(self.settings.BurstConnectionCount)) * self.settings.BurstConnectionDelay
-		glog.Infof("[t][%s]rate limit @%d (+%dms delay)\n", self.clientIpHashHex, burstCount, delay/time.Millisecond)
+		glog.Infof("[t][%s]burst rate limit @%d (+%.2fs delay)\n", self.clientIpHashHex, burstCount, float64(delay/time.Millisecond)/1000.0)
 		select {
 		case <-self.ctx.Done():
-			return fmt.Errorf("Done.")
+			err = fmt.Errorf("Done.")
 		case <-time.After(delay):
-			return nil
 		}
+		return
 	}
 
-	return nil
-}
-
-func (self *ConnectionRateLimit) Disconnect() {
-	totalKey := totalKey(self.handlerId, self.clientIpHashHex)
-
-	server.Redis(self.ctx, func(r server.RedisClient) {
-		r.Decr(self.ctx, totalKey).Err()
-	})
+	return
 }

@@ -98,7 +98,9 @@ func (self *ConnectionAnnounce) run() {
 
 	connectionId := controller.ConnectNetworkClient(self.ctx, self.clientId, self.clientAddress, self.handlerId)
 	defer server.HandleError(func() {
-		model.DisconnectNetworkClient(self.ctx, connectionId)
+		// note use an uncanceled context for cleanup
+		cleanupCtx := context.Background()
+		model.DisconnectNetworkClient(cleanupCtx, connectionId)
 	}, self.cancel)
 
 	// FIXME

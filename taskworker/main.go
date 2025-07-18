@@ -23,7 +23,7 @@ import (
 
 const RemoveTaskTimeout = 24 * time.Hour
 const RetryTimeoutAfterError = 30 * time.Second
-const PollTimeout = 1 * time.Second
+const PollTimeout = 5 * time.Second
 
 func main() {
 	usage := `BringYour task worker.
