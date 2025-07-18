@@ -1932,10 +1932,13 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)
     `),
 
-	// do this after deploy
-	// newSqlMigration(`
-	//     ALTER TABLE user_auth_attempt
-	//     DROP COLUMN client_ip,
-	//     DROP COLUMN client_port
-	// `),
+	newSqlMigration(`
+	    ALTER TABLE user_auth_attempt
+	    DROP COLUMN client_ip,
+	    DROP COLUMN client_port
+	`),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_attempt_attempt_time_user_auth_attempt_id ON user_auth_attempt (attempt_time, user_auth_attempt_id)
+    `),
 }
