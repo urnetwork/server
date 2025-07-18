@@ -274,6 +274,7 @@ var migrations = []any{
     `),
 	// the index of user_auth is covered by the unique index
 
+	// MIGRATED client_ipv4/client_ip moved to client_address_hash/client_port
 	// an attempt any of:
 	// - network create
 	// - login
@@ -835,8 +836,6 @@ var migrations = []any{
         CREATE INDEX account_payment_payment_plan ON account_payment (payment_plan_id, payment_id)
     `),
 
-	// column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
-	// index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
 	newSqlMigration(`
         ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
     `),
@@ -1940,5 +1939,14 @@ var migrations = []any{
 
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS user_auth_attempt_attempt_time_user_auth_attempt_id ON user_auth_attempt (attempt_time, user_auth_attempt_id)
+    `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX user_auth_attempt_client_ipv4
+    `),
+	newSqlMigration(`
+        ALTER TABLE user_auth_attempt
+        DROP COLUMN client_ipv4
     `),
 }
