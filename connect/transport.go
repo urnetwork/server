@@ -52,8 +52,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
 		PingTrackerCount: 4,
-		WriteTimeout:     10 * time.Second,
-		ReadTimeout:      30 * time.Second,
+		WriteTimeout:     30 * time.Second,
+		ReadTimeout:      60 * time.Second,
 
 		// a single exchange message size is encoded as an `int32`
 		// because message must be serialized/deserialized from memory,

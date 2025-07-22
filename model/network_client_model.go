@@ -6,7 +6,7 @@ import (
 	"errors"
 	// "net"
 	// "net/netip"
-	// "regexp"
+	"regexp"
 	"strconv"
 	// "strings"
 	// "sync"
@@ -1562,8 +1562,20 @@ func Testing_CreateDevice(
 	})
 }
 
+var errorIpv4 = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}`)
+var errorIpv4Port = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}:[0-9]+`)
+var errorIpv6 = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?`)
+var errorIpv6Port = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?:[0-9]+`)
+
 func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, connectionId server.Id, op string, err error) {
 	errorTime := server.NowUtc()
+
+	// scrub the error message
+	errorMessage := err.Error()
+	errorMessage = errorIpv4Port.ReplaceAllString(errorMessage, `ipv4:port`)
+	errorMessage = errorIpv4.ReplaceAllString(errorMessage, `ipv4`)
+	errorMessage = errorIpv6Port.ReplaceAllString(errorMessage, `ipv6:port`)
+	errorMessage = errorIpv6.ReplaceAllString(errorMessage, `ipv6`)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -1584,7 +1596,7 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 			clientId,
 			connectionId,
 			op,
-			err.Error(),
+			errorMessage,
 		))
 	})
 }
