@@ -38,6 +38,7 @@ type ConnectionAnnounce struct {
 	settings *ConnectionAnnounceSettings
 
 	stateLock           sync.Mutex
+	connectionId        *server.Id
 	receiveMessageCount uint64
 	receiveByteCount    ByteCount
 	sendMessageCount    uint64
@@ -115,8 +116,10 @@ func (self *ConnectionAnnounce) run() {
 		// note use an uncanceled context for cleanup
 		cleanupCtx := context.Background()
 		model.DisconnectNetworkClient(cleanupCtx, connectionId)
-		glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash))
+		glog.V(1).Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash))
 	}, self.cancel)
+
+	self.setConnectionId(connectionId)
 
 	// FIXME
 	// established := false
@@ -152,6 +155,20 @@ func (self *ConnectionAnnounce) run() {
 		*/
 
 	}
+}
+
+func (self *ConnectionAnnounce) setConnectionId(connectionId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	self.connectionId = &connectionId
+}
+
+func (self *ConnectionAnnounce) ConnectionId() *server.Id {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	return self.connectionId
 }
 
 func (self *ConnectionAnnounce) ReceiveMessage(messageByteCount ByteCount) {

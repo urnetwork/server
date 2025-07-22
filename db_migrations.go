@@ -1957,4 +1957,24 @@ var migrations = []any{
         DROP COLUMN available_block,
         ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (1 + extract(epoch from run_at)) ELSE (1 + extract(epoch from release_time)) END) STORED
     `),
+
+	newSqlMigration(`
+        CREATE TABLE network_client_connection_error (
+            error_time timestamp NOT NULL DEFAULT now(),
+            network_id uuid NOT NULL,
+            client_id uuid NOT NULL,
+            connection_id uuid NOT NULL,
+            operation varchar(16) NOT NULL,
+            error_message text NOT NULL
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_error_time_network_id_client_id ON network_client_connection_error (error_time, network_id, client_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_network_id_error_time ON network_client_connection_error (network_id, error_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_client_id_error_time ON network_client_connection_error (client_id, error_time)
+    `),
 }

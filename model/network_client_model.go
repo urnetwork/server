@@ -1561,3 +1561,30 @@ func Testing_CreateDevice(
 		))
 	})
 }
+
+func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, connectionId server.Id, op string, err error) {
+	errorTime := server.NowUtc()
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client_connection_error (
+					error_time,
+					network_id,
+					client_id,
+					connection_id,
+					operation,
+					error_message
+				)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			errorTime,
+			networkId,
+			clientId,
+			connectionId,
+			op,
+			err.Error(),
+		))
+	})
+}
