@@ -9,6 +9,7 @@ import (
 	// "os"
 	"strings"
 	"time"
+	// "runtime/debug"
 
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
@@ -45,14 +46,14 @@ func init() {
 }
 
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
-	platformTransportSettings := connect.DefaultPlatformTransportSettings()
+	// platformTransportSettings := connect.DefaultPlatformTransportSettings()
 	return &ConnectHandlerSettings{
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
 		PingTrackerCount: 4,
-		WriteTimeout:     platformTransportSettings.WriteTimeout,
-		ReadTimeout:      platformTransportSettings.ReadTimeout,
+		WriteTimeout:     5 * time.Second,
+		ReadTimeout:      15 * time.Second,
 
 		// a single exchange message size is encoded as an `int32`
 		// because message must be serialized/deserialized from memory,
@@ -69,7 +70,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		FramerSettings:       connect.DefaultFramerSettings(),
 		TransportTlsSettings: DefaultTransportTlsSettings(),
 
-		ConnectionAnnounceTimeout:   60 * time.Second,
+		ConnectionAnnounceTimeout:   30 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
 		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
 	}
@@ -143,6 +144,19 @@ func (self *ConnectHandler) run() {
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// handleCancel := func() {
+	// 	defer handleCancel_()
+	// 	var first bool
+	// 	select {
+	// 	case <- handleCtx.Done():
+	// 		first = false
+	// 	default:
+	// 		first = true
+	// 	}
+	// 	if first {
+	// 		glog.Infof("[t]handle cancel: %s\n", server.ErrorJson(r, debug.Stack()))
+	// 	}
+	// }
 	defer handleCancel()
 
 	connectedGauge.Add(1)
@@ -251,6 +265,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
 	if err != nil {
+		glog.Infof("[t]auth jwt err = %s\n", err)
 		return
 	}
 
@@ -315,6 +330,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 				messageType, message, err := ws.ReadMessage()
 				if err != nil {
+					// glog.Errorf("[t]read err = %s\n", err)
 					return
 				}
 
@@ -383,6 +399,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		case <-handleCtx.Done():
 			return
 		case <-residentTransport.Done():
+			glog.Infof("[t]resident transport done\n")
 			return
 		}
 	}

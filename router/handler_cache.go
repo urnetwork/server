@@ -26,7 +26,7 @@ func CacheNoAuth[R any](
 			}
 		}
 
-		return WarmCacheNoAuth(clientSession, impl, key, ttl)
+		return WarmCacheNoAuth(clientSession, impl, key, ttl, false)
 	}
 }
 
@@ -35,6 +35,7 @@ func WarmCacheNoAuth[R any](
 	impl ImplFunction[*R],
 	key string,
 	ttl time.Duration,
+	force bool,
 ) (*R, error) {
 	value, err := impl(clientSession)
 	if err != nil {
@@ -47,7 +48,11 @@ func WarmCacheNoAuth[R any](
 		if err == nil {
 			server.Redis(clientSession.Ctx, func(r server.RedisClient) {
 				// ignore the error
-				r.Set(clientSession.Ctx, key, string(valueJson), ttl).Err()
+				if force {
+					r.Set(clientSession.Ctx, key, string(valueJson), ttl).Err()
+				} else {
+					r.SetNX(clientSession.Ctx, key, string(valueJson), ttl).Err()
+				}
 			})
 		}
 	}()

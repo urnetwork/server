@@ -20,12 +20,12 @@ var ipInfoConfig = sync.OnceValue(func() map[string]any {
 	return c["ipinfo"].(map[string]any)
 })
 
-const LocationLookupResultExpiration = 30 * 24 * time.Hour
+const LocationLookupResultExpiration = 8 * time.Hour
 
 // FIXME use lite? curl https://api.ipinfo.io/lite/8.8.8.8?token=0c3390b39605e0
 
-func GetLocationForIp(ctx context.Context, ipStr string) (*model.Location, *model.ConnectionLocationScores, error) {
-	resultJson, err := GetIPInfo(ctx, ipStr)
+func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *model.ConnectionLocationScores, error) {
+	resultJson, err := GetIPInfo(ctx, clientIp)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,11 +93,11 @@ type IpInfoErrorResponse struct {
 	} `json:"error"`
 }
 
-func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
+func GetIPInfo(ctx context.Context, clientIp string) ([]byte, error) {
 	earliestResultTime := server.NowUtc().Add(-LocationLookupResultExpiration)
 
 	var resultJson []byte
-	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, ipStr, earliestResultTime); resultJsonStr != "" {
+	if resultJsonStr := model.GetLatestIpLocationLookupResult(ctx, clientIp, earliestResultTime); resultJsonStr != "" {
 		resultJson = []byte(resultJsonStr)
 
 		var errResp IpInfoErrorResponse
@@ -109,7 +109,7 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 
 	req, err := http.NewRequest(
 		"GET",
-		fmt.Sprintf("https://ipinfo.io/%s/json", ipStr),
+		fmt.Sprintf("https://ipinfo.io/%s/json", clientIp),
 		nil,
 	)
 	if err != nil {
@@ -145,7 +145,7 @@ func GetIPInfo(ctx context.Context, ipStr string) ([]byte, error) {
 	if err == nil && errResp.Status == 0 {
 		resultJson = server.AttemptCompactJson(resultJson)
 
-		model.SetIpLocationLookupResult(ctx, ipStr, string(resultJson))
+		model.SetIpLocationLookupResult(ctx, clientIp, string(resultJson))
 
 		return resultJson, nil
 	}

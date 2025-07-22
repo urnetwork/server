@@ -46,7 +46,7 @@ import (
 
 // IMPORTANT: this is hard coded into the `db_migrations`
 // IMPORTANT: if you change this number, you must also change the schema
-const BlockSizeSeconds = 60
+const BlockSizeSeconds = 1
 
 var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second

@@ -995,7 +995,7 @@ func SetConnectionLocation(
 	connectionId server.Id,
 	locationId server.Id,
 	connectionLocationScores *ConnectionLocationScores,
-) {
+) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		// note the network_id is allowed to be nil for a connection without an associated client
 		result, err := tx.Query(
@@ -1022,6 +1022,7 @@ func SetConnectionLocation(
 		})
 
 		if clientId == nil {
+			returnErr = fmt.Errorf("Missing client connection.")
 			return
 		}
 
@@ -1093,6 +1094,7 @@ func SetConnectionLocation(
 			networkId,
 		))
 	})
+	return
 }
 
 type LocationGroupResult struct {

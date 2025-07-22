@@ -81,7 +81,7 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 	burstKey := fmt.Sprintf(
 		"connect_burst_%s_%d",
 		self.clientIpHashHex,
-		time.Now().Unix()/int64(self.settings.BurstDuration/time.Second),
+		server.NowUtc().Unix()/int64(self.settings.BurstDuration/time.Second),
 	)
 	totalKey := fmt.Sprintf(
 		"connect_total_%s_%s",

@@ -25,7 +25,7 @@ func ScheduleWarmNetworkGetProviderLocations(clientSession *session.ClientSessio
 		&WarmNetworkGetProviderLocationsArgs{},
 		clientSession,
 		task.RunOnce("api_warm_network_get_provider_locations"),
-		task.RunAt(server.NowUtc().Add(1*time.Second)),
+		task.RunAt(server.NowUtc().Add(5*time.Second)),
 		task.Priority(task.TaskPriorityFastest),
 	)
 }

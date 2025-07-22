@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	// "encoding/hex"
+	"encoding/hex"
 	// "fmt"
 	"sync"
 	"time"
@@ -17,12 +17,14 @@ import (
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
 		SyncConnectionTimeout: 60 * time.Second,
+		LocationRetryTimeout:  5 * time.Minute,
 	}
 }
 
 type ConnectionAnnounceSettings struct {
 	// FIXME this should be the reliability block size
 	SyncConnectionTimeout time.Duration
+	LocationRetryTimeout  time.Duration
 }
 
 type ConnectionAnnounce struct {
@@ -79,9 +81,7 @@ func NewConnectionAnnounce(
 		announceTimeout: announceTimeout,
 		settings:        settings,
 	}
-	go server.HandleError(func() {
-		announce.run()
-	}, cancel)
+	go server.HandleError(announce.run, cancel)
 	return announce
 }
 
@@ -89,6 +89,7 @@ func (self *ConnectionAnnounce) run() {
 	defer self.cancel()
 
 	if 0 < self.announceTimeout {
+		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
 		select {
 		case <-self.ctx.Done():
 			return
@@ -96,11 +97,25 @@ func (self *ConnectionAnnounce) run() {
 		}
 	}
 
-	connectionId := controller.ConnectNetworkClient(self.ctx, self.clientId, self.clientAddress, self.handlerId)
+	// FIXME remove ip
+	// glog.Infof("[t]announce %s [%s]\n", self.clientId, self.clientAddress)
+
+	connectionId, clientAddressHash, err := controller.ConnectNetworkClient(
+		self.ctx,
+		self.clientId,
+		self.clientAddress,
+		self.handlerId,
+		self.settings.LocationRetryTimeout,
+	)
+	if err != nil {
+		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash), err)
+		return
+	}
 	defer server.HandleError(func() {
 		// note use an uncanceled context for cleanup
 		cleanupCtx := context.Background()
 		model.DisconnectNetworkClient(cleanupCtx, connectionId)
+		glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash))
 	}, self.cancel)
 
 	// FIXME

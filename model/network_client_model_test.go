@@ -125,3 +125,5 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 	})
 }
+
+// FIXME test GetNetworkClients, SetPendingNetworkClientConnection

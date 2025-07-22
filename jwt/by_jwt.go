@@ -47,13 +47,21 @@ var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 				}
 				block, _ := pem.Decode(bytes)
 
-				// FIXME support ecdsa
+				keyPathErrs := []error{}
 				if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+					glog.Errorf("[jwt]loaded pkcs8 key \"%s\"\n", path)
 					keys = append(keys, key.(*rsa.PrivateKey))
-				} else if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-					keys = append(keys, key)
 				} else {
-					errs = append(errs, err)
+					keyPathErrs = append(keyPathErrs, err)
+					if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+						glog.Errorf("[jwt]loaded pkcs1 key \"%s\"\n", path)
+						keys = append(keys, key)
+					} else {
+						keyPathErrs = append(keyPathErrs, err)
+						err = errors.Join(keyPathErrs...)
+						glog.Errorf("[jwt]could not load key \"%s\". err = %s\n", path, err)
+						errs = append(errs, err)
+					}
 				}
 			}
 		}
@@ -128,7 +136,7 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	var err error
 	// attempt all signing keys
 	for _, byPrivateKey := range byPrivateKeys() {
-		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (interface{}, error) {
+		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
 			return byPrivateKey.Public(), nil
 		})
 		if err == nil {

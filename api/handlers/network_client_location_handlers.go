@@ -13,7 +13,7 @@ func NetworkGetProviderLocations(w http.ResponseWriter, r *http.Request) {
 	router.WrapNoAuth(router.CacheNoAuth(
 		model.GetProviderLocations,
 		"api_network_get_provider_locations",
-		5*time.Second,
+		15*time.Second,
 	), w, r)
 }
 
@@ -22,7 +22,8 @@ func WarmNetworkGetProviderLocations(clientSession *session.ClientSession) {
 		clientSession,
 		model.GetProviderLocations,
 		"api_network_get_provider_locations",
-		5*time.Second,
+		15*time.Second,
+		true,
 	)
 }
 

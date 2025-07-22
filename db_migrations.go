@@ -1255,7 +1255,7 @@ var migrations = []any{
 
 	newCodeMigration(migration_20240124_PopulateDevice),
 
-	// ALTERED the run_at_block size is 1 minute = 60 seconds
+	// ALTERED the run_at_block size is 1 second
 	// extract(epoch ...) is epoch in seconds
 	// https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
 	newSqlMigration(`
@@ -1948,5 +1948,13 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE user_auth_attempt
         DROP COLUMN client_ipv4
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE pending_task
+        DROP COLUMN run_at_block,
+        ADD COLUMN run_at_block bigint GENERATED ALWAYS AS (extract(epoch from run_at)) STORED,
+        DROP COLUMN available_block,
+        ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (1 + extract(epoch from run_at)) ELSE (1 + extract(epoch from release_time)) END) STORED
     `),
 }

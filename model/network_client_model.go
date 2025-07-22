@@ -7,7 +7,7 @@ import (
 	// "net"
 	// "net/netip"
 	// "regexp"
-	// "strconv"
+	"strconv"
 	// "strings"
 	// "sync"
 
@@ -482,7 +482,53 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		}
 	})
 
+	if clientsResult != nil {
+		keys := []string{}
+		for _, clientInfo := range clientsResult.Clients {
+			keys = append(keys, pendingClientConnectionKey(clientInfo.ClientId))
+		}
+		server.Redis(session.Ctx, func(r server.RedisClient) {
+			unixMilliStrs, err := r.MGet(session.Ctx, keys...).Result()
+			if err != nil {
+				clientsErr = err
+				return
+			}
+			for i, clientInfo := range clientsResult.Clients {
+				clientId := clientInfo.ClientId
+				if unixMilliStrs[i] != nil {
+					unixMilliStr := unixMilliStrs[i].(string)
+					unixMilli, err := strconv.ParseInt(unixMilliStr, 10, 64)
+					if err == nil {
+						connectTime := time.UnixMilli(unixMilli)
+						pendingClientConnection := &NetworkClientConnection{
+							ClientId:     clientId,
+							ConnectionId: clientId,
+							ConnectTime:  connectTime,
+						}
+						clientInfo.Connections = append(clientInfo.Connections, pendingClientConnection)
+					}
+				}
+			}
+		})
+	}
+
 	return clientsResult, clientsErr
+}
+
+func pendingClientConnectionKey(clientId server.Id) string {
+	return fmt.Sprintf("pending_client_connection_%s", clientId)
+}
+
+func SetPendingNetworkClientConnection(ctx context.Context, clientId server.Id, expire time.Duration) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		unixMilliStr := strconv.FormatInt(server.NowUtc().UnixMilli(), 10)
+		r.Set(
+			ctx,
+			pendingClientConnectionKey(clientId),
+			unixMilliStr,
+			expire,
+		)
+	})
 }
 
 type NetworkClient struct {
@@ -679,8 +725,22 @@ func ConnectNetworkClient(
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
-) server.Id {
-	var connectionId server.Id
+) (
+	connectionId server.Id,
+	clientIp string,
+	clientPort int,
+	clientIpHash []byte,
+	err error,
+) {
+	clientIp, clientPort, err = session.SplitClientAddress(clientAddress)
+	if err != nil {
+		return
+	}
+
+	clientIpHash, err = session.ClientIpHash(clientIp)
+	if err != nil {
+		return
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
@@ -690,14 +750,7 @@ func ConnectNetworkClient(
 		service, _ := server.Service()
 		block, _ := server.Block()
 
-		var clientIp string
-		clientIp, clientPort, err := session.SplitClientAddress(clientAddress)
-		server.Raise(err)
-
-		clientIpHash, err := session.ClientIpHash(clientIp)
-		server.Raise(err)
-
-		_, err = tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_connection (
@@ -722,11 +775,10 @@ func ConnectNetworkClient(
 			clientIpHash,
 			clientPort,
 			handlerId,
-		)
-		server.Raise(err)
+		))
 	})
 
-	return connectionId
+	return
 }
 
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {

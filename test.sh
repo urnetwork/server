@@ -17,3 +17,6 @@ for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -
     # fi
 done
 # stdbuf -i0 -o0 -e0 
+
+# ./test.sh -run 'pattern'
+# ./test.sh -short
