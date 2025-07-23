@@ -527,7 +527,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		}
 	})
 
-	if clientsResult != nil {
+	if clientsResult != nil && 0 < len(clientsResult.Clients) {
 		keys := []string{}
 		for _, clientInfo := range clientsResult.Clients {
 			keys = append(keys, pendingClientConnectionKey(clientInfo.ClientId))
