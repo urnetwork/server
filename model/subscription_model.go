@@ -2626,7 +2626,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			ctx,
 			`
 			DELETE FROM transfer_balance
-			WHERE 
+			WHERE
 				end_time <= $1
 			`,
 			minTime.UTC(),
@@ -2713,4 +2713,41 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			minTime.UTC(),
 		))
 	})
+}
+
+func GetOpenTransferByteCount(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+) ByteCount {
+
+	var openTransferByteCount ByteCount = 0
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+			   COALESCE(SUM(transfer_byte_count), 0)
+			FROM transfer_contract
+			WHERE
+			    source_network_id = $1 AND
+			    open = TRUE
+			`,
+			sourceNetworkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+
+				server.Raise(result.Scan(
+					&openTransferByteCount,
+				))
+
+			}
+		})
+
+	})
+
+	return openTransferByteCount
+
 }
