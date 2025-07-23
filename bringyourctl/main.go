@@ -742,7 +742,7 @@ func closeExpiredContracts(opts docopt.Opts) {
 		}
 	}
 
-	err = model.ForceCloseOpenContractIds(ctx, time.Now().Add(-1*time.Hour), maxCount, 30)
+	_, err = model.ForceCloseOpenContractIds(ctx, time.Now().Add(-1*time.Hour), maxCount, 30)
 	if err != nil {
 		panic(err)
 	}

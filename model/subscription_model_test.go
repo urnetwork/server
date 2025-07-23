@@ -525,7 +525,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			contractCount += 1
 		}
 
-		ForceCloseOpenContractIds(ctx, time.Now())
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		// at this point the balance should be half used up
 
@@ -930,7 +930,7 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseOpenContractIds(ctx, time.Now())
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
@@ -1058,7 +1058,7 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseOpenContractIds(ctx, time.Now())
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)

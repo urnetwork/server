@@ -79,7 +79,7 @@ func CreateAccountWalletExternal(
 		err := existingRow.Scan(&existingWalletId)
 		if err == nil {
 
-			glog.Infof("!!! Found existing wallet %s for address %s", existingWalletId, createAccountWallet.WalletAddress)
+			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
 
 			// Found an existing wallet - update active = true
 			_ = server.RaisePgResult(tx.Exec(

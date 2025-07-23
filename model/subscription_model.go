@@ -2082,71 +2082,91 @@ func GetOpenContractIdsForSourceOrDestination(
 	return pairContractIdPartialCloseParties
 }
 
+func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("Done.")
+		default:
+		}
+		c, err := ForceCloseOpenContractIds(ctx, minTime, 1000, 1)
+		if err != nil {
+			return err
+		}
+		if c == 0 {
+			return nil
+		}
+	}
+}
+
 // closes all open contracts with no update in the last `timeout`
 // cases handled:
 // - no closes
 // - single close
 // - one or more checkpoints
-func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount int, parallel int) error {
+func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount int, parallel int) (closeCount int64, err error) {
 
-	// force close contracts where there is nothing to do
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			UPDATE transfer_contract
-			SET
-		        outcome = $5,
-		        close_time = $6
-			FROM (
-				SELECT
-		            t.contract_id
+	/*
+		// force close contracts where there is nothing to do
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE transfer_contract
+				SET
+			        outcome = $5,
+			        close_time = $6
+				FROM (
+					SELECT
+			            t.contract_id
 
-		        FROM (
-		            SELECT
-		                transfer_contract.contract_id,
-		                transfer_contract.source_id,
-		                transfer_contract.destination_id
+			        FROM (
+			            SELECT
+			                transfer_contract.contract_id,
+			                transfer_contract.source_id,
+			                transfer_contract.destination_id
 
-		            FROM transfer_contract
+			            FROM transfer_contract
 
-		            WHERE
-		                transfer_contract.open AND
-		                transfer_contract.create_time <= $3
+			            WHERE
+			                transfer_contract.open AND
+			                transfer_contract.create_time <= $3
 
-		            LIMIT $4
+			            LIMIT $4
 
-		        ) t
+			        ) t
 
-		        LEFT JOIN contract_close source_contract_close ON
-		            source_contract_close.contract_id = t.contract_id AND
-		            source_contract_close.party = $1
+			        LEFT JOIN contract_close source_contract_close ON
+			            source_contract_close.contract_id = t.contract_id AND
+			            source_contract_close.party = $1
 
-		        LEFT JOIN contract_close destination_contract_close ON
-		            destination_contract_close.contract_id = t.contract_id AND
-		            destination_contract_close.party = $2
+			        LEFT JOIN contract_close destination_contract_close ON
+			            destination_contract_close.contract_id = t.contract_id AND
+			            destination_contract_close.party = $2
 
-		        WHERE
-		        	destination_contract_close.contract_id IS NOT NULL AND
-		        	source_contract_close.contract_id IS NOT NULL
-		    ) t
-		    
-		    WHERE
-		        transfer_contract.contract_id = t.contract_id
-				
-			`,
-			ContractPartySource,
-			ContractPartyDestination,
-			minTime.UTC(),
-			maxCount,
-			ContractOutcomeSettled,
-			server.NowUtc(),
-		))
+			        WHERE
+			        	destination_contract_close.contract_id IS NOT NULL AND
+			        	source_contract_close.contract_id IS NOT NULL
+			    ) t
 
-		if c := tag.RowsAffected(); 0 < c {
-			glog.Infof("[sm]force closed %d malformed contracts\n", c)
-		}
-	})
+			    WHERE
+			        transfer_contract.contract_id = t.contract_id
+
+				`,
+				ContractPartySource,
+				ContractPartyDestination,
+				minTime.UTC(),
+				maxCount,
+				ContractOutcomeSettled,
+				server.NowUtc(),
+			))
+
+			if c := tag.RowsAffected(); 0 < c {
+				glog.Infof("[sm]force closed %d malformed contracts\n", c)
+				closeCount += c
+			}
+		})
+	*/
 
 	type OpenContract struct {
 		contractId    server.Id
@@ -2207,10 +2227,6 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
                     destination_contract_close.contract_id = t.contract_id AND
                     destination_contract_close.party = $2
 
-                WHERE
-                	source_contract_close.contract_id IS NULL OR
-                	destination_contract_close.contract_id IS NULL
-
             `,
 			ContractPartySource,
 			ContractPartyDestination,
@@ -2266,10 +2282,14 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		if openContract.dispute {
 			// FIXME
 			glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
 				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
-				settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
+			if err != nil {
+				return err
+			}
 
 		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
@@ -2361,8 +2381,13 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 
 		} else {
 			// nothing to settle, just close the transaction
-			// this is done in bulk at the top
-			closeMalformedContract(tag, openContract)
+			var err error
+			server.Tx(ctx, func(tx server.PgTx) {
+				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			})
+			if err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -2409,8 +2434,9 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		case <-workerCtx.Done():
 		}
 	}
+	closeCount += int64(len(openContracts))
 
-	return nil
+	return
 }
 
 type ContractClose struct {

@@ -62,7 +62,7 @@ func wrap[R any](
 	// server.Logger().Printf("Handling %s\n", impl)
 	result, err := impl(session)
 	if err != nil {
-		glog.Infof("[h]impl error: %s\n", err)
+		glog.Infof("[h]impl error (%v): %s\n", impl, err)
 		RaiseHttpError(err, w)
 		return
 	}

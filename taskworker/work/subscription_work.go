@@ -41,7 +41,7 @@ func CloseExpiredContracts(
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
 	minTime := server.NowUtc().Add(-60 * time.Minute)
-	err := model.ForceCloseOpenContractIds(
+	_, err := model.ForceCloseOpenContractIds(
 		clientSession.Ctx,
 		minTime,
 		1000000,
