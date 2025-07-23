@@ -1168,12 +1168,12 @@ func FindProviderLocations(
 	locationSearchResults := locationSearch.AroundIds(
 		session.Ctx,
 		findLocations.Query,
-		maxSearchDistance,
+		2+maxSearchDistance,
 	)
 	locationGroupSearchResults := locationGroupSearch.AroundIds(
 		session.Ctx,
 		findLocations.Query,
-		maxSearchDistance,
+		2+maxSearchDistance,
 	)
 
 	// server.Logger().Printf("Found location search results: %v\n", locationSearchResults)
@@ -2070,6 +2070,12 @@ func FindProviders2(
 	}
 
 	clientIds := maps.Keys(clientScores)
+
+	// FIXME
+	// 1. shuffle random, latency, reliability
+	// 2. then adjust quality
+	// 3. then sort quality
+
 	// mathrand.Shuffle(len(clientIds), func(i int, j int) {
 	// 	clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 	// })
@@ -2092,7 +2098,7 @@ func FindProviders2(
 		clientScore.netTypeScore += cityCount * duplicateCityScore
 	}
 
-	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
+	slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
 		clientScoreA := clientScores[a]
 		clientScoreB := clientScores[b]
 

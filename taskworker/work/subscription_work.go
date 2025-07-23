@@ -17,13 +17,22 @@ type CloseExpiredContractsResult struct {
 }
 
 func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx server.PgTx) {
+	runAt := func() time.Time {
+		now := time.Now().UTC()
+		year, month, day := now.Date()
+		hour, minute, _ := now.Clock()
+		return time.Date(year, month, day, hour, 5*(minute/5)+5, 0, 0, time.UTC)
+	}()
+
 	task.ScheduleTaskInTx(
 		tx,
 		CloseExpiredContracts,
 		&CloseExpiredContractsArgs{},
 		clientSession,
+		// legacy key
 		task.RunOnce("close_expired_contracts"),
-		task.RunAt(time.Now().Add(5*time.Minute)),
+		task.RunAt(runAt),
+		task.MaxTime(24*time.Hour),
 	)
 }
 
@@ -32,7 +41,12 @@ func CloseExpiredContracts(
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
 	minTime := server.NowUtc().Add(-15 * time.Minute)
-	err := model.ForceCloseOpenContractIds(clientSession.Ctx, minTime)
+	err := model.ForceCloseOpenContractIds(
+		clientSession.Ctx,
+		minTime,
+		1000000,
+		32,
+	)
 
 	return &CloseExpiredContractsResult{}, err
 }

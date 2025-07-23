@@ -180,7 +180,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.RemoveDisconnectedNetworkClients,
 			work.RemoveDisconnectedNetworkClientsPost,
 			"bringyour.com/service/taskworker/work.DeleteDisconnectedNetworkClients",
-			"github.com/urnetwork/server/taskworker/work/DeleteDisconnectedNetworkClients",
+			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
 			model.IndexSearchLocations,

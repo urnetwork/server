@@ -53,6 +53,13 @@ type RemoveDisconnectedNetworkClientsResult struct {
 }
 
 func ScheduleRemoveDisconnectedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
+	runAt := func() time.Time {
+		now := time.Now().UTC()
+		year, month, day := now.Date()
+		hour, minute, _ := now.Clock()
+		return time.Date(year, month, day, hour, 5*(minute/5)+5, 0, 0, time.UTC)
+	}()
+
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveDisconnectedNetworkClients,
@@ -60,7 +67,8 @@ func ScheduleRemoveDisconnectedNetworkClients(clientSession *session.ClientSessi
 		clientSession,
 		// legacy key
 		task.RunOnce("delete_disconnected_network_clients"),
-		task.RunAt(time.Now().Add(5*time.Minute)),
+		task.RunAt(runAt),
+		task.MaxTime(4*time.Hour),
 	)
 }
 
@@ -68,7 +76,7 @@ func RemoveDisconnectedNetworkClients(
 	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveDisconnectedNetworkClientsResult, error) {
-	minTime := time.Now().Add(-7 * 24 * time.Hour)
+	minTime := time.Now().Add(-8 * time.Hour)
 	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minTime)
 	return &RemoveDisconnectedNetworkClientsResult{}, nil
 }

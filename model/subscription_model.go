@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 
 	// "golang.org/x/exp/maps"
 
@@ -156,8 +157,8 @@ func NanoPointsToPoints(nanoPoints NanoPoints) float64 {
 // 12 months
 const BalanceCodeDuration = 365 * 24 * time.Hour
 
-// up to 4MiB
-const AcceptableTransfersByteDifference = 4 * 1024 * 1024
+// up to 16MiB
+const AcceptableTransfersByteDifference = 16 * 1024 * 1024
 
 const ProviderRevenueShare float64 = 0.5
 
@@ -2086,11 +2087,72 @@ func GetOpenContractIdsForSourceOrDestination(
 // - no closes
 // - single close
 // - one or more checkpoints
-func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
+func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount int, parallel int) error {
+
+	// force close contracts where there is nothing to do
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE transfer_contract
+			SET
+		        outcome = $5,
+		        close_time = $6
+			FROM (
+				SELECT
+		            t.contract_id
+
+		        FROM (
+		            SELECT
+		                transfer_contract.contract_id,
+		                transfer_contract.source_id,
+		                transfer_contract.destination_id
+
+		            FROM transfer_contract
+
+		            WHERE
+		                transfer_contract.open AND
+		                transfer_contract.create_time <= $3
+
+		            LIMIT $4
+
+		        ) t
+
+		        LEFT JOIN contract_close source_contract_close ON
+		            source_contract_close.contract_id = t.contract_id AND
+		            source_contract_close.party = $1
+
+		        LEFT JOIN contract_close destination_contract_close ON
+		            destination_contract_close.contract_id = t.contract_id AND
+		            destination_contract_close.party = $2
+
+		        WHERE
+		        	destination_contract_close.contract_id IS NOT NULL AND
+		        	source_contract_close.contract_id IS NOT NULL
+		    ) t
+		    
+		    WHERE
+		        transfer_contract.contract_id = t.contract_id
+				
+			`,
+			ContractPartySource,
+			ContractPartyDestination,
+			minTime.UTC(),
+			maxCount,
+			ContractOutcomeSettled,
+			server.NowUtc(),
+		))
+
+		if c := tag.RowsAffected(); 0 < c {
+			glog.Infof("[sm]force closed %d malformed contracts\n", c)
+		}
+	})
+
 	type OpenContract struct {
 		contractId    server.Id
 		sourceId      server.Id
 		destinationId server.Id
+		dispute       bool
 
 		sourceCloseTime             *time.Time
 		sourceUsedTransferByteCount *ByteCount
@@ -2108,9 +2170,10 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 			ctx,
 			`
                 SELECT
-                    transfer_contract.contract_id,
-                    transfer_contract.source_id,
-                    transfer_contract.destination_id,
+                    t.contract_id,
+                    t.source_id,
+                    t.destination_id,
+                    t.dispute,
 
                     source_contract_close.close_time AS source_close_time,
                     source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
@@ -2120,24 +2183,39 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
                     destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
                     destination_contract_close.checkpoint AS destination_checkpoint
 
-                FROM transfer_contract
+                FROM (
+                    SELECT
+                        transfer_contract.contract_id,
+                        transfer_contract.source_id,
+                        transfer_contract.destination_id,
+                        transfer_contract.dispute
+
+                    FROM transfer_contract
+
+                    WHERE
+                        transfer_contract.open AND
+                        transfer_contract.create_time <= $3
+
+                    LIMIT $4
+                ) t
 
                 LEFT JOIN contract_close source_contract_close ON
-                    source_contract_close.contract_id = transfer_contract.contract_id AND
+                    source_contract_close.contract_id = t.contract_id AND
                     source_contract_close.party = $1
 
                 LEFT JOIN contract_close destination_contract_close ON
-                    destination_contract_close.contract_id = transfer_contract.contract_id AND
+                    destination_contract_close.contract_id = t.contract_id AND
                     destination_contract_close.party = $2
 
                 WHERE
-                    transfer_contract.open AND
-                    transfer_contract.create_time <= $3
+                	source_contract_close.contract_id IS NULL OR
+                	destination_contract_close.contract_id IS NULL
 
             `,
 			ContractPartySource,
 			ContractPartyDestination,
 			minTime.UTC(),
+			maxCount,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2147,6 +2225,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 					&openContract.contractId,
 					&openContract.sourceId,
 					&openContract.destinationId,
+					&openContract.dispute,
 					&openContract.sourceCloseTime,
 					&openContract.sourceUsedTransferByteCount,
 					&openContract.sourceCheckpoint,
@@ -2160,10 +2239,41 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 		})
 	})
 
-	for _, openContract := range openContracts {
-		// fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
-		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
+	glog.Infof("[sm]found %d contracts to close\n", len(openContracts))
+
+	closeMalformedContract := func(tag string, openContract *OpenContract) {
+		glog.Infof("%sforce close malformed contract\n", tag)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+                    UPDATE transfer_contract
+                    SET
+                        outcome = $2,
+                        close_time = $3
+                    WHERE
+                        contract_id = $1
+                `,
+				openContract.contractId,
+				ContractOutcomeSettled,
+				server.NowUtc(),
+			))
+		})
+	}
+
+	closeContract := func(tag string, openContract *OpenContract) error {
+		if openContract.dispute {
+			// FIXME
+			glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			server.Tx(ctx, func(tx server.PgTx) {
+				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
+				settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			})
+
+		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
+			glog.Infof("%sforce close contract: both sides\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2189,6 +2299,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 
 		} else if openContract.sourceCloseTime == nil {
 			// source accepts destination
+			glog.Infof("%sforce close contract: source accepts destination\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2203,6 +2314,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 
 		} else if openContract.destinationCloseTime == nil {
 			// destination accepts source
+			glog.Infof("%sforce close contract: destination accepts source\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2215,10 +2327,12 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 				return err
 			}
 
-		} else {
+		} else if *openContract.sourceCheckpoint || *openContract.destinationCheckpoint {
 			// finalize one or more checkpoints
 
 			if *openContract.sourceCheckpoint {
+				glog.Infof("%sforce close contract: finalize source checkpoint\n", tag)
+
 				err := CloseContract(
 					ctx,
 					openContract.contractId,
@@ -2232,6 +2346,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 			}
 
 			if *openContract.destinationCheckpoint {
+				glog.Infof("%sforce close contract: finalize destination checkpoint\n", tag)
 				err := CloseContract(
 					ctx,
 					openContract.contractId,
@@ -2244,6 +2359,54 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time) error {
 				}
 			}
 
+		} else {
+			// nothing to settle, just close the transaction
+			// this is done in bulk at the top
+			closeMalformedContract(tag, openContract)
+		}
+
+		return nil
+	}
+
+	nextIndex := parallel
+	var nextIndexLock sync.Mutex
+	getAndIncrNextIndex := func() int {
+		nextIndexLock.Lock()
+		defer nextIndexLock.Unlock()
+
+		i := nextIndex
+		nextIndex += 1
+		return i
+	}
+
+	workerCtxs := []context.Context{}
+	for j0 := range parallel {
+		workerCtx, workerCancel := context.WithCancel(ctx)
+		workerCtxs = append(workerCtxs, workerCtx)
+		go func() {
+			defer workerCancel()
+			for j := j0; j < len(openContracts); j = getAndIncrNextIndex() {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
+
+				openContract := openContracts[j]
+				tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j, len(openContracts))
+				err := closeContract(tag, openContracts[j])
+				if err != nil {
+					glog.Infof("%sforce close contract err = %s\n", tag, err)
+					closeMalformedContract(tag, openContract)
+				}
+			}
+		}()
+	}
+
+	// wait for all workers
+	for _, workerCtx := range workerCtxs {
+		select {
+		case <-workerCtx.Done():
 		}
 	}
 

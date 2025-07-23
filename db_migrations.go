@@ -1977,4 +1977,20 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX network_client_connection_error_client_id_error_time ON network_client_connection_error (client_id, error_time)
     `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_active_network_id_create_time ON network_client (active, network_id, create_time)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_network_id_active_client_id
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client
+        ADD COLUMN source_client_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        DROP TABLE network_client_connection_error
+    `),
 }
