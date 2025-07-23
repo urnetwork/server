@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 
-	// "reflect"
 	"bytes"
 	"fmt"
 	"io"
+	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -62,7 +63,7 @@ func wrap[R any](
 	// server.Logger().Printf("Handling %s\n", impl)
 	result, err := impl(session)
 	if err != nil {
-		glog.Infof("[h]impl error (%v): %s\n", impl, err)
+		glog.Infof("[h]impl error: %s\n", err)
 		RaiseHttpError(err, w)
 		return
 	}
@@ -74,6 +75,13 @@ func wrap[R any](
 	}
 
 	JsonFormatter[R](w)(result)
+}
+
+func implName[R any](impl ImplFunction[R]) string {
+	name := runtime.FuncForPC(reflect.ValueOf(impl).Pointer()).Name()
+	// remove all /vXXXX paths in the canonical module
+	name = regexp.MustCompile("/v\\d+").ReplaceAllString(name, "")
+	return name
 }
 
 // guarantees NetworkId+UserId
@@ -94,7 +102,12 @@ func WrapRequireAuthNoGuest[R any](
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
-			return impl(session)
+			r, err := impl(session)
+			if err != nil {
+				// wrap the error to tag the impl
+				err = fmt.Errorf("[%s]%s", implName(impl), err)
+			}
+			return r, err
 		},
 		w,
 		req,
@@ -115,7 +128,12 @@ func WrapRequireAuth[R any](
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
-			return impl(session)
+			r, err := impl(session)
+			if err != nil {
+				// wrap the error to tag the impl
+				err = fmt.Errorf("[%s]%s", implName(impl), err)
+			}
+			return r, err
 		},
 		w,
 		req,
@@ -136,7 +154,12 @@ func WrapRequireClient[R any](
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
-			return impl(session)
+			r, err := impl(session)
+			if err != nil {
+				// wrap the error to tag the impl
+				err = fmt.Errorf("[%s]%s", implName(impl), err)
+			}
+			return r, err
 		},
 		w,
 		req,
@@ -152,7 +175,12 @@ func WrapNoAuth[R any](
 ) {
 	wrap(
 		func(session *session.ClientSession) (R, error) {
-			return impl(session)
+			r, err := impl(session)
+			if err != nil {
+				// wrap the error to tag the impl
+				err = fmt.Errorf("[%s]%s", implName(impl), err)
+			}
+			return r, err
 		},
 		w,
 		req,
