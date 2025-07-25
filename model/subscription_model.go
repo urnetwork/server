@@ -2717,7 +2717,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 func GetOpenTransferByteCount(
 	ctx context.Context,
-	sourceNetworkId server.Id,
+	payerNetworkId server.Id,
 ) ByteCount {
 
 	var openTransferByteCount ByteCount = 0
@@ -2731,10 +2731,10 @@ func GetOpenTransferByteCount(
 			   COALESCE(SUM(transfer_byte_count), 0)
 			FROM transfer_contract
 			WHERE
-			    source_network_id = $1 AND
+			    payer_network_id = $1 AND
 			    open = TRUE
 			`,
-			sourceNetworkId,
+			payerNetworkId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

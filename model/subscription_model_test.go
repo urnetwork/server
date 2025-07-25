@@ -1280,6 +1280,9 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		paidByteCount := ByteCount(0)
 		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
 
+		sourceOpenTransferByteCount := GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
+		assert.Equal(t, sourceOpenTransferByteCount, ByteCount(0))
+
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
@@ -1288,7 +1291,9 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 			assert.Equal(t, err, nil)
 
 			sourceOpenTransferByteCount := GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
-			assert.Equal(t, sourceOpenTransferByteCount, usedTransferByteCount)
+
+			// x2 since data is tied up in transfer escrow and companion transfer escrow
+			assert.Equal(t, sourceOpenTransferByteCount, usedTransferByteCount*2)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
 			assert.Equal(t, err, nil)
