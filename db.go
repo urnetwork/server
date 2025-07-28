@@ -123,6 +123,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			"pool_health_check_period":      healthCheckPeriod,
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
 			"default_transaction_read_only": "on",
+			"default_transaction_isolation": "read committed",
 		}
 		glog.Infof("[db]options = %s\n", options)
 		optionsPairs := []string{}
@@ -889,16 +890,18 @@ func parseSpec(spec string) (columnNames []string, pgTypes []string) {
 }
 
 func DbMaintenance(ctx context.Context) {
-	Tx(ctx, func(tx PgTx) {
+	/*
+		Tx(ctx, func(tx PgTx) {
 
-		RaisePgResult(tx.Exec(
-			ctx,
-			`VACUUM ANALYZE`,
-		))
+			RaisePgResult(tx.Exec(
+				ctx,
+				`VACUUM ANALYZE`,
+			))
 
-		// RaisePgResult(tx.Exec(
-		// 	ctx,
-		// 	`VACUUM FULL`,
-		// ))
-	})
+			// RaisePgResult(tx.Exec(
+			// 	ctx,
+			// 	`VACUUM FULL`,
+			// ))
+		})
+	*/
 }

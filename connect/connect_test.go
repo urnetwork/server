@@ -410,7 +410,7 @@ func testConnect(
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 600 * time.Second
+	receiveTimeout := 900 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	var messageContentSizes []ByteCount
@@ -486,6 +486,9 @@ func testConnect(
 		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
 		settings.TransportTlsSettings.EnableSelfSign = true
 		settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+		settings.ConnectionAnnounceTimeout = 0
+		// settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
+		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
 
 		routes := []*router.Route{

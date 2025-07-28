@@ -34,7 +34,8 @@ const InitialTransferBalance = 32 * model.Gib
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
 const RefreshTransferBalanceDuration = 30 * time.Hour
-const RefreshTransferBalanceTimeout = 24 * time.Hour
+
+// const RefreshTransferBalanceTimeout = 24 * time.Hour
 
 const RefreshSupporterTransferBalance = 600 * model.Gib
 const RefreshFreeTransferBalance = 60 * model.Gib
@@ -132,11 +133,21 @@ var playRefreshToken = sync.OnceValue(func() string {
 // if wallet, show a button to refresh, and to withdraw
 
 type SubscriptionBalanceResult struct {
-	BalanceByteCount          model.ByteCount          `json:"balance_byte_count"`
+	/*
+	 * StartBalanceByteCount - The available balance the user starts the day with
+	 */
+	StartBalanceByteCount model.ByteCount `json:"start_balance_byte_count"`
+	/**
+	 * BalanceByteCount - The remaining balance the user has available
+	 */
+	BalanceByteCount model.ByteCount `json:"balance_byte_count"`
+	/**
+	 * OpenTransferByteCount - The total number of bytes tied up in open transfers
+	 */
+	OpenTransferByteCount     model.ByteCount          `json:"open_transfer_byte_count"`
 	CurrentSubscription       *Subscription            `json:"current_subscription,omitempty"`
 	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
-	WalletInfo                *CircleWalletInfo        `json:"wallet_info,omitempty"`
 	UpdateTime                time.Time                `json:"update_time"`
 }
 
@@ -150,9 +161,13 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	transferBalances := model.GetActiveTransferBalances(session.Ctx, session.ByJwt.NetworkId)
 
 	netBalanceByteCount := model.ByteCount(0)
+	startBalanceByteCount := model.ByteCount(0)
 	for _, transferBalance := range transferBalances {
 		netBalanceByteCount += transferBalance.BalanceByteCount
+		startBalanceByteCount += transferBalance.StartBalanceByteCount
 	}
+
+	openTransferByteCount := model.GetOpenTransferByteCount(session.Ctx, session.ByJwt.NetworkId)
 
 	var currentSubscription *Subscription
 	if model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter) {
@@ -164,16 +179,13 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	// FIXME
 	pendingPayout := model.ByteCount(0)
 
-	// ignore any error with circle,
-	// since the model won't allow the wallet to enter a corrupt state
-	walletInfo, _ := findMostRecentCircleWallet(session)
-
 	return &SubscriptionBalanceResult{
 		BalanceByteCount:          netBalanceByteCount,
+		StartBalanceByteCount:     startBalanceByteCount,
+		OpenTransferByteCount:     openTransferByteCount,
 		CurrentSubscription:       currentSubscription,
 		ActiveTransferBalances:    transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
-		WalletInfo:                walletInfo,
 		UpdateTime:                server.NowUtc(),
 	}, nil
 }
@@ -1234,13 +1246,16 @@ type RefreshTransferBalancesResult struct {
 }
 
 func ScheduleRefreshTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	year, month, day := server.NowUtc().Date()
+	runAt := time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
 	task.ScheduleTaskInTx(
 		tx,
 		RefreshTransferBalances,
 		&RefreshTransferBalancesArgs{},
 		clientSession,
 		task.RunOnce("refresh_transfer_balances"),
-		task.RunAt(server.NowUtc().Add(RefreshTransferBalanceTimeout)),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
 	)
 }
 

@@ -16,35 +16,64 @@ func ConnectNetworkClient(
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
-) server.Id {
-	connectionId := model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
-	// server.Logger().Printf("Parse client address: %s", clientAddress)
+	retryLocationTimeout time.Duration,
+) (connectionId server.Id, clientAddressHash []byte, err error) {
+	var clientIp string
+	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+	if err != nil {
+		return
+	}
 
-	if ipStr, _, err := server.ParseClientAddress(clientAddress); err == nil {
+	locationErr := SetConnectionLocation(ctx, connectionId, clientIp)
+	if locationErr != nil && 0 < retryLocationTimeout {
+		// keep the client ip in memory and do not persist to task, etc
+		// the retry remains active as long as the context (which should be the connection context)
 		go server.HandleError(func() {
-			SetConnectionLocation(ctx, connectionId, ipStr)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(retryLocationTimeout):
+				}
+
+				locationErr := SetConnectionLocation(ctx, connectionId, clientIp)
+				if locationErr == nil {
+					return
+				}
+			}
 		})
 	}
-	return connectionId
+
+	return
 }
+
+// FIXME store the result in a db by client address hash
+// FIXME the client ip should be in memory only, never persisted
+// FIXME consider using dbip+a latency test for quality metrics
 
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
-	ipStr string,
+	clientIp string,
 ) error {
-	location, connectionLocationScores, err := GetLocationForIp(ctx, ipStr)
+	location, connectionLocationScores, err := GetLocationForIp(ctx, clientIp)
 	if err != nil {
 		// server.Logger().Printf("Get ip for location error: %s", err)
-		glog.Infof("[ncc][%s]Could not find client location. Skipping. err = %s\n", connectionId, err)
+		glog.Infof("[ncc][%s]could not find client location. err = %s\n", connectionId, err)
 		return err
 	}
 
 	model.CreateLocation(ctx, location)
-	model.SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+	err = model.SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+	if err != nil {
+		// server.Logger().Printf("Get ip for location error: %s", err)
+		glog.Infof("[ncc][%s]could set connection location. err = %s\n", connectionId, err)
+		return err
+	}
 	return nil
 }
 
+/*
 func SetMissingConnectionLocations(ctx context.Context, minTime time.Time) {
 	connectionIpStrs := map[server.Id]string{}
 
@@ -56,9 +85,9 @@ func SetMissingConnectionLocations(ctx context.Context, minTime time.Time) {
 				    network_client_connection.connection_id,
 				    network_client_connection.client_address
 				FROM network_client_connection
-				
+
 				LEFT JOIN network_client_location ON network_client_location.connection_id = network_client_connection.connection_id
-				
+
 				WHERE
 					network_client_connection.connect_time < $1 AND
 					network_client_connection.connected AND
@@ -89,3 +118,4 @@ func SetMissingConnectionLocations(ctx context.Context, minTime time.Time) {
 		SetConnectionLocation(ctx, connectionId, ipStr)
 	}
 }
+*/

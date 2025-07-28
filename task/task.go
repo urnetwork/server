@@ -46,7 +46,7 @@ import (
 
 // IMPORTANT: this is hard coded into the `db_migrations`
 // IMPORTANT: if you change this number, you must also change the schema
-const BlockSizeSeconds = 60
+const BlockSizeSeconds = 1
 
 var DefaultMaxTime = 60 * time.Minute
 var ReleaseTimeout = 30 * time.Second
@@ -214,7 +214,7 @@ func ScheduleTaskInTx[T any, R any](
 			ON CONFLICT (run_once_key) DO UPDATE SET
 				run_at = LEAST(pending_task.run_at, $6),
 				run_priority = LEAST(pending_task.run_priority, $8),
-				run_max_time_seconds = LEAST(pending_task.run_max_time_seconds, $9)
+				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $9)
 		`,
 		taskId,
 		taskTarget.TargetFunctionName(),

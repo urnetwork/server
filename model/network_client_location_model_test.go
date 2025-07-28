@@ -144,12 +144,13 @@ func TestBestAvailableProviders(t *testing.T) {
 		clientId := server.NewId()
 
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId := ConnectNetworkClient(
+		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
 			"0.0.0.0:0",
 			handlerId,
 		)
+		assert.Equal(t, err, nil)
 
 		secretKeys := map[ProvideMode][]byte{
 			ProvideModePublic: make([]byte, 32),
@@ -259,13 +260,14 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			clientSessions[clientId] = clientSession
 
 			handlerId := CreateNetworkClientHandler(ctx)
-			connectionId := ConnectNetworkClient(
+			connectionId, _, _, _, err := ConnectNetworkClient(
 				ctx,
 				clientId,
 				// use a unique ip per connection
 				fmt.Sprintf("0.0.0.%d:0", i),
 				handlerId,
 			)
+			assert.Equal(t, err, nil)
 
 			secretKeys := map[ProvideMode][]byte{
 				ProvideModePublic: make([]byte, 32),

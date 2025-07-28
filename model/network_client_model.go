@@ -2,19 +2,23 @@ package model
 
 import (
 	"context"
+	// "crypto/sha256"
 	"errors"
-	"net"
-	"net/netip"
+	// "net"
+	// "net/netip"
 	"regexp"
-	"strings"
+	"strconv"
+	// "strings"
+	// "sync"
 
 	// "bytes"
 	"fmt"
 	"time"
 
-	// FIXME replace with sha with salt
-	"github.com/twmb/murmur3"
+	// "github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
+
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -72,11 +76,14 @@ func FindClientNetwork(
 	return
 }
 
+// FIXME source client id. if source, tag the client as ancillary and just copy the device id from the source
+// FIXME get network clients to include the source network id
 type AuthNetworkClientArgs struct {
 	// if omitted, a new client_id is created
-	ClientId    *server.Id `json:"client_id,omitempty"`
-	Description string     `json:"description"`
-	DeviceSpec  string     `json:"device_spec"`
+	ClientId       *server.Id `json:"client_id,omitempty"`
+	SourceClientId *server.Id `json:"source_client_id,omitempty"`
+	Description    string     `json:"description"`
+	DeviceSpec     string     `json:"device_spec"`
 }
 
 type AuthNetworkClientResult struct {
@@ -100,26 +107,58 @@ func AuthNetworkClient(
 			createTime := server.NowUtc()
 
 			clientId := server.NewId()
-			deviceId := server.NewId()
+			var deviceId server.Id
 
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO device (
-						device_id,
-						network_id,
-						device_name,
-						device_spec,
-						create_time
-					)
-					VALUES ($1, $2, $3, $4, $5)
-				`,
-				deviceId,
-				session.ByJwt.NetworkId,
-				authClient.Description,
-				authClient.DeviceSpec,
-				createTime,
-			))
+			if authClient.SourceClientId == nil {
+				deviceId = server.NewId()
+
+				server.RaisePgResult(tx.Exec(
+					session.Ctx,
+					`
+						INSERT INTO device (
+							device_id,
+							network_id,
+							device_name,
+							device_spec,
+							create_time
+						)
+						VALUES ($1, $2, $3, $4, $5)
+					`,
+					deviceId,
+					session.ByJwt.NetworkId,
+					authClient.Description,
+					authClient.DeviceSpec,
+					createTime,
+				))
+			} else {
+				// copy the device id from the source
+				// important: validate the source client id is in the same network
+				result, err := tx.Query(
+					session.Ctx,
+					`
+						SELECT
+							device_id
+						FROM network_client
+						WHERE
+							client_id = $1 AND
+							network_id = $2
+					`,
+					*authClient.SourceClientId,
+					session.ByJwt.NetworkId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&deviceId))
+					} else {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								Message: "Client does not exist.",
+							},
+						}
+						return
+					}
+				})
+			}
 
 			server.RaisePgResult(tx.Exec(
 				session.Ctx,
@@ -130,15 +169,17 @@ func AuthNetworkClient(
 						device_id,
 						description,
 						create_time,
-						auth_time
+						auth_time,
+						source_client_id
 					)
-					VALUES ($1, $2, $3, $4, $5, $5)
+					VALUES ($1, $2, $3, $4, $5, $5, $6)
 				`,
 				clientId,
 				session.ByJwt.NetworkId,
 				deviceId,
 				authClient.Description,
 				createTime,
+				authClient.SourceClientId,
 			))
 
 			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId).Sign()
@@ -166,7 +207,7 @@ func AuthNetworkClient(
 				authClient.Description,
 				server.NowUtc(),
 			))
-			if tag.RowsAffected() != 1 {
+			if tag.RowsAffected() == 0 {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Client does not exist.",
@@ -211,7 +252,7 @@ func AuthNetworkClient(
 				deviceId,
 				authClient.DeviceSpec,
 			))
-			if tag.RowsAffected() != 1 {
+			if tag.RowsAffected() == 0 {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Device does not exist.",
@@ -254,8 +295,12 @@ func RemoveNetworkClient(
 		tag, err := tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_client SET active = false
-				WHERE client_id = $1 AND network_id = $2
+				UPDATE network_client
+				SET
+					active = false
+				WHERE
+					client_id = $1 AND
+					network_id = $2
 			`,
 			removeClient.ClientId,
 			session.ByJwt.NetworkId,
@@ -324,6 +369,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 			`
 				SELECT
 					network_client.client_id,
+					network_client.source_client_id,
 					network_client.description,
 					network_client.device_id,
 					device.device_name,
@@ -364,6 +410,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				var deviceSpec_ *string
 				server.Raise(result.Scan(
 					&clientInfo.ClientId,
+					&clientInfo.SourceClientId,
 					&clientInfo.Description,
 					&clientInfo.DeviceId,
 					&deviceName_,
@@ -480,16 +527,63 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		}
 	})
 
+	if clientsResult != nil && 0 < len(clientsResult.Clients) {
+		keys := []string{}
+		for _, clientInfo := range clientsResult.Clients {
+			keys = append(keys, pendingClientConnectionKey(clientInfo.ClientId))
+		}
+		server.Redis(session.Ctx, func(r server.RedisClient) {
+			unixMilliStrs, err := r.MGet(session.Ctx, keys...).Result()
+			if err != nil {
+				clientsErr = err
+				return
+			}
+			for i, clientInfo := range clientsResult.Clients {
+				clientId := clientInfo.ClientId
+				if unixMilliStrs[i] != nil {
+					unixMilliStr := unixMilliStrs[i].(string)
+					unixMilli, err := strconv.ParseInt(unixMilliStr, 10, 64)
+					if err == nil {
+						connectTime := time.UnixMilli(unixMilli)
+						pendingClientConnection := &NetworkClientConnection{
+							ClientId:     clientId,
+							ConnectionId: clientId,
+							ConnectTime:  connectTime,
+						}
+						clientInfo.Connections = append(clientInfo.Connections, pendingClientConnection)
+					}
+				}
+			}
+		})
+	}
+
 	return clientsResult, clientsErr
 }
 
+func pendingClientConnectionKey(clientId server.Id) string {
+	return fmt.Sprintf("pending_client_connection_%s", clientId)
+}
+
+func SetPendingNetworkClientConnection(ctx context.Context, clientId server.Id, expire time.Duration) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		unixMilliStr := strconv.FormatInt(server.NowUtc().UnixMilli(), 10)
+		r.Set(
+			ctx,
+			pendingClientConnectionKey(clientId),
+			unixMilliStr,
+			expire,
+		)
+	})
+}
+
 type NetworkClient struct {
-	ClientId    server.Id `json:"client_id"`
-	DeviceId    server.Id `json:"device_id"`
-	NetworkId   server.Id `json:"network_id"`
-	Description string    `json:"description"`
-	DeviceName  string    `json:"device_name"`
-	DeviceSpec  string    `json:"device_spec"`
+	ClientId       server.Id  `json:"client_id"`
+	SourceClientId *server.Id `json:"source_client_id,omitempty"`
+	DeviceId       server.Id  `json:"device_id"`
+	NetworkId      server.Id  `json:"network_id"`
+	Description    string     `json:"description"`
+	DeviceName     string     `json:"device_name"`
+	DeviceSpec     string     `json:"device_spec"`
 
 	CreateTime time.Time `json:"create_time"`
 	AuthTime   time.Time `json:"auth_time"`
@@ -632,28 +726,24 @@ func SetProvide(
 	})
 }
 
-func IsAddressConnectedToNetwork(
+func IsIpConnectedToNetwork(
 	ctx context.Context,
-	clientAddress string,
+	clientIp string,
 ) bool {
+	addressHash, err := session.ClientIpHash(clientIp)
+	if err != nil {
+		return false
+	}
 
-	parsedAddr, err := netip.ParseAddr(clientAddress)
-	server.Raise(err)
-
-	mh := murmur3.New128()
-	_, err = mh.Write(parsedAddr.AsSlice())
-	server.Raise(err)
-
-	addressHash := mh.Sum(nil)
-
-	var connected bool
+	connected := false
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT count(*) > 0 FROM network_client_connection
+				SELECT true FROM network_client_connection
 				WHERE client_address_hash = $1 AND connected
+				LIMIT 1
 			`,
 			addressHash,
 		)
@@ -668,10 +758,6 @@ func IsAddressConnectedToNetwork(
 
 }
 
-// matches the first group to the IPV6 address when the input is <ipv6>:<port>
-// example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
-var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
-
 // a client_id can have multiple connections to the platform
 // each connection forms a transmit for the resident transport
 // there is one resident transport
@@ -685,8 +771,22 @@ func ConnectNetworkClient(
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
-) server.Id {
-	var connectionId server.Id
+) (
+	connectionId server.Id,
+	clientIp string,
+	clientPort int,
+	clientIpHash []byte,
+	err error,
+) {
+	clientIp, clientPort, err = session.SplitClientAddress(clientAddress)
+	if err != nil {
+		return
+	}
+
+	clientIpHash, err = session.ClientIpHash(clientIp)
+	if err != nil {
+		return
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
@@ -696,35 +796,7 @@ func ConnectNetworkClient(
 		service, _ := server.Service()
 		block, _ := server.Block()
 
-		columnCount := strings.Count(clientAddress, ":")
-		bracketCount := strings.Count(clientAddress, "[")
-
-		var addressOnly string
-
-		// if the address is malformed, extract the address from the address:port string
-		if columnCount > 1 && bracketCount == 0 {
-			groups := malformedIPV6WithPort.FindStringSubmatch(clientAddress)
-
-			if len(groups) > 1 {
-				addressOnly = groups[1]
-			}
-
-		} else {
-			var err error
-			addressOnly, _, err = net.SplitHostPort(clientAddress)
-			server.Raise(err)
-		}
-
-		parsedAddr, err := netip.ParseAddr(addressOnly)
-		server.Raise(err)
-
-		mh := murmur3.New128()
-		_, err = mh.Write(parsedAddr.AsSlice())
-		server.Raise(err)
-
-		addressHash := mh.Sum(nil)
-
-		_, err = tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_client_connection (
@@ -734,8 +806,8 @@ func ConnectNetworkClient(
 					connection_host,
 					connection_service,
 					connection_block,
-					client_address,
 					client_address_hash,
+					client_address_port,
 					handler_id
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -746,14 +818,13 @@ func ConnectNetworkClient(
 			host,
 			service,
 			block,
-			clientAddress,
-			addressHash,
+			clientIpHash,
+			clientPort,
 			handlerId,
-		)
-		server.Raise(err)
+		))
 	})
 
-	return connectionId
+	return
 }
 
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
@@ -791,6 +862,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`
 				DELETE FROM network_client_connection
 				WHERE
+					connected = false AND
 					disconnect_time < $1
 			`,
 			minTime.UTC(),
@@ -867,6 +939,21 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		      	WHERE network_client.device_id IS NULL
 		    ) t
 			WHERE device.device_id = t.device_id
+			`,
+		))
+
+		// (cascade) remove residents without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_resident
+			USING (
+				SELECT network_client_resident.client_id
+		       	FROM network_client_resident
+					LEFT JOIN network_client ON network_client.client_id = network_client_resident.client_id
+		      	WHERE network_client.client_id IS NULL
+		    ) t
+			WHERE network_client_resident.client_id = t.client_id
 			`,
 		))
 
@@ -969,26 +1056,49 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duratio
 	})
 }
 
-func IsNetworkClientConnected(ctx context.Context, connectionId server.Id) bool {
-	connected := false
+type NetworkClientConnectionStatus struct {
+	Connected    bool
+	ClientExists bool
+}
+
+func (self *NetworkClientConnectionStatus) Err() error {
+	if !self.Connected {
+		return fmt.Errorf("force disconnected")
+	}
+	if !self.ClientExists {
+		return fmt.Errorf("client does not exist")
+	}
+	return nil
+}
+
+func GetNetworkClientConnectionStatus(ctx context.Context, connectionId server.Id) *NetworkClientConnectionStatus {
+	status := &NetworkClientConnectionStatus{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT connected FROM network_client_connection
-				WHERE connection_id = $1
+				SELECT
+					network_client_connection.connected,
+					network_client.client_id IS NOT NULL AS client_exists
+				FROM network_client_connection
+				LEFT JOIN network_client ON
+					network_client.client_id = network_client_connection.client_id
+				WHERE network_client_connection.connection_id = $1
 			`,
 			connectionId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&connected))
+				server.Raise(result.Scan(
+					&status.Connected,
+					&status.ClientExists,
+				))
 			}
 		})
 	})
 
-	return connected
+	return status
 }
 
 // the resident is a transport client that runs on the platform on behalf of a client
@@ -1162,41 +1272,43 @@ func NominateResident(
 	nomination *NetworkClientResident,
 ) (nominated bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					resident_id
-				FROM network_client_resident
-				WHERE
-					client_id = $1 AND
-					instance_id = $2
-				FOR UPDATE
-			`,
-			nomination.ClientId,
-			nomination.InstanceId,
-		)
+		/*
+			result, err := tx.Query(
+				ctx,
+				`
+					SELECT
+						resident_id
+					FROM network_client_resident
+					WHERE
+						client_id = $1 AND
+						instance_id = $2
+					FOR UPDATE
+				`,
+				nomination.ClientId,
+				nomination.InstanceId,
+			)
 
-		hasResident := false
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var residentId server.Id
-				server.Raise(result.Scan(&residentId))
-				if residentIdToReplace != nil && *residentIdToReplace == residentId {
+			hasResident := false
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					var residentId server.Id
+					server.Raise(result.Scan(&residentId))
+					if residentIdToReplace != nil && *residentIdToReplace == residentId {
+						hasResident = true
+					}
+				} else if residentIdToReplace == nil {
 					hasResident = true
 				}
-			} else if residentIdToReplace == nil {
-				hasResident = true
+			})
+
+			// fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
+
+			if !hasResident {
+				// already replaced
+				nominated = false
+				return
 			}
-		})
-
-		// fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
-
-		if !hasResident {
-			// already replaced
-			nominated = false
-			return
-		}
+		*/
 
 		var tag server.PgTag
 		if residentIdToReplace == nil {
@@ -1262,7 +1374,7 @@ func NominateResident(
 				residentIdToReplace,
 			))
 		}
-		if tag.RowsAffected() != 1 {
+		if tag.RowsAffected() == 0 {
 			nominated = false
 			return
 		}
@@ -1495,5 +1607,63 @@ func Testing_CreateDevice(
 			deviceName,
 			createTime,
 		))
+	})
+}
+
+var errorIpv4 = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}`)
+var errorIpv4Port = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}:[0-9]+`)
+var errorIpv6 = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?`)
+var errorIpv6Port = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?:[0-9]+`)
+
+func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, connectionId server.Id, op string, err error) {
+	ttl := 5 * time.Minute
+	warnThreshold := int64(30)
+
+	// scrub the error message
+	errorMessage := err.Error()
+	errorMessage = errorIpv4Port.ReplaceAllString(errorMessage, `ipv4:port`)
+	errorMessage = errorIpv4.ReplaceAllString(errorMessage, `ipv4`)
+	errorMessage = errorIpv6Port.ReplaceAllString(errorMessage, `ipv6:port`)
+	errorMessage = errorIpv6.ReplaceAllString(errorMessage, `ipv6`)
+
+	networkKey := fmt.Sprintf("client_error_network_%s", networkId)
+	clientKey := fmt.Sprintf("client_error_client_%s", clientId)
+	networkErrorMessageKey := fmt.Sprintf("client_error_network_%s_message_%s", networkId, errorMessage)
+	clientErrorMessageKey := fmt.Sprintf("client_error_client_%s_message_%s", clientId, errorMessage)
+
+	server.Redis(ctx, func(r server.RedisClient) {
+
+		networkCount, err := r.Incr(ctx, networkKey).Result()
+		if err == nil {
+			r.Expire(ctx, networkKey, ttl)
+			if networkCount%warnThreshold == 0 {
+				glog.Infof("[ncm][%s]network has a significant amount of connection errors (%d)\n", networkId, networkCount)
+			}
+		}
+
+		clientCount, err := r.Incr(ctx, clientKey).Result()
+		if err == nil {
+			r.Expire(ctx, clientKey, ttl)
+			if clientCount%warnThreshold == 0 {
+				glog.Infof("[ncm][%s]client has a significant amount of connection errors (%d)\n", clientId, clientCount)
+			}
+		}
+
+		networkErrorMessageCount, err := r.Incr(ctx, networkErrorMessageKey).Result()
+		if err == nil {
+			r.Expire(ctx, networkErrorMessageKey, ttl)
+			if networkErrorMessageCount%warnThreshold == 0 {
+				glog.Infof("[ncm][%s]network has a significant count of connection error message (%d): %s\n", networkId, networkErrorMessageCount, errorMessage)
+			}
+		}
+
+		clientErrorMessageCount, err := r.Incr(ctx, clientErrorMessageKey).Result()
+		if err == nil {
+			r.Expire(ctx, clientErrorMessageKey, ttl)
+			if clientErrorMessageCount%warnThreshold == 0 {
+				glog.Infof("[ncm][%s]client has a significant count of connection error message (%d): %s\n", clientId, clientErrorMessageCount, errorMessage)
+			}
+		}
+
 	})
 }

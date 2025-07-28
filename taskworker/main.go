@@ -23,7 +23,7 @@ import (
 
 const RemoveTaskTimeout = 24 * time.Hour
 const RetryTimeoutAfterError = 30 * time.Second
-const PollTimeout = 1 * time.Second
+const PollTimeout = 5 * time.Second
 
 func main() {
 	usage := `BringYour task worker.
@@ -95,12 +95,13 @@ func initTasks(ctx context.Context) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
+		// **important** make sure the required functions are loaded in `initTaskWorker`
 		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
-		work.SchedulePopulateAccountWallets(clientSession, tx)
+		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleCloseExpiredContracts(clientSession, tx)
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
@@ -112,6 +113,8 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx)
+		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
+		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 	})
 }
 
@@ -177,7 +180,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.RemoveDisconnectedNetworkClients,
 			work.RemoveDisconnectedNetworkClientsPost,
 			"bringyour.com/service/taskworker/work.DeleteDisconnectedNetworkClients",
-			"github.com/urnetwork/server/taskworker/work/DeleteDisconnectedNetworkClients",
+			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
 			model.IndexSearchLocations,
@@ -192,6 +195,30 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			controller.AdvancePayment,
 			controller.AdvancePaymentPost,
 			"bringyour.com/bringyour/controller.AdvancePayment",
+		),
+		task.NewTaskTargetWithPost(
+			work.SetMissingConnectionLocations,
+			work.SetMissingConnectionLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveLocationLookupResults,
+			work.RemoveLocationLookupResultsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveCompletedContracts,
+			work.RemoveCompletedContractsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.DbMaintenance,
+			work.DbMaintenancePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.WarmNetworkGetProviderLocations,
+			work.WarmNetworkGetProviderLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredAuthAttempts,
+			work.RemoveExpiredAuthAttemptsPost,
 		),
 	)
 

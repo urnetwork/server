@@ -59,7 +59,7 @@ Usage:
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
-    bringyourctl contracts close-expired
+    bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl task ls
     bringyourctl task rm <task_id>
@@ -85,7 +85,8 @@ Options:
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
     --amount_usd=<amount_usd>   Amount in USD.
     --destination_address=<destination_address>  Destination address.
-    --blockchain=<blockchain>  Blockchain.`
+    --blockchain=<blockchain>  Blockchain.
+    -c --count=<count>	Number to process [default: 1000].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -175,7 +176,7 @@ Options:
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
-			closeExpiredContracts()
+			closeExpiredContracts(opts)
 		}
 		if close, _ := opts.Bool("close"); close {
 			closeContract(opts)
@@ -198,12 +199,13 @@ Options:
 		if populate, _ := opts.Bool("populate"); populate {
 			accountPointsPopulate(opts)
 		}
-	} else if accountPoints, _ := opts.Bool("client"); accountPoints {
-		if populate, _ := opts.Bool("connection"); populate {
-			if fix, _ := opts.Bool("fix"); fix {
-				fixClientConnections(opts)
-			}
-		}
+		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
+		// 	if populate, _ := opts.Bool("connection"); populate {
+		// 		if fix, _ := opts.Bool("fix"); fix {
+		// 			fixClientConnections(opts)
+		// 		}
+		// 	}
+		// }
 	} else if auth, _ := opts.Bool("migrate-user-auth"); auth {
 		migrateUserAuth(opts)
 	} else {
@@ -732,10 +734,20 @@ func adminWalletTransfer(opts docopt.Opts) {
 	fmt.Println("Transaction State: ", res.State)
 }
 
-func closeExpiredContracts() {
+func closeExpiredContracts(opts docopt.Opts) {
 	ctx := context.Background()
 
-	err := model.ForceCloseOpenContractIds(ctx, 1*time.Hour)
+	var err error
+
+	maxCount := 1000
+	if _, ok := opts["--count"]; ok {
+		maxCount, err = opts.Int("--count")
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	_, err = model.ForceCloseOpenContractIds(ctx, time.Now().Add(-1*time.Hour), maxCount, 30)
 	if err != nil {
 		panic(err)
 	}
@@ -868,13 +880,13 @@ func populateTxHashes() {
 	controller.PopulateTxHashes(ctx)
 }
 
-func fixClientConnections(opts docopt.Opts) {
-	ctx := context.Background()
+// func fixClientConnections(opts docopt.Opts) {
+// 	ctx := context.Background()
 
-	minTime := time.Now().Add(-30 * time.Second)
+// 	minTime := time.Now().Add(-30 * time.Second)
 
-	controller.SetMissingConnectionLocations(ctx, minTime)
-}
+// 	controller.SetMissingConnectionLocations(ctx, minTime)
+// }
 
 /**
  * delete me after migration

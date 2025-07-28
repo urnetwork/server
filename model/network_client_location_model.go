@@ -995,7 +995,7 @@ func SetConnectionLocation(
 	connectionId server.Id,
 	locationId server.Id,
 	connectionLocationScores *ConnectionLocationScores,
-) {
+) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		// note the network_id is allowed to be nil for a connection without an associated client
 		result, err := tx.Query(
@@ -1022,6 +1022,7 @@ func SetConnectionLocation(
 		})
 
 		if clientId == nil {
+			returnErr = fmt.Errorf("Missing client connection.")
 			return
 		}
 
@@ -1093,6 +1094,7 @@ func SetConnectionLocation(
 			networkId,
 		))
 	})
+	return
 }
 
 type LocationGroupResult struct {
@@ -1166,12 +1168,12 @@ func FindProviderLocations(
 	locationSearchResults := locationSearch.AroundIds(
 		session.Ctx,
 		findLocations.Query,
-		maxSearchDistance,
+		2+maxSearchDistance,
 	)
 	locationGroupSearchResults := locationGroupSearch.AroundIds(
 		session.Ctx,
 		findLocations.Query,
-		maxSearchDistance,
+		2+maxSearchDistance,
 	)
 
 	// server.Logger().Printf("Found location search results: %v\n", locationSearchResults)
@@ -2068,9 +2070,16 @@ func FindProviders2(
 	}
 
 	clientIds := maps.Keys(clientScores)
+
+	// FIXME
+	// 1. shuffle random, latency, reliability
+	// 2. then adjust quality
+	// 3. then sort quality
+
 	// mathrand.Shuffle(len(clientIds), func(i int, j int) {
 	// 	clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 	// })
+	// FIXME change this to an initial reliability shuffle
 	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
 		return float32(clientScore.netTypeScore)
@@ -2089,7 +2098,7 @@ func FindProviders2(
 		clientScore.netTypeScore += cityCount * duplicateCityScore
 	}
 
-	slices.SortFunc(clientIds, func(a server.Id, b server.Id) int {
+	slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
 		clientScoreA := clientScores[a]
 		clientScoreB := clientScores[b]
 

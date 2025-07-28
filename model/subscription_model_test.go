@@ -525,7 +525,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			contractCount += 1
 		}
 
-		ForceCloseOpenContractIds(ctx, 0)
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		// at this point the balance should be half used up
 
@@ -930,7 +930,7 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseOpenContractIds(ctx, 0)
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
@@ -1058,7 +1058,7 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 			}
 		}
 
-		ForceCloseOpenContractIds(ctx, 0)
+		ForceCloseAllOpenContractIds(ctx, time.Now())
 
 		endingTransferBalanceA := GetActiveTransferBalanceByteCount(ctx, networkIdA)
 		endingTransferBalanceB := GetActiveTransferBalanceByteCount(ctx, networkIdB)
@@ -1249,6 +1249,66 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 		assert.Equal(t, addedTransferBalances[networkIdB], transferBalanceB.BalanceByteCount)
 		assert.Equal(t, startTime, transferBalanceB.StartTime)
 		assert.Equal(t, endTime, transferBalanceB.EndTime)
+	})
+}
+
+func TestGetOpenTransferByteCount(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+		netRevenue := UsdToNanoCents(10.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+
+		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret: balanceCode.Secret,
+		}, sourceSession)
+
+		paid := NanoCents(0)
+		paidByteCount := ByteCount(0)
+		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
+
+		sourceOpenTransferByteCount := GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
+		assert.Equal(t, sourceOpenTransferByteCount, ByteCount(0))
+
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+
+			companionTransferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+			transferEscrow, err := CreateCompanionTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, usedTransferByteCount, 1*time.Hour)
+			assert.Equal(t, err, nil)
+
+			sourceOpenTransferByteCount := GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
+
+			// x2 since data is tied up in transfer escrow and companion transfer escrow
+			assert.Equal(t, sourceOpenTransferByteCount, usedTransferByteCount*2)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			CloseContract(ctx, companionTransferEscrow.ContractId, sourceId, ByteCount(0), false)
+			CloseContract(ctx, companionTransferEscrow.ContractId, destinationId, ByteCount(0), false)
+
+			sourceOpenTransferByteCount = GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
+			assert.Equal(t, sourceOpenTransferByteCount, ByteCount(0))
+
+			paidByteCount += usedTransferByteCount
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
 	})
 }
 

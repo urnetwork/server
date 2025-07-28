@@ -115,7 +115,7 @@ func ApplyDbMigrations(ctx context.Context) {
 
 // style: use varchar not ENUM
 // style: in queries with two+ tables, use fully qualified column names
-
+// FIXME perf: CREATE INDEX should always use CONCURRENTLY - we need to use raw connections for the sql, and the db to mark raw connections as not read only
 var migrations = []any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
 	//  'provider_offline',
@@ -274,6 +274,7 @@ var migrations = []any{
     `),
 	// the index of user_auth is covered by the unique index
 
+	// MIGRATED client_ipv4/client_ip moved to client_address_hash/client_port
 	// an attempt any of:
 	// - network create
 	// - login
@@ -835,8 +836,6 @@ var migrations = []any{
         CREATE INDEX account_payment_payment_plan ON account_payment (payment_plan_id, payment_id)
     `),
 
-	// column `user_auth_attempt.client_ipv4` is deprecated; TODO remove at a future date
-	// index `user_auth_attempt_client_ipv4` is deprecated; TODO remove at a future date
 	newSqlMigration(`
         ALTER TABLE user_auth_attempt ALTER client_ipv4 DROP NOT NULL
     `),
@@ -1256,7 +1255,7 @@ var migrations = []any{
 
 	newCodeMigration(migration_20240124_PopulateDevice),
 
-	// ALTERED the run_at_block size is 1 minute = 60 seconds
+	// ALTERED the run_at_block size is 1 second
 	// extract(epoch ...) is epoch in seconds
 	// https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
 	newSqlMigration(`
@@ -1584,7 +1583,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        ALTER TABLE  network_client_connection ADD client_address_hash BYTEA NULL
+        ALTER TABLE network_client_connection ADD client_address_hash BYTEA NULL
     `),
 
 	newSqlMigration(`
@@ -1836,6 +1835,163 @@ var migrations = []any{
 
 	newSqlMigration(`
         DROP INDEX transfer_balance_network_id_active_paid_end_time
+    `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_client_address_hash_connected
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_connected_client_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_connected_connection_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_disconnect_time
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_network_id_create_time_client_id
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_resident_host_port
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS pending_task_release_time
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_balance_purchase_token
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_open_destination_id
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_client_id ON network_client_connection (connected, client_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_connected_connection_id ON network_client_connection (connected, connection_id)
+    `),
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connected_client_id
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_disconnect_time_connection_id ON network_client_connection (disconnect_time, connection_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_resident_host ON network_client_resident (resident_host, resident_id)
+    `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX network_client_connection_disconnect_time_connection_id
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection
+        ALTER COLUMN client_address SET DEFAULT '',
+        ADD COLUMN client_address_port int NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection
+        DROP COLUMN client_address
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_create_time ON transfer_contract (open, create_time, contract_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE user_auth_attempt
+        ADD COLUMN client_address_hash BYTEA,
+        ADD COLUMN client_address_port int NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_attempt_client_address_hash_client_port_attempt_time ON user_auth_attempt (client_address_hash, client_address_port, attempt_time)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX user_auth_attempt_client_address
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)
+    `),
+
+	newSqlMigration(`
+	    ALTER TABLE user_auth_attempt
+	    DROP COLUMN client_ip,
+	    DROP COLUMN client_port
+	`),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_attempt_attempt_time_user_auth_attempt_id ON user_auth_attempt (attempt_time, user_auth_attempt_id)
+    `),
+
+	// clean up unused index
+	newSqlMigration(`
+        DROP INDEX user_auth_attempt_client_ipv4
+    `),
+	newSqlMigration(`
+        ALTER TABLE user_auth_attempt
+        DROP COLUMN client_ipv4
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE pending_task
+        DROP COLUMN run_at_block,
+        ADD COLUMN run_at_block bigint GENERATED ALWAYS AS (extract(epoch from run_at)) STORED,
+        DROP COLUMN available_block,
+        ADD COLUMN available_block bigint GENERATED ALWAYS AS (CASE WHEN (release_time <= run_at) THEN (1 + extract(epoch from run_at)) ELSE (1 + extract(epoch from release_time)) END) STORED
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE network_client_connection_error (
+            error_time timestamp NOT NULL DEFAULT now(),
+            network_id uuid NOT NULL,
+            client_id uuid NOT NULL,
+            connection_id uuid NOT NULL,
+            operation varchar(16) NOT NULL,
+            error_message text NOT NULL
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_error_time_network_id_client_id ON network_client_connection_error (error_time, network_id, client_id)
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_network_id_error_time ON network_client_connection_error (network_id, error_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX network_client_connection_error_client_id_error_time ON network_client_connection_error (client_id, error_time)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_active_network_id_create_time ON network_client (active, network_id, create_time)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_network_id_active_client_id
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client
+        ADD COLUMN source_client_id uuid NULL
+    `),
+
+	newSqlMigration(`
+        DROP TABLE network_client_connection_error
     `),
 
 	newSqlMigration(`

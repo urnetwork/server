@@ -9,7 +9,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func TestLegacyByJwt(t *testing.T) {
+func TestByJwtLegacy(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 
@@ -33,7 +33,7 @@ func TestLegacyByJwt(t *testing.T) {
 	})
 }
 
-func TestFullByJwt(t *testing.T) {
+func TestByJwtFull(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 
@@ -64,7 +64,7 @@ func TestFullByJwt(t *testing.T) {
 	})
 }
 
-func TestFullByJwtWithClientId(t *testing.T) {
+func TestByJwtFullWithClientId(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx := context.Background()
 

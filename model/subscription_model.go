@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 
 	// "golang.org/x/exp/maps"
 
@@ -156,8 +157,8 @@ func NanoPointsToPoints(nanoPoints NanoPoints) float64 {
 // 12 months
 const BalanceCodeDuration = 365 * 24 * time.Hour
 
-// up to 4MiB
-const AcceptableTransfersByteDifference = 4 * 1024 * 1024
+// up to 16MiB
+const AcceptableTransfersByteDifference = 16 * 1024 * 1024
 
 const ProviderRevenueShare float64 = 0.5
 
@@ -2081,16 +2082,97 @@ func GetOpenContractIdsForSourceOrDestination(
 	return pairContractIdPartialCloseParties
 }
 
+func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("Done.")
+		default:
+		}
+		c, err := ForceCloseOpenContractIds(ctx, minTime, 1000, 1)
+		if err != nil {
+			return err
+		}
+		if c == 0 {
+			return nil
+		}
+	}
+}
+
 // closes all open contracts with no update in the last `timeout`
 // cases handled:
 // - no closes
 // - single close
 // - one or more checkpoints
-func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error {
+func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount int, parallel int) (closeCount int64, err error) {
+
+	/*
+		// force close contracts where there is nothing to do
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE transfer_contract
+				SET
+			        outcome = $5,
+			        close_time = $6
+				FROM (
+					SELECT
+			            t.contract_id
+
+			        FROM (
+			            SELECT
+			                transfer_contract.contract_id,
+			                transfer_contract.source_id,
+			                transfer_contract.destination_id
+
+			            FROM transfer_contract
+
+			            WHERE
+			                transfer_contract.open AND
+			                transfer_contract.create_time <= $3
+
+			            LIMIT $4
+
+			        ) t
+
+			        LEFT JOIN contract_close source_contract_close ON
+			            source_contract_close.contract_id = t.contract_id AND
+			            source_contract_close.party = $1
+
+			        LEFT JOIN contract_close destination_contract_close ON
+			            destination_contract_close.contract_id = t.contract_id AND
+			            destination_contract_close.party = $2
+
+			        WHERE
+			        	destination_contract_close.contract_id IS NOT NULL AND
+			        	source_contract_close.contract_id IS NOT NULL
+			    ) t
+
+			    WHERE
+			        transfer_contract.contract_id = t.contract_id
+
+				`,
+				ContractPartySource,
+				ContractPartyDestination,
+				minTime.UTC(),
+				maxCount,
+				ContractOutcomeSettled,
+				server.NowUtc(),
+			))
+
+			if c := tag.RowsAffected(); 0 < c {
+				glog.Infof("[sm]force closed %d malformed contracts\n", c)
+				closeCount += c
+			}
+		})
+	*/
+
 	type OpenContract struct {
 		contractId    server.Id
 		sourceId      server.Id
 		destinationId server.Id
+		dispute       bool
 
 		sourceCloseTime             *time.Time
 		sourceUsedTransferByteCount *ByteCount
@@ -2108,9 +2190,10 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 			ctx,
 			`
                 SELECT
-                    transfer_contract.contract_id,
-                    transfer_contract.source_id,
-                    transfer_contract.destination_id,
+                    t.contract_id,
+                    t.source_id,
+                    t.destination_id,
+                    t.dispute,
 
                     source_contract_close.close_time AS source_close_time,
                     source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
@@ -2120,26 +2203,35 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
                     destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
                     destination_contract_close.checkpoint AS destination_checkpoint
 
-                FROM transfer_contract
+                FROM (
+                    SELECT
+                        transfer_contract.contract_id,
+                        transfer_contract.source_id,
+                        transfer_contract.destination_id,
+                        transfer_contract.dispute
+
+                    FROM transfer_contract
+
+                    WHERE
+                        transfer_contract.open AND
+                        transfer_contract.create_time <= $3
+
+                    LIMIT $4
+                ) t
 
                 LEFT JOIN contract_close source_contract_close ON
-                    source_contract_close.contract_id = transfer_contract.contract_id AND
+                    source_contract_close.contract_id = t.contract_id AND
                     source_contract_close.party = $1
 
                 LEFT JOIN contract_close destination_contract_close ON
-                    destination_contract_close.contract_id = transfer_contract.contract_id AND
+                    destination_contract_close.contract_id = t.contract_id AND
                     destination_contract_close.party = $2
-
-                WHERE
-                    transfer_contract.open AND
-                    transfer_contract.create_time <= $3 AND
-                    (source_contract_close.close_time IS NULL OR source_contract_close.close_time <= $3) AND
-                    (destination_contract_close.close_time IS NULL OR destination_contract_close.close_time <= $3)
 
             `,
 			ContractPartySource,
 			ContractPartyDestination,
-			server.NowUtc().Add(-timeout),
+			minTime.UTC(),
+			maxCount,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2149,6 +2241,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 					&openContract.contractId,
 					&openContract.sourceId,
 					&openContract.destinationId,
+					&openContract.dispute,
 					&openContract.sourceCloseTime,
 					&openContract.sourceUsedTransferByteCount,
 					&openContract.sourceCheckpoint,
@@ -2162,10 +2255,45 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 		})
 	})
 
-	for _, openContract := range openContracts {
-		// fmt.Printf("FORCE CLOSE %s\n", openContract.contractId)
-		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
+	glog.Infof("[sm]found %d contracts to close\n", len(openContracts))
+
+	closeMalformedContract := func(tag string, openContract *OpenContract) {
+		glog.Infof("%sforce close malformed contract\n", tag)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+                    UPDATE transfer_contract
+                    SET
+                        outcome = $2,
+                        close_time = $3
+                    WHERE
+                        contract_id = $1
+                `,
+				openContract.contractId,
+				ContractOutcomeSettled,
+				server.NowUtc(),
+			))
+		})
+	}
+
+	closeContract := func(tag string, openContract *OpenContract) error {
+		if openContract.dispute {
+			// FIXME
+			glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			var err error
+			server.Tx(ctx, func(tx server.PgTx) {
+				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
+				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			})
+			if err != nil {
+				return err
+			}
+
+		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
+			glog.Infof("%sforce close contract: both sides\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2191,6 +2319,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 
 		} else if openContract.sourceCloseTime == nil {
 			// source accepts destination
+			glog.Infof("%sforce close contract: source accepts destination\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2205,6 +2334,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 
 		} else if openContract.destinationCloseTime == nil {
 			// destination accepts source
+			glog.Infof("%sforce close contract: destination accepts source\n", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2217,10 +2347,12 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 				return err
 			}
 
-		} else {
+		} else if *openContract.sourceCheckpoint || *openContract.destinationCheckpoint {
 			// finalize one or more checkpoints
 
 			if *openContract.sourceCheckpoint {
+				glog.Infof("%sforce close contract: finalize source checkpoint\n", tag)
+
 				err := CloseContract(
 					ctx,
 					openContract.contractId,
@@ -2234,6 +2366,7 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 			}
 
 			if *openContract.destinationCheckpoint {
+				glog.Infof("%sforce close contract: finalize destination checkpoint\n", tag)
 				err := CloseContract(
 					ctx,
 					openContract.contractId,
@@ -2246,10 +2379,64 @@ func ForceCloseOpenContractIds(ctx context.Context, timeout time.Duration) error
 				}
 			}
 
+		} else {
+			// nothing to settle, just close the transaction
+			var err error
+			server.Tx(ctx, func(tx server.PgTx) {
+				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			})
+			if err != nil {
+				return err
+			}
 		}
+
+		return nil
 	}
 
-	return nil
+	nextIndex := parallel
+	var nextIndexLock sync.Mutex
+	getAndIncrNextIndex := func() int {
+		nextIndexLock.Lock()
+		defer nextIndexLock.Unlock()
+
+		i := nextIndex
+		nextIndex += 1
+		return i
+	}
+
+	workerCtxs := []context.Context{}
+	for j0 := range parallel {
+		workerCtx, workerCancel := context.WithCancel(ctx)
+		workerCtxs = append(workerCtxs, workerCtx)
+		go func() {
+			defer workerCancel()
+			for j := j0; j < len(openContracts); j = getAndIncrNextIndex() {
+				select {
+				case <-workerCtx.Done():
+					return
+				default:
+				}
+
+				openContract := openContracts[j]
+				tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
+				err := closeContract(tag, openContracts[j])
+				if err != nil {
+					glog.Infof("%sforce close contract err = %s\n", tag, err)
+					closeMalformedContract(tag, openContract)
+				}
+			}
+		}()
+	}
+
+	// wait for all workers
+	for _, workerCtx := range workerCtxs {
+		select {
+		case <-workerCtx.Done():
+		}
+	}
+	closeCount += int64(len(openContracts))
+
+	return
 }
 
 type ContractClose struct {
@@ -2536,15 +2723,23 @@ func AddRefreshTransferBalanceToAllNetworks(
 	supporterTransferBalances map[bool]ByteCount,
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
+
+	type supporterStatus struct {
+		supporter           bool
+		netRevenueNanoCents NanoCents
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
-		networkSupporters := map[server.Id]bool{}
+		networkSupporterStatuses := map[server.Id]supporterStatus{}
 
 		result, err := tx.Query(
 			ctx,
 			`
 				SELECT
 					network.network_id,
-					(subscription_renewal.network_id IS NOT NULL) AS supporter
+					subscription_renewal.net_revenue_nano_cents,
+					subscription_renewal.start_time,
+					subscription_renewal.end_time
 				FROM network
 
 				LEFT JOIN subscription_renewal ON
@@ -2559,15 +2754,30 @@ func AddRefreshTransferBalanceToAllNetworks(
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId server.Id
-				var supporter bool
-				server.Raise(result.Scan(&networkId, &supporter))
-				networkSupporters[networkId] = supporter
+				var netRevenueNanoCents *NanoCents
+				var supporterStartTime *time.Time
+				var supporterEndTime *time.Time
+				server.Raise(result.Scan(
+					&networkId,
+					&netRevenueNanoCents,
+					&supporterStartTime,
+					&supporterEndTime,
+				))
+				status := supporterStatus{
+					supporter: false,
+				}
+				if netRevenueNanoCents != nil {
+					supportDurationFraction := float64(endTime.Sub(startTime)/time.Second) / float64(supporterEndTime.Sub(*supporterStartTime)/time.Second)
+					status.supporter = true
+					status.netRevenueNanoCents = NanoCents(supportDurationFraction * float64(*netRevenueNanoCents))
+				}
+				networkSupporterStatuses[networkId] = status
 			}
 		})
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for networkId, supporter := range networkSupporters {
-				balanceByteCount := supporterTransferBalances[supporter]
+			for networkId, status := range networkSupporterStatuses {
+				balanceByteCount := supporterTransferBalances[status.supporter]
 				batch.Queue(
 					`
 		                INSERT INTO transfer_balance (
@@ -2577,9 +2787,10 @@ func AddRefreshTransferBalanceToAllNetworks(
 		                    end_time,
 		                    start_balance_byte_count,
 		                    net_revenue_nano_cents,
+		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $5)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5)
 		            `,
 					server.NewId(),
 					networkId,
@@ -2587,6 +2798,7 @@ func AddRefreshTransferBalanceToAllNetworks(
 					endTime,
 					balanceByteCount,
 					0,
+					status.netRevenueNanoCents,
 				)
 				addedTransferBalances[networkId] = balanceByteCount
 			}
@@ -2603,7 +2815,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			ctx,
 			`
 			DELETE FROM transfer_balance
-			WHERE 
+			WHERE
 				end_time <= $1
 			`,
 			minTime.UTC(),
@@ -2618,7 +2830,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			WHERE
 			    transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
 			    account_payment.payment_id = transfer_escrow_sweep.payment_id AND
-			    account_payment.completed AND complete_time <= $1
+			    account_payment.completed AND account_payment.complete_time <= $1
 			`,
 			minTime.UTC(),
 		))
@@ -2690,4 +2902,41 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			minTime.UTC(),
 		))
 	})
+}
+
+func GetOpenTransferByteCount(
+	ctx context.Context,
+	payerNetworkId server.Id,
+) ByteCount {
+
+	var openTransferByteCount ByteCount = 0
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+			   COALESCE(SUM(transfer_byte_count), 0)
+			FROM transfer_contract
+			WHERE
+			    payer_network_id = $1 AND
+			    open = TRUE
+			`,
+			payerNetworkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+
+				server.Raise(result.Scan(
+					&openTransferByteCount,
+				))
+
+			}
+		})
+
+	})
+
+	return openTransferByteCount
+
 }

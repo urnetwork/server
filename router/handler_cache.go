@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-func Cache[R any](
+func CacheNoAuth[R any](
 	impl ImplFunction[*R],
 	key string,
 	ttl time.Duration,
@@ -26,22 +26,36 @@ func Cache[R any](
 			}
 		}
 
-		value, err := impl(clientSession)
-		if err != nil {
-			return nil, err
-		}
-
-		// store the value in parallel
-		go func() {
-			valueJson, err := json.Marshal(value)
-			if err == nil {
-				server.Redis(clientSession.Ctx, func(r server.RedisClient) {
-					// ignore the error
-					r.Set(clientSession.Ctx, key, string(valueJson), ttl).Err()
-				})
-			}
-		}()
-
-		return value, nil
+		return WarmCacheNoAuth(clientSession, impl, key, ttl, false)
 	}
+}
+
+func WarmCacheNoAuth[R any](
+	clientSession *session.ClientSession,
+	impl ImplFunction[*R],
+	key string,
+	ttl time.Duration,
+	force bool,
+) (*R, error) {
+	value, err := impl(clientSession)
+	if err != nil {
+		return nil, err
+	}
+
+	// store the value in parallel
+	go func() {
+		valueJson, err := json.Marshal(value)
+		if err == nil {
+			server.Redis(clientSession.Ctx, func(r server.RedisClient) {
+				// ignore the error
+				if force {
+					r.Set(clientSession.Ctx, key, string(valueJson), ttl).Err()
+				} else {
+					r.SetNX(clientSession.Ctx, key, string(valueJson), ttl).Err()
+				}
+			})
+		}
+	}()
+
+	return value, nil
 }

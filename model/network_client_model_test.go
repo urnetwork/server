@@ -17,26 +17,27 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		clientId := server.NewId()
 
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId := ConnectNetworkClient(
+		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
 			"0.0.0.0:0",
 			handlerId,
 		)
+		assert.Equal(t, err, nil)
 
-		err := HeartbeatNetworkClientHandler(ctx, handlerId)
+		err = HeartbeatNetworkClientHandler(ctx, handlerId)
 		assert.Equal(t, err, nil)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		select {
@@ -60,24 +61,25 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 		clientId := server.NewId()
 
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId := ConnectNetworkClient(
+		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
 			"2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894",
 			handlerId,
 		)
+		assert.Equal(t, err, nil)
 
-		err := HeartbeatNetworkClientHandler(ctx, handlerId)
+		err = HeartbeatNetworkClientHandler(ctx, handlerId)
 		assert.Equal(t, err, nil)
 
 		time.Sleep(1 * time.Second)
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		time.Sleep(1 * time.Second)
@@ -99,24 +101,25 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		clientId := server.NewId()
 
 		handlerId := CreateNetworkClientHandler(ctx)
-		connectionId := ConnectNetworkClient(
+		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
 			clientId,
 			"0.0.0.0:0",
 			handlerId,
 		)
+		assert.Equal(t, err, nil)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
 
-		connected := IsNetworkClientConnected(ctx, connectionId)
+		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
-		err := DisconnectNetworkClient(ctx, connectionId)
+		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.Equal(t, err, nil)
 
-		connected = IsNetworkClientConnected(ctx, connectionId)
+		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
 		RemoveDisconnectedNetworkClients(ctx, time.Now())
@@ -125,3 +128,5 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 	})
 }
+
+// FIXME test GetNetworkClients, SetPendingNetworkClientConnection
