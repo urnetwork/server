@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"syscall"
+
 	// "time"
 
 	"github.com/docopt/docopt-go"
@@ -79,6 +80,12 @@ Options:
 		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
 		router.NewRoute("GET", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
 		router.NewRoute("POST", "/network/ranking-visibility", handlers.SetNetworkLeaderboardPublic),
+
+		// block locations
+		router.NewRoute("POST", "/network/block-location", handlers.NetworkBlockLocation),
+		router.NewRoute("POST", "/network/unblock-location", handlers.NetworkUnblockLocation),
+		router.NewRoute("GET", "/network/blocked-locations", handlers.GetNetworkBlockedLocations),
+
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),
