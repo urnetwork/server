@@ -1993,4 +1993,13 @@ var migrations = []any{
 	newSqlMigration(`
         DROP TABLE network_client_connection_error
     `),
+
+	newSqlMigration(`
+        CREATE TABLE exclude_network_client_location (
+        	network_id uuid NOT NULL,
+            client_location_id uuid NOT NULL,
+
+            PRIMARY KEY (network_id, client_location_id)
+        )
+    `),
 }
