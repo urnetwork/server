@@ -54,30 +54,47 @@ func NetworkUnblockLocation(
 
 }
 
+type BlockedLocation struct {
+	LocationId   server.Id `json:"location_id"`
+	LocationName string    `json:"location_name"`
+}
+
 func GetNetworkBlockedLocations(
 	ctx context.Context,
 	networkId server.Id,
-) []server.Id {
+) []BlockedLocation {
 
-	var locations []server.Id
+	var locations []BlockedLocation
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		rows, _ := tx.Query(
+		result, err := tx.Query(
 			ctx,
 			`
-				SELECT client_location_id
+				SELECT
+					exclude_network_client_location.client_location_id,
+					location.location_name
 				FROM exclude_network_client_location
+				INNER JOIN location on location.location_id = exclude_network_client_location.client_location_id
 				WHERE network_id = $1
 			`,
 			networkId,
 		)
 
-		for rows.Next() {
-			var locationId server.Id
-			rows.Scan(&locationId)
-			locations = append(locations, locationId)
-		}
+		server.WithPgResult(result, err, func() {
+
+			for result.Next() {
+
+				var blockedLocation BlockedLocation
+				server.Raise(result.Scan(
+					&blockedLocation.LocationId,
+					&blockedLocation.LocationName,
+				))
+
+				locations = append(locations, blockedLocation)
+			}
+
+		})
 
 	})
 

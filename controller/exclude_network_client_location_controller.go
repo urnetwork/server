@@ -63,8 +63,8 @@ func NetworkUnblockLocation(
  */
 
 type GetNetworkBlockedLocationsResult struct {
-	LocationIds []server.Id                      `json:"location_ids"`
-	Error       *GetNetworkBlockedLocationsError `json:"error,omitempty"`
+	BlockedLocations []model.BlockedLocation          `json:"blocked_locations"`
+	Error            *GetNetworkBlockedLocationsError `json:"error,omitempty"`
 }
 
 type GetNetworkBlockedLocationsError struct {
@@ -75,10 +75,10 @@ func GetNetworkBlockedLocations(
 	session *session.ClientSession,
 ) (*GetNetworkBlockedLocationsResult, error) {
 
-	locationIds := model.GetNetworkBlockedLocations(session.Ctx, session.ByJwt.NetworkId)
+	locations := model.GetNetworkBlockedLocations(session.Ctx, session.ByJwt.NetworkId)
 
 	return &GetNetworkBlockedLocationsResult{
-		LocationIds: locationIds,
+		BlockedLocations: locations,
 	}, nil
 
 }

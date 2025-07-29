@@ -7,6 +7,7 @@ import (
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -22,21 +23,28 @@ func TestNetworkBlocking(t *testing.T) {
 			ClientId:  &clientId,
 		})
 
-		locationId := server.NewId()
+		location := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Kamakura",
+			Region:       "Kanagawa",
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		model.CreateLocation(ctx, location)
 
 		/**
 		 * block location
 		 */
 		NetworkBlockLocation(
 			&NetworkBlockLocationArgs{
-				LocationId: locationId,
+				LocationId: location.LocationId,
 			},
 			userSession,
 		)
 
 		result, err := GetNetworkBlockedLocations(userSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(result.LocationIds), 1)
+		assert.Equal(t, len(result.BlockedLocations), 1)
 
 		/**
 		 * unblock location
@@ -44,14 +52,14 @@ func TestNetworkBlocking(t *testing.T) {
 
 		NetworkUnblockLocation(
 			&NetworkUnblockLocationArgs{
-				LocationId: locationId,
+				LocationId: location.LocationId,
 			},
 			userSession,
 		)
 
 		result, err = GetNetworkBlockedLocations(userSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, len(result.LocationIds), 0)
+		assert.Equal(t, len(result.BlockedLocations), 0)
 
 	})
 }
