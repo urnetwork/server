@@ -41,6 +41,8 @@ func TestNetworkLocationBlocking(t *testing.T) {
 		assert.Equal(t, len(blockedLocations), 1)
 		assert.Equal(t, blockedLocations[0].LocationId, location1.LocationId)
 		assert.Equal(t, blockedLocations[0].LocationName, location1.City)
+		assert.Equal(t, blockedLocations[0].CountryCode, location1.CountryCode)
+		assert.Equal(t, blockedLocations[0].LocationType, LocationTypeCity)
 
 		// Try and unblock a location that is not blocked
 		NetworkUnblockLocation(ctx, networkIdA, location2.LocationId)
