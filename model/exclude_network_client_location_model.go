@@ -55,8 +55,10 @@ func NetworkUnblockLocation(
 }
 
 type BlockedLocation struct {
-	LocationId   server.Id `json:"location_id"`
-	LocationName string    `json:"location_name"`
+	LocationId   server.Id    `json:"location_id"`
+	LocationName string       `json:"location_name"`
+	LocationType LocationType `json:"location_type"`
+	CountryCode  string       `json:"country_code"`
 }
 
 func GetNetworkBlockedLocations(
@@ -73,7 +75,9 @@ func GetNetworkBlockedLocations(
 			`
 				SELECT
 					exclude_network_client_location.client_location_id,
-					location.location_name
+					location.location_name,
+					location.location_type,
+					location.country_code
 				FROM exclude_network_client_location
 				INNER JOIN location on location.location_id = exclude_network_client_location.client_location_id
 				WHERE network_id = $1
@@ -89,6 +93,8 @@ func GetNetworkBlockedLocations(
 				server.Raise(result.Scan(
 					&blockedLocation.LocationId,
 					&blockedLocation.LocationName,
+					&blockedLocation.LocationType,
+					&blockedLocation.CountryCode,
 				))
 
 				locations = append(locations, blockedLocation)
