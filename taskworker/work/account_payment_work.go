@@ -22,19 +22,9 @@ func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 		now := server.NowUtc()
 		year, month, day := now.Date()
 
-		if day < 7 {
-			// run on the 7th
-			return time.Date(year, month, 7, 0, 0, 0, 0, time.UTC)
-		} else if day < 15 {
-			// run on the 15th
-			return time.Date(year, month, 15, 0, 0, 0, 0, time.UTC)
-		} else if day < 22 {
-			// run on the 22nd
-			return time.Date(year, month, 22, 0, 0, 0, 0, time.UTC)
-		} else {
-			// else run on the 1st of next month
-			return time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
-		}
+		// run on the next Sunday
+		day += 7 - now.Weekday()
+		return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 	}()
 	task.ScheduleTaskInTx(
 		tx,
