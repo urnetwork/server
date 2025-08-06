@@ -74,6 +74,8 @@ Options:
 
 	port, _ := opts.Int("--port")
 
+	server.Warmup()
+
 	glog.Infof(
 		"[connect]serving %s %s on *:%d\n",
 		server.RequireEnv(),

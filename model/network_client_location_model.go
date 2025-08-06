@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"time"
 
 	// "errors"
@@ -21,6 +22,47 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/session"
 )
+
+func init() {
+	server.Warm(func() {
+		countryCodeLocationIds()
+	})
+}
+
+// country code is lowercase
+var countryCodeLocationIds = sync.OnceValue(func() map[string]server.Id {
+	ctx := context.Background()
+
+	countryCodeLocationIds := map[string]server.Id{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				country_code,
+				location_id
+			FROM location
+			WHERE
+				location_type = 'country'
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var countryCode string
+				var locationId server.Id
+				server.Raise(result.Scan(
+					&countryCode,
+					&locationId,
+				))
+				countryCode = strings.ToLower(countryCode)
+				countryCodeLocationIds[countryCode] = locationId
+			}
+		})
+	})
+
+	return countryCodeLocationIds
+})
 
 const DefaultMaxDistanceFraction = float32(0.2)
 
@@ -1846,6 +1888,22 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
+	// the caller ip is used to match against provider excluded lists
+	clientIp, _, err := session.ParseClientIpPort()
+	if err != nil {
+		return nil, err
+	}
+
+	ipInfo, err := server.GetIpInfo(clientIp)
+	if err != nil {
+		return nil, err
+	}
+
+	clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
+	if !ok {
+		glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
+	}
+
 	// use a min block size to reduce db activity
 	findProviders2.Count = max(findProviders2.Count, 8)
 
@@ -1925,8 +1983,15 @@ func FindProviders2(
                     temp_location_ids.location_id = network_client_location.region_location_id OR
                     temp_location_ids.location_id = network_client_location.country_location_id
 
+                LEFT JOIN exclude_network_client_location ON
+                	exclude_network_client_location.client_location_id = $2 AND
+	                exclude_network_client_location.network_id = network_client_location.network_id
+
+                WHERE exclude_network_client_location.network_id IS NULL
+
                 `,
 				ProvideModePublic,
+				clientLocationId,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -2004,12 +2069,19 @@ func FindProviders2(
                         temp_location_group_ids.location_group_id = location_group_member_region.location_group_id OR
                         temp_location_group_ids.location_group_id = location_group_member_country.location_group_id
 
+                    LEFT JOIN exclude_network_client_location ON
+	                	exclude_network_client_location.client_location_id = $2 AND
+		                exclude_network_client_location.network_id = network_client_location.network_id
+
                     WHERE
-                        location_group_member_city.location_id IS NOT NULL OR
-                        location_group_member_region.location_id IS NOT NULL OR
-                        location_group_member_country.location_id IS NOT NULL
+                    	exclude_network_client_location.network_id IS NULL AND (
+	                        location_group_member_city.location_id IS NOT NULL OR
+	                        location_group_member_region.location_id IS NOT NULL OR
+	                        location_group_member_country.location_id IS NOT NULL
+	                    )
                 `,
 				ProvideModePublic,
+				clientLocationId,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {

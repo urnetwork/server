@@ -142,6 +142,8 @@ Options:
 
 	port, _ := opts.Int("--port")
 
+	server.Warmup()
+
 	glog.Infof(
 		"[api]serving %s %s on *:%d\n",
 		server.RequireEnv(),

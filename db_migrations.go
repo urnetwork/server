@@ -2002,4 +2002,8 @@ var migrations = []any{
             PRIMARY KEY (network_id, client_location_id)
         )
     `),
+
+	newSqlMigration(`
+        CREATE INDEX exclude_network_client_location_client_location_id_network_id ON exclude_network_client_location (client_location_id, network_id)
+    `),
 }
