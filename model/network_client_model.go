@@ -6,7 +6,7 @@ import (
 	"errors"
 	// "net"
 	// "net/netip"
-	"regexp"
+	// "regexp"
 	"strconv"
 	// "strings"
 	// "sync"
@@ -730,7 +730,7 @@ func IsIpConnectedToNetwork(
 	ctx context.Context,
 	clientIp string,
 ) bool {
-	addressHash, err := session.ClientIpHash(clientIp)
+	addressHash, err := server.ClientIpHash(clientIp)
 	if err != nil {
 		return false
 	}
@@ -778,12 +778,12 @@ func ConnectNetworkClient(
 	clientIpHash []byte,
 	err error,
 ) {
-	clientIp, clientPort, err = session.SplitClientAddress(clientAddress)
+	clientIp, clientPort, err = server.SplitClientAddress(clientAddress)
 	if err != nil {
 		return
 	}
 
-	clientIpHash, err = session.ClientIpHash(clientIp)
+	clientIpHash, err = server.ClientIpHash(clientIp)
 	if err != nil {
 		return
 	}
@@ -1610,21 +1610,12 @@ func Testing_CreateDevice(
 	})
 }
 
-var errorIpv4 = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}`)
-var errorIpv4Port = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){3,3}:[0-9]+`)
-var errorIpv6 = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?`)
-var errorIpv6Port = regexp.MustCompile(`[0-9]+(?::[0-9]+){,15}(?:::[0-9]+)?:[0-9]+`)
-
 func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, connectionId server.Id, op string, err error) {
 	ttl := 5 * time.Minute
 	warnThreshold := int64(30)
 
 	// scrub the error message
-	errorMessage := err.Error()
-	errorMessage = errorIpv4Port.ReplaceAllString(errorMessage, `ipv4:port`)
-	errorMessage = errorIpv4.ReplaceAllString(errorMessage, `ipv4`)
-	errorMessage = errorIpv6Port.ReplaceAllString(errorMessage, `ipv6:port`)
-	errorMessage = errorIpv6.ReplaceAllString(errorMessage, `ipv6`)
+	errorMessage := server.ScrubIpPort(err.Error())
 
 	networkKey := fmt.Sprintf("client_error_network_%s", networkId)
 	clientKey := fmt.Sprintf("client_error_client_%s", clientId)

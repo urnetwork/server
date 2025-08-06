@@ -4,16 +4,16 @@ import (
 	"context"
 	"net/http"
 	// "strconv"
-	"crypto/sha256"
-	"net"
+	// "crypto/sha256"
+	// "net"
 	"net/netip"
-	"regexp"
-	"strconv"
+	// "regexp"
+	// "strconv"
 	"strings"
-	"sync"
+	// "sync"
 
 	// "bytes"
-	"fmt"
+	// "fmt"
 
 	// "encoding/base64"
 	"errors"
@@ -94,12 +94,12 @@ func (self *ClientSession) Auth(req *http.Request) error {
 }
 
 func (self *ClientSession) ClientIpPort() (string, int, error) {
-	return SplitClientAddress(self.ClientAddress)
+	return server.SplitClientAddress(self.ClientAddress)
 }
 
 func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err error) {
 	var ipStr string
-	ipStr, port, err = SplitClientAddress(self.ClientAddress)
+	ipStr, port, err = server.SplitClientAddress(self.ClientAddress)
 	if err != nil {
 		return
 	}
@@ -109,11 +109,11 @@ func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err err
 
 func (self *ClientSession) ClientAddressHashPort() (clientAddressHash []byte, clientPort int, err error) {
 	var clientIp string
-	clientIp, clientPort, err = SplitClientAddress(self.ClientAddress)
+	clientIp, clientPort, err = server.SplitClientAddress(self.ClientAddress)
 	if err != nil {
 		return
 	}
-	clientAddressHash, err = ClientIpHash(clientIp)
+	clientAddressHash, err = server.ClientIpHash(clientIp)
 	return
 }
 

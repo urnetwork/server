@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"time"
 
 	// "errors"
@@ -29,12 +30,12 @@ func init() {
 }
 
 // country code is lowercase
-var countryCodeLocationIds = sync.Once(func() map[string]server.Id {
+var countryCodeLocationIds = sync.OnceValue(func() map[string]server.Id {
 	ctx := context.Background()
 
 	countryCodeLocationIds := map[string]server.Id{}
 
-	server.Db(ctx, func(conn server.DbConn) {
+	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -54,7 +55,7 @@ var countryCodeLocationIds = sync.Once(func() map[string]server.Id {
 					&countryCode,
 					&locationId,
 				))
-				countryCode = strings.Lower(countryCode)
+				countryCode = strings.ToLower(countryCode)
 				countryCodeLocationIds[countryCode] = locationId
 			}
 		})
@@ -1900,7 +1901,7 @@ func FindProviders2(
 
 	clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
 	if !ok {
-		glog.Warnf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
+		glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
 	}
 
 	// use a min block size to reduce db activity
@@ -1984,7 +1985,7 @@ func FindProviders2(
 
                 LEFT JOIN exclude_network_client_location ON
                 	exclude_network_client_location.client_location_id = $2 AND
-	                exclude_network_client_location.network_id = blocked_location_ids.network_id
+	                exclude_network_client_location.network_id = network_client_location.network_id
 
                 WHERE exclude_network_client_location.network_id IS NULL
 
@@ -2070,7 +2071,7 @@ func FindProviders2(
 
                     LEFT JOIN exclude_network_client_location ON
 	                	exclude_network_client_location.client_location_id = $2 AND
-		                exclude_network_client_location.network_id = blocked_location_ids.network_id
+		                exclude_network_client_location.network_id = network_client_location.network_id
 
                     WHERE
                     	exclude_network_client_location.network_id IS NULL AND (

@@ -1,8 +1,20 @@
 package server
 
+import (
+	"sync"
+)
+
 var warmupLock sync.Mutex
 var warmupUnits []func()
 var warmedUp = false
+
+func WarmupReset() {
+	warmupLock.Lock()
+	defer warmupLock.Unlock()
+
+	warmupUnits = nil
+	warmedUp = false
+}
 
 func Warm(unit func()) {
 	runNow := false

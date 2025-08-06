@@ -2004,6 +2004,6 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE INDEX exclude_network_client_location_client_location_id_network_id (client_location_id, network_id)
+        CREATE INDEX exclude_network_client_location_client_location_id_network_id ON exclude_network_client_location (client_location_id, network_id)
     `),
 }

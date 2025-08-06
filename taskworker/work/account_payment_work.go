@@ -23,7 +23,7 @@ func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 		year, month, day := now.Date()
 
 		// run on the next Sunday
-		day += 7 - now.Weekday()
+		day += 7 - int(now.Weekday())
 		return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 	}()
 	task.ScheduleTaskInTx(
