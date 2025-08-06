@@ -63,4 +63,5 @@ func TestIpInfoPerf(t *testing.T) {
 
 	duration := endTime.Sub(startTime)
 	fmt.Printf("[ip]%d lookups per second\n", int((time.Duration(n)*duration)/time.Second))
+	assert.Equal(t, duration <= 10*time.Second, true)
 }
