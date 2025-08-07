@@ -845,10 +845,9 @@ func AuthPasswordSet(
 
 const ActiveAuthCodeLimitPerNetwork = 500
 const DefaultAuthCodeDuration = 1 * time.Minute
-const AuthCodeMaxDuration = 24 * time.Hour
+const MaxAuthCodeDuration = 24 * time.Hour
 const DefaultAuthCodeUses = 1
-
-// const AuthCodeMaxUses = 4
+const MaxAuthCodeUses = 100
 
 type AuthCodeCreateArgs struct {
 	DurationMinutes float64 `json:"duration_minutes,omitempty"`
@@ -924,7 +923,19 @@ func AuthCodeCreate(
 		authCode := base64.URLEncoding.EncodeToString(authCodeBytes)
 
 		duration := DefaultAuthCodeDuration
+		if 0 < codeCreate.DurationMinutes {
+			duration = time.Duration(codeCreate.DurationMinutes*60*1000) * time.Millisecond
+		}
+		if MaxAuthCodeDuration < duration {
+			duration = MaxAuthCodeDuration
+		}
 		uses := DefaultAuthCodeUses
+		if 0 < codeCreate.Uses {
+			uses = codeCreate.Uses
+		}
+		if MaxAuthCodeUses < uses {
+			uses = MaxAuthCodeUses
+		}
 
 		// the auth code assumes the create time of the root jwt
 		// this is to enable all derivative auth to be expired by expiring the root
