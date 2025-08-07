@@ -2016,7 +2016,8 @@ var migrations = []any{
 			user_auth varchar(256) NOT NULL,
 			create_time timestamp NOT NULL DEFAULT now(),
 
-			PRIMARY KEY (user_id, auth_type)
+			PRIMARY KEY (user_id, auth_type),
+			UNIQUE (user_auth, auth_type)
 		)
 	`),
 	newSqlMigration(`
@@ -2030,7 +2031,8 @@ var migrations = []any{
             verified bool NOT NULL DEFAULT false,
 			create_time timestamp NOT NULL DEFAULT now(),
 
-			PRIMARY KEY (user_id, auth_type)
+			PRIMARY KEY (user_id, auth_type),
+			UNIQUE (user_auth, auth_type)
 		)
 	`),
 	newSqlMigration(`
@@ -2041,7 +2043,8 @@ var migrations = []any{
 			blockchain varchar(32) NOT NULL,
 			create_time timestamp NOT NULL DEFAULT now(),
 
-			PRIMARY KEY (user_id)
+			PRIMARY KEY (user_id),
+			UNIQUE (wallet_address, blockchain)
 		)
 	`),
 }
