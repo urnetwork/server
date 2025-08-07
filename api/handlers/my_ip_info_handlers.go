@@ -13,7 +13,8 @@ import (
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
+	// "github.com/urnetwork/server/session"
+	"github.com/urnetwork/server"
 )
 
 type response struct {
@@ -38,7 +39,7 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		clientAddress = r.RemoteAddr
 	}
 
-	clientIp, _, err := session.SplitClientAddress(clientAddress)
+	clientIp, _, err := server.SplitClientAddress(clientAddress)
 
 	ipInfoRaw, err := controller.GetIPInfo(r.Context(), clientIp)
 	if err != nil {

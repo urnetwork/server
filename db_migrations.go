@@ -1995,6 +1995,19 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
+		CREATE TABLE exclude_network_client_location (
+        	network_id uuid NOT NULL,
+            client_location_id uuid NOT NULL,
+
+            PRIMARY KEY (network_id, client_location_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX exclude_network_client_location_client_location_id_network_id ON exclude_network_client_location (client_location_id, network_id)
+    `),
+
+	newSqlMigration(`
 		CREATE TABLE network_user_auth_sso
 		(
 			user_id uuid NOT NULL,

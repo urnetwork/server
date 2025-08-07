@@ -39,6 +39,8 @@ func (self *TestEnv) Run(callback func()) {
 }
 
 func (self *TestEnv) setup() func() {
+	WarmupReset()
+
 	// tests are allowed only in the `local` env
 	env := RequireEnv()
 	if env != "local" {
