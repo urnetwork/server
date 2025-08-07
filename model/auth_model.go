@@ -762,9 +762,10 @@ func AuthVerify(
 			`
 				UPDATE network_user_auth_password
 				SET verified = true
-				WHERE user_id = $1
+				WHERE user_id = $1 AND user_auth = $2
 			`,
 			userId,
+			userAuth,
 		))
 
 		server.RaisePgResult(tx.Exec(

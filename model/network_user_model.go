@@ -245,43 +245,21 @@ func addUserAuth(
 		/**
 		 * Check if this user_auth is already associated with a different user
 		 */
-		result, queryErr := tx.Query(
+		err := validateUserAuthAvailability(
 			ctx,
-			`
-			SELECT COUNT(*)
-			FROM (
-			    SELECT 1
-			    FROM network_user_auth_sso
-			    WHERE user_auth = $1 AND user_id <> $2
-
-			    UNION
-
-			    SELECT 1
-			    FROM network_user_auth_password
-			    WHERE user_auth = $1 AND user_id <> $2
-			) different_users
-			`,
-			userAuth,
+			tx,
+			*userAuth,
 			args.UserId,
 		)
-
-		conflictCount := 0
-
-		server.WithPgResult(result, queryErr, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&conflictCount))
-			}
-		})
-
-		if conflictCount > 0 {
-			returnErr = fmt.Errorf("user_auth %s already exists for a different user", *userAuth)
+		if err != nil {
+			returnErr = err
 			return
 		}
 
 		/**
 		 * Check if this type of userauth already exists for the user
 		 */
-		result, queryErr = tx.Query(
+		result, queryErr := tx.Query(
 			ctx,
 			`
 			SELECT
@@ -391,6 +369,89 @@ type AddSsoAuthArgs struct {
 	UserId        server.Id   `json:"user_id"`
 }
 
+func validateUserAuthAvailability(
+	ctx context.Context,
+	tx server.PgTx,
+	userAuth string,
+	userId server.Id,
+) error {
+
+	/**
+	 * check if the user_auth is already associated with a different user in sso table
+	 */
+	query, err := tx.Query(
+		ctx,
+		`
+		SELECT user_id
+		   FROM network_user_auth_sso
+		   WHERE user_auth = $1
+		FOR UPDATE
+		`,
+		userAuth,
+	)
+
+	if err != nil {
+		glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
+		return err
+	}
+
+	// conflictCount := 0
+	var ssoUserAuthId *server.Id
+
+	server.WithPgResult(query, err, func() {
+		if query.Next() {
+			server.Raise(
+				query.Scan(
+					&ssoUserAuthId,
+				),
+			)
+		}
+	})
+
+	if ssoUserAuthId != nil && *ssoUserAuthId != userId {
+		// user auth is associated with a different user
+		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
+	}
+
+	/**
+	 * check if the user_auth is already associated with a different user in email/phone + password table
+	 */
+	query, err = tx.Query(
+		ctx,
+		`
+		SELECT user_id
+		   FROM network_user_auth_password
+		   WHERE user_auth = $1
+		FOR UPDATE
+		`,
+		userAuth,
+	)
+
+	if err != nil {
+		glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
+		return err
+	}
+
+	var passwordUserAuthId *server.Id
+
+	server.WithPgResult(query, err, func() {
+		if query.Next() {
+			server.Raise(
+				query.Scan(
+					&passwordUserAuthId,
+				),
+			)
+		}
+	})
+
+	if passwordUserAuthId != nil && *passwordUserAuthId != userId {
+		// user already exists with this user_auth
+		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
+	}
+
+	return nil
+}
+
 func addSsoAuth(
 	args *AddSsoAuthArgs,
 	ctx context.Context,
@@ -403,50 +464,18 @@ func addSsoAuth(
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		/**
-		 * first, check if the user_auth is already associated with a different user
+		 * Check user auth isn't already associated with a different user
 		 */
-		query, err := tx.Query(
+		err := validateUserAuthAvailability(
 			ctx,
-			`
-			SELECT COUNT(*)
-		    FROM (
-		        SELECT user_id
-		        FROM network_user_auth_sso
-		        WHERE user_auth = $1 AND user_id <> $2
-
-		        UNION
-
-		        SELECT user_id
-		        FROM network_user_auth_password
-		        WHERE user_auth = $1 AND user_id <> $2
-		    ) different_users
-			`,
+			tx,
 			parsedAuthJwt.UserAuth,
 			args.UserId,
 		)
-
 		if err != nil {
-			glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
 			returnErr = err
 			return
 		}
-
-		conflictCount := 0
-
-		server.WithPgResult(query, err, func() {
-			if query.Next() {
-				server.Raise(query.Scan(&conflictCount))
-			}
-		})
-
-		if conflictCount > 0 {
-			returnErr = fmt.Errorf("user_auth %s already exists for a different user", parsedAuthJwt.UserAuth)
-			return
-		}
-
-		/**
-		 * No conflicts, insert the new SSO auth
-		 */
 
 		result, err := tx.Exec(
 			ctx,
