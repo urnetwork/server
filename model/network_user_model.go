@@ -740,19 +740,19 @@ type NetworkUserToMigrate struct {
 	UserId        server.Id `json:"user_id"`
 	UserAuth      *string   `json:"user_auth,omitempty"`
 	Verified      bool      `json:"verified"`
-	AuthType      string    `json:"auth_type"`
+	AuthType      *string   `json:"auth_type"`
 	PasswordHash  *[]byte   `json:"-"`
 	PasswordSalt  *[]byte   `json:"-"`
 	AuthJwt       *string   `json:"auth_jwt"`
 	WalletAddress *string   `json:"wallet_address,omitempty"`
-	Blockchain    string    `json:"blockchain"`
+	Blockchain    *string   `json:"wallet_blockchain"`
 }
 
 /**
  * Remove this once migration is complete
  */
 
-func MigrateNetworkUserChildAuths(
+func MigrateNetworkUserChildAuthsOriginal(
 	ctx context.Context,
 ) {
 
@@ -829,12 +829,12 @@ func MigrateNetworkUserChildAuths(
 					}
 				}
 
-				if networkUser.AuthJwt != nil && networkUser.AuthType != "" {
+				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
 
 					/**
 					 * Google or Apple SSO auth
 					 */
-					authJwt, err := ParseAuthJwt(*networkUser.AuthJwt, AuthType(networkUser.AuthType))
+					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
 					if err != nil {
 						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
 						continue
@@ -844,7 +844,172 @@ func MigrateNetworkUserChildAuths(
 						&AddSsoAuthArgs{
 							ParsedAuthJwt: *authJwt,
 							AuthJwt:       *networkUser.AuthJwt,
-							AuthJwtType:   SsoAuthType(networkUser.AuthType),
+							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
+							UserId:        networkUser.UserId,
+						},
+						ctx,
+					)
+
+					if err != nil {
+						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
+					} else {
+						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+					}
+
+				}
+
+				if networkUser.WalletAddress != nil {
+
+					/**
+					 * Wallet auth
+					 */
+
+					_, err := tx.Exec(
+						ctx,
+						`
+							INSERT INTO network_user_auth_wallet
+							(user_id, wallet_address, blockchain)
+							VALUES ($1, $2, $3)
+						`,
+						networkUser.UserId,
+						networkUser.WalletAddress,
+						AuthTypeSolana,
+					)
+
+					if err != nil {
+						glog.Errorf("Error adding wallet auth for user %s: %v", networkUser.UserId, err)
+					} else {
+						glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
+					}
+
+				}
+
+			}
+
+		})
+
+	})
+}
+
+/**
+ * Remove this once migration is complete
+ */
+
+func MigrateNetworkUserChildAuths(
+	ctx context.Context,
+) {
+
+	server.Db(ctx, func(conn server.PgConn) {
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+				    nu.user_id,
+				    nu.user_auth,
+				    nu.verified,
+				    nu.auth_type,
+				    nu.password_hash,
+				    nu.password_salt,
+				    nu.auth_jwt,
+				    nu.wallet_address,
+				    nu.wallet_blockchain
+				FROM
+				    network_user nu
+				LEFT JOIN
+				    network_user_auth_sso sso ON nu.user_id = sso.user_id
+				LEFT JOIN
+				    network_user_auth_password pass ON nu.user_id = pass.user_id
+				LEFT JOIN
+				    network_user_auth_wallet wallet ON nu.user_id = wallet.user_id
+				WHERE
+				    sso.user_id IS NULL
+				    AND pass.user_id IS NULL
+				    AND wallet.user_id IS NULL
+					AND nu.auth_type != 'guest';
+				`,
+			)
+			if err != nil {
+				glog.Infof("Error querying network_user: %v", err)
+				return
+			}
+
+			var networkUsers []NetworkUserToMigrate
+			userCount := 0
+
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+
+					networkUser := NetworkUserToMigrate{}
+
+					result.Scan(
+						&networkUser.UserId,
+						&networkUser.UserAuth,
+						&networkUser.Verified,
+						&networkUser.AuthType,
+						&networkUser.PasswordHash,
+						&networkUser.PasswordSalt,
+						&networkUser.AuthJwt,
+						&networkUser.WalletAddress,
+						&networkUser.Blockchain,
+					)
+
+					networkUsers = append(networkUsers, networkUser)
+					userCount += 1
+				}
+			})
+
+			glog.Infof("Migrating %d network users", userCount)
+
+			i := 0
+
+			for _, networkUser := range networkUsers {
+
+				glog.Infof("Migrating user %d/%d: %s", i+1, userCount, networkUser.UserId)
+
+				i += 1
+
+				if networkUser.UserAuth != nil && networkUser.PasswordHash != nil && networkUser.PasswordSalt != nil {
+
+					/**
+					 * Email or phone + password auth
+					 */
+
+					err := addUserAuth(
+						&AddUserAuthArgs{
+							UserId:       networkUser.UserId,
+							UserAuth:     networkUser.UserAuth,
+							PasswordHash: *networkUser.PasswordHash,
+							PasswordSalt: *networkUser.PasswordSalt,
+							Verified:     networkUser.Verified,
+						},
+						ctx,
+					)
+
+					if err != nil {
+						glog.Errorf("Error adding user auth for user %s: %v", networkUser.UserId, err)
+					} else {
+						glog.Infof("Added user auth for user %s: %s", networkUser.UserId, *networkUser.UserAuth)
+					}
+				}
+
+				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+
+					/**
+					 * Google or Apple SSO auth
+					 */
+					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+					if err != nil {
+						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
+						continue
+					}
+
+					err = addSsoAuth(
+						&AddSsoAuthArgs{
+							ParsedAuthJwt: *authJwt,
+							AuthJwt:       *networkUser.AuthJwt,
+							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
 							UserId:        networkUser.UserId,
 						},
 						ctx,

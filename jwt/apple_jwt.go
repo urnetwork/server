@@ -91,8 +91,13 @@ func ParseAppleJwtUnverified(jwtStr string) (*AppleJwt, error) {
 	var userNameString string
 	var ok bool
 
-	claims := token.Claims.(gojwt.MapClaims)
-	userAuthString, ok = claims["email"].(string)
+	claims := token.Claims.(*gojwt.MapClaims)
+
+	if claims == nil {
+		return nil, errors.New("Malformed jwt.")
+	}
+
+	userAuthString, ok = (*claims)["email"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}

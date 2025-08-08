@@ -95,13 +95,17 @@ func ParseGoogleJwtUnverified(jwtStr string) (*GoogleJwt, error) {
 	var userNameString string
 	var ok bool
 
-	claims := token.Claims.(gojwt.MapClaims)
+	claims := token.Claims.(*gojwt.MapClaims)
 
-	userAuthString, ok = claims["email"].(string)
+	if claims == nil {
+		return nil, errors.New("Malformed jwt.")
+	}
+
+	userAuthString, ok = (*claims)["email"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	userNameString, ok = claims["name"].(string)
+	userNameString, ok = (*claims)["name"].(string)
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
