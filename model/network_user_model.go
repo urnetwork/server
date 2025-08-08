@@ -831,14 +831,10 @@ func MigrateNetworkUserChildAuths(
 
 				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
 
-					glog.Infof("Migrating sso auth")
-					glog.Infof("SSO auth JWT is %s", *networkUser.AuthJwt)
-					glog.Infof("SSO auth type is %s", AuthType(*networkUser.AuthType))
-
 					/**
 					 * Google or Apple SSO auth
 					 */
-					authJwt, err := ParseAuthJwt(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
 					if err != nil {
 						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
 						continue
@@ -857,7 +853,7 @@ func MigrateNetworkUserChildAuths(
 					if err != nil {
 						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
 					} else {
-						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+						glog.Infof("Added SSO auth for user %s", networkUser.UserId)
 					}
 
 				}
