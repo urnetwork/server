@@ -163,6 +163,28 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 	return byJwt, nil
 }
 
+func ParseByJwtUnverified(jwtStr string) (*ByJwt, error) {
+	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+
+	claims := token.Claims.(gojwt.MapClaims)
+
+	claimsJson, err := json.Marshal(claims)
+	if err != nil {
+		return nil, err
+	}
+
+	byJwt := &ByJwt{}
+	err = json.Unmarshal(claimsJson, byJwt)
+	if err != nil {
+		return nil, err
+	}
+
+	return byJwt, nil
+}
+
 func (self *ByJwt) Sign() string {
 	claimsJson, err := json.Marshal(self)
 	if err != nil {

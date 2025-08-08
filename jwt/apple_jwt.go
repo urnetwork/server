@@ -80,3 +80,27 @@ func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
 
 	return nil, errors.New("Could not verify signed token.")
 }
+
+func ParseAppleJwtUnverified(jwtStr string) (*AppleJwt, error) {
+	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+
+	var userAuthString string
+	var userNameString string
+	var ok bool
+
+	claims := token.Claims.(gojwt.MapClaims)
+	userAuthString, ok = claims["email"].(string)
+	if !ok {
+		return nil, errors.New("Malformed jwt.")
+	}
+	userNameString = ""
+
+	jwt := &AppleJwt{
+		UserAuth: userAuthString,
+		UserName: userNameString,
+	}
+	return jwt, nil
+}

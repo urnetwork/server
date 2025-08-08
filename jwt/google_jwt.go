@@ -84,3 +84,31 @@ func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
 
 	return nil, errors.New("Could not verify signed token.")
 }
+
+func ParseGoogleJwtUnverified(jwtStr string) (*GoogleJwt, error) {
+	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+
+	var userAuthString string
+	var userNameString string
+	var ok bool
+
+	claims := token.Claims.(gojwt.MapClaims)
+
+	userAuthString, ok = claims["email"].(string)
+	if !ok {
+		return nil, errors.New("Malformed jwt.")
+	}
+	userNameString, ok = claims["name"].(string)
+	if !ok {
+		return nil, errors.New("Malformed jwt.")
+	}
+
+	jwt := &GoogleJwt{
+		UserAuth: userAuthString,
+		UserName: userNameString,
+	}
+	return jwt, nil
+}
