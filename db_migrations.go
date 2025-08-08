@@ -1995,7 +1995,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-		CREATE TABLE exclude_network_client_location (
+        CREATE TABLE exclude_network_client_location (
         	network_id uuid NOT NULL,
             client_location_id uuid NOT NULL,
 
@@ -2006,45 +2006,4 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX exclude_network_client_location_client_location_id_network_id ON exclude_network_client_location (client_location_id, network_id)
     `),
-
-	newSqlMigration(`
-		CREATE TABLE network_user_auth_sso
-		(
-			user_id uuid NOT NULL,
-			auth_type varchar(32) NOT NULL,
-			auth_jwt text NOT NULL,
-			user_auth varchar(256) NOT NULL,
-			create_time timestamp NOT NULL DEFAULT now(),
-
-			PRIMARY KEY (user_id, auth_type),
-			UNIQUE (user_auth, auth_type)
-		)
-	`),
-	newSqlMigration(`
-		CREATE TABLE network_user_auth_password
-		(
-			user_id uuid NOT NULL,
-			user_auth varchar(256) NOT NULL,
-			auth_type varchar(32) NOT NULL,
-			password_hash bytea NULL,
-            password_salt bytea NULL,
-            verified bool NOT NULL DEFAULT false,
-			create_time timestamp NOT NULL DEFAULT now(),
-
-			PRIMARY KEY (user_id, auth_type),
-			UNIQUE (user_auth, auth_type)
-		)
-	`),
-	newSqlMigration(`
-		CREATE TABLE network_user_auth_wallet
-		(
-			user_id uuid NOT NULL,
-			wallet_address text NOT NULL,
-			blockchain varchar(32) NOT NULL,
-			create_time timestamp NOT NULL DEFAULT now(),
-
-			PRIMARY KEY (user_id),
-			UNIQUE (wallet_address, blockchain)
-		)
-	`),
 }
