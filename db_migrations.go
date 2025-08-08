@@ -1995,7 +1995,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE TABLE exclude_network_client_location (
+		CREATE TABLE exclude_network_client_location (
         	network_id uuid NOT NULL,
             client_location_id uuid NOT NULL,
 
