@@ -454,7 +454,7 @@ func testConnect(
 	// send and forward idle timeouts can be arbirary values
 
 	randPauseTimeout := func() time.Duration {
-		return time.Duration(mathrand.Int63n(int64(pauseTimeout)))
+		return pauseTimeout/4 + time.Duration(mathrand.Int63n(int64(pauseTimeout)))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -724,24 +724,26 @@ func testConnect(
 	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("a", frames)
 		select {
-		case <-ctx.Done():
 		case receiveA <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}:
+		default:
+			panic(errors.New("Receive overflow."))
 		}
 	})
 
 	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
 		// printReceive("b", frames)
 		select {
-		case <-ctx.Done():
 		case receiveB <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
 			provideMode: provideMode,
 		}:
+		default:
+			panic(errors.New("Receive overflow."))
 		}
 	})
 
@@ -877,8 +879,8 @@ func testConnect(
 		messageContent := hex.EncodeToString(messageContentBytes)
 		assert.Equal(t, int(messageContentSize), len(messageContent))
 
-		ackA := make(chan error, 1024)
-		ackB := make(chan error, 1024)
+		ackA := make(chan error, 1024+burstM*2)
+		ackB := make(chan error, 1024+burstM*2)
 
 		for burstSize := 1; burstSize <= burstM; burstSize += 1 {
 			for b := 0; b < 2; b += 1 {
@@ -899,6 +901,7 @@ func testConnect(
 						return
 					case <-time.After(randPauseTimeout()):
 					}
+					fmt.Printf("unpause\n")
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientAInstanceId = server.NewId()
@@ -946,6 +949,7 @@ func testConnect(
 							case <-time.After(randPauseTimeout()):
 							}
 						}
+						fmt.Printf("unpause\n")
 						for j := 0; j < nackM; j += 1 {
 							frame, err := connect.ToFrame(&protocol.SimpleMessage{
 								MessageIndex: uint32(i*nackM + j),
@@ -978,7 +982,11 @@ func testConnect(
 							frame,
 							connect.DestinationId(connect.Id(clientIdB)),
 							func(err error) {
-								ackA <- err
+								select {
+								case ackA <- err:
+								default:
+									panic(errors.New("Ack overflow."))
+								}
 							},
 							-1,
 						)
@@ -1084,6 +1092,7 @@ func testConnect(
 						return
 					case <-time.After(randPauseTimeout()):
 					}
+					fmt.Printf("unpause\n")
 					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientBInstanceId = server.NewId()
@@ -1131,6 +1140,7 @@ func testConnect(
 							case <-time.After(randPauseTimeout()):
 							}
 						}
+						fmt.Printf("unpause\n")
 						for j := 0; j < nackM; j += 1 {
 							opts := []any{
 								connect.NoAck(),
@@ -1174,7 +1184,11 @@ func testConnect(
 							frame,
 							connect.DestinationId(connect.Id(clientIdA)),
 							func(err error) {
-								ackB <- err
+								select {
+								case ackB <- err:
+								default:
+									panic(errors.New("Ack overflow."))
+								}
 							},
 							-1,
 							opts...,
