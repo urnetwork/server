@@ -740,12 +740,12 @@ type NetworkUserToMigrate struct {
 	UserId        server.Id `json:"user_id"`
 	UserAuth      *string   `json:"user_auth,omitempty"`
 	Verified      bool      `json:"verified"`
-	AuthType      string    `json:"auth_type"`
+	AuthType      *string   `json:"auth_type"`
 	PasswordHash  *[]byte   `json:"-"`
 	PasswordSalt  *[]byte   `json:"-"`
 	AuthJwt       *string   `json:"auth_jwt"`
 	WalletAddress *string   `json:"wallet_address,omitempty"`
-	Blockchain    string    `json:"blockchain"`
+	Blockchain    *string   `json:"wallet_blockchain"`
 }
 
 /**
@@ -771,7 +771,7 @@ func MigrateNetworkUserChildAuths(
 					password_salt,
 					auth_jwt,
 					wallet_address,
-					blockchain
+					wallet_blockchain
 				FROM network_user
 				`,
 			)
@@ -829,12 +829,16 @@ func MigrateNetworkUserChildAuths(
 					}
 				}
 
-				if networkUser.AuthJwt != nil && networkUser.AuthType != "" {
+				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+
+					glog.Infof("Migrating sso auth")
+					glog.Infof("SSO auth JWT is %s", *networkUser.AuthJwt)
+					glog.Infof("SSO auth type is %s", AuthType(*networkUser.AuthType))
 
 					/**
 					 * Google or Apple SSO auth
 					 */
-					authJwt, err := ParseAuthJwt(*networkUser.AuthJwt, AuthType(networkUser.AuthType))
+					authJwt, err := ParseAuthJwt(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
 					if err != nil {
 						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
 						continue
@@ -844,7 +848,7 @@ func MigrateNetworkUserChildAuths(
 						&AddSsoAuthArgs{
 							ParsedAuthJwt: *authJwt,
 							AuthJwt:       *networkUser.AuthJwt,
-							AuthJwtType:   SsoAuthType(networkUser.AuthType),
+							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
 							UserId:        networkUser.UserId,
 						},
 						ctx,
