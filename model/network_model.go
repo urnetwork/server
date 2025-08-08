@@ -21,8 +21,6 @@ import (
 
 var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
 
-const MinPasswordLength = 6
-
 type NetworkCheckArgs struct {
 	NetworkName string `json:"network_name"`
 }
@@ -269,7 +267,6 @@ func NetworkCreate(
 			passwordSalt := createPasswordSalt()
 			passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
 
-			// todo - cleanup network_user once UIs are updated
 			_, err = tx.Exec(
 				session.Ctx,
 				`
@@ -285,17 +282,6 @@ func NetworkCreate(
 				passwordSalt,
 			)
 			server.Raise(err)
-
-			// insert into network_user_auth_password
-			addUserAuth(
-				&AddUserAuthArgs{
-					UserId:       createdUserId,
-					UserAuth:     userAuth,
-					PasswordHash: passwordHash,
-					PasswordSalt: passwordSalt,
-				},
-				session.Ctx,
-			)
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -394,17 +380,6 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
-
-				// insert into network_user_auth_sso
-				addSsoAuth(
-					&AddSsoAuthArgs{
-						UserId:        createdUserId,
-						AuthJwt:       *networkCreate.AuthJwt,
-						ParsedAuthJwt: *authJwt,
-						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
-					},
-					session.Ctx,
-				)
 
 				_, err = tx.Exec(
 					session.Ctx,
@@ -525,20 +500,6 @@ func NetworkCreate(
 			if err != nil {
 				panic(err)
 			}
-
-			// insert into network_user_auth_wallet
-			addWalletAuth(
-				&AddWalletAuthArgs{
-					WalletAuth: &WalletAuthArgs{
-						PublicKey:  networkCreate.WalletAuth.PublicKey,
-						Blockchain: networkCreate.WalletAuth.Blockchain,
-						Message:    networkCreate.WalletAuth.Message,
-						Signature:  networkCreate.WalletAuth.Signature,
-					},
-					UserId: createdUserId,
-				},
-				session.Ctx,
-			)
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -1298,21 +1259,6 @@ func GetNetwork(
 	return network
 }
 
-/**
- * todo - better password validation
- */
-func passwordValid(password string) bool {
-	if len(password) < MinPasswordLength {
-		return false
-	}
-	return true
-}
-
-/**
- * ===
- * Testing util functions
- * ===
- */
 func Testing_CreateNetwork(
 	ctx context.Context,
 	networkId server.Id,
@@ -1354,16 +1300,6 @@ func Testing_CreateNetwork(
 			passwordHash,
 			passwordSalt,
 		))
-
-		addUserAuth(
-			&AddUserAuthArgs{
-				UserId:       adminUserId,
-				UserAuth:     &userAuth,
-				PasswordHash: passwordHash,
-				PasswordSalt: passwordSalt,
-				Verified:     true,
-			}, ctx,
-		)
 	})
 
 	return
@@ -1375,8 +1311,6 @@ func Testing_CreateNetworkByWallet(
 	networkName string,
 	adminUserId server.Id,
 	publicKey string,
-	signature string,
-	message string,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -1403,19 +1337,6 @@ func Testing_CreateNetworkByWallet(
 			publicKey,
 			AuthTypeSolana,
 		))
-
-		addWalletAuth(
-			&AddWalletAuthArgs{
-				WalletAuth: &WalletAuthArgs{
-					PublicKey:  publicKey,
-					Signature:  signature,
-					Message:    message,
-					Blockchain: AuthTypeSolana,
-				},
-				UserId: adminUserId,
-			},
-			ctx,
-		)
 	})
 
 }
@@ -1450,51 +1371,6 @@ func Testing_CreateGuestNetwork(
 			AuthTypeGuest,
 			false,
 		))
-
-	})
-
-}
-
-func Testing_CreateNetworkSso(
-	networkId server.Id,
-	userId server.Id,
-	authJwt AuthJwt,
-	// authJwtType SsoAuthType,
-	ctx context.Context,
-) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network (network_id, network_name, admin_user_id)
-				VALUES ($1, $2, $3)
-			`,
-			networkId,
-			"network_name",
-			userId,
-		))
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
-				VALUES ($1, $2, $3, $4)
-			`,
-			userId,
-			"user_name",
-			AuthTypeGoogle,
-			true,
-		))
-
-		addSsoAuth(
-			&AddSsoAuthArgs{
-				ParsedAuthJwt: authJwt,
-				AuthJwt:       "",
-				AuthJwtType:   authJwt.AuthType,
-				UserId:        userId,
-			},
-			ctx,
-		)
 	})
 
 }

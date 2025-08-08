@@ -65,8 +65,6 @@ Usage:
     bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
     bringyourctl account-points populate --plan_id=<plan_id>
-    bringyourctl client connection fix
-    bringyourctl migrate-user-auth
 
 Options:
     -h --help     Show this screen.
@@ -205,9 +203,6 @@ Options:
 		// 			fixClientConnections(opts)
 		// 		}
 		// 	}
-		// }
-	} else if auth, _ := opts.Bool("migrate-user-auth"); auth {
-		migrateUserAuth(opts)
 	} else {
 		fmt.Println(usage)
 	}
@@ -887,13 +882,3 @@ func populateTxHashes() {
 
 // 	controller.SetMissingConnectionLocations(ctx, minTime)
 // }
-
-/**
- * delete me after migration
- */
-func migrateUserAuth(opts docopt.Opts) {
-	ctx := context.Background()
-	model.MigrateNetworkUserChildAuths(ctx)
-
-	fmt.Println("User auth migration completed successfully.")
-}

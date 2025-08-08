@@ -14,7 +14,6 @@ import (
 
 	// "github.com/golang/glog"
 
-	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 
@@ -70,13 +69,6 @@ type AuthLoginResultNetwork struct {
 	ByJwt string `json:"by_jwt"`
 }
 
-type SsoAuthType = string
-
-const (
-	SsoAuthTypeApple  SsoAuthType = "apple"
-	SsoAuthTypeGoogle SsoAuthType = "google"
-)
-
 func AuthLogin(
 	login AuthLoginArgs,
 	session *session.ClientSession,
@@ -90,427 +82,201 @@ func AuthLogin(
 	}
 
 	if login.UserAuth != nil {
-
-		return loginUserAuth(
-			userAuth,
-			session.Ctx,
-		)
-
-	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
-
-		/**
-		 * SSO login
-		 * ===========
-		 * Users can have multiple SSO auths associated with their account (apple, google, etc.)
-		 *
-		 * If a user only has email/phone auth, then attempts login with SSO, we allow it.
-		 * We check the user auths match and associate the new SSO auth
-		 *
-		 * If a user has a different SSO auth (ie google in our DB and tries login with apple)
-		 * we allow the login and associate the new SSO auth
-		 */
-
-		authJwt, _ := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
-
-		if authJwt != nil {
-
-			return handleLoginParsedAuthJwt(
-				&HandleLoginParsedAuthJwtArgs{
-					AuthJwt: *authJwt,
-					// AuthJwtType:       SsoAuthType(*login.AuthJwtType),
-					AuthJwtStr:        *login.AuthJwt,
-					UserAuthAttemptId: userAuthAttemptId,
+		if userAuth == nil {
+			result := &AuthLoginResult{
+				Error: &AuthLoginResultError{
+					Message: "Invalid email or phone number.",
 				},
-				session.Ctx,
-			)
+			}
+			return result, nil
+		}
 
+		var authType *string
+		server.Db(session.Ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				session.Ctx,
+				`
+					SELECT auth_type FROM network_user WHERE user_auth = $1
+				`,
+				userAuth,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&authType))
+				}
+			})
+		})
+		if authType == nil {
+			// new user
+			result := &AuthLoginResult{
+				UserAuth: userAuth,
+			}
+			return result, nil
+		} else {
+			// existing user
+			result := &AuthLoginResult{
+				UserAuth:    userAuth,
+				AuthAllowed: &[]string{*authType},
+			}
+			return result, nil
+		}
+	} else if login.AuthJwt != nil && login.AuthJwtType != nil {
+		// server.Logger().Printf("login JWT %s %s\n", *login.AuthJwt, *login.AuthJwtType)
+		authJwt, _ := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
+		// server.Logger().Printf("login JWT result: %s, %s\n", authJwt, err)
+		if authJwt != nil {
+			var userId *server.Id
+			var authType string
+			var networkId server.Id
+			var networkName string
+			server.Db(session.Ctx, func(conn server.PgConn) {
+				// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+				result, err := conn.Query(
+					session.Ctx,
+					`
+						SELECT
+							network_user.user_id,
+							network_user.auth_type,
+							network.network_id,
+							network.network_name
+						FROM network_user
+						INNER JOIN network ON network.admin_user_id = network_user.user_id
+						WHERE user_auth = $1
+					`,
+					authJwt.UserAuth,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(
+							&userId,
+							&authType,
+							&networkId,
+							&networkName,
+						))
+					}
+				})
+			})
+
+			if userId == nil {
+				// new user
+				return &AuthLoginResult{
+					UserName: &authJwt.UserName,
+				}, nil
+			} else if AuthType(authType) == authJwt.AuthType {
+				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+				isGuestMode := false
+
+				// successful login
+				byJwt := jwt.NewByJwt(
+					networkId,
+					*userId,
+					networkName,
+					isGuestMode,
+				)
+				result := &AuthLoginResult{
+					Network: &AuthLoginResultNetwork{
+						ByJwt: byJwt.Sign(),
+					},
+				}
+				return result, nil
+			} else {
+				// existing user, different auth type
+				result := &AuthLoginResult{
+					UserAuth:    &authJwt.UserAuth,
+					AuthAllowed: &[]string{authType},
+				}
+				return result, nil
+			}
 		}
 	} else if login.WalletAuth != nil {
 
-		return handleLoginWallet(
-			login.WalletAuth,
-			session.Ctx,
+		/**
+		 * Handle wallet login
+		 */
+		isValid, err := VerifySolanaSignature(
+			login.WalletAuth.PublicKey,
+			login.WalletAuth.Message,
+			login.WalletAuth.Signature,
 		)
+		if err != nil {
+			return nil, err
+		}
+
+		if !isValid {
+			return nil, errors.New("invalid signature")
+		}
+
+		/**
+		 * Check if the user exists associated with this public key
+		 */
+
+		var userId *server.Id
+		var authType string
+		var networkId server.Id
+		var networkName string
+		server.Db(session.Ctx, func(conn server.PgConn) {
+			// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
+			result, err := conn.Query(
+				session.Ctx,
+				`
+					SELECT
+						network_user.user_id,
+						network_user.auth_type,
+						network.network_id,
+						network.network_name
+					FROM network_user
+					INNER JOIN network ON network.admin_user_id = network_user.user_id
+					WHERE wallet_address = $1
+				`,
+				login.WalletAuth.PublicKey,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&userId,
+						&authType,
+						&networkId,
+						&networkName,
+					))
+				}
+			})
+		})
+
+		if userId == nil {
+
+			/**
+			 * New wallet user
+			 */
+			return &AuthLoginResult{
+				WalletAuth: login.WalletAuth,
+			}, nil
+
+		} else {
+
+			/**
+			 * Existing wallet user
+			 */
+
+			byJwt := jwt.NewByJwt(
+				networkId,
+				*userId,
+				networkName,
+				false,
+			)
+			result := &AuthLoginResult{
+				Network: &AuthLoginResultNetwork{
+					ByJwt: byJwt.Sign(),
+				},
+			}
+
+			return result, nil
+
+		}
 
 	}
 
 	return nil, errors.New("invalid login")
-}
-
-/**
- * Login attempt for email/phone + password
- */
-func loginUserAuth(
-	userAuth *string,
-	ctx context.Context,
-) (*AuthLoginResult, error) {
-	if userAuth == nil {
-		result := &AuthLoginResult{
-			Error: &AuthLoginResultError{
-				Message: "Invalid email or phone number.",
-			},
-		}
-		return result, nil
-	}
-
-	var authType *string
-
-	// check if exists in network_user_auth_password
-	// check if exists in network_user_auth_sso
-
-	// check for email/phone user auths
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT auth_type FROM network_user_auth_password WHERE user_auth = $1
-			`,
-			userAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&authType))
-			}
-		})
-	})
-
-	/**
-	 * user exists in network_user_auth_password
-	 * forward them along to login with password
-	 */
-	if authType != nil {
-
-		glog.Infof("login auth type is %s", *authType)
-
-		result := &AuthLoginResult{
-			UserAuth:    userAuth,
-			AuthAllowed: &[]string{*authType},
-		}
-		return result, nil
-	}
-
-	/**
-	 * check for sso user auths
-	 */
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT auth_type FROM network_user_auth_sso WHERE user_auth = $1
-			`,
-			userAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&authType))
-			}
-		})
-	})
-
-	if authType == nil {
-		/**
-		 * new user, neither password nor sso auth exists
-		 */
-
-		result := &AuthLoginResult{
-			UserAuth: userAuth,
-		}
-		return result, nil
-	} else {
-		/**
-		 * existing user, sso auth exists
-		 */
-
-		result := &AuthLoginResult{
-			UserAuth:    userAuth,
-			AuthAllowed: &[]string{*authType},
-		}
-		return result, nil
-	}
-}
-
-type HandleLoginParsedAuthJwtArgs struct {
-	AuthJwt           AuthJwt
-	AuthJwtStr        string
-	UserAuthAttemptId server.Id
-}
-
-func handleLoginParsedAuthJwt(
-	args *HandleLoginParsedAuthJwtArgs,
-	ctx context.Context,
-) (*AuthLoginResult, error) {
-
-	var authJwt = args.AuthJwt
-
-	var userId *server.Id
-	var networkId server.Id
-	var networkName string
-
-	ssoExists := false
-	userAuthExists := false
-	userAuthEmailVerified := false
-
-	/**
-	 * get sso auths
-	 */
-	ssoAuths, err := getSsoAuthsByUserAuth(ctx, authJwt.UserAuth)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSO auths: %w", err)
-	}
-	if len(ssoAuths) > 0 {
-		ssoExists = true
-		userId = ssoAuths[0].UserId
-	}
-
-	/**
-	 * check if userAuth exists with this email in network_user_auth_password
-	 */
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-					SELECT
-						user_id,
-						verified
-					FROM network_user_auth_password
-					WHERE user_auth = $1
-				`,
-			authJwt.UserAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var id *server.Id
-				verified := false
-				server.Raise(result.Scan(
-					&id,
-					&verified,
-				))
-				userAuthExists = true
-				userAuthEmailVerified = verified
-
-				if id != nil {
-					glog.Infof("setting user id inside of user auth as %s", id.String())
-					userId = id
-				}
-			}
-		})
-	})
-
-	if userId == nil {
-
-		// new user - direct to create network
-		return &AuthLoginResult{
-			UserName: &authJwt.UserName,
-		}, nil
-	}
-
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_user.user_id,
-					network.network_id,
-					network.network_name
-				FROM network_user
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_id = $1
-			`,
-			userId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(
-					&userId,
-					&networkId,
-					&networkName,
-				))
-			}
-		})
-	})
-
-	if &networkId == nil || &networkName == nil {
-
-		/**
-		 * This scenario should not happen
-		 * If a user has a child network_user auth added, the parent network_user row should always exist
-		 */
-		return nil, fmt.Errorf("network not found for user %s", *userId)
-	}
-
-	if !userAuthEmailVerified && userAuthExists && ssoExists {
-		// todo - mark userauth as verified
-	}
-
-	if !ssoExists && !userAuthExists {
-
-		/**
-		 * this generally would only happen for guest users
-		 * users signing in with SSO would usually have SSO or user auth
-		 * no user auth exists, create a new user
-		 */
-		return &AuthLoginResult{
-			UserName: &authJwt.UserName,
-		}, nil
-	}
-
-	/**
-	 * check for matching sso auth types
-	 */
-	var matchingSso *NetworkUserSsoAuth
-	for _, ssoAuth := range ssoAuths {
-		if ssoAuth.AuthType == authJwt.AuthType {
-			matchingSso = &ssoAuth
-			break
-		}
-	}
-
-	if matchingSso == nil {
-
-		/**
-		 * User is logging in with an SSO that does not exist
-		 * but user has a different SSO
-		 * add the new SSO auth
-		 */
-		addSsoAuth(
-			&AddSsoAuthArgs{
-				ParsedAuthJwt: args.AuthJwt,
-				AuthJwt:       args.AuthJwtStr,
-				AuthJwtType:   args.AuthJwt.AuthType,
-				UserId:        *userId,
-			},
-			ctx,
-		)
-	}
-
-	SetUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId, true)
-
-	isGuestMode := false
-
-	// successful login
-	byJwt := jwt.NewByJwt(
-		networkId,
-		*userId,
-		networkName,
-		isGuestMode,
-	)
-	result := &AuthLoginResult{
-		Network: &AuthLoginResultNetwork{
-			ByJwt: byJwt.Sign(),
-		},
-	}
-	return result, nil
-}
-
-func handleLoginWallet(
-	walletAuth *WalletAuthArgs,
-	ctx context.Context,
-) (*AuthLoginResult, error) {
-	/**
-	 * Handle wallet login
-	 */
-
-	isValid, err := VerifySolanaSignature(
-		walletAuth.PublicKey,
-		walletAuth.Message,
-		walletAuth.Signature,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isValid {
-		return nil, errors.New("invalid signature")
-	}
-
-	walletAuths, err := getWalletAuthsByAddress(
-		ctx,
-		walletAuth.PublicKey,
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet auths: %w", err)
-	}
-
-	if len(walletAuths) <= 0 {
-
-		/**
-		 * New wallet user
-		 */
-		return &AuthLoginResult{
-			WalletAuth: walletAuth,
-		}, nil
-	}
-
-	userId := walletAuths[0].UserId
-
-	if userId == nil {
-		return nil, errors.New("user ID not found for wallet auth")
-	}
-
-	/**
-	 * Check if the user exists associated with this public key
-	 */
-
-	// var userId *server.Id
-	// var authType string
-	var networkId server.Id
-	var networkName string
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_user.user_id,
-					network.network_id,
-					network.network_name
-				FROM network_user
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_id = $1
-			`,
-			userId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(
-					&userId,
-					&networkId,
-					&networkName,
-				))
-			}
-		})
-	})
-
-	// 	/**
-	// 	 * New wallet user
-	// 	 */
-	// 	return &AuthLoginResult{
-	// 		WalletAuth: login.WalletAuth,
-	// 	}, nil
-
-	// } else {
-
-	/**
-	 * Existing wallet user
-	 */
-
-	byJwt := jwt.NewByJwt(
-		networkId,
-		*userId,
-		networkName,
-		false,
-	)
-	result := &AuthLoginResult{
-		Network: &AuthLoginResultNetwork{
-			ByJwt: byJwt.Sign(),
-		},
-	}
-
-	return result, nil
-
 }
 
 // Function to verify a Solana wallet signature
@@ -592,14 +358,14 @@ func AuthLoginWithPassword(
 			session.Ctx,
 			`
 				SELECT
-					network_user_auth_password.user_id,
-					network_user_auth_password.password_hash,
-					network_user_auth_password.password_salt,
-					network_user_auth_password.verified,
+					network_user.user_id,
+					network_user.password_hash,
+					network_user.password_salt,
+					network_user.verified,
 					network.network_id,
 					network.network_name
-				FROM network_user_auth_password
-				INNER JOIN network ON network.admin_user_id = network_user_auth_password.user_id
+				FROM network_user
+				INNER JOIN network ON network.admin_user_id = network_user.user_id
 				WHERE user_auth = $1
 			`,
 			userAuth,
@@ -625,7 +391,6 @@ func AuthLoginWithPassword(
 	// server.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), passwordSalt)
 	if bytes.Equal(passwordHash, loginPasswordHash) {
-
 		if userVerified {
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -663,8 +428,9 @@ func AuthLoginWithPassword(
 			Message: "Invalid user or password.",
 		},
 	}
-
 	return result, nil
+
+	// return nil, errors.New("Invalid login.")
 }
 
 type AuthVerifyArgs struct {
@@ -723,7 +489,7 @@ func AuthVerify(
 					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_verify ON
-					user_auth_verify.user_id = network_user.user_id AND
+					user_auth_verify.user_id = network_user.user_id AND 
 					user_auth_verify.verify_code = $1 AND
 					used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
@@ -760,12 +526,11 @@ func AuthVerify(
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_user_auth_password
+				UPDATE network_user
 				SET verified = true
-				WHERE user_id = $1 AND user_auth = $2
+				WHERE user_id = $1
 			`,
 			userId,
-			userAuth,
 		))
 
 		server.RaisePgResult(tx.Exec(
@@ -1017,7 +782,7 @@ func AuthPasswordSet(
 					network.network_name
 				FROM network_user
 				INNER JOIN user_auth_reset ON
-					user_auth_reset.user_id = network_user.user_id AND
+					user_auth_reset.user_id = network_user.user_id AND 
 					user_auth_reset.reset_code = $1 AND
 					used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_reset.reset_time
@@ -1050,7 +815,7 @@ func AuthPasswordSet(
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_user_auth_password
+				UPDATE network_user
 				SET password_hash = $1, password_salt = $2
 				WHERE user_id = $3
 			`,
