@@ -15,6 +15,8 @@ COPY build/$TARGETPLATFORM/connect /usr/local/sbin/bringyour-connect
 
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
-EXPOSE 80
+EXPOSE 80/tcp
+EXPOSE 53/udp
+EXPOSE 443/udp
 STOPSIGNAL SIGTERM
 CMD ["/usr/local/sbin/bringyour-connect", "-p", "80"]
