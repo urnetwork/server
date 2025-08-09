@@ -182,9 +182,24 @@ func loginUserAuth(
 
 		glog.Infof("login auth type is %s", *authType)
 
+		isUserAuth := false
+		if UserAuthType(*authType) == UserAuthTypeEmail || UserAuthType(*authType) == UserAuthTypePhone {
+			isUserAuth = true
+		}
+
+		authAllowed := []string{*authType}
+
+		if isUserAuth {
+			/**
+			 * We can remove this check once UIs are updated
+			 * This auth type changed from "password" to "email" or "phone"
+			 */
+			authAllowed = append(authAllowed, "password")
+		}
+
 		result := &AuthLoginResult{
 			UserAuth:    userAuth,
-			AuthAllowed: &[]string{*authType},
+			AuthAllowed: &authAllowed,
 		}
 		return result, nil
 	}
