@@ -11,7 +11,8 @@ import (
 	"time"
 
 	// "errors"
-	mathrand "math/rand"
+	// mathrand "math/rand"
+	cryptorand "crypto/rand"
 	"slices"
 
 	// "runtime/debug"
@@ -1435,6 +1436,7 @@ func NewResident(
 }
 
 func (self *Resident) chaos() {
+	defer self.Cancel()
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -1442,9 +1444,14 @@ func (self *Resident) chaos() {
 		case <-time.After(1 * time.Second):
 		}
 
-		if mathrand.Float64() < self.exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
-			glog.Infof("[chaos]%s\n", self.residentId)
-			self.Cancel()
+		bs := make([]byte, 1)
+		cryptorand.Read(bs)
+		b := int(bs[0])
+		c := int(256.0 * self.exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond)
+
+		if b < c {
+			glog.Infof("[chaos][%s]%d <> %d\n", self.residentId, b, c)
+			return
 		}
 	}
 }
