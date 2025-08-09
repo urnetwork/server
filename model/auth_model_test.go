@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-playground/assert/v2"
+	"github.com/golang/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -182,9 +183,17 @@ func TestUserAuthLogin(t *testing.T) {
 		assert.NotEqual(t, result, nil)
 		assert.Equal(t, result.UserAuth, userAuth)
 		assert.NotEqual(t, result.AuthAllowed, nil)
-		assert.Equal(t, len(*result.AuthAllowed), 1)
+
+		for _, authAllowed := range *result.AuthAllowed {
+			assert.NotEqual(t, authAllowed, "")
+			glog.Infof("Auth allowed: %s", authAllowed)
+		}
+
+		assert.Equal(t, len(*result.AuthAllowed), 2)
 		authAllowed := (*result.AuthAllowed)[0]
 		assert.Equal(t, UserAuthType(authAllowed), UserAuthTypeEmail)
+		authAllowed = (*result.AuthAllowed)[1]
+		assert.Equal(t, authAllowed, "password")
 
 		networkUser := GetNetworkUser(ctx, userId)
 		assert.NotEqual(t, networkUser, nil)
