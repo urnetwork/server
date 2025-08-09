@@ -88,18 +88,23 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	glog.V(2).Infof("[tls]try %s\n", hostName)
+	glog.Infof("[tls]try %s\n", hostName)
 
 	if tlsConfig, ok := self.tlsConfigs[hostName]; ok {
+		// note a nil entry might have been entered for a previous key miss
 		if tlsConfig == nil {
+			glog.Infof("[tls]did not find tls config for %s\n", hostName)
 			return nil, fmt.Errorf("Missing key for server name \"%s\".", hostName)
 		}
+		glog.Infof("[tls]found tls config for %s\n", hostName)
 		// make a copy
 		tlsConfigCopy := *tlsConfig
 		return &tlsConfigCopy, nil
 	}
 
 	selfSigned := func() (*tls.Config, error) {
+		glog.Infof("[tls]creating self-signed cert for %s\n", hostName)
+
 		organizationName := hostName
 		validFrom := 180 * 24 * time.Hour
 		validFor := 180 * 24 * time.Hour
@@ -140,11 +145,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	}
 
 	findExplicit := func() (certPath string, keyPath string, ok bool) {
-		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/tls/%s/%s.crt", hostName, hostName))
+		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.crt", hostName, hostName))
 		if err != nil {
 			return
 		}
-		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/tls/%s/%s.key", hostName, hostName))
+		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.key", hostName, hostName))
 		if err != nil {
 			return
 		}
@@ -157,11 +162,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	findWildcard := func(baseName string) (certPath string, keyPath string, ok bool) {
 		// baseName := strings.SplitN(hostName, ".", 2)[1]
 
-		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/tls/star.%s/star.%s.crt", baseName, baseName))
+		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.crt", baseName, baseName))
 		if err != nil {
 			return
 		}
-		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("all/tls/star.%s/star.%s.key", baseName, baseName))
+		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.key", baseName, baseName))
 		if err != nil {
 			return
 		}
@@ -181,6 +186,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 			if self.settings.EnableSelfSign {
 				return selfSigned()
 			} else {
+				glog.Infof("[tls]did not find tls config for %s\n", hostName)
 				// add a missing entry to avoid future lookups
 				self.tlsConfigs[hostName] = nil
 				return nil, fmt.Errorf("Missing lookup key for server name \"%s\".", hostName)
@@ -204,9 +210,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 	}
-
 	self.tlsConfigs[hostName] = tlsConfig
-	// make  acopy
+
+	glog.Infof("[tls]found tls config for %s\n", hostName)
+
+	// make a copy
 	tlsConfigCopy := *tlsConfig
 	return &tlsConfigCopy, nil
 }

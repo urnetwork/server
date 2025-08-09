@@ -498,16 +498,16 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		return
 	}
 	defer packetConn.Close()
-	earlyListener, err := (&quic.Transport{
+	listener, err := (&quic.Transport{
 		Conn: packetConn,
 		// createdConn: true,
 		// isSingleUse: true,
-	}).ListenEarly(tlsConfig, quicConfig)
-	defer earlyListener.Close()
+	}).Listen(tlsConfig, quicConfig)
+	defer listener.Close()
 
 	for {
 		glog.V(2).Infof("[c]h3 wait to accept connection :%d\n", port)
-		earlyConn, err := earlyListener.Accept(handleCtx)
+		conn, err := listener.Accept(handleCtx)
 		if err != nil {
 			glog.Infof("[c]h3 accept connection :%d err = %s\n", port, err)
 			return
@@ -515,7 +515,8 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 
 		glog.V(2).Infof("[c]h3 accept connection :%d\n", port)
 		go func() {
-			err := self.connectQuic(earlyConn)
+			defer conn.CloseWithError(0, "")
+			err := self.connectQuic(conn)
 			if err != nil {
 				glog.V(2).Infof("[c]h3 connection exited :%d err = %s\n", port, err)
 			} else {
@@ -525,12 +526,12 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	}
 }
 
-func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
+func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
 	// find the client ip:port from the addr
-	clientAddress := earlyConn.RemoteAddr().String()
+	clientAddress := conn.RemoteAddr().String()
 
 	rateLimit, err := NewConnectionRateLimit(
 		handleCtx,
@@ -549,7 +550,7 @@ func (self *ConnectHandler) connectQuic(earlyConn *quic.Conn) error {
 		return err
 	}
 
-	stream, err := earlyConn.AcceptStream(handleCtx)
+	stream, err := conn.AcceptStream(handleCtx)
 	if err != nil {
 		return err
 	}
