@@ -178,7 +178,11 @@ type NetworkRemoveResult struct{}
 
 func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
 
-	model.RemoveNetwork(session.Ctx, session.ByJwt.NetworkId)
+	model.RemoveNetwork(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		session.ByJwt.UserId,
+	)
 
 	return &NetworkRemoveResult{}, nil
 }
