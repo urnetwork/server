@@ -195,7 +195,11 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 	return findNetworkResults, nil
 }
 
-func RemoveNetwork(ctx context.Context, networkId server.Id) {
+func RemoveNetwork(
+	ctx context.Context,
+	networkId server.Id,
+	userId server.Id,
+) {
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		// TODO: Remove network user wallets
@@ -208,6 +212,36 @@ func RemoveNetwork(ctx context.Context, networkId server.Id) {
 				WHERE network.network_id = $1 AND network_user.user_id = network.admin_user_id
 			`,
 			networkId,
+		))
+
+		// (cascade) delete network_user_auth_wallet
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_wallet
+				WHERE user_id = $1
+			`,
+			userId,
+		))
+
+		// (cascade) delete network_user_auth_password
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_password
+				WHERE user_id = $1
+			`,
+			userId,
+		))
+
+		// (cascade) delete network_user_auth_sso
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_sso
+				WHERE user_id = $1
+			`,
+			userId,
 		))
 
 		server.RaisePgResult(tx.Exec(
