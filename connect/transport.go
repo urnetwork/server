@@ -51,6 +51,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// use the min value from older version of the client
 		// `platformTransportSettings.PingTimeout`
 		MinPingTimeout:   1 * time.Second,
+		MaxPingTimeout:   15 * time.Second,
 		PingTrackerCount: 4,
 		WriteTimeout:     30 * time.Second,
 		ReadTimeout:      60 * time.Second,
@@ -78,6 +79,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 type ConnectHandlerSettings struct {
 	MinPingTimeout                  time.Duration
+	MaxPingTimeout                  time.Duration
 	PingTrackerCount                int
 	WriteTimeout                    time.Duration
 	ReadTimeout                     time.Duration
@@ -466,10 +468,12 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	defer handleCancel()
 
 	quicConfig := &quic.Config{
-		HandshakeIdleTimeout: self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
-		MaxIdleTimeout:       self.settings.MinPingTimeout * 2,
-		KeepAlivePeriod:      0,
-		Allow0RTT:            true,
+		HandshakeIdleTimeout:    self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
+		MaxIdleTimeout:          self.settings.MaxPingTimeout * 4,
+		KeepAlivePeriod:         0,
+		Allow0RTT:               true,
+		DisablePathMTUDiscovery: true,
+		InitialPacketSize:       1440,
 	}
 
 	// type clientConfig struct {
@@ -493,6 +497,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	if err != nil {
 		return
 	}
+	defer serverConn.Close()
 	packetConn, err := connTransform(serverConn)
 	if err != nil {
 		return
@@ -502,7 +507,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		Conn: packetConn,
 		// createdConn: true,
 		// isSingleUse: true,
-	}).Listen(tlsConfig, quicConfig)
+	}).ListenEarly(tlsConfig, quicConfig)
 	defer listener.Close()
 
 	for {
@@ -513,14 +518,15 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 			return
 		}
 
-		glog.V(2).Infof("[c]h3 accept connection :%d\n", port)
+		glog.Infof("[c]h3 accept connection :%d\n", port)
 		go func() {
 			defer conn.CloseWithError(0, "")
+
 			err := self.connectQuic(conn)
 			if err != nil {
-				glog.V(2).Infof("[c]h3 connection exited :%d err = %s\n", port, err)
+				glog.Infof("[c]h3 connection exited :%d err = %s\n", port, err)
 			} else {
-				glog.V(2).Infof("[c]h3 connection exited :%d\n", port)
+				glog.Infof("[c]h3 connection exited :%d\n", port)
 			}
 		}()
 	}

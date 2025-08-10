@@ -26,7 +26,8 @@ const PpMaxHeaderSize = 2048
 
 func DefaultWarpPpSettings() *PpSettings {
 	return &PpSettings{
-		MaxPacketSize:     1500,
+		MaxPacketSize: 1500,
+		// **important** this must be > proxy_timeout set in the nginx stream
 		ProxyTimeout:      45 * time.Second,
 		MaxDiscardPackets: 10,
 	}
