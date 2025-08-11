@@ -40,7 +40,7 @@ Usage:
     bringyourctl stats add
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
-    bringyourctl network remove --network_id=<network_id>
+    bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
     bringyourctl balance-code create
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
@@ -78,6 +78,7 @@ Options:
     --user_auth=<user_auth>
     --network_name=<network_name>
     --network_id=<network_id>
+    --user_id=<user_id>
     --secret=<secret>
 
     --contract_id=<contract_id> The contract to close
@@ -332,12 +333,17 @@ func networkRemove(opts docopt.Opts) {
 	ctx := context.Background()
 
 	networkIdStr, _ := opts.String("--network_id")
+	userIdStr, _ := opts.String("--user_id")
 
 	networkId, err := server.ParseId(networkIdStr)
 	if err != nil {
 		panic(err)
 	}
-	model.RemoveNetwork(ctx, networkId)
+	userId, err := server.ParseId(userIdStr)
+	if err != nil {
+		panic(err)
+	}
+	model.RemoveNetwork(ctx, networkId, userId)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

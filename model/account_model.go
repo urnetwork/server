@@ -204,6 +204,9 @@ func RemoveNetwork(
 
 		// TODO: Remove network user wallets
 
+		// FIXME do we need to check that the user is the admin?
+		// FIXME normally we would enforce the access control by passing in a clientSession
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -213,6 +216,11 @@ func RemoveNetwork(
 			`,
 			networkId,
 		))
+
+		// FIXME add network_id to:
+		// - network_user_auth_wallet
+		// - network_user_auth_password
+		// - network_user_auth_sso
 
 		// (cascade) delete network_user_auth_wallet
 		server.RaisePgResult(tx.Exec(
