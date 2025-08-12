@@ -7,7 +7,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const ReliabilityBlockSize = 60 * time.Second
+const ReliabilityBlockDuration = 60 * time.Second
 
 type ConnectionReliabilityStats struct {
 	ReceiveMessageCount        uint64
@@ -15,7 +15,7 @@ type ConnectionReliabilityStats struct {
 	SendMessageCount           uint64
 	SendByteCount              ByteCount
 	ProvideEnabledCount        uint64
-	ProvideChangeCount         uint64
+	ProvideChangedCount        uint64
 	ConnectionEstablishedCount uint64
 	ConnectionNewCount         uint64
 }
@@ -28,7 +28,7 @@ func AddConnectionReliabilityStats(
 	statsTime time.Time,
 	stats *ConnectionReliabilityStats,
 ) {
-	blockNumber := statsTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)
+	blockNumber := statsTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -50,14 +50,14 @@ func AddConnectionReliabilityStats(
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (block_number, client_address_hash, network_id, client_id) DO UPDATE
 			SET
-				connection_new_count = connection_new_count + $5,
-		        connection_established_count = connection_established_count + $6,
-		        provide_enabled_count = provide_enabled_count + $7,
-		        provide_changed_count = provide_changed_count + $8,
-		        receive_message_count = receive_message_count + $9,
-		        receive_byte_count = receive_byte_count + $10,
-		        send_message_count = send_message_count + $11,
-		        send_byte_count = send_byte_count + $12
+				connection_new_count = client_reliability.connection_new_count + $5,
+		        connection_established_count = client_reliability.connection_established_count + $6,
+		        provide_enabled_count = client_reliability.provide_enabled_count + $7,
+		        provide_changed_count = client_reliability.provide_changed_count + $8,
+		        receive_message_count = client_reliability.receive_message_count + $9,
+		        receive_byte_count = client_reliability.receive_byte_count + $10,
+		        send_message_count = client_reliability.send_message_count + $11,
+		        send_byte_count = client_reliability.send_byte_count + $12
 			`,
 			blockNumber,
 			clientAddressHash,
@@ -66,7 +66,7 @@ func AddConnectionReliabilityStats(
 			stats.ConnectionNewCount,
 			stats.ConnectionEstablishedCount,
 			stats.ProvideEnabledCount,
-			stats.ProvideChangeCount,
+			stats.ProvideChangedCount,
 			stats.ReceiveMessageCount,
 			stats.ReceiveByteCount,
 			stats.SendMessageCount,
@@ -77,7 +77,7 @@ func AddConnectionReliabilityStats(
 }
 
 func RemoveOldConnectionReliabilityStats(ctx context.Context, minTime time.Time) {
-	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)) - 1
+	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -98,58 +98,50 @@ type ReliabilityScore struct {
 
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
-	now := server.NowUtc()
-	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)
-	maxBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)
+	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	maxBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-			MERGE INTO client_connection_reliability_score
-			USING (
-				SELECT
-					network_id,
-				    client_id,
-				    SUM(1/w.valid_client_count) AS weighted_valid_count
-				FROM client_connection_reliability_blocks
+			DELETE FROM client_connection_reliability_score
+			`,
+		))
 
-				INNER JOIN (
-					SELECT
-						block_number,
-						client_address_hash,
-						COUNT(*) AS valid_client_count
-					WHERE
-						valid = true
-					GROUP BY block_number, client_address_hash
-				) w ON
-					w.block_number = client_connection_reliability_blocks.block_number AND 
-					w.client_address_hash = client_connection_reliability_blocks.client_address_hash
-
-				WHERE
-					$1 <= block_number AND
-					block_number < $2 AND
-					valid = true
-
-				GROUP BY network_id, client_id
-			) t
-			ON
-				t.client_id = client_connection_reliability_score.client_id AND
-				w.block_number
-				w.client_address_hash = client_connection_reliability_score.client_address_hash
-			WHEN MATCHED THEN UPDATE SET
-			    reliability_score = t.weighted_valid_count,
-			    reliability_weight = t.weighted_valid_count / ($2 - $1 + 1)
-			WHEN NOT MATCHED THEN INSERT (
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO client_connection_reliability_score (
 				client_id,
 				reliability_score,
 				reliability_weight
-			) VALUES (
-				t.client_id,
-				t.weighted_valid_count,
-				t.weighted_valid_count / ($2 - $1 + 1),
 			)
-			WHEN NOT MATCHED BY SOURCE THEN DELETE
+			SELECT
+			    client_id,
+			    SUM(1.0/w.valid_client_count) AS reliability_score,
+			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
+			FROM client_reliability
+
+			INNER JOIN (
+				SELECT
+					block_number,
+					client_address_hash,
+					COUNT(*) AS valid_client_count
+				FROM client_reliability
+				WHERE
+					valid = true
+				GROUP BY block_number, client_address_hash
+			) w ON
+				w.block_number = client_reliability.block_number AND 
+				w.client_address_hash = client_reliability.client_address_hash
+
+			WHERE
+				$1 <= client_reliability.block_number AND
+				client_reliability.block_number < $2 AND
+				client_reliability.valid = true
+
+			GROUP BY network_id, client_id
 			`,
 			minBlockNumber,
 			maxBlockNumber,
@@ -175,7 +167,7 @@ func GetAllClientReliabilityScores(ctx context.Context) map[server.Id]Reliabilit
 			for result.Next() {
 				var clientId server.Id
 				var s ReliabilityScore
-				server.Raise(server.Scan(
+				server.Raise(result.Scan(
 					&clientId,
 					&s.ReliabilityScore,
 					&s.ReliabilityWeight,
@@ -188,56 +180,57 @@ func GetAllClientReliabilityScores(ctx context.Context) map[server.Id]Reliabilit
 	return clientScores
 }
 
+func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
+	})
+}
+
 // this should run on payout to compute the latest
 func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
-	now := server.NowUtc()
-	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)
-	maxBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockSize/time.Millisecond)
+	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	maxBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
-		MERGE INTO network_connection_reliability_score
-		USING (
-			SELECT
-				network_id,
-			    SUM(1/w.valid_client_count) AS weighted_valid_count
-			FROM client_connection_reliability_blocks
+		DELETE FROM network_connection_reliability_score
+		`,
+	))
 
-			INNER JOIN (
-				SELECT
-					block_number,
-					client_address_hash,
-					COUNT(*) AS valid_client_count
-				WHERE
-					valid = true
-				GROUP BY block_number, client_address_hash
-			) w ON
-				w.block_number = client_connection_reliability_blocks.block_number AND 
-				w.client_address_hash = client_connection_reliability_blocks.client_address_hash
-
-			WHERE
-				$1 <= block_number AND
-				block_number < $2 AND
-				valid = true
-
-			GROUP BY network_id
-		) t
-		ON
-			t.network_id = network_connection_reliability_score.network_id
-		WHEN MATCHED THEN UPDATE SET
-		    reliability_score = t.weighted_valid_count,
-		    reliability_weight = t.weighted_valid_count / ($2 - $1 + 1)
-		WHEN NOT MATCHED THEN INSERT (
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO network_connection_reliability_score (
 			network_id,
 			reliability_score,
 			reliability_weight
-		) VALUES (
-			t.network_id,
-			t.weighted_valid_count,
-			t.weighted_valid_count / ($2 - $1 + 1),
 		)
-		WHEN NOT MATCHED BY SOURCE THEN DELETE
+		SELECT
+			network_id,
+		    SUM(1.0/w.valid_client_count) AS reliability_score,
+		    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
+		FROM client_reliability
+
+		INNER JOIN (
+			SELECT
+				block_number,
+				client_address_hash,
+				COUNT(*) AS valid_client_count
+			FROM client_reliability
+			WHERE
+				valid = true
+			GROUP BY block_number, client_address_hash
+		) w ON
+			w.block_number = client_reliability.block_number AND 
+			w.client_address_hash = client_reliability.client_address_hash
+
+		WHERE
+			$1 <= client_reliability.block_number AND
+			client_reliability.block_number < $2 AND
+			valid = true
+
+		GROUP BY network_id
 		`,
 		minBlockNumber,
 		maxBlockNumber,
@@ -262,7 +255,7 @@ func GetAllNetworkReliabilityScores(ctx context.Context) map[server.Id]Reliabili
 			for result.Next() {
 				var networkId server.Id
 				var s ReliabilityScore
-				server.Raise(server.Scan(
+				server.Raise(result.Scan(
 					&networkId,
 					&s.ReliabilityScore,
 					&s.ReliabilityWeight,

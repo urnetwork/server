@@ -1,119 +1,147 @@
 package model
 
-package (
+import (
+	"context"
+	mathrand "math/rand"
+	"net/netip"
 	"testing"
+	"time"
+
+	"github.com/go-playground/assert/v2"
+
+	"github.com/urnetwork/server"
 )
 
-
-
 func TestAddConnectionReliabilityStats(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
 
-	ipCount := 30
-	networkCount := 30
-	minClientPerNetworkCount := 1
-	maxClientPerNetworkCount := 8
-	
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	ips := []netip.Addr{}
-	// FIXME create ip pool
+		ipCount := 30
+		networkCount := 30
+		minClientPerNetworkCount := 1
+		maxClientPerNetworkCount := 8
 
-	networkClientIds := map[server.Id][]server.Id{}
-	clientIps := map[server.Id]netip.Addr{}
+		ips := []netip.Addr{}
+		for range ipCount {
+			ipv4 := make([]byte, 4)
+			mathrand.Read(ipv4)
+			ip, ok := netip.AddrFromSlice(ipv4)
+			assert.Equal(t, ok, true)
+			ips = append(ips, ip)
+		}
 
-	// FIXME create netork, client ids
-	// FIXME assign ips to client ids
+		networkClientIds := map[server.Id][]server.Id{}
+		clientIps := map[server.Id]netip.Addr{}
 
+		for range networkCount {
+			networkId := server.NewId()
+			clientCount := minClientPerNetworkCount
+			if d := maxClientPerNetworkCount - minClientPerNetworkCount; 0 < d {
+				clientCount += mathrand.Intn(d)
+			}
+			for range clientCount {
+				clientId := server.NewId()
+				ip := ips[mathrand.Intn(len(ips))]
 
-
-	netValidBlocks := map[server.Id]float64{}
-
-	// for each block, for each client, add one of stats:
-	// - normal
-	// - new connection
-	// - provider change	
-
-	startTime := server.NowUtc()
-	for i := range n {
-		statsTime := startTime.Add(i * ReliabilityBlockDuration)
-
-		validIpCounts := map[netip.Addr]int{}
-		validBlocks := map[server.Id]int{}
-
-		for networkId, clientIds := range networkClientIds {
-			for _, clientId := range clientIds {
-				ip := clientIps[clientId]
-
-
-				stats := &ConnectionReliabilityStats{}
-
-				switch mathrand.Intn(3) {
-				case 0:
-					// connection new
-					
-					stats.ConnectionNewCount = 1 + mathrand.Intn(4)
-				case 1:
-					// provide change
-
-					stats.ProvideChangeCount = 1 + mathrand.Intn(4)
-				default:
-					// normal
-
-					stats.ConnectionEstablishedCount = 1 + mathrand.Intn(4)
-					stats.ProvideEnabledCount = 1 + mathrand.Intn(4)
-					stats.ReceiveMessageCount = 1 + mathrand.Intn(4)
-					stats.ReceiveByteCount = ByteCount(1024 + mathrand.Intn(8192))
-					stats.SendMessageCount = 1 + mathrand.Intn(4)
-					stats.SendByteCount = ByteCount(1024 + mathrand.Intn(8192))
-
-					validIpCounts[ip] += 1
-					validBlocks[clientId] += 1
-				}
-
-				AddConnectionReliabilityStats(
-					ctx,
-					networkId,
-					clientId,
-					clientAddressHash,
-					statsTime,
-					stats,
-				)
+				networkClientIds[networkId] = append(networkClientIds[networkId], clientId)
+				clientIps[clientId] = ip
 			}
 		}
 
-		for clientId, count := range validBlocks {
-			ip := clientIps[clientId]
-			ipCount := validIpCounts[clientId]
+		netValidBlocks := map[server.Id]float64{}
 
-			netValidBlocks[clientId] += float64(count) / float64(ipCount)
+		// for each block, for each client, add one of stats:
+		// - normal
+		// - new connection
+		// - provider change
+
+		n := 128
+		eps := float64(0.001)
+
+		startTime := server.NowUtc()
+		for i := range n {
+			statsTime := startTime.Add(time.Duration(i) * ReliabilityBlockDuration)
+
+			validIpCounts := map[netip.Addr]int{}
+			validBlocks := map[server.Id]int{}
+
+			for networkId, clientIds := range networkClientIds {
+				for _, clientId := range clientIds {
+					ip := clientIps[clientId]
+					clientAddressHash := server.ClientIpHashForAddr(ip)
+
+					stats := &ConnectionReliabilityStats{}
+
+					switch mathrand.Intn(3) {
+					case 0:
+						// connection new
+
+						stats.ConnectionNewCount = uint64(1 + mathrand.Intn(4))
+					case 1:
+						// provide change
+
+						stats.ProvideChangedCount = uint64(1 + mathrand.Intn(4))
+					default:
+						// normal
+
+						stats.ConnectionEstablishedCount = uint64(1 + mathrand.Intn(4))
+						stats.ProvideEnabledCount = uint64(1 + mathrand.Intn(4))
+						stats.ReceiveMessageCount = uint64(1 + mathrand.Intn(4))
+						stats.ReceiveByteCount = ByteCount(1024 + mathrand.Intn(8192))
+						stats.SendMessageCount = uint64(1 + mathrand.Intn(4))
+						stats.SendByteCount = ByteCount(1024 + mathrand.Intn(8192))
+
+						validIpCounts[ip] += 1
+						validBlocks[clientId] += 1
+					}
+
+					AddConnectionReliabilityStats(
+						ctx,
+						networkId,
+						clientId,
+						clientAddressHash,
+						statsTime,
+						stats,
+					)
+				}
+			}
+
+			for clientId, count := range validBlocks {
+				ip := clientIps[clientId]
+				ipCount := validIpCounts[ip]
+
+				netValidBlocks[clientId] += float64(count) / float64(ipCount)
+			}
 		}
-	}
-	endTime.Add(n * ReliabilityBlockDuration)
+		endTime := startTime.Add(time.Duration(n) * ReliabilityBlockDuration)
 
+		UpdateClientReliabilityScores(ctx, startTime, endTime)
 
-	UpdateClientReliabilityScores(ctx, startTime, endTime)
-
-	clientScores := GetAllClientReliabilityScores()
-	for clientId, weightedValidBlocks := range netValidBlocks {
-		d := weightedValidBlocks - clientScores[clientId].WeightedValidBlocks
-		if d < e || e < d {
-			assert.Equal(t, weightedValidBlocks, clientScores[clientId].WeightedValidBlocks)
+		clientScores := GetAllClientReliabilityScores(ctx)
+		for clientId, weightedValidBlocks := range netValidBlocks {
+			d := weightedValidBlocks - clientScores[clientId].ReliabilityScore
+			if d < -eps || eps < d {
+				assert.Equal(t, weightedValidBlocks, clientScores[clientId].ReliabilityScore)
+			}
 		}
-	}
 
-	UpdateNetworkReliabilityScores(ctx, startTime, endTime)
+		UpdateNetworkReliabilityScores(ctx, startTime, endTime)
 
-	networkScores := GetAllNetworkReliabilityScores()
-	for networkId, clientIds := range networkClientIds {
-		netWeightedValidBlocks := float64(0)
-		for _, clientId := range clientIds {
-			netWeightedValidBlocks += netValidBlocks[clientId]
+		networkScores := GetAllNetworkReliabilityScores(ctx)
+		for networkId, clientIds := range networkClientIds {
+			netWeightedValidBlocks := float64(0)
+			for _, clientId := range clientIds {
+				netWeightedValidBlocks += netValidBlocks[clientId]
+			}
+			d := netWeightedValidBlocks - networkScores[networkId].ReliabilityScore
+			if d < -eps || eps < d {
+				assert.Equal(t, netWeightedValidBlocks, networkScores[networkId].ReliabilityScore)
+			}
 		}
-		d := weightedValidBlocks - networkScores[networkId].WeightedValidBlocks
-		if d < e || e < d {
-			assert.Equal(t, weightedValidBlocks, networkScores[networkId].WeightedValidBlocks)
-		}
-	}
 
-	RemoveOldClientReliabilityStats(ctx, endTime)
+		RemoveOldConnectionReliabilityStats(ctx, endTime)
 
+	})
 }

@@ -2085,8 +2085,8 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE client_connection_reliability_score (
             client_id uuid NOT NULL,
-            reliability_score real NOT NULL,
-            reliability_weight real NOT NULL
+            reliability_score double precision NOT NULL,
+            reliability_weight double precision NOT NULL
         )
     `),
 
@@ -2094,8 +2094,8 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE TABLE network_connection_reliability_score (
             network_id uuid NOT NULL,
-            reliability_score real NOT NULL,
-            reliability_weight real NOT NULL
+            reliability_score double precision NOT NULL,
+            reliability_weight double precision NOT NULL
         )
     `),
 

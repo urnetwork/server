@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	mathrand "math/rand"
 	"testing"
 	"time"
 
@@ -132,50 +133,66 @@ func TestNetworkClientLifecycle(t *testing.T) {
 // FIXME test GetNetworkClients, SetPendingNetworkClientConnection
 
 func TestSetProvide(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
 
-	clientId := X{}
-	secretKeys := map[ProvideMode][]byte{}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	startTime := server.NowUtc()
+		newSecretKeys := func() map[ProvideMode][]byte {
+			k := make([]byte, 32)
+			mathrand.Read(k)
+			return map[ProvideMode][]byte{
+				ProvideModePublic: k,
+			}
+		}
 
-	changeCount, provideModes := GetProvideKeyChanges(ctx, clientId, startTime)
-	assert.Equal(t, changeCount, 0)
-	assert.Equal(t, provideModes, map[ProvideMode]bool{})
+		clientId := server.NewId()
+		secretKeys := newSecretKeys()
 
-	_, err := GetProvideSecretKey(ctx, clientId)
-	assert.NowEqual(t, err, nil)
+		startTime := server.NowUtc()
 
-	SetProvide(ctx, clientId, secretKeys)
+		changeCount, provideModes := GetProvideKeyChanges(ctx, clientId, startTime)
+		assert.Equal(t, changeCount, 0)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{})
 
-	for provideMode, secretKey := range secretKeys {
-		k, err = GetProvideSecretKey(ctx, clientId, provideMode)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, k, secretKey)
-	}
+		for provideMode, _ := range secretKeys {
+			_, err := GetProvideSecretKey(ctx, clientId, provideMode)
+			assert.NotEqual(t, err, nil)
+		}
 
-	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-	assert.Equal(t, changeCount, 1)
-	assert.Equal(t, provideModes, map[ProvideMode]bool{
-		ProvideModePublic: true,
-	})
-
-	n := 32
-	for range n {
-		// FIXME generate new secret keys
 		SetProvide(ctx, clientId, secretKeys)
-	}
 
-	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-	assert.Equal(t, changeCount, n+1)
-	assert.Equal(t, provideModes, map[ProvideMode]bool{
-		ProvideModePublic: true,
-	})
+		for provideMode, secretKey := range secretKeys {
+			k, err := GetProvideSecretKey(ctx, clientId, provideMode)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, k, secretKey)
+		}
 
-	RemoveOldProvideKeyChanges(ctx, clientId, startTime)
+		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+		assert.Equal(t, changeCount, 1)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic: true,
+		})
 
-	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-	assert.Equal(t, changeCount, 0)
-	assert.Equal(t, provideModes, map[ProvideMode]bool{
-		ProvideModePublic: true,
+		n := 32
+		for range n {
+			secretKeys = newSecretKeys()
+			SetProvide(ctx, clientId, secretKeys)
+		}
+
+		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+		assert.Equal(t, changeCount, n+1)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic: true,
+		})
+
+		RemoveOldProvideKeyChanges(ctx, startTime)
+
+		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+		assert.Equal(t, changeCount, 0)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic: true,
+		})
+
 	})
 }

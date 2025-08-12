@@ -160,7 +160,7 @@ func (self *ConnectionAnnounce) run() {
 			self.sendByteCount = 0
 		}()
 
-		stats := &ConnectionReliabilityStats{
+		stats := &model.ConnectionReliabilityStats{
 			ReceiveMessageCount: receiveMessageCount,
 			ReceiveByteCount:    receiveByteCount,
 			SendMessageCount:    sendMessageCount,
@@ -168,7 +168,7 @@ func (self *ConnectionAnnounce) run() {
 		}
 
 		if established {
-			changeCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, statsStartTime)
+			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, statsStartTime)
 
 			// add reliability stats if all of:
 			// 1. established provide public (no changes in block)
@@ -179,22 +179,22 @@ func (self *ConnectionAnnounce) run() {
 			// OR
 			// 1. provide change (this will invalidate the block)
 
-			stats.EstablishedConnectionCount = 1
-			if currentProvideModes[ProvideModePublic] {
+			stats.ConnectionEstablishedCount = 1
+			if currentProvideModes[model.ProvideModePublic] {
 				stats.ProvideEnabledCount = 1
 			}
-			if 0 < changeCount {
-				stats.ProvideChangeCount = 1
+			if 0 < changedCount {
+				stats.ProvideChangedCount = 1
 			}
 		} else {
 			established = true
-			stats.NewConnectionCount = 1
+			stats.ConnectionNewCount = 1
 		}
-		AddConnectionReliabilityStats(
+		model.AddConnectionReliabilityStats(
 			self.ctx,
 			self.networkId,
 			self.clientId,
-			self.clientAddressHash,
+			clientAddressHash,
 			statsStartTime,
 			stats,
 		)

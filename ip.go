@@ -40,16 +40,19 @@ var clientIpHashPepper = sync.OnceValue(func() []byte {
 })
 
 func ClientIpHash(clientIp string) ([]byte, error) {
-	parsedAddr, err := netip.ParseAddr(clientIp)
+	addr, err := netip.ParseAddr(clientIp)
 	if err != nil {
 		return nil, err
 	}
+	return ClientIpHashForAddr(addr), nil
+}
 
+func ClientIpHashForAddr(addr netip.Addr) []byte {
 	h := sha256.New()
-	h.Write(parsedAddr.AsSlice())
+	h.Write(addr.AsSlice())
 	h.Write(clientIpHashPepper())
 	clientIpHash := h.Sum(nil)
-	return clientIpHash, nil
+	return clientIpHash
 }
 
 func SplitClientAddress(clientAddress string) (host string, port int, err error) {

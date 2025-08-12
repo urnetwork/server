@@ -744,7 +744,7 @@ func GetProvideKeyChanges(
 	clientId server.Id,
 	minTime time.Time,
 ) (
-	changeCount int,
+	changedCount int,
 	provideModes map[ProvideMode]bool,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -752,7 +752,7 @@ func GetProvideKeyChanges(
 			ctx,
 			`
 			SELECT
-				COUNT(*) AS change_count
+				COUNT(*) AS changed_count
 			FROM provide_key_change
 			WHERE
 				client_id = $1 AND
@@ -763,7 +763,7 @@ func GetProvideKeyChanges(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&changeCount))
+				server.Raise(result.Scan(&changedCount))
 			}
 		})
 
