@@ -723,6 +723,82 @@ func SetProvide(
 				)
 			}
 		})
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO provide_key_change (
+				client_id,
+				change_time
+			) VALUES ($1, $2)
+			`,
+			clientId,
+			server.NowUtc(),
+		))
+
+	})
+}
+
+func GetProvideKeyChanges(
+	ctx context.Context,
+	clientId server.Id,
+	minTime time.Time,
+) (
+	changeCount int,
+	provideModes map[ProvideMode]bool,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				COUNT(*) AS change_count
+			FROM provide_key_change
+			WHERE
+				client_id = $1 AND
+				$2 <= change_time
+			`,
+			clientId,
+			minTime,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&changeCount))
+			}
+		})
+
+		result, err = tx.Query(
+			ctx,
+			`
+			SELECT
+				provide_mode
+			FROM provide_key
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			provideModes = map[ProvideMode]bool{}
+			for result.Next() {
+				var provideMode ProvideMode
+				server.Raise(result.Scan(&provideMode))
+				provideModes[provideMode] = true
+			}
+		})
+	})
+	return
+}
+
+func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM provide_key_change
+			WHERE change_time < $1
+			`,
+			minTime.UTC(),
+		))
 	})
 }
 

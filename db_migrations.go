@@ -2047,4 +2047,64 @@ var migrations = []any{
 			UNIQUE (wallet_address, blockchain)
 		)
 	`),
+
+	newSqlMigration(`
+        CREATE TABLE client_reliability (
+            block_number bigint NOT NULL,
+            client_address_hash BYTEA NOT NULL,
+            network_id uuid NOT NULL,
+            client_id uuid NOT NULL,
+            connection_new_count bigint NOT NULL DEFAULT 0,
+            connection_established_count bigint NOT NULL DEFAULT 0,
+            provide_enabled_count bigint NOT NULL DEFAULT 0,
+            provide_changed_count bigint NOT NULL DEFAULT 0,
+            receive_message_count bigint NOT NULL DEFAULT 0,
+            receive_byte_count bigint NOT NULL DEFAULT 0,
+            send_message_count bigint NOT NULL DEFAULT 0,
+            send_byte_count bigint NOT NULL DEFAULT 0,
+            valid bool GENERATED ALWAYS AS (
+                connection_new_count = 0 AND
+                1 <= connection_established_count AND
+                1 <= provide_enabled_count AND
+                provide_changed_count = 0 AND
+                1 <= receive_message_count
+            ) STORED,
+
+            PRIMARY KEY (block_number, client_address_hash, network_id, client_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX client_reliability_client_id_block_number_valid ON client_reliability (client_id, block_number, valid, client_address_hash)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX client_reliability_network_id_block_number_valid ON client_reliability (network_id, block_number, valid, client_address_hash)
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE client_connection_reliability_score (
+            client_id uuid NOT NULL,
+            reliability_score real NOT NULL,
+            reliability_weight real NOT NULL
+        )
+    `),
+
+	// FIXME verify real is 64 bit float
+	newSqlMigration(`
+        CREATE TABLE network_connection_reliability_score (
+            network_id uuid NOT NULL,
+            reliability_score real NOT NULL,
+            reliability_weight real NOT NULL
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE provide_key_change (
+            client_id uuid NOT NULL,
+            change_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (client_id, change_time)
+        )
+    `),
 }

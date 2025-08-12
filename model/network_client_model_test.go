@@ -130,3 +130,52 @@ func TestNetworkClientLifecycle(t *testing.T) {
 }
 
 // FIXME test GetNetworkClients, SetPendingNetworkClientConnection
+
+func TestSetProvide(t *testing.T) {
+
+	clientId := X{}
+	secretKeys := map[ProvideMode][]byte{}
+
+	startTime := server.NowUtc()
+
+	changeCount, provideModes := GetProvideKeyChanges(ctx, clientId, startTime)
+	assert.Equal(t, changeCount, 0)
+	assert.Equal(t, provideModes, map[ProvideMode]bool{})
+
+	_, err := GetProvideSecretKey(ctx, clientId)
+	assert.NowEqual(t, err, nil)
+
+	SetProvide(ctx, clientId, secretKeys)
+
+	for provideMode, secretKey := range secretKeys {
+		k, err = GetProvideSecretKey(ctx, clientId, provideMode)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, k, secretKey)
+	}
+
+	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+	assert.Equal(t, changeCount, 1)
+	assert.Equal(t, provideModes, map[ProvideMode]bool{
+		ProvideModePublic: true,
+	})
+
+	n := 32
+	for range n {
+		// FIXME generate new secret keys
+		SetProvide(ctx, clientId, secretKeys)
+	}
+
+	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+	assert.Equal(t, changeCount, n+1)
+	assert.Equal(t, provideModes, map[ProvideMode]bool{
+		ProvideModePublic: true,
+	})
+
+	RemoveOldProvideKeyChanges(ctx, clientId, startTime)
+
+	changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
+	assert.Equal(t, changeCount, 0)
+	assert.Equal(t, provideModes, map[ProvideMode]bool{
+		ProvideModePublic: true,
+	})
+}

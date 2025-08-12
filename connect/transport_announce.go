@@ -30,6 +30,7 @@ type ConnectionAnnounceSettings struct {
 type ConnectionAnnounce struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
+	networkId       server.Id
 	clientId        server.Id
 	clientAddress   string
 	handlerId       server.Id
@@ -48,6 +49,7 @@ type ConnectionAnnounce struct {
 func NewConnectionAnnounceWithDefaults(
 	ctx context.Context,
 	cancel context.CancelFunc,
+	networkId server.Id,
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
@@ -56,6 +58,7 @@ func NewConnectionAnnounceWithDefaults(
 	return NewConnectionAnnounce(
 		ctx,
 		cancel,
+		networkId,
 		clientId,
 		clientAddress,
 		handlerId,
@@ -67,6 +70,7 @@ func NewConnectionAnnounceWithDefaults(
 func NewConnectionAnnounce(
 	ctx context.Context,
 	cancel context.CancelFunc,
+	networkId server.Id,
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
@@ -76,6 +80,7 @@ func NewConnectionAnnounce(
 	announce := &ConnectionAnnounce{
 		ctx:             ctx,
 		cancel:          cancel,
+		networkId:       networkId,
 		clientId:        clientId,
 		clientAddress:   clientAddress,
 		handlerId:       handlerId,
@@ -121,39 +126,78 @@ func (self *ConnectionAnnounce) run() {
 
 	self.setConnectionId(connectionId)
 
-	// FIXME
-	// established := false
-
+	established := false
+	nextStartTime := server.NowUtc()
 	for {
+		statsStartTime := nextStartTime
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-time.After(self.settings.SyncConnectionTimeout):
 		}
+		nextStartTime = server.NowUtc()
 
-		// FIXME use event
 		status := model.GetNetworkClientConnectionStatus(self.ctx, connectionId)
 		if err := status.Err(); err != nil {
 			glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
 			return
 		}
 
-		// FIXME client_connection_reliability_model.go
-		/*
-			if established {
-				// changeCount, currentProvideModes := model.GetProvideKeyChanges(blockStartTime)
+		var receiveMessageCount uint64
+		var receiveByteCount ByteCount
+		var sendMessageCount uint64
+		var sendByteCount ByteCount
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			receiveMessageCount = self.receiveMessageCount
+			receiveByteCount = self.receiveByteCount
+			sendMessageCount = self.sendMessageCount
+			sendByteCount = self.sendByteCount
+			self.receiveMessageCount = 0
+			self.receiveByteCount = 0
+			self.sendMessageCount = 0
+			self.sendByteCount = 0
+		}()
 
-				// FIXME add reliability stats if all of:
-				// 1. established provide public (no changes in block)
-				// 2. established connection
-				// 3. at least one message count
-				// OR
-				// 1. new connection (this will invalidate the block)
-			} else {
-				established = true
+		stats := &ConnectionReliabilityStats{
+			ReceiveMessageCount: receiveMessageCount,
+			ReceiveByteCount:    receiveByteCount,
+			SendMessageCount:    sendMessageCount,
+			SendByteCount:       sendByteCount,
+		}
+
+		if established {
+			changeCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, statsStartTime)
+
+			// add reliability stats if all of:
+			// 1. established provide public (no changes in block)
+			// 2. established connection
+			// 3. at least one message count
+			// OR
+			// 1. new connection (this will invalidate the block)
+			// OR
+			// 1. provide change (this will invalidate the block)
+
+			stats.EstablishedConnectionCount = 1
+			if currentProvideModes[ProvideModePublic] {
+				stats.ProvideEnabledCount = 1
 			}
-		*/
-
+			if 0 < changeCount {
+				stats.ProvideChangeCount = 1
+			}
+		} else {
+			established = true
+			stats.NewConnectionCount = 1
+		}
+		AddConnectionReliabilityStats(
+			self.ctx,
+			self.networkId,
+			self.clientId,
+			self.clientAddressHash,
+			statsStartTime,
+			stats,
+		)
 	}
 }
 
