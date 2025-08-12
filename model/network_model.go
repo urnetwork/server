@@ -135,12 +135,13 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network_user
-					(user_id, user_name, auth_type)
-					VALUES ($1, $2, $3)
+					(user_id, user_name, auth_type, network_id)
+					VALUES ($1, $2, $3, $4)
 				`,
 				createdUserId,
 				"guest",
 				AuthTypeGuest,
+				createdNetworkId,
 			)
 			server.Raise(err)
 
@@ -274,8 +275,8 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network_user
-					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
-					VALUES ($1, $2, $3, $4, $5, $6)
+					(user_id, user_name, auth_type, user_auth, password_hash, password_salt, network_id)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
 				`,
 				createdUserId,
 				networkCreate.UserName,
@@ -283,6 +284,7 @@ func NetworkCreate(
 				userAuth,
 				passwordHash,
 				passwordSalt,
+				createdNetworkId,
 			)
 			server.Raise(err)
 
@@ -382,14 +384,15 @@ func NetworkCreate(
 					session.Ctx,
 					`
 						INSERT INTO network_user
-						(user_id, user_name, auth_type, user_auth, auth_jwt)
-						VALUES ($1, $2, $3, $4, $5)
+						(user_id, user_name, auth_type, user_auth, auth_jwt, network_id)
+						VALUES ($1, $2, $3, $4, $5, $6)
 					`,
 					createdUserId,
 					networkCreate.UserName,
 					authJwt.AuthType,
 					normalJwtUserAuth,
 					networkCreate.AuthJwt,
+					createdNetworkId,
 				)
 				if err != nil {
 					panic(err)
@@ -513,14 +516,15 @@ func NetworkCreate(
 				session.Ctx,
 				`
 					INSERT INTO network_user
-					(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
-					VALUES ($1, $2, $3, $4, $5)
+					(user_id, auth_type, wallet_address, wallet_blockchain, user_name, network_id)
+					VALUES ($1, $2, $3, $4, $5, $6)
 				`,
 				createdUserId,
 				AuthTypeSolana,
 				networkCreate.WalletAuth.PublicKey,
 				networkCreate.WalletAuth.Blockchain,
 				networkCreate.UserName,
+				createdNetworkId,
 			)
 			if err != nil {
 				panic(err)
@@ -1343,8 +1347,8 @@ func Testing_CreateNetwork(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt, network_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			`,
 			adminUserId,
 			"test",
@@ -1353,6 +1357,7 @@ func Testing_CreateNetwork(
 			true,
 			passwordHash,
 			passwordSalt,
+			networkId,
 		))
 
 		addUserAuth(
@@ -1393,8 +1398,8 @@ func Testing_CreateNetworkByWallet(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain, network_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
 			`,
 			adminUserId,
 			"test",
@@ -1402,6 +1407,7 @@ func Testing_CreateNetworkByWallet(
 			true,
 			publicKey,
 			AuthTypeSolana,
+			networkId,
 		))
 
 		addWalletAuth(
@@ -1442,13 +1448,14 @@ func Testing_CreateGuestNetwork(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
-				VALUES ($1, $2, $3, $4)
+				INSERT INTO network_user (user_id, user_name, auth_type, verified, network_id)
+				VALUES ($1, $2, $3, $4, $5)
 			`,
 			adminUserId,
 			"test",
 			AuthTypeGuest,
 			false,
+			networkId,
 		))
 
 	})
@@ -1477,13 +1484,14 @@ func Testing_CreateNetworkSso(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
-				VALUES ($1, $2, $3, $4)
+				INSERT INTO network_user (user_id, user_name, auth_type, verified, network_id)
+				VALUES ($1, $2, $3, $4, $5)
 			`,
 			userId,
 			"user_name",
 			AuthTypeGoogle,
 			true,
+			networkId,
 		))
 
 		addSsoAuth(

@@ -195,17 +195,53 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 	return findNetworkResults, nil
 }
 
+/**
+ * We remove the rows from `network`, `network_user`, and the auth tables.
+ *
+ * Note - we are not removing the associated wallets or payments for now,
+ * they can be deleted in a separate task later.
+ */
 func RemoveNetwork(
 	ctx context.Context,
 	networkId server.Id,
-	userId server.Id,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		// TODO: Remove network user wallets
-
 		// FIXME do we need to check that the user is the admin?
 		// FIXME normally we would enforce the access control by passing in a clientSession
+
+		// (cascade) delete network_user_auth_wallet
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_wallet
+					USING network_user
+				WHERE network_user_auth_wallet.user_id = network_user.user_id AND network_user.network_id = $1
+			`,
+			networkId,
+		))
+
+		// (cascade) delete network_user_auth_password
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_password
+					USING network_user
+				WHERE network_user_auth_password.user_id = network_user.user_id AND network_user.network_id = $1
+			`,
+			networkId,
+		))
+
+		// (cascade) delete network_user_auth_sso
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_user_auth_sso
+					USING network_user
+				WHERE network_user_auth_sso.user_id = network_user.user_id AND network_user.network_id = $1
+			`,
+			networkId,
+		))
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -217,41 +253,6 @@ func RemoveNetwork(
 			networkId,
 		))
 
-		// FIXME add network_id to:
-		// - network_user_auth_wallet
-		// - network_user_auth_password
-		// - network_user_auth_sso
-
-		// (cascade) delete network_user_auth_wallet
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_user_auth_wallet
-				WHERE user_id = $1
-			`,
-			userId,
-		))
-
-		// (cascade) delete network_user_auth_password
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_user_auth_password
-				WHERE user_id = $1
-			`,
-			userId,
-		))
-
-		// (cascade) delete network_user_auth_sso
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_user_auth_sso
-				WHERE user_id = $1
-			`,
-			userId,
-		))
-
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -261,6 +262,10 @@ func RemoveNetwork(
 			networkId,
 		))
 
-		networkNameSearch.RemoveInTx(ctx, networkId, tx)
+		networkNameSearch.RemoveInTx(
+			ctx,
+			networkId,
+			tx,
+		)
 	})
 }

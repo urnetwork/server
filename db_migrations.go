@@ -2047,4 +2047,27 @@ var migrations = []any{
 			UNIQUE (wallet_address, blockchain)
 		)
 	`),
+
+	// allow NULL until populated
+	newSqlMigration(`
+        ALTER TABLE network_user
+        ADD COLUMN network_id uuid NULL
+    `),
+
+	// populate network_id in auth tables
+	newSqlMigration(`
+	    UPDATE network_user
+	    SET network_id = (SELECT network_id FROM network WHERE network_user.user_id = network.admin_user_id);
+	`),
+
+	// after populating network_id, add NOT NULL constraints
+	newSqlMigration(`
+	    ALTER TABLE network_user
+	    ALTER COLUMN network_id SET NOT NULL;
+	`),
+
+	// index network_id on network_user
+	newSqlMigration(`
+	    CREATE INDEX idx_network_user_network_id ON network_user (network_id);
+	`),
 }

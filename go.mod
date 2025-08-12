@@ -21,6 +21,7 @@ require (
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/nyaruka/phonenumbers v1.6.0
 	github.com/oklog/ulid/v2 v2.1.1
+	github.com/oschwald/maxminddb-golang/v2 v2.0.0-beta.8
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quic-go/quic-go v0.53.0
@@ -28,7 +29,6 @@ require (
 	github.com/samber/lo v1.49.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v76 v76.25.0
-	github.com/twmb/murmur3 v1.1.8
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
 	golang.org/x/crypto v0.40.0
@@ -55,7 +55,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
 	github.com/mr-tron/base58 v1.2.0 // indirect
-	github.com/oschwald/maxminddb-golang/v2 v2.0.0-beta.8 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
 	go.mongodb.org/mongo-driver v1.12.2 // indirect
