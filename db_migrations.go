@@ -2115,4 +2115,9 @@ var migrations = []any{
             PRIMARY KEY (client_id, change_time)
         )
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_hosting2 smallint NOT NULL DEFAULT 0
+    `),
 }
