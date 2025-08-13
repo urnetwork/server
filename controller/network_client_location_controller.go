@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/netip"
 
 	// "encoding/base64"
 	"fmt"
@@ -79,6 +80,17 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 		}
 		if ipInfoResult.Privacy.Hosting {
 			connectionLocationScores.NetTypeHosting = 1
+		}
+	}
+
+	// consult the internal model
+	if addr, err := netip.ParseAddr(clientIp); err == nil {
+		if ipInfo, err := server.GetIpInfo(addr); err == nil {
+			switch ipInfo.UserType {
+			case server.UserTypeHosting:
+				connectionLocationScores.NetTypeHosting2 = 1
+			}
+
 		}
 	}
 
