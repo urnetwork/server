@@ -36,7 +36,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
-		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
+		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
@@ -78,7 +78,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, true)
 
-		CloseExpiredNetworkClientHandlers(ctx, time.Duration(0))
+		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)

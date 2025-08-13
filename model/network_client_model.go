@@ -1082,7 +1082,7 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 	return
 }
 
-func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duration) {
+func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		handlerIds := []server.Id{}
 
@@ -1095,7 +1095,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duratio
 				WHERE 
 					heartbeat_time < $1
 			`,
-			server.NowUtc().Add(-timeout),
+			minTime.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

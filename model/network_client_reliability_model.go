@@ -9,7 +9,7 @@ import (
 
 const ReliabilityBlockDuration = 60 * time.Second
 
-type ConnectionReliabilityStats struct {
+type ClientReliabilityStats struct {
 	ReceiveMessageCount        uint64
 	ReceiveByteCount           ByteCount
 	SendMessageCount           uint64
@@ -20,13 +20,13 @@ type ConnectionReliabilityStats struct {
 	ConnectionNewCount         uint64
 }
 
-func AddConnectionReliabilityStats(
+func AddClientReliabilityStats(
 	ctx context.Context,
 	networkId server.Id,
 	clientId server.Id,
 	clientAddressHash [32]byte,
 	statsTime time.Time,
-	stats *ConnectionReliabilityStats,
+	stats *ClientReliabilityStats,
 ) {
 	blockNumber := statsTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
@@ -76,7 +76,7 @@ func AddConnectionReliabilityStats(
 	})
 }
 
-func RemoveOldConnectionReliabilityStats(ctx context.Context, minTime time.Time) {
+func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time) {
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -151,32 +151,37 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 	})
 }
 
-func GetAllClientReliabilityScores(ctx context.Context) map[server.Id]ReliabilityScore {
+func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server.Id]ReliabilityScore) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		clientScores = GetAllClientReliabilityScoresInTx(tx, ctx)
+	})
+	return
+}
+
+func GetAllClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
 	clientScores := map[server.Id]ReliabilityScore{}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				client_id,
-				reliability_score,
-				reliability_weight
-			FROM client_connection_reliability_score
-			`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var s ReliabilityScore
-				server.Raise(result.Scan(
-					&clientId,
-					&s.ReliabilityScore,
-					&s.ReliabilityWeight,
-				))
-				clientScores[clientId] = s
-			}
-		})
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT
+			client_id,
+			reliability_score,
+			reliability_weight
+		FROM client_connection_reliability_score
+		`,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var clientId server.Id
+			var s ReliabilityScore
+			server.Raise(result.Scan(
+				&clientId,
+				&s.ReliabilityScore,
+				&s.ReliabilityWeight,
+			))
+			clientScores[clientId] = s
+		}
 	})
 
 	return clientScores
@@ -241,33 +246,37 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	))
 }
 
-// FIXME in tx
-func GetAllNetworkReliabilityScores(ctx context.Context) map[server.Id]ReliabilityScore {
+func GetAllNetworkReliabilityScores(ctx context.Context) (networkScores map[server.Id]ReliabilityScore) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		networkScores = GetAllNetworkReliabilityScoresInTx(tx, ctx)
+	})
+	return
+}
+
+func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				network_id,
-				reliability_score,
-				reliability_weight
-			FROM network_connection_reliability_score
-			`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				var s ReliabilityScore
-				server.Raise(result.Scan(
-					&networkId,
-					&s.ReliabilityScore,
-					&s.ReliabilityWeight,
-				))
-				networkScores[networkId] = s
-			}
-		})
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT
+			network_id,
+			reliability_score,
+			reliability_weight
+		FROM network_connection_reliability_score
+		`,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			var s ReliabilityScore
+			server.Raise(result.Scan(
+				&networkId,
+				&s.ReliabilityScore,
+				&s.ReliabilityWeight,
+			))
+			networkScores[networkId] = s
+		}
 	})
 
 	return networkScores

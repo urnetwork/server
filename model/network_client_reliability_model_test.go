@@ -12,7 +12,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func TestAddConnectionReliabilityStats(t *testing.T) {
+func TestAddClientReliabilityStats(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +72,7 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 					ip := clientIps[clientId]
 					clientAddressHash := server.ClientIpHashForAddr(ip)
 
-					stats := &ConnectionReliabilityStats{}
+					stats := &ClientReliabilityStats{}
 
 					switch mathrand.Intn(3) {
 					case 0:
@@ -97,7 +97,7 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 						validBlocks[clientId] += 1
 					}
 
-					AddConnectionReliabilityStats(
+					AddClientReliabilityStats(
 						ctx,
 						networkId,
 						clientId,
@@ -142,7 +142,7 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 			}
 		}
 
-		RemoveOldConnectionReliabilityStats(ctx, endTime)
+		RemoveOldClientReliabilityStats(ctx, endTime)
 
 	})
 }
