@@ -2078,9 +2078,13 @@ var migrations = []any{
         CREATE INDEX client_reliability_valid_block_number_client_address_hash ON client_reliability (valid, block_number, client_address_hash)
     `),
 
+	// independent_reliability_score: the total reliability score independent of normalization by ip hash or block window [0, inf)
+	// reliability_score: the total reliability score normalized by ip hash [0, inf)
+	// reliability_weight: the total reliability score normalized by ip hash and block window [0, 1]
 	newSqlMigration(`
         CREATE TABLE client_connection_reliability_score (
             client_id uuid NOT NULL,
+            independent_reliability_score double precision NOT NULL,
             reliability_score double precision NOT NULL,
             reliability_weight double precision NOT NULL,
 
@@ -2088,9 +2092,14 @@ var migrations = []any{
         )
     `),
 
+	// see notes above for:
+	// - independent_reliability_score
+	// - reliability_score
+	// - reliability_weight
 	newSqlMigration(`
         CREATE TABLE network_connection_reliability_score (
             network_id uuid NOT NULL,
+            independent_reliability_score double precision NOT NULL,
             reliability_score double precision NOT NULL,
             reliability_weight double precision NOT NULL,
 

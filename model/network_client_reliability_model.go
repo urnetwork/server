@@ -92,8 +92,9 @@ func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time) {
 }
 
 type ReliabilityScore struct {
-	ReliabilityScore  float64
-	ReliabilityWeight float64
+	IndependentReliabilityScore float64
+	ReliabilityScore            float64
+	ReliabilityWeight           float64
 }
 
 // this should run regulalry to keep the client scores up to date
@@ -114,11 +115,13 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			`
 			INSERT INTO client_connection_reliability_score (
 				client_id,
+				independent_reliability_score,
 				reliability_score,
 				reliability_weight
 			)
 			SELECT
 			    client_id,
+			    SUM(1.0) AS independent_reliability_score,
 			    SUM(1.0/w.valid_client_count) AS reliability_score,
 			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
 			FROM client_reliability
@@ -166,6 +169,7 @@ func GetAllClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[
 		`
 		SELECT
 			client_id,
+			independent_reliability_score,
 			reliability_score,
 			reliability_weight
 		FROM client_connection_reliability_score
@@ -177,6 +181,7 @@ func GetAllClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[
 			var s ReliabilityScore
 			server.Raise(result.Scan(
 				&clientId,
+				&s.IndependentReliabilityScore,
 				&s.ReliabilityScore,
 				&s.ReliabilityWeight,
 			))
@@ -210,11 +215,13 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		`
 		INSERT INTO network_connection_reliability_score (
 			network_id,
+			independent_reliability_score,
 			reliability_score,
 			reliability_weight
 		)
 		SELECT
 			network_id,
+			SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0/w.valid_client_count) AS reliability_score,
 		    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
 		FROM client_reliability
@@ -261,6 +268,7 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 		`
 		SELECT
 			network_id,
+			independent_reliability_score,
 			reliability_score,
 			reliability_weight
 		FROM network_connection_reliability_score
@@ -272,6 +280,7 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 			var s ReliabilityScore
 			server.Raise(result.Scan(
 				&networkId,
+				&s.IndependentReliabilityScore,
 				&s.ReliabilityScore,
 				&s.ReliabilityWeight,
 			))

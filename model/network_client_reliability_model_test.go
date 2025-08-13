@@ -50,7 +50,8 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			}
 		}
 
-		netValidBlocks := map[server.Id]float64{}
+		netReliabilityScores := map[server.Id]float64{}
+		netIndependentReliabilityScores := map[server.Id]float64{}
 
 		// for each block, for each client, add one of stats:
 		// - normal
@@ -113,7 +114,8 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				clientAddressHash := server.ClientIpHashForAddr(ip)
 				ipCount := validIpCounts[clientAddressHash]
 
-				netValidBlocks[clientId] += float64(count) / float64(ipCount)
+				netReliabilityScores[clientId] += float64(count) / float64(ipCount)
+				netIndependentReliabilityScores[clientId] += float64(count)
 			}
 		}
 		endTime := startTime.Add(time.Duration(n) * ReliabilityBlockDuration)
@@ -121,10 +123,16 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		UpdateClientReliabilityScores(ctx, startTime, endTime)
 
 		clientScores := GetAllClientReliabilityScores(ctx)
-		for clientId, weightedValidBlocks := range netValidBlocks {
-			d := weightedValidBlocks - clientScores[clientId].ReliabilityScore
+		for clientId, reliabilityScore := range netReliabilityScores {
+			d := reliabilityScore - clientScores[clientId].ReliabilityScore
 			if d < -eps || eps < d {
-				assert.Equal(t, weightedValidBlocks, clientScores[clientId].ReliabilityScore)
+				assert.Equal(t, reliabilityScore, clientScores[clientId].ReliabilityScore)
+			}
+		}
+		for clientId, indepententReliabilityScore := range netIndependentReliabilityScores {
+			d := indepententReliabilityScore - clientScores[clientId].IndependentReliabilityScore
+			if d < -eps || eps < d {
+				assert.Equal(t, indepententReliabilityScore, clientScores[clientId].IndependentReliabilityScore)
 			}
 		}
 
@@ -132,13 +140,19 @@ func TestAddClientReliabilityStats(t *testing.T) {
 
 		networkScores := GetAllNetworkReliabilityScores(ctx)
 		for networkId, clientIds := range networkClientIds {
-			netWeightedValidBlocks := float64(0)
+			netReliabilityScore := float64(0)
+			netIndepententReliabilityScore := float64(0)
 			for _, clientId := range clientIds {
-				netWeightedValidBlocks += netValidBlocks[clientId]
+				netReliabilityScore += netReliabilityScores[clientId]
+				netIndepententReliabilityScore += netIndependentReliabilityScores[clientId]
 			}
-			d := netWeightedValidBlocks - networkScores[networkId].ReliabilityScore
+			d := netReliabilityScore - networkScores[networkId].ReliabilityScore
 			if d < -eps || eps < d {
-				assert.Equal(t, netWeightedValidBlocks, networkScores[networkId].ReliabilityScore)
+				assert.Equal(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
+			}
+			d = netIndepententReliabilityScore - networkScores[networkId].IndependentReliabilityScore
+			if d < -eps || eps < d {
+				assert.Equal(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
 			}
 		}
 
