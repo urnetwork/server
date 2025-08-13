@@ -697,6 +697,8 @@ func SetProvide(
 	secretKeys map[ProvideMode][]byte,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		changeTime := server.NowUtc()
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -723,6 +725,82 @@ func SetProvide(
 				)
 			}
 		})
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO provide_key_change (
+				client_id,
+				change_time
+			) VALUES ($1, $2)
+			`,
+			clientId,
+			changeTime,
+		))
+
+	})
+}
+
+func GetProvideKeyChanges(
+	ctx context.Context,
+	clientId server.Id,
+	minTime time.Time,
+) (
+	changedCount int,
+	provideModes map[ProvideMode]bool,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				COUNT(*) AS changed_count
+			FROM provide_key_change
+			WHERE
+				client_id = $1 AND
+				$2 <= change_time
+			`,
+			clientId,
+			minTime,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&changedCount))
+			}
+		})
+
+		result, err = tx.Query(
+			ctx,
+			`
+			SELECT
+				provide_mode
+			FROM provide_key
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			provideModes = map[ProvideMode]bool{}
+			for result.Next() {
+				var provideMode ProvideMode
+				server.Raise(result.Scan(&provideMode))
+				provideModes[provideMode] = true
+			}
+		})
+	})
+	return
+}
+
+func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM provide_key_change
+			WHERE change_time < $1
+			`,
+			minTime.UTC(),
+		))
 	})
 }
 
@@ -775,7 +853,7 @@ func ConnectNetworkClient(
 	connectionId server.Id,
 	clientIp string,
 	clientPort int,
-	clientIpHash []byte,
+	clientIpHash [32]byte,
 	err error,
 ) {
 	clientIp, clientPort, err = server.SplitClientAddress(clientAddress)
@@ -818,7 +896,7 @@ func ConnectNetworkClient(
 			host,
 			service,
 			block,
-			clientIpHash,
+			clientIpHash[:],
 			clientPort,
 			handlerId,
 		))
@@ -1004,7 +1082,7 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 	return
 }
 
-func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duration) {
+func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		handlerIds := []server.Id{}
 
@@ -1017,7 +1095,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, timeout time.Duratio
 				WHERE 
 					heartbeat_time < $1
 			`,
-			server.NowUtc().Add(-timeout),
+			minTime.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

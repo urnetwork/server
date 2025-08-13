@@ -66,7 +66,7 @@ func NewConnectionRateLimit(
 	if err != nil {
 		return nil, err
 	}
-	clientIpHashHex := hex.EncodeToString(clientIpHash)
+	clientIpHashHex := hex.EncodeToString(clientIpHash[:])
 
 	return &ConnectionRateLimit{
 		ctx:             ctx,

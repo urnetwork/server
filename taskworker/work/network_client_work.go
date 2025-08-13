@@ -32,7 +32,8 @@ func CloseExpiredNetworkClientHandlers(
 	closeExpiredNetworkClientHandlers *CloseExpiredNetworkClientHandlersArgs,
 	clientSession *session.ClientSession,
 ) (*CloseExpiredNetworkClientHandlersResult, error) {
-	model.CloseExpiredNetworkClientHandlers(clientSession.Ctx, 2*model.NetworkClientHandlerHeartbeatTimeout)
+	minTime := server.NowUtc().Add(-2 * model.NetworkClientHandlerHeartbeatTimeout)
+	model.CloseExpiredNetworkClientHandlers(clientSession.Ctx, minTime)
 	return &CloseExpiredNetworkClientHandlersResult{}, nil
 }
 
@@ -151,5 +152,41 @@ func SetMissingConnectionLocationsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	return nil
+}
+
+type RemoveOldProvideKeyChangesArgs struct {
+}
+
+type RemoveOldProvideKeyChangesResult struct {
+}
+
+func ScheduleRemoveOldProvideKeyChanges(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveOldProvideKeyChanges,
+		&RemoveOldProvideKeyChangesArgs{},
+		clientSession,
+		task.RunOnce("remove_old_provide_key_changes"),
+		task.RunAt(time.Now().Add(15*time.Minute)),
+	)
+}
+
+func RemoveOldProvideKeyChanges(
+	removeOldProvideKeyChanges *RemoveOldProvideKeyChangesArgs,
+	clientSession *session.ClientSession,
+) (*RemoveOldProvideKeyChangesResult, error) {
+	minTime := server.NowUtc().Add(-1 * time.Hour)
+	model.RemoveOldProvideKeyChanges(clientSession.Ctx, minTime)
+	return &RemoveOldProvideKeyChangesResult{}, nil
+}
+
+func RemoveOldProvideKeyChangesPost(
+	removeOldProvideKeyChanges *RemoveOldProvideKeyChangesArgs,
+	removeOldProvideKeyChangesResult *RemoveOldProvideKeyChangesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 	return nil
 }

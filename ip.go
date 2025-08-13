@@ -39,17 +39,27 @@ var clientIpHashPepper = sync.OnceValue(func() []byte {
 	return []byte(pepper)
 })
 
-func ClientIpHash(clientIp string) ([]byte, error) {
-	parsedAddr, err := netip.ParseAddr(clientIp)
+func ClientIpHash(clientIp string) ([32]byte, error) {
+	addr, err := netip.ParseAddr(clientIp)
 	if err != nil {
-		return nil, err
+		return [32]byte{}, err
 	}
+	return ClientIpHashForAddr(addr), nil
+}
 
+func ClientIpHashForAddr(addr netip.Addr) [32]byte {
+	if addr.Is4() {
+		// for ipv4, use the /27 network
+		addr = netip.PrefixFrom(addr, 27).Masked().Addr()
+	} else if addr.Is6() {
+		// for ipv6, use the /48 network
+		addr = netip.PrefixFrom(addr, 48).Masked().Addr()
+	}
 	h := sha256.New()
-	h.Write(parsedAddr.AsSlice())
+	h.Write(addr.AsSlice())
 	h.Write(clientIpHashPepper())
 	clientIpHash := h.Sum(nil)
-	return clientIpHash, nil
+	return [32]byte(clientIpHash)
 }
 
 func SplitClientAddress(clientAddress string) (host string, port int, err error) {
