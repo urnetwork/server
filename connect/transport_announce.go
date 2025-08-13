@@ -160,7 +160,7 @@ func (self *ConnectionAnnounce) run() {
 			self.sendByteCount = 0
 		}()
 
-		stats := &model.ConnectionReliabilityStats{
+		stats := &model.ClientReliabilityStats{
 			ReceiveMessageCount: receiveMessageCount,
 			ReceiveByteCount:    receiveByteCount,
 			SendMessageCount:    sendMessageCount,
@@ -190,7 +190,7 @@ func (self *ConnectionAnnounce) run() {
 			established = true
 			stats.ConnectionNewCount = 1
 		}
-		model.AddConnectionReliabilityStats(
+		model.AddClientReliabilityStats(
 			self.ctx,
 			self.networkId,
 			self.clientId,
