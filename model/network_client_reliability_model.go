@@ -24,7 +24,7 @@ func AddConnectionReliabilityStats(
 	ctx context.Context,
 	networkId server.Id,
 	clientId server.Id,
-	clientAddressHash []byte,
+	clientAddressHash [32]byte,
 	statsTime time.Time,
 	stats *ConnectionReliabilityStats,
 ) {
@@ -60,7 +60,7 @@ func AddConnectionReliabilityStats(
 		        send_byte_count = client_reliability.send_byte_count + $12
 			`,
 			blockNumber,
-			clientAddressHash,
+			clientAddressHash[:],
 			networkId,
 			clientId,
 			stats.ConnectionNewCount,
@@ -130,18 +130,20 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 					COUNT(*) AS valid_client_count
 				FROM client_reliability
 				WHERE
-					valid = true
+					valid = true AND
+					$1 <= block_number AND
+					block_number < $2
 				GROUP BY block_number, client_address_hash
 			) w ON
 				w.block_number = client_reliability.block_number AND 
 				w.client_address_hash = client_reliability.client_address_hash
 
-			WHERE
+			WHERE 
+				client_reliability.valid = true AND
 				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2 AND
-				client_reliability.valid = true
+				client_reliability.block_number < $2
 
-			GROUP BY network_id, client_id
+			GROUP BY client_id
 			`,
 			minBlockNumber,
 			maxBlockNumber,
@@ -219,16 +221,18 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 				COUNT(*) AS valid_client_count
 			FROM client_reliability
 			WHERE
-				valid = true
+				valid = true AND
+				$1 <= block_number AND
+				block_number < $2
 			GROUP BY block_number, client_address_hash
 		) w ON
 			w.block_number = client_reliability.block_number AND 
 			w.client_address_hash = client_reliability.client_address_hash
 
-		WHERE
+		WHERE 
+			client_reliability.valid = true AND
 			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2 AND
-			valid = true
+			client_reliability.block_number < $2
 
 		GROUP BY network_id
 		`,
@@ -237,6 +241,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	))
 }
 
+// FIXME in tx
 func GetAllNetworkReliabilityScores(ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 

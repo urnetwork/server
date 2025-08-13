@@ -114,14 +114,14 @@ func (self *ConnectionAnnounce) run() {
 		self.settings.LocationRetryTimeout,
 	)
 	if err != nil {
-		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash), err)
+		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)
 		return
 	}
 	defer server.HandleError(func() {
 		// note use an uncanceled context for cleanup
 		cleanupCtx := context.Background()
 		model.DisconnectNetworkClient(cleanupCtx, connectionId)
-		glog.V(1).Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash))
+		glog.V(1).Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
 	}, self.cancel)
 
 	self.setConnectionId(connectionId)

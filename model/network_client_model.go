@@ -697,6 +697,8 @@ func SetProvide(
 	secretKeys map[ProvideMode][]byte,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		changeTime := server.NowUtc()
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -733,7 +735,7 @@ func SetProvide(
 			) VALUES ($1, $2)
 			`,
 			clientId,
-			server.NowUtc(),
+			changeTime,
 		))
 
 	})
@@ -851,7 +853,7 @@ func ConnectNetworkClient(
 	connectionId server.Id,
 	clientIp string,
 	clientPort int,
-	clientIpHash []byte,
+	clientIpHash [32]byte,
 	err error,
 ) {
 	clientIp, clientPort, err = server.SplitClientAddress(clientAddress)

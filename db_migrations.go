@@ -2075,27 +2075,26 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE INDEX client_reliability_client_id_block_number_valid ON client_reliability (client_id, block_number, valid, client_address_hash)
-    `),
-
-	newSqlMigration(`
-        CREATE INDEX client_reliability_network_id_block_number_valid ON client_reliability (network_id, block_number, valid, client_address_hash)
+        CREATE INDEX client_reliability_valid_block_number_client_address_hash ON client_reliability (valid, block_number, client_address_hash)
     `),
 
 	newSqlMigration(`
         CREATE TABLE client_connection_reliability_score (
             client_id uuid NOT NULL,
             reliability_score double precision NOT NULL,
-            reliability_weight double precision NOT NULL
+            reliability_weight double precision NOT NULL,
+
+            PRIMARY KEY (client_id)
         )
     `),
 
-	// FIXME verify real is 64 bit float
 	newSqlMigration(`
         CREATE TABLE network_connection_reliability_score (
             network_id uuid NOT NULL,
             reliability_score double precision NOT NULL,
-            reliability_weight double precision NOT NULL
+            reliability_weight double precision NOT NULL,
+
+            PRIMARY KEY (network_id)
         )
     `),
 

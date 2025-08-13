@@ -186,7 +186,7 @@ func TestSetProvide(t *testing.T) {
 			ProvideModePublic: true,
 		})
 
-		RemoveOldProvideKeyChanges(ctx, startTime)
+		RemoveOldProvideKeyChanges(ctx, server.NowUtc())
 
 		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
 		assert.Equal(t, changeCount, 0)

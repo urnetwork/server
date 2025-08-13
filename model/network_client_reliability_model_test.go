@@ -64,7 +64,7 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 		for i := range n {
 			statsTime := startTime.Add(time.Duration(i) * ReliabilityBlockDuration)
 
-			validIpCounts := map[netip.Addr]int{}
+			validIpCounts := map[[32]byte]int{}
 			validBlocks := map[server.Id]int{}
 
 			for networkId, clientIds := range networkClientIds {
@@ -93,7 +93,7 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 						stats.SendMessageCount = uint64(1 + mathrand.Intn(4))
 						stats.SendByteCount = ByteCount(1024 + mathrand.Intn(8192))
 
-						validIpCounts[ip] += 1
+						validIpCounts[clientAddressHash] += 1
 						validBlocks[clientId] += 1
 					}
 
@@ -110,7 +110,8 @@ func TestAddConnectionReliabilityStats(t *testing.T) {
 
 			for clientId, count := range validBlocks {
 				ip := clientIps[clientId]
-				ipCount := validIpCounts[ip]
+				clientAddressHash := server.ClientIpHashForAddr(ip)
+				ipCount := validIpCounts[clientAddressHash]
 
 				netValidBlocks[clientId] += float64(count) / float64(ipCount)
 			}
