@@ -896,7 +896,7 @@ func ConnectNetworkClient(
 			host,
 			service,
 			block,
-			clientIpHash,
+			clientIpHash[:],
 			clientPort,
 			handlerId,
 		))
