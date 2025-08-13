@@ -823,7 +823,7 @@ func IsIpConnectedToNetwork(
 				WHERE client_address_hash = $1 AND connected
 				LIMIT 1
 			`,
-			addressHash,
+			addressHash[:],
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
