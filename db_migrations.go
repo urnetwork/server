@@ -2120,4 +2120,16 @@ var migrations = []any{
         ALTER TABLE network_client_location
             ADD COLUMN net_type_hosting2 smallint NOT NULL DEFAULT 0
     `),
+
+	newSqlMigration(`
+        ALTER TABLE client_connection_reliability_score
+            ADD COLUMN min_block_number bigint NOT NULL DEFAULT 0,
+            ADD COLUMN max_block_number bigint NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_connection_reliability_score
+            ADD COLUMN min_block_number bigint NOT NULL DEFAULT 0,
+            ADD COLUMN max_block_number bigint NOT NULL DEFAULT 0
+    `),
 }

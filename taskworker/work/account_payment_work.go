@@ -63,7 +63,7 @@ func PayoutPost(
 		schedulePayout := &SchedulePayoutArgs{
 			Retry: true,
 		}
-		runAt := time.Now().Add(1 * time.Hour)
+		runAt := server.NowUtc().Add(1 * time.Hour)
 		task.ScheduleTaskInTx(
 			tx,
 			Payout,

@@ -24,7 +24,7 @@ func ScheduleRemoveOldClientReliabilityStats(clientSession *session.ClientSessio
 		&RemoveOldClientReliabilityStatsArgs{},
 		clientSession,
 		task.RunOnce("remove_old_client_reliability_stats"),
-		task.RunAt(time.Now().Add(15*time.Minute)),
+		task.RunAt(server.NowUtc().Add(15*time.Minute)),
 	)
 }
 
@@ -56,11 +56,11 @@ type UpdateClientReliabilityScoresResult struct {
 func ScheduleUpdateClientReliabilityScores(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
 		tx,
-		RemoveOldClientReliabilityStats,
-		&RemoveOldClientReliabilityStatsArgs{},
+		UpdateClientReliabilityScores,
+		&UpdateClientReliabilityScoresArgs{},
 		clientSession,
 		task.RunOnce("update_client_reliability_scores"),
-		task.RunAt(time.Now().Add(1*time.Minute)),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
 	)
 }
 

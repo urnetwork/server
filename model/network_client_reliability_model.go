@@ -117,13 +117,17 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 				client_id,
 				independent_reliability_score,
 				reliability_score,
-				reliability_weight
+				reliability_weight,
+				min_block_number,
+				max_block_number
 			)
 			SELECT
 			    client_id,
 			    SUM(1.0) AS independent_reliability_score,
 			    SUM(1.0/w.valid_client_count) AS reliability_score,
-			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
+			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight,
+			    $1 AS min_block_number,
+			    $2 AS max_block_number
 			FROM client_reliability
 
 			INNER JOIN (
@@ -135,7 +139,7 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 				WHERE
 					valid = true AND
 					$1 <= block_number AND
-					block_number < $2
+					block_number <= $2
 				GROUP BY block_number, client_address_hash
 			) w ON
 				w.block_number = client_reliability.block_number AND 
@@ -144,7 +148,7 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			WHERE 
 				client_reliability.valid = true AND
 				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2
+				client_reliability.block_number <= $2
 
 			GROUP BY client_id
 			`,
@@ -217,13 +221,17 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			network_id,
 			independent_reliability_score,
 			reliability_score,
-			reliability_weight
+			reliability_weight,
+			min_block_number,
+			max_block_number
 		)
 		SELECT
 			network_id,
 			SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0/w.valid_client_count) AS reliability_score,
-		    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight
+		    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint + 1) AS reliability_weight,
+		    $1 AS min_block_number,
+		    $2 AS max_block_number
 		FROM client_reliability
 
 		INNER JOIN (
@@ -235,7 +243,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			WHERE
 				valid = true AND
 				$1 <= block_number AND
-				block_number < $2
+				block_number <= $2
 			GROUP BY block_number, client_address_hash
 		) w ON
 			w.block_number = client_reliability.block_number AND 
@@ -244,7 +252,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		WHERE 
 			client_reliability.valid = true AND
 			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2
+			client_reliability.block_number <= $2
 
 		GROUP BY network_id
 		`,

@@ -19,7 +19,7 @@ type DbMaintenanceResult struct {
 
 func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx) {
 	runAt := func() time.Time {
-		now := time.Now().UTC()
+		now := server.NowUtc()
 		year, month, day := now.Date()
 		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
 	}()
@@ -65,7 +65,7 @@ func ScheduleWarmEmail(clientSession *session.ClientSession, tx server.PgTx) {
 		&WarmEmailArgs{},
 		clientSession,
 		task.RunOnce("warm_email"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
+		task.RunAt(server.NowUtc().Add(1*time.Hour)),
 	)
 }
 

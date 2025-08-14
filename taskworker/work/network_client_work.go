@@ -24,7 +24,7 @@ func ScheduleCloseExpiredNetworkClientHandlers(clientSession *session.ClientSess
 		&CloseExpiredNetworkClientHandlersArgs{},
 		clientSession,
 		task.RunOnce("close_expired_network_client_handlers"),
-		task.RunAt(time.Now().Add(model.NetworkClientHandlerHeartbeatTimeout)),
+		task.RunAt(server.NowUtc().Add(model.NetworkClientHandlerHeartbeatTimeout)),
 	)
 }
 
@@ -55,7 +55,7 @@ type RemoveDisconnectedNetworkClientsResult struct {
 
 func ScheduleRemoveDisconnectedNetworkClients(clientSession *session.ClientSession, tx server.PgTx) {
 	runAt := func() time.Time {
-		now := time.Now().UTC()
+		now := server.NowUtc()
 		year, month, day := now.Date()
 		hour, minute, _ := now.Clock()
 		return time.Date(year, month, day, hour, 5*(minute/5)+5, 0, 0, time.UTC)
@@ -77,7 +77,7 @@ func RemoveDisconnectedNetworkClients(
 	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveDisconnectedNetworkClientsResult, error) {
-	minTime := time.Now().Add(-8 * time.Hour)
+	minTime := server.NowUtc().Add(-8 * time.Hour)
 	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minTime)
 	return &RemoveDisconnectedNetworkClientsResult{}, nil
 }
@@ -105,7 +105,7 @@ func ScheduleRemoveLocationLookupResults(clientSession *session.ClientSession, t
 		&RemoveLocationLookupResultsArgs{},
 		clientSession,
 		task.RunOnce("remove_lookup_results"),
-		task.RunAt(time.Now().Add(30*time.Minute)),
+		task.RunAt(server.NowUtc().Add(30*time.Minute)),
 	)
 }
 
@@ -113,7 +113,7 @@ func RemoveLocationLookupResults(
 	removeLocationLookupResults *RemoveLocationLookupResultsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveLocationLookupResultsResult, error) {
-	minTime := time.Now().Add(-controller.LocationLookupResultExpiration)
+	minTime := server.NowUtc().Add(-controller.LocationLookupResultExpiration)
 	model.RemoveLocationLookupResults(clientSession.Ctx, minTime)
 	return &RemoveLocationLookupResultsResult{}, nil
 }
@@ -168,7 +168,7 @@ func ScheduleRemoveOldProvideKeyChanges(clientSession *session.ClientSession, tx
 		&RemoveOldProvideKeyChangesArgs{},
 		clientSession,
 		task.RunOnce("remove_old_provide_key_changes"),
-		task.RunAt(time.Now().Add(15*time.Minute)),
+		task.RunAt(server.NowUtc().Add(15*time.Minute)),
 	)
 }
 
