@@ -115,6 +115,9 @@ func initTasks(ctx context.Context) {
 		work.ScheduleDbMaintenance(clientSession, tx)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
+		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
+		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
+		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 	})
 }
 
@@ -219,6 +222,22 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredAuthAttempts,
 			work.RemoveExpiredAuthAttemptsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredAuthAttempts,
+			work.RemoveExpiredAuthAttemptsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldClientReliabilityStats,
+			work.RemoveOldClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.UpdateClientReliabilityScores,
+			work.UpdateClientReliabilityScoresPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldProvideKeyChanges,
+			work.RemoveOldProvideKeyChangesPost,
 		),
 	)
 
