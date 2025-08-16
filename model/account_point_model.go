@@ -20,6 +20,7 @@ const (
 	AccountPointEventPayout              AccountPointEvent = "payout"
 	AccountPointEventPayoutLinkedAccount AccountPointEvent = "payout_linked_account"
 	AccountPointEventPayoutMultiplier    AccountPointEvent = "payout_multiplier"
+	AccountPointEventReliability         AccountPointEvent = "payout_reliability"
 )
 
 type AccountPoint struct {

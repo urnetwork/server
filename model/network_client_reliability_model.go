@@ -142,10 +142,10 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 					block_number <= $2
 				GROUP BY block_number, client_address_hash
 			) w ON
-				w.block_number = client_reliability.block_number AND 
+				w.block_number = client_reliability.block_number AND
 				w.client_address_hash = client_reliability.client_address_hash
 
-			WHERE 
+			WHERE
 				client_reliability.valid = true AND
 				$1 <= client_reliability.block_number AND
 				client_reliability.block_number <= $2
@@ -246,10 +246,10 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 				block_number <= $2
 			GROUP BY block_number, client_address_hash
 		) w ON
-			w.block_number = client_reliability.block_number AND 
+			w.block_number = client_reliability.block_number AND
 			w.client_address_hash = client_reliability.client_address_hash
 
-		WHERE 
+		WHERE
 			client_reliability.valid = true AND
 			$1 <= client_reliability.block_number AND
 			client_reliability.block_number <= $2
