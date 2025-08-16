@@ -28,6 +28,8 @@ type SubsidyConfig struct {
 	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
 	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
 	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
+	ReliabilityPointsPerPayout                int     `yaml:"reliability_points_per_payout"`
+	ReliabilitySubsidyPerPayoutUsd            int     `yaml:"reliability_subsidy_per_payout_usd"`
 
 	MinWalletPayoutUsd float64 `yaml:"min_wallet_payout_usd"`
 
@@ -357,6 +359,29 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
+		/**
+		 * Get last payment time
+		 * We'll use this for determining time range for reliability payouts
+		 */
+		lastPaymentTime := server.NowUtc()
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT create_time
+				FROM account_payment
+				ORDER BY create_time DESC
+				LIMIT 1;
+				`,
+		)
+
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(
+					&lastPaymentTime,
+				))
+			}
+		})
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -379,7 +404,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
             `,
 		))
 
-		result, err := tx.Query(
+		result, err = tx.Query(
 			ctx,
 			`
 				SELECT
@@ -514,6 +539,17 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			}
 		})
 
+		/**
+		 * reliability payout
+		 */
+		handleReliabilityPayoutInTx(
+			ctx,
+			tx,
+			// subsidyConfig,
+			paymentPlanId,
+			lastPaymentTime,
+		)
+
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
 		networkIdsToRemove := []server.Id{}
@@ -570,9 +606,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
 		}
 
-		// // this is the total number of points allocated per payout
-		// // should this factor in how frequent the payouts are?
-		// // todo: should be moved into config
+		// this is the total number of points allocated per payout
+		// should this factor in how frequent the payouts are?
+		// todo: should be moved into config
 		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
 
 		// pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints)) / 1_000_000
@@ -723,6 +759,85 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	}, server.TxReadCommitted)
 
 	return
+}
+
+func handleReliabilityPayout(
+	ctx context.Context,
+	// subsidyConfig *SubsidyConfig,
+	paymentPlanId server.Id,
+	lastPaymentTime time.Time,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		handleReliabilityPayoutInTx(
+			ctx,
+			tx,
+			// subsidyConfig,
+			paymentPlanId,
+			lastPaymentTime,
+		)
+	})
+}
+
+/**
+ * Returns map networkId -> NanoCents
+ * This is the amount of subsidy paid to each network for reliability
+ */
+func handleReliabilityPayoutInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	// subsidyConfig *SubsidyConfig,
+	paymentPlanId server.Id,
+	lastPaymentTime time.Time,
+) map[server.Id]NanoCents {
+
+	now := server.NowUtc()
+	networkReliabilitySubsidies := map[server.Id]NanoCents{}
+
+	// todo: should we use now - MinDurationPerPayout? instead of lastPaymentTime?
+	// minDurationPerPayout := subsidyConfig.MinDurationPerPayout()
+	// glog.Infof("[plan]reliability payout min duration per payout is %s\n", minDurationPerPayout)
+
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now)
+
+	// get reliability scores
+	reliabilityScores := GetAllNetworkReliabilityScoresInTx(tx, ctx)
+
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout))
+
+	totalReliabilityWeight := 0.0
+
+	for _, score := range reliabilityScores {
+		totalReliabilityWeight += score.ReliabilityWeight
+	}
+
+	if totalReliabilityWeight == 0 {
+		glog.Infof("[plan]no reliability scores found, skipping reliability payout")
+		return networkReliabilitySubsidies
+	}
+
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		for networkId, score := range reliabilityScores {
+
+			// networkReliabilityWeight := reliabilityScores[payment.NetworkId].ReliabilityWeight
+			weight := score.ReliabilityWeight
+
+			if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
+				reliabilityPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:     networkId,
+					Event:         AccountPointEventReliability,
+					PointValue:    NanoPoints(reliabilityPoints),
+					PaymentPlanId: &paymentPlanId,
+				}
+				ApplyAccountPoints(ctx, reliabilityPointsArgs)
+			}
+
+			// todo: handle usdc subsidy
+
+		}
+	})
+
+	return networkReliabilitySubsidies
+
 }
 
 func payoutChildrenReferralNetworks(
@@ -1480,7 +1595,7 @@ func GetTransferStats(
 
 				SELECT
 					0 AS paid_bytes_provided,
-					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided				
+					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
 				FROM account_payment
 
 				INNER JOIN transfer_escrow_sweep ON
