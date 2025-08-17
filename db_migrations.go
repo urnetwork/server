@@ -2132,4 +2132,9 @@ var migrations = []any{
             ADD COLUMN min_block_number bigint NOT NULL DEFAULT 0,
             ADD COLUMN max_block_number bigint NOT NULL DEFAULT 0
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_payment
+        ADD COLUMN reliability_subsidy_nano_cents bigint NOT NULL DEFAULT 0
+    `),
 }

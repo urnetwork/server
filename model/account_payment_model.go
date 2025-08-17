@@ -76,9 +76,10 @@ type AccountPayment struct {
 	PayoutByteCount ByteCount  `json:"payout_byte_count"`
 	Payout          NanoCents  `json:"payout_nano_cents"`
 	// AccountPoints   NanoPoints `json:"account_points"`
-	SubsidyPayout NanoCents `json:"subsidy_payout_nano_cents"`
-	MinSweepTime  time.Time `json:"min_sweep_time"`
-	CreateTime    time.Time `json:"create_time"`
+	SubsidyPayout      NanoCents `json:"subsidy_payout_nano_cents"`
+	ReliabilitySubsidy NanoCents `json:"reliability_subsidy_nano_cents"`
+	MinSweepTime       time.Time `json:"min_sweep_time"`
+	CreateTime         time.Time `json:"create_time"`
 
 	PaymentRecord  *string    `json:"payment_record"`
 	TokenType      *string    `json:"token_type"`
@@ -120,6 +121,7 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
                 account_payment.payout_byte_count,
                 account_payment.payout_nano_cents,
                 account_payment.subsidy_payout_nano_cents,
+                account_payment.reliability_subsidy_nano_cents,
                 account_payment.min_sweep_time,
                 account_payment.create_time,
                 account_payment.payment_record,
@@ -167,6 +169,7 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.PayoutByteCount,
 				&payment.Payout,
 				&payment.SubsidyPayout,
+				&payment.ReliabilitySubsidy,
 				&payment.MinSweepTime,
 				&payment.CreateTime,
 				&payment.PaymentRecord,
@@ -542,13 +545,27 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		/**
 		 * reliability payout
 		 */
-		handleReliabilityPayoutInTx(
+		networkReliabilitySubsidyAmounts := handleReliabilityPayoutInTx(
 			ctx,
 			tx,
 			// subsidyConfig,
 			paymentPlanId,
 			lastPaymentTime,
 		)
+
+		for networkId, reliabilitySubsidy := range networkReliabilitySubsidyAmounts {
+			payment, ok := networkPayments[networkId]
+			if !ok {
+				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
+				continue
+			}
+
+			// add the reliability subsidy to the payment
+			payment.Payout += reliabilitySubsidy
+
+			// store the reliability subsidy amount for this network
+			// networkReliabilitySubsidyAmounts[payment.NetworkId] = reliabilitySubsidy
+		}
 
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
@@ -713,9 +730,10 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 									payout_nano_cents,
 									subsidy_payout_nano_cents,
 									min_sweep_time,
-									create_time
+									create_time,
+									reliability_subsidy_nano_cents
 							)
-							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+							VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					`,
 					payment.PaymentId,
 					payment.PaymentPlanId,
@@ -726,6 +744,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
+					networkReliabilitySubsidyAmounts[payment.NetworkId],
 				)
 			}
 		})
@@ -766,9 +785,9 @@ func handleReliabilityPayout(
 	// subsidyConfig *SubsidyConfig,
 	paymentPlanId server.Id,
 	lastPaymentTime time.Time,
-) {
+) (networkSubsidyAmounts map[server.Id]NanoCents) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		handleReliabilityPayoutInTx(
+		networkSubsidyAmounts = handleReliabilityPayoutInTx(
 			ctx,
 			tx,
 			// subsidyConfig,
@@ -776,6 +795,7 @@ func handleReliabilityPayout(
 			lastPaymentTime,
 		)
 	})
+	return
 }
 
 /**
@@ -815,6 +835,8 @@ func handleReliabilityPayoutInTx(
 		return networkReliabilitySubsidies
 	}
 
+	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
+
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for networkId, score := range reliabilityScores {
 
@@ -832,6 +854,16 @@ func handleReliabilityPayoutInTx(
 			}
 
 			// todo: handle usdc subsidy
+
+			if reliabilitySubsidyPerPayout <= 0 {
+				glog.Infof("[plan]reliability subsidy per payout is 0, skipping reliability subsidy payout for %s\n", networkId)
+				continue
+			}
+
+			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
+			if reliabilitySubsidy >= 0 {
+				networkReliabilitySubsidies[networkId] += reliabilitySubsidy
+			}
 
 		}
 	})

@@ -465,14 +465,14 @@ func TestReliabilityPoints(t *testing.T) {
 			networkStatsB,
 		)
 
-		subsidyConfig := EnvSubsidyConfig()
+		// subsidyConfig := EnvSubsidyConfig()
 
 		// we want to query between now and last 4 blocks
 		lastPaymentTime := now.Add(-(ReliabilityBlockDuration * 4))
 
-		handleReliabilityPayout(
+		networkReliabilityUsdBonuses := handleReliabilityPayout(
 			ctx,
-			subsidyConfig,
+			// subsidyConfig,
 			paymentPlanId,
 			lastPaymentTime,
 		)
@@ -531,6 +531,20 @@ func TestReliabilityPoints(t *testing.T) {
 		totalPoints := NanoPointsToPoints(NanoPoints(networkPointsA[0].PointValue) + NanoPoints(networkPointsB[0].PointValue))
 
 		assert.Equal(t, totalPoints, EnvSubsidyConfig().ReliabilityPointsPerPayout)
+
+		/**
+		 * USD subsidy checks
+		 *
+		 * reliabilitySubsidyPerPayout * (expectedReliabilityWeightA / totalWeight) = expectedPoints
+		 */
+		reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
+
+		expectedUsdNetworkA := NanoCents(float64(reliabilitySubsidyPerPayout) * (expectedReliabilityWeightA / totalWeight))
+		expectedUsdNetworkB := NanoCents(float64(reliabilitySubsidyPerPayout) * (expectedReliabilityWeightB / totalWeight))
+
+		assert.Equal(t, len(networkReliabilityUsdBonuses), 2)
+		assert.Equal(t, networkReliabilityUsdBonuses[networkIdA], expectedUsdNetworkA)
+		assert.Equal(t, networkReliabilityUsdBonuses[networkIdB], expectedUsdNetworkB)
 
 	})
 }
