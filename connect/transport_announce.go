@@ -126,7 +126,7 @@ func (self *ConnectionAnnounce) run() {
 
 	self.setConnectionId(connectionId)
 
-	established := false
+	established := self.announceTimeout == 0
 	nextStartTime := server.NowUtc()
 	for {
 		statsStartTime := nextStartTime
