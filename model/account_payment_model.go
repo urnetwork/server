@@ -362,29 +362,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
-		/**
-		 * Get last payment time
-		 * We'll use this for determining time range for reliability payouts
-		 */
-		lastPaymentTime := server.NowUtc()
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT create_time
-				FROM account_payment
-				ORDER BY create_time DESC
-				LIMIT 1;
-				`,
-		)
-
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(
-					&lastPaymentTime,
-				))
-			}
-		})
-
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -407,7 +384,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
             `,
 		))
 
-		result, err = tx.Query(
+		result, err := tx.Query(
 			ctx,
 			`
 				SELECT
@@ -541,6 +518,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				}
 			}
 		})
+
+		// 7 days ago as default value if no subsidy payment exists
+		lastPaymentTime := time.Now().UTC().Add(-7 * 24 * time.Hour)
+		if subsidyPayment != nil {
+			lastPaymentTime = subsidyPayment.StartTime
+		}
 
 		/**
 		 * reliability payout
