@@ -528,14 +528,17 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		/**
 		 * reliability payout
 		 */
-		networkReliabilitySubsidyAmounts := handleReliabilityPayoutInTx(
+		networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
 			ctx,
 			tx,
-			paymentPlanId,
 			lastPaymentTime,
 		)
 
-		for networkId, reliabilitySubsidy := range networkReliabilitySubsidyAmounts {
+		/**
+		 * Add the reliability USDC subsidy to payout amount
+		 * to help payouts get above min payout threshold
+		 */
+		for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
 			payment, ok := networkPayments[networkId]
 			if !ok {
 				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
@@ -543,7 +546,23 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			}
 
 			// add the reliability subsidy to the payment
-			payment.Payout += reliabilitySubsidy
+			payment.Payout += reliabilitySubsidy.Usdc
+
+			/**
+			 * Apply points here
+			 * In the case they don't meet the payout threshold, we still want points to be applied
+			 */
+			if networkReliabilitySubsidies[payment.NetworkId].Points > 0 {
+				reliabilityPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:        payment.NetworkId,
+					Event:            AccountPointEventReliability,
+					PointValue:       NanoPoints(networkReliabilitySubsidies[payment.NetworkId].Points),
+					AccountPaymentId: &payment.PaymentId,
+					PaymentPlanId:    &paymentPlanId,
+				}
+				ApplyAccountPoints(ctx, reliabilityPointsArgs)
+			}
+
 		}
 
 		// apply wallet minimum payout threshold
@@ -607,7 +626,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// todo: should be moved into config
 		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
 
-		// pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints)) / 1_000_000
 		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
 		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
 			totalPayout,
@@ -618,6 +636,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range networkPayments {
 
+				/**
+				 * Payout account points
+				 */
 				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
 
 				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
@@ -640,6 +661,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					accountPointsArgs,
 				)
 
+				/**
+				 * Seeker bonus
+				 */
 				if seekerHolderNetworkIds[payment.NetworkId] {
 					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
 					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
@@ -723,7 +747,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
-					networkReliabilitySubsidyAmounts[payment.NetworkId],
+					networkReliabilitySubsidies[payment.NetworkId].Usdc,
 				)
 			}
 		})
@@ -759,17 +783,19 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	return
 }
 
-func handleReliabilityPayout(
+type NetworkReliabilitySubsidy struct {
+	Usdc   NanoCents
+	Points NanoPoints
+}
+
+func calculateReliabilityPayout(
 	ctx context.Context,
-	// subsidyConfig *SubsidyConfig,
-	paymentPlanId server.Id,
 	lastPaymentTime time.Time,
-) (networkSubsidyAmounts map[server.Id]NanoCents) {
+) (networkSubsidyAmounts map[server.Id]NetworkReliabilitySubsidy) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		networkSubsidyAmounts = handleReliabilityPayoutInTx(
+		networkSubsidyAmounts = calculateReliabilityPayoutInTx(
 			ctx,
 			tx,
-			paymentPlanId,
 			lastPaymentTime,
 		)
 	})
@@ -777,18 +803,17 @@ func handleReliabilityPayout(
 }
 
 /**
- * Returns map networkId -> NanoCents
+ * Returns map networkId -> NetworkReliabilitySubsidy
  * This is the amount of subsidy paid to each network for reliability
  */
-func handleReliabilityPayoutInTx(
+func calculateReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
-	paymentPlanId server.Id,
 	lastPaymentTime time.Time,
-) map[server.Id]NanoCents {
+) map[server.Id]NetworkReliabilitySubsidy {
 
 	now := server.NowUtc()
-	networkReliabilitySubsidies := map[server.Id]NanoCents{}
+	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
 	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now)
 
@@ -810,40 +835,43 @@ func handleReliabilityPayoutInTx(
 
 	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
 
-	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-		for networkId, score := range reliabilityScores {
+	// server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+	for networkId, score := range reliabilityScores {
 
-			weight := score.ReliabilityWeight
+		subsidy := NetworkReliabilitySubsidy{}
+		weight := score.ReliabilityWeight
 
-			/**
-			 * Account Points
-			 */
-			if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
-				reliabilityPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:     networkId,
-					Event:         AccountPointEventReliability,
-					PointValue:    NanoPoints(reliabilityPoints),
-					PaymentPlanId: &paymentPlanId,
-				}
-				ApplyAccountPoints(ctx, reliabilityPointsArgs)
-			}
+		// 		/**
+		// 		 * Account Points
+		// 		 */
+		if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
+			// reliabilityPointsArgs := ApplyAccountPointsArgs{
+			// 	NetworkId:     networkId,
+			// 	Event:         AccountPointEventReliability,
+			// 	PointValue:    NanoPoints(reliabilityPoints),
+			// 	PaymentPlanId: &paymentPlanId,
+			// }
+			// ApplyAccountPoints(ctx, reliabilityPointsArgs)
+			subsidy.Points = NanoPoints(reliabilityPoints)
+		}
 
-			/*
-			 * USDC subsidy
-			 */
+		// 		/*
+		// 		 * USDC subsidy
+		// 		 */
 
-			if reliabilitySubsidyPerPayout <= 0 {
-				glog.Infof("[plan]reliability subsidy per payout is 0, skipping reliability subsidy payout for %s\n", networkId)
-				continue
-			}
+		if reliabilitySubsidyPerPayout > 0 {
 
 			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
 			if reliabilitySubsidy >= 0 {
-				networkReliabilitySubsidies[networkId] += reliabilitySubsidy
+				// networkReliabilitySubsidies[networkId] += reliabilitySubsidy
+				subsidy.Usdc = reliabilitySubsidy
 			}
-
 		}
-	})
+
+		networkReliabilitySubsidies[networkId] = subsidy
+
+	}
+	// })
 
 	return networkReliabilitySubsidies
 
