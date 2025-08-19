@@ -835,35 +835,26 @@ func calculateReliabilityPayoutInTx(
 
 	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
 
-	// server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 	for networkId, score := range reliabilityScores {
 
 		subsidy := NetworkReliabilitySubsidy{}
 		weight := score.ReliabilityWeight
 
-		// 		/**
-		// 		 * Account Points
-		// 		 */
+		/**
+		 * Account Points
+		 */
 		if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
-			// reliabilityPointsArgs := ApplyAccountPointsArgs{
-			// 	NetworkId:     networkId,
-			// 	Event:         AccountPointEventReliability,
-			// 	PointValue:    NanoPoints(reliabilityPoints),
-			// 	PaymentPlanId: &paymentPlanId,
-			// }
-			// ApplyAccountPoints(ctx, reliabilityPointsArgs)
 			subsidy.Points = NanoPoints(reliabilityPoints)
 		}
 
-		// 		/*
-		// 		 * USDC subsidy
-		// 		 */
+		/*
+		 * USDC subsidy
+		 */
 
 		if reliabilitySubsidyPerPayout > 0 {
 
 			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
 			if reliabilitySubsidy >= 0 {
-				// networkReliabilitySubsidies[networkId] += reliabilitySubsidy
 				subsidy.Usdc = reliabilitySubsidy
 			}
 		}
@@ -871,7 +862,6 @@ func calculateReliabilityPayoutInTx(
 		networkReliabilitySubsidies[networkId] = subsidy
 
 	}
-	// })
 
 	return networkReliabilitySubsidies
 
