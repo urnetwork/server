@@ -667,6 +667,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 				if seekerHolderNetworkIds[payment.NetworkId] {
 					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
 					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+
+					// double reliability points for seeker holders
+					seekerBonus += networkReliabilitySubsidies[payment.NetworkId].Points
 					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
 					accountPointsArgs = ApplyAccountPointsArgs{
