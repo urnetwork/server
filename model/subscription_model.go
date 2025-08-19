@@ -150,8 +150,8 @@ func PointsToNanoPoints(points float64) NanoPoints {
 	return NanoPoints(math.Round(float64(points) * 1_000_000))
 }
 
-func NanoPointsToPoints(nanoPoints NanoPoints) float64 {
-	return math.Round(float64(nanoPoints) / 1_000_000)
+func NanoPointsToPoints(nanoPoints NanoPoints) int {
+	return int(math.Round(float64(nanoPoints) / 1_000_000))
 }
 
 // 12 months
