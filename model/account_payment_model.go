@@ -534,37 +534,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			lastPaymentTime,
 		)
 
-		/**
-		 * Add the reliability USDC subsidy to payout amount
-		 * to help payouts get above min payout threshold
-		 */
-		for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
-			payment, ok := networkPayments[networkId]
-			if !ok {
-				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
-				continue
-			}
-
-			// add the reliability subsidy to the payment
-			payment.Payout += reliabilitySubsidy.Usdc
-
-			/**
-			 * Apply points here
-			 * In the case they don't meet the payout threshold, we still want points to be applied
-			 */
-			if networkReliabilitySubsidies[payment.NetworkId].Points > 0 {
-				reliabilityPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:        payment.NetworkId,
-					Event:            AccountPointEventReliability,
-					PointValue:       NanoPoints(networkReliabilitySubsidies[payment.NetworkId].Points),
-					AccountPaymentId: &payment.PaymentId,
-					PaymentPlanId:    &paymentPlanId,
-				}
-				ApplyAccountPoints(ctx, reliabilityPointsArgs)
-			}
-
-		}
-
 		// apply wallet minimum payout threshold
 		// any wallet that does not meet the threshold will not be included in this plan
 		networkIdsToRemove := []server.Id{}
@@ -574,7 +543,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		payoutExpirationTime := server.NowUtc().Add(-subsidyConfig.WalletPayoutTimeout())
 		for networkId, payment := range networkPayments {
 			// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
-			if payment.Payout < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
+			if payment.Payout+networkReliabilitySubsidies[networkId].Usdc < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
 				networkIdsToRemove = append(networkIdsToRemove, networkId)
 			} else {
 				// this payment will be included in the plan
@@ -619,6 +588,37 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// get total points
 		for _, payment := range networkPayments {
 			totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+		}
+
+		/**
+		 * Add the reliability subsidies
+		 * We do this after calculating totalPayoutAccountNanoPoints and totalPayout so the bonus doesn't skew the points
+		 */
+		for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
+			payment, ok := networkPayments[networkId]
+			if !ok {
+				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
+				continue
+			}
+
+			// add the reliability subsidy to the payment
+			payment.Payout += reliabilitySubsidy.Usdc
+
+			/**
+			 * Apply points
+			 * We don't do this in the loop below because some networks may not meet the payout threshold, but should still receive reliability points
+			 */
+			if networkReliabilitySubsidies[payment.NetworkId].Points > 0 {
+				reliabilityPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:        payment.NetworkId,
+					Event:            AccountPointEventReliability,
+					PointValue:       NanoPoints(networkReliabilitySubsidies[payment.NetworkId].Points),
+					AccountPaymentId: &payment.PaymentId,
+					PaymentPlanId:    &paymentPlanId,
+				}
+				ApplyAccountPoints(ctx, reliabilityPointsArgs)
+			}
+
 		}
 
 		// this is the total number of points allocated per payout
