@@ -388,8 +388,6 @@ func TestReliabilityPoints(t *testing.T) {
 		clientIdB := server.NewId()
 		clientIdB2 := server.NewId()
 
-		paymentPlanId := server.NewId()
-
 		now := server.NowUtc()
 
 		/**
@@ -470,10 +468,8 @@ func TestReliabilityPoints(t *testing.T) {
 		// we want to query between now and last 4 blocks
 		lastPaymentTime := now.Add(-(ReliabilityBlockDuration * 4))
 
-		networkReliabilityUsdBonuses := handleReliabilityPayout(
+		reliabilitySubsidies := calculateReliabilityPayout(
 			ctx,
-			// subsidyConfig,
-			paymentPlanId,
 			lastPaymentTime,
 		)
 
@@ -502,11 +498,6 @@ func TestReliabilityPoints(t *testing.T) {
 		reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout))
 		totalWeight := expectedReliabilityWeightA + expectedReliabilityWeightB
 
-		networkPointsA := FetchAccountPoints(ctx, networkIdA)
-		assert.Equal(t, len(networkPointsA), 1)
-		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
-		assert.Equal(t, networkPointsA[0].Event, string(AccountPointEventReliability))
-
 		/**
 		 * expected points
 		 * reliabilityPointsPerPayout * (expectedReliabilityWeightA / totalWeight) = expectedPoints
@@ -518,17 +509,12 @@ func TestReliabilityPoints(t *testing.T) {
 		 * 62_500 * (0.4 / 0.6) = 41666.6666667 * 10^6 = 41666666667 nano points
 		 */
 		expectedPointsA := int(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightA / totalWeight)
-		assert.Equal(t, networkPointsA[0].PointValue, expectedPointsA)
+		assert.Equal(t, reliabilitySubsidies[networkIdA].Points, NanoPoints(expectedPointsA))
 
 		expectedPointsB := int(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightB / totalWeight)
-		networkPointsB := FetchAccountPoints(ctx, networkIdB)
+		assert.Equal(t, reliabilitySubsidies[networkIdB].Points, NanoPoints(expectedPointsB))
 
-		assert.Equal(t, len(networkPointsB), 1)
-		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
-		assert.Equal(t, networkPointsB[0].Event, string(AccountPointEventReliability))
-		assert.Equal(t, networkPointsB[0].PointValue, expectedPointsB)
-
-		totalPoints := NanoPointsToPoints(NanoPoints(networkPointsA[0].PointValue) + NanoPoints(networkPointsB[0].PointValue))
+		totalPoints := NanoPointsToPoints(NanoPoints(reliabilitySubsidies[networkIdA].Points) + NanoPoints(reliabilitySubsidies[networkIdB].Points))
 
 		assert.Equal(t, totalPoints, EnvSubsidyConfig().ReliabilityPointsPerPayout)
 
@@ -542,9 +528,9 @@ func TestReliabilityPoints(t *testing.T) {
 		expectedUsdNetworkA := NanoCents(float64(reliabilitySubsidyPerPayout) * (expectedReliabilityWeightA / totalWeight))
 		expectedUsdNetworkB := NanoCents(float64(reliabilitySubsidyPerPayout) * (expectedReliabilityWeightB / totalWeight))
 
-		assert.Equal(t, len(networkReliabilityUsdBonuses), 2)
-		assert.Equal(t, networkReliabilityUsdBonuses[networkIdA], expectedUsdNetworkA)
-		assert.Equal(t, networkReliabilityUsdBonuses[networkIdB], expectedUsdNetworkB)
+		assert.Equal(t, len(reliabilitySubsidies), 2)
+		assert.Equal(t, reliabilitySubsidies[networkIdA].Usdc, expectedUsdNetworkA)
+		assert.Equal(t, reliabilitySubsidies[networkIdB].Usdc, expectedUsdNetworkB)
 
 	})
 }
