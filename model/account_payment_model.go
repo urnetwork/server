@@ -531,7 +531,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		networkReliabilitySubsidyAmounts := handleReliabilityPayoutInTx(
 			ctx,
 			tx,
-			// subsidyConfig,
 			paymentPlanId,
 			lastPaymentTime,
 		)
@@ -545,9 +544,6 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 			// add the reliability subsidy to the payment
 			payment.Payout += reliabilitySubsidy
-
-			// store the reliability subsidy amount for this network
-			// networkReliabilitySubsidyAmounts[payment.NetworkId] = reliabilitySubsidy
 		}
 
 		// apply wallet minimum payout threshold
@@ -773,7 +769,6 @@ func handleReliabilityPayout(
 		networkSubsidyAmounts = handleReliabilityPayoutInTx(
 			ctx,
 			tx,
-			// subsidyConfig,
 			paymentPlanId,
 			lastPaymentTime,
 		)
@@ -788,17 +783,12 @@ func handleReliabilityPayout(
 func handleReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
-	// subsidyConfig *SubsidyConfig,
 	paymentPlanId server.Id,
 	lastPaymentTime time.Time,
 ) map[server.Id]NanoCents {
 
 	now := server.NowUtc()
 	networkReliabilitySubsidies := map[server.Id]NanoCents{}
-
-	// todo: should we use now - MinDurationPerPayout? instead of lastPaymentTime?
-	// minDurationPerPayout := subsidyConfig.MinDurationPerPayout()
-	// glog.Infof("[plan]reliability payout min duration per payout is %s\n", minDurationPerPayout)
 
 	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now)
 
@@ -823,9 +813,11 @@ func handleReliabilityPayoutInTx(
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for networkId, score := range reliabilityScores {
 
-			// networkReliabilityWeight := reliabilityScores[payment.NetworkId].ReliabilityWeight
 			weight := score.ReliabilityWeight
 
+			/**
+			 * Account Points
+			 */
 			if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
 				reliabilityPointsArgs := ApplyAccountPointsArgs{
 					NetworkId:     networkId,
@@ -836,7 +828,9 @@ func handleReliabilityPayoutInTx(
 				ApplyAccountPoints(ctx, reliabilityPointsArgs)
 			}
 
-			// todo: handle usdc subsidy
+			/*
+			 * USDC subsidy
+			 */
 
 			if reliabilitySubsidyPerPayout <= 0 {
 				glog.Infof("[plan]reliability subsidy per payout is 0, skipping reliability subsidy payout for %s\n", networkId)
