@@ -1120,17 +1120,21 @@ func AuthCodeCreate(
 	codeCreate *AuthCodeCreateArgs,
 	session *session.ClientSession,
 ) (codeCreateResult *AuthCodeCreateResult, returnErr error) {
-	if session.ByJwt.ClientId != nil {
-		// the clientId is not threaded currently
-		// no need to implement this now
-		codeCreateResult = &AuthCodeCreateResult{
-			Error: &AuthCodeCreateError{
-				AuthCodeLimitExceeded: true,
-				Message:               "A client JWT cannot create an auth code.",
-			},
-		}
-		return
-	}
+
+	// // todo:  the device needs to be cleaned up. There is an issue where we should keep the admin jwt in the device  and create clients on demand, or when they expire.
+	// // when the device is fixed the client id check can come back in
+	//
+	// if session.ByJwt.ClientId != nil {
+	// 	// the clientId is not threaded currently
+	// 	// no need to implement this now
+	// 	codeCreateResult = &AuthCodeCreateResult{
+	// 		Error: &AuthCodeCreateError{
+	// 			AuthCodeLimitExceeded: true,
+	// 			Message:               "A client JWT cannot create an auth code.",
+	// 		},
+	// 	}
+	// 	return
+	// }
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
