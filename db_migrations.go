@@ -2047,7 +2047,6 @@ var migrations = []any{
 			UNIQUE (wallet_address, blockchain)
 		)
 	`),
-
 	newSqlMigration(`
         CREATE TABLE client_reliability (
             block_number bigint NOT NULL,
@@ -2137,4 +2136,27 @@ var migrations = []any{
         ALTER TABLE account_payment
         ADD COLUMN reliability_subsidy_nano_cents bigint NOT NULL DEFAULT 0
     `),
+
+	// allow NULL until populated
+	newSqlMigration(`
+        ALTER TABLE network_user
+        ADD COLUMN network_id uuid NULL
+    `),
+
+	// populate network_id in auth tables
+	newSqlMigration(`
+	    UPDATE network_user
+	    SET network_id = (SELECT network_id FROM network WHERE network_user.user_id = network.admin_user_id);
+	`),
+
+	// after populating network_id, add NOT NULL constraints
+	newSqlMigration(`
+	    ALTER TABLE network_user
+	    ALTER COLUMN network_id SET NOT NULL;
+	`),
+
+	// index network_id on network_user
+	newSqlMigration(`
+	    CREATE INDEX idx_network_user_network_id ON network_user (network_id);
+	`),
 }
