@@ -24,7 +24,7 @@ func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 		&ExportStatsArgs{},
 		clientSession,
 		task.RunOnce("export_stats"),
-		task.RunAt(time.Now().Add(30*time.Second)),
+		task.RunAt(server.NowUtc().Add(30*time.Second)),
 	)
 }
 

@@ -16,7 +16,7 @@ func SchedulePopulateAccountWallets(clientSession *session.ClientSession, tx ser
 		&controller.PopulateAccountWalletsArgs{},
 		clientSession,
 		task.RunOnce("populate_circle_account_wallets"),
-		task.RunAt(time.Now().Add(24*time.Hour)),
+		task.RunAt(server.NowUtc().Add(24*time.Hour)),
 	)
 }
 

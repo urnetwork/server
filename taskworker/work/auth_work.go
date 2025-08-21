@@ -26,7 +26,7 @@ func ScheduleRemoveExpiredAuthCodes(clientSession *session.ClientSession, tx ser
 		&RemoveExpiredAuthCodesArgs{},
 		clientSession,
 		task.RunOnce("remove_expired_auth_codes"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
+		task.RunAt(server.NowUtc().Add(1*time.Hour)),
 	)
 }
 
@@ -62,7 +62,7 @@ func ScheduleRemoveExpiredAuthAttempts(clientSession *session.ClientSession, tx 
 		&RemoveExpiredAuthAttemptsArgs{},
 		clientSession,
 		task.RunOnce("remove_expired_auth_attempts"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
+		task.RunAt(server.NowUtc().Add(1*time.Hour)),
 	)
 }
 

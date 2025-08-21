@@ -300,6 +300,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		announce := NewConnectionAnnounce(
 			handleCtx,
 			handleCancel,
+			byJwt.NetworkId,
 			clientId,
 			clientAddress,
 			self.handlerId,
@@ -627,6 +628,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		announce := NewConnectionAnnounce(
 			handleCtx,
 			handleCancel,
+			byJwt.NetworkId,
 			clientId,
 			clientAddress,
 			self.handlerId,

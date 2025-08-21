@@ -44,7 +44,7 @@ func UserAuthAttempt(
 			`,
 			userAuthAttemptId,
 			userAuth,
-			clientAddressHash,
+			clientAddressHash[:],
 			clientPort,
 			false,
 		))
@@ -121,7 +121,7 @@ func UserAuthAttempt(
 				ORDER BY attempt_time DESC
 				LIMIT $3
 			`,
-			clientAddressHash,
+			clientAddressHash[:],
 			AttemptLookback/time.Second,
 			AttemptFailedCountThreshold,
 		)

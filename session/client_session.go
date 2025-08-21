@@ -107,7 +107,7 @@ func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err err
 	return
 }
 
-func (self *ClientSession) ClientAddressHashPort() (clientAddressHash []byte, clientPort int, err error) {
+func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, clientPort int, err error) {
 	var clientIp string
 	clientIp, clientPort, err = server.SplitClientAddress(self.ClientAddress)
 	if err != nil {

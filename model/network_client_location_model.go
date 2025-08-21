@@ -1025,11 +1025,12 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 }
 
 type ConnectionLocationScores struct {
-	NetTypeVpn     int
-	NetTypeProxy   int
-	NetTypeTor     int
-	NetTypeRelay   int
-	NetTypeHosting int
+	NetTypeVpn      int
+	NetTypeProxy    int
+	NetTypeTor      int
+	NetTypeRelay    int
+	NetTypeHosting  int
+	NetTypeHosting2 int
 }
 
 func SetConnectionLocation(
@@ -1107,9 +1108,10 @@ func SetConnectionLocation(
 		            net_type_tor,
 		            net_type_relay,
 		            net_type_hosting,
-		            network_id
+		            network_id,
+		            net_type_hosting2
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -1121,7 +1123,8 @@ func SetConnectionLocation(
                     net_type_tor = $8,
                     net_type_relay = $9,
                     net_type_hosting = $10,
-                    network_id = $11
+                    network_id = $11,
+                    net_type_hosting2 = $12
             `,
 			connectionId,
 			clientId,
@@ -1134,6 +1137,7 @@ func SetConnectionLocation(
 			connectionLocationScores.NetTypeRelay,
 			connectionLocationScores.NetTypeHosting,
 			networkId,
+			connectionLocationScores.NetTypeHosting2,
 		))
 	})
 	return

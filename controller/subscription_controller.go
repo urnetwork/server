@@ -831,23 +831,27 @@ func PlayWebhook(
 			glog.Infof("[sub]google play sub: %v\n", sub)
 
 			var networkId server.Id
-			if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
-				networkId, err = server.ParseId(sub.ExternalAccountIdentifiers.ExternalAccountId)
-				if err != nil {
-					return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ExternalAccountId, err)
-				}
-			} else if sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId != "" {
-				networkIdOrSubscriptionPaymentId, err := server.ParseId(sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId)
-				if err != nil {
-					return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId, err)
-				}
-				networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
-				if err != nil {
-					// the obfuscated account id is just a plain network id
-					networkId = networkIdOrSubscriptionPaymentId
+			if sub.ExternalAccountIdentifiers != nil {
+				if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
+					networkId, err = server.ParseId(sub.ExternalAccountIdentifiers.ExternalAccountId)
+					if err != nil {
+						return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ExternalAccountId, err)
+					}
+				} else if sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId != "" {
+					networkIdOrSubscriptionPaymentId, err := server.ParseId(sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId)
+					if err != nil {
+						return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId, err)
+					}
+					networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+					if err != nil {
+						// the obfuscated account id is just a plain network id
+						networkId = networkIdOrSubscriptionPaymentId
+					}
+				} else {
+					return nil, fmt.Errorf("Google Play subscription missing external account id and obfuscated external account id")
 				}
 			} else {
-				return nil, fmt.Errorf("Google Play subscription missing external account id and obfuscated external account id")
+				return nil, fmt.Errorf("Google Play subscription missing external account information")
 			}
 
 			if len(sub.LineItems) == 0 {

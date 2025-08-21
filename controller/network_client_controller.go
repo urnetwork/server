@@ -17,7 +17,7 @@ func ConnectNetworkClient(
 	clientAddress string,
 	handlerId server.Id,
 	retryLocationTimeout time.Duration,
-) (connectionId server.Id, clientAddressHash []byte, err error) {
+) (connectionId server.Id, clientAddressHash [32]byte, err error) {
 	var clientIp string
 	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 	if err != nil {
