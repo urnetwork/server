@@ -51,8 +51,6 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 			UserId:    userId,
 		}
 
-		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
-
 		Testing_CreateGuestNetwork(
 			ctx,
 			networkId,
@@ -60,14 +58,16 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 			userId,
 		)
 
+		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
+
 		// fetch the network user and make sure it's a guest
 
 		network := GetNetwork(clientSession)
 		assert.NotEqual(t, network, nil)
 
-		networkUser := GetNetworkUser(ctx, *network.AdminUserId)
+		isGuest := isGuestMode(ctx, &userId)
 
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
+		assert.Equal(t, isGuest, true)
 
 		// upgrade to non-guest
 
@@ -89,9 +89,15 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 		assert.Equal(t, upgradeGuestResult.Error, nil)
 		assert.Equal(t, upgradeGuestResult.VerificationRequired.UserAuth, userAuth)
 
-		// fetch the network user and make sure it's no longer a guest
-		networkUser = GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		// check if is guest
+		isGuest = isGuestMode(ctx, &userId)
+		assert.Equal(t, isGuest, false)
+
+		// should have created a user auth
+		userAuths, err := getUserAuths(userId, ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(userAuths), 1)
+		assert.Equal(t, userAuths[0].UserAuth, userAuth)
 
 		// ensure network name has been updated
 		network = GetNetwork(clientSession)
@@ -192,6 +198,9 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 			guestUserId,
 		)
 
+		isGuest := isGuestMode(ctx, &guestUserId)
+		assert.Equal(t, isGuest, true)
+
 		// fetch the network
 		// it should have no guest upgrade network id
 		network := GetNetwork(clientSession)
@@ -216,7 +225,6 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		// it should have the guest upgrade network id
 		network = GetNetwork(clientSession)
 		assert.NotEqual(t, network, nil)
-
 		assert.Equal(t, network.GuestUpgradeNetworkId, networkId)
 
 	})
@@ -226,13 +234,6 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 
 		ctx := context.Background()
-		// networkId := server.NewId()
-		// userId := server.NewId()
-		// clientId := server.NewId()
-		// networkName := "abcdef"
-
-		// model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
-
 		networkId := server.NewId()
 		userId := server.NewId()
 
@@ -263,9 +264,11 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 			},
 		}
 
-		networkUser := GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
-		assert.Equal(t, networkUser.WalletAddress, nil)
+		isGuest := isGuestMode(ctx, &userId)
+		assert.Equal(t, isGuest, true)
+		walletAuths, err := getWalletAuths(ctx, userId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(walletAuths), 0)
 
 		result, err := UpgradeGuest(args, clientSession)
 		assert.Equal(t, err, nil)
@@ -275,9 +278,13 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 		assert.NotEqual(t, network, nil)
 		assert.Equal(t, network.NetworkName, networkName)
 
-		user := GetNetworkUser(ctx, *network.AdminUserId)
-		assert.Equal(t, user.AuthType, "solana")
-		assert.Equal(t, user.WalletAddress, pk)
+		isGuest = isGuestMode(ctx, &userId)
+		assert.Equal(t, isGuest, false)
+
+		walletAuths, err = getWalletAuths(ctx, userId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(walletAuths), 1)
+		assert.Equal(t, walletAuths[0].WalletAddress, pk)
 
 	})
 }

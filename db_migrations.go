@@ -2137,4 +2137,10 @@ var migrations = []any{
         ALTER TABLE account_payment
         ADD COLUMN reliability_subsidy_nano_cents bigint NOT NULL DEFAULT 0
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_user
+        DROP COLUMN auth_type,
+        DROP COLUMN wallet_address
+    `),
 }
