@@ -44,6 +44,6 @@ func TestGetNetworkUser(t *testing.T) {
 		assert.Equal(t, networkUser.UserId, userId)
 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
 		assert.Equal(t, networkUser.Verified, true)
-		assert.Equal(t, networkUser.AuthType, model.AuthTypePassword)
+
 	})
 }

@@ -30,7 +30,6 @@ func TestNetworkUser(t *testing.T) {
 		assert.Equal(t, networkUser.UserId, userId)
 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
 		assert.Equal(t, networkUser.Verified, true)
-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
 		assert.Equal(t, networkUser.NetworkName, networkName)
 
 		// test for invalid user id
@@ -46,12 +45,13 @@ func TestNetworkUser(t *testing.T) {
 		Testing_CreateGuestNetwork(ctx, guestNetworkId, guestNetworkName, guestUserId)
 
 		networkUser = GetNetworkUser(ctx, guestUserId)
+		isGuest := isGuestMode(ctx, &guestUserId)
 
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, networkUser.UserId, guestUserId)
 		assert.Equal(t, networkUser.UserAuth, nil)
 		assert.Equal(t, networkUser.Verified, false)
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
+		assert.Equal(t, isGuest, true)
 		assert.Equal(t, networkUser.NetworkName, guestNetworkName)
 
 	})
@@ -189,6 +189,49 @@ func TestAddUserAuthWallet(t *testing.T) {
 		assert.NotEqual(t, networkUser, nil)
 		assert.Equal(t, len(networkUser.WalletAuths), 1)
 		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
+
+	})
+}
+
+func TestUserAuthExists(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		/**
+		 * Test standard user auth
+		 */
+		networkId := server.NewId()
+		userId := server.NewId()
+		email := fmt.Sprintf("%s@bringyour.com", networkId)
+
+		exists := userAuthExists(ctx, email)
+		assert.Equal(t, exists, false)
+
+		Testing_CreateNetwork(ctx, networkId, "", userId)
+
+		exists = userAuthExists(ctx, email)
+		assert.Equal(t, exists, true)
+
+		/**
+		 * Test SSO user auth
+		 */
+		networkId = server.NewId()
+		userId = server.NewId()
+		email = fmt.Sprintf("%s@bringyour.com", networkId)
+
+		exists = userAuthExists(ctx, email)
+		assert.Equal(t, exists, false)
+
+		jwt := AuthJwt{
+			AuthType: AuthTypeGoogle,
+			UserAuth: email,
+			UserName: "",
+		}
+
+		Testing_CreateNetworkSso(networkId, userId, jwt, ctx)
+
+		exists = userAuthExists(ctx, email)
+		assert.Equal(t, exists, true)
 
 	})
 }
