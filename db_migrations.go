@@ -2141,6 +2141,7 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_user
         DROP COLUMN auth_type,
-        DROP COLUMN wallet_address
+        DROP COLUMN wallet_address,
+        DROP COLUMN wallet_blockchain
     `),
 }
