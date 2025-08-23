@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -44,14 +45,15 @@ func WarmCacheNoAuth[R any](
 
 	// store the value in parallel
 	go func() {
+		storeCtx := context.Background()
 		valueJson, err := json.Marshal(value)
 		if err == nil {
-			server.Redis(clientSession.Ctx, func(r server.RedisClient) {
+			server.Redis(storeCtx, func(r server.RedisClient) {
 				// ignore the error
 				if force {
-					r.Set(clientSession.Ctx, key, string(valueJson), ttl).Err()
+					r.Set(storeCtx, key, string(valueJson), ttl).Err()
 				} else {
-					r.SetNX(clientSession.Ctx, key, string(valueJson), ttl).Err()
+					r.SetNX(storeCtx, key, string(valueJson), ttl).Err()
 				}
 			})
 		}
