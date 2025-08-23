@@ -2092,10 +2092,9 @@ var migrations = []any{
         )
     `),
 
-	// see notes above for:
-	// - independent_reliability_score
-	// - reliability_score
-	// - reliability_weight
+	// the network values are the sum of all client scores for the network:
+	// independent_reliability_score, reliability_score, reliability_weight
+	// all of these values range [0, inf)
 	newSqlMigration(`
         CREATE TABLE network_connection_reliability_score (
             network_id uuid NOT NULL,
@@ -2136,5 +2135,17 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE account_payment
         ADD COLUMN reliability_subsidy_nano_cents bigint NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE network_connection_reliability_window (
+            network_id uuid NOT NULL,
+            bucket_number bigint NOT NULL,
+            reliability_weight double precision NOT NULL DEFAULT 0,
+            client_count int NOT NULL DEFAULT 0,
+            total_client_count int NOT NULL DEFAULT 0,
+
+            PRIMARY KEY (network_id, bucket_number)
+        )
     `),
 }
