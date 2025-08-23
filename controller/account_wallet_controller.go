@@ -97,8 +97,14 @@ type HeliusAssetItemGrouping struct {
 }
 
 type HeliusAsset struct {
-	Id       string                    `json:"id"`
-	Grouping []HeliusAssetItemGrouping `json:"grouping"`
+	Id             string                    `json:"id"`
+	Grouping       []HeliusAssetItemGrouping `json:"grouping"`
+	MintExtensions *struct {
+		MetadataPointer *struct {
+			Authority       string `json:"authority"`
+			MetadataAddress string `json:"metadata_address"`
+		} `json:"metadata_pointer,omitempty"`
+	} `json:"mint_extensions,omitempty"`
 }
 
 type HeliusSearchAssetsResult struct {
@@ -150,7 +156,9 @@ func VerifySeekerNftHolder(
 		}, nil
 	}
 
-	fungibleResult, returnErr := heliusSearchAssetsFungible(verify.PublicKey)
+	searchAssets, returnErr := heliusSearchAssets(
+		verify.PublicKey,
+	)
 
 	if returnErr != nil {
 		return &VerifySeekerNftHolderResult{
@@ -172,7 +180,7 @@ func VerifySeekerNftHolder(
 		}, returnErr
 	}
 
-	isSeekerHolder := isSeekerNftHolder(fungibleResult.Result.Items)
+	isSeekerHolder := isSeekerNftHolder(searchAssets)
 	isSagaHolder := isSagaNftHolder(sagaResult.Result.Items)
 
 	if !isSeekerHolder && !isSagaHolder {
@@ -194,15 +202,34 @@ func VerifySeekerNftHolder(
 func isSeekerNftHolder(
 	items []HeliusAsset,
 ) bool {
-	seekerNftAddress := "2DMMamkkxQ6zDMBtkFp8KH7FoWzBMBA1CGTYwom4QH6Z"
+	// check for seeker preorder NFT address
+	seekerPreorderNftAddress := "2DMMamkkxQ6zDMBtkFp8KH7FoWzBMBA1CGTYwom4QH6Z"
+
+	// check for genesis token
+	sgtMetadataAuthority := "GT2zuHVaZQYZSyQMgJPLzvkmyztfyXg2NJunqFp4p3A4"
+	sgtMetadataAddress := "GT22s89nU4iWFkNXj1Bw6uYhJJWDRPpShHt4Bk8f99Te"
+
 	isHolder := false
 
 	for _, item := range items {
-		if item.Id == seekerNftAddress {
+		if item.Id == seekerPreorderNftAddress {
 			isHolder = true
 			break
 		}
 
+		/**
+		 * Check for Seeker Genesis Token
+		 * for reference https://docs.solanamobile.com/marketing/engaging-seeker-users#verifying-seeker-genesis-token-ownership
+		 */
+		if item.MintExtensions != nil && item.MintExtensions.MetadataPointer != nil {
+
+			if item.MintExtensions.MetadataPointer.Authority == sgtMetadataAuthority &&
+				item.MintExtensions.MetadataPointer.MetadataAddress == sgtMetadataAddress {
+				isHolder = true
+				break
+			}
+
+		}
 	}
 
 	return isHolder
@@ -239,10 +266,14 @@ var heliusConfig = sync.OnceValue(func() map[string]any {
 	return c["helius"].(map[string]any)
 })
 
-func heliusSearchAssetsFungible(
+func heliusSearchAssets(
 	publicKey string,
-) (*HeliusSearchAssetsResult, error) {
+	// page int,
+	// limit int,
+) ([]HeliusAsset, error) {
 
+	var assets []HeliusAsset
+	var heliusErr error
 	id := server.NewId()
 
 	apiKey := heliusConfig()["api_key"].(string)
@@ -252,32 +283,61 @@ func heliusSearchAssetsFungible(
 		apiKey,
 	)
 
-	return server.HttpPostRequireStatusOk(
-		url,
-		map[string]any{
-			"jsonrpc": "2.0",
-			"id":      id,
-			"method":  "searchAssets",
-			"params": map[string]any{
-				"ownerAddress": publicKey,
-				"tokenType":    "fungible",
+	page := 1
+	limit := 1000
+
+	for {
+		result, err := server.HttpPostRequireStatusOk(
+			url,
+			map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"method":  "searchAssets",
+				"params": map[string]any{
+					"ownerAddress": publicKey,
+					"tokenType":    "all",
+					"page":         page,
+					"limit":        limit,
+				},
 			},
-		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*HeliusSearchAssetsResult, error) {
+			func(header http.Header) {
+				header.Add("Accept", "application/json")
+			},
+			func(response *http.Response, responseBodyBytes []byte) (*HeliusSearchAssetsResult, error) {
 
-			var heliusResp HeliusSearchAssetsResult
-			if err := json.Unmarshal(responseBodyBytes, &heliusResp); err != nil {
-				glog.Infof("error unmarshalling response: %s", err.Error())
+				var heliusResp HeliusSearchAssetsResult
+				if err := json.Unmarshal(responseBodyBytes, &heliusResp); err != nil {
+					glog.Infof("error unmarshalling response: %s", err.Error())
 
-				return nil, err
-			}
+					return nil, err
+				}
 
-			return &heliusResp, nil
-		},
-	)
+				return &heliusResp, nil
+			},
+		)
+
+		if err != nil {
+			heliusErr = err
+			break
+		}
+
+		if result == nil || len(result.Result.Items) == 0 {
+			// no more items, break the loop
+			break
+		}
+
+		assets = append(assets, result.Result.Items...)
+
+		if len(result.Result.Items) < limit {
+			// if the number of items is less than the limit, we have reached the last page
+			break
+		}
+
+		page++
+
+	}
+
+	return assets, heliusErr
 
 }
 
@@ -306,7 +366,7 @@ func heliusSearchAssetsSaga(
 					"collection",
 					"46pcSL5gmjBrPqGKFaLbbCmR6iVuLJbnQy13hAe7s6CC", // Genesis Token Collection NFT Address
 				},
-				"page":  1, // Starts at 1
+				"page":  1,
 				"limit": 1000,
 			},
 		},
