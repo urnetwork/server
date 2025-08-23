@@ -118,6 +118,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
+		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 	})
 }
 
@@ -238,6 +239,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveOldProvideKeyChanges,
 			work.RemoveOldProvideKeyChangesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.UpdateNetworkReliabilityWindow,
+			work.UpdateNetworkReliabilityWindowPost,
 		),
 	)
 

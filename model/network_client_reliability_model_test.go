@@ -139,11 +139,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		UpdateNetworkReliabilityScores(ctx, startTime, endTime)
 		UpdateNetworkReliabilityWindow(ctx, startTime, endTime)
 
-		blocksPerBucket := max(
-			1,
-			// round
-			int((ReliabilityWindowBucketDuration+ReliabilityBlockDuration/2)/ReliabilityBlockDuration),
-		)
+		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
 		networkScores := GetAllNetworkReliabilityScores(ctx)
 		for networkId, clientIds := range networkClientIds {
@@ -168,7 +164,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				assert.Equal(t, totalClientCount, len(clientIds))
 			}
 			// reconstruct the total score from the weight
-			windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blocksPerBucket)
+			windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
 			d = windowReliabilityScore - networkScores[networkId].ReliabilityScore
 			if d < -eps || eps < d {
 				assert.Equal(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)

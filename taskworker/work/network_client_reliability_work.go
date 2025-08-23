@@ -83,3 +83,39 @@ func UpdateClientReliabilityScoresPost(
 	ScheduleUpdateClientReliabilityScores(clientSession, tx)
 	return nil
 }
+
+type UpdateNetworkReliabilityWindowArgs struct {
+}
+
+type UpdateNetworkReliabilityWindowResult struct {
+}
+
+func ScheduleUpdateNetworkReliabilityWindow(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		UpdateNetworkReliabilityWindow,
+		&UpdateNetworkReliabilityWindowArgs{},
+		clientSession,
+		task.RunOnce("update_network_reliability_window"),
+		task.RunAt(server.NowUtc().Add(5*time.Minute)),
+	)
+}
+
+func UpdateNetworkReliabilityWindow(
+	updateNetworkReliabilityWindow *UpdateNetworkReliabilityWindowArgs,
+	clientSession *session.ClientSession,
+) (*UpdateNetworkReliabilityWindowResult, error) {
+	minTime := server.NowUtc().Add(-7 * 24 * time.Hour)
+	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, server.NowUtc())
+	return &UpdateNetworkReliabilityWindowResult{}, nil
+}
+
+func UpdateNetworkReliabilityWindowPost(
+	updateNetworkReliabilityWindow *UpdateNetworkReliabilityWindowArgs,
+	updateNetworkReliabilityWindowResult *UpdateNetworkReliabilityWindowResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
+	return nil
+}

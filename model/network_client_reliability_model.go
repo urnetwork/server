@@ -410,6 +410,14 @@ func GetNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, networ
 	}
 }
 
+func ReliabilityBlockCountPerBucket() int {
+	return max(
+		1,
+		// round
+		int((ReliabilityWindowBucketDuration+ReliabilityBlockDuration/2)/ReliabilityBlockDuration),
+	)
+}
+
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		UpdateNetworkReliabilityWindowInTx(tx, ctx, minTime, maxTime)
@@ -420,11 +428,7 @@ func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, min
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
-	blocksPerBucket := max(
-		1,
-		// round
-		int((ReliabilityWindowBucketDuration+ReliabilityBlockDuration/2)/ReliabilityBlockDuration),
-	)
+	blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -474,7 +478,7 @@ func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, min
 		`,
 		minBlockNumber,
 		maxBlockNumber,
-		blocksPerBucket,
+		blockCountPerBucket,
 	))
 
 	server.RaisePgResult(tx.Exec(
@@ -504,6 +508,6 @@ func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, min
 		`,
 		minBlockNumber,
 		maxBlockNumber,
-		blocksPerBucket,
+		blockCountPerBucket,
 	))
 }
