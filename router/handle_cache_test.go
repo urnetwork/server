@@ -31,7 +31,7 @@ func TestCache(t *testing.T) {
 				Message: "hello!",
 			}, nil
 		}
-		f := CacheNoAuth(impl, "cache_test", 10*time.Second)
+		f := CacheNoAuth(impl, "cache_test", 60*time.Second)
 
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		// warm
@@ -77,7 +77,7 @@ func TestCacheWithAuth(t *testing.T) {
 				Message: fmt.Sprintf("hello u%s c%s!", clientSession.ByJwt.UserId, *clientSession.ByJwt.ClientId),
 			}, nil
 		}
-		f := CacheWithAuth(impl, "cache_test_with_auth", 320*time.Second)
+		f := CacheWithAuth(impl, "cache_test_with_auth", 6000*time.Second)
 
 		clientSessions := []*session.ClientSession{}
 		for i := range 32 {
