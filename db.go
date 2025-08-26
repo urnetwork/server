@@ -756,7 +756,11 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 	}
 	for i, valueColumnName := range tableSpec.valueColumnNames {
 		valuePgType := tableSpec.valuePgTypes[i]
-		valuePart := fmt.Sprintf("%s %s NOT NULL", valueColumnName, valuePgType)
+		nullable := "NOT NULL"
+		if tableSpec.valueNullables[i] {
+			nullable = "NULL"
+		}
+		valuePart := fmt.Sprintf("%s %s %s", valueColumnName, valuePgType, nullable)
 		pgParts = append(pgParts, valuePart)
 	}
 
@@ -773,6 +777,19 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		pgPlaceholders = append(pgPlaceholders, fmt.Sprintf("$%d", i))
 		i += 1
 	}
+
+	fmt.Printf(
+		`
+			CREATE TEMPORARY TABLE %s (
+				%s,
+				PRIMARY KEY (%s)
+			)
+			ON COMMIT DROP
+		`,
+		tableSpec.tableName,
+		strings.Join(pgParts, ", "),
+		strings.Join(tableSpec.keyColumnNames, ", "),
+	)
 
 	RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
 		`
@@ -830,13 +847,13 @@ type TempTableSpec struct {
 
 // spec is `table_name(value_column_name type)`
 func parseTempTableSpec(spec string) *TempTableSpec {
-	re := regexp.MustCompile("^(\\w+)\\s*\\((.*)\\)")
+	re := regexp.MustCompile("(?s)^\\s*(\\w+)\\s*\\((.*)\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
 	}
 
-	valueColumnNames, valuePgTypes := parseSpec(groups[2])
+	valueColumnNames, valuePgTypes, _ := parseSpec(groups[2])
 
 	return &TempTableSpec{
 		tableName:        groups[1],
@@ -851,18 +868,19 @@ type TempJoinTableSpec struct {
 	keyPgTypes       []string
 	valueColumnNames []string
 	valuePgTypes     []string
+	valueNullables   []bool
 }
 
 // spec is `table_name(key_column_name type[, ...] -> value_column_name type[, ...])`
 func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
-	re := regexp.MustCompile("^(\\w+)\\s*\\((.*)\\s*->\\s*(.*)\\)")
+	re := regexp.MustCompile("(?s)^\\s*(\\w+)\\s*\\((.*)\\s*->\\s*(.*)\\)")
 	groups := re.FindStringSubmatch(spec)
 	if groups == nil {
 		panic(errors.New(fmt.Sprintf("Bad spec: %s", spec)))
 	}
 
-	keyColumnNames, keyPgTypes := parseSpec(groups[2])
-	valueColumnNames, valuePgTypes := parseSpec(groups[3])
+	keyColumnNames, keyPgTypes, _ := parseSpec(groups[2])
+	valueColumnNames, valuePgTypes, valueNullables := parseSpec(groups[3])
 
 	return &TempJoinTableSpec{
 		tableName:        groups[1],
@@ -870,19 +888,22 @@ func parseTempJoinTableSpec(spec string) *TempJoinTableSpec {
 		keyPgTypes:       keyPgTypes,
 		valueColumnNames: valueColumnNames,
 		valuePgTypes:     valuePgTypes,
+		valueNullables:   valueNullables,
 	}
 }
 
-func parseSpec(spec string) (columnNames []string, pgTypes []string) {
-	re := regexp.MustCompile("^\\s*(\\w+)\\s+([^,]+)\\s*,?")
+func parseSpec(spec string) (columnNames []string, pgTypes []string, nullables []bool) {
+	re := regexp.MustCompile("(?is)^\\s*(\\w+)\\s+([^,]+?)(\\s+NULL)?\\s*(?:,|$)")
 
 	for {
+		fmt.Printf("MATCH \"%s\"\n", spec)
 		groups := re.FindStringSubmatch(spec)
 		if groups == nil {
 			break
 		}
-		columnNames = append(columnNames, groups[1])
-		pgTypes = append(pgTypes, groups[2])
+		columnNames = append(columnNames, strings.TrimSpace(groups[1]))
+		pgTypes = append(pgTypes, strings.TrimSpace(groups[2]))
+		nullables = append(nullables, strings.TrimSpace(groups[3]) != "")
 		spec = spec[len(groups[0]):]
 	}
 

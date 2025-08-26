@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	mathrand "math/rand"
 	"net/netip"
 	"testing"
@@ -35,18 +36,35 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		networkClientIds := map[server.Id][]server.Id{}
 		clientIps := map[server.Id]netip.Addr{}
 
-		for range networkCount {
+		for i := range networkCount {
 			networkId := server.NewId()
 			clientCount := minClientPerNetworkCount
 			if d := maxClientPerNetworkCount - minClientPerNetworkCount; 0 < d {
 				clientCount += mathrand.Intn(d)
 			}
-			for range clientCount {
+			for j := range clientCount {
 				clientId := server.NewId()
 				ip := ips[mathrand.Intn(len(ips))]
 
 				networkClientIds[networkId] = append(networkClientIds[networkId], clientId)
 				clientIps[clientId] = ip
+
+				// connect the client
+				clientAddress := "127.0.0.1:20000"
+				handlerId := server.NewId()
+				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+				assert.Equal(t, err, nil)
+				location := &Location{
+					LocationType: "",
+					City:         fmt.Sprintf("foo%d", j),
+					Region:       fmt.Sprintf("bar%d", i),
+					Country:      "United States",
+					CountryCode:  "us",
+				}
+				CreateLocation(ctx, location)
+				connectionLocationScores := &ConnectionLocationScores{}
+				err = SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+
 			}
 		}
 
