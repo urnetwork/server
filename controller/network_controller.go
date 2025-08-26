@@ -186,3 +186,23 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 
 	return &NetworkRemoveResult{}, nil
 }
+
+type GetNetworkReliabilityResult struct {
+	ReliabilityWindow *model.ReliabilityWindow    `json:"reliability_window,omitempty"`
+	Error             *GetNetworkReliabilityError `json:"error,omitempty"`
+}
+
+type GetNetworkReliabilityError struct {
+	Message string `json:"message"`
+}
+
+func GetNetworkReliability(
+	session *session.ClientSession,
+) (*GetNetworkReliabilityResult, error) {
+
+	window := model.GetNetworkReliabilityWindow(session.Ctx, session.ByJwt.NetworkId)
+
+	return &GetNetworkReliabilityResult{
+		ReliabilityWindow: window,
+	}, nil
+}
