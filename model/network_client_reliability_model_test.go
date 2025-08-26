@@ -11,6 +11,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestAddClientReliabilityStats(t *testing.T) {
@@ -36,6 +38,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		networkClientIds := map[server.Id][]server.Id{}
 		clientIps := map[server.Id]netip.Addr{}
 
+		totalClientCount := 0
 		for i := range networkCount {
 			networkId := server.NewId()
 			clientCount := minClientPerNetworkCount
@@ -65,6 +68,9 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				connectionLocationScores := &ConnectionLocationScores{}
 				err = SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
 
+				fmt.Printf("init client_id[%d] %s\n", totalClientCount, clientId)
+
+				totalClientCount += 1
 			}
 		}
 
@@ -159,33 +165,50 @@ func TestAddClientReliabilityStats(t *testing.T) {
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
-		networkScores := GetAllNetworkReliabilityScores(ctx)
-		for networkId, clientIds := range networkClientIds {
-			netReliabilityScore := float64(0)
-			netIndepententReliabilityScore := float64(0)
-			for _, clientId := range clientIds {
-				netReliabilityScore += netReliabilityScores[clientId]
-				netIndepententReliabilityScore += netIndependentReliabilityScores[clientId]
-			}
-			d := netReliabilityScore - networkScores[networkId].ReliabilityScore
-			if d < -eps || eps < d {
-				assert.Equal(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
-			}
-			d = netIndepententReliabilityScore - networkScores[networkId].IndependentReliabilityScore
-			if d < -eps || eps < d {
-				assert.Equal(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
-			}
+		for _, networkScores := range []map[server.Id]ReliabilityScore{
+			GetAllNetworkReliabilityScores(ctx),
+			GetAllMultipliedNetworkReliabilityScores(ctx),
+		} {
+			for networkId, clientIds := range networkClientIds {
+				netReliabilityScore := float64(0)
+				netIndepententReliabilityScore := float64(0)
+				for _, clientId := range clientIds {
+					netReliabilityScore += netReliabilityScores[clientId]
+					netIndepententReliabilityScore += netIndependentReliabilityScores[clientId]
+				}
+				d := netReliabilityScore - networkScores[networkId].ReliabilityScore
+				if d < -eps || eps < d {
+					assert.Equal(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
+				}
+				d = netIndepententReliabilityScore - networkScores[networkId].IndependentReliabilityScore
+				if d < -eps || eps < d {
+					assert.Equal(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
+				}
 
-			reliabilityWindow := GetNetworkReliabilityWindow(ctx, networkId)
-			assert.Equal(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
-			for _, totalClientCount := range reliabilityWindow.TotalClientCounts {
-				assert.Equal(t, totalClientCount, len(clientIds))
-			}
-			// reconstruct the total score from the weight
-			windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
-			d = windowReliabilityScore - networkScores[networkId].ReliabilityScore
-			if d < -eps || eps < d {
-				assert.Equal(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)
+				byJwt := jwt.NewByJwt(
+					networkId,
+					server.NewId(),
+					"",
+					false,
+				).Client(clientIds[0], server.NewId())
+				clientSession := session.Testing_CreateClientSession(
+					ctx,
+					byJwt,
+				)
+				clientSession.ClientAddress = "1.1.1.1:90000"
+
+				reliabilityWindow, err := GetNetworkReliabilityWindow(clientSession)
+				assert.Equal(t, err, nil)
+				assert.Equal(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
+				for _, totalClientCount := range reliabilityWindow.TotalClientCounts {
+					assert.Equal(t, totalClientCount, len(clientIds))
+				}
+				// reconstruct the total score from the weight
+				windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
+				d = windowReliabilityScore - networkScores[networkId].ReliabilityScore
+				if d < -eps || eps < d {
+					assert.Equal(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)
+				}
 			}
 		}
 

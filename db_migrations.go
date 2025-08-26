@@ -2081,7 +2081,11 @@ var migrations = []any{
 	// independent_reliability_score: the total reliability score independent of normalization by ip hash or block window [0, inf)
 	// reliability_score: the total reliability score normalized by ip hash [0, inf)
 	// reliability_weight: the total reliability score normalized by ip hash and block window [0, 1]
-	// UPDATED: add location_id
+	// UPDATED: add min_block_number
+	// UPDATED: add max_block_number
+	// UPDATED: add city_location_id
+	// UPDATED: add region_location_id
+	// UPDATED: add country_location_id
 	newSqlMigration(`
         CREATE TABLE client_connection_reliability_score (
             client_id uuid NOT NULL,

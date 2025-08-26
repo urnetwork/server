@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -64,10 +65,14 @@ func WarmCacheNoAuth[R any](
 }
 
 func KeyWithAuth(clientSession *session.ClientSession, key string) string {
+	var clientAddressHashHex string
+	if clientAddressHash, _, err := clientSession.ClientAddressHashPort(); err == nil {
+		clientAddressHashHex = hex.EncodeToString(clientAddressHash[:])
+	}
 	if clientSession.ByJwt.ClientId != nil {
-		return fmt.Sprintf("%s@c%s@%s", clientSession.ByJwt.NetworkId, *clientSession.ByJwt.ClientId, key)
+		return fmt.Sprintf("%s@c%s@%s@%s", clientSession.ByJwt.NetworkId, *clientSession.ByJwt.ClientId, clientAddressHashHex, key)
 	} else {
-		return fmt.Sprintf("%s@u%s@%s", clientSession.ByJwt.NetworkId, clientSession.ByJwt.UserId, key)
+		return fmt.Sprintf("%s@u%s@%s@%s", clientSession.ByJwt.NetworkId, clientSession.ByJwt.UserId, clientAddressHashHex, key)
 	}
 }
 

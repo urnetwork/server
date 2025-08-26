@@ -30,6 +30,8 @@ type SubsidyConfig struct {
 	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
 	ReliabilityPointsPerPayout                int     `yaml:"reliability_points_per_payout"`
 	ReliabilitySubsidyPerPayoutUsd            int     `yaml:"reliability_subsidy_per_payout_usd"`
+	CountryReliabilityWeightTarget            float64 `yaml:"country_reliability_weight_target"`
+	MaxCountryReliabilityMultiplier           float64 `yaml:"max_country_reliability_multiplier"`
 
 	MinWalletPayoutUsd float64 `yaml:"min_wallet_payout_usd"`
 
@@ -781,6 +783,9 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			SubsidyPayment:     subsidyPayment,
 			WithheldNetworkIds: networkIdsToRemove,
 		}
+
+		// set the bonus weights for next payout
+		UpdateClientLocationReliabilityBonusesWithDefaultsInTx(tx, ctx)
 	}, server.TxReadCommitted)
 
 	return
@@ -821,7 +826,7 @@ func calculateReliabilityPayoutInTx(
 	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now)
 
 	// get reliability scores
-	reliabilityScores := GetAllNetworkReliabilityScoresInTx(tx, ctx)
+	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
 
 	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout))
 
