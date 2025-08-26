@@ -318,7 +318,7 @@ type ReliabilityWindow struct {
 	// bucket number -> count
 	ClientCounts map[int64]int `json:"client_counts"`
 	// bucket number -> count
-	TotalClientCounts map[int64]int `json:"client_counts"`
+	TotalClientCounts map[int64]int `json:"total_client_counts"`
 }
 
 func GetNetworkReliabilityWindow(ctx context.Context, networkId server.Id) (reliabilityWindow *ReliabilityWindow) {
