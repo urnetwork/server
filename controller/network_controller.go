@@ -200,7 +200,10 @@ func GetNetworkReliability(
 	session *session.ClientSession,
 ) (*GetNetworkReliabilityResult, error) {
 
-	window := model.GetNetworkReliabilityWindow(session.Ctx, session.ByJwt.NetworkId)
+	window, err := model.GetNetworkReliabilityWindow(session)
+	if err != nil {
+		return nil, err
+	}
 
 	return &GetNetworkReliabilityResult{
 		ReliabilityWindow: window,
