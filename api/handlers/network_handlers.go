@@ -19,3 +19,7 @@ func NetworkCreate(w http.ResponseWriter, r *http.Request) {
 func UpdateNetworkName(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.UpdateNetworkName, w, r)
 }
+
+func GetNetworkReliability(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetNetworkReliability, w, r)
+}
