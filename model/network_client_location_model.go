@@ -2025,6 +2025,8 @@ func FindProviders2(
 						clientScore.tier = netTypeScore
 						clientScore.netTypeScore = scoreScale * netTypeScore
 					}
+					// FIXME there can be many connections per client id
+					// FIXME use network_client_location_reliability which is singleton
 					clientScores[clientId] = clientScore
 				}
 			})

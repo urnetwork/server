@@ -67,6 +67,7 @@ Usage:
     bringyourctl account-points populate --plan_id=<plan_id>
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
+    bringyourctl reliability set-multipliers
 
 Options:
     -h --help     Show this screen.
@@ -209,6 +210,10 @@ Options:
 		// }
 	} else if auth, _ := opts.Bool("migrate-user-auth"); auth {
 		migrateUserAuth(opts)
+	} else if reliability, _ := opts.Bool("reliability"); reliability {
+		if setMultipliers, _ := opts.Bool("set-multipliers"); setMultipliers {
+			reliabilitySetMultipliers(opts)
+		}
 	} else {
 		fmt.Println(usage)
 	}
@@ -902,4 +907,37 @@ func migrateUserAuth(opts docopt.Opts) {
 	model.MigrateNetworkUserChildAuths(ctx)
 
 	fmt.Println("User auth migration completed successfully.")
+}
+
+func reliabilitySetMultipliers(opts docopt.Opts) {
+	ctx := context.Background()
+
+	countryReliabilityMultipliers1 := model.GetAllClientLocationReliabilityMultipliers(ctx)
+
+	model.UpdateClientLocationReliabilityMultipliersWithDefaults(ctx)
+
+	countryReliabilityMultipliers2 := model.GetAllClientLocationReliabilityMultipliers(ctx)
+
+	countryCodes := map[string]server.Id{}
+	for _, m := range countryReliabilityMultipliers1 {
+		countryCodes[m.CountryCode] = m.CountryLocationId
+	}
+	for _, m := range countryReliabilityMultipliers2 {
+		countryCodes[m.CountryCode] = m.CountryLocationId
+	}
+
+	orderedCountryCodes := maps.Keys(countryCodes)
+	slices.Sort(orderedCountryCodes)
+	for _, countryCode := range orderedCountryCodes {
+		countryLocationId := countryCodes[countryCode]
+		m1 := countryReliabilityMultipliers1[countryLocationId]
+		m2 := countryReliabilityMultipliers1[countryLocationId]
+		if m1 == nil {
+			fmt.Printf("%s unset -> %.1f\n", countryCode, m2.ReliabilityMultiplier)
+		} else if m2 == nil {
+			fmt.Printf("%s %.1f -> unset\n", countryCode, m1.ReliabilityMultiplier)
+		} else {
+			fmt.Printf("%s %.1f -> %.1f\n", countryCode, m1.ReliabilityMultiplier, m2.ReliabilityMultiplier)
+		}
+	}
 }

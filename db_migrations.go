@@ -2081,6 +2081,11 @@ var migrations = []any{
 	// independent_reliability_score: the total reliability score independent of normalization by ip hash or block window [0, inf)
 	// reliability_score: the total reliability score normalized by ip hash [0, inf)
 	// reliability_weight: the total reliability score normalized by ip hash and block window [0, 1]
+	// UPDATED: add min_block_number
+	// UPDATED: add max_block_number
+	// UPDATED: add city_location_id
+	// UPDATED: add region_location_id
+	// UPDATED: add country_location_id
 	newSqlMigration(`
         CREATE TABLE client_connection_reliability_score (
             client_id uuid NOT NULL,
@@ -2095,6 +2100,8 @@ var migrations = []any{
 	// the network values are the sum of all client scores for the network:
 	// independent_reliability_score, reliability_score, reliability_weight
 	// all of these values range [0, inf)
+	// UPDATED: add country_location_id
+	// UPDATED: change PK to (network_id, country_location_id)
 	newSqlMigration(`
         CREATE TABLE network_connection_reliability_score (
             network_id uuid NOT NULL,
@@ -2146,6 +2153,72 @@ var migrations = []any{
             total_client_count int NOT NULL DEFAULT 0,
 
             PRIMARY KEY (network_id, bucket_number)
+        )
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE client_reliability
+            DROP CONSTRAINT client_reliability_pkey,
+            ADD PRIMARY KEY (block_number, client_address_hash, client_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE client_connection_reliability_score
+            ADD COLUMN city_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            ADD COLUMN region_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            ADD COLUMN country_location_id uuid NOT NULL DEFAULT gen_random_uuid()
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_connection_reliability_score
+            ADD COLUMN country_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            DROP CONSTRAINT network_connection_reliability_score_pkey,
+            ADD PRIMARY KEY (network_id, country_location_id)
+    `),
+
+	// this table tells us if a connected client is valid (not messed up/suspicious from a routing perspective)
+	// it has data from at least once connection for a disconnected client
+	// it does not tell us if a disconnected client has ever been valid. The data is incomplete for this question.
+	newSqlMigration(`
+        CREATE TABLE network_client_location_reliability (
+            client_id uuid NOT NULL,
+            update_block_number bigint NOT NULL,
+            city_location_id uuid,
+            region_location_id uuid,
+            country_location_id uuid,
+            client_address_hash_count int NOT NULL DEFAULT 0,
+            location_count int NOT NULL DEFAULT 0,
+            valid bool GENERATED ALWAYS AS (
+                country_location_id IS NOT NULL AND
+                client_address_hash_count = 1 AND
+                location_count = 1
+            ) STORED,
+            connected bool NOT NULL DEFAULT false,
+            max_net_type_score smallint NOT NULL DEFAULT 0,
+            max_net_type_score_speed smallint NOT NULL DEFAULT 0,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_location_reliability_valid_client_id ON network_client_location_reliability (valid, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_location_reliability_connected_valid_location_id_client_id ON network_client_location_reliability (connected, valid, country_location_id, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_client_location_reliability_update_block_number_client_id ON network_client_location_reliability (update_block_number, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE network_client_location_reliability_multiplier (
+            country_location_id uuid NOT NULL,
+            reliability_multiplier double precision NOT NULL DEFAULT 1,
+
+            PRIMARY KEY (country_location_id)
         )
     `),
 }

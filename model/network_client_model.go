@@ -1488,7 +1488,7 @@ func NominateResident(
 		})
 
 		nominated = true
-	}, server.TxReadCommitted)
+	})
 	return
 }
 
