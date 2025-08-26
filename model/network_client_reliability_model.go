@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"net/netip"
 	"time"
 
@@ -370,13 +369,13 @@ func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Co
 		`
 		SELECT
 			network_id,
-			independent_reliability_score * COALESCE(network_client_location_reliability_bonus.reliability_multiplier, 1.0) AS independent_reliability_score,
-			reliability_score * COALESCE(network_client_location_reliability_bonus.reliability_multiplier, 1.0) AS reliability_score,
-			reliability_weight * COALESCE(network_client_location_reliability_bonus.reliability_multiplier, 1.0) AS reliability_weight
+			independent_reliability_score * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS independent_reliability_score,
+			reliability_score * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_score,
+			reliability_weight * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_weight
 		FROM network_connection_reliability_score
 
-		LEFT JOIN network_client_location_reliability_bonus ON
-			network_client_location_reliability_bonus.country_location_id = network_connection_reliability_score.country_location_id
+		LEFT JOIN network_client_location_reliability_multiplier ON
+			network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_score.country_location_id
 		`,
 	)
 	server.WithPgResult(result, err, func() {
@@ -522,12 +521,12 @@ func GetNetworkReliabilityWindowInTx(
 			network_connection_reliability_score.country_location_id,
 			location.location_name,
 			location.country_code,
-			COALESCE(network_client_location_reliability_bonus.reliability_multiplier, 1.0) AS reliability_multiplier
+			COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
 		FROM network_connection_reliability_score
 		INNER JOIN location ON
 			location.location_id = network_connection_reliability_score.country_location_id
-		LEFT JOIN network_client_location_reliability_bonus ON
-			network_client_location_reliability_bonus.country_location_id = network_connection_reliability_score.country_location_id
+		LEFT JOIN network_client_location_reliability_multiplier ON
+			network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_score.country_location_id
 		`,
 	)
 	server.WithPgResult(result, err, func() {
@@ -554,10 +553,10 @@ func GetNetworkReliabilityWindowInTx(
 					location.location_id,
 					location.location_name,
 					location.country_code,
-					COALESCE(network_client_location_reliability_bonus.reliability_multiplier, 1.0) AS reliability_multiplier
+					COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
 				FROM location
-				INNER JOIN network_client_location_reliability_bonus ON
-					network_client_location_reliability_bonus.country_location_id = location.location_id
+				INNER JOIN network_client_location_reliability_multiplier ON
+					network_client_location_reliability_multiplier.country_location_id = location.location_id
 				WHERE
 					location.location_type = $1 AND
 					location.country_code = $2
@@ -1015,9 +1014,15 @@ func RemoveOldClientLocationReliabilities(ctx context.Context, minTime time.Time
 	})
 }
 
-func UpdateClientLocationReliabilityBonusesWithDefaultsInTx(tx server.PgTx, ctx context.Context) {
+func UpdateClientLocationReliabilityMultipliersWithDefaults(ctx context.Context) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateClientLocationReliabilityMultipliersWithDefaultsInTx(tx, ctx)
+	})
+}
+
+func UpdateClientLocationReliabilityMultipliersWithDefaultsInTx(tx server.PgTx, ctx context.Context) {
 	c := EnvSubsidyConfig()
-	UpdateClientLocationReliabilityBonusesInTx(
+	UpdateClientLocationReliabilityMultipliersInTx(
 		tx,
 		ctx,
 		c.CountryReliabilityWeightTarget,
@@ -1026,9 +1031,13 @@ func UpdateClientLocationReliabilityBonusesWithDefaultsInTx(tx server.PgTx, ctx 
 }
 
 // call this at the end of plan payments
-func UpdateClientLocationReliabilityBonusesInTx(tx server.PgTx, ctx context.Context, reliabilityWeightTarget float64, maxMultiplier float64) {
-
-	// based total network weights per country, compute bonus weights
+func UpdateClientLocationReliabilityMultipliersInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	reliabilityWeightTarget float64,
+	maxMultiplier float64,
+) {
+	// based total network weights per country, compute multipliers
 
 	result, err := tx.Query(
 		ctx,
@@ -1086,14 +1095,14 @@ func UpdateClientLocationReliabilityBonusesInTx(tx server.PgTx, ctx context.Cont
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
-		DELETE FROM network_client_location_reliability_bonus
+		DELETE FROM network_client_location_reliability_multiplier
 		`,
 	))
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
-		INSERT INTO network_client_location_reliability_bonus (
+		INSERT INTO network_client_location_reliability_multiplier (
 			country_location_id,
 			reliability_multiplier
 		)
@@ -1103,4 +1112,36 @@ func UpdateClientLocationReliabilityBonusesInTx(tx server.PgTx, ctx context.Cont
 		FROM temp_reliability_multiplier
 		`,
 	))
+}
+
+func GetAllClientLocationReliabilityMultipliers(ctx context.Context) (countryMultipliers map[server.Id]*CountryMultiplier) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_client_location_reliability_multiplier.country_location_id,
+				location.location_name,
+				location.country_code,
+				network_client_location_reliability_multiplier.reliability_multiplier
+			FROM network_client_location_reliability_multiplier
+			INNER JOIN location ON
+				location.location_id = network_client_location_reliability_multiplier.country_location_id
+			`,
+		)
+		countryMultipliers = map[server.Id]*CountryMultiplier{}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				m := &CountryMultiplier{}
+				server.Raise(result.Scan(
+					&m.CountryLocationId,
+					&m.Country,
+					&m.CountryCode,
+					&m.ReliabilityMultiplier,
+				))
+				countryMultipliers[m.CountryLocationId] = m
+			}
+		})
+	})
+	return countryMultipliers
 }

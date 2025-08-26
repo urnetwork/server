@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	mathrand "math/rand"
 	"net/netip"
 	"testing"
@@ -387,6 +388,25 @@ func TestReliabilityPoints(t *testing.T) {
 		networkIdB := server.NewId()
 		clientIdB := server.NewId()
 		clientIdB2 := server.NewId()
+
+		// connect clients
+		for i, clientId := range []server.Id{clientIdA, clientIdB, clientIdB2} {
+			// connect the client
+			clientAddress := "127.0.0.1:20000"
+			handlerId := server.NewId()
+			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+			assert.Equal(t, err, nil)
+			location := &Location{
+				LocationType: "",
+				City:         fmt.Sprintf("foo%d", i),
+				Region:       fmt.Sprintf("bar%d", i),
+				Country:      "United States",
+				CountryCode:  "us",
+			}
+			CreateLocation(ctx, location)
+			connectionLocationScores := &ConnectionLocationScores{}
+			err = SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
+		}
 
 		now := server.NowUtc()
 

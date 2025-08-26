@@ -785,7 +785,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		}
 
 		// set the bonus weights for next payout
-		UpdateClientLocationReliabilityBonusesWithDefaultsInTx(tx, ctx)
+		UpdateClientLocationReliabilityMultipliersWithDefaultsInTx(tx, ctx)
 	}, server.TxReadCommitted)
 
 	return

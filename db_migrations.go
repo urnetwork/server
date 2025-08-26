@@ -2214,7 +2214,7 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE TABLE network_client_location_reliability_bonus (
+        CREATE TABLE network_client_location_reliability_multiplier (
             country_location_id uuid NOT NULL,
             reliability_multiplier double precision NOT NULL DEFAULT 1,
 
