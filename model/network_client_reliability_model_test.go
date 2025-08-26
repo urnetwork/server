@@ -68,7 +68,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				connectionLocationScores := &ConnectionLocationScores{}
 				err = SetConnectionLocation(ctx, connectionId, location.LocationId, connectionLocationScores)
 
-				fmt.Printf("init client_id[%d] %s\n", totalClientCount, clientId)
+				// fmt.Printf("init client_id[%d] %s\n", totalClientCount, clientId)
 
 				totalClientCount += 1
 			}

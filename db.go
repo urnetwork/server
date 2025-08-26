@@ -778,19 +778,6 @@ func CreateTempJoinTableInTx[K comparable, V any](ctx context.Context, tx PgTx, 
 		i += 1
 	}
 
-	fmt.Printf(
-		`
-			CREATE TEMPORARY TABLE %s (
-				%s,
-				PRIMARY KEY (%s)
-			)
-			ON COMMIT DROP
-		`,
-		tableSpec.tableName,
-		strings.Join(pgParts, ", "),
-		strings.Join(tableSpec.keyColumnNames, ", "),
-	)
-
 	RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
 		`
 			CREATE TEMPORARY TABLE %s (
@@ -896,7 +883,6 @@ func parseSpec(spec string) (columnNames []string, pgTypes []string, nullables [
 	re := regexp.MustCompile("(?is)^\\s*(\\w+)\\s+([^,]+?)(\\s+NULL)?\\s*(?:,|$)")
 
 	for {
-		fmt.Printf("MATCH \"%s\"\n", spec)
 		groups := re.FindStringSubmatch(spec)
 		if groups == nil {
 			break

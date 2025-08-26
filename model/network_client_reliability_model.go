@@ -725,8 +725,6 @@ func (self *clientLocationReliability) Values() []any {
 	// [5] max_net_type_score
 	// [6] max_net_type_score_speed
 
-	fmt.Printf("VALUES %d, %d\n", len(self.clientAddressHashes), len(self.locations))
-
 	values := make([]any, 7)
 	if 1 == len(self.locations) {
 		location := maps.Keys(self.locations)[0]
@@ -925,20 +923,6 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		clientLocationReliabilities,
 	)
 
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM temp_network_client_location_reliability
-		`,
-	)
-	var count int
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("TEMP ROW COUNT = %d\n", count)
-
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -981,47 +965,6 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		updateBlockNumber,
 	))
 
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY ROW COUNT = %d\n", count)
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		WHERE valid = true
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY VALID ROW COUNT = %d\n", count)
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		WHERE valid = true AND connected = true
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY VALID CONNECTED ROW COUNT = %d\n", count)
-
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -1040,62 +983,21 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    `,
 	))
 
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY ROW COUNT = %d\n", count)
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		WHERE valid = true
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY VALID ROW COUNT = %d\n", count)
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT COUNT(*) FROM network_client_location_reliability
-		WHERE valid = true AND connected = true
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
-		}
-	})
-	fmt.Printf("RELIABILITY VALID CONNECTED ROW COUNT = %d\n", count)
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT client_id FROM network_client_location_reliability
-		WHERE valid = true AND connected = true AND city_location_id IS NOT NULL AND region_location_id IS NOT NULL AND country_location_id IS NOT NULL
-		ORDER BY client_id
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		for i := 0; result.Next(); i += 1 {
-			var clientId server.Id
-			server.Raise(result.Scan(&clientId))
-			fmt.Printf("valid connected client_id[%d] %s\n", i, clientId)
-		}
-	})
+	// result, err = tx.Query(
+	// 	ctx,
+	// 	`
+	// 	SELECT client_id FROM network_client_location_reliability
+	// 	WHERE valid = true AND connected = true AND city_location_id IS NOT NULL AND region_location_id IS NOT NULL AND country_location_id IS NOT NULL
+	// 	ORDER BY client_id
+	// 	`,
+	// )
+	// server.WithPgResult(result, err, func() {
+	// 	for i := 0; result.Next(); i += 1 {
+	// 		var clientId server.Id
+	// 		server.Raise(result.Scan(&clientId))
+	// 		fmt.Printf("valid connected client_id[%d] %s\n", i, clientId)
+	// 	}
+	// })
 }
 
 func RemoveOldClientLocationReliabilities(ctx context.Context, minTime time.Time) {
