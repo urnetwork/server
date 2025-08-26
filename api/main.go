@@ -86,6 +86,9 @@ Options:
 		router.NewRoute("POST", "/network/unblock-location", handlers.NetworkUnblockLocation),
 		router.NewRoute("GET", "/network/blocked-locations", handlers.GetNetworkBlockedLocations),
 
+		// reliability
+		router.NewRoute("GET", "/network/reliability", handlers.GetNetworkReliability),
+
 		router.NewRoute("POST", "/preferences/set-preferences", handlers.AccountPreferencesSet),
 		router.NewRoute("GET", "/preferences", handlers.AccountPreferencesGet),
 		router.NewRoute("POST", "/feedback/send-feedback", handlers.FeedbackSend),

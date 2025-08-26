@@ -418,7 +418,7 @@ type ReliabilityWindow struct {
 	// bucket number -> count
 	ClientCounts map[int64]int `json:"client_counts"`
 	// bucket number -> count
-	TotalClientCounts map[int64]int `json:"client_counts"`
+	TotalClientCounts map[int64]int `json:"total_client_counts"`
 
 	CountryMultipliers map[server.Id]*CountryMultiplier `json:"country_multipliers"`
 }
