@@ -22,7 +22,6 @@ func UpdateNetworkName(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetNetworkReliability(w http.ResponseWriter, r *http.Request) {
-	// router.WrapRequireAuth(controller.GetNetworkReliability, w, r)
 	router.WrapRequireAuth(
 		router.CacheWithAuth(
 			controller.GetNetworkReliability,
