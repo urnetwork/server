@@ -645,7 +645,8 @@ func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, min
 			network_id,
 			bucket_number,
 			reliability_weight,
-			client_count
+			client_count,
+			total_client_count
 		)
 
 		SELECT
