@@ -413,7 +413,7 @@ type ReliabilityWindow struct {
 	// valid+invalid
 	MaxTotalClientCount int `json:"max_total_client_count"`
 
-	// relative bucket number = (buckey number) - (min bucket number)
+	// relative bucket number = (bucket number) - (min bucket number)
 
 	// indexed by relative bucket number
 	ReliabilityWeights []float64 `json:"reliability_weights"`
