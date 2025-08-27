@@ -633,65 +633,61 @@ func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, min
 			reliability_weight,
 			client_count
 		)
-		SELECT
-			client_reliability.network_id,
-			client_reliability.block_number / $3 AS bucket_number,
-		    SUM(1.0/w.valid_client_count) / $3 AS reliability_weight,
-		    COUNT(DISTINCT client_reliability.client_id) AS client_count
 
-		FROM client_reliability
+		SELECT
+			t.network_id,
+			t.bucket_number,
+			t.reliability_weight,
+			t.client_count,
+			s.total_client_count
+		FROM (
+			SELECT
+				client_reliability.network_id,
+				client_reliability.block_number / $3 AS bucket_number,
+			    SUM(1.0/w.valid_client_count) / $3 AS reliability_weight,
+			    COUNT(DISTINCT client_reliability.client_id) AS client_count
+
+			FROM client_reliability
+
+			INNER JOIN (
+				SELECT
+					block_number,
+					client_address_hash,
+					COUNT(*) AS valid_client_count
+				FROM client_reliability
+				WHERE
+					valid = true AND
+					$1 <= block_number AND
+					block_number < $2
+				GROUP BY block_number, client_address_hash
+			) w ON
+				w.block_number = client_reliability.block_number AND
+				w.client_address_hash = client_reliability.client_address_hash
+
+			WHERE
+				client_reliability.valid = true AND
+				$1 <= client_reliability.block_number AND
+				client_reliability.block_number < $2
+
+			GROUP BY client_reliability.network_id, (client_reliability.block_number / $3)
+		) t
 
 		INNER JOIN (
 			SELECT
-				block_number,
-				client_address_hash,
-				COUNT(*) AS valid_client_count
+				network_id,
+				block_number / $3 AS bucket_number,
+			    COUNT(DISTINCT client_id) AS total_client_count
+
 			FROM client_reliability
+
 			WHERE
-				valid = true AND
 				$1 <= block_number AND
 				block_number < $2
-			GROUP BY block_number, client_address_hash
-		) w ON
-			w.block_number = client_reliability.block_number AND
-			w.client_address_hash = client_reliability.client_address_hash
 
-		WHERE
-			client_reliability.valid = true AND
-			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2
-
-		GROUP BY client_reliability.network_id, (client_reliability.block_number / $3)
-		`,
-		minBlockNumber,
-		maxBlockNumber,
-		blockCountPerBucket,
-	))
-
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		INSERT INTO network_connection_reliability_window (
-			network_id,
-			bucket_number,
-			total_client_count
-		)
-		SELECT
-			network_id,
-			block_number / $3 AS bucket_number,
-		    COUNT(DISTINCT client_id) AS total_client_count
-
-		FROM client_reliability
-
-		WHERE
-			$1 <= block_number AND
-			block_number < $2
-
-		GROUP BY network_id, (block_number / $3)
-
-		ON CONFLICT (network_id, bucket_number) DO UPDATE
-		SET
-			total_client_count = network_connection_reliability_window.total_client_count + EXCLUDED.total_client_count
+			GROUP BY network_id, (block_number / $3)
+		) s ON
+			s.network_id = t.network_id AND
+			s.bucket_number = t.bucket_number
 		`,
 		minBlockNumber,
 		maxBlockNumber,

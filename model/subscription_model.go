@@ -2808,6 +2808,8 @@ func AddRefreshTransferBalanceToAllNetworks(
 }
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
+	maxRowCount := 10000
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		// remove completed transfer balances
@@ -2826,13 +2828,21 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			ctx,
 			`
 			DELETE FROM transfer_contract
-			    USING transfer_escrow_sweep,    account_payment
+			    USING (
+			    	SELECT
+					    contract_id
+					FROM account_payment
+					INNER JOIN transfer_escrow_sweep ON
+					    transfer_escrow_sweep.payment_id = account_payment.payment_id
+
+					WHERE account_payment.completed AND account_payment.complete_time <= now()
+					LIMIT $2
+			    ) t
 			WHERE
-			    transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
-			    account_payment.payment_id = transfer_escrow_sweep.payment_id AND
-			    account_payment.completed AND account_payment.complete_time <= $1
+			    transfer_contract.contract_id = t.contract_id
 			`,
 			minTime.UTC(),
+			maxRowCount,
 		))
 
 		// remove closed transfer contracts that do not have a corresponding sweep
@@ -2848,10 +2858,12 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 					transfer_contract.create_time < $1 AND
 					transfer_contract.open = false AND
 					transfer_escrow_sweep.contract_id IS NULL
+				LIMIT $2
 			) t
 			WHERE transfer_contract.contract_id = t.contract_id
 			`,
 			minTime.UTC(),
+			maxRowCount,
 		))
 
 		// (cascade) remove contract close where the transfer contract no longer exists
@@ -2864,10 +2876,12 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		    	FROM contract_close
 		        	LEFT JOIN transfer_contract ON transfer_contract.contract_id = contract_close.contract_id
 				WHERE transfer_contract.contract_id IS NULL
+				LIMIT $2
 			) t
 			WHERE contract_close.contract_id = t.contract_id
 			`,
 			minTime.UTC(),
+			maxRowCount,
 		))
 
 		// (cascade) remove contract escrow where the transfer contract no longer exists
@@ -2880,10 +2894,12 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	       		FROM transfer_escrow
 					LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow.contract_id
 				WHERE transfer_contract.contract_id IS NULL
+				LIMIT $2
 			) t
 			WHERE transfer_escrow.contract_id = t.contract_id
 			`,
 			minTime.UTC(),
+			maxRowCount,
 		))
 
 		// (cascade) remove contract escrow sweep where the transfer contract no longer exists
@@ -2896,10 +2912,12 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			   	FROM transfer_escrow_sweep
 			    	LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow_sweep.contract_id
 			    WHERE transfer_contract.contract_id IS NULL
+			    LIMIT $2
 			) t
 			WHERE transfer_escrow_sweep.contract_id = t.contract_id;
 			`,
 			minTime.UTC(),
+			maxRowCount,
 		))
 	})
 }

@@ -87,17 +87,19 @@ func ApplyDbMigrations(ctx context.Context) {
 		})
 		switch v := migrations[i].(type) {
 		case *SqlMigration:
+			glog.Infof("[migrate][%d/%d]sql = %s\n", i, len(migrations), v.sql)
 			Tx(ctx, func(tx PgTx) {
 				defer func() {
 					if err := recover(); err != nil {
 						// print the sql for debugging
-						glog.Infof("[migrate][%d/%d]%s\n", i, len(migrations), v.sql)
+						glog.Infof("[migrate][%d/%d]err = %s; sql = %s\n", i, len(migrations), err, v.sql)
 						panic(err)
 					}
 				}()
 				RaisePgResult(tx.Exec(ctx, v.sql))
 			})
 		case *CodeMigration:
+			glog.Infof("[migrate][%d/%d]code = %v\n", i, len(migrations), v.callback)
 			v.callback(ctx)
 		default:
 			panic(fmt.Errorf("Unknown migration type %T", v))
@@ -2220,5 +2222,9 @@ var migrations = []any{
 
             PRIMARY KEY (country_location_id)
         )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_payment_completed_complete_time_contract_id ON account_payment (completed, complete_time, contract_id)
     `),
 }
