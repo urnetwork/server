@@ -20,6 +20,8 @@ WHERE schemaname NOT IN  ('pg_catalog', 'information_schema')
 
 */
 
+var DbMigrationVerbose = false
+
 type SqlMigration struct {
 	sql string
 }
@@ -87,7 +89,9 @@ func ApplyDbMigrations(ctx context.Context) {
 		})
 		switch v := migrations[i].(type) {
 		case *SqlMigration:
-			glog.Infof("[migrate][%d/%d]sql = %s\n", i, len(migrations), v.sql)
+			if DbMigrationVerbose {
+				glog.Infof("[migrate][%d/%d]sql = %s\n", i, len(migrations), v.sql)
+			}
 			Tx(ctx, func(tx PgTx) {
 				defer func() {
 					if err := recover(); err != nil {
@@ -99,7 +103,9 @@ func ApplyDbMigrations(ctx context.Context) {
 				RaisePgResult(tx.Exec(ctx, v.sql))
 			})
 		case *CodeMigration:
-			glog.Infof("[migrate][%d/%d]code = %v\n", i, len(migrations), v.callback)
+			if DbMigrationVerbose {
+				glog.Infof("[migrate][%d/%d]code = %v\n", i, len(migrations), v.callback)
+			}
 			v.callback(ctx)
 		default:
 			panic(fmt.Errorf("Unknown migration type %T", v))

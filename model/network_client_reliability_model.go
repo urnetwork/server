@@ -413,14 +413,16 @@ type ReliabilityWindow struct {
 	// valid+invalid
 	MaxTotalClientCount int `json:"max_total_client_count"`
 
-	// bucket number -> weight
-	ReliabilityWeights map[int64]float64 `json:"reliability_weights"`
-	// bucket number -> count
-	ClientCounts map[int64]int `json:"client_counts"`
-	// bucket number -> count
-	TotalClientCounts map[int64]int `json:"total_client_counts"`
+	// relative bucket number = (buckey number) - (min bucket number)
 
-	CountryMultipliers map[server.Id]*CountryMultiplier `json:"country_multipliers"`
+	// indexed by relative bucket number
+	ReliabilityWeights []float64 `json:"reliability_weights"`
+	// indexed by relative bucket number
+	ClientCounts []int `json:"client_counts"`
+	// indexed by relative bucket number
+	TotalClientCounts []int `json:"total_client_counts"`
+
+	CountryMultipliers []*CountryMultiplier `json:"country_multipliers"`
 }
 
 type CountryMultiplier struct {
@@ -491,8 +493,8 @@ func GetNetworkReliabilityWindowInTx(
 			if minBucketNumber < 0 || bucketNumber < minBucketNumber {
 				minBucketNumber = bucketNumber
 			}
-			if maxBucketNumber < 0 || maxBucketNumber < bucketNumber {
-				maxBucketNumber = bucketNumber
+			if maxBucketNumber < 0 || maxBucketNumber < bucketNumber+1 {
+				maxBucketNumber = bucketNumber + 1
 			}
 
 			if maxClientCount < clientCount {
@@ -579,19 +581,31 @@ func GetNetworkReliabilityWindowInTx(
 		}
 	}
 
+	n := maxBucketNumber - minBucketNumber
+	reliabilityWeightsSlice := make([]float64, n)
+	clientCountsSlice := make([]int, n)
+	totalClientCountsSlice := make([]int, n)
+
+	for i := range n {
+		bucketNumber := minBucketNumber + i
+		reliabilityWeightsSlice[i] = reliabilityWeights[bucketNumber]
+		clientCountsSlice[i] = clientCounts[bucketNumber]
+		totalClientCountsSlice[i] = totalClientCounts[bucketNumber]
+	}
+
 	return &ReliabilityWindow{
-		MeanReliabilityWeight: netReliabilityWeight / float64(maxBucketNumber+1-minBucketNumber),
+		MeanReliabilityWeight: netReliabilityWeight / float64(maxBucketNumber-minBucketNumber),
 		MinTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(minBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
 		MinBucketNumber:       minBucketNumber,
-		MaxTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(maxBucketNumber+1) * ReliabilityWindowBucketDuration).UnixMilli(),
-		MaxBucketNumber:       maxBucketNumber + 1,
+		MaxTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(maxBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
+		MaxBucketNumber:       maxBucketNumber,
 		BucketDurationSeconds: int(ReliabilityWindowBucketDuration / time.Second),
 		MaxClientCount:        maxClientCount,
 		MaxTotalClientCount:   maxTotalClientCount,
-		ReliabilityWeights:    reliabilityWeights,
-		ClientCounts:          clientCounts,
-		TotalClientCounts:     totalClientCounts,
-		CountryMultipliers:    countryMultipliers,
+		ReliabilityWeights:    reliabilityWeightsSlice,
+		ClientCounts:          clientCountsSlice,
+		TotalClientCounts:     totalClientCountsSlice,
+		CountryMultipliers:    maps.Values(countryMultipliers),
 	}
 }
 

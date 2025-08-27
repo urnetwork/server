@@ -119,3 +119,39 @@ func UpdateNetworkReliabilityWindowPost(
 	ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 	return nil
 }
+
+type RemoveOldClientLocationReliabilitiesArgs struct {
+}
+
+type RemoveOldClientLocationReliabilitiesResult struct {
+}
+
+func ScheduleRemoveOldClientLocationReliabilities(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveOldClientLocationReliabilities,
+		&RemoveOldClientLocationReliabilitiesArgs{},
+		clientSession,
+		task.RunOnce("remove_old_client_location_reliabilities"),
+		task.RunAt(server.NowUtc().Add(15*time.Minute)),
+	)
+}
+
+func RemoveOldClientLocationReliabilities(
+	removeOldClientLocationReliabilities *RemoveOldClientLocationReliabilitiesArgs,
+	clientSession *session.ClientSession,
+) (*RemoveOldClientLocationReliabilitiesResult, error) {
+	minTime := server.NowUtc().Add(-30 * 24 * time.Hour)
+	model.RemoveOldClientLocationReliabilities(clientSession.Ctx, minTime)
+	return &RemoveOldClientLocationReliabilitiesResult{}, nil
+}
+
+func RemoveOldClientLocationReliabilitiesPost(
+	removeOldClientLocationReliabilities *RemoveOldClientLocationReliabilitiesArgs,
+	removeOldClientLocationReliabilitiesResult *RemoveOldClientLocationReliabilitiesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
+	return nil
+}

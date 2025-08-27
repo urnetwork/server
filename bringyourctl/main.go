@@ -226,6 +226,7 @@ func dbVersion(opts docopt.Opts) {
 
 func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
+	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
 }
 

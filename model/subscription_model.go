@@ -2808,7 +2808,7 @@ func AddRefreshTransferBalanceToAllNetworks(
 }
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
-	maxRowCount := 10000
+	maxRowCount := 100000
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
