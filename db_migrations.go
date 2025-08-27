@@ -2225,6 +2225,6 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE INDEX IF NOT EXISTS account_payment_completed_complete_time_contract_id ON account_payment (completed, complete_time, contract_id)
+        CREATE INDEX IF NOT EXISTS account_payment_completed_complete_time_contract_id ON account_payment (completed, complete_time)
     `),
 }
