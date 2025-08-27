@@ -932,7 +932,7 @@ func reliabilitySetMultipliers(opts docopt.Opts) {
 	for _, countryCode := range orderedCountryCodes {
 		countryLocationId := countryCodes[countryCode]
 		m1 := countryReliabilityMultipliers1[countryLocationId]
-		m2 := countryReliabilityMultipliers1[countryLocationId]
+		m2 := countryReliabilityMultipliers2[countryLocationId]
 		if m1 == nil {
 			fmt.Printf("%s unset -> %.1f\n", countryCode, m2.ReliabilityMultiplier)
 		} else if m2 == nil {
