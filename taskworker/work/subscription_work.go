@@ -121,7 +121,7 @@ func ScheduleRemoveCompletedContracts(clientSession *session.ClientSession, tx s
 		clientSession,
 		task.RunOnce("remove_completed_contracts"),
 		task.RunAt(runAt),
-		task.MaxTime(2*time.Hour),
+		task.MaxTime(5*time.Minute),
 	)
 }
 

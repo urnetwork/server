@@ -136,7 +136,7 @@ func UpdateClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minT
 			city_location_id,
 			region_location_id,
 			country_location_id
-		) 
+		)
 		SELECT
 			t.client_id,
 			t.independent_reliability_score,
