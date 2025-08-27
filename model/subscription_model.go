@@ -2835,7 +2835,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 					INNER JOIN transfer_escrow_sweep ON
 					    transfer_escrow_sweep.payment_id = account_payment.payment_id
 
-					WHERE account_payment.completed AND account_payment.complete_time <= now()
+					WHERE account_payment.completed AND account_payment.complete_time <= $1
 					LIMIT $2
 			    ) t
 			WHERE
@@ -2876,11 +2876,10 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		    	FROM contract_close
 		        	LEFT JOIN transfer_contract ON transfer_contract.contract_id = contract_close.contract_id
 				WHERE transfer_contract.contract_id IS NULL
-				LIMIT $2
+				LIMIT $1
 			) t
 			WHERE contract_close.contract_id = t.contract_id
 			`,
-			minTime.UTC(),
 			maxRowCount,
 		))
 
@@ -2894,11 +2893,10 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	       		FROM transfer_escrow
 					LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow.contract_id
 				WHERE transfer_contract.contract_id IS NULL
-				LIMIT $2
+				LIMIT $1
 			) t
 			WHERE transfer_escrow.contract_id = t.contract_id
 			`,
-			minTime.UTC(),
 			maxRowCount,
 		))
 
@@ -2912,11 +2910,10 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			   	FROM transfer_escrow_sweep
 			    	LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow_sweep.contract_id
 			    WHERE transfer_contract.contract_id IS NULL
-			    LIMIT $2
+			    LIMIT $1
 			) t
 			WHERE transfer_escrow_sweep.contract_id = t.contract_id;
 			`,
-			minTime.UTC(),
 			maxRowCount,
 		))
 	})
