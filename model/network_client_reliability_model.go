@@ -894,6 +894,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		updateBlockNumber,
 	))
 
+	// TODO on pg17 this could be part of a MERGE with source missing
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -908,7 +909,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    		temp_network_client_location_reliability.client_id = network_client_location_reliability.client_id
 	    	WHERE temp_network_client_location_reliability.client_id IS NULL
 	    ) t
-	    WHERE network_client_location_reliability.client_id = t.client_id
+	    WHERE
+	    	network_client_location_reliability.client_id = t.client_id AND
+	    	network_client_location_reliability.connected = true
 	    `,
 	))
 
