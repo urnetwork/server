@@ -102,135 +102,108 @@ type ReliabilityScore struct {
 	ReliabilityWeight           float64
 }
 
-func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		UpdateClientReliabilityScoresInTx(tx, ctx, minTime, maxTime)
-	})
-}
-
 // FIXME support country_location_id
 // this should run regulalry to keep the client scores up to date
-func UpdateClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
-	UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 
-	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		DELETE FROM client_connection_reliability_score
-		`,
-	))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM client_connection_reliability_score
+			`,
+		))
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		INSERT INTO client_connection_reliability_score (
-			client_id,
-			independent_reliability_score,
-			reliability_score,
-			reliability_weight,
-			min_block_number,
-			max_block_number,
-			city_location_id,
-			region_location_id,
-			country_location_id
-		)
-		SELECT
-			t.client_id,
-			t.independent_reliability_score,
-			t.reliability_score,
-			t.reliability_weight,
-			$1 AS min_block_number,
-			$2 AS max_block_number,
-		    network_client_location_reliability.city_location_id,
-		    network_client_location_reliability.region_location_id,
-		    network_client_location_reliability.country_location_id
-		FROM
-		(
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO client_connection_reliability_score (
+				client_id,
+				independent_reliability_score,
+				reliability_score,
+				reliability_weight,
+				min_block_number,
+				max_block_number,
+				city_location_id,
+				region_location_id,
+				country_location_id
+			)
 			SELECT
-			    client_reliability.client_id,
+			    t.client_id,
 			    SUM(1.0) AS independent_reliability_score,
-			    SUM(1.0/w.valid_client_count) AS reliability_score,
-			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight
-			FROM client_reliability
-
-			INNER JOIN (
+			    SUM(1.0/t.valid_client_count) AS reliability_score,
+			    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+			    $1 AS min_block_number,
+				$2 AS max_block_number,
+				t.city_location_id,
+				t.region_location_id,
+				t.country_location_id
+			FROM (
 				SELECT
-					block_number,
-					client_address_hash,
-					COUNT(*) AS valid_client_count
-				FROM client_reliability
-				WHERE
-					valid = true AND
-					$1 <= block_number AND
-					block_number <= $2
-				GROUP BY block_number, client_address_hash
-			) w ON
-				w.block_number = client_reliability.block_number AND
-				w.client_address_hash = client_reliability.client_address_hash
+					client_reliability.client_id,
+					network_client_location_reliability.city_location_id,
+					network_client_location_reliability.region_location_id,
+					network_client_location_reliability.country_location_id,
+			        COUNT(*) OVER (PARTITION BY client_reliability.block_number, client_reliability.client_address_hash) valid_client_count
+			    FROM client_reliability
+			    INNER JOIN network_client_location_reliability ON
+					network_client_location_reliability.client_id = client_reliability.client_id AND
+					network_client_location_reliability.valid = true
+			    WHERE
+					client_reliability.valid = true AND
+			    	$1 <= client_reliability.block_number AND
+			    	client_reliability.block_number <= $2
+			) t
+			GROUP BY t.client_id, t.city_location_id, t.region_location_id, t.country_location_id
+			ORDER BY t.client_id
+			`,
+			minBlockNumber,
+			maxBlockNumber,
+		))
 
-			WHERE
-				client_reliability.valid = true AND
-				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2
-
-			GROUP BY client_reliability.client_id
-		) t
-
-		INNER JOIN network_client_location_reliability ON
-			network_client_location_reliability.client_id = t.client_id AND
-			network_client_location_reliability.valid = true
-
-		`,
-		minBlockNumber,
-		maxBlockNumber,
-	))
+	}, server.TxReadCommitted)
 }
 
 func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server.Id]ReliabilityScore) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		clientScores = GetAllClientReliabilityScoresInTx(tx, ctx)
+	server.Db(ctx, func(conn server.PgConn) {
+		clientScores = map[server.Id]ReliabilityScore{}
+
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				independent_reliability_score,
+				reliability_score,
+				reliability_weight
+			FROM client_connection_reliability_score
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var s ReliabilityScore
+				server.Raise(result.Scan(
+					&clientId,
+					&s.IndependentReliabilityScore,
+					&s.ReliabilityScore,
+					&s.ReliabilityWeight,
+				))
+				clientScores[clientId] = s
+			}
+		})
 	})
 	return
-}
-
-func GetAllClientReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
-	clientScores := map[server.Id]ReliabilityScore{}
-
-	result, err := tx.Query(
-		ctx,
-		`
-		SELECT
-			client_id,
-			independent_reliability_score,
-			reliability_score,
-			reliability_weight
-		FROM client_connection_reliability_score
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var clientId server.Id
-			var s ReliabilityScore
-			server.Raise(result.Scan(
-				&clientId,
-				&s.IndependentReliabilityScore,
-				&s.ReliabilityScore,
-				&s.ReliabilityWeight,
-			))
-			clientScores[clientId] = s
-		}
-	})
-
-	return clientScores
 }
 
 func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
-	})
+	}, server.TxReadCommitted)
 }
 
 // FIXME support country_location_id
@@ -261,50 +234,29 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			max_block_number
 		)
 		SELECT
-			t.network_id,
-			network_client_location_reliability.country_location_id,
-			SUM(t.independent_reliability_score) AS independent_reliability_score,
-			SUM(t.reliability_score) AS reliability_score,
-			SUM(t.reliability_weight) AS reliability_weight,
-			$1 AS min_block_number,
+		    t.network_id,
+		    t.country_location_id,
+		    SUM(1.0) AS independent_reliability_score,
+		    SUM(1.0/t.valid_client_count) AS reliability_score,
+		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    $1 AS min_block_number,
 			$2 AS max_block_number
 		FROM (
 			SELECT
 				client_reliability.network_id,
-				client_reliability.client_id,
-				SUM(1.0) AS independent_reliability_score,
-			    SUM(1.0/w.valid_client_count) AS reliability_score,
-			    SUM(1.0/w.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight
-			FROM client_reliability
-
-			INNER JOIN (
-				SELECT
-					block_number,
-					client_address_hash,
-					COUNT(*) AS valid_client_count
-				FROM client_reliability
-				WHERE
-					valid = true AND
-					$1 <= block_number AND
-					block_number <= $2
-				GROUP BY block_number, client_address_hash
-			) w ON
-				w.block_number = client_reliability.block_number AND
-				w.client_address_hash = client_reliability.client_address_hash
-
-			WHERE
-				client_reliability.valid = true AND
-				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2
-
-			GROUP BY client_reliability.network_id, client_reliability.client_id
+				network_client_location_reliability.country_location_id,
+		        COUNT(*) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
+		    FROM client_reliability
+		    INNER JOIN network_client_location_reliability ON
+				network_client_location_reliability.client_id = client_reliability.client_id AND
+				network_client_location_reliability.valid = true
+		    WHERE
+		    	client_reliability.valid = true AND
+		    	$1 <= client_reliability.block_number AND
+		    	client_reliability.block_number <= $2
 		) t
-
-		INNER JOIN network_client_location_reliability ON
-			network_client_location_reliability.client_id = t.client_id AND
-			network_client_location_reliability.valid = true
-
-		GROUP BY t.network_id, network_client_location_reliability.country_location_id
+		GROUP BY t.network_id, t.country_location_id
+		ORDER BY t.network_id, t.country_location_id
 		`,
 		minBlockNumber,
 		maxBlockNumber,
@@ -433,180 +385,185 @@ type CountryMultiplier struct {
 }
 
 func GetNetworkReliabilityWindow(clientSession *session.ClientSession) (reliabilityWindow *ReliabilityWindow, err error) {
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		networkId := clientSession.ByJwt.NetworkId
-		var clientIp netip.Addr
-		clientIp, _, err = clientSession.ParseClientIpPort()
-		reliabilityWindow = GetNetworkReliabilityWindowInTx(tx, clientSession.Ctx, networkId, &clientIp)
-	})
+	networkId := clientSession.ByJwt.NetworkId
+	var clientIp netip.Addr
+	clientIp, _, err = clientSession.ParseClientIpPort()
+	if err != nil {
+		return nil, err
+	}
+	reliabilityWindow = getNetworkReliabilityWindow(clientSession.Ctx, networkId, &clientIp)
 	return
 }
 
-func GetNetworkReliabilityWindowInTx(
-	tx server.PgTx,
+func getNetworkReliabilityWindow(
 	ctx context.Context,
 	networkId server.Id,
 	clientIp *netip.Addr,
-) *ReliabilityWindow {
-	result, err := tx.Query(
-		ctx,
-		`
-		SELECT
-			bucket_number,
-	        reliability_weight,
-	        client_count,
-	        total_client_count
-		FROM network_connection_reliability_window
+) (reliabilityWindow *ReliabilityWindow) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				bucket_number,
+		        reliability_weight,
+		        client_count,
+		        total_client_count
+			FROM network_connection_reliability_window
 
-		WHERE
-			network_id = $1
-		`,
-		networkId,
-	)
+			WHERE
+				network_id = $1
+			`,
+			networkId,
+		)
 
-	netReliabilityWeight := float64(0)
-	minBucketNumber := int64(-1)
-	// inclusive
-	maxBucketNumber := int64(-1)
+		netReliabilityWeight := float64(0)
+		minBucketNumber := int64(-1)
+		// inclusive
+		maxBucketNumber := int64(-1)
 
-	maxClientCount := 0
-	maxTotalClientCount := 0
+		maxClientCount := 0
+		maxTotalClientCount := 0
 
-	reliabilityWeights := map[int64]float64{}
-	clientCounts := map[int64]int{}
-	totalClientCounts := map[int64]int{}
+		reliabilityWeights := map[int64]float64{}
+		clientCounts := map[int64]int{}
+		totalClientCounts := map[int64]int{}
 
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var bucketNumber int64
-			var reliabilityWeight float64
-			var clientCount int
-			var totalClientCount int
-			server.Raise(result.Scan(
-				&bucketNumber,
-				&reliabilityWeight,
-				&clientCount,
-				&totalClientCount,
-			))
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var bucketNumber int64
+				var reliabilityWeight float64
+				var clientCount int
+				var totalClientCount int
+				server.Raise(result.Scan(
+					&bucketNumber,
+					&reliabilityWeight,
+					&clientCount,
+					&totalClientCount,
+				))
 
-			netReliabilityWeight += reliabilityWeight
-			if minBucketNumber < 0 || bucketNumber < minBucketNumber {
-				minBucketNumber = bucketNumber
-			}
-			if maxBucketNumber < 0 || maxBucketNumber < bucketNumber+1 {
-				maxBucketNumber = bucketNumber + 1
-			}
-
-			if maxClientCount < clientCount {
-				maxClientCount = clientCount
-			}
-			if maxTotalClientCount < totalClientCount {
-				maxTotalClientCount = totalClientCount
-			}
-
-			reliabilityWeights[bucketNumber] = reliabilityWeight
-			if 0 < clientCount {
-				clientCounts[bucketNumber] = clientCount
-			}
-			if 0 < totalClientCount {
-				totalClientCounts[bucketNumber] = totalClientCount
-			}
-		}
-	})
-
-	countryMultipliers := map[server.Id]*CountryMultiplier{}
-
-	result, err = tx.Query(
-		ctx,
-		`
-		SELECT
-			network_connection_reliability_score.country_location_id,
-			location.location_name,
-			location.country_code,
-			COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
-		FROM network_connection_reliability_score
-		INNER JOIN location ON
-			location.location_id = network_connection_reliability_score.country_location_id
-		LEFT JOIN network_client_location_reliability_multiplier ON
-			network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_score.country_location_id
-		`,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			m := &CountryMultiplier{}
-			server.Raise(result.Scan(
-				&m.CountryLocationId,
-				&m.Country,
-				&m.CountryCode,
-				&m.ReliabilityMultiplier,
-			))
-			countryMultipliers[m.CountryLocationId] = m
-		}
-	})
-
-	// include the caller ip for completeness
-	if clientIp != nil {
-		ipInfo, err := server.GetIpInfo(*clientIp)
-		if err == nil && ipInfo.CountryCode != "" {
-			result, err := tx.Query(
-				ctx,
-				`
-				SELECT
-					location.location_id,
-					location.location_name,
-					location.country_code,
-					COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
-				FROM location
-				INNER JOIN network_client_location_reliability_multiplier ON
-					network_client_location_reliability_multiplier.country_location_id = location.location_id
-				WHERE
-					location.location_type = $1 AND
-					location.country_code = $2
-				`,
-				LocationTypeCountry,
-				ipInfo.CountryCode,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					m := &CountryMultiplier{}
-					server.Raise(result.Scan(
-						&m.CountryLocationId,
-						&m.Country,
-						&m.CountryCode,
-						&m.ReliabilityMultiplier,
-					))
-					countryMultipliers[m.CountryLocationId] = m
+				netReliabilityWeight += reliabilityWeight
+				if minBucketNumber < 0 || bucketNumber < minBucketNumber {
+					minBucketNumber = bucketNumber
 				}
-			})
+				if maxBucketNumber < 0 || maxBucketNumber < bucketNumber+1 {
+					maxBucketNumber = bucketNumber + 1
+				}
+
+				if maxClientCount < clientCount {
+					maxClientCount = clientCount
+				}
+				if maxTotalClientCount < totalClientCount {
+					maxTotalClientCount = totalClientCount
+				}
+
+				reliabilityWeights[bucketNumber] = reliabilityWeight
+				if 0 < clientCount {
+					clientCounts[bucketNumber] = clientCount
+				}
+				if 0 < totalClientCount {
+					totalClientCounts[bucketNumber] = totalClientCount
+				}
+			}
+		})
+
+		countryMultipliers := map[server.Id]*CountryMultiplier{}
+
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT
+				network_connection_reliability_score.country_location_id,
+				location.location_name,
+				location.country_code,
+				COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
+			FROM network_connection_reliability_score
+			INNER JOIN location ON
+				location.location_id = network_connection_reliability_score.country_location_id
+			LEFT JOIN network_client_location_reliability_multiplier ON
+				network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_score.country_location_id
+			WHERE network_connection_reliability_score.network_id = $1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				m := &CountryMultiplier{}
+				server.Raise(result.Scan(
+					&m.CountryLocationId,
+					&m.Country,
+					&m.CountryCode,
+					&m.ReliabilityMultiplier,
+				))
+				countryMultipliers[m.CountryLocationId] = m
+			}
+		})
+
+		// include the caller ip for completeness
+		if clientIp != nil {
+			ipInfo, err := server.GetIpInfo(*clientIp)
+			if err == nil && ipInfo.CountryCode != "" {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT
+						location.location_id,
+						location.location_name,
+						location.country_code,
+						COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
+					FROM location
+					INNER JOIN network_client_location_reliability_multiplier ON
+						network_client_location_reliability_multiplier.country_location_id = location.location_id
+					WHERE
+						location.location_type = $1 AND
+						location.country_code = $2
+					`,
+					LocationTypeCountry,
+					ipInfo.CountryCode,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						m := &CountryMultiplier{}
+						server.Raise(result.Scan(
+							&m.CountryLocationId,
+							&m.Country,
+							&m.CountryCode,
+							&m.ReliabilityMultiplier,
+						))
+						countryMultipliers[m.CountryLocationId] = m
+					}
+				})
+			}
 		}
-	}
 
-	n := maxBucketNumber - minBucketNumber
-	reliabilityWeightsSlice := make([]float64, n)
-	clientCountsSlice := make([]int, n)
-	totalClientCountsSlice := make([]int, n)
+		n := maxBucketNumber - minBucketNumber
+		reliabilityWeightsSlice := make([]float64, n)
+		clientCountsSlice := make([]int, n)
+		totalClientCountsSlice := make([]int, n)
 
-	for i := range n {
-		bucketNumber := minBucketNumber + i
-		reliabilityWeightsSlice[i] = reliabilityWeights[bucketNumber]
-		clientCountsSlice[i] = clientCounts[bucketNumber]
-		totalClientCountsSlice[i] = totalClientCounts[bucketNumber]
-	}
+		for i := range n {
+			bucketNumber := minBucketNumber + i
+			reliabilityWeightsSlice[i] = reliabilityWeights[bucketNumber]
+			clientCountsSlice[i] = clientCounts[bucketNumber]
+			totalClientCountsSlice[i] = totalClientCounts[bucketNumber]
+		}
 
-	return &ReliabilityWindow{
-		MeanReliabilityWeight: netReliabilityWeight / float64(maxBucketNumber-minBucketNumber),
-		MinTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(minBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
-		MinBucketNumber:       minBucketNumber,
-		MaxTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(maxBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
-		MaxBucketNumber:       maxBucketNumber,
-		BucketDurationSeconds: int(ReliabilityWindowBucketDuration / time.Second),
-		MaxClientCount:        maxClientCount,
-		MaxTotalClientCount:   maxTotalClientCount,
-		ReliabilityWeights:    reliabilityWeightsSlice,
-		ClientCounts:          clientCountsSlice,
-		TotalClientCounts:     totalClientCountsSlice,
-		CountryMultipliers:    maps.Values(countryMultipliers),
-	}
+		reliabilityWindow = &ReliabilityWindow{
+			MeanReliabilityWeight: netReliabilityWeight / float64(maxBucketNumber-minBucketNumber),
+			MinTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(minBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
+			MinBucketNumber:       minBucketNumber,
+			MaxTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(maxBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
+			MaxBucketNumber:       maxBucketNumber,
+			BucketDurationSeconds: int(ReliabilityWindowBucketDuration / time.Second),
+			MaxClientCount:        maxClientCount,
+			MaxTotalClientCount:   maxTotalClientCount,
+			ReliabilityWeights:    reliabilityWeightsSlice,
+			ClientCounts:          clientCountsSlice,
+			TotalClientCounts:     totalClientCountsSlice,
+			CountryMultipliers:    maps.Values(countryMultipliers),
+		}
+	})
+	return
 }
 
 func ReliabilityBlockCountPerBucket() int {
@@ -619,95 +576,56 @@ func ReliabilityBlockCountPerBucket() int {
 
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowInTx(tx, ctx, minTime, maxTime)
-	})
-}
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
 
-func UpdateNetworkReliabilityWindowInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
+		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
-	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
-	blockCountPerBucket := ReliabilityBlockCountPerBucket()
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_connection_reliability_window
+			`,
+		))
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		DELETE FROM network_connection_reliability_window
-		`,
-	))
-
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		INSERT INTO network_connection_reliability_window (
-			network_id,
-			bucket_number,
-			reliability_weight,
-			client_count,
-			total_client_count
-		)
-
-		SELECT
-			t.network_id,
-			t.bucket_number,
-			t.reliability_weight,
-			t.client_count,
-			s.total_client_count
-		FROM (
-			SELECT
-				client_reliability.network_id,
-				client_reliability.block_number / $3 AS bucket_number,
-			    SUM(1.0/w.valid_client_count) / $3 AS reliability_weight,
-			    COUNT(DISTINCT client_reliability.client_id) AS client_count
-
-			FROM client_reliability
-
-			INNER JOIN (
-				SELECT
-					block_number,
-					client_address_hash,
-					COUNT(*) AS valid_client_count
-				FROM client_reliability
-				WHERE
-					valid = true AND
-					$1 <= block_number AND
-					block_number < $2
-				GROUP BY block_number, client_address_hash
-			) w ON
-				w.block_number = client_reliability.block_number AND
-				w.client_address_hash = client_reliability.client_address_hash
-
-			WHERE
-				client_reliability.valid = true AND
-				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2
-
-			GROUP BY client_reliability.network_id, (client_reliability.block_number / $3)
-		) t
-
-		INNER JOIN (
-			SELECT
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO network_connection_reliability_window (
 				network_id,
-				block_number / $3 AS bucket_number,
-			    COUNT(DISTINCT client_id) AS total_client_count
-
-			FROM client_reliability
-
-			WHERE
-				$1 <= block_number AND
-				block_number < $2
-
-			GROUP BY network_id, (block_number / $3)
-		) s ON
-			s.network_id = t.network_id AND
-			s.bucket_number = t.bucket_number
-		`,
-		minBlockNumber,
-		maxBlockNumber,
-		blockCountPerBucket,
-	))
+				bucket_number,
+				reliability_weight,
+				client_count,
+				total_client_count
+			)
+			SELECT
+			    t.network_id,
+			    t.bucket_number,
+			    SUM(CASE WHEN t.valid = true THEN 1.0/t.valid_client_count ELSE 0 END) / $3 AS reliability_weight,
+			    COUNT(DISTINCT t.client_id) FILTER (WHERE t.valid = true) AS client_count,
+			    COUNT(DISTINCT t.client_id) AS total_client_count
+			FROM (
+				SELECT
+					valid,
+					network_id,
+					client_id,
+					block_number / $3 AS bucket_number,
+			        COUNT(*) FILTER (WHERE valid = true) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
+			    FROM client_reliability
+			    WHERE
+			    	$1 <= block_number AND
+			    	block_number <= $2
+			) t
+			GROUP BY t.network_id, t.bucket_number
+			ORDER BY t.network_id, t.bucket_number
+			`,
+			minBlockNumber,
+			maxBlockNumber,
+			blockCountPerBucket,
+		))
+	}, server.TxReadCommitted)
 }
 
 type cityRegionCountry struct {
@@ -960,6 +878,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_net_type_score,
 	        max_net_type_score_speed
 	    FROM temp_network_client_location_reliability
+	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
 	    SET
 	    	update_block_number = $1,

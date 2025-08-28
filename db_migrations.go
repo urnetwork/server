@@ -2056,6 +2056,7 @@ var migrations = []any{
 		)
 	`),
 
+	// UPDATE: PK changed to (block_number, client_address_hash, client_id)
 	newSqlMigration(`
         CREATE TABLE client_reliability (
             block_number bigint NOT NULL,

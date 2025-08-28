@@ -945,7 +945,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 			minTime.UTC(),
 		))
+	}, server.TxReadCommitted)
 
+	server.Tx(ctx, func(tx server.PgTx) {
 		// (cascade) clean up network_client_location
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -963,6 +965,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -972,23 +977,27 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			minTime.UTC(),
 		))
 
-		// FIXME perf only do this when the client can recover correctly
-		// remove network clients without a connection
-		// important: the app will need to create a new client id for these clients when it notices the existing jwt fails
-		// server.RaisePgResult(tx.Exec(
-		// 	ctx,
-		// 	`
-		// 	DELETE FROM network_client
-		// 	USING (
-		// 		SELECT network_client.client_id
-		// 		FROM network_client
-		// 	    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
-		// 		WHERE network_client.create_time < $1 AND network_client_connection.client_id IS NULL
-		// 	) t
-		// 	WHERE network_client.client_id = t.client_id
-		// 	`,
-		// 	minTime.UTC(),
-		// ))
+	}, server.TxReadCommitted)
+
+	// FIXME perf only do this when the client can recover correctly
+	// remove network clients without a connection
+	// important: the app will need to create a new client id for these clients when it notices the existing jwt fails
+	// server.RaisePgResult(tx.Exec(
+	// 	ctx,
+	// 	`
+	// 	DELETE FROM network_client
+	// 	USING (
+	// 		SELECT network_client.client_id
+	// 		FROM network_client
+	// 	    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
+	// 		WHERE network_client.create_time < $1 AND network_client_connection.client_id IS NULL
+	// 	) t
+	// 	WHERE network_client.client_id = t.client_id
+	// 	`,
+	// 	minTime.UTC(),
+	// ))
+
+	server.Tx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove provide keys without a network client
 		server.RaisePgResult(tx.Exec(
@@ -1005,6 +1014,10 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
 		// (cascade) remove devices without a network client
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1019,6 +1032,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			WHERE device.device_id = t.device_id
 			`,
 		))
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove residents without a network client
 		server.RaisePgResult(tx.Exec(
@@ -1035,7 +1051,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
-	})
+	}, server.TxReadCommitted)
 }
 
 func CreateNetworkClientHandler(ctx context.Context) (handlerId server.Id) {

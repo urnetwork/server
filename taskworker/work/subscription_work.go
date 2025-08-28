@@ -108,20 +108,14 @@ type RemoveCompletedContractsResult struct {
 }
 
 func ScheduleRemoveCompletedContracts(clientSession *session.ClientSession, tx server.PgTx) {
-	runAt := func() time.Time {
-		now := server.NowUtc()
-		year, month, day := now.Date()
-		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
-	}()
-
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveCompletedContracts,
 		&RemoveCompletedContractsArgs{},
 		clientSession,
 		task.RunOnce("remove_completed_contracts"),
-		task.RunAt(runAt),
-		task.MaxTime(5*time.Minute),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(30*time.Minute),
 	)
 }
 

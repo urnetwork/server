@@ -825,16 +825,27 @@ func taskLs(opts docopt.Opts) {
 
 	orderedTaskIds := maps.Keys(tasks)
 	slices.SortFunc(orderedTaskIds, func(a server.Id, b server.Id) int {
-		return a.Cmp(b)
+		taskA := tasks[a]
+		taskB := tasks[b]
+		if taskA.RunAt == taskB.RunAt {
+			return a.Cmp(b)
+		} else if taskA.RunAt.Before(taskB.RunAt) {
+			return -1
+		} else {
+			return 1
+		}
 	})
 
 	fmt.Printf("%d pending tasks:\n", len(tasks))
+	now := server.NowUtc()
 	for _, taskId := range orderedTaskIds {
 		task := tasks[taskId]
+		remaining := (task.RunAt.Sub(now) / time.Second) * time.Second
+		runAtStr := fmt.Sprintf("%s", remaining)
 		if task.RescheduleError != "" {
-			fmt.Printf("  %s %s: rescheduled err = %s\n", taskId, task.FunctionName, task.RescheduleError)
+			fmt.Printf("[%8s]  %s %s: rescheduled err = %s\n", runAtStr, taskId, task.FunctionName, task.RescheduleError)
 		} else {
-			fmt.Printf("  %s %s\n", taskId, task.FunctionName)
+			fmt.Printf("[%8s]  %s %s\n", runAtStr, taskId, task.FunctionName)
 		}
 	}
 

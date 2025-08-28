@@ -53,13 +53,13 @@ func TransferStats(session *session.ClientSession) (*model.TransferStats, error)
 
 func SchedulePendingPayments(clientSession *session.ClientSession) {
 	pendingPayments := model.GetPendingPayments(clientSession.Ctx)
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		for _, payment := range pendingPayments {
+	for _, payment := range pendingPayments {
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			ScheduleAdvancePayment(&AdvancePaymentArgs{
 				PaymentId: payment.PaymentId,
 			}, clientSession, tx)
-		}
-	})
+		})
+	}
 }
 
 func SendPayments(clientSession *session.ClientSession) error {
@@ -86,13 +86,13 @@ func SendPayments(clientSession *session.ClientSession) error {
 		}
 	}
 
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		for _, payment := range plan.NetworkPayments {
+	for _, payment := range plan.NetworkPayments {
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			ScheduleAdvancePayment(&AdvancePaymentArgs{
 				PaymentId: payment.PaymentId,
 			}, clientSession, tx)
-		}
-	})
+		})
+	}
 
 	return nil
 }

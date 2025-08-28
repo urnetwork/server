@@ -153,7 +153,7 @@ func ScheduleTaskInTx[T any, R any](
 	}
 
 	runAt := &RunAtOption{
-		At: time.Time{},
+		At: server.NowUtc(),
 	}
 	var runOnce *RunOnceOption
 	runPriority := &RunPriorityOption{
