@@ -29,7 +29,9 @@ import (
 const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
 
 // const LimitClientIdsPer24Hours = 1024
-const LimitClientIdsPerNetwork = 128
+// const LimitClientIdsPerNetwork = 128
+// 2025-08-29 increase this for now to allow larger providers to come online
+const LimitClientIdsPerNetwork = 100000
 
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
