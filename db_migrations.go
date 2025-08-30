@@ -2214,6 +2214,7 @@ var migrations = []any{
         CREATE INDEX network_client_location_reliability_valid_client_id ON network_client_location_reliability (valid, client_id)
     `),
 
+	// RENAMED to network_client_location_reliability_connected_valid_country
 	newSqlMigration(`
         CREATE INDEX network_client_location_reliability_connected_valid_location_id_client_id ON network_client_location_reliability (connected, valid, country_location_id, client_id)
     `),
@@ -2237,5 +2238,22 @@ var migrations = []any{
 
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_client_id ON network_client_location_reliability (connected, client_id)
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability
+            ADD COLUMN network_id uuid NOT NULL DEFAULT gen_random_uuid()
+    `),
+
+	newSqlMigration(`
+        ALTER INDEX network_client_location_reliability_connected_valid_location_id_client_id RENAME TO network_client_location_reliability_connected_valid_country
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_region ON network_client_location_reliability (connected, valid, region_location_id, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_city ON network_client_location_reliability (connected, valid, city_location_id, client_id)
     `),
 }
