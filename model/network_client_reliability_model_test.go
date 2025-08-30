@@ -53,6 +53,14 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				clientIps[clientId] = ip
 
 				// connect the client
+				Testing_CreateDevice(
+					ctx,
+					networkId,
+					server.NewId(),
+					clientId,
+					"",
+					"",
+				)
 				clientAddress := "127.0.0.1:20000"
 				handlerId := server.NewId()
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
