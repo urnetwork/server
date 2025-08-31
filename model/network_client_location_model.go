@@ -2119,7 +2119,10 @@ func FindProviders2(
 
 	clientIds := maps.Keys(clientScores)
 	// overshoot so that the list can be filtered
-	n := min(findProviders2.Count*2, len(clientIds))
+	n := min(
+		max(findProviders2.Count*2, 1000),
+		len(clientIds),
+	)
 
 	connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
@@ -2177,6 +2180,9 @@ func FindProviders2(
 
 	providers := []*FindProvidersProvider{}
 	for _, clientId := range clientIds {
+		if findProviders2.Count <= len(providers) {
+			break
+		}
 		if activeClientIds[clientId] {
 			clientScore := clientScores[clientId]
 			provider := &FindProvidersProvider{
