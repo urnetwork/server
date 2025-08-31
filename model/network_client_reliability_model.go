@@ -635,6 +635,7 @@ type cityRegionCountry struct {
 }
 
 type clientLocationReliability struct {
+	networkId server.Id
 	locations map[cityRegionCountry]int
 
 	clientAddressHashes map[[32]byte]int
@@ -645,38 +646,42 @@ type clientLocationReliability struct {
 
 // server.ComplexValue
 func (self *clientLocationReliability) Values() []any {
-	// [0] city_location_id
-	// [1] region_location_id
-	// [2] country_location_id
-	// [3] client_address_hash_count
-	// [4] location_count
-	// [5] max_net_type_score
-	// [6] max_net_type_score_speed
+	// [0] network_id
+	// [1] city_location_id
+	// [2] region_location_id
+	// [3] country_location_id
+	// [4] client_address_hash_count
+	// [5] location_count
+	// [6] max_net_type_score
+	// [7] max_net_type_score_speed
 
-	values := make([]any, 7)
+	values := make([]any, 8)
+
+	values[0] = self.networkId
+
 	if 1 == len(self.locations) {
 		location := maps.Keys(self.locations)[0]
-		values[0] = &location.cityLocationId
-		values[1] = &location.regionLocationId
-		values[2] = &location.countryLocationId
+		values[1] = &location.cityLocationId
+		values[2] = &location.regionLocationId
+		values[3] = &location.countryLocationId
 	}
 	// else leave locations nil
 
-	values[3] = len(self.clientAddressHashes)
-	values[4] = len(self.locations)
+	values[4] = len(self.clientAddressHashes)
+	values[5] = len(self.locations)
 	// values[5] = self.connected
 
 	maxNetTypeScore := 0
 	for netTypeScore, _ := range self.netTypeScores {
 		maxNetTypeScore = max(maxNetTypeScore, netTypeScore)
 	}
-	values[5] = maxNetTypeScore
+	values[6] = maxNetTypeScore
 
 	maxNetTypeScoreSpeed := 0
 	for netTypeScoreSpeed, _ := range self.netTypeScoreSpeeds {
 		maxNetTypeScoreSpeed = max(maxNetTypeScoreSpeed, netTypeScoreSpeed)
 	}
-	values[6] = maxNetTypeScoreSpeed
+	values[7] = maxNetTypeScoreSpeed
 
 	return values
 }
@@ -698,7 +703,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		ctx,
 		`
 		SELECT
-			network_client_location.client_id,
+			network_client.client_id,
+			network_client.network_id,
 			network_client_connection.client_address_hash,	
 			network_client_location.city_location_id,
 	        network_client_location.region_location_id,
@@ -707,6 +713,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.net_type_score_speed
 
 		FROM network_client_connection
+
+		INNER JOIN network_client ON
+			network_client.client_id = network_client_connection.client_id 
 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
@@ -720,6 +729,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
+			var networkId server.Id
 			var clientAddressHash [32]byte
 			var cityLocationId server.Id
 			var regionLocationId server.Id
@@ -729,6 +739,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
+				&networkId,
 				&clientAddressHashSlice,
 				&cityLocationId,
 				&regionLocationId,
@@ -746,6 +757,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				}
 				clientLocationReliabilities[clientId] = r
 			}
+			r.networkId = networkId
 			r.locations[cityRegionCountry{
 				cityLocationId:    cityLocationId,
 				regionLocationId:  regionLocationId,
@@ -761,7 +773,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		ctx,
 		`
 		SELECT
-			network_client_location.client_id,
+			network_client.client_id,
+			network_client.network_id,
 			network_client_connection.client_address_hash,	
 			network_client_location.city_location_id,
 	        network_client_location.region_location_id,
@@ -770,6 +783,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.net_type_score_speed
 
 		FROM network_client_connection
+
+		INNER JOIN network_client ON
+			network_client.client_id = network_client_connection.client_id
 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
@@ -794,6 +810,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
+			var networkId server.Id
 			var clientAddressHash [32]byte
 			var cityLocationId server.Id
 			var regionLocationId server.Id
@@ -803,6 +820,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
+				&networkId,
 				&clientAddressHashSlice,
 				&cityLocationId,
 				&regionLocationId,
@@ -813,6 +831,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
+					networkId:           networkId,
 					locations:           map[cityRegionCountry]int{},
 					clientAddressHashes: map[[32]byte]int{},
 					netTypeScores:       map[int]int{},
@@ -839,6 +858,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		`
 			temp_network_client_location_reliability(
 				client_id uuid ->
+				network_id uuid,
 				city_location_id uuid NULL,
 	            region_location_id uuid NULL,
 	            country_location_id uuid NULL,
@@ -856,6 +876,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		`
 	    INSERT INTO network_client_location_reliability (
 	    	client_id,
+	    	network_id,
 	    	update_block_number,
 			city_location_id,
 	        region_location_id,
@@ -868,6 +889,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    )
 	    SELECT
 	    	client_id,
+	    	network_id,
 	    	$1 AS update_block_number,
 	    	city_location_id,
 	        region_location_id,
@@ -881,6 +903,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
 	    SET
+	    	network_id = EXCLUDED.network_id,
 	    	update_block_number = $1,
 	    	city_location_id = EXCLUDED.city_location_id,
 	        region_location_id = EXCLUDED.region_location_id,

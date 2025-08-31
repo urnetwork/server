@@ -390,16 +390,28 @@ func TestReliabilityPoints(t *testing.T) {
 		clientIdB2 := server.NewId()
 
 		// connect clients
-		for i, clientId := range []server.Id{clientIdA, clientIdB, clientIdB2} {
+		for clientId, networkId := range map[server.Id]server.Id{
+			clientIdA:  networkIdA,
+			clientIdB:  networkIdB,
+			clientIdB2: networkIdB,
+		} {
 			// connect the client
+			Testing_CreateDevice(
+				ctx,
+				networkId,
+				server.NewId(),
+				clientId,
+				"",
+				"",
+			)
 			clientAddress := "127.0.0.1:20000"
 			handlerId := server.NewId()
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			assert.Equal(t, err, nil)
 			location := &Location{
 				LocationType: "",
-				City:         fmt.Sprintf("foo%d", i),
-				Region:       fmt.Sprintf("bar%d", i),
+				City:         fmt.Sprintf("foo-%s", clientId),
+				Region:       fmt.Sprintf("bar-%s", clientId),
 				Country:      "United States",
 				CountryCode:  "us",
 			}

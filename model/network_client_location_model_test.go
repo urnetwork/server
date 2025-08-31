@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"golang.org/x/exp/maps"
 
@@ -143,6 +144,15 @@ func TestBestAvailableProviders(t *testing.T) {
 
 		clientId := server.NewId()
 
+		Testing_CreateDevice(
+			ctx,
+			networkIdA,
+			server.NewId(),
+			clientId,
+			"",
+			"",
+		)
+
 		handlerId := CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := ConnectNetworkClient(
 			ctx,
@@ -205,6 +215,26 @@ func TestBestAvailableProviders(t *testing.T) {
 			},
 		}
 
+		clientAddressHash, _, err := clientSessionA.ClientAddressHashPort()
+		assert.Equal(t, err, nil)
+		stats := &ClientReliabilityStats{
+			ConnectionEstablishedCount: 1,
+			ProvideEnabledCount:        1,
+			ReceiveMessageCount:        1,
+			ReceiveByteCount:           1024,
+			SendMessageCount:           1,
+			SendByteCount:              1024,
+		}
+		AddClientReliabilityStats(
+			ctx,
+			networkIdA,
+			clientId,
+			clientAddressHash,
+			server.NowUtc(),
+			stats,
+		)
+		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+
 		res, err := FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(res.Providers), 1)
@@ -259,6 +289,15 @@ func TestFindProviders2WithExclude(t *testing.T) {
 
 			clientSessions[clientId] = clientSession
 
+			Testing_CreateDevice(
+				ctx,
+				networkId,
+				server.NewId(),
+				clientId,
+				"",
+				"",
+			)
+
 			handlerId := CreateNetworkClientHandler(ctx)
 			connectionId, _, _, _, err := ConnectNetworkClient(
 				ctx,
@@ -276,7 +315,28 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			SetProvide(ctx, clientId, secretKeys)
 
 			SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+
+			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+			assert.Equal(t, err, nil)
+			stats := &ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			}
+			AddClientReliabilityStats(
+				ctx,
+				networkId,
+				clientId,
+				clientAddressHash,
+				server.NowUtc(),
+				stats,
+			)
 		}
+
+		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
 		clientIds := maps.Keys(clientSessions)
 		clientIdA := clientIds[0]

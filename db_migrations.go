@@ -2256,4 +2256,12 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_city ON network_client_location_reliability (connected, valid, city_location_id, client_id)
     `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_client_id ON network_client_location_reliability (connected, valid, client_id)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_connected_client_id
+    `),
 }
