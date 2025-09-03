@@ -1598,14 +1598,105 @@ func VerifyHeliusBody(req *http.Request) (io.Reader, error) {
 	return bytes.NewReader(bodyBytes), nil
 }
 
+type SolanaTransaction struct {
+	AccountData      []AccountData          `json:"accountData"`
+	Description      string                 `json:"description"`
+	Events           map[string]interface{} `json:"events"`
+	Fee              int64                  `json:"fee"`
+	FeePayer         string                 `json:"feePayer"`
+	Instructions     []Instruction          `json:"instructions"`
+	NativeTransfers  []NativeTransfer       `json:"nativeTransfers"`
+	Signature        string                 `json:"signature"`
+	Slot             int64                  `json:"slot"`
+	Source           string                 `json:"source"`
+	Timestamp        int64                  `json:"timestamp"`
+	TokenTransfers   []TokenTransfer        `json:"tokenTransfers"`
+	TransactionError interface{}            `json:"transactionError"`
+	Type             string                 `json:"type"`
+}
+
+type AccountData struct {
+	Account             string               `json:"account"`
+	NativeBalanceChange int64                `json:"nativeBalanceChange"`
+	TokenBalanceChanges []TokenBalanceChange `json:"tokenBalanceChanges"`
+}
+
+type TokenBalanceChange struct {
+	Mint           string         `json:"mint"`
+	RawTokenAmount RawTokenAmount `json:"rawTokenAmount"`
+	TokenAccount   string         `json:"tokenAccount"`
+	UserAccount    string         `json:"userAccount"`
+}
+
+type RawTokenAmount struct {
+	Decimals    int    `json:"decimals"`
+	TokenAmount string `json:"tokenAmount"`
+}
+
+type Instruction struct {
+	Accounts          []string           `json:"accounts"`
+	Data              string             `json:"data"`
+	InnerInstructions []InnerInstruction `json:"innerInstructions"`
+	ProgramId         string             `json:"programId"`
+}
+
+type InnerInstruction struct {
+	Accounts  []string `json:"accounts"`
+	Data      string   `json:"data"`
+	ProgramId string   `json:"programId"`
+}
+
+type NativeTransfer struct {
+	Amount          int64  `json:"amount"`
+	FromUserAccount string `json:"fromUserAccount"`
+	ToUserAccount   string `json:"toUserAccount"`
+}
+
+type TokenTransfer struct {
+	FromTokenAccount string `json:"fromTokenAccount"`
+	FromUserAccount  string `json:"fromUserAccount"`
+	Mint             string `json:"mint"`
+	ToTokenAccount   string `json:"toTokenAccount"`
+	ToUserAccount    string `json:"toUserAccount"`
+	TokenAmount      int64  `json:"tokenAmount"`
+	TokenStandard    string `json:"tokenStandard"`
+}
+
 type HeliusWebhookArgs struct{}
 
 type HeliusWebhookResult struct{}
 
+const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
+
 func HeliusWebhook(
-	webhookArgs *HeliusWebhookArgs,
-	clientSession *session.ClientSession,
+	transaction *SolanaTransaction,
+	// clientSession *session.ClientSession,
 ) (*HeliusWebhookResult, error) {
+
+	if transaction.Type != "TRANSFER" {
+		return &HeliusWebhookResult{}, nil
+	}
+
+	if len(transaction.TokenTransfers) == 0 {
+		return &HeliusWebhookResult{}, nil
+	}
+
+	paymentReceived := false
+
+	for _, tokenTransfer := range transaction.TokenTransfers {
+
+		if tokenTransfer.Mint == solanaUsdcMint &&
+			tokenTransfer.ToUserAccount == solanaReceiverAddress &&
+			tokenTransfer.TokenAmount >= 30 {
+			paymentReceived = true
+		}
+
+	}
+
+	if !paymentReceived {
+		return &HeliusWebhookResult{}, nil
+	}
 
 	return &HeliusWebhookResult{}, nil
 }
