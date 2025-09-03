@@ -1934,8 +1934,6 @@ func FindProviders2(
 	// duplicateClientAddressScore := 5
 	// duplicateCityScore := 2
 
-	n := max(findProviders2.Count*2, 1000)
-
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		locationIds := map[server.Id]bool{}
 		locationGroupIds := map[server.Id]bool{}
@@ -1997,10 +1995,8 @@ func FindProviders2(
                 	network_client_location_reliability.valid = true AND
                 	exclude_network_client_location.network_id IS NULL
 
-                LIMIT $2
                 `,
 				clientLocationId,
-				10*n,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -2080,11 +2076,8 @@ func FindProviders2(
 	                        location_group_member_region.location_id IS NOT NULL OR
 	                        location_group_member_country.location_id IS NOT NULL
 	                    )
-	                
-	                LIMIT $2
                 `,
 				clientLocationId,
-				10*n,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -2131,8 +2124,8 @@ func FindProviders2(
 
 	clientIds := maps.Keys(clientScores)
 	// overshoot so that the list can be filtered
-	n = min(
-		n,
+	n := min(
+		max(findProviders2.Count*2, 1000),
 		len(clientIds),
 	)
 
