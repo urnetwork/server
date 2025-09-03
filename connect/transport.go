@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 	// "runtime/debug"
+	"encoding/binary"
+	mathrand "math/rand"
+	"strconv"
 
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
@@ -194,12 +197,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// attemp to parse the auth message from the header
 	// if that fails, expect the auth message as the first message
-	auth := func() *protocol.Auth {
+	auth, transportVersion := func() (*protocol.Auth, int) {
 		glog.V(2).Infof("[c]header: %v\n", r.Header)
 
 		headerAuth := r.Header.Get("Authorization")
 		headerAppVersion := r.Header.Get("X-UR-AppVersion")
 		headerInstanceId := r.Header.Get("X-UR-InstanceId")
+		headerTransportVersion := r.Header.Get("X-UR-TransportVersion")
+
+		transportVersion := 0
+		if i, err := strconv.Atoi(headerTransportVersion); err == nil {
+			transportVersion = i
+		}
 
 		bearerPrefix := "Bearer "
 
@@ -212,13 +221,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					ByJwt:      jwt,
 					InstanceId: instanceId.Bytes(),
 					AppVersion: headerAppVersion,
-				}
+				}, transportVersion
 			} else {
 				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
 			}
 		}
 
-		return nil
+		return nil, transportVersion
 	}()
 
 	upgrader := websocket.Upgrader{
@@ -297,6 +306,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
 		}
+		var testConfig *TestConfig
+		if transportVersion < 2 {
+			testConfig = V0TestConfig()
+		} else {
+			testConfig = DefaultTestConfig()
+		}
 		announce := NewConnectionAnnounce(
 			handleCtx,
 			handleCancel,
@@ -305,6 +320,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientAddress,
 			self.handlerId,
 			announceTimeout,
+			testConfig,
 			&self.settings.ConnectionAnnounceSettings,
 		)
 		defer announce.Close()
@@ -329,6 +345,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				residentTransport.Close()
 			}()
 
+			var speedTest *SpeedTest
+
 			for {
 				ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 				messageType, message, err := ws.ReadMessage()
@@ -345,9 +363,32 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					// reliability tracking
 					announce.ReceiveMessage(ByteCount(len(message)))
 
-					if 0 == len(message) {
-						// ping
-						pingTracker.ReceivePing()
+					if len(message) <= 16 {
+						if len(message) == 0 {
+							// ping
+							pingTracker.ReceivePing()
+						} else if len(message) == 5 {
+							switch message[0] {
+							case connect.TransportControlSpeedStart:
+								speedTest = &SpeedTest{
+									TestId: binary.BigEndian.Uint32(message[1:5]),
+								}
+							case connect.TransportControlSpeedStop:
+								announce.ReceiveSpeed(speedTest)
+								speedTest = nil
+							}
+						} else if len(message) == 16 {
+							// latency response
+							if testId, err := server.IdFromBytes(message); err == nil {
+								announce.ReceiveLatency(&LatencyTest{
+									TestId: testId,
+								})
+							}
+						}
+						continue
+					}
+					if speedTest != nil {
+						speedTest.TotalByteCount += model.ByteCount(len(message))
 						continue
 					}
 
@@ -370,6 +411,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		go server.HandleError(func() {
 			defer handleCancel()
 
+			write := func(message []byte) error {
+				ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				err := ws.WriteMessage(websocket.BinaryMessage, message)
+				if err != nil {
+					// note that for websocket a deadline timeout cannot be recovered
+					if connectionId := announce.ConnectionId(); connectionId != nil {
+						model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
+					}
+					return err
+				}
+				// reliability tracking
+				announce.SendMessage(ByteCount(len(message)))
+				glog.V(2).Infof("[ts] ->%s\n", clientId)
+				return nil
+			}
+
 			for {
 				select {
 				case <-handleCtx.Done():
@@ -381,18 +438,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 
-					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-					err := ws.WriteMessage(websocket.BinaryMessage, message)
-					if err != nil {
-						// note that for websocket a deadline timeout cannot be recovered
-						if connectionId := announce.ConnectionId(); connectionId != nil {
-							model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
-						}
+					if len(message) <= 16 {
+						glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+					} else if write(message) != nil {
 						return
 					}
-					// reliability tracking
-					announce.SendMessage(ByteCount(len(message)))
-					glog.V(2).Infof("[ts] ->%s\n", clientId)
+
 				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0))
@@ -405,6 +456,45 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					}
 					// reliability tracking
 					announce.SendMessage(0)
+				case latencyTest := <-announce.PendingLatencyTest:
+					if announce.SendLatency(latencyTest) {
+						message := latencyTest.TestId.Bytes()
+						ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+						err := ws.WriteMessage(websocket.BinaryMessage, message)
+						if err != nil {
+							// note that for websocket a dealine timeout cannot be recovered
+							if connectionId := announce.ConnectionId(); connectionId != nil {
+								model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
+							}
+							return
+						}
+						// reliability tracking
+						announce.SendMessage(model.ByteCount(len(message)))
+					}
+				case speedTest := <-announce.PendingSpeedTest:
+					// client should echo control values and packets in speed test mode
+
+					if announce.SendSpeed(speedTest) {
+						controlMessage := make([]byte, 5)
+						binary.BigEndian.PutUint32(controlMessage[1:5], speedTest.TestId)
+						controlMessage[0] = connect.TransportControlSpeedStart
+						if write(controlMessage) != nil {
+							return
+						}
+						// read data size amount of speed test and time limit of speed test
+						chunk := make([]byte, 1024)
+						for range (speedTest.TotalByteCount + model.ByteCount(len(chunk)-1)) / model.ByteCount(len(chunk)) {
+							mathrand.Read(chunk)
+							if write(chunk) != nil {
+								return
+							}
+						}
+						controlMessage[0] = connect.TransportControlSpeedStop
+						if write(controlMessage) != nil {
+							return
+						}
+					}
+
 				}
 			}
 		}, handleCancel)
@@ -633,6 +723,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			clientAddress,
 			self.handlerId,
 			announceTimeout,
+			V0TestConfig(),
 			&self.settings.ConnectionAnnounceSettings,
 		)
 		defer announce.Close()

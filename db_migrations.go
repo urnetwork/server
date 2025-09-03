@@ -2264,4 +2264,27 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS network_client_location_reliability_connected_client_id
     `),
+
+	newSqlMigration(`
+        CREATE TABLE network_client_latency (
+            connection_id uuid NOT NULL,
+            latency_ms integer NOT NULL,
+
+            PRIMARY KEY (connection_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE network_client_speed (
+            connection_id uuid NOT NULL,
+            bytes_per_second bigint NOT NULL,
+
+            PRIMARY KEY (connection_id)
+        )
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_connection
+            ADD COLUMN expected_latency_ms integer NOT NULL DEFAULT 0
+    `),
 }

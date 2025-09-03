@@ -16,15 +16,55 @@ import (
 
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
-		SyncConnectionTimeout: 60 * time.Second,
+		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
 		LocationRetryTimeout:  5 * time.Minute,
+		MaxLatencyCount:       16,
 	}
 }
 
 type ConnectionAnnounceSettings struct {
-	// FIXME this should be the reliability block size
 	SyncConnectionTimeout time.Duration
 	LocationRetryTimeout  time.Duration
+	MaxLatencyCount       int
+}
+
+type LatencyTest struct {
+	TestId server.Id
+}
+
+type SpeedTest struct {
+	TestId         uint32
+	TotalByteCount model.ByteCount
+}
+
+func DefaultTestConfig() *TestConfig {
+	return &TestConfig{
+		MaxLatencyCount: 10,
+		// warm up then test
+		MaxSpeedCount:       2,
+		SpeedTotalByteCount: 512 * model.Kib,
+	}
+}
+
+func V0TestConfig() *TestConfig {
+	return &TestConfig{
+		MaxLatencyCount: 0,
+		MaxSpeedCount:   0,
+	}
+}
+
+type TestConfig struct {
+	MaxLatencyCount     int
+	MaxSpeedCount       int
+	SpeedTotalByteCount ByteCount
+}
+
+func (self *TestConfig) AllowLatency() bool {
+	return 0 < self.MaxLatencyCount
+}
+
+func (self *TestConfig) AllowSpeed() bool {
+	return 0 < self.MaxSpeedCount
 }
 
 type ConnectionAnnounce struct {
@@ -44,6 +84,20 @@ type ConnectionAnnounce struct {
 	receiveByteCount    ByteCount
 	sendMessageCount    uint64
 	sendByteCount       ByteCount
+
+	latencyCount           int
+	latencyTest            *LatencyTest
+	latencyTestSendTime    time.Time
+	minLatencyMilliseconds uint64
+	speedCount             int
+	speedTestId            uint32
+	speedTest              *SpeedTest
+	speedTestSendTime      time.Time
+	maxBytesPerSecond      model.ByteCount
+
+	testConfig         *TestConfig
+	PendingLatencyTest chan *LatencyTest
+	PendingSpeedTest   chan *SpeedTest
 }
 
 func NewConnectionAnnounceWithDefaults(
@@ -63,6 +117,7 @@ func NewConnectionAnnounceWithDefaults(
 		clientAddress,
 		handlerId,
 		announceTimeout,
+		DefaultTestConfig(),
 		DefaultConnectionAnnounceSettings(),
 	)
 }
@@ -75,17 +130,21 @@ func NewConnectionAnnounce(
 	clientAddress string,
 	handlerId server.Id,
 	announceTimeout time.Duration,
+	testConfig *TestConfig,
 	settings *ConnectionAnnounceSettings,
 ) *ConnectionAnnounce {
 	announce := &ConnectionAnnounce{
-		ctx:             ctx,
-		cancel:          cancel,
-		networkId:       networkId,
-		clientId:        clientId,
-		clientAddress:   clientAddress,
-		handlerId:       handlerId,
-		announceTimeout: announceTimeout,
-		settings:        settings,
+		ctx:                ctx,
+		cancel:             cancel,
+		networkId:          networkId,
+		clientId:           clientId,
+		clientAddress:      clientAddress,
+		handlerId:          handlerId,
+		announceTimeout:    announceTimeout,
+		settings:           settings,
+		testConfig:         testConfig,
+		PendingLatencyTest: make(chan *LatencyTest),
+		PendingSpeedTest:   make(chan *SpeedTest),
 	}
 	go server.HandleError(announce.run, cancel)
 	return announce
@@ -94,18 +153,67 @@ func NewConnectionAnnounce(
 func (self *ConnectionAnnounce) run() {
 	defer self.cancel()
 
+	provider := func() bool {
+		provideModes, err := model.GetProvideModes(self.ctx, self.clientId)
+		if err != nil {
+			return false
+		}
+		return provideModes[model.ProvideModePublic]
+	}
+
+	if provider() {
+		if self.testConfig.AllowLatency() {
+			self.nextLatency()
+		} else if self.testConfig.AllowSpeed() {
+			self.nextSpeed()
+		}
+	}
+
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.announceTimeout):
+		case <-time.After(self.announceTimeout / 2):
+		}
+
+		nextLatency := false
+		nextSpeed := false
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if self.testConfig.AllowLatency() {
+				nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
+				if !nextLatency {
+					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+				}
+			} else if self.testConfig.AllowSpeed() {
+				nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+			}
+		}()
+		if nextLatency || nextSpeed {
+			if provider() {
+				if nextLatency {
+					self.nextLatency()
+				} else if nextSpeed {
+					self.nextSpeed()
+				}
+			}
+		}
+
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(self.announceTimeout / 2):
 		}
 	}
 
 	// FIXME remove ip
 	// glog.Infof("[t]announce %s [%s]\n", self.clientId, self.clientAddress)
 
+	// FIXME compute expected latency between client and this edge
+	// FIXME store edge coordinated in the config as host variables
+	// FIXME pass the host coordinate in here so the expected latency can be set
 	connectionId, clientAddressHash, err := controller.ConnectNetworkClient(
 		self.ctx,
 		self.clientId,
@@ -125,6 +233,12 @@ func (self *ConnectionAnnounce) run() {
 	}, self.cancel)
 
 	self.setConnectionId(connectionId)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.setLatencyWithLock()
+		self.setSpeedWithLock()
+	}()
 
 	established := self.announceTimeout == 0
 	nextStartTime := server.NowUtc()
@@ -169,6 +283,29 @@ func (self *ConnectionAnnounce) run() {
 
 		if established {
 			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, statsStartTime)
+			provideEnabled := currentProvideModes[model.ProvideModePublic]
+
+			nextLatency := false
+			nextSpeed := false
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.testConfig.AllowLatency() {
+					nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
+					if !nextLatency {
+						nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+					}
+				} else if self.testConfig.AllowSpeed() {
+					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+				}
+			}()
+			if provideEnabled {
+				if nextLatency {
+					self.nextLatency()
+				} else if nextSpeed {
+					self.nextSpeed()
+				}
+			}
 
 			// add reliability stats if all of:
 			// 1. established provide public (no changes in block)
@@ -180,7 +317,7 @@ func (self *ConnectionAnnounce) run() {
 			// 1. provide change (this will invalidate the block)
 
 			stats.ConnectionEstablishedCount = 1
-			if currentProvideModes[model.ProvideModePublic] {
+			if provideEnabled {
 				stats.ProvideEnabledCount = 1
 			}
 			if 0 < changedCount {
@@ -233,4 +370,183 @@ func (self *ConnectionAnnounce) SendMessage(messageByteCount ByteCount) {
 
 func (self *ConnectionAnnounce) Close() {
 	self.cancel()
+}
+
+func (self *ConnectionAnnounce) nextLatency() {
+	latencyTest := &LatencyTest{
+		TestId: server.NewId(),
+	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.latencyTest = latencyTest
+	}()
+	go func() {
+		select {
+		case <-self.ctx.Done():
+			return
+		case self.PendingLatencyTest <- latencyTest:
+		}
+	}()
+}
+
+func (self *ConnectionAnnounce) SendLatency(latencyTest *LatencyTest) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.latencyTest != nil && self.latencyTest.TestId == latencyTest.TestId {
+		self.latencyTestSendTime = time.Now()
+		return true
+	}
+	return false
+}
+
+func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (success bool) {
+	nextLatency := false
+	nextSpeed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.latencyTest != nil && self.latencyTest.TestId == latencyTest.TestId {
+			latencyMilliseconds := uint64((time.Now().Sub(self.latencyTestSendTime) + time.Millisecond/2) / time.Millisecond)
+
+			glog.Infof("[ta][%s]latency %dms\n", self.clientId, latencyMilliseconds)
+
+			self.latencyCount += 1
+			if self.latencyCount == 1 || latencyMilliseconds < self.minLatencyMilliseconds {
+				self.minLatencyMilliseconds = latencyMilliseconds
+			}
+
+			self.latencyTest = nil
+
+			nextLatency = self.latencyCount < self.settings.MaxLatencyCount
+			if !nextLatency {
+				self.setLatencyWithLock()
+				if self.testConfig.AllowSpeed() {
+					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+				}
+			}
+
+			success = true
+		}
+	}()
+	if nextLatency {
+		self.nextLatency()
+	}
+	if nextSpeed {
+		self.nextSpeed()
+	}
+	return
+}
+
+func (self *ConnectionAnnounce) setLatencyWithLock() {
+	if 0 < self.latencyCount && self.connectionId != nil {
+		server.Tx(self.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				self.ctx,
+				`
+				INSERT INTO network_client_latency (
+					connection_id,
+					latency_ms
+				)
+				VALUES ($1, $2)
+				ON CONFLICT (connection_id) DO UPDATE
+				SET
+					latency_ms = LEAST(network_client_latency.latency_ms, $2)
+				`,
+				*self.connectionId,
+				self.minLatencyMilliseconds,
+			))
+		})
+	}
+}
+
+func (self *ConnectionAnnounce) nextSpeed() {
+	var speedTest *SpeedTest
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		speedTest = &SpeedTest{
+			TestId:         self.speedTestId,
+			TotalByteCount: self.testConfig.SpeedTotalByteCount,
+		}
+		self.speedTestId += 1
+		self.speedTest = speedTest
+	}()
+	go func() {
+		select {
+		case <-self.ctx.Done():
+			return
+		case self.PendingSpeedTest <- speedTest:
+		}
+	}()
+}
+
+func (self *ConnectionAnnounce) SendSpeed(speedTest *SpeedTest) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.speedTest != nil && self.speedTest.TestId == speedTest.TestId {
+		self.speedTestSendTime = time.Now()
+		return true
+	}
+	return false
+}
+
+func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool) {
+	nextSpeed := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.speedTest != nil && self.speedTest.TestId == speedTest.TestId && self.speedTest.TotalByteCount == speedTest.TotalByteCount {
+
+			bytesPerSecond := (1000 * speedTest.TotalByteCount) / model.ByteCount(time.Now().Sub(self.speedTestSendTime)/time.Millisecond)
+
+			glog.Infof("[ta][%s]speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
+
+			self.speedCount += 1
+			if self.speedCount == 1 || self.maxBytesPerSecond < bytesPerSecond {
+				self.maxBytesPerSecond = bytesPerSecond
+			}
+
+			self.speedTest = nil
+
+			nextSpeed = self.speedCount < self.testConfig.MaxSpeedCount
+			if !nextSpeed {
+				self.setSpeedWithLock()
+			}
+
+			success = true
+		}
+	}()
+	if nextSpeed {
+		self.nextSpeed()
+	}
+	return
+}
+
+func (self *ConnectionAnnounce) setSpeedWithLock() {
+	if 0 < self.speedCount && self.connectionId != nil {
+		server.Tx(self.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				self.ctx,
+				`
+				INSERT INTO network_client_speed (
+					connection_id,
+					bytes_per_second
+				)
+				VALUES ($1, $2)
+				ON CONFLICT (connection_id) DO UPDATE
+				SET
+					bytes_per_second = GREATEST(network_client_speed.bytes_per_second, $2)
+				`,
+				*self.connectionId,
+				self.maxBytesPerSecond,
+			))
+		})
+	}
+
 }
