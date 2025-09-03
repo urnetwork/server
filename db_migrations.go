@@ -90,13 +90,13 @@ func ApplyDbMigrations(ctx context.Context) {
 		switch v := migrations[i].(type) {
 		case *SqlMigration:
 			if DbMigrationVerbose {
-				glog.Infof("[migrate][%d/%d]sql = %s\n", i, len(migrations), v.sql)
+				glog.Infof("[migrate][%d/%d]sql = %s\n", i+1, len(migrations), v.sql)
 			}
 			Tx(ctx, func(tx PgTx) {
 				defer func() {
 					if err := recover(); err != nil {
 						// print the sql for debugging
-						glog.Infof("[migrate][%d/%d]err = %s; sql = %s\n", i, len(migrations), err, v.sql)
+						glog.Infof("[migrate][%d/%d]err = %s; sql = %s\n", i+1, len(migrations), err, v.sql)
 						panic(err)
 					}
 				}()
@@ -104,7 +104,7 @@ func ApplyDbMigrations(ctx context.Context) {
 			})
 		case *CodeMigration:
 			if DbMigrationVerbose {
-				glog.Infof("[migrate][%d/%d]code = %v\n", i, len(migrations), v.callback)
+				glog.Infof("[migrate][%d/%d]code = %v\n", i+1, len(migrations), v.callback)
 			}
 			v.callback(ctx)
 		default:
