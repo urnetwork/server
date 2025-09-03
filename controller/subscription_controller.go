@@ -1569,3 +1569,43 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 
 	return renewalInfo, transactionInfo, nil
 }
+
+/**
+ * Helius Webhooks for Solana payments
+ */
+
+var heliusAuthSecret = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
+})
+
+func VerifyHeliusBody(req *http.Request) (io.Reader, error) {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// log body
+	glog.Infof("Helius webhook body: %s", string(bodyBytes))
+
+	secret := req.Header.Get("X-Helius-Auth")
+	glog.Infof("Helius webhook auth header: %s", secret)
+	glog.Infof("Helius expected auth header: %s", heliusAuthSecret())
+	if secret != heliusAuthSecret() {
+		return nil, errors.New("Invalid authentication.")
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+type HeliusWebhookArgs struct{}
+
+type HeliusWebhookResult struct{}
+
+func HeliusWebhook(
+	webhookArgs *HeliusWebhookArgs,
+	clientSession *session.ClientSession,
+) (*HeliusWebhookResult, error) {
+
+	return &HeliusWebhookResult{}, nil
+}
