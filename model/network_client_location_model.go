@@ -545,10 +545,15 @@ type Location struct {
 	Region            string
 	Country           string
 	CountryCode       string
+	Continent         string
+	ContinentCode     string
 	LocationId        server.Id
 	CityLocationId    server.Id
 	RegionLocationId  server.Id
 	CountryLocationId server.Id
+	Latitude          float64
+	Longitude         float64
+	Timezone          string
 }
 
 func (self *Location) GuessLocationType() (LocationType, error) {
