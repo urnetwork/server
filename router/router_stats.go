@@ -91,7 +91,7 @@ func (self *RouterStats) run() {
 				block,
 				i,
 				route,
-				float64(stats.netSuccessDuration/time.Nanosecond)/(1000.0*1000.0),
+				(float64(stats.netSuccessDuration/time.Nanosecond)/(1000.0*1000.0))/float64(stats.successCount),
 				stats.errorCount,
 				stats.errorCount+stats.successCount,
 			)

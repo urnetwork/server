@@ -22,15 +22,15 @@ func TestWarmup(t *testing.T) {
 			cRun = true
 		}
 
-		Warm(a)
+		OnWarmup(a)
 		assert.Equal(t, aRun, false)
-		Warm(b)
+		OnWarmup(b)
 		assert.Equal(t, bRun, false)
 		Warmup()
 		assert.Equal(t, aRun, true)
 		assert.Equal(t, bRun, true)
 		assert.Equal(t, cRun, false)
-		Warm(c)
+		OnWarmup(c)
 		assert.Equal(t, cRun, true)
 	})
 }

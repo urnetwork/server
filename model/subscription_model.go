@@ -831,8 +831,6 @@ func createTransferEscrowInTx(
                 $2 < end_time
 
             ORDER BY end_time
-
-            FOR UPDATE
         `,
 		payerNetworkId,
 		now,
@@ -886,35 +884,40 @@ func createTransferEscrowInTx(
 		priority = UnpaidPriority
 	}
 
-	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-		for balanceId, escrow := range balanceEscrows {
-			batch.Queue(
-				`
-                    UPDATE transfer_balance
-                    SET
-                        balance_byte_count = transfer_balance.balance_byte_count - $2
-                    WHERE
-                        transfer_balance.balance_id = $1
-                `,
-				balanceId,
-				escrow.balanceByteCount,
-			)
+	for balanceId, escrow := range balanceEscrows {
+		result := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                UPDATE transfer_balance
+                SET
+                    balance_byte_count = transfer_balance.balance_byte_count - $2
+                WHERE
+                    transfer_balance.balance_id = $1 AND
+                    $2 <= transfer_balance.balance_byte_count
+            `,
+			balanceId,
+			escrow.balanceByteCount,
+		))
 
-			batch.Queue(
-				`
-                    INSERT INTO transfer_escrow (
-                        contract_id,
-                        balance_id,
-                        balance_byte_count
-                    )
-                    VALUES ($1, $2, $3)
-                `,
-				contractId,
-				balanceId,
-				escrow.balanceByteCount,
-			)
+		if result.RowsAffected() != 1 {
+			panic(&server.PgRetry{})
 		}
-	})
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                INSERT INTO transfer_escrow (
+                    contract_id,
+                    balance_id,
+                    balance_byte_count
+                )
+                VALUES ($1, $2, $3)
+            `,
+			contractId,
+			balanceId,
+			escrow.balanceByteCount,
+		))
+	}
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -1303,7 +1306,6 @@ func CloseContract(
                 FROM transfer_contract
                 WHERE
                     contract_id = $1
-                FOR UPDATE
             `,
 			contractId,
 		)
@@ -1500,7 +1502,6 @@ func settleEscrowInTx(
                 FROM contract_close
                 WHERE
                     contract_id = $1
-                FOR UPDATE
             `,
 			contractId,
 		)
@@ -1547,7 +1548,6 @@ func settleEscrowInTx(
                 WHERE
                     contract_id = $1 AND
                     party = $2
-                FOR UPDATE
             `,
 			contractId,
 			party,
@@ -1585,8 +1585,6 @@ func settleEscrowInTx(
                 transfer_contract.outcome IS NULL
 
             ORDER BY transfer_balance.end_time ASC
-
-            FOR UPDATE
         `,
 		contractId,
 	)
@@ -1648,7 +1646,6 @@ func settleEscrowInTx(
             FROM transfer_contract
             WHERE
                 contract_id = $1
-            FOR UPDATE
         `,
 		contractId,
 	)

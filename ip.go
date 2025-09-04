@@ -6,10 +6,10 @@ import (
 	// "errors"
 	"crypto/sha256"
 	"fmt"
-	"io"
+	// "io"
 	"net"
 	"net/netip"
-	"os"
+	// "os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,7 +28,7 @@ import (
 )
 
 func init() {
-	Warm(func() {
+	OnWarmup(func() {
 		ipDb()
 	})
 
