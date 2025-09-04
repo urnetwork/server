@@ -385,7 +385,6 @@ func validateUserAuthAvailability(
 		SELECT user_id
 		   FROM network_user_auth_sso
 		   WHERE user_auth = $1
-		FOR UPDATE
 		`,
 		userAuth,
 	)
@@ -422,7 +421,6 @@ func validateUserAuthAvailability(
 		SELECT user_id
 		   FROM network_user_auth_password
 		   WHERE user_auth = $1
-		FOR UPDATE
 		`,
 		userAuth,
 	)
