@@ -112,8 +112,10 @@ func (self *safePgPool) open() *pgxpool.Pool {
 
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
+		// https://github.com/jackc/pgx/blob/master/pgconn/config.go#L445
 		options := map[string]string{
-			"sslmode": "disable",
+			"sslmode":         "disable",
+			"connect_timeout": "120",
 			// FIXME perf move to config
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),

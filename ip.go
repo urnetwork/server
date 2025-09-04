@@ -6,8 +6,10 @@ import (
 	// "errors"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -119,6 +121,19 @@ var ipDb = sync.OnceValue(func() *mmdb.Reader {
 	if err != nil {
 		panic(err)
 	}
+
+	// f, err := os.Open(path)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer f.Close()
+
+	// h := sha256.New()
+	// if _, err := io.Copy(h, f); err != nil {
+	// 	panic(err)
+	// }
+	// dbVersion := h.Sum(nil)
+
 	db, err := mmdb.Open(path)
 	if err != nil {
 		panic(err)
@@ -473,7 +488,9 @@ func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 }
 
 func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
-	r := ipDb().Lookup(addr)
+	ipDb := ipDb()
+
+	r := ipDb.Lookup(addr)
 	var ipInfo IpInfo
 	err := r.Decode(&ipInfo)
 	if err != nil {

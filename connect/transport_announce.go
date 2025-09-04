@@ -153,22 +153,6 @@ func NewConnectionAnnounce(
 func (self *ConnectionAnnounce) run() {
 	defer self.cancel()
 
-	provider := func() bool {
-		provideModes, err := model.GetProvideModes(self.ctx, self.clientId)
-		if err != nil {
-			return false
-		}
-		return provideModes[model.ProvideModePublic]
-	}
-
-	if provider() {
-		if self.testConfig.AllowLatency() {
-			self.nextLatency()
-		} else if self.testConfig.AllowSpeed() {
-			self.nextSpeed()
-		}
-	}
-
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
 		select {
@@ -177,26 +161,29 @@ func (self *ConnectionAnnounce) run() {
 		case <-time.After(self.announceTimeout / 2):
 		}
 
-		nextLatency := false
-		nextSpeed := false
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if self.testConfig.AllowLatency() {
-				nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
-				if !nextLatency {
+		if self.testConfig.AllowLatency() || self.testConfig.AllowSpeed() {
+			nextLatency := false
+			nextSpeed := false
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.testConfig.AllowLatency() {
+					nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
+					if !nextLatency {
+						nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+					}
+				} else if self.testConfig.AllowSpeed() {
 					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
 				}
-			} else if self.testConfig.AllowSpeed() {
-				nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
-			}
-		}()
-		if nextLatency || nextSpeed {
-			if provider() {
-				if nextLatency {
-					self.nextLatency()
-				} else if nextSpeed {
-					self.nextSpeed()
+			}()
+			if nextLatency || nextSpeed {
+				provideModes, err := model.GetProvideModes(self.ctx, self.clientId)
+				if err == nil && provideModes[model.ProvideModePublic] {
+					if nextLatency {
+						self.nextLatency()
+					} else if nextSpeed {
+						self.nextSpeed()
+					}
 				}
 			}
 		}
@@ -251,11 +238,14 @@ func (self *ConnectionAnnounce) run() {
 		}
 		nextStartTime = server.NowUtc()
 
-		status := model.GetNetworkClientConnectionStatus(self.ctx, connectionId)
-		if err := status.Err(); err != nil {
-			glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
-			return
-		}
+		// FIXME need events to support kicking off connections from the model
+		/*
+			status := model.GetNetworkClientConnectionStatus(self.ctx, connectionId)
+			if err := status.Err(); err != nil {
+				glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
+				return
+			}
+		*/
 
 		var receiveMessageCount uint64
 		var receiveByteCount ByteCount

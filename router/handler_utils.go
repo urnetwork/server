@@ -63,8 +63,9 @@ func wrap[R any](
 	// server.Logger().Printf("Handling %s\n", impl)
 	result, err := impl(session)
 	if err != nil {
-		glog.Infof("[h]impl error: %s\n", err)
-		RaiseHttpError(err, w)
+		if !RaiseHttpError(err, w) {
+			glog.Infof("[h]impl error: %s\n", err)
+		}
 		return
 	}
 
@@ -237,8 +238,9 @@ func wrapWithInput[T any, R any](
 		custom := map[string]any{
 			"headers": req.Header,
 		}
-		glog.Infof("[h]request impl error (%T): %s\n", input, server.ErrorJsonWithCustomNoStack(err, custom))
-		RaiseHttpError(err, w)
+		if !RaiseHttpError(err, w) {
+			glog.Infof("[h]request impl error (%T): %s\n", input, server.ErrorJsonWithCustomNoStack(err, custom))
+		}
 		return
 	}
 
@@ -406,7 +408,7 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 	)
 }
 
-func RaiseHttpError(err error, w http.ResponseWriter) {
+func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 
@@ -416,9 +418,11 @@ func RaiseHttpError(err error, w http.ResponseWriter) {
 	if groups := codeRe.FindStringSubmatch(message); groups != nil {
 		statusCode, _ = strconv.Atoi(groups[1])
 		message = groups[2]
+		statusError = true
 	}
 
 	http.Error(w, message, statusCode)
+	return
 }
 
 func RequestBodyFormatter(req *http.Request) (io.Reader, error) {
