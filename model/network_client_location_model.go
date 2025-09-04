@@ -2031,7 +2031,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			`
 	            SELECT
 	            	location_group_member_city.location_group_id AS city_location_group_id,
-	            	location_group_member_region.location_group_id AS regoon_location_group_id,
+	            	location_group_member_region.location_group_id AS region_location_group_id,
 	            	location_group_member_country.location_group_id AS country_location_group_id,
 	                network_client_location_reliability.client_id,
 	                network_client_location_reliability.network_id,
@@ -2122,7 +2122,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		})
 	})
 
-	exportClientScores := func(s map[server.Id]*ClientScore) ([]byte, [][]byte) {
+	exportClientScores := func(s map[server.Id]*ClientScore) (
+		countsBytes []byte,
+		samplesBytes [][]byte,
+		counts []int,
+		samples [][]*ClientScore,
+	) {
 		clientScores := maps.Values(s)
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
 			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
@@ -2131,49 +2136,55 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
 		c := (len(clientScores) + n - 1) / n
 
-		counts := make([]int, n)
-		samples := make([][]byte, n)
+		counts = make([]int, n)
+		samples = make([][]*ClientScore, n)
+		samplesBytes = make([][]byte, n)
 
 		for i := range n {
 			i0 := i * c
 			i1 := min((i+1)*c, len(clientScores))
-			sampleClientScores := clientScores[i0:i1]
+			sample := clientScores[i0:i1]
 
-			counts[i] = len(sampleClientScores)
+			counts[i] = len(sample)
+			samples[i] = sample
 
 			b := bytes.NewBuffer(nil)
 			e := gob.NewEncoder(b)
-			e.Encode(sampleClientScores)
-			samples[i] = b.Bytes()
+			e.Encode(sample)
+			samplesBytes[i] = b.Bytes()
 		}
 
 		b := bytes.NewBuffer(nil)
 		e := gob.NewEncoder(b)
 		e.Encode(counts)
+		countsBytes = b.Bytes()
 
-		return b.Bytes(), samples
+		return
 	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
 
 		for locationId, clientScores := range locationClientScores {
-			counts, samples := exportClientScores(clientScores)
-			pipe.Set(ctx, clientScoreLocationCountsKey(locationId), counts, ttl)
-			for i, sample := range samples {
-				pipe.Set(ctx, clientScoreLocationSampleKey(locationId, i), sample, ttl)
+			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
+			pipe.Set(ctx, clientScoreLocationCountsKey(locationId), countsBytes, ttl)
+			for i, sampleBytes := range samplesBytes {
+				pipe.Set(ctx, clientScoreLocationSampleKey(locationId, i), sampleBytes, ttl)
 			}
+			glog.Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
 		}
 		for locationGroupId, clientScores := range locationGroupClientScores {
-			counts, samples := exportClientScores(clientScores)
-			pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId), counts, ttl)
-			for i, sample := range samples {
-				pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, i), sample, ttl)
+			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
+			pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId), countsBytes, ttl)
+			for i, sampleBytes := range samplesBytes {
+				pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, i), sampleBytes, ttl)
 			}
+			glog.Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 		}
 
 		_, returnErr = pipe.Exec(ctx)
 	})
+
 	return
 }
 
@@ -2197,18 +2208,14 @@ func loadClientScores(
 			locationGroupCounts[locationGroupId] = v
 		}
 
-		_, returnErr = pipe.Exec(ctx)
-		if returnErr != nil {
-			return
-		}
+		pipe.Exec(ctx)
 
 		sampleKeyCounts := map[string]int{}
 
 		for locationId, countsCmd := range locationCounts {
-			countsBytes, err := countsCmd.Bytes()
-			if err != nil {
-				returnErr = err
-				return
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
 			}
 			b := bytes.NewBuffer(countsBytes)
 			e := gob.NewDecoder(b)
@@ -2222,10 +2229,9 @@ func loadClientScores(
 			}
 		}
 		for locationGroupId, countsCmd := range locationGroupCounts {
-			countsBytes, err := countsCmd.Bytes()
-			if err != nil {
-				returnErr = err
-				return
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
 			}
 			b := bytes.NewBuffer(countsBytes)
 			e := gob.NewDecoder(b)
@@ -2258,18 +2264,14 @@ func loadClientScores(
 			netCount += c
 		}
 
-		_, returnErr = pipe.Exec(ctx)
-		if returnErr != nil {
-			return
-		}
+		pipe.Exec(ctx)
 
 		clientScores = map[server.Id]*ClientScore{}
 
 		for _, sampleCmd := range samples {
-			sampleBytes, err := sampleCmd.Bytes()
-			if err != nil {
-				returnErr = err
-				return
+			sampleBytes, _ := sampleCmd.Bytes()
+			if len(sampleBytes) == 0 {
+				continue
 			}
 			b := bytes.NewBuffer(sampleBytes)
 			e := gob.NewDecoder(b)
@@ -2354,7 +2356,9 @@ func FindProviders2(
 	}
 	loadEndTime := time.Now()
 	loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
-	glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
+	if 50.0 <= loadMillis {
+		glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
+	}
 
 	for _, clientId := range findProviders2.ExcludeClientIds {
 		delete(clientScores, clientId)
