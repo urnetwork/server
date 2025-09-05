@@ -85,15 +85,15 @@ type ConnectionAnnounce struct {
 	sendMessageCount    uint64
 	sendByteCount       ByteCount
 
-	latencyCount           int
-	latencyTest            *LatencyTest
-	latencyTestSendTime    time.Time
-	minLatencyMilliseconds uint64
-	speedCount             int
-	speedTestId            uint32
-	speedTest              *SpeedTest
-	speedTestSendTime      time.Time
-	maxBytesPerSecond      model.ByteCount
+	latencyCount        int
+	latencyTest         *LatencyTest
+	latencyTestSendTime time.Time
+	minLatencyMillis    uint64
+	speedCount          int
+	speedTestId         uint32
+	speedTest           *SpeedTest
+	speedTestSendTime   time.Time
+	maxBytesPerSecond   model.ByteCount
 
 	testConfig         *TestConfig
 	PendingLatencyTest chan *LatencyTest
@@ -392,6 +392,7 @@ func (self *ConnectionAnnounce) SendLatency(latencyTest *LatencyTest) bool {
 }
 
 func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (success bool) {
+	receiveTime := time.Now()
 	nextLatency := false
 	nextSpeed := false
 	func() {
@@ -399,13 +400,13 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 		defer self.stateLock.Unlock()
 
 		if self.latencyTest != nil && self.latencyTest.TestId == latencyTest.TestId {
-			latencyMilliseconds := uint64((time.Now().Sub(self.latencyTestSendTime) + time.Millisecond/2) / time.Millisecond)
+			latencyMillis := uint64((receiveTime.Sub(self.latencyTestSendTime) + time.Millisecond/2) / time.Millisecond)
 
-			glog.Infof("[ta][%s]latency %dms\n", self.clientId, latencyMilliseconds)
+			glog.Infof("[ta][%s]latency %dms\n", self.clientId, latencyMillis)
 
 			self.latencyCount += 1
-			if self.latencyCount == 1 || latencyMilliseconds < self.minLatencyMilliseconds {
-				self.minLatencyMilliseconds = latencyMilliseconds
+			if self.latencyCount == 1 || latencyMillis < self.minLatencyMillis {
+				self.minLatencyMillis = latencyMillis
 			}
 
 			self.latencyTest = nil
@@ -446,7 +447,7 @@ func (self *ConnectionAnnounce) setLatencyWithLock() {
 					latency_ms = LEAST(network_client_latency.latency_ms, $2)
 				`,
 				*self.connectionId,
-				self.minLatencyMilliseconds,
+				self.minLatencyMillis,
 			))
 		})
 	}
@@ -486,14 +487,15 @@ func (self *ConnectionAnnounce) SendSpeed(speedTest *SpeedTest) bool {
 }
 
 func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool) {
+	receiveTime := time.Now()
 	nextSpeed := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 
 		if self.speedTest != nil && self.speedTest.TestId == speedTest.TestId && self.speedTest.TotalByteCount == speedTest.TotalByteCount {
-
-			bytesPerSecond := (1000 * speedTest.TotalByteCount) / model.ByteCount(time.Now().Sub(self.speedTestSendTime)/time.Millisecond)
+			testMillis := model.ByteCount((receiveTime.Sub(self.speedTestSendTime) + time.Millisecond/2) / time.Millisecond)
+			bytesPerSecond := (1000*speedTest.TotalByteCount + testMillis/2) / testMillis
 
 			glog.Infof("[ta][%s]speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
 
