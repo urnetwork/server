@@ -1,6 +1,10 @@
 package myinfo
 
-import "github.com/ipinfo/go/v2/ipinfo"
+// import "github.com/ipinfo/go/v2/ipinfo"
+
+import (
+	"github.com/urnetwork/server/model"
+)
 
 type Location struct {
 	Coordinates *Coordinates `json:"coordinates,omitempty"`
@@ -37,48 +41,45 @@ type MyInfo struct {
 	Privacy  *Privacy  `json:"privacy,omitempty"`
 }
 
-func FromIPInfo(ipInfo *ipinfo.Core) (MyInfo, error) {
+func NewMyInfo(clientIp string, location *model.Location, connectionLocationScores *model.ConnectionLocationScores) (MyInfo, error) {
 
-	if ipInfo.Location == "" {
-		return MyInfo{
-			IP: ipInfo.IP.String(),
-		}, nil
-	}
+	// if ipInfo.Location == "" {
+	// 	return MyInfo{
+	// 		IP: ipInfo.IP.String(),
+	// 	}, nil
+	// }
 
-	coords, err := ParseCoordinates(ipInfo.Location)
-	if err != nil {
-		return MyInfo{}, err
-	}
+	// coords, err := ParseCoordinates(ipInfo.Location)
+	// if err != nil {
+	// 	return MyInfo{}, err
+	// }
 
-	var privacy *Privacy
-
-	if ipInfo.Privacy != nil {
-		privacy = &Privacy{
-			VPN:     ipInfo.Privacy.VPN,
-			Proxy:   ipInfo.Privacy.Proxy,
-			Tor:     ipInfo.Privacy.Tor,
-			Relay:   ipInfo.Privacy.Relay,
-			Hosting: ipInfo.Privacy.Hosting,
-			Service: ipInfo.Privacy.Service,
-		}
+	privacy := &Privacy{
+		VPN:     0 < connectionLocationScores.NetTypeVpn,
+		Proxy:   0 < connectionLocationScores.NetTypeProxy,
+		Tor:     0 < connectionLocationScores.NetTypeTor,
+		Relay:   0 < connectionLocationScores.NetTypeRelay,
+		Hosting: 0 < connectionLocationScores.NetTypeHosting,
 	}
 
 	return MyInfo{
-		IP: ipInfo.IP.String(),
+		IP: clientIp,
 		Location: &Location{
-			Coordinates: &coords,
-			City:        ipInfo.City,
-			Region:      ipInfo.Region,
+			Coordinates: &Coordinates{
+				Longitude: location.Longitude,
+				Latitude:  location.Latitude,
+			},
+			City:   location.City,
+			Region: location.Region,
 			Country: &Country{
-				Code:    ipInfo.Country,
-				Name:    ipInfo.CountryName,
-				FlagURL: ipInfo.CountryFlagURL,
+				Code: location.CountryCode,
+				Name: location.Country,
 			},
 			Continent: &Continent{
-				Code: ipInfo.Continent.Code,
-				Name: ipInfo.Continent.Name,
+				Code: location.ContinentCode,
+				Name: location.Continent,
 			},
-			Timezone: ipInfo.Timezone,
+			Timezone: location.Timezone,
 		},
 		Privacy: privacy,
 	}, nil

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	// "errors"
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"math"
 	mathrand "math/rand"
@@ -17,6 +19,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/search"
 	"github.com/urnetwork/connect"
@@ -24,45 +28,53 @@ import (
 )
 
 func init() {
-	server.Warm(func() {
+	resetCountryCodeLocationIds()
+	server.OnReset(func() {
+		resetCountryCodeLocationIds()
+	})
+	server.OnWarmup(func() {
 		countryCodeLocationIds()
 	})
 }
 
-// country code is lowercase
-var countryCodeLocationIds = sync.OnceValue(func() map[string]server.Id {
-	ctx := context.Background()
+func resetCountryCodeLocationIds() {
+	countryCodeLocationIds = sync.OnceValue(func() map[string]server.Id {
+		ctx := context.Background()
 
-	countryCodeLocationIds := map[string]server.Id{}
+		countryCodeLocationIds := map[string]server.Id{}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				country_code,
-				location_id
-			FROM location
-			WHERE
-				location_type = 'country'
-			`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var countryCode string
-				var locationId server.Id
-				server.Raise(result.Scan(
-					&countryCode,
-					&locationId,
-				))
-				countryCode = strings.ToLower(countryCode)
-				countryCodeLocationIds[countryCode] = locationId
-			}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					country_code,
+					location_id
+				FROM location
+				WHERE
+					location_type = 'country'
+				`,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var countryCode string
+					var locationId server.Id
+					server.Raise(result.Scan(
+						&countryCode,
+						&locationId,
+					))
+					countryCode = strings.ToLower(countryCode)
+					countryCodeLocationIds[countryCode] = locationId
+				}
+			})
 		})
-	})
 
-	return countryCodeLocationIds
-})
+		return countryCodeLocationIds
+	})
+}
+
+// country code is lowercase
+var countryCodeLocationIds func() map[string]server.Id
 
 const DefaultMaxDistanceFraction = float32(0.2)
 
@@ -545,10 +557,15 @@ type Location struct {
 	Region            string
 	Country           string
 	CountryCode       string
+	Continent         string
+	ContinentCode     string
 	LocationId        server.Id
 	CityLocationId    server.Id
 	RegionLocationId  server.Id
 	CountryLocationId server.Id
+	Latitude          float64
+	Longitude         float64
+	Timezone          string
 }
 
 func (self *Location) GuessLocationType() (LocationType, error) {
@@ -1792,9 +1809,11 @@ type ProviderSpec struct {
 	BestAvailable   *bool      `json:"best_available,omitempty"`
 }
 
+type RankMode = string
+
 const (
-	RankModeQuality string = "quality"
-	RankModeSpeed   string = "speed"
+	RankModeQuality RankMode = "quality"
+	RankModeSpeed   RankMode = "speed"
 )
 
 type FindProviders2Args struct {
@@ -1802,7 +1821,7 @@ type FindProviders2Args struct {
 	Count               int             `json:"count"`
 	ExcludeClientIds    []server.Id     `json:"exclude_client_ids"`
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
-	RankMode            string          `json:"rank_mode"`
+	RankMode            RankMode        `json:"rank_mode"`
 }
 
 type FindProviders2Result struct {
@@ -1855,33 +1874,416 @@ func findLocationGroupByNameInTx(
 	return locationGroup
 }
 
-func findHomeLocationIdInTx(
-	tx server.PgTx,
-	session *session.ClientSession,
-) (locationId server.Id, found bool) {
-	// TODO this should be set per network
+// func findHomeLocationIdInTx(
+// 	tx server.PgTx,
+// 	session *session.ClientSession,
+// ) (locationId server.Id, found bool) {
+// 	// TODO this should be set per network
 
-	result, err := tx.Query(
-		session.Ctx,
-		`
-			SELECT
-				location_id
-			FROM location
-			WHERE
-				location_type = $1 AND
-				country_code = $2 AND
-				location_name = $3
+// 	result, err := tx.Query(
+// 		session.Ctx,
+// 		`
+// 			SELECT
+// 				location_id
+// 			FROM location
+// 			WHERE
+// 				location_type = $1 AND
+// 				country_code = $2 AND
+// 				location_name = $3
 
-			LIMIT 1
-		`,
-		LocationTypeCountry,
-		"us",
-		"United States",
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&locationId))
-			found = true
+// 			LIMIT 1
+// 		`,
+// 		LocationTypeCountry,
+// 		"us",
+// 		"United States",
+// 	)
+// 	server.WithPgResult(result, err, func() {
+// 		if result.Next() {
+// 			server.Raise(result.Scan(&locationId))
+// 			found = true
+// 		}
+// 	})
+
+// 	return
+// }
+
+type ClientScore struct {
+	ClientId          server.Id
+	NetworkId         server.Id
+	Scores            map[string]int
+	ReliabilityWeight float32
+	Tiers             map[string]int
+	// FIXME latency, speed
+}
+
+const MaxClientScore = 50
+const ClientScoreSampleCount = 200
+
+// FIXME store gob lists randomly allocated to bucket sizes N
+// FIXME store the list[i] and total bucket size per location_id, location_group_id
+
+func clientScoreLocationCountsKey(locationId server.Id) string {
+	return fmt.Sprintf("client_score_l_%s", locationId)
+}
+
+func clientScoreLocationGroupCountsKey(locationGroupId server.Id) string {
+	return fmt.Sprintf("client_score_g_%s", locationGroupId)
+}
+
+func clientScoreLocationSampleKey(locationId server.Id, index int) string {
+	return fmt.Sprintf("client_score_g_%s_%d", locationId, index)
+}
+
+func clientScoreLocationGroupSampleKey(locationGroupId server.Id, index int) string {
+	return fmt.Sprintf("client_score_g_%s_%d", locationGroupId, index)
+}
+
+func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
+	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
+	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
+
+	scorePerTier := 10
+
+	server.Db(ctx, func(conn server.PgConn) {
+
+		result, err := conn.Query(
+			ctx,
+			`
+	        SELECT
+	        	network_client_location_reliability.city_location_id,
+	        	network_client_location_reliability.region_location_id,
+	        	network_client_location_reliability.country_location_id,
+	            network_client_location_reliability.client_id,
+	            network_client_location_reliability.network_id,
+	            network_client_location_reliability.max_net_type_score,
+	            network_client_location_reliability.max_net_type_score_speed,
+	            client_connection_reliability_score.reliability_weight
+
+	        FROM network_client_location_reliability
+
+	        INNER JOIN client_connection_reliability_score ON
+	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+	        WHERE
+	        	network_client_location_reliability.connected = true AND
+	        	network_client_location_reliability.valid = true
+	        `,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var cityLocationId server.Id
+				var regionLocationId server.Id
+				var countryLocationId server.Id
+				var clientId server.Id
+				var networkId server.Id
+				var netTypeScore int
+				var netTypeScoreSpeed int
+				var reliabilityWeight float32
+				server.Raise(result.Scan(
+					&cityLocationId,
+					&regionLocationId,
+					&countryLocationId,
+					&clientId,
+					&networkId,
+					&netTypeScore,
+					&netTypeScoreSpeed,
+					&reliabilityWeight,
+				))
+				clientScore := &ClientScore{
+					ClientId:          clientId,
+					NetworkId:         networkId,
+					ReliabilityWeight: reliabilityWeight,
+					Scores:            map[string]int{},
+					Tiers:             map[string]int{},
+				}
+
+				clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
+				clientScore.Scores[RankModeSpeed] = scorePerTier * netTypeScoreSpeed
+
+				clientScore.Tiers[RankModeQuality] = netTypeScore
+				clientScore.Scores[RankModeQuality] = scorePerTier * netTypeScore
+
+				clientScores, ok := locationClientScores[cityLocationId]
+				if !ok {
+					clientScores = map[server.Id]*ClientScore{}
+					locationClientScores[cityLocationId] = clientScores
+				}
+				clientScores[clientId] = clientScore
+
+				clientScores, ok = locationClientScores[regionLocationId]
+				if !ok {
+					clientScores = map[server.Id]*ClientScore{}
+					locationClientScores[regionLocationId] = clientScores
+				}
+				clientScores[clientId] = clientScore
+
+				clientScores, ok = locationClientScores[countryLocationId]
+				if !ok {
+					clientScores = map[server.Id]*ClientScore{}
+					locationClientScores[countryLocationId] = clientScores
+				}
+				clientScores[clientId] = clientScore
+
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			`
+	            SELECT
+	            	location_group_member_city.location_group_id AS city_location_group_id,
+	            	location_group_member_region.location_group_id AS region_location_group_id,
+	            	location_group_member_country.location_group_id AS country_location_group_id,
+	                network_client_location_reliability.client_id,
+	                network_client_location_reliability.network_id,
+	                network_client_location_reliability.max_net_type_score,
+	                network_client_location_reliability.max_net_type_score_speed,
+	                client_connection_reliability_score.reliability_weight
+
+	            FROM network_client_location_reliability
+
+	            INNER JOIN client_connection_reliability_score ON
+	        		client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+
+	            LEFT JOIN location_group_member location_group_member_city ON
+	                location_group_member_city.location_id = network_client_location_reliability.city_location_id
+
+	            LEFT JOIN location_group_member location_group_member_region ON
+	                location_group_member_region.location_id = network_client_location_reliability.region_location_id
+
+	            LEFT JOIN location_group_member location_group_member_country ON
+	                location_group_member_country.location_id = network_client_location_reliability.country_location_id
+
+	            WHERE
+	            	network_client_location_reliability.connected = true AND
+	            	network_client_location_reliability.valid = true
+	        `,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var cityLocationGroupId *server.Id
+				var regionLocationGroupId *server.Id
+				var countryLocationGroupId *server.Id
+				var clientId server.Id
+				var networkId server.Id
+				var netTypeScore int
+				var netTypeScoreSpeed int
+				var reliabilityWeight float32
+				server.Raise(result.Scan(
+					&cityLocationGroupId,
+					&regionLocationGroupId,
+					&countryLocationGroupId,
+					&clientId,
+					&networkId,
+					&netTypeScore,
+					&netTypeScoreSpeed,
+					&reliabilityWeight,
+				))
+				clientScore := &ClientScore{
+					ClientId:          clientId,
+					NetworkId:         networkId,
+					ReliabilityWeight: reliabilityWeight,
+					Scores:            map[string]int{},
+					Tiers:             map[string]int{},
+				}
+
+				clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
+				clientScore.Scores[RankModeSpeed] = scorePerTier * netTypeScoreSpeed
+
+				clientScore.Tiers[RankModeQuality] = netTypeScore
+				clientScore.Scores[RankModeQuality] = scorePerTier * netTypeScore
+
+				if cityLocationGroupId != nil {
+					clientScores, ok := locationGroupClientScores[*cityLocationGroupId]
+					if !ok {
+						clientScores = map[server.Id]*ClientScore{}
+						locationGroupClientScores[*cityLocationGroupId] = clientScores
+					}
+					clientScores[clientId] = clientScore
+				}
+
+				if regionLocationGroupId != nil {
+					clientScores, ok := locationGroupClientScores[*regionLocationGroupId]
+					if !ok {
+						clientScores = map[server.Id]*ClientScore{}
+						locationGroupClientScores[*regionLocationGroupId] = clientScores
+					}
+					clientScores[clientId] = clientScore
+				}
+
+				if countryLocationGroupId != nil {
+					clientScores, ok := locationGroupClientScores[*countryLocationGroupId]
+					if !ok {
+						clientScores = map[server.Id]*ClientScore{}
+						locationGroupClientScores[*countryLocationGroupId] = clientScores
+					}
+					clientScores[clientId] = clientScore
+				}
+			}
+		})
+	})
+
+	exportClientScores := func(s map[server.Id]*ClientScore) (
+		countsBytes []byte,
+		samplesBytes [][]byte,
+		counts []int,
+		samples [][]*ClientScore,
+	) {
+		clientScores := maps.Values(s)
+		mathrand.Shuffle(len(clientScores), func(i int, j int) {
+			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
+		})
+
+		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
+		c := (len(clientScores) + n - 1) / n
+
+		counts = make([]int, n)
+		samples = make([][]*ClientScore, n)
+		samplesBytes = make([][]byte, n)
+
+		for i := range n {
+			i0 := i * c
+			i1 := min((i+1)*c, len(clientScores))
+			sample := clientScores[i0:i1]
+
+			counts[i] = len(sample)
+			samples[i] = sample
+
+			b := bytes.NewBuffer(nil)
+			e := gob.NewEncoder(b)
+			e.Encode(sample)
+			samplesBytes[i] = b.Bytes()
+		}
+
+		b := bytes.NewBuffer(nil)
+		e := gob.NewEncoder(b)
+		e.Encode(counts)
+		countsBytes = b.Bytes()
+
+		return
+	}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+
+		for locationId, clientScores := range locationClientScores {
+			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
+			pipe.Set(ctx, clientScoreLocationCountsKey(locationId), countsBytes, ttl)
+			for i, sampleBytes := range samplesBytes {
+				pipe.Set(ctx, clientScoreLocationSampleKey(locationId, i), sampleBytes, ttl)
+			}
+			glog.Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
+		}
+		for locationGroupId, clientScores := range locationGroupClientScores {
+			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
+			pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId), countsBytes, ttl)
+			for i, sampleBytes := range samplesBytes {
+				pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, i), sampleBytes, ttl)
+			}
+			glog.Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
+		}
+
+		_, returnErr = pipe.Exec(ctx)
+	})
+
+	return
+}
+
+func loadClientScores(
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	n int,
+) (clientScores map[server.Id]*ClientScore, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+
+		locationCounts := map[server.Id]*redis.StringCmd{}
+		for locationId, _ := range locationIds {
+			v := pipe.Get(ctx, clientScoreLocationCountsKey(locationId))
+			locationCounts[locationId] = v
+		}
+		locationGroupCounts := map[server.Id]*redis.StringCmd{}
+		for locationGroupId, _ := range locationGroupIds {
+			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(locationGroupId))
+			locationGroupCounts[locationGroupId] = v
+		}
+
+		pipe.Exec(ctx)
+
+		sampleKeyCounts := map[string]int{}
+
+		for locationId, countsCmd := range locationCounts {
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
+			}
+			b := bytes.NewBuffer(countsBytes)
+			e := gob.NewDecoder(b)
+			var counts []int
+			returnErr = e.Decode(&counts)
+			if returnErr != nil {
+				return
+			}
+			for i, count := range counts {
+				sampleKeyCounts[clientScoreLocationSampleKey(locationId, i)] = count
+			}
+		}
+		for locationGroupId, countsCmd := range locationGroupCounts {
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
+			}
+			b := bytes.NewBuffer(countsBytes)
+			e := gob.NewDecoder(b)
+			var counts []int
+			returnErr = e.Decode(&counts)
+			if returnErr != nil {
+				return
+			}
+			for i, count := range counts {
+				sampleKeyCounts[clientScoreLocationGroupSampleKey(locationGroupId, i)] = count
+			}
+		}
+
+		keys := maps.Keys(sampleKeyCounts)
+		mathrand.Shuffle(len(keys), func(i int, j int) {
+			keys[i], keys[j] = keys[j], keys[i]
+		})
+
+		pipe = r.TxPipeline()
+
+		samples := []*redis.StringCmd{}
+		netCount := 0
+		for _, key := range keys {
+			if n <= netCount {
+				break
+			}
+			c := sampleKeyCounts[key]
+			v := pipe.Get(ctx, key)
+			samples = append(samples, v)
+			netCount += c
+		}
+
+		pipe.Exec(ctx)
+
+		clientScores = map[server.Id]*ClientScore{}
+
+		for _, sampleCmd := range samples {
+			sampleBytes, _ := sampleCmd.Bytes()
+			if len(sampleBytes) == 0 {
+				continue
+			}
+			b := bytes.NewBuffer(sampleBytes)
+			e := gob.NewDecoder(b)
+			var sample []*ClientScore
+			returnErr = e.Decode(&sample)
+			if returnErr != nil {
+				return
+			}
+
+			for _, clientScore := range sample {
+				clientScores[clientScore.ClientId] = clientScore
+			}
 		}
 	})
 
@@ -1909,230 +2311,83 @@ func FindProviders2(
 	}
 
 	// use a min block size to reduce db activity
-	findProviders2.Count = max(findProviders2.Count, 8)
+	count := max(findProviders2.Count, 20)
 
-	if findProviders2.RankMode == "" {
-		findProviders2.RankMode = RankModeQuality
+	rankMode := findProviders2.RankMode
+	if rankMode == "" {
+		rankMode = RankModeQuality
 	}
 
-	type clientScore struct {
-		score             int
-		reliabilityWeight float32
-		tier              int
+	activeClientIds := map[server.Id]bool{}
+
+	locationIds := map[server.Id]bool{}
+	locationGroupIds := map[server.Id]bool{}
+
+	for _, spec := range findProviders2.Specs {
+		if spec.LocationId != nil {
+			locationIds[*spec.LocationId] = true
+		}
+		if spec.LocationGroupId != nil {
+			locationGroupIds[*spec.LocationGroupId] = true
+		}
+		if spec.ClientId != nil {
+			activeClientIds[*spec.ClientId] = true
+		}
+		if spec.BestAvailable != nil && *spec.BestAvailable {
+			// homeLocationId, found := findHomeLocationIdInTx(tx, session)
+			homeLocationId, ok := countryCodeLocationIds()["us"]
+			if ok {
+				locationIds[homeLocationId] = true
+			}
+		}
 	}
 
-	// score 0 is best
-	clientScores := map[server.Id]*clientScore{}
-	scoreScale := 10
-	intermediaryScore := 5
-	maxScore := 5 * scoreScale
-	// duplicateClientAddressScore := 5
-	// duplicateCityScore := 2
+	n := max(count*10, 1000)
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		locationIds := map[server.Id]bool{}
-		locationGroupIds := map[server.Id]bool{}
-
-		for _, spec := range findProviders2.Specs {
-			if spec.LocationId != nil {
-				locationIds[*spec.LocationId] = true
-			}
-			if spec.LocationGroupId != nil {
-				locationGroupIds[*spec.LocationGroupId] = true
-			}
-			if spec.ClientId != nil {
-				clientScores[*spec.ClientId] = &clientScore{}
-			}
-			if spec.BestAvailable != nil && *spec.BestAvailable {
-				homeLocationId, found := findHomeLocationIdInTx(tx, session)
-				if found {
-					locationIds[homeLocationId] = true
-				}
-			}
-		}
-
-		if 0 < len(locationIds) {
-			server.CreateTempTableInTx(
-				session.Ctx,
-				tx,
-				"temp_location_ids(location_id uuid)",
-				maps.Keys(locationIds)...,
-			)
-
-			// TODO consider just storing the entire client score list per country/region/city in memory
-			// TODO this would then be just parallel loads from memory for each country/region/city
-			result, err := tx.Query(
-				session.Ctx,
-				`
-                SELECT
-
-                    network_client_location_reliability.client_id,
-                    network_client_location_reliability.max_net_type_score,
-                    network_client_location_reliability.max_net_type_score_speed,
-                    client_connection_reliability_score.reliability_weight
-
-                FROM network_client_location_reliability
-
-                INNER JOIN client_connection_reliability_score ON
-                	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
-
-                INNER JOIN temp_location_ids ON 
-                    temp_location_ids.location_id = network_client_location_reliability.city_location_id OR
-                    temp_location_ids.location_id = network_client_location_reliability.region_location_id OR
-                    temp_location_ids.location_id = network_client_location_reliability.country_location_id
-
-                LEFT JOIN exclude_network_client_location ON
-                	exclude_network_client_location.client_location_id = $1 AND
-	                exclude_network_client_location.network_id = network_client_location_reliability.network_id
-
-                WHERE
-                	network_client_location_reliability.connected = true AND
-                	network_client_location_reliability.valid = true AND
-                	exclude_network_client_location.network_id IS NULL
-
-                `,
-				clientLocationId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					var netTypeScore int
-					var netTypeScoreSpeed int
-					var reliabilityWeight float32
-					server.Raise(result.Scan(
-						&clientId,
-						&netTypeScore,
-						&netTypeScoreSpeed,
-						&reliabilityWeight,
-					))
-					clientScore := &clientScore{
-						reliabilityWeight: reliabilityWeight,
-					}
-					switch findProviders2.RankMode {
-					case RankModeSpeed:
-						clientScore.tier = netTypeScoreSpeed
-						clientScore.score = scoreScale * netTypeScoreSpeed
-					default:
-						clientScore.tier = netTypeScore
-						clientScore.score = scoreScale * netTypeScore
-					}
-					clientScores[clientId] = clientScore
-				}
-			})
-		}
-
-		if 0 < len(locationGroupIds) {
-			server.CreateTempTableInTx(
-				session.Ctx,
-				tx,
-				"temp_location_group_ids(location_group_id uuid)",
-				maps.Keys(locationGroupIds)...,
-			)
-
-			// TODO consider just storing the entire client score list per country/region/city in memory
-			// TODO this would then be just parallel loads from memory for each country/region/city
-			result, err := tx.Query(
-				session.Ctx,
-				`
-                    SELECT
-                        network_client_location_reliability.client_id,
-                        network_client_location_reliability.max_net_type_score,
-                        network_client_location_reliability.max_net_type_score_speed,
-                        client_connection_reliability_score.reliability_weight
-
-                    FROM network_client_location_reliability
-
-                    INNER JOIN client_connection_reliability_score ON
-                		client_connection_reliability_score.client_id = network_client_location_reliability.client_id
-
-                    LEFT JOIN location_group_member location_group_member_city ON
-                        location_group_member_city.location_id = network_client_location_reliability.city_location_id
-
-                    LEFT JOIN location_group_member location_group_member_region ON
-                        location_group_member_region.location_id = network_client_location_reliability.region_location_id
-
-                    LEFT JOIN location_group_member location_group_member_country ON
-                        location_group_member_country.location_id = network_client_location_reliability.country_location_id
-
-                    INNER JOIN temp_location_group_ids ON 
-                        temp_location_group_ids.location_group_id = location_group_member_city.location_group_id OR
-                        temp_location_group_ids.location_group_id = location_group_member_region.location_group_id OR
-                        temp_location_group_ids.location_group_id = location_group_member_country.location_group_id
-
-                    LEFT JOIN exclude_network_client_location ON
-	                	exclude_network_client_location.client_location_id = $1 AND
-		                exclude_network_client_location.network_id = network_client_location_reliability.network_id
-
-                    WHERE
-                    	network_client_location_reliability.connected = true AND
-                    	network_client_location_reliability.valid = true AND
-                    	exclude_network_client_location.network_id IS NULL AND (
-	                        location_group_member_city.location_id IS NOT NULL OR
-	                        location_group_member_region.location_id IS NOT NULL OR
-	                        location_group_member_country.location_id IS NOT NULL
-	                    )
-                `,
-				clientLocationId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					var netTypeScore int
-					var netTypeScoreSpeed int
-					var reliabilityWeight float32
-					server.Raise(result.Scan(
-						&clientId,
-						&netTypeScore,
-						&netTypeScoreSpeed,
-						&reliabilityWeight,
-					))
-					clientScore := &clientScore{
-						reliabilityWeight: reliabilityWeight,
-					}
-					switch findProviders2.RankMode {
-					case RankModeSpeed:
-						clientScore.tier = netTypeScoreSpeed
-						clientScore.score = scoreScale * netTypeScoreSpeed
-					default:
-						clientScore.tier = netTypeScore
-						clientScore.score = scoreScale * netTypeScore
-					}
-					clientScores[clientId] = clientScore
-				}
-			})
-		}
-	})
+	loadStartTime := time.Now()
+	clientScores, err := loadClientScores(
+		session.Ctx,
+		locationIds,
+		locationGroupIds,
+		n,
+	)
+	if err != nil {
+		return nil, err
+	}
+	loadEndTime := time.Now()
+	loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
+	if 50.0 <= loadMillis {
+		glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
+	}
 
 	for _, clientId := range findProviders2.ExcludeClientIds {
 		delete(clientScores, clientId)
 	}
 	// the final hop is excluded
 	// intermediaries have net score incremented
+	intermediaryScore := MaxClientScore / 10
 	for _, destination := range findProviders2.ExcludeDestinations {
 		for _, clientId := range destination[:len(destination)-1] {
 			if clientScore, ok := clientScores[clientId]; ok {
-				clientScore.score += intermediaryScore
+				clientScore.Scores[rankMode] += intermediaryScore
 			}
 		}
 		delete(clientScores, destination[len(destination)-1])
 	}
 
 	clientIds := maps.Keys(clientScores)
-	// overshoot so that the list can be filtered
-	n := min(
-		max(findProviders2.Count*2, 1000),
-		len(clientIds),
-	)
+	// oversample so that the list can be filtered
+	n = min(n/2, len(clientIds))
 
 	connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
-		return float32(max(0, maxScore-clientScore.score))
+		return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
 	})
 	clientIds = clientIds[:n]
 
 	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
 		clientScore := clientScores[clientId]
-		return clientScore.reliabilityWeight
+		return clientScore.ReliabilityWeight
 	})
 
 	// band by scores
@@ -2140,54 +2395,71 @@ func FindProviders2(
 		clientScoreA := clientScores[a]
 		clientScoreB := clientScores[b]
 
-		return clientScoreA.score - clientScoreB.score
+		return clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]
 	})
+
+	filterActive := func(clientNetworks map[server.Id]server.Id) {
+		server.Tx(session.Ctx, func(tx server.PgTx) {
+			server.CreateTempJoinTableInTx(
+				session.Ctx,
+				tx,
+				"temp_client_networks(client_id uuid -> network_id uuid)",
+				clientNetworks,
+			)
+
+			result, err := tx.Query(
+				session.Ctx,
+				`
+				SELECT
+					temp_client_networks.client_id
+				FROM temp_client_networks
+				INNER JOIN provide_key ON
+		            provide_key.provide_mode = $1 AND
+		            provide_key.client_id = temp_client_networks.client_id
+		        INNER JOIN network_client_connection ON
+		        	network_client_connection.connected = true AND
+		        	network_client_connection.client_id = temp_client_networks.client_id
+		        LEFT JOIN exclude_network_client_location ON
+	            	exclude_network_client_location.client_location_id = $2 AND
+	                exclude_network_client_location.network_id = temp_client_networks.network_id
+	            WHERE
+	            	exclude_network_client_location.network_id IS NULL
+				`,
+				ProvideModePublic,
+				clientLocationId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					activeClientIds[clientId] = true
+				}
+			})
+		})
+	}
 
 	// filter the list to include only clients that are actively connected and providing
-	activeClientIds := map[server.Id]bool{}
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-
-		server.CreateTempTableInTx(
-			session.Ctx,
-			tx,
-			"temp_client_ids(client_id uuid)",
-			clientIds...,
-		)
-
-		result, err := tx.Query(
-			session.Ctx,
-			`
-			SELECT
-				temp_client_ids.client_id
-			FROM temp_client_ids
-			INNER JOIN provide_key ON
-	            provide_key.provide_mode = $1 AND
-	            provide_key.client_id = temp_client_ids.client_id
-	        INNER JOIN network_client_connection ON
-	        	network_client_connection.connected = true AND
-	        	network_client_connection.client_id = temp_client_ids.client_id
-			`,
-			ProvideModePublic,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				activeClientIds[clientId] = true
-			}
-		})
-	})
-
-	providers := []*FindProvidersProvider{}
-	for _, clientId := range clientIds {
-		if findProviders2.Count <= len(providers) {
-			break
+	i := 0
+	for i < len(clientIds) && len(activeClientIds) < count {
+		clientNetworks := map[server.Id]server.Id{}
+		j1 := min(i+2*count, len(clientIds))
+		for j := i; j < j1; j += 1 {
+			clientId := clientIds[j]
+			clientScore := clientScores[clientId]
+			clientNetworks[clientId] = clientScore.NetworkId
 		}
+		filterActive(clientNetworks)
+		i = j1
+	}
+
+	// output in order of `clientIds`
+	providers := []*FindProvidersProvider{}
+	for _, clientId := range clientIds[:i] {
 		if activeClientIds[clientId] {
 			clientScore := clientScores[clientId]
 			provider := &FindProvidersProvider{
 				ClientId: clientId,
-				Tier:     clientScore.tier,
+				Tier:     clientScore.Tiers[rankMode],
 				// TODO
 				EstimatedBytesPerSecond: 0,
 			}

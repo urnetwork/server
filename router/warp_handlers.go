@@ -63,23 +63,25 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func collectStatus(ctx context.Context) (string, error) {
-	// ping postgres
-	var dbError error
-	server.Db(ctx, func(conn server.PgConn) {
-		dbError = conn.Ping(ctx)
-	})
-	if dbError != nil {
-		return "", dbError
-	}
+	/*
+		// ping postgres
+		var dbError error
+		server.Db(ctx, func(conn server.PgConn) {
+			dbError = conn.Ping(ctx)
+		})
+		if dbError != nil {
+			return "", dbError
+		}
 
-	// ping redis
-	var redisError error
-	server.Redis(ctx, func(client server.RedisClient) {
-		redisError = client.Ping(ctx).Err()
-	})
-	if redisError != nil {
-		return "", redisError
-	}
+		// ping redis
+		var redisError error
+		server.Redis(ctx, func(client server.RedisClient) {
+			redisError = client.Ping(ctx).Err()
+		})
+		if redisError != nil {
+			return "", redisError
+		}
+	*/
 
 	return "ok", nil
 }

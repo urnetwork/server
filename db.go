@@ -112,8 +112,10 @@ func (self *safePgPool) open() *pgxpool.Pool {
 
 		// see the Config struct for human understandable docs
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
+		// https://github.com/jackc/pgx/blob/master/pgconn/config.go#L445
 		options := map[string]string{
-			"sslmode": "disable",
+			"sslmode":         "disable",
+			"connect_timeout": "60",
 			// FIXME perf move to config
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
@@ -241,6 +243,13 @@ func OptDebugTx() DbDebugOptions {
 }
 */
 
+type PgRetry struct {
+}
+
+func (self *PgRetry) Error() string {
+	return "retry"
+}
+
 // transient errors can be resolved by either
 // - changing the parameters of the query to avoid constraint conflicts
 // - chaning the timing of the query to avoid rollbacks
@@ -257,6 +266,8 @@ func isTransientError(err error) bool {
 		}
 		// fmt.Printf("[db]intransient error = %d\n", v.Code)
 		return false
+	case *PgRetry:
+		return true
 	default:
 		return false
 	}
