@@ -6,17 +6,10 @@ import (
 
 var warmupLock sync.Mutex
 var warmupUnits []func()
+var resetUnits []func()
 var warmedUp = false
 
-func WarmupReset() {
-	warmupLock.Lock()
-	defer warmupLock.Unlock()
-
-	warmupUnits = nil
-	warmedUp = false
-}
-
-func Warm(unit func()) {
+func OnWarmup(unit func()) {
 	runNow := false
 	func() {
 		warmupLock.Lock()
@@ -42,6 +35,28 @@ func Warmup() {
 		runUnits = warmupUnits
 		warmupUnits = nil
 		warmedUp = true
+	}()
+	for _, unit := range runUnits {
+		unit()
+	}
+}
+
+func OnReset(unit func()) {
+	warmupLock.Lock()
+	defer warmupLock.Unlock()
+
+	resetUnits = append(resetUnits, unit)
+}
+
+func Reset() {
+	var runUnits []func()
+	func() {
+		warmupLock.Lock()
+		defer warmupLock.Unlock()
+
+		runUnits = resetUnits
+		warmupUnits = nil
+		warmedUp = false
 	}()
 	for _, unit := range runUnits {
 		unit()

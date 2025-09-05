@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ipinfo/go/v2/ipinfo"
+	// "github.com/ipinfo/go/v2/ipinfo"
 	// "github.com/urnetwork/server"
 	"github.com/urnetwork/server/api/myipinfo/landmarks"
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
@@ -40,44 +40,18 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientIp, _, err := server.SplitClientAddress(clientAddress)
-
-	ipInfoRaw, err := controller.GetIPInfo(r.Context(), clientIp)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	info := &ipinfo.Core{}
-	err = json.Unmarshal(ipInfoRaw, info)
+	location, connectionLocationScores, err := controller.GetLocationForIp(r.Context(), clientIp)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// enrich the IP info with additional data
-	func(v *ipinfo.Core) {
-		if v.Country != "" {
-			v.CountryName = ipinfo.GetCountryName(v.Country)
-			v.IsEU = ipinfo.IsEU(v.Country)
-			v.CountryFlag.Emoji = ipinfo.GetCountryFlagEmoji(v.Country)
-			v.CountryFlag.Unicode = ipinfo.GetCountryFlagUnicode(v.Country)
-			v.CountryFlagURL = ipinfo.GetCountryFlagURL(v.Country)
-			v.CountryCurrency.Code = ipinfo.GetCountryCurrencyCode(v.Country)
-			v.CountryCurrency.Symbol = ipinfo.GetCountryCurrencySymbol(v.Country)
-			v.Continent.Code = ipinfo.GetContinentCode(v.Country)
-			v.Continent.Name = ipinfo.GetContinentName(v.Country)
-		}
-		if v.Abuse != nil && v.Abuse.Country != "" {
-			v.Abuse.CountryName = ipinfo.GetCountryName(v.Abuse.Country)
-		}
-	}(info)
-
-	if info.Bogon {
-		http.Error(w, "bogon IP", http.StatusForbidden)
-		return
-	}
-
-	myInfo, err := myinfo.FromIPInfo(info)
+	myInfo, err := myinfo.NewMyInfo(clientIp, location, connectionLocationScores)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

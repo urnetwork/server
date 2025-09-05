@@ -2,7 +2,7 @@ package controller
 
 import (
 	// "context"
-	// "fmt"
+	"fmt"
 	// "errors"
 	// "time"
 	"sync"
@@ -130,6 +130,9 @@ func AuthPasswordReset(
 	session *session.ClientSession,
 ) (*AuthPasswordResetResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&reset.UserAuth)
+	if userAuth == nil {
+		return nil, fmt.Errorf("Invalid user auth.")
+	}
 
 	resetCreateCode := model.AuthPasswordResetCreateCodeArgs{
 		UserAuth: *userAuth,

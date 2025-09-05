@@ -336,14 +336,27 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			)
 		}
 
-		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour))
+		UpdateClientScores(ctx, 5*time.Second)
 
 		clientIds := maps.Keys(clientSessions)
 		clientIdA := clientIds[0]
 		clientSessionA := clientSessions[clientIdA]
 
-		bestAvailable := true
 		findProviders2Args := &FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					LocationGroupId: &createLocationGroup.LocationGroupId,
+				},
+			},
+			Count: 2 * n,
+		}
+		res, err := FindProviders2(findProviders2Args, clientSessionA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), n)
+
+		bestAvailable := true
+		findProviders2Args = &FindProviders2Args{
 			Specs: []*ProviderSpec{
 				{
 					BestAvailable: &bestAvailable,
@@ -351,7 +364,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			},
 			Count: 2 * n,
 		}
-		res, err := FindProviders2(findProviders2Args, clientSessionA)
+		res, err = FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(res.Providers), n)
 

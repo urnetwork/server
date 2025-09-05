@@ -180,7 +180,7 @@ func loginUserAuth(
 	 */
 	if authType != nil {
 
-		glog.Infof("login auth type is %s", *authType)
+		glog.V(1).Infof("login auth type is %s", *authType)
 
 		isUserAuth := false
 		if UserAuthType(*authType) == UserAuthTypeEmail || UserAuthType(*authType) == UserAuthTypePhone {

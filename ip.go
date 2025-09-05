@@ -6,8 +6,10 @@ import (
 	// "errors"
 	"crypto/sha256"
 	"fmt"
+	// "io"
 	"net"
 	"net/netip"
+	// "os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +28,7 @@ import (
 )
 
 func init() {
-	Warm(func() {
+	OnWarmup(func() {
 		ipDb()
 	})
 
@@ -119,6 +121,19 @@ var ipDb = sync.OnceValue(func() *mmdb.Reader {
 	if err != nil {
 		panic(err)
 	}
+
+	// f, err := os.Open(path)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer f.Close()
+
+	// h := sha256.New()
+	// if _, err := io.Copy(h, f); err != nil {
+	// 	panic(err)
+	// }
+	// dbVersion := h.Sum(nil)
+
 	db, err := mmdb.Open(path)
 	if err != nil {
 		panic(err)
@@ -136,6 +151,9 @@ const (
 )
 
 type IpInfo struct {
+	// continent code is lowercase
+	ContinentCode string
+	Continent     string
 	// country code is lowercase
 	CountryCode    string
 	Country        string
@@ -144,6 +162,7 @@ type IpInfo struct {
 	City           string
 	Longitude      float64
 	Latitude       float64
+	Timezone       string
 	UserType       UserType
 	Organization   string
 	ASN            uint32
@@ -168,6 +187,53 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 		// }
 		// glog.Infof("[ip]decode key \"%s\" = %s\n", key, kind)
 		switch string(key) {
+		case "continent":
+			// readMap
+			// code
+			// names [en]
+			countryIter, _, err := d.ReadMap()
+			if err != nil {
+				return err
+			}
+			for countryKey, err := range countryIter {
+				if err != nil {
+					return err
+				}
+				switch string(countryKey) {
+				case "code":
+					continentCode, err := d.ReadString()
+					if err != nil {
+						return err
+					}
+					self.ContinentCode = strings.ToLower(continentCode)
+				case "names":
+					namesIter, _, err := d.ReadMap()
+					if err != nil {
+						return err
+					}
+					for namesKey, err := range namesIter {
+						if err != nil {
+							return err
+						}
+						switch string(namesKey) {
+						case "en":
+							self.Continent, err = d.ReadString()
+							if err != nil {
+								return err
+							}
+						default:
+							if err := d.SkipValue(); err != nil {
+								return err
+							}
+						}
+					}
+				default:
+					if err := d.SkipValue(); err != nil {
+						return err
+					}
+				}
+			}
+
 		case "country":
 			// readMap
 			// iso_code
@@ -316,6 +382,7 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 			// readMap
 			// latitude
 			// longitude
+			// timezone
 			locationIter, _, err := d.ReadMap()
 			if err != nil {
 				return err
@@ -332,6 +399,11 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 					}
 				case "longitude":
 					self.Longitude, err = d.ReadFloat64()
+					if err != nil {
+						return err
+					}
+				case "timezone":
+					self.Timezone, err = d.ReadString()
 					if err != nil {
 						return err
 					}
@@ -416,7 +488,9 @@ func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 }
 
 func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
-	r := ipDb().Lookup(addr)
+	ipDb := ipDb()
+
+	r := ipDb.Lookup(addr)
 	var ipInfo IpInfo
 	err := r.Decode(&ipInfo)
 	if err != nil {

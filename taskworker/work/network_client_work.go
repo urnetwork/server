@@ -7,7 +7,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 
-	"github.com/urnetwork/server/controller"
+	// "github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/session"
 )
 
@@ -92,6 +92,7 @@ func RemoveDisconnectedNetworkClientsPost(
 	return nil
 }
 
+// FIXME remove
 type RemoveLocationLookupResultsArgs struct {
 }
 
@@ -99,22 +100,22 @@ type RemoveLocationLookupResultsResult struct {
 }
 
 func ScheduleRemoveLocationLookupResults(clientSession *session.ClientSession, tx server.PgTx) {
-	task.ScheduleTaskInTx(
-		tx,
-		RemoveLocationLookupResults,
-		&RemoveLocationLookupResultsArgs{},
-		clientSession,
-		task.RunOnce("remove_lookup_results"),
-		task.RunAt(server.NowUtc().Add(30*time.Minute)),
-	)
+	// task.ScheduleTaskInTx(
+	// 	tx,
+	// 	RemoveLocationLookupResults,
+	// 	&RemoveLocationLookupResultsArgs{},
+	// 	clientSession,
+	// 	task.RunOnce("remove_lookup_results"),
+	// 	task.RunAt(server.NowUtc().Add(30*time.Minute)),
+	// )
 }
 
 func RemoveLocationLookupResults(
 	removeLocationLookupResults *RemoveLocationLookupResultsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveLocationLookupResultsResult, error) {
-	minTime := server.NowUtc().Add(-controller.LocationLookupResultExpiration)
-	model.RemoveLocationLookupResults(clientSession.Ctx, minTime)
+	// minTime := server.NowUtc().Add(-controller.LocationLookupResultExpiration)
+	// model.RemoveLocationLookupResults(clientSession.Ctx, minTime)
 	return &RemoveLocationLookupResultsResult{}, nil
 }
 
@@ -124,7 +125,7 @@ func RemoveLocationLookupResultsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRemoveLocationLookupResults(clientSession, tx)
+	// ScheduleRemoveLocationLookupResults(clientSession, tx)
 	return nil
 }
 
