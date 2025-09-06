@@ -1575,7 +1575,7 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
  */
 
 var heliusAuthSecret = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
 	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
 })
 
@@ -1671,7 +1671,7 @@ const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
 
 func HeliusWebhook(
 	transaction *SolanaTransaction,
-	// clientSession *session.ClientSession,
+	clientSession *session.ClientSession,
 ) (*HeliusWebhookResult, error) {
 
 	if transaction.Type != "TRANSFER" {
