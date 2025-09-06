@@ -1908,14 +1908,16 @@ func findLocationGroupByNameInTx(
 // }
 
 type ClientScore struct {
-	ClientId          server.Id
-	NetworkId         server.Id
-	Scores            map[string]int
-	ReliabilityWeight float32
-	Tiers             map[string]int
-	// FIXME latency, speed
+	ClientId                 server.Id
+	NetworkId                server.Id
+	Scores                   map[string]int
+	ReliabilityWeight        float32
+	Tiers                    map[string]int
+	MinRelativeLatencyMillis int
+	MaxBytesPerSecond        ByteCount
 }
 
+// scores are [0, max], where 0 is best
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
 
@@ -1942,7 +1944,41 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
-	scorePerTier := 10
+	scorePerTier := 20
+	relativeLatencyMillisThreshold := 100
+	relativeLatencyMillisPerScore := 20
+	bytesPerSecondThreshold := 2 * Mib
+	bytesPerSecondPerScore := 100 * Kib
+
+	setScore := func(
+		clientScore *ClientScore,
+		netTypeScore int,
+		netTypeScoreSpeed int,
+		minRelativeLatencyMillis int,
+		maxBytesPerSecond ByteCount,
+	) {
+		scoreAdjust := 0
+		if d := minRelativeLatencyMillis - relativeLatencyMillisThreshold; 0 < d {
+			scoreAdjust += (d + relativeLatencyMillisPerScore/2) / relativeLatencyMillisPerScore
+		}
+		if 0 < maxBytesPerSecond {
+			if d := bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
+				scoreAdjust += int((d + bytesPerSecondPerScore/2) / bytesPerSecondPerScore)
+			}
+		}
+
+		clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
+		clientScore.Scores[RankModeSpeed] = min(
+			scorePerTier*netTypeScoreSpeed+scoreAdjust,
+			MaxClientScore,
+		)
+
+		clientScore.Tiers[RankModeQuality] = netTypeScore
+		clientScore.Scores[RankModeQuality] = min(
+			scorePerTier*netTypeScore+scoreAdjust,
+			MaxClientScore,
+		)
+	}
 
 	server.Db(ctx, func(conn server.PgConn) {
 
@@ -1957,6 +1993,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	            network_client_location_reliability.network_id,
 	            network_client_location_reliability.max_net_type_score,
 	            network_client_location_reliability.max_net_type_score_speed,
+	            network_client_location_reliability.min_relative_latency_ms,
+	            network_client_location_reliability.max_bytes_per_second,
 	            client_connection_reliability_score.reliability_weight
 
 	        FROM network_client_location_reliability
@@ -1977,6 +2015,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				var networkId server.Id
 				var netTypeScore int
 				var netTypeScoreSpeed int
+				var minRelativeLatencyMillis int
+				var maxBytesPerSecond ByteCount
 				var reliabilityWeight float32
 				server.Raise(result.Scan(
 					&cityLocationId,
@@ -1986,21 +2026,27 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					&networkId,
 					&netTypeScore,
 					&netTypeScoreSpeed,
+					&minRelativeLatencyMillis,
+					&maxBytesPerSecond,
 					&reliabilityWeight,
 				))
 				clientScore := &ClientScore{
-					ClientId:          clientId,
-					NetworkId:         networkId,
-					ReliabilityWeight: reliabilityWeight,
-					Scores:            map[string]int{},
-					Tiers:             map[string]int{},
+					ClientId:                 clientId,
+					NetworkId:                networkId,
+					ReliabilityWeight:        reliabilityWeight,
+					MinRelativeLatencyMillis: minRelativeLatencyMillis,
+					MaxBytesPerSecond:        maxBytesPerSecond,
+					Scores:                   map[string]int{},
+					Tiers:                    map[string]int{},
 				}
 
-				clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
-				clientScore.Scores[RankModeSpeed] = scorePerTier * netTypeScoreSpeed
-
-				clientScore.Tiers[RankModeQuality] = netTypeScore
-				clientScore.Scores[RankModeQuality] = scorePerTier * netTypeScore
+				setScore(
+					clientScore,
+					netTypeScore,
+					netTypeScoreSpeed,
+					minRelativeLatencyMillis,
+					maxBytesPerSecond,
+				)
 
 				clientScores, ok := locationClientScores[cityLocationId]
 				if !ok {
@@ -2037,6 +2083,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	                network_client_location_reliability.network_id,
 	                network_client_location_reliability.max_net_type_score,
 	                network_client_location_reliability.max_net_type_score_speed,
+	                network_client_location_reliability.min_relative_latency_ms,
+		            network_client_location_reliability.max_bytes_per_second,
 	                client_connection_reliability_score.reliability_weight
 
 	            FROM network_client_location_reliability
@@ -2067,6 +2115,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				var networkId server.Id
 				var netTypeScore int
 				var netTypeScoreSpeed int
+				var minRelativeLatencyMillis int
+				var maxBytesPerSecond ByteCount
 				var reliabilityWeight float32
 				server.Raise(result.Scan(
 					&cityLocationGroupId,
@@ -2076,21 +2126,27 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					&networkId,
 					&netTypeScore,
 					&netTypeScoreSpeed,
+					&minRelativeLatencyMillis,
+					&maxBytesPerSecond,
 					&reliabilityWeight,
 				))
 				clientScore := &ClientScore{
-					ClientId:          clientId,
-					NetworkId:         networkId,
-					ReliabilityWeight: reliabilityWeight,
-					Scores:            map[string]int{},
-					Tiers:             map[string]int{},
+					ClientId:                 clientId,
+					NetworkId:                networkId,
+					ReliabilityWeight:        reliabilityWeight,
+					MinRelativeLatencyMillis: minRelativeLatencyMillis,
+					MaxBytesPerSecond:        maxBytesPerSecond,
+					Scores:                   map[string]int{},
+					Tiers:                    map[string]int{},
 				}
 
-				clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
-				clientScore.Scores[RankModeSpeed] = scorePerTier * netTypeScoreSpeed
-
-				clientScore.Tiers[RankModeQuality] = netTypeScore
-				clientScore.Scores[RankModeQuality] = scorePerTier * netTypeScore
+				setScore(
+					clientScore,
+					netTypeScore,
+					netTypeScoreSpeed,
+					minRelativeLatencyMillis,
+					maxBytesPerSecond,
+				)
 
 				if cityLocationGroupId != nil {
 					clientScores, ok := locationGroupClientScores[*cityLocationGroupId]
@@ -2390,12 +2446,20 @@ func FindProviders2(
 		return clientScore.ReliabilityWeight
 	})
 
-	// band by scores
+	// band by tier, score
 	slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
 		clientScoreA := clientScores[a]
 		clientScoreB := clientScores[b]
 
-		return clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]
+		if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
+			return d
+		}
+
+		if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
+			return d
+		}
+
+		return 0
 	})
 
 	filterActive := func(clientNetworks map[server.Id]server.Id) {

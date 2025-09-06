@@ -640,8 +640,10 @@ type clientLocationReliability struct {
 
 	clientAddressHashes map[[32]byte]int
 
-	netTypeScores      map[int]int
-	netTypeScoreSpeeds map[int]int
+	netTypeScores            map[int]int
+	netTypeScoreSpeeds       map[int]int
+	allBytesPerSecond        map[ByteCount]int
+	allRelativeLatencyMillis map[int]int
 }
 
 // server.ComplexValue
@@ -654,8 +656,10 @@ func (self *clientLocationReliability) Values() []any {
 	// [5] location_count
 	// [6] max_net_type_score
 	// [7] max_net_type_score_speed
+	// [8] max_bytes_per_second
+	// [9] min_relative_latency_ms
 
-	values := make([]any, 8)
+	values := make([]any, 10)
 
 	values[0] = self.networkId
 
@@ -683,6 +687,26 @@ func (self *clientLocationReliability) Values() []any {
 	}
 	values[7] = maxNetTypeScoreSpeed
 
+	maxBytesPerSecond := ByteCount(0)
+	for bytesPerSecond, _ := range self.allBytesPerSecond {
+		maxBytesPerSecond = max(maxBytesPerSecond, bytesPerSecond)
+	}
+	values[8] = maxBytesPerSecond
+
+	var minRelativeLatencyMillis int
+	if len(self.allRelativeLatencyMillis) == 0 {
+		minRelativeLatencyMillis = 0
+	} else {
+		keys := maps.Keys(self.allRelativeLatencyMillis)
+		minRelativeLatencyMillis = keys[0]
+		if 1 < len(keys) {
+			for _, relativeLatencyMillis := range keys[1:] {
+				minRelativeLatencyMillis = min(minRelativeLatencyMillis, relativeLatencyMillis)
+			}
+		}
+	}
+	values[9] = minRelativeLatencyMillis
+
 	return values
 }
 
@@ -697,8 +721,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// - if a disconnected client is not in `network_client_location_reliability`,
 	//   the most recent disconnected connection is used to update the values
 
-	// for each client, summarize all the active locations
+	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
 
+	// for each client, summarize all the active locations
 	result, err := tx.Query(
 		ctx,
 		`
@@ -710,7 +735,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
 			network_client_location.net_type_score,
-			network_client_location.net_type_score_speed
+			network_client_location.net_type_score_speed,
+			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
 
 		FROM network_client_connection
 
@@ -720,12 +747,16 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
 
+		LEFT JOIN network_client_latency ON
+			network_client_latency.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_speed ON
+			network_client_speed.connection_id = network_client_connection.connection_id
+
 		WHERE
 			network_client_connection.connected = true
 		`,
 	)
-
-	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
@@ -736,6 +767,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var countryLocationId server.Id
 			var netTypeScore int
 			var netTypeScoreSpeed int
+			var bytesPerSecond ByteCount
+			var relativeLatencyMillis int
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -746,14 +779,18 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&countryLocationId,
 				&netTypeScore,
 				&netTypeScoreSpeed,
+				&bytesPerSecond,
+				&relativeLatencyMillis,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
-					locations:           map[cityRegionCountry]int{},
-					clientAddressHashes: map[[32]byte]int{},
-					netTypeScores:       map[int]int{},
-					netTypeScoreSpeeds:  map[int]int{},
+					locations:                map[cityRegionCountry]int{},
+					clientAddressHashes:      map[[32]byte]int{},
+					netTypeScores:            map[int]int{},
+					netTypeScoreSpeeds:       map[int]int{},
+					allBytesPerSecond:        map[ByteCount]int{},
+					allRelativeLatencyMillis: map[int]int{},
 				}
 				clientLocationReliabilities[clientId] = r
 			}
@@ -766,9 +803,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			r.clientAddressHashes[clientAddressHash] += 1
 			r.netTypeScores[netTypeScore] += 1
 			r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
+			r.allBytesPerSecond[bytesPerSecond] += 1
+			r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
 		}
 	})
 
+	// fill in disconnected clients that are missing from `network_client_location_reliability`
 	result, err = tx.Query(
 		ctx,
 		`
@@ -780,7 +820,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
 			network_client_location.net_type_score,
-			network_client_location.net_type_score_speed
+			network_client_location.net_type_score_speed,
+			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
 
 		FROM network_client_connection
 
@@ -789,6 +831,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_latency ON
+			network_client_latency.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_speed ON
+			network_client_speed.connection_id = network_client_connection.connection_id
 
 		LEFT JOIN network_client_location_reliability ON
 			network_client_location_reliability.client_id = network_client_connection.client_id
@@ -805,8 +853,6 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		minTime,
 		maxTime,
 	)
-
-	// if client id does not exist, fill it in
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
@@ -817,6 +863,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var countryLocationId server.Id
 			var netTypeScore int
 			var netTypeScoreSpeed int
+			var bytesPerSecond ByteCount
+			var relativeLatencyMillis int
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -827,15 +875,19 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&countryLocationId,
 				&netTypeScore,
 				&netTypeScoreSpeed,
+				&bytesPerSecond,
+				&relativeLatencyMillis,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
-					networkId:           networkId,
-					locations:           map[cityRegionCountry]int{},
-					clientAddressHashes: map[[32]byte]int{},
-					netTypeScores:       map[int]int{},
-					netTypeScoreSpeeds:  map[int]int{},
+					networkId:                networkId,
+					locations:                map[cityRegionCountry]int{},
+					clientAddressHashes:      map[[32]byte]int{},
+					netTypeScores:            map[int]int{},
+					netTypeScoreSpeeds:       map[int]int{},
+					allBytesPerSecond:        map[ByteCount]int{},
+					allRelativeLatencyMillis: map[int]int{},
 				}
 				clientLocationReliabilities[clientId] = r
 
@@ -847,6 +899,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				r.clientAddressHashes[clientAddressHash] += 1
 				r.netTypeScores[netTypeScore] += 1
 				r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
+				r.allBytesPerSecond[bytesPerSecond] += 1
+				r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
 			}
 			// else there is already an entry, don't update
 		}
@@ -865,7 +919,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	            client_address_hash_count int,
 	            location_count int,
 	            max_net_type_score smallint,
-	            max_net_type_score_speed smallint
+	            max_net_type_score_speed smallint,
+	            max_bytes_per_second bigint,
+	            min_relative_latency_ms integer
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -885,7 +941,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count,
 	        connected,
 	        max_net_type_score,
-	        max_net_type_score_speed
+	        max_net_type_score_speed,
+	        max_bytes_per_second,
+	        min_relative_latency_ms
 	    )
 	    SELECT
 	    	client_id,
@@ -898,7 +956,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count,
 	        true AS connected,
 	        max_net_type_score,
-	        max_net_type_score_speed
+	        max_net_type_score_speed,
+	        max_bytes_per_second,
+	        min_relative_latency_ms
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -912,7 +972,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count = EXCLUDED.location_count,
 	        connected = true,
 	        max_net_type_score = EXCLUDED.max_net_type_score,
-	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed
+	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed,
+	        max_bytes_per_second = EXCLUDED.max_bytes_per_second,
+	        min_relative_latency_ms = EXCLUDED.min_relative_latency_ms
 	    `,
 		updateBlockNumber,
 	))

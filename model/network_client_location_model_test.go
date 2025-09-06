@@ -234,6 +234,7 @@ func TestBestAvailableProviders(t *testing.T) {
 			stats,
 		)
 		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientScores(ctx, 5*time.Second)
 
 		res, err := FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)

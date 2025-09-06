@@ -2287,4 +2287,11 @@ var migrations = []any{
         ALTER TABLE network_client_connection
             ADD COLUMN expected_latency_ms integer NOT NULL DEFAULT 0
     `),
+
+	// relative latency is actual - expected
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability
+            ADD column max_bytes_per_second bigint NOT NULL DEFAULT 0,
+            ADD column min_relative_latency_ms integer NOT NULL DEFAULT 0
+    `),
 }
