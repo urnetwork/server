@@ -2634,6 +2634,7 @@ type SubscriptionMarket = string
 const SubscriptionMarketApple = "apple"
 const SubscriptionMarketGoogle = "google"
 const SubscriptionMarketStripe = "stripe"
+const SubscriptionMarketSolana = "solana"
 
 type SubscriptionRenewal struct {
 	NetworkId          server.Id

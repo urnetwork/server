@@ -59,3 +59,7 @@ func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
 func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.SubscriptionCreatePaymentId, w, r)
 }
+
+func CreateSolanaPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.CreateSolanaPaymentIntent, w, r)
+}

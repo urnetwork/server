@@ -95,8 +95,9 @@ Options:
 		router.NewRoute("POST", "/pay/stripe", handlers.StripeWebhook),
 		router.NewRoute("POST", "/pay/coinbase", handlers.CoinbaseWebhook),
 		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
-		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
+		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
+		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),

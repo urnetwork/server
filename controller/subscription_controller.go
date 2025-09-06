@@ -42,6 +42,8 @@ const RefreshFreeTransferBalance = 60 * model.Gib
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
+const SubscriptionYearDuration = 365 * 24 * time.Hour
+
 const SpecialCompany = "company"
 
 type Skus struct {
@@ -1653,18 +1655,20 @@ type NativeTransfer struct {
 }
 
 type TokenTransfer struct {
-	FromTokenAccount string `json:"fromTokenAccount"`
-	FromUserAccount  string `json:"fromUserAccount"`
-	Mint             string `json:"mint"`
-	ToTokenAccount   string `json:"toTokenAccount"`
-	ToUserAccount    string `json:"toUserAccount"`
-	TokenAmount      int64  `json:"tokenAmount"`
-	TokenStandard    string `json:"tokenStandard"`
+	FromTokenAccount string  `json:"fromTokenAccount"`
+	FromUserAccount  string  `json:"fromUserAccount"`
+	Mint             string  `json:"mint"`
+	ToTokenAccount   string  `json:"toTokenAccount"`
+	ToUserAccount    string  `json:"toUserAccount"`
+	TokenAmount      float64 `json:"tokenAmount"`
+	TokenStandard    string  `json:"tokenStandard"`
 }
 
 type HeliusWebhookArgs struct{}
 
-type HeliusWebhookResult struct{}
+type HeliusWebhookResult struct {
+	Message string `json:"message,omitempty"`
+}
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
@@ -1675,14 +1679,19 @@ func HeliusWebhook(
 ) (*HeliusWebhookResult, error) {
 
 	if transaction.Type != "TRANSFER" {
-		return &HeliusWebhookResult{}, nil
+		return &HeliusWebhookResult{
+			Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
+		}, nil
 	}
 
 	if len(transaction.TokenTransfers) == 0 {
-		return &HeliusWebhookResult{}, nil
+		return &HeliusWebhookResult{
+			Message: "Ignoring transaction with no token transfers",
+		}, nil
 	}
 
 	paymentReceived := false
+	var tokenAmountReceived float64
 
 	for _, tokenTransfer := range transaction.TokenTransfers {
 
@@ -1690,13 +1699,83 @@ func HeliusWebhook(
 			tokenTransfer.ToUserAccount == solanaReceiverAddress &&
 			tokenTransfer.TokenAmount >= 30 {
 			paymentReceived = true
+			tokenAmountReceived = tokenTransfer.TokenAmount
 		}
 
 	}
 
 	if !paymentReceived {
-		return &HeliusWebhookResult{}, nil
+		return &HeliusWebhookResult{
+			Message: "Ignoring transaction with no matching USDC payment",
+		}, nil
 	}
 
-	return &HeliusWebhookResult{}, nil
+	// array of accounts to use to search for payment intents
+	accounts := make([]string, len(transaction.AccountData))
+	for i, accountData := range transaction.AccountData {
+		accounts[i] = accountData.Account
+	}
+
+	networkId, err := model.SearchPaymentIntents(accounts, clientSession)
+
+	if err != nil {
+		glog.Errorf("Failed to find network ID for Solana payment: %v", err)
+		return &HeliusWebhookResult{
+			Message: "Server err calling SearchPaymentIntents",
+		}, nil
+	}
+
+	if networkId == nil {
+		glog.Infof("No payment intent found for this network ID")
+		return &HeliusWebhookResult{
+			Message: "No payment intent found for this network ID",
+		}, nil
+	}
+
+	// good to go, create transfer balance + year plan
+	startTime := server.NowUtc()
+	endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          *networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         model.UsdToNanoCents(tokenAmountReceived),
+		SubscriptionMarket: model.SubscriptionMarketSolana,
+		TransactionId:      transaction.Signature,
+	}
+
+	model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
+
+	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
+
+	return &HeliusWebhookResult{
+		Message: fmt.Sprintf("Payment received for network ID %s", *networkId),
+	}, nil
+}
+
+/**
+ * Solana Payment intents
+ * We create a reference for each payment intent and map it to the network ID
+ */
+
+type SolanaPaymentIntentArgs struct {
+	Reference string `json:"reference"`
+}
+
+type SolanaPaymentIntentResult struct {
+	Error *SolanaPaymentIntentError `json:"error,omitempty"`
+}
+
+type SolanaPaymentIntentError struct {
+	Message string `json:"message"`
+}
+
+func CreateSolanaPaymentIntent(
+	intent *SolanaPaymentIntentArgs,
+	clientSession *session.ClientSession,
+) (*SolanaPaymentIntentResult, error) {
+	model.CreateSolanaPaymentIntent(intent.Reference, clientSession)
+	return &SolanaPaymentIntentResult{}, nil
 }
