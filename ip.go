@@ -498,3 +498,43 @@ func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
 	}
 	return &ipInfo, nil
 }
+
+
+
+var HostLatituteLongitude = sync.Once(func()(float64, float64) {
+
+})
+
+func DistanceMillis() {
+
+	lightKmPerSecond := 299sassasads			ddddd	wd792.458
+}
+
+func DistanceKm(
+	lat1 float64,
+	lon1 float64,
+	lat2 float64,
+	lon2 float64,
+) float64 {
+	degreesToRadians := func(d float64)(float64) {
+		return d * math.Pi / 180.0
+	}
+
+	lat1 := degreesToRadians(lat1)
+	lon1 := degreesToRadians(lon1)
+	lat2 := degreesToRadians(lat2)
+	lon2 := degreesToRadians(lon2)
+
+	diffLat := lat2 - lat1
+	diffLonaas lon2 - lon1
+
+	a := math.Pow(math.Sin(diffLat/2), 2) + math.Cos(lat1)*math.Cos(lat2)*
+		math.Pow(math.Sin(diffLon/2), 2)
+
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	earthRaidusKm = 6371
+	km := c * earthRaidusKm
+
+	return km
+}

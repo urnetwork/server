@@ -868,6 +868,18 @@ func ConnectNetworkClient(
 		return
 	}
 
+	var expectedLatencyMillis int
+	if ipInfo, err := server.IpInfo(clientIp); err == nil {
+		hostLatitude, hostLongitude := server.HostLatituteLongitude()
+		distanceMillis := server.DistanceMillis(
+			hostLatitude,
+			hostLongitude,
+			ipInfo.Latitude,
+			ipInfo.Longitude,
+		)
+		expectedLatencyMillis = 2 * distanceMillis
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
 		connectTime := server.NowUtc()
@@ -888,9 +900,10 @@ func ConnectNetworkClient(
 					connection_block,
 					client_address_hash,
 					client_address_port,
-					handler_id
+					handler_id,
+					expected_latency_ms
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			`,
 			clientId,
 			connectionId,
@@ -901,6 +914,7 @@ func ConnectNetworkClient(
 			clientIpHash[:],
 			clientPort,
 			handlerId,
+			expectedLatencyMillis,
 		))
 	})
 
