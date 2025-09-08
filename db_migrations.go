@@ -2210,10 +2210,12 @@ var migrations = []any{
         )
     `),
 
+	// DROPPED
 	newSqlMigration(`
         CREATE INDEX network_client_location_reliability_valid_client_id ON network_client_location_reliability (valid, client_id)
     `),
 
+	// DROPPED
 	// RENAMED to network_client_location_reliability_connected_valid_country
 	newSqlMigration(`
         CREATE INDEX network_client_location_reliability_connected_valid_location_id_client_id ON network_client_location_reliability (connected, valid, country_location_id, client_id)
@@ -2249,14 +2251,17 @@ var migrations = []any{
         ALTER INDEX network_client_location_reliability_connected_valid_location_id_client_id RENAME TO network_client_location_reliability_connected_valid_country
     `),
 
+	// DROPPED
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_region ON network_client_location_reliability (connected, valid, region_location_id, client_id)
     `),
 
+	// DROPPED
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_city ON network_client_location_reliability (connected, valid, city_location_id, client_id)
     `),
 
+	// DROPPED
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_location_reliability_connected_valid_client_id ON network_client_location_reliability (connected, valid, client_id)
     `),
@@ -2293,5 +2298,29 @@ var migrations = []any{
         ALTER TABLE network_client_location_reliability
             ADD column max_bytes_per_second bigint NOT NULL DEFAULT 0,
             ADD column min_relative_latency_ms integer NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_location_reliability_valid_connected_client_id ON network_client_location_reliability (valid, connected, client_id)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_connected_valid_country
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_connected_valid_region
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_connected_valid_city
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_valid_client_id
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_reliability_connected_valid_client_id
     `),
 }

@@ -61,6 +61,8 @@ func ScheduleUpdateClientReliabilityScores(clientSession *session.ClientSession,
 		clientSession,
 		task.RunOnce("update_client_reliability_scores"),
 		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(60*time.Minute),
+		task.Priority(task.TaskPriorityFastest),
 	)
 }
 
@@ -98,6 +100,8 @@ func ScheduleUpdateNetworkReliabilityWindow(clientSession *session.ClientSession
 		clientSession,
 		task.RunOnce("update_network_reliability_window"),
 		task.RunAt(server.NowUtc().Add(5*time.Minute)),
+		task.MaxTime(30*time.Minute),
+		task.Priority(task.TaskPriorityFastest),
 	)
 }
 

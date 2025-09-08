@@ -151,9 +151,10 @@ func ScheduleAdvancePayment(
 	tx server.PgTx,
 ) {
 	// randomly schedule between now and 5 minutes from now
-	delay := 5 * time.Minute
+	minDelay := 5 * time.Minute
+	delay := 25 * time.Minute
 	// this avoid circle and coinbase rate limiting
-	timeout := time.Duration(mathrand.Float64()*float64(delay/time.Second)) * time.Second
+	timeout := minDelay + time.Duration(mathrand.Float64()*float64(delay/time.Second))*time.Second
 	runAt := server.NowUtc().Add(timeout)
 
 	task.ScheduleTaskInTx(
@@ -189,9 +190,10 @@ func AdvancePayment(
 
 	if payment.WalletId == nil {
 		// cannot advance until the wallet is set
+		// the payment will get picked up in the next dangling payment sweep. No need to keep trying until then.
 		return &AdvancePaymentResult{
 			Complete: false,
-			Canceled: false,
+			Canceled: true,
 		}, nil
 	}
 
@@ -334,29 +336,35 @@ func advancePayment(
 
 		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
-		estimatedFees, err := circleClient.EstimateTransferFee(
-			payoutAmount,
-			accountWallet.WalletAddress,
-			formattedBlockchain,
-		)
+		feeInUSDC, err := func() (float64, error) {
+			estimatedFees, err := circleClient.EstimateTransferFee(
+				payoutAmount,
+				accountWallet.WalletAddress,
+				formattedBlockchain,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
+			}
+
+			fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
+			if err != nil {
+				return 0, err
+			}
+
+			feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
+			if err != nil {
+				return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
+			}
+
+			return feeInUSDC, nil
+		}()
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
-			return
+			// just choose a reasonable value
+			glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
+			feeInUSDC = 0.01
 		}
 
-		fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
-		if err != nil {
-			returnErr = err
-			return
-		}
-
-		feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
-		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
-			return
-		}
-
-		payoutAmount = payoutAmount - *feeInUSDC
+		payoutAmount = payoutAmount - feeInUSDC
 
 		// ensure paymout amount is greater than minimum payout threshold
 		if model.UsdToNanoCents(payoutAmount) <= 0 {
@@ -455,7 +463,7 @@ func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
 	return &fee, nil
 }
 
-func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
+func ConvertFeeToUSDC(currencyTicker string, fee float64) (float64, error) {
 
 	currencyTicker = strings.ToUpper(currencyTicker)
 
@@ -463,22 +471,22 @@ func ConvertFeeToUSDC(currencyTicker string, fee float64) (*float64, error) {
 
 	ratesResult, err := coinbaseClient.FetchExchangeRates(currencyTicker)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	rateStr, exists := ratesResult.Rates["USDC"]
 	if !exists {
-		return nil, fmt.Errorf("currency ticker not found for %s", currencyTicker)
+		return 0, fmt.Errorf("currency ticker not found for %s", currencyTicker)
 	}
 
 	rate, err := strconv.ParseFloat(rateStr, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse rate: %v", err)
+		return 0, fmt.Errorf("failed to parse rate: %v", err)
 	}
 
 	feeUsdc := fee * rate
 
-	return &feeUsdc, nil
+	return feeUsdc, nil
 }
 
 func getExplorerTxPath(network string) *string {

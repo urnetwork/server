@@ -714,7 +714,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 		panic(err)
 	}
 
-	fmt.Printf("Total Fee in USD: %f\n", *usdFee)
+	fmt.Printf("Total Fee in USD: %f\n", usdFee)
 }
 
 func adminWalletTransfer(opts docopt.Opts) {

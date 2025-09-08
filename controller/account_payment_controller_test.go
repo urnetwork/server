@@ -164,7 +164,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, paymentRecord.Blockchain, "MATIC")
 
 			// payoutAmount (in USD) - fee (in USD) = token amount
-			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout)-*feeInUSDC, float64(*paymentRecord.TokenAmount))
+			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout)-feeInUSDC, float64(*paymentRecord.TokenAmount))
 			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
 
@@ -263,7 +263,7 @@ func TestFeeToUsd(t *testing.T) {
 
 		feeInUSDC, err := ConvertFeeToUSDC("MATIC", fee)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, *feeInUSDC, 0.50)
+		assert.Equal(t, feeInUSDC, 0.50)
 	})
 }
 

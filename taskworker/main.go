@@ -53,6 +53,7 @@ Options:
 	if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
 		initTasks(quitEvent.Ctx)
 	} else {
+		// note the total parallelism is count*batch_size
 		count, _ := opts.Int("--count")
 		batchSize, _ := opts.Int("--batch_size")
 		port, _ := opts.Int("--port")

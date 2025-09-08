@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"sync"
 	"time"
 
 	"golang.org/x/exp/maps"
@@ -48,7 +49,7 @@ import (
 // IMPORTANT: if you change this number, you must also change the schema
 const BlockSizeSeconds = 1
 
-var DefaultMaxTime = 60 * time.Minute
+var DefaultMaxTime = 2 * time.Minute
 var ReleaseTimeout = 30 * time.Second
 
 // the reschedule time is uniformly chosen on [0, t] so the expected mean will be t/2
@@ -60,6 +61,8 @@ const (
 	TaskPriorityFastest TaskPriority = 20
 	TaskPrioritySlowest TaskPriority = 0
 )
+
+var DefaultPriority = (TaskPriorityFastest + TaskPrioritySlowest) / 2
 
 type TaskFunction[T any, R any] func(T, *session.ClientSession) (R, error)
 
@@ -157,7 +160,7 @@ func ScheduleTaskInTx[T any, R any](
 	}
 	var runOnce *RunOnceOption
 	runPriority := &RunPriorityOption{
-		Priority: (TaskPriorityFastest + TaskPrioritySlowest) / 2,
+		Priority: DefaultPriority,
 	}
 	runMaxTime := &RunMaxTimeOption{
 		MaxTime: DefaultMaxTime,
@@ -908,6 +911,11 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 	// select from the backlog as well as the current block
 	// run the current block first so that the current block doesn't get starved by the backlog
 
+	type taskPriority struct {
+		priority       int
+		maxTimeSeconds int
+	}
+
 	var taskIds []server.Id
 
 	server.Tx(self.ctx, func(tx server.PgTx) {
@@ -915,18 +923,19 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		now := server.NowUtc()
 		nowBlock := now.Unix() / BlockSizeSeconds
 
-		taskIdPriorities := map[server.Id]int{}
+		taskIdPriorities := map[server.Id]taskPriority{}
 
 		result, err := tx.Query(
 			self.ctx,
 			`
 			    SELECT
 			    	task_id,
-			    	run_priority
+			    	run_priority,
+			    	run_max_time_seconds
 			    FROM pending_task
 			    WHERE
 			        available_block <= $1
-			    ORDER BY available_block DESC, run_priority DESC
+			    ORDER BY available_block, run_priority DESC, run_max_time_seconds DESC
 			    LIMIT $2
 			    FOR UPDATE SKIP LOCKED
 		    `,
@@ -937,10 +946,11 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var taskId server.Id
-				var priority int
+				var priority taskPriority
 				server.Raise(result.Scan(
 					&taskId,
-					&priority,
+					&priority.priority,
+					&priority.maxTimeSeconds,
 				))
 				taskIdPriorities[taskId] = priority
 			}
@@ -953,11 +963,31 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		slices.SortStableFunc(taskIds, func(a server.Id, b server.Id) int {
 			aPriority := taskIdPriorities[a]
 			bPriority := taskIdPriorities[b]
-			return aPriority - bPriority
+			// descending
+			if c := bPriority.priority - aPriority.priority; c != 0 {
+				return c
+			}
+			// descending
+			if c := bPriority.maxTimeSeconds - aPriority.maxTimeSeconds; c != 0 {
+				return c
+			}
+			return 0
 		})
 
-		// keep up to n
-		taskIds = taskIds[0:min(n, len(taskIds))]
+		// isolate higher priority and longer running tasks
+		// this ensures that they don't block or get blocked with rescheduling
+		i := 0
+		for k := min(n, len(taskIds)); i < k; {
+			priority := taskIdPriorities[taskIds[i]]
+			i += 1
+			if DefaultPriority < priority.priority {
+				break
+			}
+			if DefaultMaxTime < time.Duration(priority.maxTimeSeconds)*time.Second {
+				break
+			}
+		}
+		taskIds = taskIds[0:i]
 
 		claimTime := server.NowUtc()
 		releaseTime := claimTime.Add(ReleaseTimeout)
@@ -978,7 +1008,7 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 				)
 			}
 		})
-	}, server.TxReadCommitted)
+	})
 
 	return GetTasks(self.ctx, taskIds...), nil
 }
@@ -1029,52 +1059,61 @@ func (self *TaskWorker) EvalTasks(n int) (
 			close(results)
 		}()
 
+		var wg sync.WaitGroup
+
 		for _, task := range tasks {
-			r := &result{
-				task: task,
-				finished: finished{
-					runStartTime: server.NowUtc(),
-				},
-			}
-			if target, ok := self.targets[task.FunctionName]; ok {
-				glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
-				r.runStartTime = server.NowUtc()
-				var result any
-				var err error
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
-							switch v := r.(type) {
-							case error:
-								err = v
-							default:
-								err = fmt.Errorf("%s", r)
-							}
-						}
-					}()
-					result, r.runPost, err = target.Run(evalCtx, task)
-				}()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 
-				if err == nil {
-					var resultJsonBytes []byte
-					resultJsonBytes, err = json.Marshal(result)
-					if err == nil {
-						r.resultJson = string(resultJsonBytes)
-					}
+				r := &result{
+					task: task,
+					finished: finished{
+						runStartTime: server.NowUtc(),
+					},
 				}
-				r.err = err
-			} else {
-				r.err = fmt.Errorf("Target not found (%s).", task.FunctionName)
-			}
+				if target, ok := self.targets[task.FunctionName]; ok {
+					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
+					r.runStartTime = server.NowUtc()
+					var result any
+					var err error
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
+								switch v := r.(type) {
+								case error:
+									err = v
+								default:
+									err = fmt.Errorf("%s", r)
+								}
+							}
+						}()
+						result, r.runPost, err = target.Run(evalCtx, task)
+					}()
 
-			r.runEndTime = server.NowUtc()
-			select {
-			case results <- r:
-			case <-taskCtx.Done():
-				return
-			}
+					if err == nil {
+						var resultJsonBytes []byte
+						resultJsonBytes, err = json.Marshal(result)
+						if err == nil {
+							r.resultJson = string(resultJsonBytes)
+						}
+					}
+					r.err = err
+				} else {
+					r.err = fmt.Errorf("Target not found (%s).", task.FunctionName)
+				}
+
+				r.runEndTime = server.NowUtc()
+				select {
+				case results <- r:
+				case <-taskCtx.Done():
+					return
+				}
+			}()
 		}
+
+		wg.Wait()
 	}()
 
 	finishedTasks := map[server.Id]*finished{}

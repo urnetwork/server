@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/exp/maps"
 
@@ -158,6 +159,7 @@ func ScheduleIndexSearchLocations(
 		&IndexSearchLocationsArgs{},
 		clientSession,
 		task.RunOnce("index_search_locations"),
+		task.MaxTime(30*time.Minute),
 	)
 }
 
