@@ -42,6 +42,8 @@ const RefreshFreeTransferBalance = 60 * model.Gib
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
+const SubscriptionYearDuration = 365 * 24 * time.Hour
+
 const SpecialCompany = "company"
 
 type Skus struct {
@@ -1568,4 +1570,212 @@ func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]i
 	}
 
 	return renewalInfo, transactionInfo, nil
+}
+
+/**
+ * Helius Webhooks for Solana payments
+ */
+
+var heliusAuthSecret = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
+	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
+})
+
+func VerifyHeliusBody(req *http.Request) (io.Reader, error) {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// log body
+	glog.Infof("Helius webhook body: %s", string(bodyBytes))
+
+	secret := req.Header.Get("X-Helius-Auth")
+	glog.Infof("Helius webhook auth header: %s", secret)
+	glog.Infof("Helius expected auth header: %s", heliusAuthSecret())
+	if secret != heliusAuthSecret() {
+		return nil, errors.New("Invalid authentication.")
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+type SolanaTransaction struct {
+	AccountData      []AccountData          `json:"accountData"`
+	Description      string                 `json:"description"`
+	Events           map[string]interface{} `json:"events"`
+	Fee              int64                  `json:"fee"`
+	FeePayer         string                 `json:"feePayer"`
+	Instructions     []Instruction          `json:"instructions"`
+	NativeTransfers  []NativeTransfer       `json:"nativeTransfers"`
+	Signature        string                 `json:"signature"`
+	Slot             int64                  `json:"slot"`
+	Source           string                 `json:"source"`
+	Timestamp        int64                  `json:"timestamp"`
+	TokenTransfers   []TokenTransfer        `json:"tokenTransfers"`
+	TransactionError interface{}            `json:"transactionError"`
+	Type             string                 `json:"type"`
+}
+
+type AccountData struct {
+	Account             string               `json:"account"`
+	NativeBalanceChange int64                `json:"nativeBalanceChange"`
+	TokenBalanceChanges []TokenBalanceChange `json:"tokenBalanceChanges"`
+}
+
+type TokenBalanceChange struct {
+	Mint           string         `json:"mint"`
+	RawTokenAmount RawTokenAmount `json:"rawTokenAmount"`
+	TokenAccount   string         `json:"tokenAccount"`
+	UserAccount    string         `json:"userAccount"`
+}
+
+type RawTokenAmount struct {
+	Decimals    int    `json:"decimals"`
+	TokenAmount string `json:"tokenAmount"`
+}
+
+type Instruction struct {
+	Accounts          []string           `json:"accounts"`
+	Data              string             `json:"data"`
+	InnerInstructions []InnerInstruction `json:"innerInstructions"`
+	ProgramId         string             `json:"programId"`
+}
+
+type InnerInstruction struct {
+	Accounts  []string `json:"accounts"`
+	Data      string   `json:"data"`
+	ProgramId string   `json:"programId"`
+}
+
+type NativeTransfer struct {
+	Amount          int64  `json:"amount"`
+	FromUserAccount string `json:"fromUserAccount"`
+	ToUserAccount   string `json:"toUserAccount"`
+}
+
+type TokenTransfer struct {
+	FromTokenAccount string  `json:"fromTokenAccount"`
+	FromUserAccount  string  `json:"fromUserAccount"`
+	Mint             string  `json:"mint"`
+	ToTokenAccount   string  `json:"toTokenAccount"`
+	ToUserAccount    string  `json:"toUserAccount"`
+	TokenAmount      float64 `json:"tokenAmount"`
+	TokenStandard    string  `json:"tokenStandard"`
+}
+
+type HeliusWebhookArgs struct{}
+
+type HeliusWebhookResult struct {
+	Message string `json:"message,omitempty"`
+}
+
+const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
+
+func HeliusWebhook(
+	transaction *SolanaTransaction,
+	clientSession *session.ClientSession,
+) (*HeliusWebhookResult, error) {
+
+	if transaction.Type != "TRANSFER" {
+		return &HeliusWebhookResult{
+			Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
+		}, nil
+	}
+
+	if len(transaction.TokenTransfers) == 0 {
+		return &HeliusWebhookResult{
+			Message: "Ignoring transaction with no token transfers",
+		}, nil
+	}
+
+	paymentReceived := false
+	var tokenAmountReceived float64
+
+	for _, tokenTransfer := range transaction.TokenTransfers {
+
+		if tokenTransfer.Mint == solanaUsdcMint &&
+			tokenTransfer.ToUserAccount == solanaReceiverAddress &&
+			tokenTransfer.TokenAmount >= 30 {
+			paymentReceived = true
+			tokenAmountReceived = tokenTransfer.TokenAmount
+		}
+
+	}
+
+	if !paymentReceived {
+		return &HeliusWebhookResult{
+			Message: "Ignoring transaction with no matching USDC payment",
+		}, nil
+	}
+
+	// array of accounts to use to search for payment intents
+	accounts := make([]string, len(transaction.AccountData))
+	for i, accountData := range transaction.AccountData {
+		accounts[i] = accountData.Account
+	}
+
+	networkId, err := model.SearchPaymentIntents(accounts, clientSession)
+
+	if err != nil {
+		glog.Errorf("Failed to find network ID for Solana payment: %v", err)
+		return &HeliusWebhookResult{
+			Message: "Server err calling SearchPaymentIntents",
+		}, nil
+	}
+
+	if networkId == nil {
+		glog.Infof("No payment intent found for this network ID")
+		return &HeliusWebhookResult{
+			Message: "No payment intent found for this network ID",
+		}, nil
+	}
+
+	// good to go, create transfer balance + year plan
+	startTime := server.NowUtc()
+	endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          *networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         model.UsdToNanoCents(tokenAmountReceived),
+		SubscriptionMarket: model.SubscriptionMarketSolana,
+		TransactionId:      transaction.Signature,
+	}
+
+	model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
+
+	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
+
+	return &HeliusWebhookResult{
+		Message: fmt.Sprintf("Payment received for network ID %s", *networkId),
+	}, nil
+}
+
+/**
+ * Solana Payment intents
+ * We create a reference for each payment intent and map it to the network ID
+ */
+
+type SolanaPaymentIntentArgs struct {
+	Reference string `json:"reference"`
+}
+
+type SolanaPaymentIntentResult struct {
+	Error *SolanaPaymentIntentError `json:"error,omitempty"`
+}
+
+type SolanaPaymentIntentError struct {
+	Message string `json:"message"`
+}
+
+func CreateSolanaPaymentIntent(
+	intent *SolanaPaymentIntentArgs,
+	clientSession *session.ClientSession,
+) (*SolanaPaymentIntentResult, error) {
+	model.CreateSolanaPaymentIntent(intent.Reference, clientSession)
+	return &SolanaPaymentIntentResult{}, nil
 }

@@ -2323,4 +2323,22 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS network_client_location_reliability_connected_valid_client_id
     `),
+
+	newSqlMigration(`
+		CREATE TABLE solana_payment_intent (
+		    payment_reference text PRIMARY KEY,
+		    network_id uuid NOT NULL,
+		    created_at timestamp NOT NULL DEFAULT now(),
+		    expires_at timestamp,
+		    tx_signature text
+		);
+
+		CREATE INDEX IF NOT EXISTS solana_payment_intent_payment_reference
+		    ON solana_payment_intent (payment_reference)
+		    WHERE tx_signature IS NULL;
+
+		CREATE UNIQUE INDEX IF NOT EXISTS solana_payment_intent_tx_signature
+		    ON solana_payment_intent (tx_signature)
+		    WHERE tx_signature IS NOT NULL;
+	`),
 }

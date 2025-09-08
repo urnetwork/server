@@ -39,6 +39,15 @@ func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+func HeliusWebhook(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyHeliusBody,
+		controller.HeliusWebhook,
+		w,
+		r,
+	)
+}
+
 func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.CheckBalanceCode, w, r)
 }
@@ -49,4 +58,8 @@ func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
 
 func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.SubscriptionCreatePaymentId, w, r)
+}
+
+func CreateSolanaPaymentIntent(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.CreateSolanaPaymentIntent, w, r)
 }
