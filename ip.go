@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	// "sync"
+	"math"
 
 	// "database/sql/driver"
 
@@ -475,6 +476,14 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 	return nil
 }
 
+func GetIpInfoFromString(ip string) (*IpInfo, error) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return nil, err
+	}
+	return GetIpInfo(addr)
+}
+
 func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 	if ipv4 := ip.To4(); ipv4 != nil {
 		addr := netip.AddrFrom4([4]byte(ipv4))
@@ -499,42 +508,60 @@ func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
 	return &ipInfo, nil
 }
 
+var HostLatituteLongitude = sync.OnceValues(func() (latitude float64, longitude float64) {
+	settings := GetSettings()
 
-
-var HostLatituteLongitude = sync.Once(func()(float64, float64) {
-
+	if s, ok := settings["latitude"]; ok {
+		if v, ok := s.(float64); ok {
+			latitude = v
+		}
+	}
+	if s, ok := settings["longitude"]; ok {
+		if v, ok := s.(float64); ok {
+			longitude = v
+		}
+	}
+	return
 })
 
-func DistanceMillis() {
-
-	lightKmPerSecond := 299sassasads			ddddd	wd792.458
+func DistanceMillis(
+	lat1 float64,
+	lon1 float64,
+	lat2 float64,
+	lon2 float64,
+) float64 {
+	km := DistanceKm(lat1, lon1, lat2, lon2)
+	lightKmPerMillisecond := 299.792458
+	millis := km / lightKmPerMillisecond
+	return millis
 }
 
+// from https://github.com/umahmood/haversine
 func DistanceKm(
 	lat1 float64,
 	lon1 float64,
 	lat2 float64,
 	lon2 float64,
 ) float64 {
-	degreesToRadians := func(d float64)(float64) {
+	degreesToRadians := func(d float64) float64 {
 		return d * math.Pi / 180.0
 	}
 
-	lat1 := degreesToRadians(lat1)
-	lon1 := degreesToRadians(lon1)
-	lat2 := degreesToRadians(lat2)
-	lon2 := degreesToRadians(lon2)
+	lat1 = degreesToRadians(lat1)
+	lon1 = degreesToRadians(lon1)
+	lat2 = degreesToRadians(lat2)
+	lon2 = degreesToRadians(lon2)
 
 	diffLat := lat2 - lat1
-	diffLonaas lon2 - lon1
+	diffLon := lon2 - lon1
 
 	a := math.Pow(math.Sin(diffLat/2), 2) + math.Cos(lat1)*math.Cos(lat2)*
 		math.Pow(math.Sin(diffLon/2), 2)
 
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
-	earthRaidusKm = 6371
-	km := c * earthRaidusKm
+	earthRadiusKm := 6371.0
+	km := c * earthRadiusKm
 
 	return km
 }

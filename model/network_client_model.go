@@ -869,7 +869,7 @@ func ConnectNetworkClient(
 	}
 
 	var expectedLatencyMillis int
-	if ipInfo, err := server.IpInfo(clientIp); err == nil {
+	if ipInfo, err := server.GetIpInfoFromString(clientIp); err == nil {
 		hostLatitude, hostLongitude := server.HostLatituteLongitude()
 		distanceMillis := server.DistanceMillis(
 			hostLatitude,
@@ -877,7 +877,7 @@ func ConnectNetworkClient(
 			ipInfo.Latitude,
 			ipInfo.Longitude,
 		)
-		expectedLatencyMillis = 2 * distanceMillis
+		expectedLatencyMillis = int(2.5*distanceMillis + 0.5)
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -981,6 +981,44 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// (cascade) clean up network_client_latency
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_latency
+			USING (
+			    SELECT
+			        network_client_latency.connection_id
+			    FROM network_client_latency
+			    LEFT JOIN network_client_connection ON
+			        network_client_connection.connection_id = network_client_latency.connection_id
+			    WHERE network_client_connection.connection_id IS NULL
+			) t
+			WHERE network_client_latency.connection_id = t.connection_id
+			`,
+		))
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// (cascade) clean up network_client_speed
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_speed
+			USING (
+			    SELECT
+			        network_client_speed.connection_id
+			    FROM network_client_speed
+			    LEFT JOIN network_client_connection ON
+			        network_client_connection.connection_id = network_client_speed.connection_id
+			    WHERE network_client_connection.connection_id IS NULL
+			) t
+			WHERE network_client_speed.connection_id = t.connection_id
+			`,
+		))
 	}, server.TxReadCommitted)
 
 	server.Tx(ctx, func(tx server.PgTx) {
