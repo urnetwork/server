@@ -831,7 +831,7 @@ func calculateReliabilityPayoutInTx(
 	now := server.NowUtc()
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now)
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now, true)
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)

@@ -152,7 +152,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		}
 		endTime := startTime.Add(time.Duration(n) * ReliabilityBlockDuration)
 
-		UpdateClientReliabilityScores(ctx, startTime, endTime)
+		UpdateClientReliabilityScores(ctx, startTime, endTime, true)
 
 		clientScores := GetAllClientReliabilityScores(ctx)
 		for clientId, reliabilityScore := range netReliabilityScores {
@@ -168,8 +168,8 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			}
 		}
 
-		UpdateNetworkReliabilityScores(ctx, startTime, endTime)
-		UpdateNetworkReliabilityWindow(ctx, startTime, endTime)
+		UpdateNetworkReliabilityScores(ctx, startTime, endTime, true)
+		UpdateNetworkReliabilityWindow(ctx, startTime, endTime, true)
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 

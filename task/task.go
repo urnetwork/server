@@ -1008,7 +1008,7 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 				)
 			}
 		})
-	})
+	}, server.TxReadCommitted)
 
 	return GetTasks(self.ctx, taskIds...), nil
 }
