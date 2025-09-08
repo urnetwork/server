@@ -868,6 +868,18 @@ func ConnectNetworkClient(
 		return
 	}
 
+	var expectedLatencyMillis int
+	if ipInfo, err := server.GetIpInfoFromString(clientIp); err == nil {
+		hostLatitude, hostLongitude := server.HostLatituteLongitude()
+		distanceMillis := server.DistanceMillis(
+			hostLatitude,
+			hostLongitude,
+			ipInfo.Latitude,
+			ipInfo.Longitude,
+		)
+		expectedLatencyMillis = int(2.5*distanceMillis + 0.5)
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		connectionId = server.NewId()
 		connectTime := server.NowUtc()
@@ -888,9 +900,10 @@ func ConnectNetworkClient(
 					connection_block,
 					client_address_hash,
 					client_address_port,
-					handler_id
+					handler_id,
+					expected_latency_ms
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			`,
 			clientId,
 			connectionId,
@@ -901,6 +914,7 @@ func ConnectNetworkClient(
 			clientIpHash[:],
 			clientPort,
 			handlerId,
+			expectedLatencyMillis,
 		))
 	})
 
@@ -967,6 +981,44 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			`,
 		))
 
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// (cascade) clean up network_client_latency
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_latency
+			USING (
+			    SELECT
+			        network_client_latency.connection_id
+			    FROM network_client_latency
+			    LEFT JOIN network_client_connection ON
+			        network_client_connection.connection_id = network_client_latency.connection_id
+			    WHERE network_client_connection.connection_id IS NULL
+			) t
+			WHERE network_client_latency.connection_id = t.connection_id
+			`,
+		))
+	}, server.TxReadCommitted)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// (cascade) clean up network_client_speed
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client_speed
+			USING (
+			    SELECT
+			        network_client_speed.connection_id
+			    FROM network_client_speed
+			    LEFT JOIN network_client_connection ON
+			        network_client_connection.connection_id = network_client_speed.connection_id
+			    WHERE network_client_connection.connection_id IS NULL
+			) t
+			WHERE network_client_speed.connection_id = t.connection_id
+			`,
+		))
 	}, server.TxReadCommitted)
 
 	server.Tx(ctx, func(tx server.PgTx) {

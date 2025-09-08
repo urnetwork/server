@@ -233,7 +233,8 @@ func TestBestAvailableProviders(t *testing.T) {
 			server.NowUtc(),
 			stats,
 		)
-		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc(), true)
+		UpdateClientScores(ctx, 5*time.Second)
 
 		res, err := FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
@@ -336,7 +337,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			)
 		}
 
-		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour))
+		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour), true)
 		UpdateClientScores(ctx, 5*time.Second)
 
 		clientIds := maps.Keys(clientSessions)

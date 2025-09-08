@@ -65,3 +65,70 @@ func TestIpInfoPerf(t *testing.T) {
 	fmt.Printf("[ip]%d lookups per second (%s total)\n", int((time.Duration(n)*duration)/time.Second), duration)
 	assert.Equal(t, duration <= 20*time.Second, true)
 }
+
+func TestDistance(t *testing.T) {
+	var tests = []struct {
+		lat1   float64
+		lon1   float64
+		lat2   float64
+		lon2   float64
+		km     float64
+		millis float64
+	}{
+		{
+			22.55, 43.12, // Rio de Janeiro, Brazil
+			13.45, 100.28, // Bangkok, Thailand
+			6094.544,
+			20.329,
+		},
+		{
+			20.10, 57.30, // Port Louis, Mauritius
+			0.57, 100.21, // Padang, Indonesia
+			5145.526,
+			17.164,
+		},
+		{
+			51.45, 1.15, // Oxford, United Kingdom
+			41.54, 12.27, // Vatican, City Vatican City
+			1389.179,
+			4.634,
+		},
+		{
+			22.34, 17.05, // Windhoek, Namibia
+			51.56, 4.29, // Rotterdam, Netherlands
+			3429.893,
+			11.441,
+		},
+		{
+			63.24, 56.59, // Esperanza, Argentina
+			8.50, 13.14, // Luanda, Angola
+			6996.186,
+			23.337,
+		},
+		{
+			90.00, 0.00, // North/South Poles
+			48.51, 2.21, // Paris,  France
+			4613.478,
+			15.389,
+		},
+		{
+			45.04, 7.42, // Turin, Italy
+			3.09, 101.42, // Kuala Lumpur, Malaysia
+			10078.112,
+			33.617,
+		},
+	}
+
+	for _, test := range tests {
+		km := DistanceKm(test.lat1, test.lon1, test.lat2, test.lon2)
+		millis := DistanceMillis(test.lat1, test.lon1, test.lat2, test.lon2)
+
+		eps := 0.1
+		if d := km - test.km; d < -eps || eps < d {
+			assert.Equal(t, test.km, km)
+		}
+		if d := millis - test.millis; d < -eps || eps < d {
+			assert.Equal(t, test.millis, millis)
+		}
+	}
+}

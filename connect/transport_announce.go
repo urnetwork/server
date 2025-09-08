@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	// "fmt"
+	mathrand "math/rand"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
 		LocationRetryTimeout:  5 * time.Minute,
 		MaxLatencyCount:       16,
+		MinTestTimeout:        120 * time.Second,
+		MaxTestTimeout:        600 * time.Second,
 	}
 }
 
@@ -26,6 +29,8 @@ type ConnectionAnnounceSettings struct {
 	SyncConnectionTimeout time.Duration
 	LocationRetryTimeout  time.Duration
 	MaxLatencyCount       int
+	MinTestTimeout        time.Duration
+	MaxTestTimeout        time.Duration
 }
 
 type LatencyTest struct {
@@ -167,13 +172,12 @@ func (self *ConnectionAnnounce) run() {
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-				if self.testConfig.AllowLatency() {
-					nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
-					if !nextLatency {
-						nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
+				if self.latencyTest == nil && self.speedTest == nil {
+					if self.testConfig.AllowLatency() {
+						nextLatency = true
+					} else if self.testConfig.AllowSpeed() {
+						nextSpeed = true
 					}
-				} else if self.testConfig.AllowSpeed() {
-					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
 				}
 			}()
 			if nextLatency || nextSpeed {
@@ -227,104 +231,140 @@ func (self *ConnectionAnnounce) run() {
 		self.setSpeedWithLock()
 	}()
 
-	established := self.announceTimeout == 0
-	nextStartTime := server.NowUtc()
-	for {
-		statsStartTime := nextStartTime
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-time.After(self.settings.SyncConnectionTimeout):
+	nextTestTime := server.NowUtc().Add(self.settings.MaxTestTimeout)
+	nextTest := func() time.Duration {
+		timeout := nextTestTime.Sub(server.NowUtc())
+		if 0 < timeout {
+			return timeout
 		}
-		nextStartTime = server.NowUtc()
-
-		// FIXME need events to support kicking off connections from the model
-		/*
-			status := model.GetNetworkClientConnectionStatus(self.ctx, connectionId)
-			if err := status.Err(); err != nil {
-				glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
-				return
-			}
-		*/
-
-		var receiveMessageCount uint64
-		var receiveByteCount ByteCount
-		var sendMessageCount uint64
-		var sendByteCount ByteCount
+		nextLatency := false
+		nextSpeed := false
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			receiveMessageCount = self.receiveMessageCount
-			receiveByteCount = self.receiveByteCount
-			sendMessageCount = self.sendMessageCount
-			sendByteCount = self.sendByteCount
-			self.receiveMessageCount = 0
-			self.receiveByteCount = 0
-			self.sendMessageCount = 0
-			self.sendByteCount = 0
+			if self.latencyTest == nil && self.speedTest == nil {
+				self.latencyCount = 0
+				self.speedCount = 0
+				if self.testConfig.AllowLatency() {
+					nextLatency = true
+				} else if self.testConfig.AllowSpeed() {
+					nextSpeed = true
+				}
+			}
 		}()
-
-		stats := &model.ClientReliabilityStats{
-			ReceiveMessageCount: receiveMessageCount,
-			ReceiveByteCount:    receiveByteCount,
-			SendMessageCount:    sendMessageCount,
-			SendByteCount:       sendByteCount,
+		if nextLatency {
+			self.nextLatency()
+		} else if nextSpeed {
+			self.nextSpeed()
 		}
+		timeout = self.settings.MinTestTimeout + time.Duration(
+			mathrand.Int63n(int64(self.settings.MaxTestTimeout-self.settings.MinTestTimeout)),
+		)
+		nextTestTime = server.NowUtc().Add(timeout)
+		return timeout
+	}
 
-		if established {
-			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, statsStartTime)
-			provideEnabled := currentProvideModes[model.ProvideModePublic]
+	established := self.announceTimeout == 0
+	nextStartTime := server.NowUtc()
+	for {
+		nextTestTimeout := nextTest()
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(nextTestTimeout):
+		case <-time.After(self.settings.SyncConnectionTimeout):
+			startTime := nextStartTime
+			nextStartTime = server.NowUtc()
 
-			nextLatency := false
-			nextSpeed := false
+			// FIXME need events to support kicking off connections from the model
+			/*
+				status := model.GetNetworkClientConnectionStatus(self.ctx, connectionId)
+				if err := status.Err(); err != nil {
+					glog.Infof("[t][%s]connection err = %s\n", connectionId, err)
+					return
+				}
+			*/
+
+			var receiveMessageCount uint64
+			var receiveByteCount ByteCount
+			var sendMessageCount uint64
+			var sendByteCount ByteCount
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-				if self.testConfig.AllowLatency() {
-					nextLatency = (self.latencyCount == 0 && self.latencyTest == nil)
-					if !nextLatency {
-						nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
-					}
-				} else if self.testConfig.AllowSpeed() {
-					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
-				}
+				receiveMessageCount = self.receiveMessageCount
+				receiveByteCount = self.receiveByteCount
+				sendMessageCount = self.sendMessageCount
+				sendByteCount = self.sendByteCount
+				self.receiveMessageCount = 0
+				self.receiveByteCount = 0
+				self.sendMessageCount = 0
+				self.sendByteCount = 0
 			}()
-			if provideEnabled {
-				if nextLatency {
-					self.nextLatency()
-				} else if nextSpeed {
-					self.nextSpeed()
+
+			stats := &model.ClientReliabilityStats{
+				ReceiveMessageCount: receiveMessageCount,
+				ReceiveByteCount:    receiveByteCount,
+				SendMessageCount:    sendMessageCount,
+				SendByteCount:       sendByteCount,
+			}
+
+			if established {
+				changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
+				provideEnabled := currentProvideModes[model.ProvideModePublic]
+
+				nextLatency := false
+				nextSpeed := false
+				func() {
+					self.stateLock.Lock()
+					defer self.stateLock.Unlock()
+					if self.latencyTest == nil && self.speedTest == nil {
+
+					}
+					if self.testConfig.AllowLatency() {
+						nextLatency = (self.latencyCount == 0)
+					}
+					if !nextLatency && self.testConfig.AllowSpeed() {
+						nextSpeed = (self.speedCount == 0)
+					}
+				}()
+				if provideEnabled {
+					if nextLatency {
+						self.nextLatency()
+					} else if nextSpeed {
+						self.nextSpeed()
+					}
 				}
-			}
 
-			// add reliability stats if all of:
-			// 1. established provide public (no changes in block)
-			// 2. established connection
-			// 3. at least one message count
-			// OR
-			// 1. new connection (this will invalidate the block)
-			// OR
-			// 1. provide change (this will invalidate the block)
+				// add reliability stats if all of:
+				// 1. established provide public (no changes in block)
+				// 2. established connection
+				// 3. at least one message count
+				// OR
+				// 1. new connection (this will invalidate the block)
+				// OR
+				// 1. provide change (this will invalidate the block)
 
-			stats.ConnectionEstablishedCount = 1
-			if provideEnabled {
-				stats.ProvideEnabledCount = 1
+				stats.ConnectionEstablishedCount = 1
+				if provideEnabled {
+					stats.ProvideEnabledCount = 1
+				}
+				if 0 < changedCount {
+					stats.ProvideChangedCount = 1
+				}
+			} else {
+				established = true
+				stats.ConnectionNewCount = 1
 			}
-			if 0 < changedCount {
-				stats.ProvideChangedCount = 1
-			}
-		} else {
-			established = true
-			stats.ConnectionNewCount = 1
+			model.AddClientReliabilityStats(
+				self.ctx,
+				self.networkId,
+				self.clientId,
+				clientAddressHash,
+				startTime,
+				stats,
+			)
 		}
-		model.AddClientReliabilityStats(
-			self.ctx,
-			self.networkId,
-			self.clientId,
-			clientAddressHash,
-			statsStartTime,
-			stats,
-		)
 	}
 }
 
@@ -402,7 +442,7 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 		if self.latencyTest != nil && self.latencyTest.TestId == latencyTest.TestId {
 			latencyMillis := uint64((receiveTime.Sub(self.latencyTestSendTime) + time.Millisecond/2) / time.Millisecond)
 
-			glog.Infof("[ta][%s]latency %dms\n", self.clientId, latencyMillis)
+			glog.V(1).Infof("[ta][%s]latency %dms\n", self.clientId, latencyMillis)
 
 			self.latencyCount += 1
 			if self.latencyCount == 1 || latencyMillis < self.minLatencyMillis {
@@ -424,8 +464,7 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 	}()
 	if nextLatency {
 		self.nextLatency()
-	}
-	if nextSpeed {
+	} else if nextSpeed {
 		self.nextSpeed()
 	}
 	return
@@ -497,7 +536,7 @@ func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool
 			testMillis := model.ByteCount((receiveTime.Sub(self.speedTestSendTime) + time.Millisecond/2) / time.Millisecond)
 			bytesPerSecond := (1000*speedTest.TotalByteCount + testMillis/2) / testMillis
 
-			glog.Infof("[ta][%s]speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
+			glog.V(1).Infof("[ta][%s]speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
 
 			self.speedCount += 1
 			if self.speedCount == 1 || self.maxBytesPerSecond < bytesPerSecond {

@@ -24,6 +24,7 @@ func ScheduleCloseExpiredNetworkClientHandlers(clientSession *session.ClientSess
 		&CloseExpiredNetworkClientHandlersArgs{},
 		clientSession,
 		task.RunOnce("close_expired_network_client_handlers"),
+		task.MaxTime(15*time.Minute),
 		task.RunAt(server.NowUtc().Add(model.NetworkClientHandlerHeartbeatTimeout)),
 	)
 }

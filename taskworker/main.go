@@ -53,6 +53,7 @@ Options:
 	if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
 		initTasks(quitEvent.Ctx)
 	} else {
+		// note the total parallelism is count*batch_size
 		count, _ := opts.Int("--count")
 		batchSize, _ := opts.Int("--batch_size")
 		port, _ := opts.Int("--port")
@@ -121,6 +122,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
 		work.ScheduleUpdateClientScores(clientSession, tx)
+		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
 	})
 }
 
@@ -253,6 +255,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.UpdateClientScores,
 			work.UpdateClientScoresPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldNetworkReliabilityWindow,
+			work.RemoveOldNetworkReliabilityWindowPost,
 		),
 	)
 

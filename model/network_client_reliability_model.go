@@ -104,9 +104,11 @@ type ReliabilityScore struct {
 
 // FIXME support country_location_id
 // this should run regulalry to keep the client scores up to date
-func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
+func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+		if complete {
+			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+		}
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -200,16 +202,18 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 	return
 }
 
-func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time) {
+func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete)
 	}, server.TxReadCommitted)
 }
 
 // FIXME support country_location_id
 // this should run on payout to compute the latest
-func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
-	UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+	if complete {
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+	}
 
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -574,21 +578,23 @@ func ReliabilityBlockCountPerBucket() int {
 	)
 }
 
-func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) {
+func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime)
+		if complete {
+			UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete)
+		}
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM network_connection_reliability_window
-			`,
-		))
+		// server.RaisePgResult(tx.Exec(
+		// 	ctx,
+		// 	`
+		// 	DELETE FROM network_connection_reliability_window
+		// 	`,
+		// ))
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -620,10 +626,33 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			) t
 			GROUP BY t.network_id, t.bucket_number
 			ORDER BY t.network_id, t.bucket_number
+			ON CONFLICT (network_id, bucket_number) DO UPDATE
+			SET
+				reliability_weight = EXCLUDED.reliability_weight,
+				client_count = EXCLUDED.client_count,
+				total_client_count = EXCLUDED.total_client_count
 			`,
 			minBlockNumber,
 			maxBlockNumber,
 			blockCountPerBucket,
+		))
+	}, server.TxReadCommitted)
+}
+
+func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - 1
+
+		blockCountPerBucket := ReliabilityBlockCountPerBucket()
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_connection_reliability_window
+			WHERE
+				bucket_number <= $1
+			`,
+			minBlockNumber/int64(blockCountPerBucket),
 		))
 	}, server.TxReadCommitted)
 }
@@ -640,8 +669,10 @@ type clientLocationReliability struct {
 
 	clientAddressHashes map[[32]byte]int
 
-	netTypeScores      map[int]int
-	netTypeScoreSpeeds map[int]int
+	netTypeScores            map[int]int
+	netTypeScoreSpeeds       map[int]int
+	allBytesPerSecond        map[ByteCount]int
+	allRelativeLatencyMillis map[int]int
 }
 
 // server.ComplexValue
@@ -654,8 +685,10 @@ func (self *clientLocationReliability) Values() []any {
 	// [5] location_count
 	// [6] max_net_type_score
 	// [7] max_net_type_score_speed
+	// [8] max_bytes_per_second
+	// [9] min_relative_latency_ms
 
-	values := make([]any, 8)
+	values := make([]any, 10)
 
 	values[0] = self.networkId
 
@@ -683,13 +716,38 @@ func (self *clientLocationReliability) Values() []any {
 	}
 	values[7] = maxNetTypeScoreSpeed
 
+	maxBytesPerSecond := ByteCount(0)
+	for bytesPerSecond, _ := range self.allBytesPerSecond {
+		maxBytesPerSecond = max(maxBytesPerSecond, bytesPerSecond)
+	}
+	values[8] = maxBytesPerSecond
+
+	var minRelativeLatencyMillis int
+	if len(self.allRelativeLatencyMillis) == 0 {
+		minRelativeLatencyMillis = 0
+	} else {
+		keys := maps.Keys(self.allRelativeLatencyMillis)
+		minRelativeLatencyMillis = keys[0]
+		if 1 < len(keys) {
+			for _, relativeLatencyMillis := range keys[1:] {
+				minRelativeLatencyMillis = min(minRelativeLatencyMillis, relativeLatencyMillis)
+			}
+		}
+	}
+	values[9] = minRelativeLatencyMillis
+
 	return values
+}
+
+func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, maxTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+	}, server.TxReadCommitted)
 }
 
 // this should be called regularly
 // a valid client will have one connected location and one connected address hash
 func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
-
 	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
 	// old entries are not deleted on each update, but the connected status is updated
@@ -697,8 +755,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// - if a disconnected client is not in `network_client_location_reliability`,
 	//   the most recent disconnected connection is used to update the values
 
-	// for each client, summarize all the active locations
+	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
 
+	// for each client, summarize all the active locations
 	result, err := tx.Query(
 		ctx,
 		`
@@ -710,7 +769,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
 			network_client_location.net_type_score,
-			network_client_location.net_type_score_speed
+			network_client_location.net_type_score_speed,
+			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
 
 		FROM network_client_connection
 
@@ -720,12 +781,16 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
 
+		LEFT JOIN network_client_latency ON
+			network_client_latency.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_speed ON
+			network_client_speed.connection_id = network_client_connection.connection_id
+
 		WHERE
 			network_client_connection.connected = true
 		`,
 	)
-
-	clientLocationReliabilities := map[server.Id]*clientLocationReliability{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
@@ -736,6 +801,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var countryLocationId server.Id
 			var netTypeScore int
 			var netTypeScoreSpeed int
+			var bytesPerSecond ByteCount
+			var relativeLatencyMillis int
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -746,14 +813,18 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&countryLocationId,
 				&netTypeScore,
 				&netTypeScoreSpeed,
+				&bytesPerSecond,
+				&relativeLatencyMillis,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
-					locations:           map[cityRegionCountry]int{},
-					clientAddressHashes: map[[32]byte]int{},
-					netTypeScores:       map[int]int{},
-					netTypeScoreSpeeds:  map[int]int{},
+					locations:                map[cityRegionCountry]int{},
+					clientAddressHashes:      map[[32]byte]int{},
+					netTypeScores:            map[int]int{},
+					netTypeScoreSpeeds:       map[int]int{},
+					allBytesPerSecond:        map[ByteCount]int{},
+					allRelativeLatencyMillis: map[int]int{},
 				}
 				clientLocationReliabilities[clientId] = r
 			}
@@ -766,9 +837,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			r.clientAddressHashes[clientAddressHash] += 1
 			r.netTypeScores[netTypeScore] += 1
 			r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
+			r.allBytesPerSecond[bytesPerSecond] += 1
+			r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
 		}
 	})
 
+	// fill in disconnected clients that are missing from `network_client_location_reliability`
 	result, err = tx.Query(
 		ctx,
 		`
@@ -780,7 +854,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        network_client_location.region_location_id,
 	        network_client_location.country_location_id,
 			network_client_location.net_type_score,
-			network_client_location.net_type_score_speed
+			network_client_location.net_type_score_speed,
+			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
 
 		FROM network_client_connection
 
@@ -789,6 +865,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_latency ON
+			network_client_latency.connection_id = network_client_connection.connection_id
+
+		LEFT JOIN network_client_speed ON
+			network_client_speed.connection_id = network_client_connection.connection_id
 
 		LEFT JOIN network_client_location_reliability ON
 			network_client_location_reliability.client_id = network_client_connection.client_id
@@ -805,8 +887,6 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		minTime,
 		maxTime,
 	)
-
-	// if client id does not exist, fill it in
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
@@ -817,6 +897,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var countryLocationId server.Id
 			var netTypeScore int
 			var netTypeScoreSpeed int
+			var bytesPerSecond ByteCount
+			var relativeLatencyMillis int
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -827,15 +909,19 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&countryLocationId,
 				&netTypeScore,
 				&netTypeScoreSpeed,
+				&bytesPerSecond,
+				&relativeLatencyMillis,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
-					networkId:           networkId,
-					locations:           map[cityRegionCountry]int{},
-					clientAddressHashes: map[[32]byte]int{},
-					netTypeScores:       map[int]int{},
-					netTypeScoreSpeeds:  map[int]int{},
+					networkId:                networkId,
+					locations:                map[cityRegionCountry]int{},
+					clientAddressHashes:      map[[32]byte]int{},
+					netTypeScores:            map[int]int{},
+					netTypeScoreSpeeds:       map[int]int{},
+					allBytesPerSecond:        map[ByteCount]int{},
+					allRelativeLatencyMillis: map[int]int{},
 				}
 				clientLocationReliabilities[clientId] = r
 
@@ -847,6 +933,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				r.clientAddressHashes[clientAddressHash] += 1
 				r.netTypeScores[netTypeScore] += 1
 				r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
+				r.allBytesPerSecond[bytesPerSecond] += 1
+				r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
 			}
 			// else there is already an entry, don't update
 		}
@@ -865,7 +953,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	            client_address_hash_count int,
 	            location_count int,
 	            max_net_type_score smallint,
-	            max_net_type_score_speed smallint
+	            max_net_type_score_speed smallint,
+	            max_bytes_per_second bigint,
+	            min_relative_latency_ms integer
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -885,7 +975,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count,
 	        connected,
 	        max_net_type_score,
-	        max_net_type_score_speed
+	        max_net_type_score_speed,
+	        max_bytes_per_second,
+	        min_relative_latency_ms
 	    )
 	    SELECT
 	    	client_id,
@@ -898,7 +990,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count,
 	        true AS connected,
 	        max_net_type_score,
-	        max_net_type_score_speed
+	        max_net_type_score_speed,
+	        max_bytes_per_second,
+	        min_relative_latency_ms
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -912,7 +1006,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        location_count = EXCLUDED.location_count,
 	        connected = true,
 	        max_net_type_score = EXCLUDED.max_net_type_score,
-	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed
+	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed,
+	        max_bytes_per_second = EXCLUDED.max_bytes_per_second,
+	        min_relative_latency_ms = EXCLUDED.min_relative_latency_ms
 	    `,
 		updateBlockNumber,
 	))
