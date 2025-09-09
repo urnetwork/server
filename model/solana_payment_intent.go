@@ -47,17 +47,25 @@ func CreateSolanaPaymentIntent(
  * The Helius webhook returns an array of accounts
  * There is no indication which is the reference id, so we have to search them all
  */
+
+type PaymentIntentSearchResult struct {
+	NetworkId        *server.Id `json:"network_id"`
+	PaymentReference string     `json:"payment_reference"`
+}
+
 func SearchPaymentIntents(
 	references []string,
 	session *session.ClientSession,
-) (networkId *server.Id, err error) {
+) (*PaymentIntentSearchResult, error) {
+
+	var paymentIntent *PaymentIntentSearchResult
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 
 		result, err := tx.Query(
 			session.Ctx,
 			`
-			SELECT network_id
+			SELECT payment_reference, network_id
 		    FROM solana_payment_intent
 		    WHERE tx_signature IS NULL
 		      AND payment_reference = ANY($1)
@@ -67,14 +75,16 @@ func SearchPaymentIntents(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
+				paymentIntent = &PaymentIntentSearchResult{}
 				server.Raise(result.Scan(
-					&networkId,
+					&paymentIntent.PaymentReference,
+					&paymentIntent.NetworkId,
 				))
 			}
 		})
 	})
 
-	return
+	return paymentIntent, nil
 
 }
 

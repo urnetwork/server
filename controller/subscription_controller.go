@@ -172,10 +172,17 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	openTransferByteCount := model.GetOpenTransferByteCount(session.Ctx, session.ByJwt.NetworkId)
 
 	var currentSubscription *Subscription
-	if model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter) {
+
+	active, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+
+	if active {
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
+	}
+
+	if market != nil {
+		currentSubscription.Store = *market
 	}
 
 	// FIXME
@@ -1229,7 +1236,10 @@ func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(RefreshTransferBalanceDuration)
 	var transferBalance model.ByteCount
-	if model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter) {
+
+	active, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
+
+	if active {
 		transferBalance = RefreshSupporterTransferBalance
 	} else {
 		transferBalance = RefreshFreeTransferBalance
@@ -1587,13 +1597,10 @@ func VerifyHeliusBody(req *http.Request) (io.Reader, error) {
 		return nil, err
 	}
 
-	// log body
-	glog.Infof("Helius webhook body: %s", string(bodyBytes))
+	secret := req.Header.Get("Authorization")
 
-	secret := req.Header.Get("X-Helius-Auth")
-	glog.Infof("Helius webhook auth header: %s", secret)
-	glog.Infof("Helius expected auth header: %s", heliusAuthSecret())
 	if secret != heliusAuthSecret() {
+		glog.Infof("[helius] Invalid authentication; dumping all headers")
 		return nil, errors.New("Invalid authentication.")
 	}
 
@@ -1674,85 +1681,100 @@ const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
 
 func HeliusWebhook(
-	transaction *SolanaTransaction,
+	transactions []*SolanaTransaction,
 	clientSession *session.ClientSession,
 ) (*HeliusWebhookResult, error) {
 
-	if transaction.Type != "TRANSFER" {
-		return &HeliusWebhookResult{
-			Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
-		}, nil
+	if len(transactions) == 0 {
+		return &HeliusWebhookResult{Message: "No transactions"}, nil
 	}
 
-	if len(transaction.TokenTransfers) == 0 {
-		return &HeliusWebhookResult{
-			Message: "Ignoring transaction with no token transfers",
-		}, nil
-	}
+	var matched int
+	for _, transaction := range transactions {
 
-	paymentReceived := false
-	var tokenAmountReceived float64
-
-	for _, tokenTransfer := range transaction.TokenTransfers {
-
-		if tokenTransfer.Mint == solanaUsdcMint &&
-			tokenTransfer.ToUserAccount == solanaReceiverAddress &&
-			tokenTransfer.TokenAmount >= 30 {
-			paymentReceived = true
-			tokenAmountReceived = tokenTransfer.TokenAmount
+		if transaction.Type != "TRANSFER" {
+			return &HeliusWebhookResult{
+				Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
+			}, nil
 		}
 
+		if len(transaction.TokenTransfers) == 0 {
+			return &HeliusWebhookResult{
+				Message: "Ignoring transaction with no token transfers",
+			}, nil
+		}
+
+		paymentReceived := false
+		var tokenAmountReceived float64
+
+		for _, tokenTransfer := range transaction.TokenTransfers {
+
+			if tokenTransfer.Mint == solanaUsdcMint &&
+				tokenTransfer.ToUserAccount == solanaReceiverAddress &&
+				tokenTransfer.TokenAmount >= 30 {
+				paymentReceived = true
+				tokenAmountReceived = tokenTransfer.TokenAmount
+			}
+
+		}
+
+		if !paymentReceived {
+			return &HeliusWebhookResult{
+				Message: "Ignoring transaction with no matching USDC payment",
+			}, nil
+		}
+
+		// array of accounts to use to search for payment intents
+		accounts := make([]string, len(transaction.AccountData))
+		for i, accountData := range transaction.AccountData {
+			accounts[i] = accountData.Account
+		}
+
+		paymentSearchResult, err := model.SearchPaymentIntents(accounts, clientSession)
+
+		if err != nil {
+			return &HeliusWebhookResult{
+				Message: "Server err calling SearchPaymentIntents",
+			}, nil
+		}
+
+		if paymentSearchResult == nil {
+			return &HeliusWebhookResult{
+				Message: "No payment intent found for this network ID",
+			}, nil
+		}
+
+		// good to go, create transfer balance + year plan
+		startTime := server.NowUtc()
+		endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
+
+		subscriptionRenewal := model.SubscriptionRenewal{
+			NetworkId:          *paymentSearchResult.NetworkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			NetRevenue:         model.UsdToNanoCents(tokenAmountReceived),
+			SubscriptionMarket: model.SubscriptionMarketSolana,
+			TransactionId:      paymentSearchResult.PaymentReference,
+		}
+
+		model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
+
+		AddRefreshTransferBalance(clientSession.Ctx, *paymentSearchResult.NetworkId)
+
+		model.MarkPaymentIntentCompleted(
+			paymentSearchResult.PaymentReference,
+			transaction.Signature,
+			clientSession,
+		)
+
+		matched++
 	}
 
-	if !paymentReceived {
-		return &HeliusWebhookResult{
-			Message: "Ignoring transaction with no matching USDC payment",
-		}, nil
+	if matched == 0 {
+		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
-
-	// array of accounts to use to search for payment intents
-	accounts := make([]string, len(transaction.AccountData))
-	for i, accountData := range transaction.AccountData {
-		accounts[i] = accountData.Account
-	}
-
-	networkId, err := model.SearchPaymentIntents(accounts, clientSession)
-
-	if err != nil {
-		glog.Errorf("Failed to find network ID for Solana payment: %v", err)
-		return &HeliusWebhookResult{
-			Message: "Server err calling SearchPaymentIntents",
-		}, nil
-	}
-
-	if networkId == nil {
-		glog.Infof("No payment intent found for this network ID")
-		return &HeliusWebhookResult{
-			Message: "No payment intent found for this network ID",
-		}, nil
-	}
-
-	// good to go, create transfer balance + year plan
-	startTime := server.NowUtc()
-	endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
-
-	subscriptionRenewal := model.SubscriptionRenewal{
-		NetworkId:          *networkId,
-		SubscriptionType:   model.SubscriptionTypeSupporter,
-		StartTime:          startTime,
-		EndTime:            endTime,
-		NetRevenue:         model.UsdToNanoCents(tokenAmountReceived),
-		SubscriptionMarket: model.SubscriptionMarketSolana,
-		TransactionId:      transaction.Signature,
-	}
-
-	model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
-
-	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
-
-	return &HeliusWebhookResult{
-		Message: fmt.Sprintf("Payment received for network ID %s", *networkId),
-	}, nil
+	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
 }
 
 /**
