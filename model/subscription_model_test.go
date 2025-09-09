@@ -1216,8 +1216,11 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 				NetRevenue:       NanoCents(0),
 			},
 		)
-		assert.Equal(t, HasSubscriptionRenewal(ctx, networkIdA, SubscriptionTypeSupporter), false)
-		assert.Equal(t, HasSubscriptionRenewal(ctx, networkIdB, SubscriptionTypeSupporter), true)
+
+		active, _ := HasSubscriptionRenewal(ctx, networkIdA, SubscriptionTypeSupporter)
+		assert.Equal(t, active, false)
+		active, _ = HasSubscriptionRenewal(ctx, networkIdB, SubscriptionTypeSupporter)
+		assert.Equal(t, active, true)
 
 		startTime := server.NowUtc()
 		endTime := startTime.Add(24 * time.Hour)

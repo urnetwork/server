@@ -35,15 +35,16 @@ func TestSolanaPaymentIntents(t *testing.T) {
 		references := []string{"AAA", "BBB", "CCC", "DDD"}
 
 		// test not found
-		foundNetworkId, err := SearchPaymentIntents(references, userSession)
+		paymentSearchResult, err := SearchPaymentIntents(references, userSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, foundNetworkId, nil)
+		assert.Equal(t, paymentSearchResult, nil)
 
 		// test found
 		references = append(references, reference)
-		foundNetworkId, err = SearchPaymentIntents(references, userSession)
+		paymentSearchResult, err = SearchPaymentIntents(references, userSession)
 		assert.Equal(t, err, nil)
-		assert.Equal(t, *foundNetworkId, networkId)
+		assert.Equal(t, *paymentSearchResult.NetworkId, networkId)
+		assert.Equal(t, *&paymentSearchResult.PaymentReference, reference)
 
 		// mark completed
 		err = MarkPaymentIntentCompleted(reference, "tx-signature-1", userSession)

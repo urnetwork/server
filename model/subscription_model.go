@@ -2684,20 +2684,22 @@ func HasSubscriptionRenewal(
 	ctx context.Context,
 	networkId server.Id,
 	subscriptionType SubscriptionType,
-) bool {
+) (bool, *string) {
 	active := false
+	var market *string
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT
-					 COUNT(*) AS subscription_renewal_count
-				FROM subscription_renewal
-				WHERE
-					network_id = $1 AND
-					subscription_type = $2 AND
-					start_time <= $3 AND
-					$3 < end_time
+			SELECT
+				MIN(market) AS market,
+				COUNT(*) AS subscription_renewal_count
+			FROM subscription_renewal
+			WHERE
+				network_id = $1
+				AND subscription_type = $2
+				AND start_time <= $3
+				AND $3 < end_time;
 			`,
 			networkId,
 			subscriptionType,
@@ -2706,12 +2708,15 @@ func HasSubscriptionRenewal(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				var count int
-				server.Raise(result.Scan(&count))
+				server.Raise(result.Scan(
+					&market,
+					&count,
+				))
 				active = (0 < count)
 			}
 		})
 	})
-	return active
+	return active, market
 }
 
 func AddRefreshTransferBalanceToAllNetworks(
