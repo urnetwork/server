@@ -2344,7 +2344,7 @@ var migrations = []any{
 		    WHERE tx_signature IS NOT NULL;
 	`),
 
-    newSqlMigration(`
+	newSqlMigration(`
         ALTER TABLE network_user_auth_sso
             ADD COLUMN product_updates_sync bool NOT NULL DEFAULT false
     `),
@@ -2374,4 +2374,4 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX network_product_updates_sync_admin_user_id ON network (product_updates_sync, admin_user_id)
     `),
-    
+}
