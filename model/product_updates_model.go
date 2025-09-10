@@ -144,7 +144,7 @@ func SetProductUpdatesSyncForUsers(ctx context.Context, userIdProductUpdatesSync
 			for userId, productUpdatesSync := range userIdProductUpdatesSync {
 				batch.Queue(
 					`
-					UDPATE network_user_auth_sso
+					UPDATE network_user_auth_sso
 					SET
 						product_updates_sync = $2
 					WHERE
@@ -156,7 +156,7 @@ func SetProductUpdatesSyncForUsers(ctx context.Context, userIdProductUpdatesSync
 
 				batch.Queue(
 					`
-					UDPATE network_user_auth_password
+					UPDATE network_user_auth_password
 					SET
 						product_updates_sync = $2
 					WHERE
@@ -237,7 +237,7 @@ func SetNetworkProductUpdatesSyncForUsers(ctx context.Context, networkIdProductU
 			for networkId, productUpdatesSync := range networkIdProductUpdatesSync {
 				batch.Queue(
 					`
-					UDPATE network
+					UPDATE network
 					SET
 						product_updates_sync = $2
 					WHERE
