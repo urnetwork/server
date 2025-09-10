@@ -38,8 +38,8 @@ Options:
   -h --help     Show this screen.
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].
-  -n --count=<count>  Number of worker processes [default: 16].
-  -b --batch_size=<batch_size>  Batch size [default: 8].`
+  -n --count=<count>  Number of worker processes [default: 8].
+  -b --batch_size=<batch_size>  Batch size [default: 4].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -123,6 +123,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
 		work.ScheduleUpdateClientScores(clientSession, tx)
 		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
+		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
 	})
 }
 
@@ -259,6 +260,19 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveOldNetworkReliabilityWindow,
 			work.RemoveOldNetworkReliabilityWindowPost,
+		),
+
+		task.NewTaskTargetWithPost(
+			work.SyncInitialProductUpdates,
+			work.SyncInitialProductUpdatesPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SyncProductUpdatesForUser,
+			controller.SyncProductUpdatesForUserPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.RemoveProductUpdates,
+			controller.RemoveProductUpdatesPost,
 		),
 	)
 

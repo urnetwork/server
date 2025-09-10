@@ -32,6 +32,7 @@ type ClientSession struct {
 	Cancel context.CancelFunc
 	// ip:port
 	ClientAddress string
+	Header        map[string][]string
 	ByJwt         *jwt.ByJwt
 }
 
@@ -52,6 +53,7 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		Ctx:           cancelCtx,
 		Cancel:        cancel,
 		ClientAddress: clientAddress,
+		Header:        map[string][]string(req.Header),
 	}, nil
 }
 
@@ -62,6 +64,7 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 		Ctx:           cancelCtx,
 		Cancel:        cancel,
 		ClientAddress: clientAddress,
+		Header:        map[string][]string{},
 		ByJwt:         byJwt,
 	}
 }
@@ -126,6 +129,7 @@ func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientS
 		Ctx:           cancelCtx,
 		Cancel:        cancel,
 		ClientAddress: clientAddress,
+		Header:        map[string][]string{},
 		ByJwt:         byJwt,
 	}
 }

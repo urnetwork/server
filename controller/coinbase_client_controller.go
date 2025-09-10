@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,7 @@ import (
 )
 
 type CoinbaseClient interface {
-	FetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error)
+	FetchExchangeRates(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error)
 }
 
 type CoreCoinbaseClient struct{}
@@ -40,12 +41,14 @@ type CoinbaseResponse[T any] struct {
 }
 
 func (c *CoreCoinbaseClient) FetchExchangeRates(
+	ctx context.Context,
 	currencyTicker string,
 ) (*CoinbaseExchangeRatesResults, error) {
 	path := fmt.Sprintf("/v2/exchange-rates?currency=%s", currencyTicker)
 	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
 
 	exchangeRatesResult, err := server.HttpGetRequireStatusOk(
+		ctx,
 		uri,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")

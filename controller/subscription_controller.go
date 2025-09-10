@@ -314,6 +314,7 @@ func stripeHandleCheckoutSessionCompleted(
 		stripeSessionId,
 	)
 	lineItems, err := server.HttpGetRequireStatusOk[*StripeLineItems](
+		clientSession.Ctx,
 		url,
 		func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
@@ -411,6 +412,7 @@ func stripeHandleInvoicePaid(
 
 	url := fmt.Sprintf("https://api.stripe.com/v1/invoices/%s?expand[]=subscription", invoiceId)
 	fullInvoice, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		clientSession.Ctx,
 		url,
 		func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
@@ -472,6 +474,7 @@ func stripeHandleInvoicePaid(
 	// Get the checkout session using the subscription ID
 	url = fmt.Sprintf("https://api.stripe.com/v1/checkout/sessions?subscription=%s", subscriptionId)
 	sessionsResp, err := server.HttpGetRequireStatusOk[map[string]interface{}](
+		clientSession.Ctx,
 		url,
 		func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
@@ -663,7 +666,7 @@ func CreateBalanceCode(
 }
 
 // https://developers.google.com/android-publisher/authorization
-func playAuth() (string, error) {
+func playAuth(ctx context.Context) (string, error) {
 	form := url.Values{}
 	form.Add("grant_type", "refresh_token")
 	form.Add("client_id", playClientId())
@@ -671,6 +674,7 @@ func playAuth() (string, error) {
 	form.Add("refresh_token", playRefreshToken())
 
 	result, err := server.HttpPostForm(
+		ctx,
 		"https://accounts.google.com/o/oauth2/token",
 		form,
 		server.NoCustomHeaders,
@@ -689,8 +693,8 @@ func playAuth() (string, error) {
 	return "", errors.New("Could not auth.")
 }
 
-func playAuthHeaders(header http.Header) {
-	if auth, err := playAuth(); err == nil {
+func playAuthHeader(ctx context.Context, header http.Header) {
+	if auth, err := playAuth(ctx); err == nil {
 		header.Add("Authorization", auth)
 	}
 }
@@ -810,8 +814,11 @@ func PlayWebhook(
 				rtdnMessage.SubscriptionNotification.PurchaseToken,
 			)
 			sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
+				clientSession.Ctx,
 				url,
-				playAuthHeaders,
+				func(header http.Header) {
+					playAuthHeader(clientSession.Ctx, header)
+				},
 				server.ResponseJsonObject[*PlaySubscription],
 			)
 			if err != nil {
@@ -882,9 +889,12 @@ func PlayWebhook(
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 				)
 				server.HttpPostRawRequireStatusOk(
+					clientSession.Ctx,
 					url,
 					[]byte{},
-					playAuthHeaders,
+					func(header http.Header) {
+						playAuthHeader(clientSession.Ctx, header)
+					},
 				)
 
 				// fire this immediately since we pull current plan from subscription_renewal table
@@ -963,8 +973,11 @@ func PlaySubscriptionRenewal(
 		playSubscriptionRenewal.PurchaseToken,
 	)
 	sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
+		clientSession.Ctx,
 		url,
-		playAuthHeaders,
+		func(header http.Header) {
+			playAuthHeader(clientSession.Ctx, header)
+		},
 		server.ResponseJsonObject[*PlaySubscription],
 	)
 	if err != nil {
@@ -1188,7 +1201,7 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
-	err = verifyPlayAuth(authHeader)
+	err = verifyPlayAuth(req.Context(), authHeader)
 	if err != nil {
 		glog.Infof("verifyPlayAuth failed: %v", err)
 		return nil, err
@@ -1197,14 +1210,14 @@ func VerifyPlayBody(req *http.Request) (io.Reader, error) {
 	return bytes.NewReader(bodyBytes), nil
 }
 
-func verifyPlayAuth(auth string) error {
+func verifyPlayAuth(ctx context.Context, auth string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
 		jwt := auth[len(bearerPrefix):len(auth)]
 		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
 
-		claimBytes, err := server.HttpGetRawRequireStatusOk(url, server.NoCustomHeaders)
+		claimBytes, err := server.HttpGetRawRequireStatusOk(ctx, url, server.NoCustomHeaders)
 		if err != nil {
 			return err
 		}

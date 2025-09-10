@@ -68,6 +68,7 @@ Usage:
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
     bringyourctl reliability set-multipliers
+    bringyourctl product-updates sync
 
 Options:
     -h --help     Show this screen.
@@ -213,6 +214,10 @@ Options:
 	} else if reliability, _ := opts.Bool("reliability"); reliability {
 		if setMultipliers, _ := opts.Bool("set-multipliers"); setMultipliers {
 			reliabilitySetMultipliers(opts)
+		}
+	} else if productUdpates, _ := opts.Bool("product-updates"); productUdpates {
+		if sync_, _ := opts.Bool("sync"); sync_ {
+			productUpdatesSync(opts)
 		}
 	} else {
 		fmt.Println(usage)
@@ -952,4 +957,10 @@ func reliabilitySetMultipliers(opts docopt.Opts) {
 			fmt.Printf("%s %.1f -> %.1f\n", countryCode, m1.ReliabilityMultiplier, m2.ReliabilityMultiplier)
 		}
 	}
+}
+
+func productUpdatesSync(opts docopt.Opts) {
+	ctx := context.Background()
+
+	controller.SyncInitialProductUpdates(ctx)
 }

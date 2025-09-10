@@ -142,6 +142,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 			// estimate fee
 			estimatedFees, err := mockCircleClient.EstimateTransferFee(
+				ctx,
 				*paymentRecord.TokenAmount,
 				wallet.WalletAddress,
 				"MATIC",
@@ -156,7 +157,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, err, nil)
 
 			// convert fee to usdc
-			feeInUSDC, err := ConvertFeeToUSDC("MATIC", *fee)
+			feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", *fee)
 			assert.Equal(t, err, nil)
 
 			assert.Equal(t, err, nil)
@@ -187,7 +188,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		// set coinbase mock to return a completed status
 		mockCircleClient = &mockCircleApiClient{
-			GetTransactionFunc: func(transactionId string) (*GetTransactionResult, error) {
+			GetTransactionFunc: func(ctx context.Context, transactionId string) (*GetTransactionResult, error) {
 				staticData := &GetTransactionResult{
 					Transaction: CircleTransaction{
 						State:      "COMPLETE",
@@ -245,7 +246,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 func TestFeeToUsd(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		coinbaseClient := &mockCoinbaseClient{
-			FetchExchangeRatesFunc: func(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
+			FetchExchangeRatesFunc: func(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
 				staticData := &CoinbaseExchangeRatesResults{
 					Currency: "MATIC",
 					Rates: map[string]string{
@@ -257,40 +258,52 @@ func TestFeeToUsd(t *testing.T) {
 			},
 		}
 
+		ctx := context.Background()
+
 		SetCoinbaseClient(coinbaseClient)
 		// fee of 1 Matic for testing
 		fee := 1.0
 
-		feeInUSDC, err := ConvertFeeToUSDC("MATIC", fee)
+		feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", fee)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, feeInUSDC, 0.50)
 	})
 }
 
 type mockCircleApiClient struct {
-	GetTransactionFunc            func(id string) (*GetTransactionResult, error)
+	GetTransactionFunc func(
+		ctx context.Context,
+		id string,
+	) (*GetTransactionResult, error)
 	CreateTransferTransactionFunc func(
+		ctx context.Context,
 		amount float64,
 		destinationAddress string,
 		network string,
 	) (*CreateTransferTransactionResult, error)
 	EstimateTransferFeeFunc func(
+		ctx context.Context,
 		amount float64,
 		destinationAddress string,
 		network string,
 	) (*FeeEstimateResult, error)
 }
 
-func (m *mockCircleApiClient) GetTransaction(id string) (*GetTransactionResult, error) {
-	return m.GetTransactionFunc(id)
+func (m *mockCircleApiClient) GetTransaction(
+	ctx context.Context,
+	id string,
+) (*GetTransactionResult, error) {
+	return m.GetTransactionFunc(ctx, id)
 }
 
 func (m *mockCircleApiClient) CreateTransferTransaction(
+	ctx context.Context,
 	amount float64,
 	destinationAddress string,
 	network string,
 ) (*CreateTransferTransactionResult, error) {
 	return m.CreateTransferTransactionFunc(
+		ctx,
 		amount,
 		destinationAddress,
 		network,
@@ -298,18 +311,20 @@ func (m *mockCircleApiClient) CreateTransferTransaction(
 }
 
 func (m *mockCircleApiClient) EstimateTransferFee(
+	ctx context.Context,
 	amount float64,
 	destinationAddress string,
 	network string,
 ) (*FeeEstimateResult, error) {
 	return m.EstimateTransferFeeFunc(
+		ctx,
 		amount,
 		destinationAddress,
 		network,
 	)
 }
 
-func defaultGetTransactionDataHandler(transactionId string) (*GetTransactionResult, error) {
+func defaultGetTransactionDataHandler(ctx context.Context, transactionId string) (*GetTransactionResult, error) {
 	return &GetTransactionResult{
 		Transaction: CircleTransaction{
 			State:      "INITIATED",
@@ -326,6 +341,7 @@ func defaultGetTransactionDataHandler(transactionId string) (*GetTransactionResu
 }
 
 func defaultSendPaymentHandler(
+	ctx context.Context,
 	amount float64,
 	destinationAddress string,
 	network string,
@@ -339,6 +355,7 @@ func defaultSendPaymentHandler(
 }
 
 func defaultEstimateFeeHandler(
+	ctx context.Context,
 	amount float64,
 	destinationAddress string,
 	network string,
@@ -376,9 +393,9 @@ func (c *mockAWSMessageSender) SendAccountMessageTemplate(userAuth string, templ
 }
 
 type mockCoinbaseClient struct {
-	FetchExchangeRatesFunc func(currencyTicker string) (*CoinbaseExchangeRatesResults, error)
+	FetchExchangeRatesFunc func(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error)
 }
 
-func (m *mockCoinbaseClient) FetchExchangeRates(currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
-	return m.FetchExchangeRatesFunc(currencyTicker)
+func (m *mockCoinbaseClient) FetchExchangeRates(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
+	return m.FetchExchangeRatesFunc(ctx, currencyTicker)
 }

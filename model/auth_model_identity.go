@@ -7,12 +7,13 @@ import (
 	mathrand "math/rand"
 	"net/mail"
 	"strings"
+	"sync"
 
 	// "github.com/golang/glog"
 
 	"github.com/nyaruka/phonenumbers"
+	"github.com/urnetwork/server"
 	"golang.org/x/crypto/argon2"
-	// "github.com/urnetwork/server"
 )
 
 type UserAuthType string
@@ -24,7 +25,10 @@ const (
 )
 
 // BE CAREFUL do not change without a backwards-compatible migration
-var passwordPepper = []byte("t1me4atoporita")
+var passwordPepper = sync.OnceValue(func() []byte {
+	password := server.Vault.RequireSimpleResource("password.yml")
+	return []byte(password.RequireString("password", "pepper"))
+})
 
 // BE CAREFUL do not change without a backwards-compatible migration
 func NormalUserAuthV1(userAuth *string) (*string, UserAuthType) {
@@ -71,7 +75,7 @@ func NormalUserAuth(userAuth string) (string, UserAuthType) {
 // BE CAREFUL do not change without a backwards-compatible migration
 func computePasswordHashV1(password []byte, passwordSalt []byte) []byte {
 	pepperedPassword := []byte{}
-	pepperedPassword = append(pepperedPassword, passwordPepper...)
+	pepperedPassword = append(pepperedPassword, passwordPepper()...)
 	pepperedPassword = append(pepperedPassword, password...)
 	// use RFC recommendations from https://pkg.go.dev/golang.org/x/crypto/argon2
 	// 3 seconds

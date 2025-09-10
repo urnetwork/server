@@ -66,7 +66,7 @@ func TestRemoveNetwork(t *testing.T) {
 		assert.Equal(t, len(networkUser.SsoAuths), 1)
 		assert.Equal(t, len(networkUser.WalletAuths), 1)
 
-		RemoveNetwork(ctx, networkId, userId)
+		RemoveNetwork(ctx, networkId, &userId)
 
 		networkUser = GetNetworkUser(ctx, userId)
 		assert.Equal(t, networkUser, nil)

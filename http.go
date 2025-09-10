@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,13 +35,27 @@ func DefaultHttpClient() *http.Client {
 type HeaderCallback func(header http.Header)
 type ResponseCallback[R any] func(response *http.Response, responseBodyBytes []byte) (R, error)
 
+type Status struct {
+	Code   int
+	Status string
+}
+
+func NewStatusFromResponse(response *http.Response) *Status {
+	return &Status{
+		Code:   response.StatusCode,
+		Status: response.Status,
+	}
+}
+
 func HttpPostRequireStatusOk[R any](
+	ctx context.Context,
 	url string,
 	requestBody any,
 	headerCallback HeaderCallback,
 	responseCallback ResponseCallback[R],
 ) (R, error) {
 	return HttpPost[R](
+		ctx,
 		url,
 		requestBody,
 		headerCallback,
@@ -49,11 +64,13 @@ func HttpPostRequireStatusOk[R any](
 }
 
 func HttpPostRawRequireStatusOk(
+	ctx context.Context,
 	url string,
 	requestBody []byte,
 	headerCallback HeaderCallback,
 ) ([]byte, error) {
 	return HttpPost[[]byte](
+		ctx,
 		url,
 		requestBody,
 		headerCallback,
@@ -64,32 +81,54 @@ func HttpPostRawRequireStatusOk(
 }
 
 func HttpPostBasic[R any](
+	ctx context.Context,
 	url string,
 	requestBody any,
 ) (R, error) {
-	return HttpPost(url, requestBody, NoCustomHeaders, ResponseJsonObject[R])
+	return HttpPost(ctx, url, requestBody, NoCustomHeaders, ResponseJsonObject[R])
+}
+
+func HttpPostBasicWithStatus[R any](
+	ctx context.Context,
+	url string,
+	requestBody any,
+) (*Status, R, error) {
+	return HttpPostWithStatus(ctx, url, requestBody, NoCustomHeaders, ResponseJsonObject[R])
 }
 
 func HttpPost[R any](
+	ctx context.Context,
 	url string,
 	requestBody any,
 	headerCallback HeaderCallback,
 	responseCallback ResponseCallback[R],
-) (R, error) {
+) (r R, err error) {
+	_, r, err = HttpPostWithStatus(ctx, url, requestBody, headerCallback, responseCallback)
+	return
+}
+
+func HttpPostWithStatus[R any](
+	ctx context.Context,
+	url string,
+	requestBody any,
+	headerCallback HeaderCallback,
+	responseCallback ResponseCallback[R],
+) (*Status, R, error) {
 	var empty R
 
 	requestBodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 
-	request, err := http.NewRequest(
+	request, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		url,
 		bytes.NewReader(requestBodyBytes),
 	)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 
 	header := request.Header
@@ -100,19 +139,21 @@ func HttpPost[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 	defer response.Body.Close()
 
 	responseBodyBytes, err := io.ReadAll(response.Body)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 
-	return responseCallback(response, responseBodyBytes)
+	r, err := responseCallback(response, responseBodyBytes)
+	return NewStatusFromResponse(response), r, err
 }
 
 func HttpPostForm[R any](
+	ctx context.Context,
 	url string,
 	form url.Values,
 	headerCallback HeaderCallback,
@@ -120,7 +161,8 @@ func HttpPostForm[R any](
 ) (R, error) {
 	var empty R
 
-	request, err := http.NewRequest(
+	request, err := http.NewRequestWithContext(
+		ctx,
 		"POST",
 		url,
 		strings.NewReader(form.Encode()),
@@ -150,11 +192,13 @@ func HttpPostForm[R any](
 }
 
 func HttpGetRequireStatusOk[R any](
+	ctx context.Context,
 	url string,
 	headerCallback HeaderCallback,
 	responseCallback ResponseCallback[R],
 ) (R, error) {
 	return HttpGet[R](
+		ctx,
 		url,
 		headerCallback,
 		HttpResponseRequireStatusOk[R](responseCallback),
@@ -162,10 +206,12 @@ func HttpGetRequireStatusOk[R any](
 }
 
 func HttpGetRawRequireStatusOk(
+	ctx context.Context,
 	url string,
 	headerCallback HeaderCallback,
 ) ([]byte, error) {
 	return HttpGet[[]byte](
+		ctx,
 		url,
 		headerCallback,
 		HttpResponseRequireStatusOk[[]byte](func(response *http.Response, responseBodyBytes []byte) ([]byte, error) {
@@ -175,21 +221,40 @@ func HttpGetRawRequireStatusOk(
 }
 
 func HttpGetBasic[R any](
+	ctx context.Context,
 	url string,
 ) (R, error) {
-	return HttpGet(url, NoCustomHeaders, ResponseJsonObject[R])
+	return HttpGet(ctx, url, NoCustomHeaders, ResponseJsonObject[R])
+}
+
+func HttpGetBasicWithStatus[R any](
+	ctx context.Context,
+	url string,
+) (*Status, R, error) {
+	return HttpGetWithStatus(ctx, url, NoCustomHeaders, ResponseJsonObject[R])
 }
 
 func HttpGet[R any](
+	ctx context.Context,
 	url string,
 	headerCallback HeaderCallback,
 	responseCallback ResponseCallback[R],
-) (R, error) {
+) (r R, err error) {
+	_, r, err = HttpGetWithStatus(ctx, url, headerCallback, responseCallback)
+	return
+}
+
+func HttpGetWithStatus[R any](
+	ctx context.Context,
+	url string,
+	headerCallback HeaderCallback,
+	responseCallback ResponseCallback[R],
+) (*Status, R, error) {
 	var empty R
 
-	request, err := http.NewRequest("GET", url, nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 
 	header := request.Header
@@ -199,16 +264,74 @@ func HttpGet[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 	defer response.Body.Close()
 
 	responseBodyBytes, err := io.ReadAll(response.Body)
 	if err != nil {
-		return empty, err
+		return nil, empty, err
 	}
 
-	return responseCallback(response, responseBodyBytes)
+	r, err := responseCallback(response, responseBodyBytes)
+	return NewStatusFromResponse(response), r, err
+}
+
+func HttpDeleteBasic[R any](
+	ctx context.Context,
+	url string,
+) (R, error) {
+	return HttpDelete(ctx, url, NoCustomHeaders, ResponseJsonObject[R])
+}
+
+func HttpDeleteBasicWithStatus[R any](
+	ctx context.Context,
+	url string,
+) (*Status, R, error) {
+	return HttpDeleteWithStatus(ctx, url, NoCustomHeaders, ResponseJsonObject[R])
+}
+
+func HttpDelete[R any](
+	ctx context.Context,
+	url string,
+	headerCallback HeaderCallback,
+	responseCallback ResponseCallback[R],
+) (r R, err error) {
+	_, r, err = HttpDeleteWithStatus(ctx, url, headerCallback, responseCallback)
+	return
+}
+
+func HttpDeleteWithStatus[R any](
+	ctx context.Context,
+	url string,
+	headerCallback HeaderCallback,
+	responseCallback ResponseCallback[R],
+) (*Status, R, error) {
+	var empty R
+
+	request, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return nil, empty, err
+	}
+
+	header := request.Header
+	headerCallback(header)
+
+	client := DefaultHttpClient()
+
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, empty, err
+	}
+	defer response.Body.Close()
+
+	responseBodyBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, empty, err
+	}
+
+	r, err := responseCallback(response, responseBodyBytes)
+	return NewStatusFromResponse(response), r, err
 }
 
 func NoCustomHeaders(header http.Header) {

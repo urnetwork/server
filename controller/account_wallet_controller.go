@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,6 +158,7 @@ func VerifySeekerNftHolder(
 	}
 
 	searchAssets, returnErr := heliusSearchAssets(
+		session.Ctx,
 		verify.PublicKey,
 	)
 
@@ -169,7 +171,7 @@ func VerifySeekerNftHolder(
 		}, returnErr
 	}
 
-	sagaResult, returnErr := heliusSearchAssetsSaga(verify.PublicKey)
+	sagaResult, returnErr := heliusSearchAssetsSaga(session.Ctx, verify.PublicKey)
 
 	if returnErr != nil {
 		return &VerifySeekerNftHolderResult{
@@ -267,6 +269,7 @@ var heliusConfig = sync.OnceValue(func() map[string]any {
 })
 
 func heliusSearchAssets(
+	ctx context.Context,
 	publicKey string,
 	// page int,
 	// limit int,
@@ -288,6 +291,7 @@ func heliusSearchAssets(
 
 	for {
 		result, err := server.HttpPostRequireStatusOk(
+			ctx,
 			url,
 			map[string]any{
 				"jsonrpc": "2.0",
@@ -342,6 +346,7 @@ func heliusSearchAssets(
 }
 
 func heliusSearchAssetsSaga(
+	ctx context.Context,
 	publicKey string,
 ) (*HeliusSearchAssetsResult, error) {
 
@@ -355,6 +360,7 @@ func heliusSearchAssetsSaga(
 	)
 
 	return server.HttpPostRequireStatusOk(
+		ctx,
 		url,
 		map[string]any{
 			"jsonrpc": "2.0",
