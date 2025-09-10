@@ -3,11 +3,13 @@ package model
 import (
 	"context"
 
+	"golang.org/x/exp/maps"
+
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/session"
 )
 
-func GetProductUpdateUserEmailsForUser(ctx context.Context, userId server.Id) (productUpdates bool, userEmails map[string]server.Id) {
+func GetProductUpdateUserEmailsForUser(ctx context.Context, userId server.Id) (productUpdates bool, userEmails []string) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -27,7 +29,7 @@ func GetProductUpdateUserEmailsForUser(ctx context.Context, userId server.Id) (p
 			}
 		})
 
-		userEmails = map[string]server.Id{}
+		uniqueUserEmails := map[string]server.Id{}
 
 		result, err = conn.Query(
 			ctx,
@@ -64,10 +66,12 @@ func GetProductUpdateUserEmailsForUser(ctx context.Context, userId server.Id) (p
 				}
 
 				if authType == UserAuthTypeEmail {
-					userEmails[userAuth] = userId
+					uniqueUserEmails[userAuth] = userId
 				}
 			}
 		})
+
+		userEmails = maps.Keys(uniqueUserEmails)
 	})
 
 	return

@@ -11,6 +11,8 @@ import (
 
 	"github.com/golang/glog"
 
+	"golang.org/x/exp/maps"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -117,7 +119,7 @@ func BrevoWebhook(
 	}
 
 	if webhookArgs.Event == "unsubscribe" {
-		glog.Info("[product_updates]unsubscribe %s\n", maskEmail(webhookArgs.Email))
+		glog.Infof("[product_updates]unsubscribe %s\n", maskEmail(webhookArgs.Email))
 		model.AccountProductUpdatesSetForEmail(
 			clientSession.Ctx,
 			webhookArgs.Email,
@@ -289,12 +291,14 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 	userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
 	networkIdProductUpdatesSync := map[server.Id]bool{}
 
-	for userEmail, networkId := range userEmailNetworkIds {
-		glog.Info("[product_updates]add to new networks %s\n", maskEmail(userEmail))
+	userEmails := maps.Keys(userEmailNetworkIds)
+	for i, userEmail := range userEmails {
+		networkId := userEmailNetworkIds[userEmail]
+		glog.Infof("[product_updates][%d/%d]add to new networks %s\n", i+1, len(userEmails), maskEmail(userEmail))
 		if err := BrevoAddToList(ctx, userEmail, newNetworksListId()); err == nil {
 			networkIdProductUpdatesSync[networkId] = true
 		} else {
-			glog.Info("[product_updates]could not add to new networks %s. err = %s\n", maskEmail(userEmail), err)
+			glog.Infof("[product_updates][%d/%d]could not add to new networks %s. err = %s\n", i+1, len(userEmails), maskEmail(userEmail), err)
 		}
 	}
 
@@ -304,12 +308,14 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 	userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
 	userIdProductUpdatesSync := map[server.Id]bool{}
 
-	for userEmail, userId := range userEmailUserIds {
-		glog.Info("[product_updates]add to product updates %s\n", maskEmail(userEmail))
+	userEmails = maps.Keys(userEmailUserIds)
+	for i, userEmail := range userEmails {
+		userId := userEmailUserIds[userEmail]
+		glog.Infof("[product_updates][%d/%d]add to product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
 		if err := BrevoAddToList(ctx, userEmail, productUpdatesListId()); err == nil {
 			userIdProductUpdatesSync[userId] = true
 		} else {
-			glog.Info("[product_updates]could not add to product updates %s. err = %s\n", maskEmail(userEmail), err)
+			glog.Infof("[product_updates][%d/%d]could not add to product updates %s. err = %s\n", i+1, len(userEmails), maskEmail(userEmail), err)
 		}
 	}
 
@@ -345,21 +351,21 @@ func SyncProductUpdatesForUser(
 		clientSession.ByJwt.UserId,
 	)
 	if productUpdates {
-		for userEmail, _ := range userEmails {
-			glog.Info("[product_updates]add to product updates %s\n", maskEmail(userEmail))
+		for i, userEmail := range userEmails {
+			glog.Infof("[product_updates][%d/%d]add to product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
 			err := BrevoAddToList(clientSession.Ctx, userEmail, productUpdatesListId())
 			if err != nil {
 				return nil, err
 			}
 		}
 	} else {
-		for userEmail, _ := range userEmails {
-			glog.Info("[product_updates]remove from new networks %s\n", maskEmail(userEmail))
+		for i, userEmail := range userEmails {
+			glog.Infof("[product_updates][%d/%d]remove from new networks %s\n", i+1, len(userEmails), maskEmail(userEmail))
 			err := BrevoRemoveFromList(clientSession.Ctx, userEmail, newNetworksListId())
 			if err != nil {
 				return nil, err
 			}
-			glog.Info("[product_updates]remove from product updates %s\n", maskEmail(userEmail))
+			glog.Infof("[product_updates][%d/%d]remove from product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
 			err = BrevoRemoveFromList(clientSession.Ctx, userEmail, productUpdatesListId())
 			if err != nil {
 				return nil, err
@@ -404,7 +410,7 @@ func RemoveProductUpdates(
 ) (*RemoveProductUpdatesResult, error) {
 	_, authType := model.NormalUserAuthV1(&removeProductUpdates.UserAuth)
 	if authType == model.UserAuthTypeEmail {
-		glog.Info("[product_updates]remove email %s\n", maskEmail(removeProductUpdates.UserAuth))
+		glog.Infof("[product_updates]remove email %s\n", maskEmail(removeProductUpdates.UserAuth))
 		err := BrevoRemoveContact(clientSession.Ctx, removeProductUpdates.UserAuth)
 		if err != nil {
 			return nil, err
