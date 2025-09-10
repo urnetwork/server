@@ -302,7 +302,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 
 		var subWg sync.WaitGroup
 
-		n := len(userEmails) / parallelCount
+		n := max(16, len(userEmails)/parallelCount)
 		for j := 0; j < len(userEmails); j += n {
 			i0 := j
 			i1 := min(j+n, len(userEmails))
@@ -340,7 +340,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 
 		var subWg sync.WaitGroup
 
-		n := len(userEmails) / parallelCount
+		n := max(16, len(userEmails)/parallelCount)
 		for j := 0; j < len(userEmails); j += n {
 			i0 := j
 			i1 := min(j+n, len(userEmails))
