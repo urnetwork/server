@@ -354,7 +354,7 @@ func networkRemove(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	model.RemoveNetwork(ctx, networkId, userId)
+	model.RemoveNetwork(ctx, networkId, &userId)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {
@@ -679,6 +679,8 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 }
 
 func adminWalletEstimateFee(opts docopt.Opts) {
+	ctx := context.Background()
+
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
 		panic(err)
@@ -696,7 +698,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	fees, err := client.EstimateTransferFee(amountUsd, destinationAddress, blockchain)
+	fees, err := client.EstimateTransferFee(ctx, amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}
@@ -714,7 +716,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 	fmt.Printf("Total Fee: %f\n", *fee)
 
-	usdFee, err := controller.ConvertFeeToUSDC(blockchain, *fee)
+	usdFee, err := controller.ConvertFeeToUSDC(ctx, blockchain, *fee)
 	if err != nil {
 		panic(err)
 	}
@@ -723,6 +725,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 }
 
 func adminWalletTransfer(opts docopt.Opts) {
+	ctx := context.Background()
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
@@ -741,7 +744,7 @@ func adminWalletTransfer(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	res, err := client.CreateTransferTransaction(amountUsd, destinationAddress, blockchain)
+	res, err := client.CreateTransferTransaction(ctx, amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}
