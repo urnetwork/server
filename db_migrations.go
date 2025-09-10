@@ -265,6 +265,7 @@ var migrations = []any{
 	// RENAME validate to verified
 	// password_hash: 32-byte argon2 hash digest
 	// password_salt: 32-byte random
+	// FIXME add network_id
 	newSqlMigration(`
         CREATE TABLE network_user (
             user_id uuid NOT NULL,
@@ -509,6 +510,7 @@ var migrations = []any{
         CREATE INDEX network_client_connection_client_id_connected ON network_client_connection (client_id, connected)
     `),
 
+	// DROPPED
 	newSqlMigration(`
         CREATE TABLE ip_location_lookup (
             ip_address varchar(64) NOT NULL,
@@ -2341,4 +2343,35 @@ var migrations = []any{
 		    ON solana_payment_intent (tx_signature)
 		    WHERE tx_signature IS NOT NULL;
 	`),
-}
+
+    newSqlMigration(`
+        ALTER TABLE network_user_auth_sso
+            ADD COLUMN product_updates_sync bool NOT NULL DEFAULT false
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_user_auth_password
+            ADD COLUMN product_updates_sync bool NOT NULL DEFAULT false
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_user_auth_sso_product_updates_sync_user_id ON network_user_auth_sso (product_updates_sync, user_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_user_auth_password_product_updates_sync_user_id ON network_user_auth_password (product_updates_sync, user_id)
+    `),
+
+	newSqlMigration(`
+        DROP TABLE ip_location_lookup
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network
+            ADD COLUMN product_updates_sync bool NOT NULL DEFAULT false
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX network_product_updates_sync_admin_user_id ON network (product_updates_sync, admin_user_id)
+    `),
+    
