@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -243,7 +244,7 @@ func advancePayment(
 		var status string
 
 		// get the status of the transaction
-		txResult, err := circleClient.GetTransaction(*payment.PaymentRecord)
+		txResult, err := circleClient.GetTransaction(clientSession.Ctx, *payment.PaymentRecord)
 		if err != nil {
 			returnErr = fmt.Errorf("[%s]Payment transaction error = %s", payment.PaymentId, err)
 			return
@@ -338,6 +339,7 @@ func advancePayment(
 
 		feeInUSDC, err := func() (float64, error) {
 			estimatedFees, err := circleClient.EstimateTransferFee(
+				clientSession.Ctx,
 				payoutAmount,
 				accountWallet.WalletAddress,
 				formattedBlockchain,
@@ -351,7 +353,7 @@ func advancePayment(
 				return 0, err
 			}
 
-			feeInUSDC, err := ConvertFeeToUSDC(formattedBlockchain, *fee)
+			feeInUSDC, err := ConvertFeeToUSDC(clientSession.Ctx, formattedBlockchain, *fee)
 			if err != nil {
 				return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
 			}
@@ -380,6 +382,7 @@ func advancePayment(
 
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
+			clientSession.Ctx,
 			payoutAmount,
 			accountWallet.WalletAddress,
 			formattedBlockchain,
@@ -463,13 +466,13 @@ func calculateFeeSolana(feeEstimate FeeEstimate) (*float64, error) {
 	return &fee, nil
 }
 
-func ConvertFeeToUSDC(currencyTicker string, fee float64) (float64, error) {
+func ConvertFeeToUSDC(ctx context.Context, currencyTicker string, fee float64) (float64, error) {
 
 	currencyTicker = strings.ToUpper(currencyTicker)
 
 	coinbaseClient := NewCoinbaseClient()
 
-	ratesResult, err := coinbaseClient.FetchExchangeRates(currencyTicker)
+	ratesResult, err := coinbaseClient.FetchExchangeRates(ctx, currencyTicker)
 	if err != nil {
 		return 0, err
 	}

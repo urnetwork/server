@@ -68,6 +68,7 @@ Usage:
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
     bringyourctl reliability set-multipliers
+    bringyourctl product-updates sync
 
 Options:
     -h --help     Show this screen.
@@ -214,6 +215,10 @@ Options:
 		if setMultipliers, _ := opts.Bool("set-multipliers"); setMultipliers {
 			reliabilitySetMultipliers(opts)
 		}
+	} else if productUdpates, _ := opts.Bool("product-updates"); productUdpates {
+		if sync_, _ := opts.Bool("sync"); sync_ {
+			productUpdatesSync(opts)
+		}
 	} else {
 		fmt.Println(usage)
 	}
@@ -349,7 +354,7 @@ func networkRemove(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	model.RemoveNetwork(ctx, networkId, userId)
+	model.RemoveNetwork(ctx, networkId, &userId)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {
@@ -674,6 +679,8 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 }
 
 func adminWalletEstimateFee(opts docopt.Opts) {
+	ctx := context.Background()
+
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
 		panic(err)
@@ -691,7 +698,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	fees, err := client.EstimateTransferFee(amountUsd, destinationAddress, blockchain)
+	fees, err := client.EstimateTransferFee(ctx, amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}
@@ -709,7 +716,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 
 	fmt.Printf("Total Fee: %f\n", *fee)
 
-	usdFee, err := controller.ConvertFeeToUSDC(blockchain, *fee)
+	usdFee, err := controller.ConvertFeeToUSDC(ctx, blockchain, *fee)
 	if err != nil {
 		panic(err)
 	}
@@ -718,6 +725,7 @@ func adminWalletEstimateFee(opts docopt.Opts) {
 }
 
 func adminWalletTransfer(opts docopt.Opts) {
+	ctx := context.Background()
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
@@ -736,7 +744,7 @@ func adminWalletTransfer(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	res, err := client.CreateTransferTransaction(amountUsd, destinationAddress, blockchain)
+	res, err := client.CreateTransferTransaction(ctx, amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}
@@ -952,4 +960,10 @@ func reliabilitySetMultipliers(opts docopt.Opts) {
 			fmt.Printf("%s %.1f -> %.1f\n", countryCode, m1.ReliabilityMultiplier, m2.ReliabilityMultiplier)
 		}
 	}
+}
+
+func productUpdatesSync(opts docopt.Opts) {
+	ctx := context.Background()
+
+	controller.SyncInitialProductUpdates(ctx)
 }

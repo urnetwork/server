@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/exp/maps"
+
+	// "github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -198,59 +202,122 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 func RemoveNetwork(
 	ctx context.Context,
 	networkId server.Id,
-	userId server.Id,
-) {
+	adminUserId *server.Id,
+) (success bool, userAuths map[string]bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		if adminUserId != nil {
+			result, err := tx.Query(
+				ctx,
+				`
+				SELECT
+					admin_user_id
+				FROM network
+				WHERE network_id = $1
+				`,
+				networkId,
+			)
 
-		// TODO: Remove network user wallets
+			adminMatch := false
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					var userId server.Id
+					server.Raise(result.Scan(&userId))
+					if *adminUserId == userId {
+						adminMatch = true
+					}
+				}
+			})
 
-		// FIXME do we need to check that the user is the admin?
-		// FIXME normally we would enforce the access control by passing in a clientSession
+			if !adminMatch {
+				return
+			}
+		}
 
-		server.RaisePgResult(tx.Exec(
+		userIds := map[server.Id]bool{}
+		userAuths = map[string]bool{}
+
+		result, err := tx.Query(
 			ctx,
 			`
-				DELETE FROM network_user
-				USING network
-				WHERE network.network_id = $1 AND network_user.user_id = network.admin_user_id
+			SELECT
+				network.admin_user_id
+			FROM network
+			WHERE network_id = $1
 			`,
 			networkId,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var userId server.Id
+				server.Raise(result.Scan(&userId))
+				userIds[userId] = true
+			}
+		})
 
-		// FIXME add network_id to:
-		// - network_user_auth_wallet
-		// - network_user_auth_password
-		// - network_user_auth_sso
+		server.CreateTempTableInTx(ctx, tx, "temp_user_id(user_id uuid)", maps.Keys(userIds)...)
 
-		// (cascade) delete network_user_auth_wallet
-		server.RaisePgResult(tx.Exec(
+		result, err = tx.Query(
 			ctx,
 			`
-				DELETE FROM network_user_auth_wallet
-				WHERE user_id = $1
-			`,
-			userId,
-		))
+			SELECT
+				user_auth
+			FROM network_user_auth_password
+			INNER JOIN temp_user_id ON temp_user_id.user_id = network_user_auth_password.user_id
 
-		// (cascade) delete network_user_auth_password
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_user_auth_password
-				WHERE user_id = $1
-			`,
-			userId,
-		))
+			UNION ALL
 
-		// (cascade) delete network_user_auth_sso
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_user_auth_sso
-				WHERE user_id = $1
+			SELECT
+				user_auth
+			FROM network_user_auth_sso
+			INNER JOIN temp_user_id ON temp_user_id.user_id = network_user_auth_sso.user_id
 			`,
-			userId,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var userAuth string
+				server.Raise(result.Scan(&userAuth))
+				userAuths[userAuth] = true
+			}
+		})
+
+		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+			for userId, _ := range userIds {
+				batch.Queue(
+					`
+						DELETE FROM network_user
+						WHERE user_id = $1
+					`,
+					userId,
+				)
+
+				// (cascade) delete network_user_auth_wallet
+				batch.Queue(
+					`
+						DELETE FROM network_user_auth_wallet
+						WHERE user_id = $1
+					`,
+					userId,
+				)
+
+				// (cascade) delete network_user_auth_password
+				batch.Queue(
+					`
+						DELETE FROM network_user_auth_password
+						WHERE user_id = $1
+					`,
+					userId,
+				)
+
+				// (cascade) delete network_user_auth_sso
+				batch.Queue(
+					`
+						DELETE FROM network_user_auth_sso
+						WHERE user_id = $1
+					`,
+					userId,
+				)
+			}
+		})
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -262,5 +329,8 @@ func RemoveNetwork(
 		))
 
 		networkNameSearch.RemoveInTx(ctx, networkId, tx)
+
+		success = true
 	})
+	return
 }

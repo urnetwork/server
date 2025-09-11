@@ -1,6 +1,8 @@
 package model
 
 import (
+	"context"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -32,6 +34,42 @@ func AccountPreferencesSet(
 
 	result := &AccountPreferencesSetResult{}
 	return result, nil
+}
+
+func AccountProductUpdatesSetForEmail(ctx context.Context, userEmail string, productUpdates bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO account_preferences (network_id, product_updates)
+			SELECT
+				DISTINCT network.network_id,
+				$3 AS product_updates
+			FROM (
+				SELECT
+					user_id
+				FROM network_user_auth_sso
+				WHERE
+					user_auth = $1
+
+				UNION ALL
+
+				SELECT
+					user_id
+				FROM network_user_auth_password
+				WHERE
+					user_auth = $1
+			) t
+			INNER JOIN network ON network.admin_user_id = t.user_id
+			ON CONFLICT (network_id) DO UPDATE
+			SET
+				product_updates = $2
+			`,
+			userEmail,
+			productUpdates,
+		))
+	})
+
 }
 
 type AccountPreferencesGetResult struct {

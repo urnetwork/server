@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -68,6 +69,7 @@ func WalletCircleInit(
 	}
 
 	return server.HttpPostRequireStatusOk(
+		session.Ctx,
 		"https://api.circle.com/v1/w3s/user/initialize",
 		map[string]any{
 			"idempotencyKey": server.NewId(),
@@ -118,6 +120,7 @@ func WalletValidateAddress(
 	chain = strings.TrimSpace(chain)
 
 	return server.HttpPostRequireStatusOk(
+		session.Ctx,
 		"https://api.circle.com/v1/w3s/transactions/validateAddress",
 		map[string]any{
 			"blockchain": chain,
@@ -214,6 +217,7 @@ func WalletCircleTransferOut(
 		}
 
 		result, returnErr = server.HttpPostRequireStatusOk(
+			session.Ctx,
 			"https://api.circle.com/v1/w3s/user/transactions/transfer",
 			map[string]any{
 				"userId":             circleUserToken.circleUserId,
@@ -259,13 +263,14 @@ type GetPublicKeyResult struct {
 	PublicKey string `json:"publicKey"`
 }
 
-func getPublicKey() (*string, error) {
+func getPublicKey(ctx context.Context) (*string, error) {
 
 	circleApiToken := circleConfig()["api_token"]
 
 	url := "https://api.circle.com/v1/w3s/config/entity/publicKey"
 
 	publicKey, err := server.HttpGetRequireStatusOk(
+		ctx,
 		url,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -336,6 +341,7 @@ func createCircleUser(session *session.ClientSession) (
 	circleApiToken := circleConfig()["api_token"]
 
 	_, resultErr = server.HttpPost(
+		session.Ctx,
 		"https://api.circle.com/v1/w3s/users",
 		map[string]any{
 			"userId": circleUserId,
@@ -380,7 +386,9 @@ type CircleUserToken struct {
 	EncryptionKey string `json:"encryption_key"`
 }
 
-func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, error) {
+func createCircleUserToken(
+	session *session.ClientSession,
+) (*CircleUserToken, error) {
 	circleUserId := model.GetOrCreateCircleUserId(
 		session.Ctx,
 		session.ByJwt.NetworkId,
@@ -390,6 +398,7 @@ func createCircleUserToken(session *session.ClientSession) (*CircleUserToken, er
 	circleApiToken := circleConfig()["api_token"]
 
 	return server.HttpPostRequireStatusOk(
+		session.Ctx,
 		"https://api.circle.com/v1/w3s/users/token",
 		map[string]any{
 			"userId": circleUserId,
@@ -511,6 +520,7 @@ func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 	}
 
 	err = verifyCircleAuth(
+		req.Context(),
 		req.Header.Get("X-Circle-Key-Id"),
 		req.Header.Get("X-Circle-Signature"),
 		bodyBytes,
@@ -525,11 +535,12 @@ func VerifyCircleBody(req *http.Request) (io.Reader, error) {
 	return bytes.NewReader(bodyBytes), nil
 }
 
-func verifyCircleAuth(keyId string, signature string, responseBodyBytes []byte) error {
+func verifyCircleAuth(ctx context.Context, keyId string, signature string, responseBodyBytes []byte) error {
 
 	circleApiToken := circleConfig()["api_token"]
 
 	pk, err := server.HttpGetRequireStatusOk(
+		ctx,
 		fmt.Sprintf("https://api.circle.com/v2/notifications/publicKey/%s", keyId),
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -676,7 +687,7 @@ func CircleWalletWebhook(
 
 			circleWalletId := event.CorrelationIds[0]
 
-			circleWallet, err := getCircleWallet(circleWalletId)
+			circleWallet, err := getCircleWallet(clientSession.Ctx, circleWalletId)
 			if err != nil {
 				// server.Logger().Printf("CircleWalletWebhook: getCircleWalletErr: %s\n", err.Error())
 
@@ -749,8 +760,9 @@ type CircleWalletResult struct {
 	Wallet CircleWallet `json:"wallet"`
 }
 
-func getCircleWallet(circleWalletId string) (*CircleWallet, error) {
+func getCircleWallet(ctx context.Context, circleWalletId string) (*CircleWallet, error) {
 	return server.HttpGetRequireStatusOk(
+		ctx,
 		fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s", circleWalletId),
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -783,6 +795,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 	circleApiToken := circleConfig()["api_token"]
 
 	walletInfos, err := server.HttpGetRequireStatusOk(
+		session.Ctx,
 		"https://api.circle.com/v1/w3s/wallets",
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -852,6 +865,7 @@ func findCircleWallets(session *session.ClientSession) ([]*CircleWalletInfo, err
 
 	for _, walletInfo := range walletInfos {
 		data, err := server.HttpGetRequireStatusOk(
+			session.Ctx,
 			fmt.Sprintf("https://api.circle.com/v1/w3s/wallets/%s/balances?includeAll=true", walletInfo.WalletId),
 			func(header http.Header) {
 				header.Add("Accept", "application/json")

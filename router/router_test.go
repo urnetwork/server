@@ -17,7 +17,7 @@ import (
 
 func TestRouterBasic(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
-		cancelCtx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		NoAuth := func(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +125,7 @@ func TestRouterBasic(t *testing.T) {
 
 		port := 8080
 
-		routerHandler := NewRouter(cancelCtx, routes)
+		routerHandler := NewRouter(ctx, routes)
 		go http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
 
 		select {
@@ -164,6 +164,7 @@ func TestRouterBasic(t *testing.T) {
 		var err error
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -171,6 +172,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -178,6 +180,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -185,6 +188,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -193,6 +197,7 @@ func TestRouterBasic(t *testing.T) {
 
 		// users in guest mode should be restricted to authenticated level routes
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -200,6 +205,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -207,6 +213,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -215,6 +222,7 @@ func TestRouterBasic(t *testing.T) {
 
 		// authenticated users should be able to access guest level routes
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -222,6 +230,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -229,6 +238,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/client", port),
 			authClient,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -236,6 +246,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpGet(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/client", port),
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
@@ -243,6 +254,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
 			map[string]any{},
 			server.NoCustomHeaders,
@@ -251,6 +263,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
 			map[string]any{},
 			auth,
@@ -259,6 +272,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
 			map[string]any{},
 			auth,
@@ -268,6 +282,7 @@ func TestRouterBasic(t *testing.T) {
 
 		// should allow guest requests
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
 			map[string]any{},
 			authGuestMode,
@@ -276,6 +291,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
 			map[string]any{},
 			server.NoCustomHeaders,
@@ -284,6 +300,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			authGuestMode,
@@ -293,6 +310,7 @@ func TestRouterBasic(t *testing.T) {
 
 		// should deny guest requests
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			auth,
@@ -301,6 +319,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputauth-no-guest", port),
 			map[string]any{},
 			server.NoCustomHeaders,
@@ -309,6 +328,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
 			map[string]any{},
 			authClient,
@@ -317,6 +337,7 @@ func TestRouterBasic(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		_, err = server.HttpPost(
+			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
 			map[string]any{},
 			auth,

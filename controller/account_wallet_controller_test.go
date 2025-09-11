@@ -149,6 +149,8 @@ func TestAccountWallet(t *testing.T) {
 func TestSeekerNFTVerification(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 
+		ctx := context.Background()
+
 		sagaHolderPublicKey := "FhWtLQZ7Fefy6Mp7Yp9CnFgQjfw6N4a3Y8r5qw888DkB"
 		seekerPreorderHolderPublicKey := "JBSmKmcTMRSM7mmLZd2do6PMpd9eAtKgKC9a4UtYwLuE"
 		seekerGenesisHolderPublicKey := "CwrNT8btVQNbb2ob1k81sV652wdmJB6CgWTVBNT5GJjC"
@@ -157,7 +159,7 @@ func TestSeekerNFTVerification(t *testing.T) {
 		/**
 		 * Verify Saga NFT Holder
 		 */
-		result, err := heliusSearchAssetsSaga(sagaHolderPublicKey)
+		result, err := heliusSearchAssetsSaga(ctx, sagaHolderPublicKey)
 		assert.Equal(t, err, nil)
 		isHolder := isSagaNftHolder(result.Result.Items)
 		assert.Equal(t, isHolder, true)
@@ -165,7 +167,7 @@ func TestSeekerNFTVerification(t *testing.T) {
 		/**
 		 * Verify non Saga NFT Holder
 		 */
-		result, err = heliusSearchAssetsSaga(nonHolderPublicKey)
+		result, err = heliusSearchAssetsSaga(ctx, nonHolderPublicKey)
 		assert.Equal(t, err, nil)
 		isHolder = isSagaNftHolder(result.Result.Items)
 		assert.Equal(t, isHolder, false)
@@ -173,7 +175,7 @@ func TestSeekerNFTVerification(t *testing.T) {
 		/**
 		 * Verify Seeker Preorder NFT Holder
 		 */
-		items, err := heliusSearchAssets(seekerPreorderHolderPublicKey)
+		items, err := heliusSearchAssets(ctx, seekerPreorderHolderPublicKey)
 		assert.Equal(t, err, nil)
 
 		isHolder = isSeekerNftHolder(items)
@@ -182,7 +184,7 @@ func TestSeekerNFTVerification(t *testing.T) {
 		/**
 		 * Verify Seeker Genesis Holder
 		 */
-		items, err = heliusSearchAssets(seekerGenesisHolderPublicKey)
+		items, err = heliusSearchAssets(ctx, seekerGenesisHolderPublicKey)
 		assert.Equal(t, err, nil)
 
 		isHolder = isSeekerNftHolder(items)
@@ -192,7 +194,7 @@ func TestSeekerNFTVerification(t *testing.T) {
 		 * Verify non Seeker Preorder or Genesis NFT Holder
 		 */
 
-		items, err = heliusSearchAssets(nonHolderPublicKey)
+		items, err = heliusSearchAssets(ctx, nonHolderPublicKey)
 		assert.Equal(t, err, nil)
 		isHolder = isSeekerNftHolder(result.Result.Items)
 		assert.Equal(t, isHolder, false)

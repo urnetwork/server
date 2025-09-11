@@ -2,8 +2,9 @@ package controller
 
 import (
 	// "time"
+	"fmt"
 
-	// "github.com/urnetwork/server"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -64,6 +65,13 @@ func NetworkCreate(
 				&NetworkWelcomeTemplate{},
 			)
 		}
+
+		AccountPreferencesSet(
+			&model.AccountPreferencesSetArgs{
+				ProductUpdates: true,
+			},
+			session,
+		)
 
 	}
 
@@ -177,14 +185,22 @@ func UpgradeFromGuestExisting(
 type NetworkRemoveResult struct{}
 
 func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
-
-	model.RemoveNetwork(
+	success, userAuths := model.RemoveNetwork(
 		session.Ctx,
 		session.ByJwt.NetworkId,
-		session.ByJwt.UserId,
+		&session.ByJwt.UserId,
 	)
+	if success {
+		server.Tx(session.Ctx, func(tx server.PgTx) {
+			for userAuth, _ := range userAuths {
+				ScheduleRemoveProductUpdates(session, userAuth, tx)
+			}
+		})
 
-	return &NetworkRemoveResult{}, nil
+		return &NetworkRemoveResult{}, nil
+	}
+
+	return nil, fmt.Errorf("Could not remove network")
 }
 
 type GetNetworkReliabilityResult struct {

@@ -16,16 +16,21 @@ import (
 
 type CircleApi interface {
 	EstimateTransferFee(
+		ctx context.Context,
 		amount float64,
 		destinationAddress string,
 		network string,
 	) (*FeeEstimateResult, error)
 	CreateTransferTransaction(
+		ctx context.Context,
 		amountInUsd float64,
 		destinationAddress string,
 		network string,
 	) (*CreateTransferTransactionResult, error)
-	GetTransaction(id string) (*GetTransactionResult, error)
+	GetTransaction(
+		ctx context.Context,
+		id string,
+	) (*GetTransactionResult, error)
 }
 
 type CoreCircleApiClient struct{}
@@ -51,6 +56,7 @@ type CreateTransferTransactionResult struct {
 }
 
 func (c *CoreCircleApiClient) CreateTransferTransaction(
+	ctx context.Context,
 	amountInUsd float64,
 	destinationAddress string,
 	network string,
@@ -68,7 +74,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 		return nil, err
 	}
 
-	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	cipher, err := generateEntitySecretCipher(ctx, hexEncodedEntitySecret)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +82,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
 
 	res, err := server.HttpPostRequireStatusOk(
+		ctx,
 		uri,
 		map[string]any{
 			"idempotencyKey":         server.NewId(),
@@ -128,6 +135,7 @@ type FeeEstimateResult struct {
 }
 
 func (c *CoreCircleApiClient) EstimateTransferFee(
+	ctx context.Context,
 	amount float64,
 	destinationAddress string,
 	network string,
@@ -147,6 +155,7 @@ func (c *CoreCircleApiClient) EstimateTransferFee(
 	}
 
 	return server.HttpPostRequireStatusOk(
+		ctx,
 		url,
 		map[string]any{
 			"amounts":            []string{fmt.Sprintf("%f", amount)},
@@ -200,13 +209,14 @@ type GetTransactionResult struct {
 	ResponseBodyBytes []byte
 }
 
-func (c *CoreCircleApiClient) GetTransaction(id string) (*GetTransactionResult, error) {
+func (c *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*GetTransactionResult, error) {
 
 	uri := fmt.Sprintf("https://api.circle.com/v1/w3s/transactions/%s", id)
 
 	circleApiToken := circleConfig()["api_token"]
 
 	return server.HttpGetRequireStatusOk(
+		ctx,
 		uri,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -296,12 +306,12 @@ type WalletSetResult struct {
 }
 
 // for developers to create a new wallet set for payouts
-func CreateDeveloperWalletSet(name string) {
+func CreateDeveloperWalletSet(ctx context.Context, name string) {
 	hexEncodedEntitySecret := entitySecret()
 
 	circleApiToken := circleConfig()["api_token"]
 
-	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	cipher, err := generateEntitySecretCipher(ctx, hexEncodedEntitySecret)
 	if err != nil {
 		glog.Infof("[circlec]error generating entity secret cipher: %s", err)
 		return
@@ -311,6 +321,7 @@ func CreateDeveloperWalletSet(name string) {
 	idemKey := server.NewId()
 
 	walletSet, err := server.HttpPostRequireStatusOk(
+		ctx,
 		url,
 		map[string]any{
 			"idempotencyKey":         idemKey,
@@ -358,12 +369,12 @@ type DeveloperWalletResult struct {
 
 // for developers to create a new wallet for payouts
 // not for end users
-func CreateDeveloperWallet(walletSetId string) {
+func CreateDeveloperWallet(ctx context.Context, walletSetId string) {
 	hexEncodedEntitySecret := entitySecret()
 
 	circleApiToken := circleConfig()["api_token"]
 
-	cipher, err := generateEntitySecretCipher(hexEncodedEntitySecret)
+	cipher, err := generateEntitySecretCipher(ctx, hexEncodedEntitySecret)
 	if err != nil {
 		glog.Infof("[circlec]error generating entity secret cipher: %s", err)
 		return
@@ -373,6 +384,7 @@ func CreateDeveloperWallet(walletSetId string) {
 	idemKey := server.NewId()
 
 	wallets, err := server.HttpPostRequireStatusOk(
+		ctx,
 		url,
 		map[string]any{
 			"idempotencyKey":         idemKey,
@@ -410,14 +422,14 @@ func CreateDeveloperWallet(walletSetId string) {
 
 }
 
-func generateEntitySecretCipher(hexEncodedEntitySecret string) ([]byte, error) {
+func generateEntitySecretCipher(ctx context.Context, hexEncodedEntitySecret string) ([]byte, error) {
 
 	entitySecret, err := hex.DecodeString(hexEncodedEntitySecret)
 	if err != nil {
 		panic(err)
 	}
 
-	publicKeyString, err := getPublicKey()
+	publicKeyString, err := getPublicKey(ctx)
 	if err != nil {
 		return nil, err
 	}

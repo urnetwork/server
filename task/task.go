@@ -99,6 +99,9 @@ func (self *RunOnceOption) String() string {
 	return string(keyJson)
 }
 
+// FIXME RunReplace(key ...any)
+//  remove all unclaimed tasks with same key, then add
+
 type RunPriorityOption struct {
 	Priority TaskPriority
 }

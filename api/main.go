@@ -141,6 +141,7 @@ Options:
 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
+		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
 	}
 
 	// server.().Printf("%s\n", opts)
