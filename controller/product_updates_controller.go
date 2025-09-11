@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	// "time"
+	"encoding/base64"
 
 	"github.com/golang/glog"
 
@@ -21,10 +22,16 @@ import (
 
 var brevoWebhookExpectedAuths = sync.OnceValue(func() map[string]bool {
 	brevo := server.Vault.RequireSimpleResource("brevo.yml")
+	// TODO these are users not bearer tokens
 	bearers := brevo.String("brevo", "webhook_bearers")
 	expectedAuths := map[string]bool{}
 	for _, bearer := range bearers {
-		expectedAuth := fmt.Sprintf("bearer %s", bearer)
+		expectedAuth := strings.ToLower(fmt.Sprintf(
+			"Basic %s",
+			base64.StdEncoding.EncodeToString([]byte(
+				fmt.Sprintf("%s:", bearer),
+			)),
+		))
 		expectedAuths[expectedAuth] = true
 	}
 	return expectedAuths
@@ -100,6 +107,7 @@ func BrevoWebhook(
 	webhookArgs *BrevoWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*BrevoWebhookResult, error) {
+	// glog.Infof("[product_updates]brevo webhook: (%v) %v\n", clientSession.Header, webhookArgs)
 
 	auth := func() bool {
 		auths, ok := clientSession.Header["Authorization"]

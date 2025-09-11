@@ -9,7 +9,7 @@ import (
 )
 
 func BrevoWebhook(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(
+	router.WrapWithInputNoAuth(
 		controller.BrevoWebhook,
 		w,
 		r,

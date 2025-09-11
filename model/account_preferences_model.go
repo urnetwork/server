@@ -44,7 +44,7 @@ func AccountProductUpdatesSetForEmail(ctx context.Context, userEmail string, pro
 			INSERT INTO account_preferences (network_id, product_updates)
 			SELECT
 				DISTINCT network.network_id,
-				$3 AS product_updates
+				$2 AS product_updates
 			FROM (
 				SELECT
 					user_id
