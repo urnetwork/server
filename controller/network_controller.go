@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -66,12 +67,15 @@ func NetworkCreate(
 			)
 		}
 
-		AccountPreferencesSet(
-			&model.AccountPreferencesSetArgs{
-				ProductUpdates: true,
-			},
-			session,
-		)
+		byJwt, err := jwt.ParseByJwt(*(result.Network.ByJwt))
+		if err == nil {
+			AccountPreferencesSet(
+				&model.AccountPreferencesSetArgs{
+					ProductUpdates: true,
+				},
+				session.WithByJwt(byJwt),
+			)
+		}
 
 	}
 

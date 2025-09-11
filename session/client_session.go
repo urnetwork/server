@@ -120,6 +120,16 @@ func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, 
 	return
 }
 
+func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
+	return &ClientSession{
+		Ctx:           self.Ctx,
+		Cancel:        self.Cancel,
+		ClientAddress: self.ClientAddress,
+		Header:        self.Header,
+		ByJwt:         byJwt,
+	}
+}
+
 func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 

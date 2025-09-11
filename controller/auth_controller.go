@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -191,6 +192,16 @@ func AuthVerify(
 			verify.UserAuth,
 			&NetworkWelcomeTemplate{},
 		)
+
+		byJwt, err := jwt.ParseByJwt(result.Network.ByJwt)
+		if err == nil {
+			AccountPreferencesSet(
+				&model.AccountPreferencesSetArgs{
+					ProductUpdates: true,
+				},
+				session.WithByJwt(byJwt),
+			)
+		}
 	}
 	return result, err
 }
