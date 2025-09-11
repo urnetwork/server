@@ -1711,7 +1711,7 @@ func HeliusWebhook(
 
 			if tokenTransfer.Mint == solanaUsdcMint &&
 				tokenTransfer.ToUserAccount == solanaReceiverAddress &&
-				tokenTransfer.TokenAmount >= 30 {
+				tokenTransfer.TokenAmount >= 40 {
 				paymentReceived = true
 				tokenAmountReceived = tokenTransfer.TokenAmount
 			}
