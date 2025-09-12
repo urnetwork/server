@@ -192,3 +192,20 @@ func TestAddUserAuthWallet(t *testing.T) {
 
 	})
 }
+
+func TestFindNetworkIdByEmail(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "abcdef"
+
+		userAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		retrievedNetworkId, err := FindNetworkIdByEmail(ctx, userAuth)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *retrievedNetworkId, networkId)
+
+	})
+}
