@@ -687,8 +687,10 @@ func (self *clientLocationReliability) Values() []any {
 	// [7] max_net_type_score_speed
 	// [8] max_bytes_per_second
 	// [9] min_relative_latency_ms
+	// [10] has_speed_test
+	// [11] has_latency_test
 
-	values := make([]any, 10)
+	values := make([]any, 12)
 
 	values[0] = self.networkId
 
@@ -736,6 +738,9 @@ func (self *clientLocationReliability) Values() []any {
 	}
 	values[9] = minRelativeLatencyMillis
 
+	values[10] = 0 < len(self.allBytesPerSecond)
+	values[11] = 0 < len(self.allRelativeLatencyMillis)
+
 	return values
 }
 
@@ -771,7 +776,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.net_type_score,
 			network_client_location.net_type_score_speed,
 			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
-			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms,
+			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
+			network_client_latency.latency_ms IS NOT NULL AS has_latency_test
 
 		FROM network_client_connection
 
@@ -803,6 +810,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var netTypeScoreSpeed int
 			var bytesPerSecond ByteCount
 			var relativeLatencyMillis int
+			var hasSpeedTest bool
+			var hasLatencyTest bool
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -815,6 +824,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&netTypeScoreSpeed,
 				&bytesPerSecond,
 				&relativeLatencyMillis,
+				&hasSpeedTest,
+				&hasLatencyTest,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
@@ -837,8 +848,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			r.clientAddressHashes[clientAddressHash] += 1
 			r.netTypeScores[netTypeScore] += 1
 			r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
-			r.allBytesPerSecond[bytesPerSecond] += 1
-			r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
+			if hasSpeedTest {
+				r.allBytesPerSecond[bytesPerSecond] += 1
+			}
+			if hasLatencyTest {
+				r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
+			}
 		}
 	})
 
@@ -856,7 +871,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_location.net_type_score,
 			network_client_location.net_type_score_speed,
 			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
-			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms
+			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms,
+			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
+			network_client_latency.latency_ms IS NOT NULL AS has_latency_test
 
 		FROM network_client_connection
 
@@ -899,6 +916,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var netTypeScoreSpeed int
 			var bytesPerSecond ByteCount
 			var relativeLatencyMillis int
+			var hasSpeedTest bool
+			var hasLatencyTest bool
 			clientAddressHashSlice := clientAddressHash[:]
 			server.Raise(result.Scan(
 				&clientId,
@@ -911,6 +930,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&netTypeScoreSpeed,
 				&bytesPerSecond,
 				&relativeLatencyMillis,
+				&hasSpeedTest,
+				&hasLatencyTest,
 			))
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
@@ -933,8 +954,12 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				r.clientAddressHashes[clientAddressHash] += 1
 				r.netTypeScores[netTypeScore] += 1
 				r.netTypeScoreSpeeds[netTypeScoreSpeed] += 1
-				r.allBytesPerSecond[bytesPerSecond] += 1
-				r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
+				if hasSpeedTest {
+					r.allBytesPerSecond[bytesPerSecond] += 1
+				}
+				if hasLatencyTest {
+					r.allRelativeLatencyMillis[relativeLatencyMillis] += 1
+				}
 			}
 			// else there is already an entry, don't update
 		}
@@ -955,7 +980,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	            max_net_type_score smallint,
 	            max_net_type_score_speed smallint,
 	            max_bytes_per_second bigint,
-	            min_relative_latency_ms integer
+	            min_relative_latency_ms integer,
+	            has_speed_test bool,
+	            has_latency_test bool 
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -977,7 +1004,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_net_type_score,
 	        max_net_type_score_speed,
 	        max_bytes_per_second,
-	        min_relative_latency_ms
+	        min_relative_latency_ms,
+	        has_speed_test,
+	        has_latency_test
 	    )
 	    SELECT
 	    	client_id,
@@ -992,7 +1021,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_net_type_score,
 	        max_net_type_score_speed,
 	        max_bytes_per_second,
-	        min_relative_latency_ms
+	        min_relative_latency_ms,
+	        has_speed_test,
+	        has_latency_test
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -1008,7 +1039,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        max_net_type_score = EXCLUDED.max_net_type_score,
 	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed,
 	        max_bytes_per_second = EXCLUDED.max_bytes_per_second,
-	        min_relative_latency_ms = EXCLUDED.min_relative_latency_ms
+	        min_relative_latency_ms = EXCLUDED.min_relative_latency_ms,
+	        has_speed_test = EXCLUDED.has_speed_test,
+	        has_latency_test = EXCLUDED.has_latency_test
 	    `,
 		updateBlockNumber,
 	))

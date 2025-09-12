@@ -1947,8 +1947,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	scorePerTier := 20
 	relativeLatencyMillisThreshold := 100
 	relativeLatencyMillisPerScore := 20
-	bytesPerSecondThreshold := 2 * Mib
-	bytesPerSecondPerScore := 100 * Kib
+	bytesPerSecondThreshold := 1 * Mib
+	bytesPerSecondPerScore := 200 * Kib
+	missingLatencyScore := 10
+	missingSpeedScore := 10
 
 	setScore := func(
 		clientScore *ClientScore,
@@ -1956,15 +1958,25 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		netTypeScoreSpeed int,
 		minRelativeLatencyMillis int,
 		maxBytesPerSecond ByteCount,
+		hasLatencyTest bool,
+		hasSpeedTest bool,
 	) {
 		scoreAdjust := 0
-		if d := minRelativeLatencyMillis - relativeLatencyMillisThreshold; 0 < d {
-			scoreAdjust += (d + relativeLatencyMillisPerScore/2) / relativeLatencyMillisPerScore
+
+		if hasLatencyTest {
+			if d := minRelativeLatencyMillis - relativeLatencyMillisThreshold; 0 < d {
+				scoreAdjust += (d + relativeLatencyMillisPerScore/2) / relativeLatencyMillisPerScore
+			}
+		} else {
+			scoreAdjust += missingLatencyScore
 		}
-		if 0 < maxBytesPerSecond {
+
+		if hasSpeedTest {
 			if d := bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
 				scoreAdjust += int((d + bytesPerSecondPerScore/2) / bytesPerSecondPerScore)
 			}
+		} else {
+			scoreAdjust += missingSpeedScore
 		}
 
 		clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
@@ -1995,6 +2007,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	            network_client_location_reliability.max_net_type_score_speed,
 	            network_client_location_reliability.min_relative_latency_ms,
 	            network_client_location_reliability.max_bytes_per_second,
+	            network_client_location_reliability.has_latency_test,
+	            network_client_location_reliability.has_speed_test,
 	            client_connection_reliability_score.reliability_weight
 
 	        FROM network_client_location_reliability
@@ -2017,6 +2031,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				var netTypeScoreSpeed int
 				var minRelativeLatencyMillis int
 				var maxBytesPerSecond ByteCount
+				var hasLatencyTest bool
+				var hasSpeedTest bool
 				var reliabilityWeight float32
 				server.Raise(result.Scan(
 					&cityLocationId,
@@ -2028,6 +2044,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					&netTypeScoreSpeed,
 					&minRelativeLatencyMillis,
 					&maxBytesPerSecond,
+					&hasLatencyTest,
+					&hasSpeedTest,
 					&reliabilityWeight,
 				))
 				clientScore := &ClientScore{
@@ -2046,6 +2064,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					netTypeScoreSpeed,
 					minRelativeLatencyMillis,
 					maxBytesPerSecond,
+					hasLatencyTest,
+					hasSpeedTest,
 				)
 
 				clientScores, ok := locationClientScores[cityLocationId]
@@ -2085,6 +2105,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	                network_client_location_reliability.max_net_type_score_speed,
 	                network_client_location_reliability.min_relative_latency_ms,
 		            network_client_location_reliability.max_bytes_per_second,
+		            network_client_location_reliability.has_latency_test,
+		            network_client_location_reliability.has_speed_test,
 	                client_connection_reliability_score.reliability_weight
 
 	            FROM network_client_location_reliability
@@ -2117,6 +2139,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				var netTypeScoreSpeed int
 				var minRelativeLatencyMillis int
 				var maxBytesPerSecond ByteCount
+				var hasLatencyTest bool
+				var hasSpeedTest bool
 				var reliabilityWeight float32
 				server.Raise(result.Scan(
 					&cityLocationGroupId,
@@ -2128,6 +2152,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					&netTypeScoreSpeed,
 					&minRelativeLatencyMillis,
 					&maxBytesPerSecond,
+					&hasLatencyTest,
+					&hasSpeedTest,
 					&reliabilityWeight,
 				))
 				clientScore := &ClientScore{
@@ -2146,6 +2172,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					netTypeScoreSpeed,
 					minRelativeLatencyMillis,
 					maxBytesPerSecond,
+					hasLatencyTest,
+					hasSpeedTest,
 				)
 
 				if cityLocationGroupId != nil {
