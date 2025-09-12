@@ -12,7 +12,7 @@ import (
 )
 
 func maxUserAuthAttemptsError() error {
-	return errors.New("User auth attempts exceeded limits.")
+	return errors.New("503 User auth attempts exceeded limits.")
 }
 
 const AttemptLookback = 5 * time.Minute

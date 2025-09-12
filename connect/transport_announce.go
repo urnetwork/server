@@ -20,8 +20,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
 		LocationRetryTimeout:  5 * time.Minute,
 		MaxLatencyCount:       16,
-		MinTestTimeout:        120 * time.Second,
-		MaxTestTimeout:        600 * time.Second,
+		MinTestTimeout:        60 * time.Minute,
+		MaxTestTimeout:        600 * time.Minute,
 	}
 }
 
