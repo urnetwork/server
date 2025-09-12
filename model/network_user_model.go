@@ -732,6 +732,40 @@ func getWalletAuthsByAddress(
 	return walletAuths, nil
 }
 
+func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.Id, err error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, execErr := tx.Query(
+			ctx,
+			`
+				SELECT
+					network.network_id
+				FROM network_user_auth_password
+				LEFT JOIN network ON
+					network.admin_user_id = network_user_auth_password.user_id
+				WHERE network_user_auth_password.user_auth = $1
+			`,
+			email,
+		)
+		if execErr != nil {
+			// server.Raise(err)
+			err = execErr
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				server.Raise(result.Scan(
+					&networkId,
+				))
+			}
+		})
+	})
+
+	return
+
+}
+
 /**
  * Migrating network_user to the new model
  * This is a temporary structure to hold the data
