@@ -2374,4 +2374,10 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX network_product_updates_sync_admin_user_id ON network (product_updates_sync, admin_user_id)
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability
+            ADD COLUMN has_speed_test bool DEFAULT true,
+            ADD COLUMN has_latency_test bool DEFAULT true
+    `),
 }
