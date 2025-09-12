@@ -792,7 +792,12 @@ type PlayWebhookMessage struct {
 	Data string `json:"data"`
 }
 
+type PlayWebhookResultMessage struct {
+	Message string `json:"message"`
+}
+
 type PlayWebhookResult struct {
+	Message *PlayWebhookResultMessage
 }
 
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
@@ -846,6 +851,20 @@ func PlayWebhook(
 
 			glog.Infof("[sub]google play sub: %v\n", sub)
 
+			if len(sub.LineItems) == 0 {
+				glog.Infof("Google play cannot not renew subscription with zero line items (%s)", rtdnMessage.SubscriptionNotification.PurchaseToken)
+				return &PlayWebhookResult{
+					Message: &PlayWebhookResultMessage{
+						Message: fmt.Sprintf(
+							"Google play cannot not renew subscription with zero line items (%s), sub state: (%s), sub aknowledgement: (%s)",
+							rtdnMessage.SubscriptionNotification.PurchaseToken,
+							sub.SubscriptionState,
+							sub.AcknowledgementState,
+						),
+					},
+				}, nil
+			}
+
 			var networkId server.Id
 			if sub.ExternalAccountIdentifiers != nil {
 				if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
@@ -867,11 +886,15 @@ func PlayWebhook(
 					return nil, fmt.Errorf("Google Play subscription missing external account id and obfuscated external account id")
 				}
 			} else {
-				return nil, fmt.Errorf("Google Play subscription missing external account information")
-			}
-
-			if len(sub.LineItems) == 0 {
-				return nil, fmt.Errorf("Google play cannot not renew subscription with zero line items (%s)", rtdnMessage.SubscriptionNotification.PurchaseToken)
+				return &PlayWebhookResult{
+					Message: &PlayWebhookResultMessage{
+						Message: fmt.Sprintf(
+							"Google Play subscription no external account information: sub state: (%s), sub aknowledgement: (%s)",
+							sub.SubscriptionState,
+							sub.AcknowledgementState,
+						),
+					},
+				}, nil
 			}
 
 			minExpiryTime := sub.LineItems[0].RequireExpiryTime()
