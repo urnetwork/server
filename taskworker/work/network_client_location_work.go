@@ -24,7 +24,7 @@ func ScheduleUpdateClientScores(clientSession *session.ClientSession, tx server.
 		&UpdateClientScoresArgs{},
 		clientSession,
 		task.RunOnce("update_client_scores"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.RunAt(server.NowUtc().Add(5*time.Second)),
 		task.Priority(task.TaskPriorityFastest),
 	)
 }
