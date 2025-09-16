@@ -230,5 +230,13 @@ func TestFindNetworkIdByEmail(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, *retrievedNetworkId, networkId)
 
+		/**
+		 * Test not found
+		 */
+
+		retrievedNetworkId, err = FindNetworkIdByEmail(ctx, "unknown@email.com")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, retrievedNetworkId, nil)
+
 	})
 }
