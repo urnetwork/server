@@ -739,12 +739,15 @@ func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.
 		result, execErr := tx.Query(
 			ctx,
 			`
-				SELECT
-					network.network_id
-				FROM network_user_auth_password
-				LEFT JOIN network ON
-					network.admin_user_id = network_user_auth_password.user_id
-				WHERE network_user_auth_password.user_auth = $1
+			SELECT network.network_id
+			FROM network
+			WHERE EXISTS (
+			  SELECT 1 FROM network_user_auth_password
+			  WHERE network_user_auth_password.user_id = network.admin_user_id AND network_user_auth_password.user_auth = $1
+			) OR EXISTS (
+			  SELECT 1 FROM network_user_auth_sso
+			  WHERE network_user_auth_sso.user_id = network.admin_user_id AND network_user_auth_sso.user_auth = $1
+			)
 			`,
 			email,
 		)
