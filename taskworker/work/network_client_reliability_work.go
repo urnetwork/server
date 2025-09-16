@@ -60,8 +60,8 @@ func ScheduleUpdateClientReliabilityScores(clientSession *session.ClientSession,
 		&UpdateClientReliabilityScoresArgs{},
 		clientSession,
 		task.RunOnce("update_client_reliability_scores"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
-		task.MaxTime(30*time.Minute),
+		// task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(60*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
 }
@@ -71,7 +71,7 @@ func UpdateClientReliabilityScores(
 	clientSession *session.ClientSession,
 ) (*UpdateClientReliabilityScoresResult, error) {
 	// the use case for these stats is match making, which values near term data over long term data
-	minTime := server.NowUtc().Add(-60 * time.Minute)
+	minTime := server.NowUtc().Add(-120 * time.Minute)
 	maxTime := server.NowUtc()
 	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateClientReliabilityScores(clientSession.Ctx, minTime, maxTime, false)

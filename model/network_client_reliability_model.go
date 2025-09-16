@@ -540,6 +540,10 @@ func getNetworkReliabilityWindow(
 			}
 		}
 
+		// drop the latest data point which may be incomplete
+		if minBucketNumber < maxBucketNumber {
+			maxBucketNumber -= 1
+		}
 		n := maxBucketNumber - minBucketNumber
 		reliabilityWeightsSlice := make([]float64, n)
 		clientCountsSlice := make([]int, n)
