@@ -263,6 +263,36 @@ func RequireHostPorts() map[int]int {
 	return hostPorts
 }
 
+func RequireServicePortToHostPort(servicePort int) int {
+	hostPort, ok := RequireHostPorts()[servicePort]
+	if !ok {
+		panic(fmt.Errorf("Host port not found for service port %s", servicePort))
+	}
+	return hostPort
+}
+
+func HostIp() (string, error) {
+	if hostIp := os.Getenv("WARP_HOST_IP"); hostIp != "" {
+		return hostIp, nil
+	}
+	return "", errors.New("WARP_HOST_IP not set")
+}
+
+func RequireHostIp() string {
+	hostIp, err := HostIp()
+	if err != nil {
+		panic(err)
+	}
+	return hostIp
+}
+
+func RequireListenIpPort(servicePort int) (string, int) {
+	if hostIp, err := HostIp(); err == nil {
+		return hostIp, RequireServicePortToHostPort(servicePort)
+	}
+	return "0.0.0.0", servicePort
+}
+
 // these are the most efficient dest for this host to reach the target host
 func Routes() map[string]string {
 	routeStrs := map[string]string{}

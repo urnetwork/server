@@ -85,8 +85,10 @@ Options:
 			port,
 		)
 
+		listenIp, listenPort := server.RequireListenIpPort(port)
+
 		routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-		err = http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
+		err = http.ListenAndServe(fmt.Sprintf("%s:%d", listenIp, listenPort), routerHandler)
 		glog.Errorf("[taskworker]close = %s\n", err)
 	}
 }

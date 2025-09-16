@@ -399,8 +399,10 @@ func (self *Exchange) Run() {
 func (self *Exchange) serveExchangeConnection(port int) {
 	defer self.cancel()
 
+	listenIp, listenPort := server.RequireListenIpPort(port)
+
 	// leave host part empty to listen on all available interfaces
-	serverSocket, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	serverSocket, err := net.Listen("tcp", fmt.Sprintf("%s:%d", listenIp, listenPort))
 	if err != nil {
 		return
 	}
