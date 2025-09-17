@@ -18,7 +18,11 @@ import (
 	"sync"
 	"time"
 
-	stripewebhook "github.com/stripe/stripe-go/v76/webhook"
+	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/customer"
+	"github.com/stripe/stripe-go/v82/ephemeralkey"
+	"github.com/stripe/stripe-go/v82/paymentintent"
+	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 
 	"github.com/golang/glog"
 
@@ -75,6 +79,11 @@ var stripeWebhookSigningSecret = sync.OnceValue(func() string {
 var stripeApiToken = sync.OnceValue(func() string {
 	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
 	return c["api"].(map[string]any)["token"].(string)
+})
+
+var stripePublishableKey = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
+	return c["api"].(map[string]any)["publishable_key"].(string)
 })
 
 var stripeSkus = sync.OnceValue(func() map[string]*Sku {
@@ -572,6 +581,109 @@ func stripeHandleInvoicePaid(
 	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
 
 	return &StripeWebhookResult{}, nil
+
+}
+
+type SubscriptionType string
+
+const (
+	SubscriptionTypeMonthly SubscriptionType = "monthly"
+	SubscriptionTypeYearly  SubscriptionType = "yearly"
+)
+
+type StripeCreatePaymentIntentArgs struct {
+	SubscriptionType SubscriptionType `json:"subscription_type"`
+}
+
+type StripeCreatePaymentIntentArgsErr struct {
+	Message string `json:"message"`
+}
+
+type StripeCreatePaymentIntentResult struct {
+	PaymentIntent  *string                           `json:"payment_intent,omitempty"`
+	EphemeralKey   *string                           `json:"ephemeral_key,omitempty"`
+	CustomerId     *string                           `json:"customer_id,omitempty"`
+	PublishableKey *string                           `json:"publishable_key,omitempty"`
+	Error          *StripeCreatePaymentIntentArgsErr `json:"error,omitempty"`
+}
+
+func StripeCreatePaymentIntent(
+	args *StripeCreatePaymentIntentArgs,
+	session *session.ClientSession,
+) (*StripeCreatePaymentIntentResult, error) {
+
+	// check if user has a stripe customer id
+	stripeCustomerId, _ := model.GetStripeCustomer(session)
+
+	if stripeCustomerId == nil {
+		// create a new stripe customer
+		params := &stripe.CustomerParams{}
+		result, err := customer.New(params)
+		if err != nil {
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe customer: %v", err)},
+			}, nil
+		}
+
+		err = model.CreateStripeCustomer(result.ID, session)
+		if err != nil {
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to save stripe customer: %v", err)},
+			}, nil
+		}
+
+		stripeCustomerId = &result.ID
+	}
+
+	ekparams := &stripe.EphemeralKeyParams{
+		Customer:      stripeCustomerId,
+		StripeVersion: stripe.String("2023-08-16"),
+	}
+
+	ek, err := ephemeralkey.New(ekparams)
+	if err != nil {
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe ephemeral key: %v", err)},
+		}, nil
+	}
+
+	var price int64 = 0
+
+	switch args.SubscriptionType {
+	case SubscriptionTypeMonthly:
+		price = 500
+	case SubscriptionTypeYearly:
+		price = 4000
+	default:
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Invalid subscription type: %s", args.SubscriptionType)},
+		}, nil
+	}
+
+	currency := string(stripe.CurrencyUSD)
+
+	params := &stripe.PaymentIntentParams{
+		Amount:   stripe.Int64(price),
+		Currency: &currency,
+		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
+			Enabled: stripe.Bool(true),
+		},
+	}
+	result, err := paymentintent.New(params)
+	if err != nil {
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe payment intent: %v", err)},
+		}, nil
+	}
+
+	pk := stripePublishableKey()
+
+	return &StripeCreatePaymentIntentResult{
+		PaymentIntent:  &result.ID,
+		EphemeralKey:   &ek.ID,
+		CustomerId:     stripeCustomerId,
+		PublishableKey: &pk,
+	}, nil
 
 }
 

@@ -63,3 +63,7 @@ func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {
 func CreateSolanaPaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.CreateSolanaPaymentIntent, w, r)
 }
+
+func CreateStripePaymentIntent(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.StripeCreatePaymentIntent, w, r)
+}
