@@ -2380,4 +2380,13 @@ var migrations = []any{
             ADD COLUMN has_speed_test bool DEFAULT true,
             ADD COLUMN has_latency_test bool DEFAULT true
     `),
+
+	newSqlMigration(`
+		CREATE TABLE stripe_customer (
+		    network_id uuid NOT NULL,
+		    stripe_customer_id varchar(64) NOT NULL UNIQUE,
+		    create_time timestamp NOT NULL DEFAULT now(),
+		    PRIMARY KEY (network_id, stripe_customer_id)
+		);
+    `),
 }
