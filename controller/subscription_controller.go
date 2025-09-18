@@ -21,7 +21,7 @@ import (
 	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/customer"
 	"github.com/stripe/stripe-go/v82/ephemeralkey"
-	"github.com/stripe/stripe-go/v82/paymentintent"
+	"github.com/stripe/stripe-go/v82/subscription"
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 
 	"github.com/golang/glog"
@@ -90,6 +90,16 @@ var stripeSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
 	server.Config.RequireSimpleResource("stripe.yml").UnmarshalYaml(&skus)
 	return skus.Skus
+})
+
+type StripeSubscriptionPrices struct {
+	Yearly  string `yaml:"yearly"`
+	Monthly string `yaml:"monthly"`
+}
+
+var stripeSubscriptionPrices = sync.OnceValue(func() StripeSubscriptionPrices {
+	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
+	return c["subscription_prices"].(StripeSubscriptionPrices)
 })
 
 var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
@@ -437,8 +447,12 @@ type StripeCustomerExpanded struct {
 }
 
 type StripeInvoiceExpanded struct {
-	Customer *StripeCustomerExpanded `json:"customer"`
-	Lines    *StripeLineItems        `json:"lines"`
+	Customer     *StripeCustomerExpanded `json:"customer"`
+	Lines        *StripeLineItems        `json:"lines"`
+	Subscription *struct {
+		ID       string            `json:"id"`
+		Metadata map[string]string `json:"metadata"`
+	} `json:"subscription"`
 }
 
 func stripeHandleInvoicePaid(
@@ -508,7 +522,28 @@ func stripeHandleInvoicePaid(
 	}
 
 	var networkId *server.Id
-	if fullInvoice != nil && fullInvoice.Customer != nil && fullInvoice.Customer.Email != "" {
+
+	// check subscription metadata for network id
+	if fullInvoice.Subscription != nil {
+
+		glog.Infof("subscription metadata: %v", fullInvoice.Subscription.Metadata)
+
+		if subNetworkId := fullInvoice.Subscription.Metadata["network_id"]; subNetworkId != "" {
+
+			glog.Infof("found network id in subscription metadata: %s", subNetworkId)
+
+			id, err := server.ParseId(subNetworkId)
+			if err != nil {
+				glog.Infof("Invalid network id format in subscription metadata: %v", err)
+			} else {
+				glog.Infof("found network id in subscription metadata: %s", id.String())
+				networkId = &id
+			}
+		}
+	}
+
+	// next, try and associate networkId by email
+	if networkId == nil && fullInvoice != nil && fullInvoice.Customer != nil && fullInvoice.Customer.Email != "" {
 
 		// search network by email
 		foundId, err := model.FindNetworkIdByEmail(clientSession.Ctx, fullInvoice.Customer.Email)
@@ -615,6 +650,8 @@ func StripeCreatePaymentIntent(
 	// check if user has a stripe customer id
 	stripeCustomerId, _ := model.GetStripeCustomer(session)
 
+	stripe.Key = stripeApiToken()
+
 	if stripeCustomerId == nil {
 		// create a new stripe customer
 		params := &stripe.CustomerParams{}
@@ -647,44 +684,106 @@ func StripeCreatePaymentIntent(
 		}, nil
 	}
 
-	var price int64 = 0
+	// prices := stripeSubscriptionPrices()
+	var priceId string
 
 	switch args.SubscriptionType {
 	case SubscriptionTypeMonthly:
-		price = 500
+		priceId = "price_1RGDllEqqTaiwAGPOOvPrHUX"
+		// priceId = string(prices.Monthly)
 	case SubscriptionTypeYearly:
-		price = 4000
+		priceId = "price_1S5Bd2EqqTaiwAGPuCdDFm6a"
+		// priceId = string(prices.Yearly)
 	default:
 		return &StripeCreatePaymentIntentResult{
 			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Invalid subscription type: %s", args.SubscriptionType)},
 		}, nil
 	}
 
-	currency := string(stripe.CurrencyUSD)
-
-	params := &stripe.PaymentIntentParams{
-		Amount:   stripe.Int64(price),
-		Currency: &currency,
-		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
-			Enabled: stripe.Bool(true),
+	params := &stripe.SubscriptionParams{
+		Customer: stripeCustomerId,
+		Items: []*stripe.SubscriptionItemsParams{
+			{Price: &priceId},
+		},
+		PaymentBehavior: stripe.String("default_incomplete"),
+		// Save payment method for future renewals
+		PaymentSettings: &stripe.SubscriptionPaymentSettingsParams{
+			SaveDefaultPaymentMethod: stripe.String("on_subscription"),
+		},
+		Metadata: map[string]string{
+			"network_id": session.ByJwt.NetworkId.String(),
+		},
+		Expand: []*string{
+			stripe.String("latest_invoice"),
 		},
 	}
-	result, err := paymentintent.New(params)
+
+	sub, err := subscription.New(params)
 	if err != nil {
 		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe payment intent: %v", err)},
+			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe subscription: %v", err)},
+		}, nil
+	}
+
+	if sub.LatestInvoice == nil || sub.LatestInvoice.ID == "" {
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: "No latest invoice found on the subscription"},
+		}, nil
+	}
+
+	// Define helper structs to unmarshal the invoice with PaymentIntent
+	type PaymentIntent struct {
+		ID           string `json:"id"`
+		ClientSecret string `json:"client_secret"`
+	}
+
+	type InvoiceWithPI struct {
+		PaymentIntent *PaymentIntent `json:"payment_intent"`
+	}
+
+	// Fetch the invoice with PaymentIntent expanded
+	url := fmt.Sprintf(
+		"https://api.stripe.com/v1/invoices/%s?expand[]=payment_intent",
+		sub.LatestInvoice.ID,
+	)
+
+	invoice, err := server.HttpGetRequireStatusOk[*InvoiceWithPI](
+		session.Ctx,
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+		},
+		server.ResponseJsonObject[*InvoiceWithPI],
+	)
+
+	if err != nil {
+		glog.Infof("Failed to fetch invoice details: %v", err)
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to fetch invoice details: %v", err)},
+		}, nil
+	}
+
+	if invoice.PaymentIntent == nil || invoice.PaymentIntent.ClientSecret == "" {
+		glog.Infof("No payment intent found on the latest invoice")
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{Message: "No payment intent found on the latest invoice"},
 		}, nil
 	}
 
 	pk := stripePublishableKey()
+	clientSecret := invoice.PaymentIntent.ClientSecret
+
+	glog.Infof("invoice retrieved, client secret is: %s", clientSecret)
+	glog.Infof("ephemeral key is: %s", ek.Secret)
+	glog.Infof("customer id is: %s", *stripeCustomerId)
+	glog.Infof("publishable key is: %s", pk)
 
 	return &StripeCreatePaymentIntentResult{
-		PaymentIntent:  &result.ID,
-		EphemeralKey:   &ek.ID,
+		PaymentIntent:  &clientSecret,
+		EphemeralKey:   &ek.Secret,
 		CustomerId:     stripeCustomerId,
 		PublishableKey: &pk,
 	}, nil
-
 }
 
 type CoinbaseWebhookArgs struct {
