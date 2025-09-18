@@ -626,16 +626,19 @@ const (
 	SubscriptionTypeYearly  SubscriptionType = "yearly"
 )
 
-type StripeCreatePaymentIntentArgs struct {
-	SubscriptionType SubscriptionType `json:"subscription_type"`
-}
+type StripeCreatePaymentIntentArgs struct{}
 
 type StripeCreatePaymentIntentArgsErr struct {
 	Message string `json:"message"`
 }
 
+type StripePaymentIntent struct {
+	SubscriptionType SubscriptionType `json:"subscription_type"`
+	ClientSecret     string           `json:"client_secret"`
+}
+
 type StripeCreatePaymentIntentResult struct {
-	PaymentIntent  *string                           `json:"payment_intent,omitempty"`
+	PaymentIntents []StripePaymentIntent             `json:"payment_intents,omitempty"`
 	EphemeralKey   *string                           `json:"ephemeral_key,omitempty"`
 	CustomerId     *string                           `json:"customer_id,omitempty"`
 	PublishableKey *string                           `json:"publishable_key,omitempty"`
@@ -685,101 +688,109 @@ func StripeCreatePaymentIntent(
 	}
 
 	// prices := stripeSubscriptionPrices()
-	var priceId string
 
-	switch args.SubscriptionType {
-	case SubscriptionTypeMonthly:
-		priceId = "price_1RGDllEqqTaiwAGPOOvPrHUX"
-		// priceId = string(prices.Monthly)
-	case SubscriptionTypeYearly:
-		priceId = "price_1S5Bd2EqqTaiwAGPuCdDFm6a"
-		// priceId = string(prices.Yearly)
-	default:
-		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Invalid subscription type: %s", args.SubscriptionType)},
-		}, nil
+	type SubPrice struct {
+		PriceId string
+		Type    SubscriptionType
 	}
 
-	params := &stripe.SubscriptionParams{
-		Customer: stripeCustomerId,
-		Items: []*stripe.SubscriptionItemsParams{
-			{Price: &priceId},
+	var subPrices []SubPrice = []SubPrice{
+		// stripeSubscriptionPrices().Monthly,
+		// stripeSubscriptionPrices().Yearly,
+		SubPrice{
+			PriceId: "price_1RGDllEqqTaiwAGPOOvPrHUX",
+			Type:    SubscriptionTypeMonthly,
 		},
-		PaymentBehavior: stripe.String("default_incomplete"),
-		// Save payment method for future renewals
-		PaymentSettings: &stripe.SubscriptionPaymentSettingsParams{
-			SaveDefaultPaymentMethod: stripe.String("on_subscription"),
-		},
-		Metadata: map[string]string{
-			"network_id": session.ByJwt.NetworkId.String(),
-		},
-		Expand: []*string{
-			stripe.String("latest_invoice"),
+		SubPrice{
+			PriceId: "price_1S5Bd2EqqTaiwAGPuCdDFm6a",
+			Type:    SubscriptionTypeYearly,
 		},
 	}
 
-	sub, err := subscription.New(params)
-	if err != nil {
-		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe subscription: %v", err)},
-		}, nil
-	}
+	var intents []StripePaymentIntent
 
-	if sub.LatestInvoice == nil || sub.LatestInvoice.ID == "" {
-		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: "No latest invoice found on the subscription"},
-		}, nil
-	}
+	for _, subPrice := range subPrices {
 
-	// Define helper structs to unmarshal the invoice with PaymentIntent
-	type PaymentIntent struct {
-		ID           string `json:"id"`
-		ClientSecret string `json:"client_secret"`
-	}
+		params := &stripe.SubscriptionParams{
+			Customer: stripeCustomerId,
+			Items: []*stripe.SubscriptionItemsParams{
+				{Price: &subPrice.PriceId},
+			},
+			PaymentBehavior: stripe.String("default_incomplete"),
+			// Save payment method for future renewals
+			PaymentSettings: &stripe.SubscriptionPaymentSettingsParams{
+				SaveDefaultPaymentMethod: stripe.String("on_subscription"),
+			},
+			Metadata: map[string]string{
+				"network_id": session.ByJwt.NetworkId.String(),
+			},
+			Expand: []*string{
+				stripe.String("latest_invoice"),
+			},
+		}
 
-	type InvoiceWithPI struct {
-		PaymentIntent *PaymentIntent `json:"payment_intent"`
-	}
+		sub, err := subscription.New(params)
+		if err != nil {
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to create stripe subscription: %v", err)},
+			}, nil
+		}
 
-	// Fetch the invoice with PaymentIntent expanded
-	url := fmt.Sprintf(
-		"https://api.stripe.com/v1/invoices/%s?expand[]=payment_intent",
-		sub.LatestInvoice.ID,
-	)
+		if sub.LatestInvoice == nil || sub.LatestInvoice.ID == "" {
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: "No latest invoice found on the subscription"},
+			}, nil
+		}
 
-	invoice, err := server.HttpGetRequireStatusOk[*InvoiceWithPI](
-		session.Ctx,
-		url,
-		func(header http.Header) {
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
-		},
-		server.ResponseJsonObject[*InvoiceWithPI],
-	)
+		// Define helper structs to unmarshal the invoice with PaymentIntent
+		type PaymentIntent struct {
+			ID           string `json:"id"`
+			ClientSecret string `json:"client_secret"`
+		}
 
-	if err != nil {
-		glog.Infof("Failed to fetch invoice details: %v", err)
-		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to fetch invoice details: %v", err)},
-		}, nil
-	}
+		type InvoiceWithPI struct {
+			PaymentIntent *PaymentIntent `json:"payment_intent"`
+		}
 
-	if invoice.PaymentIntent == nil || invoice.PaymentIntent.ClientSecret == "" {
-		glog.Infof("No payment intent found on the latest invoice")
-		return &StripeCreatePaymentIntentResult{
-			Error: &StripeCreatePaymentIntentArgsErr{Message: "No payment intent found on the latest invoice"},
-		}, nil
+		// Fetch the invoice with PaymentIntent expanded
+		url := fmt.Sprintf(
+			"https://api.stripe.com/v1/invoices/%s?expand[]=payment_intent",
+			sub.LatestInvoice.ID,
+		)
+
+		invoice, err := server.HttpGetRequireStatusOk[*InvoiceWithPI](
+			session.Ctx,
+			url,
+			func(header http.Header) {
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+			},
+			server.ResponseJsonObject[*InvoiceWithPI],
+		)
+
+		if err != nil {
+			glog.Infof("Failed to fetch invoice details: %v", err)
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: fmt.Sprintf("Failed to fetch invoice details: %v", err)},
+			}, nil
+		}
+
+		if invoice.PaymentIntent == nil || invoice.PaymentIntent.ClientSecret == "" {
+			glog.Infof("No payment intent found on the latest invoice")
+			return &StripeCreatePaymentIntentResult{
+				Error: &StripeCreatePaymentIntentArgsErr{Message: "No payment intent found on the latest invoice"},
+			}, nil
+		}
+
+		intents = append(intents, StripePaymentIntent{
+			ClientSecret:     invoice.PaymentIntent.ClientSecret,
+			SubscriptionType: subPrice.Type,
+		})
 	}
 
 	pk := stripePublishableKey()
-	clientSecret := invoice.PaymentIntent.ClientSecret
-
-	glog.Infof("invoice retrieved, client secret is: %s", clientSecret)
-	glog.Infof("ephemeral key is: %s", ek.Secret)
-	glog.Infof("customer id is: %s", *stripeCustomerId)
-	glog.Infof("publishable key is: %s", pk)
 
 	return &StripeCreatePaymentIntentResult{
-		PaymentIntent:  &clientSecret,
+		PaymentIntents: intents,
 		EphemeralKey:   &ek.Secret,
 		CustomerId:     stripeCustomerId,
 		PublishableKey: &pk,
