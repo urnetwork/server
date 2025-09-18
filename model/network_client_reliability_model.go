@@ -158,7 +158,7 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			    WHERE
 					client_reliability.valid = true AND
 			    	$1 <= client_reliability.block_number AND
-			    	client_reliability.block_number <= $2
+			    	client_reliability.block_number < $2
 			) t
 			GROUP BY t.client_id, t.city_location_id, t.region_location_id, t.country_location_id
 			ORDER BY t.client_id
@@ -257,7 +257,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		    WHERE
 		    	client_reliability.valid = true AND
 		    	$1 <= client_reliability.block_number AND
-		    	client_reliability.block_number <= $2
+		    	client_reliability.block_number < $2
 		) t
 		GROUP BY t.network_id, t.country_location_id
 		ORDER BY t.network_id, t.country_location_id
@@ -582,16 +582,23 @@ func ReliabilityBlockCountPerBucket() int {
 	)
 }
 
-func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		if complete {
-			UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete)
-		}
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
+
+		// round to whole blocks
+		// min round down
+		if c := minBlockNumber % int64(blockCountPerBucket); c != 0 {
+			minBlockNumber -= int64(c)
+		}
+		// max round up
+		if c := maxBlockNumber % int64(blockCountPerBucket); c != 0 {
+			maxBlockNumber += int64(blockCountPerBucket) - c
+		}
 
 		// server.RaisePgResult(tx.Exec(
 		// 	ctx,
@@ -626,7 +633,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			    FROM client_reliability
 			    WHERE
 			    	$1 <= block_number AND
-			    	block_number <= $2
+			    	block_number < $2
 			) t
 			GROUP BY t.network_id, t.bucket_number
 			ORDER BY t.network_id, t.bucket_number

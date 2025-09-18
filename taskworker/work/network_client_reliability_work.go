@@ -60,7 +60,7 @@ func ScheduleUpdateClientReliabilityScores(clientSession *session.ClientSession,
 		&UpdateClientReliabilityScoresArgs{},
 		clientSession,
 		task.RunOnce("update_client_reliability_scores"),
-		// task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
 		task.MaxTime(60*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
@@ -71,12 +71,12 @@ func UpdateClientReliabilityScores(
 	clientSession *session.ClientSession,
 ) (*UpdateClientReliabilityScoresResult, error) {
 	// the use case for these stats is match making, which values near term data over long term data
-	minTime := server.NowUtc().Add(-120 * time.Minute)
+	minTime := server.NowUtc().Add(-15 * time.Minute)
 	maxTime := server.NowUtc()
+
 	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateClientReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
 	model.UpdateNetworkReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
-	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateClientReliabilityScoresResult{}, nil
 }
 
@@ -97,28 +97,25 @@ type UpdateNetworkReliabilityWindowResult struct {
 }
 
 func ScheduleUpdateNetworkReliabilityWindow(clientSession *session.ClientSession, tx server.PgTx) {
-	// task.ScheduleTaskInTx(
-	// 	tx,
-	// 	UpdateNetworkReliabilityWindow,
-	// 	&UpdateNetworkReliabilityWindowArgs{},
-	// 	clientSession,
-	// 	task.RunOnce("update_network_reliability_window"),
-	// 	task.RunAt(server.NowUtc().Add(5*time.Minute)),
-	// 	task.MaxTime(30*time.Minute),
-	// 	task.Priority(task.TaskPriorityFastest),
-	// )
+	task.ScheduleTaskInTx(
+		tx,
+		UpdateNetworkReliabilityWindow,
+		&UpdateNetworkReliabilityWindowArgs{},
+		clientSession,
+		task.RunOnce("update_network_reliability_window"),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(30*time.Minute),
+		task.Priority(task.TaskPriorityFastest),
+	)
 }
 
 func UpdateNetworkReliabilityWindow(
 	updateNetworkReliabilityWindow *UpdateNetworkReliabilityWindowArgs,
 	clientSession *session.ClientSession,
 ) (*UpdateNetworkReliabilityWindowResult, error) {
-	// minTime := server.NowUtc().Add(-2 * time.Hour)
-	// maxTime := server.NowUtc()
-	// // note we separate out the calls from a single transaction to improve performance
-	// model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
-	// model.UpdateNetworkReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
-	// model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
+	minTime := server.NowUtc().Add(-1 * time.Hour)
+	maxTime := server.NowUtc()
+	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime)
 	return &UpdateNetworkReliabilityWindowResult{}, nil
 }
 
@@ -128,7 +125,7 @@ func UpdateNetworkReliabilityWindowPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	// ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
+	ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 	return nil
 }
 
