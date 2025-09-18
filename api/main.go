@@ -182,9 +182,9 @@ Options:
 	// 	}()
 	// }
 
-	listenIp, listenPort := server.RequireListenIpPort(port)
+	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
 	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-	err = http.ListenAndServe(fmt.Sprintf("%s:%d", listenIp, listenPort), routerHandler)
+	err = http.ListenAndServe(fmt.Sprintf("%s:%d", listenIpv4, listenPort), routerHandler)
 	glog.Errorf("[api]close = %s\n", err)
 }

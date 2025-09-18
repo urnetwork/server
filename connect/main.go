@@ -111,10 +111,10 @@ Options:
 	// rateLimitHandler := NewConnectionHandlerRateLimitWithDefaults(quitEvent.Ctx, handlerId)
 	// defer rateLimitHandler.Close()
 
-	listenIp, listenPort := server.RequireListenIpPort(port)
+	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
 	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-	if err := http.ListenAndServe(fmt.Sprintf("%s:%d", listenIp, listenPort), routerHandler); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf("%s:%d", listenIpv4, listenPort), routerHandler); err != nil {
 		glog.Errorf("[connect]close = %s\n", err)
 	}
 }

@@ -271,26 +271,41 @@ func RequireServicePortToHostPort(servicePort int) int {
 	return hostPort
 }
 
-func HostIp() (string, error) {
-	if hostIp := os.Getenv("WARP_HOST_IP"); hostIp != "" {
-		return hostIp, nil
+func HostIp() (ipv4 string, ipv6 string, err error) {
+	ipv4 = os.Getenv("WARP_HOST_IPV4")
+	ipv6 = os.Getenv("WARP_HOST_IPV6")
+
+	if ipv4 == "" && ipv6 == "" {
+		err = errors.New("WARP_HOST_IPV4 and WARP_HOST_IPV6 not set")
+	} else if ipv4 == "" {
+		err = errors.New("WARP_HOST_IPV4 not set")
+	} else if ipv6 == "" {
+		err = errors.New("WARP_HOST_IPV6 not set")
 	}
-	return "", errors.New("WARP_HOST_IP not set")
+
+	return
 }
 
-func RequireHostIp() string {
-	hostIp, err := HostIp()
+func RequireHostIp() (ipv4 string, ipv6 string) {
+	var err error
+	ipv4, ipv6, err = HostIp()
 	if err != nil {
 		panic(err)
 	}
-	return hostIp
+	return
 }
 
-func RequireListenIpPort(servicePort int) (string, int) {
-	if hostIp, err := HostIp(); err == nil {
-		return hostIp, RequireServicePortToHostPort(servicePort)
+func RequireListenIpPort(servicePort int) (ipv4 string, ipv6 string, hostPort int) {
+	var err error
+	ipv4, ipv6, err = HostIp()
+	if err == nil {
+		hostPort = RequireServicePortToHostPort(servicePort)
+	} else {
+		ipv4 = "0.0.0.0"
+		ipv6 = "[::]"
+		hostPort = servicePort
 	}
-	return "0.0.0.0", servicePort
+	return
 }
 
 // these are the most efficient dest for this host to reach the target host
