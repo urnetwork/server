@@ -275,12 +275,9 @@ func HostIp() (ipv4 string, ipv6 string, err error) {
 	ipv4 = os.Getenv("WARP_HOST_IPV4")
 	ipv6 = os.Getenv("WARP_HOST_IPV6")
 
+	// at least one of ipv4/ipv6 must be set
 	if ipv4 == "" && ipv6 == "" {
 		err = errors.New("WARP_HOST_IPV4 and WARP_HOST_IPV6 not set")
-	} else if ipv4 == "" {
-		err = errors.New("WARP_HOST_IPV4 not set")
-	} else if ipv6 == "" {
-		err = errors.New("WARP_HOST_IPV6 not set")
 	}
 
 	return
