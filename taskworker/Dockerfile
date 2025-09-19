@@ -15,6 +15,5 @@ COPY build/$TARGETPLATFORM/taskworker /usr/local/sbin/bringyour-taskworker
 
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
-EXPOSE 80
 STOPSIGNAL SIGTERM
 CMD ["/usr/local/sbin/bringyour-taskworker", "-p", "80"]

@@ -15,6 +15,5 @@ COPY build/$TARGETPLATFORM/api /usr/local/sbin/bringyour-api
 
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
-EXPOSE 80
 STOPSIGNAL SIGTERM
 CMD ["/usr/local/sbin/bringyour-api", "-p", "80"]

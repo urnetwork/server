@@ -10,15 +10,17 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-func WarpStatus(w http.ResponseWriter, r *http.Request) {
-	type WarpStatusResult struct {
-		Version       *string `json:"version,omitempty"`
-		ConfigVersion *string `json:"config_version,omitempty"`
-		Status        string  `json:"status"`
-		ClientAddress string  `json:"client_address"`
-		Host          string  `json:"host"`
-	}
+type WarpStatusResult struct {
+	Version       *string `json:"version,omitempty"`
+	ConfigVersion *string `json:"config_version,omitempty"`
+	Status        string  `json:"status"`
+	ClientAddress string  `json:"client_address"`
+	Host          string  `json:"host"`
+	Service       string  `json:"service"`
+	Block         string  `json:"block"`
+}
 
+func WarpStatus(w http.ResponseWriter, r *http.Request) {
 	var warpVersion *string
 	if version, err := server.Version(); err == nil {
 		warpVersion = &version
@@ -51,6 +53,8 @@ func WarpStatus(w http.ResponseWriter, r *http.Request) {
 		Status:        status,
 		ClientAddress: clientAddress,
 		Host:          server.RequireHost(),
+		Service:       server.RequireService(),
+		Block:         server.RequireBlock(),
 	}
 
 	responseJson, err := json.Marshal(result)
