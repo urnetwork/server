@@ -169,7 +169,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		}
 
 		UpdateNetworkReliabilityScores(ctx, startTime, endTime, true)
-		UpdateNetworkReliabilityWindow(ctx, startTime, endTime, true)
+		UpdateNetworkReliabilityWindow(ctx, startTime, endTime)
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 

@@ -21,6 +21,8 @@ import (
 	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/customer"
 	"github.com/stripe/stripe-go/v82/ephemeralkey"
+
+	stripesession "github.com/stripe/stripe-go/v82/billingportal/session"
 	"github.com/stripe/stripe-go/v82/subscription"
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 
@@ -794,6 +796,49 @@ func StripeCreatePaymentIntent(
 		EphemeralKey:   &ek.Secret,
 		CustomerId:     stripeCustomerId,
 		PublishableKey: &pk,
+	}, nil
+}
+
+type StripeCreateCustomerPortalError struct {
+	Message string `json:"message"`
+}
+
+type StripeCreateCustomerPortalResult struct {
+	Url   string                           `json:"url,omitempty"`
+	Error *StripeCreateCustomerPortalError `json:"error,omitempty"`
+}
+
+type StripeCreateCustomerPortalArgs struct{}
+
+func StripeCreateCustomerPortal(
+	args *StripeCreateCustomerPortalArgs,
+	session *session.ClientSession,
+) (*StripeCreateCustomerPortalResult, error) {
+
+	stripeCustomerId, err := model.GetStripeCustomer(session)
+	if err != nil || stripeCustomerId == nil {
+		return &StripeCreateCustomerPortalResult{
+			Error: &StripeCreateCustomerPortalError{Message: "No stripe customer found"},
+		}, nil
+	}
+
+	stripe.Key = stripeApiToken()
+
+	params := &stripe.BillingPortalSessionParams{
+		Customer: stripeCustomerId,
+		// ReturnURL: stripe.String("https://example.com/account"),
+	}
+
+	result, err := stripesession.New(params)
+
+	if err != nil {
+		return &StripeCreateCustomerPortalResult{
+			Error: &StripeCreateCustomerPortalError{Message: fmt.Sprintf("Failed to create stripe customer portal session: %v", err)},
+		}, nil
+	}
+
+	return &StripeCreateCustomerPortalResult{
+		Url: result.URL,
 	}, nil
 }
 

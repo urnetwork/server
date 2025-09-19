@@ -99,6 +99,7 @@ Options:
 		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
+		router.NewRoute("POST", "/stripe/customer-portal", handlers.StripeCreateCustomerPortal),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
