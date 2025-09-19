@@ -810,6 +810,9 @@ type StripeCreateCustomerPortalResult struct {
 
 type StripeCreateCustomerPortalArgs struct{}
 
+/**
+ * Used to create a Stripe URL for the customer to manage their subscription
+ */
 func StripeCreateCustomerPortal(
 	args *StripeCreateCustomerPortalArgs,
 	session *session.ClientSession,
