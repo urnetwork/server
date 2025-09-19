@@ -27,7 +27,7 @@ require (
 	github.com/redis/go-redis/v9 v9.11.0
 	github.com/samber/lo v1.49.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	github.com/stripe/stripe-go/v76 v76.25.0
+	github.com/stripe/stripe-go/v82 v82.5.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
 	golang.org/x/crypto v0.40.0
@@ -56,7 +56,6 @@ require (
 	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
-	github.com/stripe/stripe-go/v82 v82.5.0 // indirect
 	go.mongodb.org/mongo-driver v1.12.2 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/mock v0.5.2 // indirect

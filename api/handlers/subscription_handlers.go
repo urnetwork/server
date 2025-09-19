@@ -67,3 +67,7 @@ func CreateSolanaPaymentIntent(w http.ResponseWriter, r *http.Request) {
 func CreateStripePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreatePaymentIntent, w, r)
 }
+
+func StripeCreateCustomerPortal(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.StripeCreateCustomerPortal, w, r)
+}
