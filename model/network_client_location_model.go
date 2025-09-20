@@ -1829,9 +1829,10 @@ type FindProviders2Result struct {
 }
 
 type FindProvidersProvider struct {
-	ClientId                server.Id `json:"client_id"`
-	EstimatedBytesPerSecond ByteCount `json:"estimated_bytes_per_second"`
-	Tier                    int       `json:"tier"`
+	ClientId                   server.Id `json:"client_id"`
+	EstimatedBytesPerSecond    ByteCount `json:"estimated_bytes_per_second"`
+	HasEstimatedBytesPerSecond bool      `json:"has_estimated_bytes_per_second"`
+	Tier                       int       `json:"tier"`
 }
 
 func findLocationGroupByNameInTx(
@@ -1915,6 +1916,8 @@ type ClientScore struct {
 	Tiers                    map[string]int
 	MinRelativeLatencyMillis int
 	MaxBytesPerSecond        ByteCount
+	HasLatencyTest           bool
+	HasSpeedTest             bool
 }
 
 // scores are [0, max], where 0 is best
@@ -2054,6 +2057,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					ReliabilityWeight:        reliabilityWeight,
 					MinRelativeLatencyMillis: minRelativeLatencyMillis,
 					MaxBytesPerSecond:        maxBytesPerSecond,
+					HasLatencyTest:           hasLatencyTest,
+					HasSpeedTest:             hasSpeedTest,
 					Scores:                   map[string]int{},
 					Tiers:                    map[string]int{},
 				}
@@ -2550,9 +2555,10 @@ func FindProviders2(
 		if activeClientIds[clientId] {
 			clientScore := clientScores[clientId]
 			provider := &FindProvidersProvider{
-				ClientId:                clientId,
-				Tier:                    clientScore.Tiers[rankMode],
-				EstimatedBytesPerSecond: clientScore.MaxBytesPerSecond,
+				ClientId:                   clientId,
+				Tier:                       clientScore.Tiers[rankMode],
+				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 			}
 			providers = append(providers, provider)
 		}
