@@ -1830,7 +1830,7 @@ type FindProviders2Result struct {
 
 type FindProvidersProvider struct {
 	ClientId                server.Id `json:"client_id"`
-	EstimatedBytesPerSecond int       `json:"estimated_bytes_per_second"`
+	EstimatedBytesPerSecond ByteCount `json:"estimated_bytes_per_second"`
 	Tier                    int       `json:"tier"`
 }
 
@@ -2550,10 +2550,9 @@ func FindProviders2(
 		if activeClientIds[clientId] {
 			clientScore := clientScores[clientId]
 			provider := &FindProvidersProvider{
-				ClientId: clientId,
-				Tier:     clientScore.Tiers[rankMode],
-				// TODO
-				EstimatedBytesPerSecond: 0,
+				ClientId:                clientId,
+				Tier:                    clientScore.Tiers[rankMode],
+				EstimatedBytesPerSecond: clientScore.MaxBytesPerSecond,
 			}
 			providers = append(providers, provider)
 		}
