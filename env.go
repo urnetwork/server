@@ -266,7 +266,7 @@ func RequireHostPorts() map[int]int {
 func RequireServicePortToHostPort(servicePort int) int {
 	hostPort, ok := RequireHostPorts()[servicePort]
 	if !ok {
-		panic(fmt.Errorf("Host port not found for service port %s", servicePort))
+		panic(fmt.Errorf("Host port not found for service port %d", servicePort))
 	}
 	return hostPort
 }
