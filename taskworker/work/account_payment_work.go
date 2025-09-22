@@ -32,6 +32,7 @@ func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
 		&SchedulePayoutArgs{},
 		clientSession,
 		task.RunOnce("payout"),
+		task.MaxTime(60*time.Minute),
 		task.RunAt(runAt),
 	)
 }
