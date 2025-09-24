@@ -121,10 +121,10 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		// this must match the warp `settings.yml` for the environment
 		StartInternalPort: 5080,
 
-		MaxConcurrentForwardsPerResident: 1024,
+		MaxConcurrentForwardsPerResident: 32 * 1024,
 
-		ResidentIdleTimeout: 60 * time.Minute,
-		ForwardIdleTimeout:  60 * time.Minute,
+		ResidentIdleTimeout: 15 * time.Minute,
+		ForwardIdleTimeout:  1 * time.Minute,
 		AbuseMinTimeout:     5 * time.Second,
 		ControlMinTimeout:   5 * time.Millisecond,
 
@@ -134,7 +134,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
-		ExchangeConnectionResidentPollTimeout: 30 * time.Second,
+		ExchangeConnectionResidentPollTimeout: 5 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 4,

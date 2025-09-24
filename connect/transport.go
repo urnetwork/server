@@ -56,8 +56,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		MinPingTimeout:   1 * time.Second,
 		MaxPingTimeout:   15 * time.Second,
 		PingTrackerCount: 4,
-		WriteTimeout:     30 * time.Second,
-		ReadTimeout:      60 * time.Second,
+		WriteTimeout:     15 * time.Second,
+		ReadTimeout:      30 * time.Second,
 
 		// a single exchange message size is encoded as an `int32`
 		// because message must be serialized/deserialized from memory,
@@ -65,10 +65,11 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// messages above this size will be ignored from clients and the exchange
 		MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
 
-		QuicConnectTimeout:   2 * time.Second,
-		QuicHandshakeTimeout: 2 * time.Second,
+		QuicConnectTimeout:   15 * time.Second,
+		QuicHandshakeTimeout: 15 * time.Second,
 
-		ListenH3Port:         443,
+		ListenH3Port: 443,
+		// FIXME use a different port and DNAT 53->(different port) from the routers
 		ListenDnsPort:        53,
 		EnableProxyProtocol:  true,
 		FramerSettings:       connect.DefaultFramerSettings(),
@@ -140,7 +141,7 @@ func (self *ConnectHandler) run() {
 	defer self.cancel()
 
 	go self.runH3()
-	go self.runH3Dns()
+	// go self.runH3Dns()
 
 	select {
 	case <-self.ctx.Done():
@@ -564,7 +565,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		KeepAlivePeriod:         0,
 		Allow0RTT:               true,
 		DisablePathMTUDiscovery: true,
-		InitialPacketSize:       1440,
+		InitialPacketSize:       1400,
 	}
 
 	// type clientConfig struct {
@@ -577,11 +578,17 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
-	glog.V(2).Infof("[c]h3 listen :%d\n", port)
+	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+	listenIp := net.ParseIP(listenIpv4)
+	if listenIp == nil {
+		return
+	}
+
+	glog.V(2).Infof("[c]h3 listen %s:%d\n", listenIp, listenPort)
 
 	serverAddr := &net.UDPAddr{
-		IP:   net.IPv4zero,
-		Port: port,
+		IP:   listenIp,
+		Port: listenPort,
 	}
 
 	serverConn, err := net.ListenUDP("udp", serverAddr)
@@ -602,22 +609,22 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	defer listener.Close()
 
 	for {
-		glog.V(2).Infof("[c]h3 wait to accept connection :%d\n", port)
+		glog.V(2).Infof("[c]h3 wait to accept connection %s:%d\n", listenIp, listenPort)
 		conn, err := listener.Accept(handleCtx)
 		if err != nil {
-			glog.Infof("[c]h3 accept connection :%d err = %s\n", port, err)
+			glog.Infof("[c]h3 accept connection %s:%d err = %s\n", listenIp, listenPort, err)
 			return
 		}
 
-		glog.Infof("[c]h3 accept connection :%d\n", port)
+		glog.Infof("[c]h3 accept connection %s:%d\n", listenIp, listenPort)
 		go func() {
 			defer conn.CloseWithError(0, "")
 
 			err := self.connectQuic(conn)
 			if err != nil {
-				glog.Infof("[c]h3 connection exited :%d err = %s\n", port, err)
+				glog.Infof("[c]h3 connection exited %s:%d err = %s\n", listenIp, listenPort, err)
 			} else {
-				glog.Infof("[c]h3 connection exited :%d\n", port)
+				glog.Infof("[c]h3 connection exited %s:%d\n", listenIp, listenPort)
 			}
 		}()
 	}
