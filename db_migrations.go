@@ -2393,4 +2393,33 @@ var migrations = []any{
 	newSqlMigration(`
 	    ALTER TABLE stripe_customer ADD CONSTRAINT stripe_customer_network_id_unique UNIQUE (network_id);
 	`),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_privacy smallint NOT NULL DEFAULT 0,
+            ADD COLUMN net_type_virtual smallint NOT NULL DEFAULT 0,
+            DROP COLUMN net_type_score,
+            ADD COLUMN net_type_score smallint GENERATED ALWAYS AS (
+                net_type_privacy +
+                net_type_virtual +
+                net_type_hosting
+            ) STORED,
+            DROP COLUMN net_type_score_speed,
+            ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+                1 +
+                net_type_privacy +
+                net_type_virtual +
+                - net_type_hosting
+            ) STORED
+    `),
+
+	// newSqlMigration(`
+	//     ALTER TABLE network_client_location
+	//         DROP COLUMN net_type_vpn,
+	//         DROP COLUMN net_type_proxy,
+	//         DROP COLUMN net_type_tor,
+	//         DROP COLUMN net_type_relay,
+	//         DROP COLUMN net_type_hosting2
+	// `),
+
 }
