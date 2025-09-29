@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const DefaultHttpTimeout = 10 * time.Second
+const DefaultHttpTimeout = 30 * time.Second
 const DefaultHttpConnectTimeout = 5 * time.Second
 const DefaultHttpTlsTimeout = 5 * time.Second
 

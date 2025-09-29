@@ -55,10 +55,7 @@ func NewMyInfo(clientIp string, location *model.Location, connectionLocationScor
 	// }
 
 	privacy := &Privacy{
-		VPN:     0 < connectionLocationScores.NetTypeVpn,
-		Proxy:   0 < connectionLocationScores.NetTypeProxy,
-		Tor:     0 < connectionLocationScores.NetTypeTor,
-		Relay:   0 < connectionLocationScores.NetTypeRelay,
+		VPN:     0 < connectionLocationScores.NetTypePrivacy,
 		Hosting: 0 < connectionLocationScores.NetTypeHosting,
 	}
 

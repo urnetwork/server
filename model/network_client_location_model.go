@@ -1042,12 +1042,9 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 }
 
 type ConnectionLocationScores struct {
-	NetTypeVpn      int
-	NetTypeProxy    int
-	NetTypeTor      int
-	NetTypeRelay    int
-	NetTypeHosting  int
-	NetTypeHosting2 int
+	NetTypeHosting int
+	NetTypePrivacy int
+	NetTypeVirtual int
 }
 
 func SetConnectionLocation(
@@ -1120,41 +1117,32 @@ func SetConnectionLocation(
                     city_location_id,
                     region_location_id,
                     country_location_id,
-                    net_type_vpn,
-		            net_type_proxy,
-		            net_type_tor,
-		            net_type_relay,
 		            net_type_hosting,
-		            network_id,
-		            net_type_hosting2
+		            net_type_privacy,
+		            net_type_virtual,
+		            network_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
                     city_location_id = $3,
                     region_location_id = $4,
                     country_location_id = $5,
-                    net_type_vpn = $6,
-                    net_type_proxy = $7,
-                    net_type_tor = $8,
-                    net_type_relay = $9,
-                    net_type_hosting = $10,
-                    network_id = $11,
-                    net_type_hosting2 = $12
+                    net_type_hosting = $6,
+                    net_type_privacy = $7,
+                    net_type_virtual = $8,
+                    network_id = $9
             `,
 			connectionId,
 			clientId,
 			cityLocationId,
 			regionLocationId,
 			countryLocationId,
-			connectionLocationScores.NetTypeVpn,
-			connectionLocationScores.NetTypeProxy,
-			connectionLocationScores.NetTypeTor,
-			connectionLocationScores.NetTypeRelay,
 			connectionLocationScores.NetTypeHosting,
+			connectionLocationScores.NetTypePrivacy,
+			connectionLocationScores.NetTypeVirtual,
 			networkId,
-			connectionLocationScores.NetTypeHosting2,
 		))
 	})
 	return

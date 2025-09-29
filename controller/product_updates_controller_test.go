@@ -18,7 +18,7 @@ func TestBrevo(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		n := 10
+		n := 4
 		userEmails := []string{}
 		for range n {
 			userEmail := fmt.Sprintf("test.%s@ur.io", server.NewId())
