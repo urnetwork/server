@@ -37,6 +37,16 @@ func TestIpInfo(t *testing.T) {
 	assert.NotEqual(t, ipInfo2.Longitude, float64(0.0))
 	assert.NotEqual(t, ipInfo2.Latitude, float64(0.0))
 
+	ip3 := net.ParseIP("1.1.1.1")
+	ipInfo3, err := GetIpInfoFromIp(ip3)
+	assert.Equal(t, err, nil)
+	assert.NotEqual(t, ipInfo3, nil)
+
+	assert.Equal(t, ipInfo3.UserType, UserTypeHosting)
+	assert.Equal(t, ipInfo3.Hosting, true)
+	assert.NotEqual(t, ipInfo3.Longitude, float64(0.0))
+	assert.NotEqual(t, ipInfo3.Latitude, float64(0.0))
+
 }
 
 func TestIpInfoPerf(t *testing.T) {

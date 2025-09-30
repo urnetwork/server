@@ -126,3 +126,11 @@ func AttemptCompactJson(jsonBytes []byte) []byte {
 		return jsonBytes
 	}
 }
+
+func MaskValue(v string) string {
+	if len(v) < 6 {
+		return "***"
+	} else {
+		return fmt.Sprintf("%s***%s", v[:2], v[len(v)-2:])
+	}
+}
