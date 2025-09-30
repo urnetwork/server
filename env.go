@@ -582,7 +582,7 @@ func (self *SimpleResource) RequireString(path ...string) string {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
 	value := values[0]
-	glog.Infof("[env]%s[%s] = %s\n", self.path, strings.Join(path, " "), value)
+	glog.Infof("[env]%s[%s] = %s\n", self.path, strings.Join(path, " "), MaskValue(value))
 	return value
 }
 

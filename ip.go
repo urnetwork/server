@@ -33,7 +33,8 @@ func init() {
 		ipDb()
 	})
 
-	glog.Infof("[ip]ip info database type: %s\n", ipDb().Metadata.DatabaseType)
+	db, _ := ipDb()
+	glog.Infof("[ip]ip info database type: %s\n", db.Metadata.DatabaseType)
 }
 
 var clientIpHashPepper = sync.OnceValue(func() []byte {
@@ -118,8 +119,15 @@ func ScrubIpPort(s string) string {
 
 // Packaged ip metadata
 
-var ipDb = sync.OnceValue(func() *mmdb.Reader {
-	path, err := Config.ResourcePath("mmdb/ip.mmdb")
+type schemaType string
+
+const (
+	schemaTypeDbIpEnterprise schemaType = "DBIP-Location-ISP (compat=Enterprise)"
+	schemaTypeIpInfoCoreData schemaType = "ipinfo bundle_location_core.mmdb"
+)
+
+var ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
+	path, err := Config.ResourcePath("mmdb/ip-ipinfo.mmdb")
 	if err != nil {
 		panic(err)
 	}
@@ -140,19 +148,24 @@ var ipDb = sync.OnceValue(func() *mmdb.Reader {
 	if err != nil {
 		panic(err)
 	}
-	return db
+
+	return db, schemaType(db.Metadata.DatabaseType)
 })
 
 type UserType int
 
 const (
-	UserTypeUnknown  UserType = 0
-	UserTypeConsumer UserType = 1
-	UserTypeBusiness UserType = 2
-	UserTypeHosting  UserType = 3
+	UserTypeUnknown UserType = 0
+	// consumer is ISP
+	UserTypeConsumer   UserType = 1
+	UserTypeBusiness   UserType = 2
+	UserTypeHosting    UserType = 3
+	UserTypeGovernment UserType = 4
+	UserTypeEducation  UserType = 5
 )
 
 type IpInfo struct {
+	schemaType schemaType
 	// continent code is lowercase
 	ContinentCode string
 	Continent     string
@@ -169,9 +182,23 @@ type IpInfo struct {
 	Organization   string
 	ASN            uint32
 	ASOrganization string
+	Hosting        bool
+	Privacy        bool
+	Virtual        bool
 }
 
 func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
+	switch self.schemaType {
+	case schemaTypeDbIpEnterprise:
+		return self.unmarshalDbIp(d)
+	case schemaTypeIpInfoCoreData:
+		return self.unmarshalIpInfo(d)
+	default:
+		return fmt.Errorf("Unknown schema type: %s", self.schemaType)
+	}
+}
+
+func (self *IpInfo) unmarshalDbIp(d *mmdbdata.Decoder) error {
 	// the following schema are supported:
 	// - `DBIP-Location-ISP (compat=Enterprise)`
 	//   https://db-ip.com/db/format/ip-to-location-isp/mmdb.html
@@ -442,6 +469,7 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 						self.UserType = UserTypeBusiness
 					case "hosting":
 						self.UserType = UserTypeHosting
+						self.Hosting = true
 					default:
 						self.UserType = UserTypeUnknown
 					}
@@ -477,6 +505,123 @@ func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 	return nil
 }
 
+func (self *IpInfo) unmarshalIpInfo(d *mmdbdata.Decoder) error {
+	// the following schema are supported:
+	// - `ipinfo bundle_location_core.mmdb`
+	//    https://ipinfo.io/developers/ipinfo-core-database
+	mapIter, _, err := d.ReadMap()
+	if err != nil {
+		return err
+	}
+	for key, err := range mapIter {
+		if err != nil {
+			return err
+		}
+
+		switch string(key) {
+		case "continent_code":
+			continentCode, err := d.ReadString()
+			if err != nil {
+				return err
+			}
+			self.ContinentCode = strings.ToLower(continentCode)
+		case "continent":
+			self.Continent, err = d.ReadString()
+			if err != nil {
+				return err
+			}
+		case "country_code":
+			countryCode, err := d.ReadString()
+			if err != nil {
+				return err
+			}
+			self.CountryCode = strings.ToLower(countryCode)
+		case "country":
+			self.Country, err = d.ReadString()
+			if err != nil {
+				return err
+			}
+		case "region":
+			region, err := d.ReadString()
+			if err != nil {
+				return err
+			}
+			self.Region = region
+			self.Regions = []string{region}
+		case "city":
+			self.City, err = d.ReadString()
+			if err != nil {
+				return err
+			}
+		case "longitude":
+			self.Longitude, err = d.ReadFloat64()
+			if err != nil {
+				return err
+			}
+		case "latitude":
+			self.Latitude, err = d.ReadFloat64()
+			if err != nil {
+				return err
+			}
+		case "as_type":
+			asType, err := d.ReadString()
+			if err != nil {
+				return err
+			}
+			var userType UserType
+			switch strings.ToLower(asType) {
+			case "isp":
+				userType = UserTypeConsumer
+			case "hosting":
+				userType = UserTypeHosting
+			case "business":
+				userType = UserTypeBusiness
+			case "government":
+				userType = UserTypeGovernment
+			case "education":
+				userType = UserTypeEducation
+			default:
+				userType = UserTypeUnknown
+			}
+			self.UserType = userType
+		case "asn":
+			asnStr, err := d.ReadString()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Sscanf(asnStr, "AS%d", &self.ASN)
+			if err != nil {
+				return err
+			}
+		case "is_hosting":
+			self.Hosting, err = d.ReadBool()
+			if err != nil {
+				return err
+			}
+		case "is_satellite":
+			satellite, err := d.ReadBool()
+			if err != nil {
+				return err
+			}
+			if satellite {
+				self.Virtual = true
+			}
+		case "is_anonymous":
+			self.Privacy, err = d.ReadBool()
+			if err != nil {
+				return err
+			}
+		default:
+			// glog.Infof("[ip]decode skip key \"%s\"\n", key)
+			if err := d.SkipValue(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func GetIpInfoFromString(ip string) (*IpInfo, error) {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -498,10 +643,12 @@ func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 }
 
 func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
-	ipDb := ipDb()
+	ipDb, schemaType := ipDb()
 
 	r := ipDb.Lookup(addr)
-	var ipInfo IpInfo
+	ipInfo := IpInfo{
+		schemaType: schemaType,
+	}
 	err := r.Decode(&ipInfo)
 	if err != nil {
 		return nil, err

@@ -61,13 +61,7 @@ func maskEmail(userEmail string) string {
 	user := parts[0]
 	host := parts[1]
 
-	maskedUser := func() string {
-		if len(user) < 6 {
-			return "***"
-		} else {
-			return fmt.Sprintf("%s***%s", user[:2], user[len(user)-2:])
-		}
-	}()
+	maskedUser := server.MaskValue(user)
 
 	return fmt.Sprintf("%s@%s", maskedUser, host)
 }

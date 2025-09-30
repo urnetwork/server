@@ -21,7 +21,7 @@ func TestIpInfo(t *testing.T) {
 	assert.Equal(t, ipInfo1.CountryCode, "us")
 	assert.Equal(t, ipInfo1.Country, "United States")
 	assert.Equal(t, ipInfo1.Region, "California")
-	assert.Equal(t, ipInfo1.UserType, UserTypeHosting)
+	assert.Equal(t, ipInfo1.UserType, UserTypeConsumer)
 	assert.NotEqual(t, ipInfo1.Longitude, float64(0.0))
 	assert.NotEqual(t, ipInfo1.Latitude, float64(0.0))
 
@@ -32,10 +32,20 @@ func TestIpInfo(t *testing.T) {
 
 	assert.Equal(t, ipInfo2.CountryCode, "us")
 	assert.Equal(t, ipInfo2.Country, "United States")
-	assert.Equal(t, ipInfo2.Region, "California")
-	assert.Equal(t, ipInfo2.UserType, UserTypeHosting)
+	assert.Equal(t, ipInfo2.Region, "Virginia")
+	assert.Equal(t, ipInfo2.UserType, UserTypeConsumer)
 	assert.NotEqual(t, ipInfo2.Longitude, float64(0.0))
 	assert.NotEqual(t, ipInfo2.Latitude, float64(0.0))
+
+	ip3 := net.ParseIP("1.1.1.1")
+	ipInfo3, err := GetIpInfoFromIp(ip3)
+	assert.Equal(t, err, nil)
+	assert.NotEqual(t, ipInfo3, nil)
+
+	assert.Equal(t, ipInfo3.UserType, UserTypeHosting)
+	assert.Equal(t, ipInfo3.Hosting, true)
+	assert.NotEqual(t, ipInfo3.Longitude, float64(0.0))
+	assert.NotEqual(t, ipInfo3.Latitude, float64(0.0))
 
 }
 

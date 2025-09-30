@@ -45,10 +45,14 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 	}
 
 	connectionLocationScores := &model.ConnectionLocationScores{}
-	switch ipInfo.UserType {
-	case server.UserTypeHosting:
+	if ipInfo.Hosting {
 		connectionLocationScores.NetTypeHosting = 1
-		connectionLocationScores.NetTypeHosting2 = 1
+	}
+	if ipInfo.Privacy {
+		connectionLocationScores.NetTypePrivacy = 1
+	}
+	if ipInfo.Virtual {
+		connectionLocationScores.NetTypeVirtual = 1
 	}
 
 	return location, connectionLocationScores, nil
