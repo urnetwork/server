@@ -2413,13 +2413,12 @@ var migrations = []any{
             ) STORED
     `),
 
-	// newSqlMigration(`
-	//     ALTER TABLE network_client_location
-	//         DROP COLUMN net_type_vpn,
-	//         DROP COLUMN net_type_proxy,
-	//         DROP COLUMN net_type_tor,
-	//         DROP COLUMN net_type_relay,
-	//         DROP COLUMN net_type_hosting2
-	// `),
-
+	newSqlMigration(`
+	    ALTER TABLE network_client_location
+	        DROP COLUMN net_type_vpn,
+	        DROP COLUMN net_type_proxy,
+	        DROP COLUMN net_type_tor,
+	        DROP COLUMN net_type_relay,
+	        DROP COLUMN net_type_hosting2
+	`),
 }
