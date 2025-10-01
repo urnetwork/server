@@ -72,7 +72,9 @@ func NewSearchLocal(ctx context.Context, impl Search, settings *SearchLocalSetti
 		settings:                  settings,
 		valueIdVariantProjections: map[server.Id]map[int]*localProjection{},
 	}
-	go searchLocal.update(initialSyncDone)
+	go server.HandleError(func() {
+		searchLocal.update(initialSyncDone)
+	}, cancel)
 
 	return searchLocal
 }
@@ -114,6 +116,10 @@ func (self *SearchLocal) WaitForInitialSync(ctx context.Context) bool {
 	case <-self.initialSync.Done():
 		return true
 	}
+}
+
+func (self *SearchLocal) Close() {
+	self.cancel()
 }
 
 func (self *SearchLocal) index(update *SearchValueUpdate) {
@@ -226,7 +232,7 @@ func (self *SearchLocal) AroundRaw(ctx context.Context, query string, distance i
 }
 
 func (self *SearchLocal) AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
-	return self.AroundIds(ctx, NormalizeForSearch(query), distance, options...)
+	return self.AroundIdsRaw(ctx, NormalizeForSearch(query), distance, options...)
 }
 
 func (self *SearchLocal) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {

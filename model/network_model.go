@@ -24,14 +24,20 @@ func init() {
 	server.OnWarmup(func() {
 		networkNameSearch().WaitForInitialSync(context.Background())
 	})
+	server.OnReset(func() {
+		networkNameSearch().Close()
+		networkNameSearch = sync.OnceValue(createNetworkNameSearch)
+	})
 }
 
-var networkNameSearch = sync.OnceValue(func() *search.SearchLocal {
+func createNetworkNameSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
 		search.NewSearchDb("network_name", search.SearchTypeFull),
 	)
-})
+}
+
+var networkNameSearch = sync.OnceValue(createNetworkNameSearch)
 
 const MinPasswordLength = 6
 

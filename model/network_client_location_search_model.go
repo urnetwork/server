@@ -20,21 +20,30 @@ func init() {
 		locationSearch().WaitForInitialSync(context.Background())
 		locationGroupSearch().WaitForInitialSync(context.Background())
 	})
+	server.OnReset(func() {
+		locationSearch().Close()
+		locationGroupSearch().Close()
+		locationSearch = sync.OnceValue(createLocationSearch)
+		locationGroupSearch = sync.OnceValue(createLocationGroupSearch)
+	})
 }
 
-var locationSearch = sync.OnceValue(func() *search.SearchLocal {
+func createLocationSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
 		search.NewSearchDb("location_prefix", search.SearchTypePrefix),
 	)
-})
+}
 
-var locationGroupSearch = sync.OnceValue(func() *search.SearchLocal {
+func createLocationGroupSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
 		search.NewSearchDb("location_group_prefix", search.SearchTypePrefix),
 	)
-})
+}
+
+var locationSearch = sync.OnceValue(createLocationSearch)
+var locationGroupSearch = sync.OnceValue(createLocationGroupSearch)
 
 func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 	// locations

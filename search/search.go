@@ -545,11 +545,10 @@ func (self *SearchDb) RemoveInTx(ctx context.Context, valueId server.Id, tx serv
 		`
 		INSERT INTO search_value_update
 		(realm, value_id, remove)
-		VALUES ($1, $2, $3)
+		VALUES ($1, $2, true)
 		`,
 		self.realm,
 		valueId,
-		true,
 	))
 }
 
@@ -630,7 +629,8 @@ func (self *SearchDb) SearchValues(ctx context.Context) (values []*SearchValue) 
 		        value
 			FROM search_value
 			WHERE
-				realm = $1
+				realm = $1 AND
+				alias = 0
 			`,
 			self.realm,
 		)

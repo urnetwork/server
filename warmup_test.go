@@ -7,7 +7,7 @@ import (
 )
 
 func TestWarmup(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false, Warmup: false}).Run(func() {
 
 		aRun := false
 		a := func() {
