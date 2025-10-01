@@ -2421,4 +2421,21 @@ var migrations = []any{
 	        DROP COLUMN net_type_relay,
 	        DROP COLUMN net_type_hosting2
 	`),
+
+	newSqlMigration(`
+        CREATE TABLE search_value_update (
+            realm varchar(32) NOT NULL,
+            update_id bigint GENERATED ALWAYS AS IDENTITY,
+            value_id uuid NOT NULL,
+            value_variant int,
+            value varchar(1024),
+            remove bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY (realm, update_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX search_value_update_realm_value_id_variant ON search_value_update (realm, value_id, value_variant)
+    `),
 }
