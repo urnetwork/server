@@ -23,7 +23,7 @@ func TestSearchSubstring(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		testSearch := NewSearch("test", SearchTypeSubstring)
+		testSearch := NewSearchDb("test", SearchTypeSubstring)
 
 		searchSubstring(t, ctx, testSearch)
 	})

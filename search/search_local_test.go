@@ -25,7 +25,7 @@ func TestSearchSubstringLocal(t *testing.T) {
 
 		testSearch := NewSearchLocalWithDefaults(
 			ctx,
-			NewSearch("test", SearchTypeSubstring),
+			NewSearchDb("test", SearchTypeSubstring),
 		)
 
 		searchSubstring(t, ctx, testSearch)
