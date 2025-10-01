@@ -727,7 +727,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range countryLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -810,7 +810,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range regionLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -902,7 +902,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range cityLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -981,7 +981,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		})
 
 		for i, searchStr := range locationGroup.SearchStrings() {
-			locationGroupSearch.AddInTx(ctx, searchStr, locationGroupId, i, tx)
+			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, i, tx)
 		}
 	})
 }
@@ -1216,12 +1216,12 @@ func FindProviderLocations(
 	maxSearchDistance := int(math.Ceil(
 		float64(maxDistanceFraction) * float64(len(findLocations.Query)),
 	))
-	locationSearchResults := locationSearch.AroundIds(
+	locationSearchResults := locationSearch().AroundIds(
 		session.Ctx,
 		findLocations.Query,
 		2+maxSearchDistance,
 	)
-	locationGroupSearchResults := locationGroupSearch.AroundIds(
+	locationGroupSearchResults := locationGroupSearch().AroundIds(
 		session.Ctx,
 		findLocations.Query,
 		2+maxSearchDistance,
@@ -1574,12 +1574,12 @@ func FindLocations(
 	maxSearchDistance := int(math.Ceil(
 		float64(maxDistanceFraction) * float64(len(findLocations.Query)),
 	))
-	locationSearchResults := locationSearch.AroundIds(
+	locationSearchResults := locationSearch().AroundIds(
 		session.Ctx,
 		findLocations.Query,
 		maxSearchDistance,
 	)
-	locationGroupSearchResults := locationGroupSearch.AroundIds(
+	locationGroupSearchResults := locationGroupSearch().AroundIds(
 		session.Ctx,
 		findLocations.Query,
 		maxSearchDistance,

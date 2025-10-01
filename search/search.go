@@ -9,6 +9,8 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/golang/glog"
+
 	"github.com/urnetwork/server"
 )
 
@@ -62,44 +64,90 @@ func OptStats() *SearchStats {
 	return &SearchStats{}
 }
 
-type Search struct {
+type SearchValue struct {
+	Value        string
+	ValueId      server.Id
+	ValueVariant int
+}
+
+type SearchValueUpdate struct {
+	UpdateId int64
+	Remove   bool
+	SearchValue
+}
+
+type Search interface {
+	Realm() string
+	SearchType() SearchType
+	MinAliasLength() int
+
+	AnyAround(ctx context.Context, query string, distance int) bool
+	Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult
+	AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult
+	AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult
+	AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult
+	Add(ctx context.Context, value string, valueId server.Id, valueVariant int)
+	AddRaw(ctx context.Context, value string, valueId server.Id, valueVariant int)
+	AddInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx)
+	AddRawInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx)
+	Remove(ctx context.Context, valueId server.Id)
+	RemoveInTx(ctx context.Context, valueId server.Id, tx server.PgTx)
+
+	// return is ordered by update id
+	OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64) []*SearchValueUpdate
+	SearchValues(ctx context.Context) []*SearchValue
+}
+
+type SearchDb struct {
 	realm          string
 	searchType     SearchType
 	minAliasLength int
 }
 
-func NewSearch(realm string, searchType SearchType) *Search {
-	return NewSearchWithMinAliasLength(realm, searchType, 1)
+func NewSearchDb(realm string, searchType SearchType) *SearchDb {
+	return NewSearchDbWithMinAliasLength(realm, searchType, 1)
 }
 
-func NewSearchWithMinAliasLength(realm string, searchType SearchType, minAliasLength int) *Search {
-	return &Search{
+func NewSearchDbWithMinAliasLength(realm string, searchType SearchType, minAliasLength int) *SearchDb {
+	return &SearchDb{
 		realm:          realm,
 		searchType:     searchType,
 		minAliasLength: minAliasLength,
 	}
 }
 
-func (self *Search) AnyAround(ctx context.Context, query string, distance int) bool {
+func (self *SearchDb) Realm() string {
+	return self.realm
+}
+
+func (self *SearchDb) SearchType() SearchType {
+	return self.searchType
+}
+
+func (self *SearchDb) MinAliasLength() int {
+	return self.minAliasLength
+}
+
+func (self *SearchDb) AnyAround(ctx context.Context, query string, distance int) bool {
 	results := self.Around(ctx, query, distance)
 	return 0 < len(results)
 }
 
-func (self *Search) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
+func (self *SearchDb) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
 	results := self.AroundIds(ctx, query, distance, options...)
 	return maps.Values(results)
 }
 
-func (self *Search) AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
+func (self *SearchDb) AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
 	results := self.AroundIdsRaw(ctx, query, distance, options...)
 	return maps.Values(results)
 }
 
-func (self *Search) AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
+func (self *SearchDb) AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
 	return self.AroundIdsRaw(ctx, NormalizeForSearch(query), distance, options)
 }
 
-func (self *Search) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
+func (self *SearchDb) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
 	stats := OptStats()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -300,23 +348,23 @@ func (self *Search) AroundIdsRaw(ctx context.Context, query string, distance int
 	return matches
 }
 
-func (self *Search) Add(ctx context.Context, value string, valueId server.Id, valueVariant int) {
+func (self *SearchDb) Add(ctx context.Context, value string, valueId server.Id, valueVariant int) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		self.AddInTx(ctx, value, valueId, valueVariant, tx)
 	})
 }
 
-func (self *Search) AddRaw(ctx context.Context, value string, valueId server.Id, valueVariant int) {
+func (self *SearchDb) AddRaw(ctx context.Context, value string, valueId server.Id, valueVariant int) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		self.AddRawInTx(ctx, value, valueId, valueVariant, tx)
 	})
 }
 
-func (self *Search) AddInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) {
+func (self *SearchDb) AddInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) {
 	self.AddRawInTx(ctx, NormalizeForSearch(value), valueId, valueVariant, tx)
 }
 
-func (self *Search) AddRawInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) {
+func (self *SearchDb) AddRawInTx(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -384,14 +432,12 @@ func (self *Search) AddRawInTx(ctx context.Context, value string, valueId server
 			}
 		}
 
+		// alias 0 must be the full string
+		insertOne(value, 0)
 		switch self.searchType {
 		case SearchTypeFull:
-			insertOne(value, 0)
 		case SearchTypePrefix:
 			// compute each prefix as a full search alias
-			// alias 0 must be the full string
-			insertOne(value, 0)
-
 			alias := 1
 			for i := len(value); 0 <= i; i -= 1 {
 				valuePrefix := value[:i]
@@ -406,9 +452,6 @@ func (self *Search) AddRawInTx(ctx context.Context, value string, valueId server
 			}
 		case SearchTypeSubstring:
 			// for each suffix, compute each prefix as a full search alias
-			// alias 0 must be the full string
-			insertOne(value, 0)
-
 			alias := 1
 			for i := 0; i < len(value); i += 1 {
 				for j := len(value); i < j; j -= 1 {
@@ -425,15 +468,42 @@ func (self *Search) AddRawInTx(ctx context.Context, value string, valueId server
 			}
 		}
 	})
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM search_value_update
+		WHERE
+			realm = $1 AND
+			value_id = $2 AND
+			value_variant = $3
+		`,
+		self.realm,
+		valueId,
+		valueVariant,
+	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO search_value_update
+		(realm, value_id, value, value_variant)
+		VALUES ($1, $2, $3, $4)
+		`,
+		self.realm,
+		valueId,
+		value,
+		valueVariant,
+	))
 }
 
-func (self *Search) Remove(ctx context.Context, valueId server.Id) {
+func (self *SearchDb) Remove(ctx context.Context, valueId server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		self.RemoveInTx(ctx, valueId, tx)
 	})
 }
 
-func (self *Search) RemoveInTx(ctx context.Context, valueId server.Id, tx server.PgTx) {
+func (self *SearchDb) RemoveInTx(ctx context.Context, valueId server.Id, tx server.PgTx) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -457,4 +527,128 @@ func (self *Search) RemoveInTx(ctx context.Context, valueId server.Id, tx server
 		self.realm,
 		valueId,
 	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM search_value_update
+		WHERE
+			realm = $1 AND
+			value_id = $2
+		`,
+		self.realm,
+		valueId,
+	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO search_value_update
+		(realm, value_id, remove)
+		VALUES ($1, $2, $3)
+		`,
+		self.realm,
+		valueId,
+		true,
+	))
+}
+
+func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64) (updates []*SearchValueUpdate) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				update_id,
+		        value_id,
+		        value_variant,
+		        value,
+		        remove
+			FROM search_value_update
+			WHERE
+				realm = $1 AND
+				$2 <= update_id
+			`,
+			self.realm,
+			startUpdateId,
+		)
+
+		updates = []*SearchValueUpdate{}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var updateId int64
+				var valueId server.Id
+				var valueVariant *int
+				var value *string
+				var remove bool
+				server.Raise(result.Scan(
+					&updateId,
+					&valueId,
+					&valueVariant,
+					&value,
+					&remove,
+				))
+
+				if remove {
+					update := &SearchValueUpdate{
+						UpdateId: updateId,
+						Remove:   true,
+						SearchValue: SearchValue{
+							ValueId: valueId,
+						},
+					}
+					updates = append(updates, update)
+				} else if valueVariant != nil && value != nil {
+					update := &SearchValueUpdate{
+						UpdateId: updateId,
+						SearchValue: SearchValue{
+							ValueId:      valueId,
+							ValueVariant: *valueVariant,
+							Value:        *value,
+						},
+					}
+					updates = append(updates, update)
+				} else {
+					glog.Infof("[s][%s]update[%d] must have value variant and value. Malformed record, will skip.", valueId, updateId)
+				}
+			}
+		})
+	})
+
+	return
+}
+
+func (self *SearchDb) SearchValues(ctx context.Context) (values []*SearchValue) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				value_id,
+		        value_variant,
+		        value
+			FROM search_value
+			WHERE
+				realm = $1
+			`,
+			self.realm,
+		)
+
+		values = []*SearchValue{}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var value SearchValue
+				server.Raise(result.Scan(
+					&value.ValueId,
+					&value.ValueVariant,
+					&value.Value,
+				))
+				values = append(values, &value)
+			}
+		})
+	})
+
+	return
 }

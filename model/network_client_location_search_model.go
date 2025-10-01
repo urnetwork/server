@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"golang.org/x/exp/maps"
@@ -14,8 +15,26 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-var locationSearch = search.NewSearch("location_prefix", search.SearchTypePrefix)
-var locationGroupSearch = search.NewSearch("location_group_prefix", search.SearchTypePrefix)
+func init() {
+	server.OnWarmup(func() {
+		locationSearch().WaitForInitialSync(context.Background())
+		locationGroupSearch().WaitForInitialSync(context.Background())
+	})
+}
+
+var locationSearch = sync.OnceValue(func() *search.SearchLocal {
+	return search.NewSearchLocalWithDefaults(
+		context.Background(),
+		search.NewSearchDb("location_prefix", search.SearchTypePrefix),
+	)
+})
+
+var locationGroupSearch = sync.OnceValue(func() *search.SearchLocal {
+	return search.NewSearchLocalWithDefaults(
+		context.Background(),
+		search.NewSearchDb("location_group_prefix", search.SearchTypePrefix),
+	)
+})
 
 func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 	// locations
@@ -81,10 +100,10 @@ func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 	locationIds := maps.Keys(locations)
 	for i, locationId := range locationIds {
 		location := locations[locationId]
-		locationSearch.RemoveInTx(ctx, locationId, tx)
+		locationSearch().RemoveInTx(ctx, locationId, tx)
 		searchStrings := location.SearchStrings()
 		for j, searchStr := range searchStrings {
-			locationSearch.AddInTx(ctx, searchStr, locationId, j, tx)
+			locationSearch().AddInTx(ctx, searchStr, locationId, j, tx)
 			glog.Infof("[location]index %d/%d %d/%d: %s\n", i+1, len(locationIds), j+1, len(searchStrings), searchStr)
 		}
 	}
@@ -134,10 +153,10 @@ func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 	locationGroupIds := maps.Keys(locationGroups)
 	for i, locationGroupId := range locationGroupIds {
 		locationGroup := locationGroups[locationGroupId]
-		locationGroupSearch.RemoveInTx(ctx, locationGroupId, tx)
+		locationGroupSearch().RemoveInTx(ctx, locationGroupId, tx)
 		searchStrings := locationGroup.SearchStrings()
 		for j, searchStr := range searchStrings {
-			locationGroupSearch.AddInTx(ctx, searchStr, locationGroupId, j, tx)
+			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, j, tx)
 			glog.Infof("[location]index group %d/%d %d/%d: %s\n", i+1, len(locationGroupIds), j+1, len(searchStrings), searchStr)
 		}
 	}
