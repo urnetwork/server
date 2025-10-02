@@ -27,12 +27,44 @@ func TestSearchSubstringLocal(t *testing.T) {
 			ctx,
 			NewSearchDb("test", SearchTypeSubstring),
 		)
+		testSearch.WaitForInitialSync(ctx)
 
 		searchSubstring(t, ctx, testSearch)
 	})
 }
 
 func TestSearchSubstringRandomLocal(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		d := 3
+		minAliasLength := d + 1
+		testSearch := NewSearchLocalWithDefaults(
+			ctx,
+			NewSearchDbWithMinAliasLength("test", SearchTypeSubstring, minAliasLength),
+		)
+		testSearch.WaitForInitialSync(ctx)
+
+		searchSubstringRandom(t, ctx, testSearch, d)
+	})
+}
+
+func TestSearchSubstringLocalNoWait(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		testSearch := NewSearchLocalWithDefaults(
+			ctx,
+			NewSearchDb("test", SearchTypeSubstring),
+		)
+
+		searchSubstring(t, ctx, testSearch)
+	})
+}
+
+func TestSearchSubstringRandomLocalNoWait(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

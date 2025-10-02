@@ -17,8 +17,10 @@ import (
 
 func init() {
 	server.OnWarmup(func() {
-		locationSearch().WaitForInitialSync(context.Background())
-		locationGroupSearch().WaitForInitialSync(context.Background())
+		locationSearch()
+		//.WaitForInitialSync(context.Background())
+		locationGroupSearch()
+		//.WaitForInitialSync(context.Background())
 	})
 	server.OnReset(func() {
 		locationSearch().Close()
@@ -31,14 +33,14 @@ func init() {
 func createLocationSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
-		search.NewSearchDb("location_prefix", search.SearchTypePrefix),
+		search.NewSearchDbWithMinAliasLength("location_prefix", search.SearchTypePrefix, 3),
 	)
 }
 
 func createLocationGroupSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
-		search.NewSearchDb("location_group_prefix", search.SearchTypePrefix),
+		search.NewSearchDbWithMinAliasLength("location_group_prefix", search.SearchTypePrefix, 3),
 	)
 }
 

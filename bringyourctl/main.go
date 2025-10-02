@@ -69,6 +69,7 @@ Usage:
     bringyourctl migrate-user-auth
     bringyourctl reliability set-multipliers
     bringyourctl product-updates sync
+    bringyourctl query location <query>
 
 Options:
     -h --help     Show this screen.
@@ -219,6 +220,8 @@ Options:
 		if sync_, _ := opts.Bool("sync"); sync_ {
 			productUpdatesSync(opts)
 		}
+	} else if search_, _ := opts.Bool("query"); search_ {
+		searchQuery(opts)
 	} else {
 		fmt.Println(usage)
 	}
@@ -239,7 +242,7 @@ func searchAdd(opts docopt.Opts) {
 	realm, _ := opts.String("--realm")
 	searchType, _ := opts.String("--type")
 
-	searchService := search.NewSearch(
+	searchService := search.NewSearchDb(
 		realm,
 		search.SearchType(searchType),
 	)
@@ -254,7 +257,7 @@ func searchAround(opts docopt.Opts) {
 	searchType, _ := opts.String("--type")
 	distance, _ := opts.Int("--distance")
 
-	searchService := search.NewSearch(
+	searchService := search.NewSearchDb(
 		realm,
 		search.SearchType(searchType),
 	)
@@ -966,4 +969,21 @@ func productUpdatesSync(opts docopt.Opts) {
 	ctx := context.Background()
 
 	controller.SyncInitialProductUpdates(ctx)
+}
+
+func searchQuery(opts docopt.Opts) {
+
+	query, _ := opts.String("<query>")
+
+	ctx := context.Background()
+
+	startTime := time.Now()
+	rs := model.SearchLocations(ctx, query, 2)
+	endTime := time.Now()
+
+	fmt.Printf("Search took %.2fms (%d)\n", float64(endTime.Sub(startTime)/time.Microsecond)/1000.0, len(rs))
+
+	for i, r := range rs {
+		fmt.Printf("[%d] %s\n", i, r.Value)
+	}
 }

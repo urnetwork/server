@@ -22,7 +22,8 @@ import (
 
 func init() {
 	server.OnWarmup(func() {
-		networkNameSearch().WaitForInitialSync(context.Background())
+		networkNameSearch()
+		//.WaitForInitialSync(context.Background())
 	})
 	server.OnReset(func() {
 		networkNameSearch().Close()

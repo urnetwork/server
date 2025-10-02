@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"golang.org/x/exp/maps"
-	"golang.org/x/sync/semaphore"
+	// "golang.org/x/sync/semaphore"
 
 	"github.com/golang/glog"
 
@@ -19,7 +19,7 @@ import (
 func DefaultSearchLocalSettings() *SearchLocalSettings {
 	return &SearchLocalSettings{
 		UpdatePollTimeout: 15 * time.Second,
-		ParallelCount:     48,
+		ParallelCount:     8,
 	}
 }
 
@@ -82,17 +82,26 @@ func NewSearchLocal(ctx context.Context, impl Search, settings *SearchLocalSetti
 func (self *SearchLocal) update(initialSyncDone context.CancelFunc) {
 	defer self.cancel()
 
-	values := self.SearchValues(self.ctx)
-	for _, value := range values {
-		self.index(&SearchValueUpdate{
-			SearchValue: *value,
-		})
+	updateLimit := 10000
+
+	var startValueId server.Id
+	for {
+		values := self.OrderedSearchValues(self.ctx, startValueId, updateLimit)
+		if len(values) == 0 {
+			break
+		}
+		for _, value := range values {
+			self.index(&SearchValueUpdate{
+				SearchValue: *value,
+			})
+		}
+		startValueId = values[len(values)-1].ValueId
 	}
 	initialSyncDone()
 
 	var startUpdateId int64
 	for {
-		orderedUpdates := self.impl.OrderedSearchRecordsAfter(self.ctx, startUpdateId)
+		orderedUpdates := self.impl.OrderedSearchRecordsAfter(self.ctx, startUpdateId, updateLimit)
 
 		for _, update := range orderedUpdates {
 			self.index(update)
@@ -218,8 +227,14 @@ func (self *SearchLocal) MinAliasLength() int {
 }
 
 func (self *SearchLocal) AnyAround(ctx context.Context, query string, distance int) bool {
-	results := self.aroundIdsRawN(ctx, query, distance, 1)
-	return 0 < len(results)
+	select {
+	case <-self.initialSync.Done():
+		results := self.aroundIdsRawN(ctx, query, distance, 1)
+		return 0 < len(results)
+	default:
+		return self.impl.AnyAround(ctx, query, distance)
+	}
+
 }
 
 func (self *SearchLocal) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
@@ -227,8 +242,14 @@ func (self *SearchLocal) Around(ctx context.Context, query string, distance int,
 }
 
 func (self *SearchLocal) AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
-	results := self.aroundIdsRawN(ctx, query, distance, 0, options...)
-	return maps.Values(results)
+
+	select {
+	case <-self.initialSync.Done():
+		results := self.aroundIdsRawN(ctx, query, distance, 0, options...)
+		return maps.Values(results)
+	default:
+		return self.impl.AroundRaw(ctx, query, distance, options...)
+	}
 }
 
 func (self *SearchLocal) AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
@@ -236,20 +257,27 @@ func (self *SearchLocal) AroundIds(ctx context.Context, query string, distance i
 }
 
 func (self *SearchLocal) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
-	return self.aroundIdsRawN(ctx, query, distance, 0, options...)
+
+	select {
+	case <-self.initialSync.Done():
+		return self.aroundIdsRawN(ctx, query, distance, 0, options...)
+	default:
+		return self.impl.AroundIdsRaw(ctx, query, distance, options...)
+	}
+
 }
 
 func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distance int, n int, options ...any) map[server.Id]*SearchResult {
-	stats := OptStats()
+	stats := &SearchStats{}
+	limit := &SearchLimit{}
 	for _, option := range options {
 		switch v := option.(type) {
 		case *SearchStats:
 			stats = v
+		case *SearchLimit:
+			limit = v
 		}
 	}
-
-	self.stateLock.RLock()
-	defer self.stateLock.RUnlock()
 
 	queryHisto := createHisto(query)
 
@@ -263,31 +291,18 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 		}
 	}()
 
-	var resultsMutex sync.Mutex
-	results := map[server.Id]*SearchResult{}
-
-	add := func(variantProjections map[int]*localProjection) {
-		candidateCount := 0
+	add := func(results map[server.Id]*SearchResult, variantProjections map[int]*localProjection) (candidateCount int) {
 		var r *SearchResult
 
 		addLen := func(i int, minD int) {
 			for _, p := range variantProjections {
 				for v, h := range p.lenValueHistos[i] {
-					select {
-					case <-resultsCtx.Done():
-						return
-					default:
-					}
 					if minHistoDistance(queryHisto, h.histo, distance) {
 						candidateCount += 1
 						d := EditDistance(query, v)
-						// if !minHistoDistance(queryHisto, h.histo, distance) && (d <= distance) {
-						// 	glog.Infof("[s]BAD MIN SCAN[%d] %s <> %s (%v <> %v) %d <> %d\n", i, query, v, queryHisto, h.histo, distance, EditDistance(query, v))
-
-						// }
 						if d <= distance && (r == nil || d < r.ValueDistance) {
 							r = &SearchResult{
-								Value:         v,
+								Value:         p.value,
 								ValueVariant:  p.valueVariant,
 								Alias:         h.alias,
 								AliasValue:    v,
@@ -311,38 +326,77 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 			addLen(len(query)+i, i)
 		}
 
-		func() {
-			resultsMutex.Lock()
-			defer resultsMutex.Unlock()
-
-			stats.CandidateCount += candidateCount
-
-			if r != nil {
-				results[r.ValueId] = r
-				if 0 < n && n <= len(results) {
-					resultsCancel()
-				}
+		if r != nil {
+			results[r.ValueId] = r
+			if 0 < n && n <= len(results) {
+				resultsCancel()
 			}
+		}
+		return
+	}
+
+	var partitions [][]map[int]*localProjection
+	func() {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+
+		if 1 < self.settings.ParallelCount {
+			// ceil
+			n := (len(self.valueIdVariantProjections) + self.settings.ParallelCount - 1) / self.settings.ParallelCount
+			partitions = make([][]map[int]*localProjection, self.settings.ParallelCount)
+			i := 0
+			for _, variantProjections := range self.valueIdVariantProjections {
+				if n <= len(partitions[i]) {
+					i += 1
+				}
+				partitions[i] = append(partitions[i], variantProjections)
+			}
+		} else {
+			partitions = [][]map[int]*localProjection{
+				maps.Values(self.valueIdVariantProjections),
+			}
+		}
+	}()
+
+	var resultsMutex sync.Mutex
+	results := map[server.Id]*SearchResult{}
+
+	var wg sync.WaitGroup
+
+	for _, partition := range partitions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			localResults := map[server.Id]*SearchResult{}
+			localCandidateCount := 0
+
+			func() {
+				for _, variantProjections := range partition {
+					select {
+					case <-resultsCtx.Done():
+						return
+					default:
+					}
+					localCandidateCount += add(localResults, variantProjections)
+				}
+			}()
+
+			func() {
+				resultsMutex.Lock()
+				defer resultsMutex.Unlock()
+
+				maps.Copy(results, localResults)
+				stats.CandidateCount += localCandidateCount
+			}()
 		}()
 	}
 
-	s := semaphore.NewWeighted(int64(self.settings.ParallelCount))
-	func() {
-		for _, variantProjections := range self.valueIdVariantProjections {
-			select {
-			case <-resultsCtx.Done():
-				return
-			default:
-			}
+	wg.Wait()
 
-			s.Acquire(resultsCtx, 1)
-			go func() {
-				defer s.Release(1)
-				add(variantProjections)
-			}()
-		}
-	}()
-	s.Acquire(resultsCtx, int64(self.settings.ParallelCount))
+	if 0 < limit.MostLikely {
+		results = mostLikely(query, results, limit.MostLikely)
+	}
 
 	return results
 }
@@ -397,12 +451,12 @@ func (self *SearchLocal) RemoveInTx(ctx context.Context, valueId server.Id, tx s
 	self.impl.RemoveInTx(ctx, valueId, tx)
 }
 
-func (self *SearchLocal) OrderedSearchRecordsAfter(ctx context.Context, startRecordId int64) []*SearchValueUpdate {
-	return self.impl.OrderedSearchRecordsAfter(ctx, startRecordId)
+func (self *SearchLocal) OrderedSearchRecordsAfter(ctx context.Context, startRecordId int64, limit int) []*SearchValueUpdate {
+	return self.impl.OrderedSearchRecordsAfter(ctx, startRecordId, limit)
 }
 
-func (self *SearchLocal) SearchValues(ctx context.Context) []*SearchValue {
-	return self.impl.SearchValues(ctx)
+func (self *SearchLocal) OrderedSearchValues(ctx context.Context, startValueId server.Id, limit int) []*SearchValue {
+	return self.impl.OrderedSearchValues(ctx, startValueId, limit)
 }
 
 func createHisto(v string) map[rune]int {

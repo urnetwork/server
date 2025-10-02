@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	// "unicode"
@@ -64,6 +65,16 @@ func OptStats() *SearchStats {
 	return &SearchStats{}
 }
 
+type SearchLimit struct {
+	MostLikely int
+}
+
+func OptMostLikley(limit int) *SearchLimit {
+	return &SearchLimit{
+		MostLikely: limit,
+	}
+}
+
 type SearchValue struct {
 	Value        string
 	ValueId      server.Id
@@ -94,8 +105,8 @@ type Search interface {
 	RemoveInTx(ctx context.Context, valueId server.Id, tx server.PgTx)
 
 	// return is ordered by update id
-	OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64) []*SearchValueUpdate
-	SearchValues(ctx context.Context) []*SearchValue
+	OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64, limit int) []*SearchValueUpdate
+	OrderedSearchValues(ctx context.Context, startValueId server.Id, limit int) []*SearchValue
 }
 
 type SearchDb struct {
@@ -148,11 +159,14 @@ func (self *SearchDb) AroundIds(ctx context.Context, query string, distance int,
 }
 
 func (self *SearchDb) AroundIdsRaw(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
-	stats := OptStats()
+	stats := &SearchStats{}
+	limit := &SearchLimit{}
 	for _, option := range options {
 		switch v := option.(type) {
 		case *SearchStats:
 			stats = v
+		case *SearchLimit:
+			limit = v
 		}
 	}
 
@@ -344,6 +358,10 @@ func (self *SearchDb) AroundIdsRaw(ctx context.Context, query string, distance i
 
 		stats.CandidateCount = candidateCount
 	})
+
+	if 0 < limit.MostLikely {
+		matches = mostLikely(query, matches, limit.MostLikely)
+	}
 
 	return matches
 }
@@ -552,7 +570,7 @@ func (self *SearchDb) RemoveInTx(ctx context.Context, valueId server.Id, tx serv
 	))
 }
 
-func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64) (updates []*SearchValueUpdate) {
+func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64, limit int) (updates []*SearchValueUpdate) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -567,9 +585,12 @@ func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdate
 			WHERE
 				realm = $1 AND
 				$2 <= update_id
+			ORDER BY update_id
+			LIMIT $3
 			`,
 			self.realm,
 			startUpdateId,
+			limit,
 		)
 
 		updates = []*SearchValueUpdate{}
@@ -618,7 +639,7 @@ func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdate
 	return
 }
 
-func (self *SearchDb) SearchValues(ctx context.Context) (values []*SearchValue) {
+func (self *SearchDb) OrderedSearchValues(ctx context.Context, startValueId server.Id, limit int) (values []*SearchValue) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -630,9 +651,14 @@ func (self *SearchDb) SearchValues(ctx context.Context) (values []*SearchValue) 
 			FROM search_value
 			WHERE
 				realm = $1 AND
-				alias = 0
+				alias = 0 AND
+				$2 < value_id
+			ORDER BY value_id
+			LIMIT $3
 			`,
 			self.realm,
+			startValueId,
+			limit,
 		)
 
 		values = []*SearchValue{}
@@ -651,4 +677,54 @@ func (self *SearchDb) SearchValues(ctx context.Context) (values []*SearchValue) 
 	})
 
 	return
+}
+
+func mostLikely(query string, results map[server.Id]*SearchResult, n int) map[server.Id]*SearchResult {
+	// most likely:
+	// - distance
+	// - number of consecutive letters that match from first
+	// all exact matches are included regardless of n
+
+	if len(results) <= n {
+		return results
+	}
+
+	consec := func(s string) int {
+		i := 0
+		n := min(len(s), len(query))
+		for i < n && query[i] == s[i] {
+			i += 1
+		}
+		return i
+	}
+
+	orderedResults := maps.Values(results)
+	slices.SortFunc(orderedResults, func(a *SearchResult, b *SearchResult) int {
+		if d := a.ValueDistance - b.ValueDistance; d != 0 {
+			return d
+		}
+		if d := consec(a.AliasValue) - consec(b.AliasValue); d != 0 {
+			return d
+		}
+		return a.ValueId.Cmp(b.ValueId)
+	})
+
+	i := 0
+	for _, r := range orderedResults {
+		if 0 < r.ValueDistance {
+			break
+		}
+		if consec(r.AliasValue) < len(query) {
+			break
+		}
+		i += 1
+	}
+	n = max(n, i)
+
+	mostLikelyResults := map[server.Id]*SearchResult{}
+	for _, r := range orderedResults[:n] {
+		mostLikelyResults[r.ValueId] = r
+	}
+
+	return mostLikelyResults
 }
