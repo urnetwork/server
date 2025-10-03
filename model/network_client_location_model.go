@@ -2139,31 +2139,7 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
-	// the caller ip is used to match against provider excluded lists
-	clientIp, _, err := session.ParseClientIpPort()
-	if err != nil {
-		return nil, err
-	}
-
-	ipInfo, err := server.GetIpInfo(clientIp)
-	if err != nil {
-		return nil, err
-	}
-
-	clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
-	if !ok {
-		glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
-	}
-
-	// use a min block size to reduce db activity
-	count := max(findProviders2.Count, 20)
-
-	rankMode := findProviders2.RankMode
-	if rankMode == "" {
-		rankMode = RankModeQuality
-	}
-
-	activeClientIds := map[server.Id]bool{}
+	providers := []*FindProvidersProvider{}
 
 	locationIds := map[server.Id]bool{}
 	locationGroupIds := map[server.Id]bool{}
@@ -2176,7 +2152,10 @@ func FindProviders2(
 			locationGroupIds[*spec.LocationGroupId] = true
 		}
 		if spec.ClientId != nil {
-			activeClientIds[*spec.ClientId] = true
+			provider := &FindProvidersProvider{
+				ClientId: *(spec.ClientId),
+			}
+			providers = append(providers, provider)
 		}
 		if spec.BestAvailable != nil && *spec.BestAvailable {
 			// homeLocationId, found := findHomeLocationIdInTx(tx, session)
@@ -2187,136 +2166,162 @@ func FindProviders2(
 		}
 	}
 
-	n := max(count*10, 1000)
+	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
+		// use a min block size to reduce db activity
+		count := max(findProviders2.Count, 20)
 
-	loadStartTime := time.Now()
-	clientScores, err := loadClientScores(
-		session.Ctx,
-		locationIds,
-		locationGroupIds,
-		n,
-	)
-	if err != nil {
-		return nil, err
-	}
-	loadEndTime := time.Now()
-	loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
-	if 50.0 <= loadMillis {
-		glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
-	}
-
-	for _, clientId := range findProviders2.ExcludeClientIds {
-		delete(clientScores, clientId)
-	}
-	// the final hop is excluded
-	// intermediaries have net score incremented
-	intermediaryScore := MaxClientScore / 10
-	for _, destination := range findProviders2.ExcludeDestinations {
-		for _, clientId := range destination[:len(destination)-1] {
-			if clientScore, ok := clientScores[clientId]; ok {
-				clientScore.Scores[rankMode] += intermediaryScore
-			}
-		}
-		delete(clientScores, destination[len(destination)-1])
-	}
-
-	clientIds := maps.Keys(clientScores)
-	// oversample so that the list can be filtered
-	n = min(n/2, len(clientIds))
-
-	connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
-		clientScore := clientScores[clientId]
-		return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
-	})
-	clientIds = clientIds[:n]
-
-	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
-		clientScore := clientScores[clientId]
-		return clientScore.ReliabilityWeight
-	})
-
-	// band by tier, score
-	slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
-		clientScoreA := clientScores[a]
-		clientScoreB := clientScores[b]
-
-		if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
-			return d
+		rankMode := RankModeQuality
+		if findProviders2.RankMode != "" {
+			rankMode = findProviders2.RankMode
 		}
 
-		if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
-			return d
+		n := max(count*10, 1000)
+
+		loadStartTime := time.Now()
+		clientScores, err := loadClientScores(
+			session.Ctx,
+			locationIds,
+			locationGroupIds,
+			n,
+		)
+		if err != nil {
+			return nil, err
+		}
+		loadEndTime := time.Now()
+		loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
+		if 50.0 <= loadMillis {
+			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
 		}
 
-		return 0
-	})
-
-	filterActive := func(clientNetworks map[server.Id]server.Id) {
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			server.CreateTempJoinTableInTx(
-				session.Ctx,
-				tx,
-				"temp_client_networks(client_id uuid -> network_id uuid)",
-				clientNetworks,
-			)
-
-			result, err := tx.Query(
-				session.Ctx,
-				`
-				SELECT
-					temp_client_networks.client_id
-				FROM temp_client_networks
-				INNER JOIN provide_key ON
-		            provide_key.provide_mode = $1 AND
-		            provide_key.client_id = temp_client_networks.client_id
-		        INNER JOIN network_client_connection ON
-		        	network_client_connection.connected = true AND
-		        	network_client_connection.client_id = temp_client_networks.client_id
-		        LEFT JOIN exclude_network_client_location ON
-	            	exclude_network_client_location.client_location_id = $2 AND
-	                exclude_network_client_location.network_id = temp_client_networks.network_id
-	            WHERE
-	            	exclude_network_client_location.network_id IS NULL
-				`,
-				ProvideModePublic,
-				clientLocationId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
-					activeClientIds[clientId] = true
+		for _, clientId := range findProviders2.ExcludeClientIds {
+			delete(clientScores, clientId)
+		}
+		// the final hop is excluded
+		// intermediaries have net score incremented
+		intermediaryScore := MaxClientScore / 10
+		for _, destination := range findProviders2.ExcludeDestinations {
+			for _, clientId := range destination[:len(destination)-1] {
+				if clientScore, ok := clientScores[clientId]; ok {
+					clientScore.Scores[rankMode] += intermediaryScore
 				}
-			})
-		})
-	}
-
-	// filter the list to include only clients that are actively connected and providing
-	i := 0
-	for i < len(clientIds) && len(activeClientIds) < count {
-		clientNetworks := map[server.Id]server.Id{}
-		j1 := min(i+2*count, len(clientIds))
-		for j := i; j < j1; j += 1 {
-			clientId := clientIds[j]
-			clientScore := clientScores[clientId]
-			clientNetworks[clientId] = clientScore.NetworkId
-		}
-		filterActive(clientNetworks)
-		i = j1
-	}
-
-	// output in order of `clientIds`
-	providers := []*FindProvidersProvider{}
-	for _, clientId := range clientIds[:i] {
-		if activeClientIds[clientId] {
-			clientScore := clientScores[clientId]
-			provider := &FindProvidersProvider{
-				ClientId:                   clientId,
-				Tier:                       clientScore.Tiers[rankMode],
-				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
-				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 			}
-			providers = append(providers, provider)
+			delete(clientScores, destination[len(destination)-1])
+		}
+
+		clientIds := maps.Keys(clientScores)
+		// oversample so that the list can be filtered
+		n = min(n/2, len(clientIds))
+
+		connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+			clientScore := clientScores[clientId]
+			return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
+		})
+		clientIds = clientIds[:n]
+
+		connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
+			clientScore := clientScores[clientId]
+			return clientScore.ReliabilityWeight
+		})
+
+		// band by tier, score
+		slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
+			clientScoreA := clientScores[a]
+			clientScoreB := clientScores[b]
+
+			if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
+				return d
+			}
+
+			if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
+				return d
+			}
+
+			return 0
+		})
+
+		// the caller ip is used to match against provider excluded lists
+		clientIp, _, err := session.ParseClientIpPort()
+		if err != nil {
+			return nil, err
+		}
+
+		ipInfo, err := server.GetIpInfo(clientIp)
+		if err != nil {
+			return nil, err
+		}
+
+		clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
+		if !ok {
+			glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
+		}
+
+		activeClientIds := map[server.Id]bool{}
+		filterActive := func(clientNetworks map[server.Id]server.Id) {
+			server.Tx(session.Ctx, func(tx server.PgTx) {
+				server.CreateTempJoinTableInTx(
+					session.Ctx,
+					tx,
+					"temp_client_networks(client_id uuid -> network_id uuid)",
+					clientNetworks,
+				)
+
+				result, err := tx.Query(
+					session.Ctx,
+					`
+					SELECT
+						temp_client_networks.client_id
+					FROM temp_client_networks
+					INNER JOIN provide_key ON
+			            provide_key.provide_mode = $1 AND
+			            provide_key.client_id = temp_client_networks.client_id
+			        INNER JOIN network_client_connection ON
+			        	network_client_connection.connected = true AND
+			        	network_client_connection.client_id = temp_client_networks.client_id
+			        LEFT JOIN exclude_network_client_location ON
+		            	exclude_network_client_location.client_location_id = $2 AND
+		                exclude_network_client_location.network_id = temp_client_networks.network_id
+		            WHERE
+		            	exclude_network_client_location.network_id IS NULL
+					`,
+					ProvideModePublic,
+					clientLocationId,
+				)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var clientId server.Id
+						server.Raise(result.Scan(&clientId))
+						activeClientIds[clientId] = true
+					}
+				})
+			})
+		}
+
+		// filter the list to include only clients that are actively connected and providing
+		i := 0
+		for i < len(clientIds) && len(activeClientIds) < count {
+			clientNetworks := map[server.Id]server.Id{}
+			j1 := min(i+2*count, len(clientIds))
+			for j := i; j < j1; j += 1 {
+				clientId := clientIds[j]
+				clientScore := clientScores[clientId]
+				clientNetworks[clientId] = clientScore.NetworkId
+			}
+			filterActive(clientNetworks)
+			i = j1
+		}
+
+		// output in order of `clientIds`
+		for _, clientId := range clientIds[:i] {
+			if activeClientIds[clientId] {
+				clientScore := clientScores[clientId]
+				provider := &FindProvidersProvider{
+					ClientId:                   clientId,
+					Tier:                       clientScore.Tiers[rankMode],
+					EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
+				}
+				providers = append(providers, provider)
+			}
 		}
 	}
 
