@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/http"
+	// "net/http"
 	"os"
 	"syscall"
+	// "net"
+	// "errors"
 
 	// "time"
 
@@ -43,6 +45,9 @@ Options:
 
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
+
+	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	defer cancel()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
@@ -186,7 +191,13 @@ Options:
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-	err = http.ListenAndServe(fmt.Sprintf("%s:%d", listenIpv4, listenPort), routerHandler)
-	glog.Errorf("[api]close = %s\n", err)
+	err = server.ListenAndServeWithReusePort(
+		ctx,
+		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
+		router.NewRouter(ctx, routes),
+	)
+	if err != nil {
+		panic(err)
+	}
+	glog.Infof("[api]close\n")
 }

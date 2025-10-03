@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	// "github.com/golang/glog"
 
@@ -19,7 +20,25 @@ import (
 	"github.com/urnetwork/server/search"
 )
 
-var networkNameSearch = search.NewSearch("network_name", search.SearchTypeFull)
+func init() {
+	server.OnWarmup(func() {
+		networkNameSearch()
+		//.WaitForInitialSync(context.Background())
+	})
+	server.OnReset(func() {
+		networkNameSearch().Close()
+		networkNameSearch = sync.OnceValue(createNetworkNameSearch)
+	})
+}
+
+func createNetworkNameSearch() *search.SearchLocal {
+	return search.NewSearchLocalWithDefaults(
+		context.Background(),
+		search.NewSearchDb("network_name", search.SearchTypeFull),
+	)
+}
+
+var networkNameSearch = sync.OnceValue(createNetworkNameSearch)
 
 const MinPasswordLength = 6
 
@@ -38,7 +57,7 @@ const (
 )
 
 func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
-	taken := networkNameSearch.AnyAround(session.Ctx, check.NetworkName, 1)
+	taken := networkNameSearch().AnyAround(session.Ctx, check.NetworkName, 1)
 
 	result := &NetworkCheckResult{
 		Available: !taken,
@@ -314,7 +333,7 @@ func NetworkCreate(
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -425,7 +444,7 @@ func NetworkCreate(
 			if created {
 				auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-				networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+				networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -560,7 +579,7 @@ func NetworkCreate(
 
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
 
-			networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -669,7 +688,7 @@ func checkNetworkNameAvailability(
 		return
 	}
 
-	taken := networkNameSearch.AnyAround(session.Ctx, networkName, 1)
+	taken := networkNameSearch().AnyAround(session.Ctx, networkName, 1)
 
 	if taken {
 		err = errors.New("Network name not available")
@@ -861,7 +880,7 @@ func UpgradeGuest(
 
 			// do we need to run auditNetworkCreate on the upgrade from guest -> normal account?
 
-			networkNameSearch.Add(session.Ctx, networkName, session.ByJwt.NetworkId, 0)
+			networkNameSearch().Add(session.Ctx, networkName, session.ByJwt.NetworkId, 0)
 
 			result = &UpgradeGuestResult{
 				VerificationRequired: &UpgradeGuestResultVerification{

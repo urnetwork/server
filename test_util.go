@@ -15,11 +15,13 @@ import (
 
 type TestEnv struct {
 	ApplyDbMigrations bool
+	Warmup            bool
 }
 
 func DefaultTestEnv() *TestEnv {
 	return &TestEnv{
 		ApplyDbMigrations: true,
+		Warmup:            false,
 	}
 }
 
@@ -121,7 +123,13 @@ db: %d`,
 		ApplyDbMigrations(ctx)
 	}
 
+	if self.Warmup {
+		Warmup()
+	}
+
 	return func() {
+		Reset()
+
 		Redis(ctx, func(client RedisClient) {
 			cmd := client.FlushDB(ctx)
 			_, err := cmd.Result()

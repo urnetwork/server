@@ -94,15 +94,15 @@ func TestLocationsSearch(t *testing.T) {
 
 			indexSearchLocationsInTx(ctx, tx)
 
-			r1 := locationSearch.AroundIds(ctx, "san fra", 0)
+			r1 := locationSearch().AroundIds(ctx, "san fra", 0)
 			assert.Equal(t, len(r1), 1)
 			assert.Equal(t, 0, r1[locationSanFrancisco.LocationId].ValueDistance)
 
-			r2 := locationSearch.AroundIds(ctx, "san frn", 1)
+			r2 := locationSearch().AroundIds(ctx, "san frn", 1)
 			assert.Equal(t, len(r2), 1)
 			assert.Equal(t, 1, r2[locationSanFrancisco.LocationId].ValueDistance)
 
-			r3 := locationGroupSearch.AroundIds(ctx, "who's the", 0)
+			r3 := locationGroupSearch().AroundIds(ctx, "who's the", 0)
 			assert.Equal(t, len(r3), 1)
 			assert.Equal(t, 0, r3[locationGroupWhosTheBest.LocationGroupId].ValueDistance)
 

@@ -116,7 +116,7 @@ type FindNetworkResult struct {
 func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetworkResult, error) {
 	findNetworkResults := []*FindNetworkResult{}
 
-	searchResults := networkNameSearch.Around(ctx, networkName, 3)
+	searchResults := networkNameSearch().Around(ctx, networkName, 3)
 
 	if len(searchResults) == 0 {
 		return []*FindNetworkResult{}, nil
@@ -328,7 +328,7 @@ func RemoveNetwork(
 			networkId,
 		))
 
-		networkNameSearch.RemoveInTx(ctx, networkId, tx)
+		networkNameSearch().RemoveInTx(ctx, networkId, tx)
 
 		success = true
 	})

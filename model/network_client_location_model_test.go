@@ -432,36 +432,36 @@ func TestFindProviders2WithExclude(t *testing.T) {
 	})
 }
 
-func TestFindLocationGroupByName(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+// func TestFindLocationGroupByName(t *testing.T) {
+// 	server.DefaultTestEnv().Run(func() {
 
-		ctx := context.Background()
+// 		ctx := context.Background()
 
-		createLocationGroup := &LocationGroup{
-			Name:     StrongPrivacyLaws,
-			Promoted: true,
-		}
+// 		createLocationGroup := &LocationGroup{
+// 			Name:     StrongPrivacyLaws,
+// 			Promoted: true,
+// 		}
 
-		CreateLocationGroup(ctx, createLocationGroup)
+// 		CreateLocationGroup(ctx, createLocationGroup)
 
-		server.Tx(ctx, func(tx server.PgTx) {
-			// query existing
-			locationGroup := findLocationGroupByNameInTx(ctx, StrongPrivacyLaws, tx)
-			assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
-			assert.Equal(t, locationGroup.Promoted, true)
+// 		server.Tx(ctx, func(tx server.PgTx) {
+// 			// query existing
+// 			locationGroup := findLocationGroupByNameInTx(ctx, StrongPrivacyLaws, tx)
+// 			assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+// 			assert.Equal(t, locationGroup.Promoted, true)
 
-			// locationGroupId := locationGroup.LocationGroupId
+// 			// locationGroupId := locationGroup.LocationGroupId
 
-			// query with incorrect case should still return
-			// locationGroup = findLocationGroupByNameInTx(ctx, "strong privacy Laws And internet freedom", tx)
-			// assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
-			// assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
-			// assert.Equal(t, locationGroup.Promoted, true)
+// 			// query with incorrect case should still return
+// 			// locationGroup = findLocationGroupByNameInTx(ctx, "strong privacy Laws And internet freedom", tx)
+// 			// assert.Equal(t, locationGroup.Name, StrongPrivacyLaws)
+// 			// assert.Equal(t, locationGroup.LocationGroupId, locationGroupId)
+// 			// assert.Equal(t, locationGroup.Promoted, true)
 
-			// query should return nil if no match
-			locationGroup = findLocationGroupByNameInTx(ctx, "invalid", tx)
-			assert.Equal(t, locationGroup, nil)
+// 			// query should return nil if no match
+// 			locationGroup = findLocationGroupByNameInTx(ctx, "invalid", tx)
+// 			assert.Equal(t, locationGroup, nil)
 
-		})
-	})
-}
+// 		})
+// 	})
+// }

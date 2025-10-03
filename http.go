@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const DefaultHttpTimeout = 30 * time.Second
@@ -371,4 +375,28 @@ type HttpStatusError struct {
 
 func (self *HttpStatusError) Error() string {
 	return fmt.Sprintf("Bad status: %s %s", self.Status, self.ResponseBody)
+}
+
+func ListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler) error {
+	server := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+	}
+
+	listenConfig := net.ListenConfig{
+		Control: func(network string, address string, rawConn syscall.RawConn) error {
+			var setErr error
+			err := rawConn.Control(func(fd uintptr) {
+				setErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			})
+			return errors.Join(err, setErr)
+		},
+	}
+
+	listener, err := listenConfig.Listen(ctx, "tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+
+	return server.Serve(listener)
 }

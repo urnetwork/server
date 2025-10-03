@@ -126,6 +126,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleUpdateClientScores(clientSession, tx)
 		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
+		work.ScheduleUpdateClientLocations(clientSession, tx)
 	})
 }
 
@@ -263,7 +264,6 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.RemoveOldNetworkReliabilityWindow,
 			work.RemoveOldNetworkReliabilityWindowPost,
 		),
-
 		task.NewTaskTargetWithPost(
 			work.SyncInitialProductUpdates,
 			work.SyncInitialProductUpdatesPost,
@@ -275,6 +275,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			controller.RemoveProductUpdates,
 			controller.RemoveProductUpdatesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.UpdateClientLocations,
+			work.UpdateClientLocationsPost,
 		),
 	)
 

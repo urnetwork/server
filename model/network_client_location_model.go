@@ -11,7 +11,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
-	"math"
+	// "math"
 	mathrand "math/rand"
 	"slices"
 
@@ -21,9 +21,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/urnetwork/server"
-	// "github.com/urnetwork/server/search"
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/search"
 	"github.com/urnetwork/server/session"
 )
 
@@ -727,7 +727,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range countryLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -810,7 +810,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range regionLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -902,7 +902,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 
 			// add to the search
 			for i, searchStr := range cityLocation.SearchStrings() {
-				locationSearch.AddInTx(ctx, searchStr, locationId, i, tx)
+				locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
 			}
 		}
 
@@ -981,7 +981,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		})
 
 		for i, searchStr := range locationGroup.SearchStrings() {
-			locationGroupSearch.AddInTx(ctx, searchStr, locationGroupId, i, tx)
+			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, i, tx)
 		}
 	})
 }
@@ -1194,471 +1194,111 @@ type FindLocationsResult struct {
 	Devices []*LocationDeviceResult `json:"devices"`
 }
 
-// search for locations that match query
-// match clients for those locations with provide enabled available to `clientId`
-// sum number of unique client ids
-// (this selects at least one connection because location is joined to the connection)
-// result is a list of: location name, location type, location id, match score, number active providers
-// args have query and count
-// args have location types, which would typically be all (city, region, country, group)
-// args have min search threshold
-// FIXME (brien) I think there is a bug in this function. Needs more testing
-func FindProviderLocations(
-	findLocations *FindLocationsArgs,
-	session *session.ClientSession,
-) (*FindLocationsResult, error) {
-	var maxDistanceFraction float32
-	if findLocations.EnableMaxDistanceFraction {
-		maxDistanceFraction = findLocations.MaxDistanceFraction
-	} else {
-		maxDistanceFraction = DefaultMaxDistanceFraction
-	}
-	maxSearchDistance := int(math.Ceil(
-		float64(maxDistanceFraction) * float64(len(findLocations.Query)),
-	))
-	locationSearchResults := locationSearch.AroundIds(
-		session.Ctx,
-		findLocations.Query,
-		2+maxSearchDistance,
+// used for debugging
+func SearchLocations(ctx context.Context, query string, distance int) []*search.SearchResult {
+	s := locationSearch()
+	s.WaitForInitialSync(ctx)
+
+	startTime := time.Now()
+	r := s.Around(
+		ctx,
+		query,
+		distance,
+		search.OptMostLikley(10),
 	)
-	locationGroupSearchResults := locationGroupSearch.AroundIds(
-		session.Ctx,
-		findLocations.Query,
-		2+maxSearchDistance,
-	)
+	endTime := time.Now()
+	glog.Infof("Search took %.2fms\n", float64(endTime.Sub(startTime)/time.Microsecond)/1000.0)
 
-	// server.Logger().Printf("Found location search results: %v\n", locationSearchResults)
-	// server.Logger().Printf("Found location group results: %v\n", locationGroupSearchResults)
+	return r
+}
 
-	locationResults := map[server.Id]*LocationResult{}
-	locationGroupResults := map[server.Id]*LocationGroupResult{}
+type ClientLocation struct {
+	LocationId  server.Id
+	ClientCount int
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		searchLocationIds := []server.Id{}
-		for searchLocationId, _ := range locationSearchResults {
-			searchLocationIds = append(searchLocationIds, searchLocationId)
-		}
-		// extend the locations with the search group members
-		server.CreateTempTableInTx(
-			session.Ctx,
-			tx,
-			"find_location_group_ids(location_group_id uuid)",
-			maps.Keys(locationGroupSearchResults)...,
-		)
+	Name              string
+	LocationType      LocationType
+	CityLocationId    *server.Id
+	RegionLocationId  *server.Id
+	CountryLocationId *server.Id
+	CountryCode       string
+}
+
+type ClientLocationGroup struct {
+	LocationGroupId server.Id
+
+	Name     string
+	Promoted bool
+}
+
+type InitialClientLocations struct {
+	Locations      []*ClientLocation
+	LocationGroups []*ClientLocationGroup
+}
+
+func clientLocationKey(locationId server.Id) string {
+	return fmt.Sprintf("client_location_l_%s", locationId)
+}
+
+func initialClientLocationsKey() string {
+	return fmt.Sprintf("initial_client_locations")
+}
+
+func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
+
+	clientLocations := map[server.Id]*ClientLocation{}
+	removeClientLocations := map[server.Id]bool{}
+
+	initialClientLocations := &InitialClientLocations{}
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		locationClientCounts := map[server.Id]int{}
+
 		result, err := tx.Query(
-			session.Ctx,
+			ctx,
 			`
-                SELECT
-                    DISTINCT location_group_member.location_id
-                FROM location_group_member
-                INNER JOIN find_location_group_ids ON
-                    find_location_group_ids.location_group_id = location_group_member.location_group_id
-            `,
+	        SELECT
+	        	network_client_location_reliability.city_location_id,
+	        	network_client_location_reliability.region_location_id,
+	        	network_client_location_reliability.country_location_id
+
+	        FROM network_client_location_reliability
+
+	        INNER JOIN client_connection_reliability_score ON
+	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+
+	        WHERE
+	        	network_client_location_reliability.connected = true AND
+	        	network_client_location_reliability.valid = true
+	        `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var locationId server.Id
-				server.Raise(result.Scan(&locationId))
-				searchLocationIds = append(searchLocationIds, locationId)
-			}
-		})
-
-		// server.Logger().Printf("Search location ids: %v\n", searchLocationIds)
-		// for _, searchLocationId := range searchLocationIds {
-		// server.Logger().Printf("  Search location id: %s\n", searchLocationId.String())
-		// }
-
-		server.CreateTempTableInTx(
-			session.Ctx,
-			tx,
-			"find_location_ids(location_id uuid)",
-			searchLocationIds...,
-		)
-
-		// extend the locations with all regions and countries
-		// this handles the case where the location searched for does not have matches,
-		// but the parent locations do
-
-		_, err = tx.Exec(
-			session.Ctx,
-			`
-                INSERT INTO find_location_ids
-                SELECT
-                    DISTINCT location.region_location_id
-                FROM location
-                INNER JOIN find_location_ids ON find_location_ids.location_id = location.city_location_id
-                ON CONFLICT DO NOTHING
-            `,
-		)
-		server.Raise(err)
-
-		_, err = tx.Exec(
-			session.Ctx,
-			`
-                INSERT INTO find_location_ids
-                SELECT
-                    DISTINCT location.country_location_id
-                FROM location
-                INNER JOIN find_location_ids ON 
-                    find_location_ids.location_id = location.city_location_id OR
-                    find_location_ids.location_id = location.region_location_id
-                ON CONFLICT DO NOTHING
-            `,
-		)
-		server.Raise(err)
-
-		result, err = tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    COUNT(DISTINCT network_client_location.client_id) AS client_count,
-                    network_client_location.city_location_id,
-                    network_client_location.region_location_id,
-                    network_client_location.country_location_id
-
-                FROM network_client_location
-
-                INNER JOIN provide_key ON
-                    provide_key.provide_mode = $1 AND
-                    provide_key.client_id = network_client_location.client_id
-
-                INNER JOIN network_client_connection ON
-                    network_client_connection.connected = true AND
-                    network_client_connection.connection_id = network_client_location.connection_id
-
-                LEFT JOIN find_location_ids find_location_ids_city ON
-                    find_location_ids_city.location_id = network_client_location.city_location_id
-                LEFT JOIN find_location_ids find_location_ids_region ON
-                    find_location_ids_region.location_id = network_client_location.region_location_id
-                LEFT JOIN find_location_ids find_location_ids_country ON
-                    find_location_ids_country.location_id = network_client_location.country_location_id
-
-                WHERE
-                    find_location_ids_city.location_id IS NOT NULL OR
-                    find_location_ids_region.location_id IS NOT NULL OR
-                    find_location_ids_country.location_id IS NOT NULL
-
-                GROUP BY
-                    network_client_location.city_location_id,
-                    network_client_location.region_location_id,
-                    network_client_location.country_location_id
-            `,
-			ProvideModePublic,
-		)
-		providerCount := map[server.Id]int{}
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientCount int
-				var cityLocationId *server.Id
-				var regionLocationId *server.Id
-				var countryLocationId *server.Id
-
+				var cityLocationId server.Id
+				var regionLocationId server.Id
+				var countryLocationId server.Id
 				server.Raise(result.Scan(
-					&clientCount,
 					&cityLocationId,
 					&regionLocationId,
 					&countryLocationId,
 				))
 
-				if cityLocationId != nil {
-					providerCount[*cityLocationId] += clientCount
-				}
-				if regionLocationId != nil {
-					providerCount[*regionLocationId] += clientCount
-				}
-				if countryLocationId != nil {
-					providerCount[*countryLocationId] += clientCount
-				}
-			}
-		})
-
-		// server.Logger().Printf("Found provider counts: %v\n", providerCount)
-
-		server.CreateTempJoinTableInTx(
-			session.Ctx,
-			tx,
-			"result_location_ids(location_id uuid -> client_count int)",
-			providerCount,
-		)
-		result, err = tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    location.location_id,
-                    location.location_type,
-                    location.location_name,
-                    location.city_location_id,
-                    location.region_location_id,
-                    location.country_location_id,
-                    location.country_code,
-                    result_location_ids.client_count
-                FROM location
-                INNER JOIN result_location_ids ON
-                    result_location_ids.location_id = location.location_id
-            `,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				locationResult := &LocationResult{}
-				server.Raise(result.Scan(
-					&locationResult.LocationId,
-					&locationResult.LocationType,
-					&locationResult.Name,
-					&locationResult.CityLocationId,
-					&locationResult.RegionLocationId,
-					&locationResult.CountryLocationId,
-					&locationResult.CountryCode,
-					&locationResult.ProviderCount,
-				))
-				// find the match score
-				if searchResult, ok := locationSearchResults[locationResult.LocationId]; ok {
-					locationResult.MatchDistance = searchResult.ValueDistance
-				} else {
-					locationResult.MatchDistance = maxSearchDistance + 1
-				}
-				locationResults[locationResult.LocationId] = locationResult
-			}
-		})
-
-		result, err = tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    location_group.location_group_id,
-                    location_group.location_group_name,
-                    location_group.promoted,
-                    t.client_count
-                FROM location_group
-                INNER JOIN (
-                    SELECT
-                        location_group_member.location_group_id,
-                        SUM(result_location_ids.client_count) AS client_count
-                    FROM location_group_member
-                    INNER JOIN result_location_ids ON
-                        result_location_ids.location_id = location_group_member.location_id
-                    GROUP BY location_group_id
-                ) t ON t.location_group_id = location_group.location_group_id
-            `,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				locationGroupResult := &LocationGroupResult{}
-				server.Raise(result.Scan(
-					&locationGroupResult.LocationGroupId,
-					&locationGroupResult.Name,
-					&locationGroupResult.Promoted,
-					&locationGroupResult.ProviderCount,
-				))
-				// find the match score
-				if searchResult, ok := locationGroupSearchResults[locationGroupResult.LocationGroupId]; ok {
-					locationGroupResult.MatchDistance = searchResult.ValueDistance
-				} else {
-					locationGroupResult.MatchDistance = maxSearchDistance + 1
-				}
-				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
-			}
-		})
-	})
-
-	return &FindLocationsResult{
-		Locations: maps.Values(locationResults),
-		Groups:    maps.Values(locationGroupResults),
-		Devices:   findLocationDevices(session.Ctx, findLocations),
-	}, nil
-}
-
-func GetProviderLocations(
-	session *session.ClientSession,
-) (*FindLocationsResult, error) {
-	locationResults := map[server.Id]*LocationResult{}
-	locationGroupResults := map[server.Id]*LocationGroupResult{}
-
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			session.Ctx,
-			`
-            	SELECT
-					location.location_id,
-                    location.location_type,
-                    location.location_name,
-                    location.city_location_id,
-                    location.region_location_id,
-                    location.country_location_id,
-                    location.country_code,
-                    t.client_count
-
-				FROM (
-	                SELECT
-	                    network_client_location.country_location_id AS location_id,
-	                    COUNT(DISTINCT network_client_connection.client_id) AS client_count
-
-	                FROM network_client_connection
-
-	                INNER JOIN provide_key ON
-	                    provide_key.provide_mode = $1 AND
-	                    provide_key.client_id = network_client_connection.client_id
-
-	                INNER JOIN network_client_location ON
-	                    network_client_location.connection_id = network_client_connection.connection_id
-
-                    WHERE
-                        network_client_connection.connected = true
-	                GROUP BY
-	                    network_client_location.country_location_id
-	            ) t
-
-	            INNER JOIN location ON location.location_id = t.location_id
-	        `,
-			ProvideModePublic,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				locationResult := &LocationResult{}
-				server.Raise(result.Scan(
-					&locationResult.LocationId,
-					&locationResult.LocationType,
-					&locationResult.Name,
-					&locationResult.CityLocationId,
-					&locationResult.RegionLocationId,
-					&locationResult.CountryLocationId,
-					&locationResult.CountryCode,
-					&locationResult.ProviderCount,
-				))
-				locationResults[locationResult.LocationId] = locationResult
-			}
-		})
-
-		result, err = conn.Query(
-			session.Ctx,
-			`
-                SELECT
-                    location_group.location_group_id,
-                    location_group.location_group_name,
-                    location_group.promoted
-                FROM location_group
-            `,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				locationGroupResult := &LocationGroupResult{}
-				server.Raise(result.Scan(
-					&locationGroupResult.LocationGroupId,
-					&locationGroupResult.Name,
-					&locationGroupResult.Promoted,
-					// &locationGroupResult.ProviderCount,
-				))
-				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
-			}
-		})
-	})
-
-	return &FindLocationsResult{
-		Locations: maps.Values(locationResults),
-		Groups:    maps.Values(locationGroupResults),
-		Devices:   getLocationDevices(session.Ctx),
-	}, nil
-}
-
-// this just finds locations and groups regardless of whether there are active providers there
-// these are locations where there could be providers
-func FindLocations(
-	findLocations *FindLocationsArgs,
-	session *session.ClientSession,
-) (*FindLocationsResult, error) {
-	var maxDistanceFraction float32
-	if findLocations.EnableMaxDistanceFraction {
-		maxDistanceFraction = findLocations.MaxDistanceFraction
-	} else {
-		maxDistanceFraction = DefaultMaxDistanceFraction
-	}
-	maxSearchDistance := int(math.Ceil(
-		float64(maxDistanceFraction) * float64(len(findLocations.Query)),
-	))
-	locationSearchResults := locationSearch.AroundIds(
-		session.Ctx,
-		findLocations.Query,
-		maxSearchDistance,
-	)
-	locationGroupSearchResults := locationGroupSearch.AroundIds(
-		session.Ctx,
-		findLocations.Query,
-		maxSearchDistance,
-	)
-
-	locationResults := map[server.Id]*LocationResult{}
-	locationGroupResults := map[server.Id]*LocationGroupResult{}
-
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		searchLocationIds := []server.Id{}
-		for searchLocationId, _ := range locationSearchResults {
-			searchLocationIds = append(searchLocationIds, searchLocationId)
-		}
-		// extend the locations with the search group members
-		server.CreateTempTableInTx(
-			session.Ctx,
-			tx,
-			"find_location_group_ids(location_group_id uuid)",
-			maps.Keys(locationGroupSearchResults)...,
-		)
-		result, err := tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    DISTINCT location_group_member.location_id
-                FROM location_group_member
-                INNER JOIN find_location_group_ids ON
-                    find_location_group_ids.location_group_id = location_group_member.location_group_id
-            `,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var locationId server.Id
-				server.Raise(result.Scan(&locationId))
-				searchLocationIds = append(searchLocationIds, locationId)
+				locationClientCounts[cityLocationId] += 1
+				locationClientCounts[regionLocationId] += 1
+				locationClientCounts[countryLocationId] += 1
 			}
 		})
 
 		server.CreateTempTableInTx(
-			session.Ctx,
+			ctx,
 			tx,
-			"find_location_ids(location_id uuid)",
-			searchLocationIds...,
+			"temp_location_ids(location_id uuid)",
+			maps.Keys(locationClientCounts)...,
 		)
-
-		// extend the locations with all regions and countries
-		// this handles the case where the location searched for does not have matches,
-		// but the parent locations do
-
-		_, err = tx.Exec(
-			session.Ctx,
-			`
-                INSERT INTO find_location_ids
-                SELECT
-                    location.region_location_id
-                FROM location
-                INNER JOIN find_location_ids ON find_location_ids.location_id = location.city_location_id
-                ON CONFLICT DO NOTHING
-            `,
-		)
-		server.Raise(err)
-
-		_, err = tx.Exec(
-			session.Ctx,
-			`
-                INSERT INTO find_location_ids
-                SELECT
-                    location.country_location_id
-                FROM location
-                INNER JOIN find_location_ids ON 
-                    find_location_ids.location_id = location.city_location_id OR
-                    find_location_ids.location_id = location.region_location_id
-                ON CONFLICT DO NOTHING
-            `,
-		)
-		server.Raise(err)
 
 		result, err = tx.Query(
-			session.Ctx,
+			ctx,
 			`
                 SELECT
                     location.location_id,
@@ -1669,68 +1309,302 @@ func FindLocations(
                     location.country_location_id,
                     location.country_code
                 FROM location
-                INNER JOIN find_location_ids ON
-                    find_location_ids.location_id = location.location_id
             `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				locationResult := &LocationResult{}
+				clientLocation := &ClientLocation{}
 				server.Raise(result.Scan(
-					&locationResult.LocationId,
-					&locationResult.LocationType,
-					&locationResult.Name,
-					&locationResult.CityLocationId,
-					&locationResult.RegionLocationId,
-					&locationResult.CountryLocationId,
-					&locationResult.CountryCode,
+					&clientLocation.LocationId,
+					&clientLocation.LocationType,
+					&clientLocation.Name,
+					&clientLocation.CityLocationId,
+					&clientLocation.RegionLocationId,
+					&clientLocation.CountryLocationId,
+					&clientLocation.CountryCode,
 				))
-				// find the match score
-				if searchResult, ok := locationSearchResults[locationResult.LocationId]; ok {
-					locationResult.MatchDistance = searchResult.ValueDistance
+				if clientCount, ok := locationClientCounts[clientLocation.LocationId]; ok {
+					clientLocation.ClientCount = clientCount
+					clientLocations[clientLocation.LocationId] = clientLocation
+
+					if clientLocation.LocationType == LocationTypeCountry {
+						initialClientLocations.Locations = append(initialClientLocations.Locations, clientLocation)
+					}
+				} else {
+					removeClientLocations[clientLocation.LocationId] = true
 				}
-				locationResults[locationResult.LocationId] = locationResult
 			}
 		})
 
 		result, err = tx.Query(
-			session.Ctx,
+			ctx,
 			`
                 SELECT
                     location_group.location_group_id,
                     location_group.location_group_name,
                     location_group.promoted
                 FROM location_group
-                INNER JOIN (
-                    SELECT
-                        DISTINCT location_group_member.location_group_id
-                    FROM location_group_member
-                    INNER JOIN find_location_ids ON
-                        find_location_ids.location_id = location_group_member.location_id
-                ) t ON t.location_group_id = location_group.location_group_id
             `,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				locationGroupResult := &LocationGroupResult{}
+				clientLocationGroup := &ClientLocationGroup{}
 				server.Raise(result.Scan(
-					&locationGroupResult.LocationGroupId,
-					&locationGroupResult.Name,
-					&locationGroupResult.Promoted,
+					&clientLocationGroup.LocationGroupId,
+					&clientLocationGroup.Name,
+					&clientLocationGroup.Promoted,
 				))
-				// find the match score
-				if searchResult, ok := locationGroupSearchResults[locationGroupResult.LocationGroupId]; ok {
-					locationGroupResult.MatchDistance = searchResult.ValueDistance
-				}
-				locationGroupResults[locationGroupResult.LocationGroupId] = locationGroupResult
+				initialClientLocations.LocationGroups = append(initialClientLocations.LocationGroups, clientLocationGroup)
 			}
 		})
 	})
 
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+
+		for locationId, clientLocation := range clientLocations {
+			b := bytes.NewBuffer(nil)
+			e := gob.NewEncoder(b)
+			e.Encode(clientLocation)
+			clientLocationBytes := b.Bytes()
+
+			pipe.Set(ctx, clientLocationKey(locationId), clientLocationBytes, ttl)
+			glog.V(2).Infof("[nclm]update client location (%s)\n", locationId)
+		}
+		for locationId, _ := range removeClientLocations {
+			pipe.Del(ctx, clientLocationKey(locationId))
+			glog.V(2).Infof("[nclm]remove client location (%s)\n", locationId)
+		}
+
+		b := bytes.NewBuffer(nil)
+		e := gob.NewEncoder(b)
+		e.Encode(initialClientLocations)
+		initialClientLocationsBytes := b.Bytes()
+		pipe.Set(ctx, initialClientLocationsKey(), initialClientLocationsBytes, ttl)
+		glog.V(2).Infof("[nclm]update initial client locations\n")
+
+		_, returnErr = pipe.Exec(ctx)
+	})
+
+	glog.Info("[nclm]updated %d client locations, removed %d, and updated initial\n", len(clientLocations), len(removeClientLocations))
+
+	return
+}
+
+func loadClientLocations(
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+) (clientLocations map[server.Id]*ClientLocation, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
+			pipe := r.TxPipeline()
+
+			clientLocationCmds := map[server.Id]*redis.StringCmd{}
+
+			for locationId, _ := range locationIds {
+				v := pipe.Get(ctx, clientLocationKey(locationId))
+				clientLocationCmds[locationId] = v
+			}
+
+			pipe.Exec(ctx)
+
+			for locationId, clientLocationCmd := range clientLocationCmds {
+				clientLocationBytes, _ := clientLocationCmd.Bytes()
+				if len(clientLocationBytes) == 0 {
+					continue
+				}
+				b := bytes.NewBuffer(clientLocationBytes)
+				e := gob.NewDecoder(b)
+				var clientLocation ClientLocation
+				err := e.Decode(&clientLocation)
+				if err != nil {
+					return err
+				}
+
+				clientLocations[locationId] = &clientLocation
+			}
+
+			return nil
+		}
+
+		clientLocations = map[server.Id]*ClientLocation{}
+
+		returnErr = load(locationIds, clientLocations)
+		if returnErr != nil {
+			return
+		}
+
+		expandedLocationIds := map[server.Id]bool{}
+
+		for _, clientLocation := range clientLocations {
+			if clientLocation.CityLocationId != nil {
+				_, ok := locationIds[*clientLocation.CityLocationId]
+				if !ok {
+					expandedLocationIds[*clientLocation.CityLocationId] = true
+				}
+			}
+			if clientLocation.RegionLocationId != nil {
+				_, ok := locationIds[*clientLocation.RegionLocationId]
+				if !ok {
+					expandedLocationIds[*clientLocation.RegionLocationId] = true
+				}
+			}
+			if clientLocation.CountryLocationId != nil {
+				_, ok := locationIds[*clientLocation.CountryLocationId]
+				if !ok {
+					expandedLocationIds[*clientLocation.CountryLocationId] = true
+				}
+			}
+		}
+
+		returnErr = load(expandedLocationIds, clientLocations)
+		if returnErr != nil {
+			return
+		}
+	})
+
+	return
+}
+
+func loadInitialClientLocations(ctx context.Context) (initialClientLocations *InitialClientLocations, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+
+		cmd := r.Get(ctx, initialClientLocationsKey())
+
+		initialClientLocationsBytes, _ := cmd.Bytes()
+		b := bytes.NewBuffer(initialClientLocationsBytes)
+		e := gob.NewDecoder(b)
+		var initialClientLocations_ InitialClientLocations
+		returnErr = e.Decode(&initialClientLocations_)
+		if returnErr != nil {
+			return
+		}
+
+		initialClientLocations = &initialClientLocations_
+	})
+	return
+}
+
+func FindProviderLocations(
+	findLocations *FindLocationsArgs,
+	session *session.ClientSession,
+) (*FindLocationsResult, error) {
+
+	if clientId, err := server.ParseId(findLocations.Query); err == nil {
+		device := &LocationDeviceResult{
+			ClientId:   clientId,
+			DeviceName: fmt.Sprintf("%s", clientId),
+		}
+
+		deviceResults := []*LocationDeviceResult{
+			device,
+		}
+
+		return &FindLocationsResult{
+			Locations: []*LocationResult{},
+			Groups:    []*LocationGroupResult{},
+			Devices:   deviceResults,
+		}, nil
+	} else {
+		// note group search is no longer supported
+
+		maxSearchDistance := 2
+		locationSearchResults := locationSearch().AroundIds(
+			session.Ctx,
+			findLocations.Query,
+			maxSearchDistance,
+			search.OptMostLikley(30),
+		)
+
+		locationIds := map[server.Id]bool{}
+		for locationId, _ := range locationSearchResults {
+			locationIds[locationId] = true
+		}
+		clientLocations, err := loadClientLocations(session.Ctx, locationIds)
+		if err != nil {
+			return nil, err
+		}
+
+		locationResults := []*LocationResult{}
+
+		for locationId, clientLocation := range clientLocations {
+			locationResult := &LocationResult{
+				LocationId:        clientLocation.LocationId,
+				LocationType:      clientLocation.LocationType,
+				Name:              clientLocation.Name,
+				CityLocationId:    clientLocation.CityLocationId,
+				RegionLocationId:  clientLocation.RegionLocationId,
+				CountryLocationId: clientLocation.CountryLocationId,
+				CountryCode:       clientLocation.CountryCode,
+				ProviderCount:     clientLocation.ClientCount,
+			}
+
+			if r, ok := locationSearchResults[locationId]; ok {
+				locationResult.MatchDistance = r.ValueDistance
+			} else {
+				locationResult.MatchDistance = maxSearchDistance + 1
+			}
+
+			locationResults = append(locationResults, locationResult)
+		}
+
+		return &FindLocationsResult{
+			Locations: locationResults,
+			Groups:    []*LocationGroupResult{},
+			Devices:   []*LocationDeviceResult{},
+		}, nil
+	}
+}
+
+func GetProviderLocations(
+	session *session.ClientSession,
+) (*FindLocationsResult, error) {
+	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	locationResults := []*LocationResult{}
+	locationGroupResults := []*LocationGroupResult{}
+
+	for _, clientLocation := range initialClientLocations.Locations {
+		locationResult := &LocationResult{
+			LocationId:        clientLocation.LocationId,
+			LocationType:      clientLocation.LocationType,
+			Name:              clientLocation.Name,
+			CityLocationId:    clientLocation.CityLocationId,
+			RegionLocationId:  clientLocation.RegionLocationId,
+			CountryLocationId: clientLocation.CountryLocationId,
+			CountryCode:       clientLocation.CountryCode,
+			ProviderCount:     clientLocation.ClientCount,
+		}
+		locationResults = append(locationResults, locationResult)
+	}
+	for _, clientLocationGroup := range initialClientLocations.LocationGroups {
+		locationGroupResult := &LocationGroupResult{
+			LocationGroupId: clientLocationGroup.LocationGroupId,
+			Name:            clientLocationGroup.Name,
+			Promoted:        clientLocationGroup.Promoted,
+		}
+		locationGroupResults = append(locationGroupResults, locationGroupResult)
+	}
+
 	return &FindLocationsResult{
-		Locations: maps.Values(locationResults),
-		Groups:    maps.Values(locationGroupResults),
-		Devices:   findLocationDevices(session.Ctx, findLocations),
+		Locations: locationResults,
+		Groups:    locationGroupResults,
+		Devices:   []*LocationDeviceResult{},
+	}, nil
+}
+
+// no longer supported
+func FindLocations(
+	findLocations *FindLocationsArgs,
+	session *session.ClientSession,
+) (*FindLocationsResult, error) {
+	return &FindLocationsResult{
+		Locations: []*LocationResult{},
+		Groups:    []*LocationGroupResult{},
+		Devices:   []*LocationDeviceResult{},
 	}, nil
 }
 
@@ -1745,48 +1619,13 @@ type FindProvidersResult struct {
 	ClientIds []server.Id `json:"client_ids,omitempty"`
 }
 
+// no longer supported. See `FindProviders2`
 func FindProviders(
 	findProviders *FindProvidersArgs,
 	session *session.ClientSession,
 ) (*FindProvidersResult, error) {
-	clientIds := map[server.Id]bool{}
-
-	if findProviders.LocationId != nil {
-		clientIdsForLocation := GetProvidersForLocation(
-			session.Ctx,
-			*findProviders.LocationId,
-		)
-		for _, clientId := range clientIdsForLocation {
-			clientIds[clientId] = true
-		}
-	}
-
-	if findProviders.LocationGroupId != nil {
-		clientIdsForLocationGroup := GetProvidersForLocationGroup(
-			session.Ctx,
-			*findProviders.LocationGroupId,
-		)
-		for _, clientId := range clientIdsForLocationGroup {
-			clientIds[clientId] = true
-		}
-	}
-
-	for _, clientId := range findProviders.ExcludeClientIds {
-		delete(clientIds, clientId)
-	}
-
-	outClientIds := maps.Keys(clientIds)
-
-	if findProviders.Count < len(clientIds) {
-		// sample
-		mathrand.Shuffle(len(outClientIds), func(i int, j int) {
-			outClientIds[i], outClientIds[j] = outClientIds[j], outClientIds[i]
-		})
-		outClientIds = outClientIds[:findProviders.Count]
-	}
-
 	return &FindProvidersResult{
-		ClientIds: outClientIds,
+		ClientIds: []server.Id{},
 	}, nil
 }
 
@@ -1822,79 +1661,6 @@ type FindProvidersProvider struct {
 	HasEstimatedBytesPerSecond bool      `json:"has_estimated_bytes_per_second"`
 	Tier                       int       `json:"tier"`
 }
-
-func findLocationGroupByNameInTx(
-	ctx context.Context,
-	name string,
-	tx server.PgTx,
-) *LocationGroup {
-
-	var locationGroup *LocationGroup
-
-	result, err := tx.Query(
-		ctx,
-		`
-			SELECT
-					location_group_id,
-					location_group_name,
-					promoted
-
-			FROM location_group
-
-			WHERE
-					location_group_name = $1
-
-			LIMIT 1
-		`,
-		name,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			locationGroup = &LocationGroup{}
-
-			server.Raise(result.Scan(
-				&locationGroup.LocationGroupId,
-				&locationGroup.Name,
-				&locationGroup.Promoted,
-			))
-		}
-	})
-
-	return locationGroup
-}
-
-// func findHomeLocationIdInTx(
-// 	tx server.PgTx,
-// 	session *session.ClientSession,
-// ) (locationId server.Id, found bool) {
-// 	// TODO this should be set per network
-
-// 	result, err := tx.Query(
-// 		session.Ctx,
-// 		`
-// 			SELECT
-// 				location_id
-// 			FROM location
-// 			WHERE
-// 				location_type = $1 AND
-// 				country_code = $2 AND
-// 				location_name = $3
-
-// 			LIMIT 1
-// 		`,
-// 		LocationTypeCountry,
-// 		"us",
-// 		"United States",
-// 	)
-// 	server.WithPgResult(result, err, func() {
-// 		if result.Next() {
-// 			server.Raise(result.Scan(&locationId))
-// 			found = true
-// 		}
-// 	})
-
-// 	return
-// }
 
 type ClientScore struct {
 	ClientId                 server.Id
@@ -2248,7 +2014,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			for i, sampleBytes := range samplesBytes {
 				pipe.Set(ctx, clientScoreLocationSampleKey(locationId, i), sampleBytes, ttl)
 			}
-			glog.Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
+			glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
 		}
 		for locationGroupId, clientScores := range locationGroupClientScores {
 			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
@@ -2256,11 +2022,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			for i, sampleBytes := range samplesBytes {
 				pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, i), sampleBytes, ttl)
 			}
-			glog.Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
+			glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 		}
 
 		_, returnErr = pipe.Exec(ctx)
 	})
+
+	glog.Infof("[nclm]update %d location scores, %d location group scores\n", len(locationClientScores), len(locationGroupClientScores))
 
 	return
 }
@@ -2371,31 +2139,7 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
-	// the caller ip is used to match against provider excluded lists
-	clientIp, _, err := session.ParseClientIpPort()
-	if err != nil {
-		return nil, err
-	}
-
-	ipInfo, err := server.GetIpInfo(clientIp)
-	if err != nil {
-		return nil, err
-	}
-
-	clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
-	if !ok {
-		glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
-	}
-
-	// use a min block size to reduce db activity
-	count := max(findProviders2.Count, 20)
-
-	rankMode := findProviders2.RankMode
-	if rankMode == "" {
-		rankMode = RankModeQuality
-	}
-
-	activeClientIds := map[server.Id]bool{}
+	providers := []*FindProvidersProvider{}
 
 	locationIds := map[server.Id]bool{}
 	locationGroupIds := map[server.Id]bool{}
@@ -2408,7 +2152,10 @@ func FindProviders2(
 			locationGroupIds[*spec.LocationGroupId] = true
 		}
 		if spec.ClientId != nil {
-			activeClientIds[*spec.ClientId] = true
+			provider := &FindProvidersProvider{
+				ClientId: *(spec.ClientId),
+			}
+			providers = append(providers, provider)
 		}
 		if spec.BestAvailable != nil && *spec.BestAvailable {
 			// homeLocationId, found := findHomeLocationIdInTx(tx, session)
@@ -2419,136 +2166,162 @@ func FindProviders2(
 		}
 	}
 
-	n := max(count*10, 1000)
+	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
+		// use a min block size to reduce db activity
+		count := max(findProviders2.Count, 20)
 
-	loadStartTime := time.Now()
-	clientScores, err := loadClientScores(
-		session.Ctx,
-		locationIds,
-		locationGroupIds,
-		n,
-	)
-	if err != nil {
-		return nil, err
-	}
-	loadEndTime := time.Now()
-	loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
-	if 50.0 <= loadMillis {
-		glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
-	}
-
-	for _, clientId := range findProviders2.ExcludeClientIds {
-		delete(clientScores, clientId)
-	}
-	// the final hop is excluded
-	// intermediaries have net score incremented
-	intermediaryScore := MaxClientScore / 10
-	for _, destination := range findProviders2.ExcludeDestinations {
-		for _, clientId := range destination[:len(destination)-1] {
-			if clientScore, ok := clientScores[clientId]; ok {
-				clientScore.Scores[rankMode] += intermediaryScore
-			}
-		}
-		delete(clientScores, destination[len(destination)-1])
-	}
-
-	clientIds := maps.Keys(clientScores)
-	// oversample so that the list can be filtered
-	n = min(n/2, len(clientIds))
-
-	connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
-		clientScore := clientScores[clientId]
-		return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
-	})
-	clientIds = clientIds[:n]
-
-	connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
-		clientScore := clientScores[clientId]
-		return clientScore.ReliabilityWeight
-	})
-
-	// band by tier, score
-	slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
-		clientScoreA := clientScores[a]
-		clientScoreB := clientScores[b]
-
-		if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
-			return d
+		rankMode := RankModeQuality
+		if findProviders2.RankMode != "" {
+			rankMode = findProviders2.RankMode
 		}
 
-		if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
-			return d
+		n := max(count*10, 1000)
+
+		loadStartTime := time.Now()
+		clientScores, err := loadClientScores(
+			session.Ctx,
+			locationIds,
+			locationGroupIds,
+			n,
+		)
+		if err != nil {
+			return nil, err
+		}
+		loadEndTime := time.Now()
+		loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
+		if 50.0 <= loadMillis {
+			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
 		}
 
-		return 0
-	})
-
-	filterActive := func(clientNetworks map[server.Id]server.Id) {
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			server.CreateTempJoinTableInTx(
-				session.Ctx,
-				tx,
-				"temp_client_networks(client_id uuid -> network_id uuid)",
-				clientNetworks,
-			)
-
-			result, err := tx.Query(
-				session.Ctx,
-				`
-				SELECT
-					temp_client_networks.client_id
-				FROM temp_client_networks
-				INNER JOIN provide_key ON
-		            provide_key.provide_mode = $1 AND
-		            provide_key.client_id = temp_client_networks.client_id
-		        INNER JOIN network_client_connection ON
-		        	network_client_connection.connected = true AND
-		        	network_client_connection.client_id = temp_client_networks.client_id
-		        LEFT JOIN exclude_network_client_location ON
-	            	exclude_network_client_location.client_location_id = $2 AND
-	                exclude_network_client_location.network_id = temp_client_networks.network_id
-	            WHERE
-	            	exclude_network_client_location.network_id IS NULL
-				`,
-				ProvideModePublic,
-				clientLocationId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
-					activeClientIds[clientId] = true
+		for _, clientId := range findProviders2.ExcludeClientIds {
+			delete(clientScores, clientId)
+		}
+		// the final hop is excluded
+		// intermediaries have net score incremented
+		intermediaryScore := MaxClientScore / 10
+		for _, destination := range findProviders2.ExcludeDestinations {
+			for _, clientId := range destination[:len(destination)-1] {
+				if clientScore, ok := clientScores[clientId]; ok {
+					clientScore.Scores[rankMode] += intermediaryScore
 				}
-			})
-		})
-	}
-
-	// filter the list to include only clients that are actively connected and providing
-	i := 0
-	for i < len(clientIds) && len(activeClientIds) < count {
-		clientNetworks := map[server.Id]server.Id{}
-		j1 := min(i+2*count, len(clientIds))
-		for j := i; j < j1; j += 1 {
-			clientId := clientIds[j]
-			clientScore := clientScores[clientId]
-			clientNetworks[clientId] = clientScore.NetworkId
-		}
-		filterActive(clientNetworks)
-		i = j1
-	}
-
-	// output in order of `clientIds`
-	providers := []*FindProvidersProvider{}
-	for _, clientId := range clientIds[:i] {
-		if activeClientIds[clientId] {
-			clientScore := clientScores[clientId]
-			provider := &FindProvidersProvider{
-				ClientId:                   clientId,
-				Tier:                       clientScore.Tiers[rankMode],
-				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
-				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 			}
-			providers = append(providers, provider)
+			delete(clientScores, destination[len(destination)-1])
+		}
+
+		clientIds := maps.Keys(clientScores)
+		// oversample so that the list can be filtered
+		n = min(n/2, len(clientIds))
+
+		connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+			clientScore := clientScores[clientId]
+			return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
+		})
+		clientIds = clientIds[:n]
+
+		connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
+			clientScore := clientScores[clientId]
+			return clientScore.ReliabilityWeight
+		})
+
+		// band by tier, score
+		slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
+			clientScoreA := clientScores[a]
+			clientScoreB := clientScores[b]
+
+			if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
+				return d
+			}
+
+			if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
+				return d
+			}
+
+			return 0
+		})
+
+		// the caller ip is used to match against provider excluded lists
+		clientIp, _, err := session.ParseClientIpPort()
+		if err != nil {
+			return nil, err
+		}
+
+		ipInfo, err := server.GetIpInfo(clientIp)
+		if err != nil {
+			return nil, err
+		}
+
+		clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
+		if !ok {
+			glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
+		}
+
+		activeClientIds := map[server.Id]bool{}
+		filterActive := func(clientNetworks map[server.Id]server.Id) {
+			server.Tx(session.Ctx, func(tx server.PgTx) {
+				server.CreateTempJoinTableInTx(
+					session.Ctx,
+					tx,
+					"temp_client_networks(client_id uuid -> network_id uuid)",
+					clientNetworks,
+				)
+
+				result, err := tx.Query(
+					session.Ctx,
+					`
+					SELECT
+						temp_client_networks.client_id
+					FROM temp_client_networks
+					INNER JOIN provide_key ON
+			            provide_key.provide_mode = $1 AND
+			            provide_key.client_id = temp_client_networks.client_id
+			        INNER JOIN network_client_connection ON
+			        	network_client_connection.connected = true AND
+			        	network_client_connection.client_id = temp_client_networks.client_id
+			        LEFT JOIN exclude_network_client_location ON
+		            	exclude_network_client_location.client_location_id = $2 AND
+		                exclude_network_client_location.network_id = temp_client_networks.network_id
+		            WHERE
+		            	exclude_network_client_location.network_id IS NULL
+					`,
+					ProvideModePublic,
+					clientLocationId,
+				)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var clientId server.Id
+						server.Raise(result.Scan(&clientId))
+						activeClientIds[clientId] = true
+					}
+				})
+			})
+		}
+
+		// filter the list to include only clients that are actively connected and providing
+		i := 0
+		for i < len(clientIds) && len(activeClientIds) < count {
+			clientNetworks := map[server.Id]server.Id{}
+			j1 := min(i+2*count, len(clientIds))
+			for j := i; j < j1; j += 1 {
+				clientId := clientIds[j]
+				clientScore := clientScores[clientId]
+				clientNetworks[clientId] = clientScore.NetworkId
+			}
+			filterActive(clientNetworks)
+			i = j1
+		}
+
+		// output in order of `clientIds`
+		for _, clientId := range clientIds[:i] {
+			if activeClientIds[clientId] {
+				clientScore := clientScores[clientId]
+				provider := &FindProvidersProvider{
+					ClientId:                   clientId,
+					Tier:                       clientScore.Tiers[rankMode],
+					EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
+				}
+				providers = append(providers, provider)
+			}
 		}
 	}
 
@@ -2574,191 +2347,4 @@ func CreateProviderSpec(
 	// }, nil
 	// FIXME
 	return nil, fmt.Errorf("Not implemented.")
-}
-
-func GetProvidersForLocation(ctx context.Context, locationId server.Id) []server.Id {
-	clientIds := []server.Id{}
-
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-            SELECT
-                DISTINCT network_client_location.client_id
-            FROM network_client_location
-
-            INNER JOIN provide_key ON
-	            provide_key.provide_mode = $1 AND
-                provide_key.client_id = network_client_location.client_id
-
-            INNER JOIN network_client_connection ON
-	            network_client_connection.connected = true AND
-                network_client_connection.connection_id = network_client_location.connection_id
-
-            WHERE
-                network_client_location.city_location_id = $2 OR
-                network_client_location.region_location_id = $2 OR
-                network_client_location.country_location_id = $2
-            `,
-			ProvideModePublic,
-			locationId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
-			}
-		})
-	})
-
-	return clientIds
-}
-
-func GetProvidersForLocationGroup(
-	ctx context.Context,
-	locationGroupId server.Id,
-) []server.Id {
-	clientIds := []server.Id{}
-
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-                SELECT
-                    DISTINCT network_client_location.client_id
-                FROM network_client_location
-
-                INNER JOIN provide_key ON
-	                provide_key.provide_mode = $1 AND
-                    provide_key.client_id = network_client_location.client_id
-
-                INNER JOIN network_client_connection ON
-	                network_client_connection.connected = true AND
-                    network_client_connection.connection_id = network_client_location.connection_id
-
-                LEFT JOIN location_group_member location_group_member_city ON
-                    location_group_member_city.location_group_id = $2 AND
-                    location_group_member_city.location_id = network_client_location.city_location_id
-
-                LEFT JOIN location_group_member location_group_member_region ON
-                    location_group_member_region.location_group_id = $2 AND
-                    location_group_member_region.location_id = network_client_location.region_location_id
-
-                LEFT JOIN location_group_member location_group_member_country ON
-                    location_group_member_country.location_group_id = $2 AND
-                    location_group_member_country.location_id = network_client_location.country_location_id
-
-                WHERE
-                    location_group_member_city.location_id IS NOT NULL OR
-                    location_group_member_region.location_id IS NOT NULL OR
-                    location_group_member_country.location_id IS NOT NULL
-            `,
-			ProvideModePublic,
-			locationGroupId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
-			}
-		})
-	})
-
-	return clientIds
-}
-
-func findLocationDevices(ctx context.Context, findLocations *FindLocationsArgs) []*LocationDeviceResult {
-	// if query is a udid, include a raw client id
-
-	devices := []*LocationDeviceResult{}
-
-	if clientId, err := server.ParseId(findLocations.Query); err == nil {
-		device := &LocationDeviceResult{
-			ClientId:   clientId,
-			DeviceName: fmt.Sprintf("%s", clientId),
-		}
-		devices = append(devices, device)
-	}
-
-	return devices
-}
-
-func getLocationDevices(ctx context.Context) []*LocationDeviceResult {
-	return []*LocationDeviceResult{}
-}
-
-func GetLatestIpLocationLookupResult(
-	ctx context.Context,
-	ipStr string,
-	earliestResultTime time.Time,
-) string {
-	var resultJson string
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-                SELECT
-                    result_json
-                FROM ip_location_lookup
-                WHERE
-                    ip_address = $1 AND
-                    $2 <= lookup_time AND
-                    valid
-                ORDER BY lookup_time DESC
-                LIMIT 1
-            `,
-			ipStr,
-			earliestResultTime,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&resultJson))
-			}
-		})
-	})
-	return resultJson
-}
-
-func SetIpLocationLookupResult(
-	ctx context.Context,
-	ipStr string,
-	result string,
-) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
-			ctx,
-			`
-                INSERT INTO ip_location_lookup (
-                    ip_address,
-                    result_json
-                )
-                VALUES ($1, $2)
-                ON CONFLICT (ip_address, lookup_time) DO UPDATE
-                SET
-                	result_json = $2
-            `,
-			ipStr,
-			result,
-		)
-		server.Raise(err)
-	})
-}
-
-func RemoveLocationLookupResults(
-	ctx context.Context,
-	minTime time.Time,
-) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
-			ctx,
-			`
-                DELETE FROM ip_location_lookup
-                WHERE lookup_time < $1
-            `,
-			minTime.UTC(),
-		)
-		server.Raise(err)
-	})
 }
