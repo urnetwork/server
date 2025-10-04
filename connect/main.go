@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
+	// "fmt"
+	// "net/http"
+	"net"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -45,21 +47,24 @@ Options:
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
-	exchange := NewExchangeFromEnvWithDefaults(quitEvent.Ctx)
+	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	defer cancel()
+
+	exchange := NewExchangeFromEnvWithDefaults(ctx)
 	defer exchange.Close()
 
-	handlerId := model.CreateNetworkClientHandler(quitEvent.Ctx)
+	handlerId := model.CreateNetworkClientHandler(ctx)
 
-	connectHandler := NewConnectHandlerWithDefaults(quitEvent.Ctx, handlerId, exchange)
+	connectHandler := NewConnectHandlerWithDefaults(ctx, handlerId, exchange)
 	// update the heartbeat
 	go func() {
 		for {
 			select {
-			case <-quitEvent.Ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(model.NetworkClientHandlerHeartbeatTimeout):
 			}
-			err := model.HeartbeatNetworkClientHandler(quitEvent.Ctx, handlerId)
+			err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
 			if err != nil {
 				// shut down
 				quitEvent.Set()
@@ -113,8 +118,13 @@ Options:
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-	routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-	if err := http.ListenAndServe(fmt.Sprintf("%s:%d", listenIpv4, listenPort), routerHandler); err != nil {
-		glog.Errorf("[connect]close = %s\n", err)
+	err = server.ListenAndServeWithReusePort(
+		ctx,
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		router.NewRouter(ctx, routes),
+	)
+	if err != nil {
+		panic(err)
 	}
+	glog.Infof("[connect]close\n")
 }

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"fmt"
+	// "fmt"
 	// "net/http"
 	"os"
 	"syscall"
 	// "net"
 	// "errors"
+	"net"
+	"strconv"
 
 	// "time"
 
@@ -193,7 +195,7 @@ Options:
 
 	err = server.ListenAndServeWithReusePort(
 		ctx,
-		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
 		router.NewRouter(ctx, routes),
 	)
 	if err != nil {

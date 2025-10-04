@@ -579,19 +579,27 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	}
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
-	listenIp := net.ParseIP(listenIpv4)
-	if listenIp == nil {
-		return
+	// listenIp := net.ParseIP(listenIpv4)
+	// if listenIp == nil {
+	// 	return
+	// }
+
+	glog.V(2).Infof("[c]h3 listen %s:%d\n", listenIpv4, listenPort)
+
+	// serverAddr := &net.UDPAddr{
+	// 	IP:   listenIp,
+	// 	Port: listenPort,
+	// }
+
+	listenConfig := net.ListenConfig{
+		Control: server.SoReusePort,
 	}
 
-	glog.V(2).Infof("[c]h3 listen %s:%d\n", listenIp, listenPort)
-
-	serverAddr := &net.UDPAddr{
-		IP:   listenIp,
-		Port: listenPort,
-	}
-
-	serverConn, err := net.ListenUDP("udp", serverAddr)
+	serverConn, err := listenConfig.ListenPacket(
+		handleCtx,
+		"udp",
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+	)
 	if err != nil {
 		return
 	}
@@ -609,22 +617,22 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	defer listener.Close()
 
 	for {
-		glog.V(2).Infof("[c]h3 wait to accept connection %s:%d\n", listenIp, listenPort)
+		glog.V(2).Infof("[c]h3 wait to accept connection %s:%d\n", listenIpv4, listenPort)
 		conn, err := listener.Accept(handleCtx)
 		if err != nil {
-			glog.Infof("[c]h3 accept connection %s:%d err = %s\n", listenIp, listenPort, err)
+			glog.Infof("[c]h3 accept connection %s:%d err = %s\n", listenIpv4, listenPort, err)
 			return
 		}
 
-		glog.Infof("[c]h3 accept connection %s:%d\n", listenIp, listenPort)
+		glog.Infof("[c]h3 accept connection %s:%d\n", listenIpv4, listenPort)
 		go func() {
 			defer conn.CloseWithError(0, "")
 
 			err := self.connectQuic(conn)
 			if err != nil {
-				glog.Infof("[c]h3 connection exited %s:%d err = %s\n", listenIp, listenPort, err)
+				glog.Infof("[c]h3 connection exited %s:%d err = %s\n", listenIpv4, listenPort, err)
 			} else {
-				glog.Infof("[c]h3 connection exited %s:%d\n", listenIp, listenPort)
+				glog.Infof("[c]h3 connection exited %s:%d\n", listenIpv4, listenPort)
 			}
 		}()
 	}
