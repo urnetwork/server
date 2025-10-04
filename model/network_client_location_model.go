@@ -1222,6 +1222,11 @@ type ClientLocation struct {
 	RegionLocationId  *server.Id
 	CountryLocationId *server.Id
 	CountryCode       string
+
+	// location id -> client count
+	TopCityLocationIdCounts map[server.Id]int
+	// location id -> client count
+	TopRegionLocationIdCounts map[server.Id]int
 }
 
 type ClientLocationGroup struct {
@@ -1245,6 +1250,9 @@ func initialClientLocationsKey() string {
 }
 
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
+	topCitiesPerRegion := 20
+	topCitiesPerCountry := 10
+	topRegionsPerCountry := 10
 
 	clientLocations := map[server.Id]*ClientLocation{}
 	removeClientLocations := map[server.Id]bool{}
@@ -1313,7 +1321,10 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				clientLocation := &ClientLocation{}
+				clientLocation := &ClientLocation{
+					TopCityLocationIdCounts:   map[server.Id]int{},
+					TopRegionLocationIdCounts: map[server.Id]int{},
+				}
 				server.Raise(result.Scan(
 					&clientLocation.LocationId,
 					&clientLocation.LocationType,
@@ -1335,6 +1346,45 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				}
 			}
 		})
+
+		// create top links
+		for locationId, clientLocation := range clientLocations {
+			switch clientLocation.LocationType {
+			case LocationTypeCity:
+				regionClientLocation := clientLocations[*(clientLocation.RegionLocationId)]
+				regionClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+
+				countryClientLocation := clientLocations[*(clientLocation.CountryLocationId)]
+				countryClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+			case LocationTypeRegion:
+				countryClientLocation := clientLocations[*(clientLocation.CountryLocationId)]
+				countryClientLocation.TopRegionLocationIdCounts[locationId] = clientLocation.ClientCount
+			}
+		}
+		filterTop := func(locationIdCounts map[server.Id]int, n int) map[server.Id]int {
+			locationIds := maps.Keys(locationIdCounts)
+			slices.SortFunc(locationIds, func(a server.Id, b server.Id) int {
+				d := locationIdCounts[b] - locationIdCounts[a]
+				if d != 0 {
+					return d
+				}
+				return a.Cmp(b)
+			})
+			filteredLocationIdCounts := map[server.Id]int{}
+			for _, locationId := range locationIds[:min(n, len(locationIds))] {
+				filteredLocationIdCounts[locationId] = locationIdCounts[locationId]
+			}
+			return filteredLocationIdCounts
+		}
+		for _, clientLocation := range clientLocations {
+			switch clientLocation.LocationType {
+			case LocationTypeRegion:
+				clientLocation.TopCityLocationIdCounts = filterTop(clientLocation.TopCityLocationIdCounts, topCitiesPerRegion)
+			case LocationTypeCountry:
+				clientLocation.TopCityLocationIdCounts = filterTop(clientLocation.TopCityLocationIdCounts, topCitiesPerCountry)
+				clientLocation.TopRegionLocationIdCounts = filterTop(clientLocation.TopRegionLocationIdCounts, topRegionsPerCountry)
+			}
+		}
 
 		result, err = tx.Query(
 			ctx,
@@ -1454,6 +1504,13 @@ func loadClientLocations(
 				if !ok {
 					expandedLocationIds[*clientLocation.CountryLocationId] = true
 				}
+			}
+
+			for locationId, _ := range clientLocation.TopCityLocationIdCounts {
+				expandedLocationIds[locationId] = true
+			}
+			for locationId, _ := range clientLocation.TopRegionLocationIdCounts {
+				expandedLocationIds[locationId] = true
 			}
 		}
 
