@@ -401,8 +401,16 @@ func (self *Exchange) serveExchangeConnection(port int) {
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
+	listenConfig := net.ListenConfig{
+		Control: server.SoReusePort,
+	}
+
 	// leave host part empty to listen on all available interfaces
-	serverSocket, err := net.Listen("tcp", fmt.Sprintf("%s:%d", listenIpv4, listenPort))
+	serverSocket, err := listenConfig.Listen(
+		self.ctx,
+		"tcp",
+		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
+	)
 	if err != nil {
 		return
 	}

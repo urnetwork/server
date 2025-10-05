@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
+	// "fmt"
+	// "net/http"
+	"net"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -50,8 +52,11 @@ Options:
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
+	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	defer cancel()
+
 	if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
-		initTasks(quitEvent.Ctx)
+		initTasks(ctx)
 	} else {
 		// note the total parallelism is count*batch_size
 		count, _ := opts.Int("--count")
@@ -66,12 +71,12 @@ Options:
 			batchSize,
 		)
 
-		initTasks(quitEvent.Ctx)
+		initTasks(ctx)
 
 		// one TaskWorker can be shared with many go routines calling EvalTasks
-		taskWorker := initTaskWorker(quitEvent.Ctx)
+		taskWorker := initTaskWorker(ctx)
 		for i := 0; i < count; i += 1 {
-			go evalTasks(quitEvent.Ctx, taskWorker, batchSize)
+			go evalTasks(ctx, taskWorker, batchSize)
 		}
 
 		routes := []*router.Route{
@@ -87,9 +92,15 @@ Options:
 
 		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-		routerHandler := router.NewRouter(quitEvent.Ctx, routes)
-		err = http.ListenAndServe(fmt.Sprintf("%s:%d", listenIpv4, listenPort), routerHandler)
-		glog.Errorf("[taskworker]close = %s\n", err)
+		err := server.ListenAndServeWithReusePort(
+			ctx,
+			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+			router.NewRouter(ctx, routes),
+		)
+		if err != nil {
+			panic(err)
+		}
+		glog.Infof("[taskworker]close\n")
 	}
 }
 

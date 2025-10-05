@@ -349,7 +349,7 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 				if n <= len(partitions[i]) {
 					i += 1
 				}
-				partitions[i] = append(partitions[i], variantProjections)
+				partitions[i] = append(partitions[i], maps.Clone(variantProjections))
 			}
 		} else {
 			partitions = [][]map[int]*localProjection{
