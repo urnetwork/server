@@ -143,8 +143,6 @@ func (self *SearchLocal) index(update *SearchValueUpdate) {
 
 		glog.Infof("[s][%s][%s/%d]index update[%d] add %s\n", self.Realm(), update.ValueId, update.ValueVariant, update.UpdateId, server.MaskValue(update.Value))
 
-		minAliasLength := self.MinAliasLength()
-
 		lenValueHistos := map[int]map[string]aliasHisto{}
 
 		insertOne := func(value string, alias int) {
@@ -162,40 +160,8 @@ func (self *SearchLocal) index(update *SearchValueUpdate) {
 			}
 		}
 
-		insertOne(update.Value, 0)
-
-		switch self.SearchType() {
-		case SearchTypeFull:
-		case SearchTypePrefix:
-			// compute each prefix as a full search alias
-			alias := 1
-			for i := len(update.Value); 0 <= i; i -= 1 {
-				valuePrefix := update.Value[:i]
-				if len(valuePrefix) < minAliasLength {
-					continue
-				}
-				if len(valuePrefix) == len(update.Value) {
-					continue
-				}
-				insertOne(valuePrefix, alias)
-				alias += 1
-			}
-		case SearchTypeSubstring:
-			// for each suffix, compute each prefix as a full search alias
-			alias := 1
-			for i := 0; i < len(update.Value); i += 1 {
-				for j := len(update.Value); i < j; j -= 1 {
-					valueSub := update.Value[i:j]
-					if len(valueSub) < minAliasLength {
-						continue
-					}
-					if len(valueSub) == len(update.Value) {
-						continue
-					}
-					insertOne(valueSub, alias)
-					alias += 1
-				}
-			}
+		for _, searchAlias := range GenerateAliases(update.Value, self.SearchType(), self.MinAliasLength()) {
+			insertOne(searchAlias.Value, searchAlias.Alias)
 		}
 
 		p := &localProjection{

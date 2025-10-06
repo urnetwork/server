@@ -450,40 +450,8 @@ func (self *SearchDb) AddRawInTx(ctx context.Context, value string, valueId serv
 			}
 		}
 
-		// alias 0 must be the full string
-		insertOne(value, 0)
-		switch self.searchType {
-		case SearchTypeFull:
-		case SearchTypePrefix:
-			// compute each prefix as a full search alias
-			alias := 1
-			for i := len(value); 0 <= i; i -= 1 {
-				valuePrefix := value[:i]
-				if len(valuePrefix) < self.minAliasLength {
-					continue
-				}
-				if len(valuePrefix) == len(value) {
-					continue
-				}
-				insertOne(valuePrefix, alias)
-				alias += 1
-			}
-		case SearchTypeSubstring:
-			// for each suffix, compute each prefix as a full search alias
-			alias := 1
-			for i := 0; i < len(value); i += 1 {
-				for j := len(value); i < j; j -= 1 {
-					valueSub := value[i:j]
-					if len(valueSub) < self.minAliasLength {
-						continue
-					}
-					if len(valueSub) == len(value) {
-						continue
-					}
-					insertOne(valueSub, alias)
-					alias += 1
-				}
-			}
+		for _, searchAlias := range GenerateAliases(value, self.searchType, self.minAliasLength) {
+			insertOne(searchAlias.Value, searchAlias.Alias)
 		}
 	})
 
