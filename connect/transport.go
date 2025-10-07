@@ -591,8 +591,11 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	// 	Port: listenPort,
 	// }
 
-	listenConfig := net.ListenConfig{
-		Control: server.SoReusePort,
+	reusePort := false
+
+	listenConfig := net.ListenConfig{}
+	if reusePort {
+		listenConfig.Control = server.SoReusePort
 	}
 
 	serverConn, err := listenConfig.ListenPacket(

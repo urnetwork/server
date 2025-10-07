@@ -193,10 +193,13 @@ Options:
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-	err = server.ListenAndServeWithReusePort(
+	reusePort := false
+
+	err = server.HttpListenAndServeWithReusePort(
 		ctx,
 		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
 		router.NewRouter(ctx, routes),
+		reusePort,
 	)
 	if err != nil {
 		panic(err)
