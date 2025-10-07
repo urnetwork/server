@@ -1,8 +1,8 @@
 package controller
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
@@ -33,6 +33,8 @@ import (
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+
+	"github.com/gagliardetto/solana-go"
 )
 
 var circleConfig = sync.OnceValue(func() map[string]any {
@@ -116,38 +118,16 @@ func WalletValidateAddress(
 	session *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
 
-	chain := strings.ToUpper(walletValidateAddress.Chain)
-	chain = strings.TrimSpace(chain)
+	_, err := solana.PublicKeyFromBase58(walletValidateAddress.Address)
+	if err != nil {
+		return &WalletValidateAddressResult{
+			Valid: false,
+		}, nil
+	}
 
-	return server.HttpPostRequireStatusOk(
-		session.Ctx,
-		"https://api.circle.com/v1/w3s/transactions/validateAddress",
-		map[string]any{
-			"blockchain": chain,
-			"address":    walletValidateAddress.Address,
-		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*WalletValidateAddressResult, error) {
-			_, data, err := parseCircleResponseData(responseBodyBytes)
-			if err != nil {
-				return nil, err
-			}
-
-			valid := false
-			if validAny := data["isValid"]; validAny != nil {
-				if v, ok := validAny.(bool); ok {
-					valid = v
-				}
-			}
-
-			return &WalletValidateAddressResult{
-				Valid: valid,
-			}, nil
-		},
-	)
+	return &WalletValidateAddressResult{
+		Valid: true,
+	}, nil
 }
 
 type WalletBalanceResult struct {
