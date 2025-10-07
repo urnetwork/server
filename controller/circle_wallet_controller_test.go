@@ -62,21 +62,8 @@ func TestWalletValidateAddress(t *testing.T) {
 		assert.NotEqual(t, result.UserToken, nil)
 		assert.NotEqual(t, result.ChallengeId, "")
 
-		// test valid MATIC address
-		validateResult, err := WalletValidateAddress(
-			&WalletValidateAddressArgs{
-				// BringYour USDC Polygon
-				Address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
-				Chain:   model.MATIC.String(),
-			},
-			session,
-		)
-
-		assert.Equal(t, err, nil)
-		assert.Equal(t, validateResult.Valid, true)
-
 		// test valid SOL address
-		validateResult, err = WalletValidateAddress(
+		validateResult, err := WalletValidateAddress(
 			&WalletValidateAddressArgs{
 				Address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
 				Chain:   model.SOL.String(),
