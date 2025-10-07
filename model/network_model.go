@@ -357,6 +357,7 @@ func NetworkCreate(
 		// user is creating a network via social login
 
 		// server.Logger().Printf("Parsing JWT\n")
+
 		authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
 		// server.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
 		if authJwt != nil {
@@ -415,15 +416,22 @@ func NetworkCreate(
 				}
 
 				// insert into network_user_auth_sso
-				addSsoAuth(
+				err = addSsoAuthInTx(
+					tx,
+					session.Ctx,
 					&AddSsoAuthArgs{
 						UserId:        createdUserId,
 						AuthJwt:       *networkCreate.AuthJwt,
 						ParsedAuthJwt: *authJwt,
 						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
 					},
-					session.Ctx,
 				)
+
+				if err != nil {
+					glog.Infof("Error adding sso auth in tx: %s", err.Error())
+					created = false
+					return
+				}
 
 				_, err = tx.Exec(
 					session.Ctx,
@@ -437,6 +445,7 @@ func NetworkCreate(
 					createdUserId,
 					containsProfanity,
 				)
+
 				if err != nil {
 					panic(err)
 				}

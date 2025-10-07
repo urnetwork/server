@@ -57,7 +57,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20250918142248-ac5a1e292845 // indirect
 	go.mongodb.org/mongo-driver v1.17.4 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
@@ -81,7 +80,7 @@ require (
 	github.com/prometheus/common v0.63.0 // indirect
 	github.com/prometheus/procfs v0.16.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.36.0
 	golang.org/x/text v0.29.0 // indirect
 	src.agwa.name/tlshacks v0.0.0-20250628001001-c92050511ef4 // indirect
 )

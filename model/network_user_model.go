@@ -457,47 +457,63 @@ func addSsoAuth(
 	ctx context.Context,
 ) (returnErr error) {
 
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		returnErr = addSsoAuthInTx(tx, ctx, args)
+
+	})
+
+	return returnErr
+
+}
+
+func addSsoAuthInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	args *AddSsoAuthArgs,
+) (returnErr error) {
+
 	parsedAuthJwt := args.ParsedAuthJwt
 
 	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	/**
+	 * Check user auth isn't already associated with a different user
+	 */
+	err := validateUserAuthAvailability(
+		ctx,
+		tx,
+		parsedAuthJwt.UserAuth,
+		args.UserId,
+	)
+	if err != nil {
+		returnErr = err
+		return
+	}
 
-		/**
-		 * Check user auth isn't already associated with a different user
-		 */
-		err := validateUserAuthAvailability(
-			ctx,
-			tx,
-			parsedAuthJwt.UserAuth,
-			args.UserId,
-		)
-		if err != nil {
-			returnErr = err
-			return
-		}
-
-		result, err := tx.Exec(
-			ctx,
-			`
+	result, err := tx.Exec(
+		ctx,
+		`
 			INSERT INTO network_user_auth_sso
 			(user_id, auth_type, user_auth, auth_jwt)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (user_id, auth_type) DO NOTHING;
 		`,
-			args.UserId,
-			parsedAuthJwt.AuthType,
-			normalJwtUserAuth,
-			args.AuthJwt,
-		)
+		args.UserId,
+		parsedAuthJwt.AuthType,
+		normalJwtUserAuth,
+		args.AuthJwt,
+	)
 
-		if result.RowsAffected() <= 0 {
-			// If no rows were affected, it means the user_id and auth_type already exist
-			returnErr = fmt.Errorf("SSO auth for user_id %s and auth_type %s already exists", args.UserId, parsedAuthJwt.AuthType)
-			return
-		}
+	if result.RowsAffected() <= 0 {
+		// If no rows were affected, it means the user_id and auth_type already exist
+		returnErr = fmt.Errorf("SSO auth for user_id %s and auth_type %s already exists", args.UserId, parsedAuthJwt.AuthType)
+		return
+	}
 
-	})
+	if err != nil {
+		returnErr = err
+	}
 
 	return returnErr
 
