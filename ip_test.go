@@ -32,7 +32,7 @@ func TestIpInfo(t *testing.T) {
 
 	assert.Equal(t, ipInfo2.CountryCode, "us")
 	assert.Equal(t, ipInfo2.Country, "United States")
-	assert.Equal(t, ipInfo2.Region, "Virginia")
+	assert.Equal(t, ipInfo2.Region, "California")
 	assert.Equal(t, ipInfo2.UserType, UserTypeConsumer)
 	assert.NotEqual(t, ipInfo2.Longitude, float64(0.0))
 	assert.NotEqual(t, ipInfo2.Latitude, float64(0.0))
