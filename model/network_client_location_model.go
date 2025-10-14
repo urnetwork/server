@@ -2280,16 +2280,12 @@ func FindProviders2(
 			return clientScore.ReliabilityWeight
 		})
 
-		// band by tier, score
+		// band by tier
 		slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
 			clientScoreA := clientScores[a]
 			clientScoreB := clientScores[b]
 
 			if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
-				return d
-			}
-
-			if d := clientScoreA.Scores[rankMode] - clientScoreB.Scores[rankMode]; d != 0 {
 				return d
 			}
 
