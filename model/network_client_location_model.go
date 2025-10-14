@@ -1703,6 +1703,7 @@ const (
 type FindProviders2Args struct {
 	Specs               []*ProviderSpec `json:"specs"`
 	Count               int             `json:"count"`
+	ForceCount          bool            `json:"force_count"`
 	ExcludeClientIds    []server.Id     `json:"exclude_client_ids"`
 	ExcludeDestinations [][]server.Id   `json:"exclude_destinations"`
 	RankMode            RankMode        `json:"rank_mode"`
@@ -2225,14 +2226,20 @@ func FindProviders2(
 
 	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
 		// use a min block size to reduce db activity
-		count := max(findProviders2.Count, 20)
+		var count int
+		var n int
+		if findProviders2.ForceCount {
+			count = findProviders2.Count
+			n = count
+		} else {
+			count = max(findProviders2.Count, 20)
+			n = max(count*10, 1000)
+		}
 
 		rankMode := RankModeQuality
 		if findProviders2.RankMode != "" {
 			rankMode = findProviders2.RankMode
 		}
-
-		n := max(count*10, 1000)
 
 		loadStartTime := time.Now()
 		clientScores, err := loadClientScores(
@@ -2266,8 +2273,7 @@ func FindProviders2(
 		}
 
 		clientIds := maps.Keys(clientScores)
-		// oversample so that the list can be filtered
-		n = min(n/2, len(clientIds))
+		n = min(n, len(clientIds))
 
 		connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]

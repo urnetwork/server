@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -388,7 +389,6 @@ func TestFindProviders2WithExclude(t *testing.T) {
 					BestAvailable: &bestAvailable,
 				},
 			},
-			Count:            2 * n,
 			ExcludeClientIds: []server.Id{clientIds[0]},
 			ExcludeDestinations: [][]server.Id{
 				[]server.Id{
@@ -409,6 +409,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			priorityClientIds[clientId] = true
 		}
 		// the exclude destination intermediaries (not the egress hop) will come next
+		// exclude [3], [6], [9] which are the egress in `ExcludeDestination`
 		otherClientIds := map[server.Id]bool{}
 		otherClientIds[clientIds[1]] = true
 		otherClientIds[clientIds[2]] = true
@@ -417,15 +418,31 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		otherClientIds[clientIds[7]] = true
 		otherClientIds[clientIds[8]] = true
 
-		res, err = FindProviders2(findProviders2Args, clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(res.Providers), len(priorityClientIds)+len(otherClientIds))
-		for _, provider := range res.Providers[:len(priorityClientIds)] {
-			ok := priorityClientIds[provider.ClientId]
+		// the match is a weighted shuffle so we should expect over
+		//   sufficient iterations the priority client ids will come first
+		netProviderIncludedCounts := map[server.Id]int{}
+		for range 1024 {
+			findProviders2Args.Count = len(priorityClientIds)
+			// prevent oversampling
+			findProviders2Args.ForceCount = true
+			res, err = FindProviders2(findProviders2Args, clientSessionA)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, len(res.Providers), len(priorityClientIds))
+			for _, provider := range res.Providers {
+				netProviderIncludedCounts[provider.ClientId] += 1
+			}
+		}
+		// descending by included count
+		orderedClientIds := maps.Keys(netProviderIncludedCounts)
+		slices.SortStableFunc(orderedClientIds, func(a server.Id, b server.Id) int {
+			return netProviderIncludedCounts[b] - netProviderIncludedCounts[a]
+		})
+		for _, clientId := range orderedClientIds[:len(priorityClientIds)] {
+			ok := priorityClientIds[clientId]
 			assert.Equal(t, ok, true)
 		}
-		for _, provider := range res.Providers[len(priorityClientIds):] {
-			ok := otherClientIds[provider.ClientId]
+		for _, clientId := range orderedClientIds[len(priorityClientIds):] {
+			ok := otherClientIds[clientId]
 			assert.Equal(t, ok, true)
 		}
 
