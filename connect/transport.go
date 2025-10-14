@@ -140,8 +140,12 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 func (self *ConnectHandler) run() {
 	defer self.cancel()
 
-	go self.runH3()
-	// go self.runH3Dns()
+	if server.HasPort(self.settings.ListenH3Port) {
+		go self.runH3()
+	}
+	if server.HasPort(self.settings.ListenDnsPort) {
+		go self.runH3Dns()
+	}
 
 	select {
 	case <-self.ctx.Done():

@@ -477,7 +477,6 @@ func testConnect(
 	// FIXME server quic tls to create a temp cert
 	// FIXME client tls to trust self signed cert
 	createServer := func(exchange *Exchange, port int) *http.Server {
-		fmt.Printf("create server :%d\n", port)
 		settings := DefaultConnectHandlerSettings()
 		// settings.EnableTlsSelfSign = true
 		settings.ListenH3Port = port + 443
@@ -490,6 +489,8 @@ func testConnect(
 		// settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
 		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
+
+		fmt.Printf("create server :%d (:%d :%d)\n", port, settings.ListenH3Port, settings.ListenDnsPort)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),

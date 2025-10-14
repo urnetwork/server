@@ -305,6 +305,19 @@ func RequireListenIpPort(servicePort int) (ipv4 string, ipv6 string, hostPort in
 	return
 }
 
+func HasPort(servicePort int) bool {
+	_, _, err := HostIp()
+	if err == nil {
+		hostPorts, err := HostPorts()
+		if err != nil {
+			return false
+		}
+		_, ok := hostPorts[servicePort]
+		return ok
+	}
+	return true
+}
+
 // these are the most efficient dest for this host to reach the target host
 func Routes() map[string]string {
 	routeStrs := map[string]string{}
