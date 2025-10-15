@@ -1760,12 +1760,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
 	scorePerTier := 20
-	relativeLatencyMillisThreshold := 100
-	relativeLatencyMillisPerScore := 20
-	bytesPerSecondThreshold := 1 * Mib
-	bytesPerSecondPerScore := 200 * Kib
-	missingLatencyScore := 10
-	missingSpeedScore := 10
+	relativeLatencyMillisThreshold := 50
+	relativeLatencyMillisPerScore := 5
+	bytesPerSecondThreshold := 2 * Mib
+	bytesPerSecondPerScore := 50 * Kib
+	missingLatencyScore := 20
+	missingSpeedScore := 20
 
 	setScore := func(
 		clientScore *ClientScore,
@@ -1794,17 +1794,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			scoreAdjust += missingSpeedScore
 		}
 
-		clientScore.Tiers[RankModeSpeed] = netTypeScoreSpeed
-		clientScore.Scores[RankModeSpeed] = min(
+		scoreSpeed := min(
 			scorePerTier*netTypeScoreSpeed+scoreAdjust,
 			MaxClientScore,
 		)
+		clientScore.Scores[RankModeSpeed] = scoreSpeed
+		clientScore.Tiers[RankModeSpeed] = scoreSpeed / scorePerTier
 
-		clientScore.Tiers[RankModeQuality] = netTypeScore
-		clientScore.Scores[RankModeQuality] = min(
+		scoreQuality := min(
 			scorePerTier*netTypeScore+scoreAdjust,
 			MaxClientScore,
 		)
+		clientScore.Scores[RankModeQuality] = scoreQuality
+		clientScore.Tiers[RankModeQuality] = scoreQuality / scorePerTier
 	}
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -2227,14 +2229,20 @@ func FindProviders2(
 	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
 		// use a min block size to reduce db activity
 		var count int
-		var n int
 		if findProviders2.ForceCount {
 			count = findProviders2.Count
-			n = count
 		} else {
 			count = max(findProviders2.Count, 20)
-			n = max(count*10, 1000)
 		}
+
+		// the random process is
+		// 1. load (ideally this would be all, but is truncated for performance)
+		// 2. oversample based on reliability
+		// 3. shuffle based on quality
+		// 4. band based on tier and keep the top `count`
+		minLoadCount := 1000
+		loadMultiplier := 10
+		oversampleMultiplier := 2
 
 		rankMode := RankModeQuality
 		if findProviders2.RankMode != "" {
@@ -2246,7 +2254,7 @@ func FindProviders2(
 			session.Ctx,
 			locationIds,
 			locationGroupIds,
-			n,
+			max(loadMultiplier*count, minLoadCount),
 		)
 		if err != nil {
 			return nil, err
@@ -2273,17 +2281,20 @@ func FindProviders2(
 		}
 
 		clientIds := maps.Keys(clientScores)
-		n = min(n, len(clientIds))
 
-		connect.WeightedSelectFunc(clientIds, n, func(clientId server.Id) float32 {
+		// note the selection must use reliability at the top level,
+		// since SUM(reliability per IP/subnet)<=1, this is the only way to ensure that
+		// multiple clients with the same IP/subnet are not over represented
+		m := min(oversampleMultiplier*count, len(clientIds))
+		connect.WeightedSelectFunc(clientIds, m, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]
-			return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
+			return clientScore.ReliabilityWeight
 		})
-		clientIds = clientIds[:n]
+		clientIds = clientIds[:m]
 
 		connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]
-			return clientScore.ReliabilityWeight
+			return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
 		})
 
 		// band by tier
@@ -2291,11 +2302,7 @@ func FindProviders2(
 			clientScoreA := clientScores[a]
 			clientScoreB := clientScores[b]
 
-			if d := clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]; d != 0 {
-				return d
-			}
-
-			return 0
+			return clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]
 		})
 
 		// the caller ip is used to match against provider excluded lists
@@ -2314,8 +2321,8 @@ func FindProviders2(
 			glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
 		}
 
-		activeClientIds := map[server.Id]bool{}
-		filterActive := func(clientNetworks map[server.Id]server.Id) {
+		filterActive := func(clientNetworks map[server.Id]server.Id) map[server.Id]bool {
+			activeClientIds := map[server.Id]bool{}
 			server.Tx(session.Ctx, func(tx server.PgTx) {
 				server.CreateTempJoinTableInTx(
 					session.Ctx,
@@ -2353,24 +2360,19 @@ func FindProviders2(
 					}
 				})
 			})
+			return activeClientIds
 		}
 
 		// filter the list to include only clients that are actively connected and providing
-		i := 0
-		for i < len(clientIds) && len(activeClientIds) < count {
-			clientNetworks := map[server.Id]server.Id{}
-			j1 := min(i+2*count, len(clientIds))
-			for j := i; j < j1; j += 1 {
-				clientId := clientIds[j]
-				clientScore := clientScores[clientId]
-				clientNetworks[clientId] = clientScore.NetworkId
-			}
-			filterActive(clientNetworks)
-			i = j1
+		clientNetworks := map[server.Id]server.Id{}
+		for _, clientId := range clientIds {
+			clientScore := clientScores[clientId]
+			clientNetworks[clientId] = clientScore.NetworkId
 		}
+		activeClientIds := filterActive(clientNetworks)
 
 		// output in order of `clientIds`
-		for _, clientId := range clientIds[:i] {
+		for _, clientId := range clientIds {
 			if activeClientIds[clientId] {
 				clientScore := clientScores[clientId]
 				provider := &FindProvidersProvider{
@@ -2380,6 +2382,9 @@ func FindProviders2(
 					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 				}
 				providers = append(providers, provider)
+				if count <= len(providers) {
+					break
+				}
 			}
 		}
 	}
