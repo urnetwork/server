@@ -183,6 +183,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		clientAddress = r.RemoteAddr
 	}
 
+	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
+		return
+	} else if !addrPort.Addr().Is4() {
+		// *important* without egress verification, we rely on the ingress address to match the egress address
+		// currently the network only supports v4 egress
+		// egress verification and v6 support both need to be addressed in the future
+		return
+	}
+
 	rateLimit, err := NewConnectionRateLimit(
 		handleCtx,
 		clientAddress,
@@ -651,6 +660,15 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	// find the client ip:port from the addr
 	clientAddress := conn.RemoteAddr().String()
+
+	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
+		return err
+	} else if !addrPort.Addr().Is4() {
+		// *important* without egress verification, we rely on the ingress address to match the egress address
+		// currently the network only supports v4 egress
+		// egress verification and v6 support both need to be addressed in the future
+		return fmt.Errorf("Only IPv4 is supported.")
+	}
 
 	rateLimit, err := NewConnectionRateLimit(
 		handleCtx,
