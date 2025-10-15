@@ -1436,7 +1436,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		_, returnErr = pipe.Exec(ctx)
 	})
 
-	glog.Info("[nclm]updated %d client locations, removed %d, and updated initial\n", len(clientLocations), len(removeClientLocations))
+	glog.Infof("[nclm]updated %d client locations, removed %d, and updated initial\n", len(clientLocations), len(removeClientLocations))
 
 	return
 }
@@ -1760,12 +1760,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
 	scorePerTier := 20
-	relativeLatencyMillisThreshold := 50
-	relativeLatencyMillisPerScore := 5
+	relativeLatencyMillisThreshold := 200
+	relativeLatencyMillisPerScore := 20
 	bytesPerSecondThreshold := 2 * Mib
 	bytesPerSecondPerScore := 50 * Kib
-	missingLatencyScore := 20
-	missingSpeedScore := 20
+	missingLatencyScore := scorePerTier / 2
+	missingSpeedScore := scorePerTier / 2
 
 	setScore := func(
 		clientScore *ClientScore,
@@ -2237,12 +2237,10 @@ func FindProviders2(
 
 		// the random process is
 		// 1. load (ideally this would be all, but is truncated for performance)
-		// 2. oversample based on reliability
-		// 3. shuffle based on quality
-		// 4. band based on tier and keep the top `count`
+		// 2. sample based on reliability * quality
+		// 3. band based on tier and keep the top `count`
 		minLoadCount := 1000
 		loadMultiplier := 10
-		oversampleMultiplier := 2
 
 		rankMode := RankModeQuality
 		if findProviders2.RankMode != "" {
@@ -2281,21 +2279,16 @@ func FindProviders2(
 		}
 
 		clientIds := maps.Keys(clientScores)
-
-		// note the selection must use reliability at the top level,
-		// since SUM(reliability per IP/subnet)<=1, this is the only way to ensure that
-		// multiple clients with the same IP/subnet are not over represented
-		m := min(oversampleMultiplier*count, len(clientIds))
-		connect.WeightedSelectFunc(clientIds, m, func(clientId server.Id) float32 {
-			clientScore := clientScores[clientId]
-			return clientScore.ReliabilityWeight
+		mathrand.Shuffle(len(clientScores), func(i int, j int) {
+			clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 		})
-		clientIds = clientIds[:m]
 
-		connect.WeightedShuffleFunc(clientIds, func(clientId server.Id) float32 {
+		connect.WeightedSelectFunc(clientIds, count, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]
-			return float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
+			qualityWeight := float32(max(0, MaxClientScore-clientScore.Scores[rankMode]))
+			return clientScore.ReliabilityWeight * qualityWeight
 		})
+		clientIds = clientIds[:min(count, len(clientIds))]
 
 		// band by tier
 		slices.SortStableFunc(clientIds, func(a server.Id, b server.Id) int {
@@ -2382,9 +2375,6 @@ func FindProviders2(
 					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 				}
 				providers = append(providers, provider)
-				if count <= len(providers) {
-					break
-				}
 			}
 		}
 	}
