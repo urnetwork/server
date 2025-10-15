@@ -97,6 +97,59 @@ func SplitClientAddress(clientAddress string) (host string, port int, err error)
 	return
 }
 
+func ParseClientAddress(clientAddress string) (addrPort netip.AddrPort, err error) {
+	var host string
+	var port int
+	host, port, err = SplitClientAddress(clientAddress)
+	if err != nil {
+		return
+	}
+	var addr netip.Addr
+	addr, err = netip.ParseAddr(host)
+	if err != nil {
+		return
+	}
+	addrPort = netip.AddrPortFrom(addr, uint16(port))
+	return
+}
+
+/*
+func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
+	// ipv4:port
+	// [ipv6]:port
+	// ipv6:port
+
+	ipv4 := regexp.MustCompile("^([0-9\\.]+):(\\d+)$")
+	ipv6 := regexp.MustCompile("^\\[([0-9a-f:]+)\\]:(\\d+)$")
+	// ip not properly escaped with [...]
+	badIpv6 := regexp.MustCompile("^([0-9a-f:]+):(\\d+)$")
+
+	groups := ipv4.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
+
+	groups = ipv6.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
+
+	groups = badIpv6.FindStringSubmatch(clientAddress)
+	if groups != nil {
+		ip = groups[1]
+		port, _ = strconv.Atoi(groups[2])
+		return
+	}
+
+	err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
+	return
+}
+*/
+
 // matches the first group to the IPV6 address when the input is <ipv6>:<port>
 // example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
 var malformedIPV6WithPort = regexp.MustCompile(`^(.+):(\d+)$`)

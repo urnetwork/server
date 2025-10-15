@@ -2,8 +2,8 @@ package server
 
 import (
 	"fmt"
-	"regexp"
-	"strconv"
+	// "regexp"
+	// "strconv"
 	"time"
 	// "runtime/debug"
 	// "strings"
@@ -78,41 +78,6 @@ func Raise(err error) {
 	if err != nil {
 		panic(err)
 	}
-}
-
-func ParseClientAddress(clientAddress string) (ip string, port int, err error) {
-	// ipv4:port
-	// [ipv6]:port
-	// ipv6:port
-
-	ipv4 := regexp.MustCompile("^([0-9\\.]+):(\\d+)$")
-	ipv6 := regexp.MustCompile("^\\[([0-9a-f:]+)\\]:(\\d+)$")
-	// ip not properly escaped with [...]
-	badIpv6 := regexp.MustCompile("^([0-9a-f:]+):(\\d+)$")
-
-	groups := ipv4.FindStringSubmatch(clientAddress)
-	if groups != nil {
-		ip = groups[1]
-		port, _ = strconv.Atoi(groups[2])
-		return
-	}
-
-	groups = ipv6.FindStringSubmatch(clientAddress)
-	if groups != nil {
-		ip = groups[1]
-		port, _ = strconv.Atoi(groups[2])
-		return
-	}
-
-	groups = badIpv6.FindStringSubmatch(clientAddress)
-	if groups != nil {
-		ip = groups[1]
-		port, _ = strconv.Atoi(groups[2])
-		return
-	}
-
-	err = fmt.Errorf("Client address does not match ipv4 or ipv6 spec: %s", clientAddress)
-	return
 }
 
 // returns source if cannot compact

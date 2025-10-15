@@ -142,3 +142,23 @@ func TestDistance(t *testing.T) {
 		}
 	}
 }
+
+func TestParseClientAddress(t *testing.T) {
+	addrPort, err := ParseClientAddress("[2001:470:99:57:e643:4bff:fe23:a343]:443")
+	assert.Equal(t, err, nil)
+	assert.Equal(t, addrPort.Addr().String(), "2001:470:99:57:e643:4bff:fe23:a343")
+	assert.Equal(t, int(addrPort.Port()), 443)
+
+	addrPort, err = ParseClientAddress("127.0.0.1:443")
+	assert.Equal(t, err, nil)
+	assert.Equal(t, addrPort.Addr().String(), "127.0.0.1")
+	assert.Equal(t, int(addrPort.Port()), 443)
+
+	addrPort, err = ParseClientAddress("fd00:6a4f:a007:15da::1:40704")
+	assert.Equal(t, err, nil)
+	assert.Equal(t, addrPort.Addr().String(), "fd00:6a4f:a007:15da::1")
+	assert.Equal(t, int(addrPort.Port()), 40704)
+
+	addrPort, err = ParseClientAddress(":443")
+	assert.NotEqual(t, err, nil)
+}
