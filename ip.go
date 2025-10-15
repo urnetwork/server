@@ -53,12 +53,11 @@ func ClientIpHash(clientIp string) ([32]byte, error) {
 
 func ClientIpHashForAddr(addr netip.Addr) [32]byte {
 	if addr.Is4() {
-		// for ipv4, use the /32 network
-		// note this used to be /27, but because of the limited ipv4 range, it seems fine to count individual ipv4
-		addr = netip.PrefixFrom(addr, 32).Masked().Addr()
+		// for ipv4, use the /29 network
+		addr = netip.PrefixFrom(addr, 29).Masked().Addr()
 	} else if addr.Is6() {
-		// for ipv6, use the /48 network
-		addr = netip.PrefixFrom(addr, 48).Masked().Addr()
+		// for ipv6, use the /56 network
+		addr = netip.PrefixFrom(addr, 56).Masked().Addr()
 	}
 	h := sha256.New()
 	h.Write(addr.AsSlice())
