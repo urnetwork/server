@@ -1763,13 +1763,30 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
+	type performanceTarget struct {
+		relativeLatencyMillisThreshold int
+		relativeLatencyMillisPerScore  int
+		bytesPerSecondThreshold        ByteCount
+		bytesPerSecondPerScore         ByteCount
+	}
+
 	scorePerTier := 20
-	relativeLatencyMillisThreshold := 200
-	relativeLatencyMillisPerScore := 20
-	bytesPerSecondThreshold := 2 * Mib
-	bytesPerSecondPerScore := 50 * Kib
-	missingLatencyScore := scorePerTier / 2
-	missingSpeedScore := scorePerTier / 2
+	missingLatencyScore := scorePerTier
+	missingSpeedScore := scorePerTier
+	performanceTargets := map[RankMode]performanceTarget{
+		RankModeQuality: performanceTarget{
+			relativeLatencyMillisThreshold: 100,
+			relativeLatencyMillisPerScore:  20,
+			bytesPerSecondThreshold:        2 * Mib,
+			bytesPerSecondPerScore:         100 * Kib,
+		},
+		RankModeSpeed: performanceTarget{
+			relativeLatencyMillisThreshold: 20,
+			relativeLatencyMillisPerScore:  5,
+			bytesPerSecondThreshold:        20 * Mib,
+			bytesPerSecondPerScore:         500 * Kib,
+		},
+	}
 
 	setScore := func(
 		clientScore *ClientScore,
@@ -1780,37 +1797,32 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		hasLatencyTest bool,
 		hasSpeedTest bool,
 	) {
-		scoreAdjust := 0
+		for rankMode, target := range performanceTargets {
+			scoreAdjust := 0
 
-		if hasLatencyTest {
-			if d := minRelativeLatencyMillis - relativeLatencyMillisThreshold; 0 < d {
-				scoreAdjust += (d + relativeLatencyMillisPerScore/2) / relativeLatencyMillisPerScore
+			if hasLatencyTest {
+				if d := minRelativeLatencyMillis - target.relativeLatencyMillisThreshold; 0 < d {
+					scoreAdjust += (d + target.relativeLatencyMillisPerScore/2) / target.relativeLatencyMillisPerScore
+				}
+			} else {
+				scoreAdjust += missingLatencyScore
 			}
-		} else {
-			scoreAdjust += missingLatencyScore
-		}
 
-		if hasSpeedTest {
-			if d := bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
-				scoreAdjust += int((d + bytesPerSecondPerScore/2) / bytesPerSecondPerScore)
+			if hasSpeedTest {
+				if d := target.bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
+					scoreAdjust += int((d + target.bytesPerSecondPerScore/2) / target.bytesPerSecondPerScore)
+				}
+			} else {
+				scoreAdjust += missingSpeedScore
 			}
-		} else {
-			scoreAdjust += missingSpeedScore
+
+			score := min(
+				scorePerTier*netTypeScoreSpeed+scoreAdjust,
+				MaxClientScore,
+			)
+			clientScore.Scores[rankMode] = score
+			clientScore.Tiers[rankMode] = score / scorePerTier
 		}
-
-		scoreSpeed := min(
-			scorePerTier*netTypeScoreSpeed+scoreAdjust,
-			MaxClientScore,
-		)
-		clientScore.Scores[RankModeSpeed] = scoreSpeed
-		clientScore.Tiers[RankModeSpeed] = scoreSpeed / scorePerTier
-
-		scoreQuality := min(
-			scorePerTier*netTypeScore+scoreAdjust,
-			MaxClientScore,
-		)
-		clientScore.Scores[RankModeQuality] = scoreQuality
-		clientScore.Tiers[RankModeQuality] = scoreQuality / scorePerTier
 	}
 
 	server.Db(ctx, func(conn server.PgConn) {
