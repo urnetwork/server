@@ -42,6 +42,14 @@ var connectedGauge = prometheus.NewGauge(
 	},
 )
 
+
+// FIXME without egress verification, we rely on the ingress address to match the egress address
+// FIXME turn this on to solve ipv6 aliasing abuse on the network
+// currently the network only supports v4 egress
+// egress verification and v6 support both need to be addressed in the future
+AllowOnlyIpv4 := false
+
+
 var serviceTransitionTime = time.Now().Add(30 * time.Second)
 
 func init() {
@@ -185,10 +193,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
 		return
-	} else if !addrPort.Addr().Is4() {
-		// *important* without egress verification, we rely on the ingress address to match the egress address
-		// currently the network only supports v4 egress
-		// egress verification and v6 support both need to be addressed in the future
+	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
 		return
 	}
 
@@ -663,10 +668,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
 		return err
-	} else if !addrPort.Addr().Is4() {
-		// *important* without egress verification, we rely on the ingress address to match the egress address
-		// currently the network only supports v4 egress
-		// egress verification and v6 support both need to be addressed in the future
+	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
 		return fmt.Errorf("Only IPv4 is supported.")
 	}
 
