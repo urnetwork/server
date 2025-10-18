@@ -2438,4 +2438,14 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE UNIQUE INDEX search_value_update_realm_value_id_variant ON search_value_update (realm, value_id, value_variant)
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            ADD COLUMN net_type_foreign smallint NOT NULL DEFAULT 0,
+            DROP COLUMN net_type_score_speed,
+            ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+                net_type_privacy +
+                net_type_virtual
+            ) STORED
+    `),
 }
