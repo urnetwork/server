@@ -55,5 +55,21 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 		connectionLocationScores.NetTypeVirtual = 1
 	}
 
+	arinInfo, err := server.GetArinInfo(addr)
+	if err == nil {
+		// if the org ownership does not match the ip country,
+		// we consider the use case of the ip to be virtual
+		foreign := false
+		for _, orgCountryCode := range arinInfo.OrgCountryCodes {
+			if orgCountryCode != ipInfo.CountryCode {
+				foreign = true
+				break
+			}
+		}
+		if foreign {
+			connectionLocationScores.NetTypeForeign = 1
+		}
+	}
+
 	return location, connectionLocationScores, nil
 }

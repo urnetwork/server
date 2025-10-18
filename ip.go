@@ -30,11 +30,11 @@ import (
 
 func init() {
 	OnWarmup(func() {
-		ipDb()
-	})
+		db, _ := ipDb()
+		glog.Infof("[ip]ip info database type: %s\n", db.Metadata.DatabaseType)
 
-	db, _ := ipDb()
-	glog.Infof("[ip]ip info database type: %s\n", db.Metadata.DatabaseType)
+		arinDb()
+	})
 }
 
 var clientIpHashPepper = sync.OnceValue(func() []byte {
@@ -176,6 +176,7 @@ type schemaType string
 const (
 	schemaTypeDbIpEnterprise schemaType = "DBIP-Location-ISP (compat=Enterprise)"
 	schemaTypeIpInfoCoreData schemaType = "ipinfo bundle_location_core.mmdb"
+	schemaTypeArinDb         schemaType = "urnetwork arindb"
 )
 
 var ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
@@ -183,18 +184,6 @@ var ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 	if err != nil {
 		panic(err)
 	}
-
-	// f, err := os.Open(path)
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// defer f.Close()
-
-	// h := sha256.New()
-	// if _, err := io.Copy(h, f); err != nil {
-	// 	panic(err)
-	// }
-	// dbVersion := h.Sum(nil)
 
 	db, err := mmdb.Open(path)
 	if err != nil {
@@ -764,4 +753,102 @@ func DistanceKm(
 	km := c * earthRadiusKm
 
 	return km
+}
+
+var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
+	path, err := Config.ResourcePath("arindb/arin.mmdb")
+	if err != nil {
+		panic(err)
+	}
+
+	db, err := mmdb.Open(path)
+	if err != nil {
+		panic(err)
+	}
+
+	return db, schemaType(db.Metadata.DatabaseType)
+})
+
+type ArinInfo struct {
+	schemaType      schemaType
+	OrgCountryCodes []string
+}
+
+func (self *ArinInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
+	switch self.schemaType {
+	case schemaTypeArinDb:
+		return self.unmarshalArinDb(d)
+	default:
+		return fmt.Errorf("Unknown schema type: %s", self.schemaType)
+	}
+}
+
+func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
+	mapIter, _, err := d.ReadMap()
+	if err != nil {
+		return err
+	}
+	for key, err := range mapIter {
+		if err != nil {
+			return err
+		}
+
+		switch string(key) {
+		case "org_country_codes":
+			iter, n, err := d.ReadSlice()
+			if err != nil {
+				return err
+			}
+			orgCountryCodes := make([]string, 0, n)
+			for range iter {
+				countryCode, err := d.ReadString()
+				if err != nil {
+					return err
+				}
+				orgCountryCodes = append(orgCountryCodes, countryCode)
+			}
+			self.OrgCountryCodes = orgCountryCodes
+		default:
+			// glog.Infof("[ip]decode skip key \"%s\"\n", key)
+			if err := d.SkipValue(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func GetArinInfoFromString(ip string) (*ArinInfo, error) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return nil, err
+	}
+	return GetArinInfo(addr)
+}
+
+func GetArinInfoFromIp(ip net.IP) (*ArinInfo, error) {
+	if ipv4 := ip.To4(); ipv4 != nil {
+		addr := netip.AddrFrom4([4]byte(ipv4))
+		return GetArinInfo(addr)
+	} else if ipv6 := ip.To16(); ipv6 != nil {
+		addr := netip.AddrFrom16([16]byte(ipv6))
+		return GetArinInfo(addr)
+	} else {
+		return nil, fmt.Errorf("Unknown ip size.")
+	}
+}
+
+func GetArinInfo(addr netip.Addr) (*ArinInfo, error) {
+	arinDb, schemaType := arinDb()
+
+	r := arinDb.Lookup(addr)
+	arinInfo := ArinInfo{
+		schemaType: schemaType,
+	}
+	err := r.Decode(&arinInfo)
+	if err != nil {
+		return nil, err
+	}
+	return &arinInfo, nil
 }

@@ -162,3 +162,20 @@ func TestParseClientAddress(t *testing.T) {
 	addrPort, err = ParseClientAddress(":443")
 	assert.NotEqual(t, err, nil)
 }
+
+func TestArinInfo(t *testing.T) {
+	ip1 := net.ParseIP("65.19.157.62")
+	arinInfo1, err := GetArinInfoFromIp(ip1)
+	assert.Equal(t, err, nil)
+	assert.NotEqual(t, arinInfo1, nil)
+
+	assert.Equal(t, arinInfo1.OrgCountryCodes[0], "us")
+
+	ip2 := net.ParseIP("2001:4200::1")
+	arinInfo2, err := GetArinInfoFromIp(ip2)
+	assert.Equal(t, err, nil)
+	assert.NotEqual(t, arinInfo2, nil)
+
+	assert.Equal(t, arinInfo2.OrgCountryCodes[0], "mu")
+
+}

@@ -1045,6 +1045,7 @@ type ConnectionLocationScores struct {
 	NetTypeHosting int
 	NetTypePrivacy int
 	NetTypeVirtual int
+	NetTypeForeign int
 }
 
 func SetConnectionLocation(
@@ -1120,9 +1121,10 @@ func SetConnectionLocation(
 		            net_type_hosting,
 		            net_type_privacy,
 		            net_type_virtual,
+		            net_type_foreign,
 		            network_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -1132,7 +1134,8 @@ func SetConnectionLocation(
                     net_type_hosting = $6,
                     net_type_privacy = $7,
                     net_type_virtual = $8,
-                    network_id = $9
+                    net_type_foreign = $9,
+                    network_id = $10
             `,
 			connectionId,
 			clientId,
@@ -1142,6 +1145,7 @@ func SetConnectionLocation(
 			connectionLocationScores.NetTypeHosting,
 			connectionLocationScores.NetTypePrivacy,
 			connectionLocationScores.NetTypeVirtual,
+			connectionLocationScores.NetTypeForeign,
 			networkId,
 		))
 	})
