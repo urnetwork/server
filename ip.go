@@ -805,7 +805,7 @@ func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
 				if err != nil {
 					return err
 				}
-				orgCountryCodes = append(orgCountryCodes, countryCode)
+				orgCountryCodes = append(orgCountryCodes, strings.ToLower(countryCode))
 			}
 			self.OrgCountryCodes = orgCountryCodes
 		default:
