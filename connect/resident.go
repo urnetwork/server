@@ -98,6 +98,7 @@ type ExchangeSettings struct {
 	ForwardEnforceActiveContracts bool
 
 	ContractManagerCheckTimeout time.Duration
+	DrainOneTimeout             time.Duration
 
 	ExchangeChaosSettings
 }
@@ -142,6 +143,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ForwardEnforceActiveContracts: false,
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
+		DrainOneTimeout:       1 * time.Second,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
 	}
@@ -161,6 +163,9 @@ type Exchange struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	listenCtx    context.Context
+	listenCancel context.CancelFunc
+
 	host    string
 	service string
 	block   string
@@ -172,8 +177,12 @@ type Exchange struct {
 
 	settings *ExchangeSettings
 
-	residentsLock sync.Mutex
-	residents     map[server.Id]*Resident
+	stateLock sync.Mutex
+	// client id -> resident
+	residents map[server.Id]*Resident
+
+	// client id -> connection id -> cancel func
+	connections map[server.Id]map[server.Id]context.CancelFunc
 }
 
 func NewExchange(
@@ -187,16 +196,21 @@ func NewExchange(
 ) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	listenCtx, listenCancel := context.WithCancel(cancelCtx)
+
 	exchange := &Exchange{
 		ctx:                cancelCtx,
 		cancel:             cancel,
+		listenCtx:          listenCtx,
+		listenCancel:       listenCancel,
 		host:               host,
 		service:            service,
 		block:              block,
 		hostToServicePorts: hostToServicePorts,
 		routes:             routes,
-		residents:          map[server.Id]*Resident{},
 		settings:           settings,
+		residents:          map[server.Id]*Resident{},
+		connections:        map[server.Id]map[server.Id]context.CancelFunc{},
 	}
 
 	go server.HandleError(exchange.Run, cancel)
@@ -273,8 +287,8 @@ func (self *Exchange) NominateLocalResident(
 	}
 
 	func() {
-		self.residentsLock.Lock()
-		defer self.residentsLock.Unlock()
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
 		resident := NewResident(
 			self.ctx,
@@ -287,8 +301,8 @@ func (self *Exchange) NominateLocalResident(
 			server.HandleError(resident.Run)
 			glog.V(1).Infof("[r]close %s\n", clientId)
 
-			self.residentsLock.Lock()
-			defer self.residentsLock.Unlock()
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
 			resident.Close()
 			if currentResident := self.residents[clientId]; resident == currentResident {
 				delete(self.residents, clientId)
@@ -358,8 +372,8 @@ func (self *Exchange) NominateLocalResident(
 func (self *Exchange) Run() {
 	// remove existing residents at host:port
 	func() {
-		self.residentsLock.Lock()
-		defer self.residentsLock.Unlock()
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 		residentIds := map[server.Id]bool{}
 		for _, resident := range self.residents {
 			residentIds[resident.residentId] = true
@@ -407,7 +421,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 
 	// leave host part empty to listen on all available interfaces
 	serverSocket, err := listenConfig.Listen(
-		self.ctx,
+		self.listenCtx,
 		"tcp",
 		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
 	)
@@ -421,7 +435,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 
 		for {
 			select {
-			case <-self.ctx.Done():
+			case <-self.listenCtx.Done():
 				return
 			default:
 			}
@@ -440,12 +454,17 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	}, self.cancel)
 
 	select {
-	case <-self.ctx.Done():
+	case <-self.listenCtx.Done():
 	}
 }
 
 func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	defer conn.Close()
+
+	if self.IsDrain() {
+		return
+	}
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
@@ -456,14 +475,18 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		return
 	}
 
+	connectionId := server.NewId()
+	self.registerConnection(header.ClientId, connectionId, handleCancel)
+	defer self.unregisterConnection(header.ClientId, connectionId)
+
 	c := func() *Resident {
 		endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
 		for {
 			var resident *Resident
 			var ok bool
 			func() {
-				self.residentsLock.Lock()
-				defer self.residentsLock.Unlock()
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
 
 				resident, ok = self.residents[header.ClientId]
 			}()
@@ -663,10 +686,74 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	}
 }
 
+func (self *Exchange) registerConnection(clientId server.Id, connectionId server.Id, handleCancel context.CancelFunc) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	handleCancels, ok := self.connections[clientId]
+	if !ok {
+		handleCancels = map[server.Id]context.CancelFunc{}
+		self.connections[clientId] = handleCancels
+	}
+	handleCancels[connectionId] = handleCancel
+}
+
+func (self *Exchange) unregisterConnection(clientId server.Id, connectionId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	handleCancels, ok := self.connections[clientId]
+	if ok {
+		delete(handleCancels, connectionId)
+		if len(handleCancels) == 0 {
+			delete(self.connections, clientId)
+		}
+	}
+}
+
+func (self *Exchange) IsDrain() bool {
+	select {
+	case <-self.listenCtx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (self *Exchange) Drain() {
-	// FIXME mark as in drain, so that new connections are rejected
-	// FIXME on a paced schedule, notify clients to reconnect
-	// FIXME wait for no more clients, then return
+	self.listenCancel()
+
+	for {
+		resident, handleCancels, ok := func() (*Resident, []context.CancelFunc, bool) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+
+			// active connections with potential residents
+			for clientId, handleCancels := range self.connections {
+				resident := self.residents[clientId]
+				return resident, maps.Values(handleCancels), true
+			}
+			// residents without active connections
+			for _, resident := range self.residents {
+				return resident, nil, true
+			}
+			return nil, nil, false
+		}()
+		if !ok {
+			break
+		}
+		if resident != nil {
+			resident.Close()
+		}
+		for _, handleCancel := range handleCancels {
+			handleCancel()
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(self.settings.DrainOneTimeout):
+		}
+	}
 }
 
 func (self *Exchange) Close() {
@@ -1479,6 +1566,12 @@ func (self *Resident) Run() {
 	case <-self.ctx.Done():
 	case <-self.client.Done():
 	}
+
+	model.RemoveResident(
+		context.Background(),
+		self.clientId,
+		self.residentId,
+	)
 }
 
 /*

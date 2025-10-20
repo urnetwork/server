@@ -159,6 +159,10 @@ func (self *ConnectHandler) run() {
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	if self.exchange.IsDrain() {
+		return
+	}
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	// handleCancel := func() {
 	// 	defer handleCancel_()
@@ -315,6 +319,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		// server.Logger("ERROR HB\n")
 		return
 	}
+
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
 
 	c := func() {
 		announceTimeout := time.Duration(0)
@@ -571,6 +579,10 @@ func (self *ConnectHandler) runH3Dns() {
 }
 
 func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketConn) (net.PacketConn, error)) {
+	if self.exchange.IsDrain() {
+		return
+	}
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 
 	defer handleCancel()
@@ -740,6 +752,10 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		// server.Logger("ERROR HB\n")
 		return fmt.Errorf("Client id is not part of network.")
 	}
+
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
 
 	stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err = framer.Write(stream, authFrameBytes)
