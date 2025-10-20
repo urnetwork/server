@@ -724,24 +724,32 @@ func (self *Exchange) Drain() {
 	self.listenCancel()
 
 	for {
-		resident, handleCancels, ok := func() (*Resident, []context.CancelFunc, bool) {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		clientId, resident, handleCancels, remainingCount, ok := func() (server.Id, *Resident, []context.CancelFunc, int, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
+
+			n := max(len(self.connections), len(self.residents))
 
 			// active connections with potential residents
 			for clientId, handleCancels := range self.connections {
 				resident := self.residents[clientId]
-				return resident, maps.Values(handleCancels), true
+				return clientId, resident, maps.Values(handleCancels), n - 1, true
 			}
 			// residents without active connections
 			for _, resident := range self.residents {
-				return resident, nil, true
+				return resident.clientId, resident, nil, n - 1, true
 			}
-			return nil, nil, false
+			return server.Id{}, nil, nil, 0, false
 		}()
 		if !ok {
 			break
 		}
+		glog.Infof("[c][%s]drain one (at least %d remaining)\n", clientId, remainingCount)
 		if resident != nil {
 			resident.Close()
 		}
@@ -1567,8 +1575,9 @@ func (self *Resident) Run() {
 	case <-self.client.Done():
 	}
 
+	cleanupCtx := context.Background()
 	model.RemoveResident(
-		context.Background(),
+		cleanupCtx,
 		self.clientId,
 		self.residentId,
 	)

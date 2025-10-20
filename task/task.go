@@ -831,15 +831,45 @@ type RunPostArgs struct {
 type RunPostResult struct {
 }
 
-type TaskWorker struct {
-	ctx     context.Context
-	targets map[string]Target
+func DefaultTaskWorkerSettings() *TaskWorkerSettings {
+	return &TaskWorkerSettings{
+		BatchSize:              4,
+		RetryTimeoutAfterError: 30 * time.Second,
+		PollTimeout:            5 * time.Second,
+	}
 }
 
-func NewTaskWorker(ctx context.Context) *TaskWorker {
+type TaskWorkerSettings struct {
+	BatchSize              int
+	RetryTimeoutAfterError time.Duration
+	PollTimeout            time.Duration
+}
+
+type TaskWorker struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	runCtx    context.Context
+	runCancel context.CancelFunc
+	runWg     sync.WaitGroup
+	targets   map[string]Target
+	settings  *TaskWorkerSettings
+}
+
+func NewTaskWorkerWithDefaults(ctx context.Context) *TaskWorker {
+	return NewTaskWorker(ctx, DefaultTaskWorkerSettings())
+}
+
+func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorker {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	runCtx, runCancel := context.WithCancel(cancelCtx)
+
 	taskWorker := &TaskWorker{
-		ctx:     ctx,
-		targets: map[string]Target{},
+		ctx:       cancelCtx,
+		cancel:    cancel,
+		runCtx:    runCtx,
+		runCancel: runCancel,
+		targets:   map[string]Target{},
+		settings:  settings,
 	}
 
 	taskWorker.AddTargets(
@@ -847,6 +877,48 @@ func NewTaskWorker(ctx context.Context) *TaskWorker {
 	)
 
 	return taskWorker
+}
+
+func (self *TaskWorker) Run() {
+	self.runWg.Add(1)
+	defer self.runWg.Done()
+
+	emptyCount := 0
+	for {
+		select {
+		case <-self.runCtx.Done():
+			return
+		default:
+		}
+
+		finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := self.EvalTasks(self.settings.BatchSize)
+		if err != nil {
+			glog.Infof("[taskworker]error running tasks: %s\n", err)
+			select {
+			case <-self.runCtx.Done():
+				return
+			case <-time.After(self.settings.RetryTimeoutAfterError):
+			}
+		} else if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 {
+			emptyCount += 1
+			if emptyCount%30 == 0 {
+				glog.Infof("[taskworker]take(0)\n")
+			}
+			select {
+			case <-self.runCtx.Done():
+				return
+			case <-time.After(self.settings.PollTimeout):
+			}
+		} else {
+			emptyCount = 0
+		}
+	}
+}
+
+func (self *TaskWorker) Drain() {
+	self.runCancel()
+
+	self.runWg.Wait()
 }
 
 func (self *TaskWorker) AddTargets(taskTargets ...Target) {
@@ -1319,4 +1391,46 @@ func (self *TaskWorker) EvalTasks(n int) (
 	}
 
 	return
+}
+
+func (self *TaskWorker) Close() {
+	self.cancel()
+}
+
+// PERIODIC CLEANUP
+
+type TaskCleanupArgs struct {
+}
+
+type TaskCleanupResult struct {
+}
+
+func ScheduleTaskCleanup(clientSession *session.ClientSession, tx server.PgTx) {
+	ScheduleTaskInTx(
+		tx,
+		TaskCleanup,
+		&TaskCleanupArgs{},
+		clientSession,
+		RunOnce("task_cleanup"),
+		RunAt(time.Now().Add(1*time.Hour)),
+	)
+}
+
+func TaskCleanup(
+	taskCleanup *TaskCleanupArgs,
+	clientSession *session.ClientSession,
+) (*TaskCleanupResult, error) {
+	minTime := time.Now().Add(-24 * time.Hour)
+	RemoveFinishedTasks(clientSession.Ctx, minTime)
+	return &TaskCleanupResult{}, nil
+}
+
+func TaskCleanupPost(
+	taskCleanup *TaskCleanupArgs,
+	taskCleanupResult *TaskCleanupResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleTaskCleanup(clientSession, tx)
+	return nil
 }

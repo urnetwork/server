@@ -74,12 +74,12 @@ Options:
 
 	// drain on sigterm
 	go func() {
+		defer cancel()
 		select {
 		case <-ctx.Done():
 			return
 		case <-quitEvent.Ctx.Done():
 			exchange.Drain()
-			cancel()
 		}
 	}()
 

@@ -82,7 +82,7 @@ func TestTask(t *testing.T) {
 		}
 
 		for i := 0; i < n; i += 1 {
-			taskWorker := NewTaskWorker(ctx)
+			taskWorker := NewTaskWorkerWithDefaults(ctx)
 			taskWorker.AddTargets(NewTaskTargetWithPost(Work1, Work1Post))
 
 			go func() {

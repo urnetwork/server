@@ -2171,6 +2171,8 @@ func loadClientScores(
 			keys[i], keys[j] = keys[j], keys[i]
 		})
 
+		glog.Infof("LOAD KEYS %s\n", keys)
+
 		pipe = r.TxPipeline()
 
 		samples := []*redis.StringCmd{}
@@ -2279,6 +2281,10 @@ func FindProviders2(
 			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
 		}
 
+		if len(clientScores) < count {
+			glog.Infof("COULD NOT LOAD FULL ASK (%d < %d)\n", len(clientScores), count)
+		}
+
 		for _, clientId := range findProviders2.ExcludeClientIds {
 			delete(clientScores, clientId)
 		}
@@ -2328,61 +2334,9 @@ func FindProviders2(
 		clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
 		if !ok {
 			glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
-		}
 
-		filterActive := func(clientNetworks map[server.Id]server.Id) map[server.Id]bool {
-			activeClientIds := map[server.Id]bool{}
-			server.Tx(session.Ctx, func(tx server.PgTx) {
-				server.CreateTempJoinTableInTx(
-					session.Ctx,
-					tx,
-					"temp_client_networks(client_id uuid -> network_id uuid)",
-					clientNetworks,
-				)
-
-				result, err := tx.Query(
-					session.Ctx,
-					`
-					SELECT
-						temp_client_networks.client_id
-					FROM temp_client_networks
-					INNER JOIN provide_key ON
-			            provide_key.provide_mode = $1 AND
-			            provide_key.client_id = temp_client_networks.client_id
-			        INNER JOIN network_client_connection ON
-			        	network_client_connection.connected = true AND
-			        	network_client_connection.client_id = temp_client_networks.client_id
-			        LEFT JOIN exclude_network_client_location ON
-		            	exclude_network_client_location.client_location_id = $2 AND
-		                exclude_network_client_location.network_id = temp_client_networks.network_id
-		            WHERE
-		            	exclude_network_client_location.network_id IS NULL
-					`,
-					ProvideModePublic,
-					clientLocationId,
-				)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var clientId server.Id
-						server.Raise(result.Scan(&clientId))
-						activeClientIds[clientId] = true
-					}
-				})
-			})
-			return activeClientIds
-		}
-
-		// filter the list to include only clients that are actively connected and providing
-		clientNetworks := map[server.Id]server.Id{}
-		for _, clientId := range clientIds {
-			clientScore := clientScores[clientId]
-			clientNetworks[clientId] = clientScore.NetworkId
-		}
-		activeClientIds := filterActive(clientNetworks)
-
-		// output in order of `clientIds`
-		for _, clientId := range clientIds {
-			if activeClientIds[clientId] {
+			// output in order of `clientIds`
+			for _, clientId := range clientIds {
 				clientScore := clientScores[clientId]
 				provider := &FindProvidersProvider{
 					ClientId:                   clientId,
@@ -2391,6 +2345,70 @@ func FindProviders2(
 					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 				}
 				providers = append(providers, provider)
+			}
+		} else {
+			filterActive := func(clientNetworks map[server.Id]server.Id) map[server.Id]bool {
+				activeClientIds := map[server.Id]bool{}
+				server.Tx(session.Ctx, func(tx server.PgTx) {
+					server.CreateTempJoinTableInTx(
+						session.Ctx,
+						tx,
+						"temp_client_networks(client_id uuid -> network_id uuid)",
+						clientNetworks,
+					)
+
+					result, err := tx.Query(
+						session.Ctx,
+						`
+						SELECT
+							temp_client_networks.client_id
+						FROM temp_client_networks
+						INNER JOIN provide_key ON
+				            provide_key.provide_mode = $1 AND
+				            provide_key.client_id = temp_client_networks.client_id
+				        INNER JOIN network_client_connection ON
+				        	network_client_connection.connected = true AND
+				        	network_client_connection.client_id = temp_client_networks.client_id
+				        LEFT JOIN exclude_network_client_location ON
+			            	exclude_network_client_location.client_location_id = $2 AND
+			                exclude_network_client_location.network_id = temp_client_networks.network_id
+			            WHERE
+			            	exclude_network_client_location.network_id IS NULL
+						`,
+						ProvideModePublic,
+						clientLocationId,
+					)
+					server.WithPgResult(result, err, func() {
+						for result.Next() {
+							var clientId server.Id
+							server.Raise(result.Scan(&clientId))
+							activeClientIds[clientId] = true
+						}
+					})
+				})
+				return activeClientIds
+			}
+
+			// filter the list to include only clients that are actively connected and providing
+			clientNetworks := map[server.Id]server.Id{}
+			for _, clientId := range clientIds {
+				clientScore := clientScores[clientId]
+				clientNetworks[clientId] = clientScore.NetworkId
+			}
+			activeClientIds := filterActive(clientNetworks)
+
+			// output in order of `clientIds`
+			for _, clientId := range clientIds {
+				if activeClientIds[clientId] {
+					clientScore := clientScores[clientId]
+					provider := &FindProvidersProvider{
+						ClientId:                   clientId,
+						Tier:                       clientScore.Tiers[rankMode],
+						EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+						HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
+					}
+					providers = append(providers, provider)
+				}
 			}
 		}
 	}
