@@ -663,6 +663,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	}
 }
 
+func (self *Exchange) Drain() {
+	// FIXME mark as in drain, so that new connections are rejected
+	// FIXME on a paced schedule, notify clients to reconnect
+	// FIXME wait for no more clients, then return
+}
+
 func (self *Exchange) Close() {
 	self.cancel()
 }
