@@ -2448,4 +2448,15 @@ var migrations = []any{
                 net_type_virtual
             ) STORED
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+            DROP COLUMN net_type_score,
+            ADD COLUMN net_type_score smallint GENERATED ALWAYS AS (
+                net_type_privacy +
+                net_type_virtual +
+                net_type_hosting +
+                net_type_foreign
+            ) STORED
+    `),
 }
