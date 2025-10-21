@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 	"sync"
-	"time"
+	// "time"
 
 	"golang.org/x/exp/maps"
 
@@ -11,8 +11,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/search"
-	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
+	// "github.com/urnetwork/server/session"
+	// "github.com/urnetwork/server/task"
 )
 
 func init() {
@@ -47,7 +47,7 @@ func createLocationGroupSearch() *search.SearchLocal {
 var locationSearch = sync.OnceValue(createLocationSearch)
 var locationGroupSearch = sync.OnceValue(createLocationGroupSearch)
 
-func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
+func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 	// locations
 	result, err := tx.Query(ctx,
 		`
@@ -171,44 +171,4 @@ func indexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 			glog.Infof("[location]index group %d/%d %d/%d: %s\n", i+1, len(locationGroupIds), j+1, len(searchStrings), searchStr)
 		}
 	}
-}
-
-type IndexSearchLocationsArgs struct {
-}
-
-type IndexSearchLocationsResult struct {
-}
-
-func ScheduleIndexSearchLocations(
-	clientSession *session.ClientSession,
-	tx server.PgTx,
-) {
-	task.ScheduleTaskInTx(
-		tx,
-		IndexSearchLocations,
-		&IndexSearchLocationsArgs{},
-		clientSession,
-		task.RunOnce("index_search_locations"),
-		task.MaxTime(30*time.Minute),
-	)
-}
-
-func IndexSearchLocations(
-	indexSearchLocations *IndexSearchLocationsArgs,
-	clientSession *session.ClientSession,
-) (*IndexSearchLocationsResult, error) {
-	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		indexSearchLocationsInTx(clientSession.Ctx, tx)
-	})
-	return &IndexSearchLocationsResult{}, nil
-}
-
-func IndexSearchLocationsPost(
-	indexSearchLocations *IndexSearchLocationsArgs,
-	indexSearchLocationsResult *IndexSearchLocationsResult,
-	clientSession *session.ClientSession,
-	tx server.PgTx,
-) error {
-	// do nothing
-	return nil
 }
