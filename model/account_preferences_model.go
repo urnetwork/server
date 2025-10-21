@@ -43,8 +43,8 @@ func AccountProductUpdatesSetForEmail(ctx context.Context, userEmail string, pro
 			`
 			INSERT INTO account_preferences (network_id, product_updates)
 			SELECT
-				DISTINCT network.network_id,
-				$2 AS product_updates
+				network.network_id,
+				$2::boolean AS product_updates
 			FROM (
 				SELECT
 					user_id
