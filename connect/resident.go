@@ -143,7 +143,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ForwardEnforceActiveContracts: false,
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
-		DrainOneTimeout:       1 * time.Second,
+		// default drain 300/minute
+		DrainOneTimeout: 200 * time.Millisecond,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
 	}
