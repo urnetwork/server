@@ -92,7 +92,7 @@ func TestLocationsSearch(t *testing.T) {
 				Promoted: false,
 			})
 
-			indexSearchLocationsInTx(ctx, tx)
+			IndexSearchLocationsInTx(ctx, tx)
 
 			r1 := locationSearch().AroundIds(ctx, "san fra", 0)
 			assert.Equal(t, len(r1), 3)

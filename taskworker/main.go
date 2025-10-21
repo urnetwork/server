@@ -16,7 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
+	// "github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
@@ -133,7 +133,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
-		model.ScheduleIndexSearchLocations(clientSession, tx)
+		work.ScheduleIndexSearchLocations(clientSession, tx)
 		controller.ScheduleRefreshTransferBalances(clientSession, tx)
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
@@ -218,8 +218,8 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
-			model.IndexSearchLocations,
-			model.IndexSearchLocationsPost,
+			work.IndexSearchLocations,
+			work.IndexSearchLocationsPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.RefreshTransferBalances,
