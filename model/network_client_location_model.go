@@ -2171,8 +2171,6 @@ func loadClientScores(
 			keys[i], keys[j] = keys[j], keys[i]
 		})
 
-		glog.Infof("LOAD KEYS %s\n", keys)
-
 		pipe = r.TxPipeline()
 
 		samples := []*redis.StringCmd{}
@@ -2279,10 +2277,6 @@ func FindProviders2(
 		loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
 		if 50.0 <= loadMillis {
 			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
-		}
-
-		if len(clientScores) < count {
-			glog.Infof("COULD NOT LOAD FULL ASK (%d < %d)\n", len(clientScores), count)
 		}
 
 		for _, clientId := range findProviders2.ExcludeClientIds {

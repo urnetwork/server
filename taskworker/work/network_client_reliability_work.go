@@ -24,7 +24,8 @@ func ScheduleRemoveOldClientReliabilityStats(clientSession *session.ClientSessio
 		&RemoveOldClientReliabilityStatsArgs{},
 		clientSession,
 		task.RunOnce("remove_old_client_reliability_stats"),
-		task.RunAt(server.NowUtc().Add(15*time.Minute)),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(1*time.Hour),
 	)
 }
 
@@ -32,8 +33,9 @@ func RemoveOldClientReliabilityStats(
 	removeOldClientReliabilityStats *RemoveOldClientReliabilityStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientReliabilityStatsResult, error) {
-	minTime := server.NowUtc().Add(-30 * 24 * time.Hour)
-	model.RemoveOldClientReliabilityStats(clientSession.Ctx, minTime)
+	minTime := server.NowUtc().Add(-10 * 24 * time.Hour)
+	limit := 50000
+	model.RemoveOldClientReliabilityStats(clientSession.Ctx, minTime, limit)
 	return &RemoveOldClientReliabilityStatsResult{}, nil
 }
 
@@ -142,8 +144,8 @@ func ScheduleRemoveOldNetworkReliabilityWindow(clientSession *session.ClientSess
 		&RemoveOldNetworkReliabilityWindowArgs{},
 		clientSession,
 		task.RunOnce("remove_old_network_reliability_window"),
-		task.RunAt(server.NowUtc().Add(5*time.Minute)),
-		task.Priority(task.TaskPriorityFastest),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(1*time.Hour),
 	)
 }
 
@@ -151,8 +153,9 @@ func RemoveOldNetworkReliabilityWindow(
 	removeOldNetworkReliabilityWindow *RemoveOldNetworkReliabilityWindowArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldNetworkReliabilityWindowResult, error) {
-	minTime := server.NowUtc().Add(-7 * 24 * time.Hour)
-	model.RemoveOldNetworkReliabilityWindow(clientSession.Ctx, minTime)
+	minTime := server.NowUtc().Add(-10 * 24 * time.Hour)
+	limit := 50000
+	model.RemoveOldNetworkReliabilityWindow(clientSession.Ctx, minTime, limit)
 	return &RemoveOldNetworkReliabilityWindowResult{}, nil
 }
 

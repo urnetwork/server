@@ -11,7 +11,7 @@ import (
 	"net"
 	"strconv"
 
-	// "time"
+	"time"
 
 	"github.com/docopt/docopt-go"
 	// "github.com/prometheus/client_golang/prometheus"

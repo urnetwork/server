@@ -163,9 +163,6 @@ type Exchange struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	listenCtx    context.Context
-	listenCancel context.CancelFunc
-
 	host    string
 	service string
 	block   string
@@ -196,13 +193,9 @@ func NewExchange(
 ) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	listenCtx, listenCancel := context.WithCancel(cancelCtx)
-
 	exchange := &Exchange{
 		ctx:                cancelCtx,
 		cancel:             cancel,
-		listenCtx:          listenCtx,
-		listenCancel:       listenCancel,
 		host:               host,
 		service:            service,
 		block:              block,
@@ -421,7 +414,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 
 	// leave host part empty to listen on all available interfaces
 	serverSocket, err := listenConfig.Listen(
-		self.listenCtx,
+		self.ctx,
 		"tcp",
 		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
 	)
@@ -435,7 +428,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 
 		for {
 			select {
-			case <-self.listenCtx.Done():
+			case <-self.ctx.Done():
 				return
 			default:
 			}
@@ -454,16 +447,12 @@ func (self *Exchange) serveExchangeConnection(port int) {
 	}, self.cancel)
 
 	select {
-	case <-self.listenCtx.Done():
+	case <-self.ctx.Done():
 	}
 }
 
 func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	defer conn.Close()
-
-	if self.IsDrain() {
-		return
-	}
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
@@ -711,18 +700,7 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 	}
 }
 
-func (self *Exchange) IsDrain() bool {
-	select {
-	case <-self.listenCtx.Done():
-		return true
-	default:
-		return false
-	}
-}
-
 func (self *Exchange) Drain() {
-	self.listenCancel()
-
 	for {
 		select {
 		case <-self.ctx.Done():
