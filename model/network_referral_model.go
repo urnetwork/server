@@ -20,6 +20,8 @@ func CreateNetworkReferral(
 	referralCode string,
 ) *NetworkReferral {
 
+	var networkReferral *NetworkReferral
+
 	referralCode = strings.ToUpper(referralCode)
 
 	// find network id by associated referral code
@@ -33,16 +35,34 @@ func CreateNetworkReferral(
 		return nil
 	}
 
-	// create network referral
-	networkReferral := &NetworkReferral{
-		NetworkId:         &networkId,
-		ReferralNetworkId: referralNetworkId,
-	}
-
 	createTime := server.NowUtc()
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+
+		// count referral_network records for this network
+		var count int
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT COUNT(*) FROM network_referral
+				WHERE referral_network_id = $1
+			`,
+			referralNetworkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+
+		// if count >= max allowed, abort
+
+		const maxReferralsPerNetwork = 5
+		if count >= maxReferralsPerNetwork {
+			return
+		}
+
+		_, err = tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_referral (
@@ -56,10 +76,18 @@ func CreateNetworkReferral(
 				    referral_network_id = EXCLUDED.referral_network_id,
 				    create_time = EXCLUDED.create_time;
 			`,
-			networkReferral.NetworkId,
-			networkReferral.ReferralNetworkId,
+			networkId,
+			referralNetworkId,
 			createTime,
-		))
+		)
+
+		if err == nil {
+			// create network referral
+			networkReferral = &NetworkReferral{
+				NetworkId:         &networkId,
+				ReferralNetworkId: referralNetworkId,
+			}
+		}
 	})
 	return networkReferral
 

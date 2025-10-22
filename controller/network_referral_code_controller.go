@@ -31,7 +31,8 @@ func GetNetworkReferralCode(
 }
 
 type ValidateNetworkReferralCodeResult struct {
-	IsValid bool `json:"is_valid"`
+	IsValid  bool `json:"is_valid"`
+	IsCapped bool `json:"is_capped"`
 }
 
 type ValidateReferralCodeArgs struct {
@@ -48,10 +49,11 @@ func ValidateReferralCode(
 
 	referralCode := validateReferralCode.ReferralCode
 
-	isValid := model.ValidateReferralCode(session.Ctx, referralCode)
+	validationResult := model.ValidateReferralCode(session.Ctx, referralCode)
 
 	return &ValidateNetworkReferralCodeResult{
-		IsValid: isValid,
+		IsValid:  validationResult.Valid,
+		IsCapped: validationResult.IsCapped,
 	}, nil
 
 }

@@ -27,11 +27,19 @@ func SetNetworkReferral(
 	session *session.ClientSession,
 ) (*SetNetworkReferralResult, error) {
 
-	isValid := model.ValidateReferralCode(session.Ctx, setNetworkReferral.ReferralCode)
-	if !isValid {
+	validationResult := model.ValidateReferralCode(session.Ctx, setNetworkReferral.ReferralCode)
+	if !validationResult.Valid {
 		return &SetNetworkReferralResult{
 			Error: &SetNetworkReferralError{
 				Message: "Invalid referral code",
+			},
+		}, nil
+	}
+
+	if validationResult.IsCapped {
+		return &SetNetworkReferralResult{
+			Error: &SetNetworkReferralError{
+				Message: "Referral code has reached maximum number of referrals",
 			},
 		}, nil
 	}
@@ -46,7 +54,7 @@ func SetNetworkReferral(
 
 	}
 
-	if strings.ToUpper(networkReferralCode.ReferralCode) == strings.ToUpper(setNetworkReferral.ReferralCode) {
+	if strings.EqualFold(networkReferralCode.ReferralCode, setNetworkReferral.ReferralCode) {
 		return &SetNetworkReferralResult{
 			Error: &SetNetworkReferralError{
 				Message: "Cannot set the same referral code as the current network",
