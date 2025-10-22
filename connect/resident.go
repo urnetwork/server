@@ -295,16 +295,20 @@ func (self *Exchange) NominateLocalResident(
 			server.HandleError(resident.Run)
 			glog.V(1).Infof("[r]close %s\n", clientId)
 
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			resident.Close()
-			if currentResident := self.residents[clientId]; resident == currentResident {
-				delete(self.residents, clientId)
-			}
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				resident.Close()
+				if currentResident := self.residents[clientId]; resident == currentResident {
+					delete(self.residents, clientId)
+				}
+			}()
+
+			cleanupCtx := context.Background()
 			// this will remove the resident only if current
 			// it will always clear ports associated with the resident
 			model.RemoveResident(
-				self.ctx,
+				cleanupCtx,
 				resident.clientId,
 				resident.residentId,
 			)
@@ -1553,13 +1557,6 @@ func (self *Resident) Run() {
 	case <-self.ctx.Done():
 	case <-self.client.Done():
 	}
-
-	cleanupCtx := context.Background()
-	model.RemoveResident(
-		cleanupCtx,
-		self.clientId,
-		self.residentId,
-	)
 }
 
 /*
