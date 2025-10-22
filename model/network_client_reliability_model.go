@@ -81,7 +81,7 @@ func AddClientReliabilityStats(
 	})
 }
 
-func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time) {
+func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time, limit int) {
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -89,9 +89,25 @@ func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time) {
 			ctx,
 			`
 			DELETE FROM client_reliability
-			WHERE block_number <= $1
+			USING (
+			    SELECT
+			        block_number,
+			        client_address_hash,
+			        network_id,
+			        client_id
+			    FROM client_reliability
+			    WHERE block_number <= $1
+			    ORDER BY block_number
+			    LIMIT $2
+			) t
+			WHERE
+			    client_reliability.block_number = t.block_number AND
+			    client_reliability.client_address_hash = t.client_address_hash AND
+			    client_reliability.network_id = t.network_id AND
+			    client_reliability.client_id = t.client_id
 			`,
 			minBlockNumber,
+			limit,
 		))
 	})
 }
@@ -650,7 +666,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 	}, server.TxReadCommitted)
 }
 
-func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time) {
+func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, limit int) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - 1
 
@@ -660,10 +676,21 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time) {
 			ctx,
 			`
 			DELETE FROM network_connection_reliability_window
+			USING (
+			    SELECT
+			        network_id,
+			        bucket_number
+			    FROM network_connection_reliability_window
+			    WHERE bucket_number <= $1
+			    ORDER BY network_id, bucket_number
+			    LIMIT $2
+			) t
 			WHERE
-				bucket_number <= $1
+			    network_connection_reliability_window.network_id = t.network_id AND
+			    network_connection_reliability_window.bucket_number = t.bucket_number
 			`,
 			minBlockNumber/int64(blockCountPerBucket),
+			limit,
 		))
 	}, server.TxReadCommitted)
 }

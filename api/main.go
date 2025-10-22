@@ -11,7 +11,7 @@ import (
 	"net"
 	"strconv"
 
-	// "time"
+	"time"
 
 	"github.com/docopt/docopt-go"
 	// "github.com/prometheus/client_golang/prometheus"
@@ -23,6 +23,8 @@ import (
 	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/router"
 )
+
+const DrainTimeout = 60 * time.Second
 
 func main() {
 	usage := `BringYour API server.
@@ -48,8 +50,23 @@ Options:
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
-	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// drain on sigterm
+	go func() {
+		defer cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-quitEvent.Ctx.Done():
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(DrainTimeout):
+			}
+		}
+	}()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),

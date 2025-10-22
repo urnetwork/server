@@ -316,6 +316,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
+
 	c := func() {
 		announceTimeout := time.Duration(0)
 		if serviceTransitionTime.Before(time.Now()) {
@@ -740,6 +744,10 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		// server.Logger("ERROR HB\n")
 		return fmt.Errorf("Client id is not part of network.")
 	}
+
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
 
 	stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err = framer.Write(stream, authFrameBytes)

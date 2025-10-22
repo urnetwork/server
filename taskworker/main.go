@@ -8,7 +8,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
-	"time"
+	// "time"
 
 	"github.com/docopt/docopt-go"
 
@@ -22,10 +22,6 @@ import (
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
-
-const RemoveTaskTimeout = 24 * time.Hour
-const RetryTimeoutAfterError = 30 * time.Second
-const PollTimeout = 5 * time.Second
 
 func main() {
 	usage := `BringYour task worker.
@@ -52,7 +48,7 @@ Options:
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
-	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
@@ -74,10 +70,23 @@ Options:
 		initTasks(ctx)
 
 		// one TaskWorker can be shared with many go routines calling EvalTasks
+		settings := task.DefaultTaskWorkerSettings()
+		settings.BatchSize = batchSize
 		taskWorker := initTaskWorker(ctx)
 		for i := 0; i < count; i += 1 {
-			go evalTasks(ctx, taskWorker, batchSize)
+			go taskWorker.Run()
 		}
+
+		// drain on sigterm
+		go func() {
+			defer cancel()
+			select {
+			case <-ctx.Done():
+				return
+			case <-quitEvent.Ctx.Done():
+				taskWorker.Drain()
+			}
+		}()
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
@@ -122,7 +131,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleCloseExpiredContracts(clientSession, tx)
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
-		ScheduleTaskCleanup(clientSession, tx)
+		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
 		controller.ScheduleRefreshTransferBalances(clientSession, tx)
@@ -146,11 +155,15 @@ func initTasks(ctx context.Context) {
 
 func initTaskWorker(ctx context.Context) *task.TaskWorker {
 
-	taskWorker := task.NewTaskWorker(ctx)
+	taskWorker := task.NewTaskWorkerWithDefaults(ctx)
 
 	// 2024.11.15 migration from "bringyour.com" to new package
 
 	taskWorker.AddTargets(
+		task.NewTaskTargetWithPost(
+			task.TaskCleanup,
+			task.TaskCleanupPost,
+		),
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(
 			work.ExportStats,
@@ -171,10 +184,6 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,
 			"bringyour.com/service/taskworker/work.ProcessPendingPayouts",
-		),
-		task.NewTaskTargetWithPost(
-			TaskCleanup,
-			TaskCleanupPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,
@@ -297,75 +306,4 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 	)
 
 	return taskWorker
-}
-
-func evalTasks(ctx context.Context, taskWorker *task.TaskWorker, batchSize int) {
-	emptyCount := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(batchSize)
-		if err != nil {
-			glog.Infof("[taskworker]error running tasks: %s\n", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(RetryTimeoutAfterError):
-			}
-		} else if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 {
-			emptyCount += 1
-			if emptyCount%30 == 0 {
-				glog.Infof("[taskworker]take(0)\n")
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(PollTimeout):
-			}
-		} else {
-			emptyCount = 0
-		}
-	}
-}
-
-// PERIODIC CLEANUP
-
-type TaskCleanupArgs struct {
-}
-
-type TaskCleanupResult struct {
-}
-
-func ScheduleTaskCleanup(clientSession *session.ClientSession, tx server.PgTx) {
-	task.ScheduleTaskInTx(
-		tx,
-		TaskCleanup,
-		&TaskCleanupArgs{},
-		clientSession,
-		task.RunOnce("task_cleanup"),
-		task.RunAt(time.Now().Add(1*time.Hour)),
-	)
-}
-
-func TaskCleanup(
-	taskCleanup *TaskCleanupArgs,
-	clientSession *session.ClientSession,
-) (*TaskCleanupResult, error) {
-	minTime := time.Now().Add(-RemoveTaskTimeout)
-	task.RemoveFinishedTasks(clientSession.Ctx, minTime)
-	return &TaskCleanupResult{}, nil
-}
-
-func TaskCleanupPost(
-	taskCleanup *TaskCleanupArgs,
-	taskCleanupResult *TaskCleanupResult,
-	clientSession *session.ClientSession,
-	tx server.PgTx,
-) error {
-	ScheduleTaskCleanup(clientSession, tx)
-	return nil
 }

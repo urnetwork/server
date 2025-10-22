@@ -47,7 +47,7 @@ Options:
 	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
 	defer closeFn()
 
-	ctx, cancel := context.WithCancel(quitEvent.Ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	exchange := NewExchangeFromEnvWithDefaults(ctx)
@@ -67,8 +67,19 @@ Options:
 			err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
 			if err != nil {
 				// shut down
-				quitEvent.Set()
+				cancel()
 			}
+		}
+	}()
+
+	// drain on sigterm
+	go func() {
+		defer cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-quitEvent.Ctx.Done():
+			exchange.Drain()
 		}
 	}()
 

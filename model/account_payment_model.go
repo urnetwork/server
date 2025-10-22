@@ -346,6 +346,9 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 }
 
 func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (paymentPlan *PaymentPlan, returnErr error) {
+	now := server.NowUtc()
+	UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		paymentPlanId := server.NewId()
@@ -808,6 +811,9 @@ func calculateReliabilityPayout(
 	ctx context.Context,
 	lastPaymentTime time.Time,
 ) (networkSubsidyAmounts map[server.Id]NetworkReliabilitySubsidy) {
+	now := server.NowUtc()
+	UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		networkSubsidyAmounts = calculateReliabilityPayoutInTx(
 			ctx,
@@ -831,7 +837,7 @@ func calculateReliabilityPayoutInTx(
 	now := server.NowUtc()
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now, true)
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now, false)
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
