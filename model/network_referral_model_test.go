@@ -22,6 +22,16 @@ func TestNetworkReferral(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkAId, "a", networkAId)
 		Testing_CreateNetwork(ctx, networkBId, "b", networkBId)
 
+		// networks to meet max limit
+		networkCId := server.NewId()
+		networkDId := server.NewId()
+		networkEId := server.NewId()
+		networkFId := server.NewId()
+		Testing_CreateNetwork(ctx, networkCId, "c", networkCId)
+		Testing_CreateNetwork(ctx, networkDId, "d", networkDId)
+		Testing_CreateNetwork(ctx, networkEId, "e", networkEId)
+		Testing_CreateNetwork(ctx, networkFId, "f", networkFId)
+
 		// create a network referral code
 		createdReferralCode := CreateNetworkReferralCode(ctx, referralNetworkId)
 		createReferralCodeNetworkB := CreateNetworkReferralCode(ctx, networkBId)
@@ -46,8 +56,20 @@ func TestNetworkReferral(t *testing.T) {
 		assert.Equal(t, referrals[0].NetworkId, networkAId)
 		assert.Equal(t, referrals[1].NetworkId, networkBId)
 
-		// users can update their referral code
+		// meet limit
+		CreateNetworkReferral(ctx, networkCId, createdReferralCode.ReferralCode)
+		CreateNetworkReferral(ctx, networkDId, createdReferralCode.ReferralCode)
+		CreateNetworkReferral(ctx, networkEId, createdReferralCode.ReferralCode)
+		referrals = GetReferralsByReferralNetworkId(ctx, referralNetworkId)
+		assert.Equal(t, len(referrals), 5)
 
+		// exceed limit
+		exceedLimitReferral := CreateNetworkReferral(ctx, networkFId, createdReferralCode.ReferralCode)
+		assert.Equal(t, exceedLimitReferral, nil)
+		referrals = GetReferralsByReferralNetworkId(ctx, referralNetworkId)
+		assert.Equal(t, len(referrals), 5)
+
+		// users can update their referral code
 		CreateNetworkReferral(ctx, networkAId, createReferralCodeNetworkB.ReferralCode)
 		referralNetwork = GetReferralNetworkByChildNetworkId(ctx, networkAId)
 		assert.Equal(t, referralNetwork.Id, createReferralCodeNetworkB.NetworkId)
@@ -55,9 +77,8 @@ func TestNetworkReferral(t *testing.T) {
 		// remove referral code
 		UnlinkReferralNetwork(ctx, networkAId)
 		referrals = GetReferralsByReferralNetworkId(ctx, referralNetworkId)
-		assert.Equal(t, len(referrals), 1)
+		assert.Equal(t, len(referrals), 4)
 		referralNetwork = GetReferralNetworkByChildNetworkId(ctx, networkAId)
 		assert.Equal(t, referralNetwork, nil)
-
 	})
 }

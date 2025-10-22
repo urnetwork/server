@@ -70,7 +70,7 @@ func TestNetworkReferral(t *testing.T) {
 		assert.Equal(t, networkCReferral, nil)
 
 		/**
-		 * User should not be able to set their own referral code
+		 * User should not be able to set their referral code to their own network
 		 */
 		args = controller.SetNetworkReferralArgs{
 			ReferralCode: referralCodeC.ReferralCode,
