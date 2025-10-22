@@ -123,30 +123,82 @@ func GetNetworkIdByReferralCode(referralCode string) *server.Id {
 
 }
 
-func ValidateReferralCode(ctx context.Context, referralCode string) bool {
+type ValidateReferralCodeResult struct {
+	Valid    bool `json:"valid"`
+	IsCapped bool `json:"is_capped"`
+}
 
-	var exists bool
+func ValidateReferralCode(
+	ctx context.Context,
+	referralCode string,
+) ValidateReferralCodeResult {
+
+	maxReferrals := 5
+
+	validateResult := ValidateReferralCodeResult{
+		Valid:    false,
+		IsCapped: false,
+	}
 
 	referralCode = strings.ToUpper(referralCode)
+	var referralNetworkId *server.Id
 
 	server.Tx(ctx, func(tx server.PgTx) {
+
+		/**
+		 * check existence
+		 */
 		result, err := tx.Query(
 			ctx,
 			`
-						SELECT
-								1
-						FROM network_referral_code
-						WHERE
-								referral_code = $1
-				`,
+				SELECT
+					network_id
+				FROM network_referral_code
+				WHERE
+					referral_code = $1
+			`,
 			referralCode,
 		)
 
 		server.WithPgResult(result, err, func() {
-			exists = result.Next()
+
+			if result.Next() {
+				server.Raise(result.Scan(&referralNetworkId))
+				validateResult.Valid = true
+			}
+
 		})
+
+		if validateResult.Valid {
+
+			/**
+			 * Check cap
+			 */
+
+			var count int
+			result, err = tx.Query(
+				ctx,
+				`
+					SELECT COUNT(*) FROM network_referral
+					WHERE referral_network_id = $1
+				`,
+				referralNetworkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&count))
+				}
+
+				if count >= maxReferrals {
+					validateResult.IsCapped = true
+				}
+
+			})
+
+		}
+
 	})
 
-	return exists
+	return validateResult
 
 }
