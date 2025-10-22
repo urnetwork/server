@@ -280,87 +280,89 @@ func (self *Exchange) NominateLocalResident(
 		return false
 	}
 
+	resident := NewResident(
+		self.ctx,
+		self,
+		clientId,
+		instanceId,
+		residentId,
+	)
+	go server.HandleError(func() {
+		server.HandleError(resident.Run)
+		glog.V(1).Infof("[r]close %s\n", clientId)
+
+		resident.Close()
+
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if currentResident := self.residents[clientId]; resident == currentResident {
+				delete(self.residents, clientId)
+			}
+		}()
+
+		cleanupCtx := context.Background()
+		// this will remove the resident only if current
+		// it will always clear ports associated with the resident
+		model.RemoveResident(
+			cleanupCtx,
+			resident.clientId,
+			resident.residentId,
+		)
+	})
+	go func() {
+		defer resident.Cancel()
+		for {
+			select {
+			case <-resident.Done():
+				return
+			case <-time.After(self.settings.ResidentIdleTimeout):
+			}
+
+			if resident.IsIdle() {
+				glog.V(1).Infof("[r]idle %s\n", clientId)
+				return
+			}
+		}
+	}()
+	// poll the resident the same as exchange connections
+	go func() {
+		defer resident.Cancel()
+		for {
+			select {
+			case <-resident.Done():
+				return
+			case <-time.After(self.settings.ExchangeConnectionResidentPollTimeout):
+			}
+
+			pollResident := func() bool {
+				return server.HandleErrorWithReturn(func() bool {
+					currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, clientId, instanceId)
+					if err != nil {
+						return false
+					}
+					return residentId == currentResidentId
+				})
+			}
+
+			if !pollResident() {
+				glog.V(1).Infof("[r]not current %s\n", clientId)
+				return
+			}
+		}
+	}()
+
+	var replacedResident *Resident
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-
-		resident := NewResident(
-			self.ctx,
-			self,
-			clientId,
-			instanceId,
-			residentId,
-		)
-		go server.HandleError(func() {
-			server.HandleError(resident.Run)
-			glog.V(1).Infof("[r]close %s\n", clientId)
-
-			func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				resident.Close()
-				if currentResident := self.residents[clientId]; resident == currentResident {
-					delete(self.residents, clientId)
-				}
-			}()
-
-			cleanupCtx := context.Background()
-			// this will remove the resident only if current
-			// it will always clear ports associated with the resident
-			model.RemoveResident(
-				cleanupCtx,
-				resident.clientId,
-				resident.residentId,
-			)
-		})
-		go func() {
-			defer resident.Cancel()
-			for {
-				select {
-				case <-resident.Done():
-					return
-				case <-time.After(self.settings.ResidentIdleTimeout):
-				}
-
-				if resident.IsIdle() {
-					glog.V(1).Infof("[r]idle %s\n", clientId)
-					return
-				}
-			}
-		}()
-		// poll the resident the same as exchange connections
-		go func() {
-			defer resident.Cancel()
-			for {
-				select {
-				case <-resident.Done():
-					return
-				case <-time.After(self.settings.ExchangeConnectionResidentPollTimeout):
-				}
-
-				pollResident := func() bool {
-					return server.HandleErrorWithReturn(func() bool {
-						currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, clientId, instanceId)
-						if err != nil {
-							return false
-						}
-						return residentId == currentResidentId
-					})
-				}
-
-				if !pollResident() {
-					glog.V(1).Infof("[r]not current %s\n", clientId)
-					return
-				}
-			}
-		}()
-
-		if replacedResident, ok := self.residents[clientId]; ok {
-			replacedResident.Cancel()
-		}
+		replacedResident = self.residents[clientId]
 		self.residents[clientId] = resident
-		glog.V(1).Infof("[r]open %s\n", clientId)
 	}()
+	if replacedResident != nil {
+		replacedResident.Cancel()
+	}
+	glog.V(1).Infof("[r]open %s\n", clientId)
 
 	return true
 }
@@ -368,29 +370,8 @@ func (self *Exchange) NominateLocalResident(
 // runs the exchange to expose local nominated residents
 // there should be one local exchange per service
 func (self *Exchange) Run() {
-	// remove existing residents at host:port
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		residentIds := map[server.Id]bool{}
-		for _, resident := range self.residents {
-			residentIds[resident.residentId] = true
-		}
-		residentsForHostPort := model.GetResidentsForHostPorts(
-			self.ctx,
-			self.host,
-			maps.Keys(self.hostToServicePorts),
-		)
-		for _, residentForHostPort := range residentsForHostPort {
-			if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
-				model.RemoveResident(
-					self.ctx,
-					residentForHostPort.ClientId,
-					residentForHostPort.ResidentId,
-				)
-			}
-		}
-	}()
+	// remove old residents at host:port
+	self.removeOldResidents()
 
 	// start exchange connection servers
 	for _, servicePort := range self.hostToServicePorts {
@@ -405,6 +386,31 @@ func (self *Exchange) Run() {
 
 	select {
 	case <-self.ctx.Done():
+	}
+}
+
+func (self *Exchange) removeOldResidents() {
+	residentIds := map[server.Id]bool{}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, resident := range self.residents {
+			residentIds[resident.residentId] = true
+		}
+	}()
+	residentsForHostPort := model.GetResidentsForHostPorts(
+		self.ctx,
+		self.host,
+		maps.Keys(self.hostToServicePorts),
+	)
+	for _, residentForHostPort := range residentsForHostPort {
+		if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
+			model.RemoveResident(
+				self.ctx,
+				residentForHostPort.ClientId,
+				residentForHostPort.ResidentId,
+			)
+		}
 	}
 }
 
@@ -481,7 +487,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-
 				resident, ok = self.residents[header.ClientId]
 			}()
 
@@ -1644,8 +1649,6 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	}
 
 	c := func() bool {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
 
 		nextForward := func() *ResidentForward {
 			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
@@ -1653,12 +1656,15 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				server.HandleError(forward.Run)
 				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
 
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				forward.Close()
-				if currentForward := self.forwards[destinationId]; forward == currentForward {
-					delete(self.forwards, destinationId)
-				}
+				// note we don't call close here because only the sender should call close
+				forward.Cancel()
+				func() {
+					self.stateLock.Lock()
+					defer self.stateLock.Unlock()
+					if currentForward := self.forwards[destinationId]; forward == currentForward {
+						delete(self.forwards, destinationId)
+					}
+				}()
 			}()
 			go func() {
 				defer forward.Cancel()
@@ -1678,20 +1684,32 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				}
 			}()
 
-			if replacedForward, ok := self.forwards[destinationId]; ok {
+			var replacedForward *ResidentForward
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				replacedForward = self.forwards[destinationId]
+				self.forwards[destinationId] = forward
+			}()
+			if replacedForward != nil {
 				replacedForward.Cancel()
 			}
-			self.forwards[destinationId] = forward
 			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
 
 			return forward
 		}
 
 		limit := false
-		forward, ok := self.forwards[destinationId]
-		if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
-			limit = true
-		}
+		var forward *ResidentForward
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			var ok bool
+			forward, ok = self.forwards[destinationId]
+			if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
+				limit = true
+			}
+		}()
 
 		if forward == nil && limit {
 			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
@@ -1764,11 +1782,11 @@ func (self *Resident) AddTransport() (
 		receiveTransport: connect.NewReceiveGatewayTransport(),
 	}
 
-	func() {
-		routeManager := self.client.RouteManager()
-		routeManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
-		routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
+	routeManager := self.client.RouteManager()
+	routeManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
+	routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
 
+	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.transports[transport] = true
@@ -1779,9 +1797,11 @@ func (self *Resident) AddTransport() (
 		routeManager.RemoveTransport(transport.sendTransport)
 		routeManager.RemoveTransport(transport.receiveTransport)
 
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		delete(self.transports, transport)
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			delete(self.transports, transport)
+		}()
 
 		// note `send` is not closed. This channel is left open.
 		// it used to be closed after a delay, but it is not needed to close it.
@@ -1842,13 +1862,16 @@ func (self *Resident) Close() {
 	self.clientReceiveUnsub()
 	self.clientForwardUnsub()
 
+	forwards := []*ResidentForward{}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		for _, forward := range self.forwards {
-			forward.Cancel()
-		}
+		forwards = maps.Values(self.forwards)
+		clear(self.forwards)
 	}()
+	for _, forward := range forwards {
+		forward.Cancel()
+	}
 }
 
 type clientTransport struct {
