@@ -220,7 +220,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			}
 		}
 
-		RemoveOldClientReliabilityStats(ctx, endTime)
+		RemoveOldClientReliabilityStats(ctx, endTime, 10000)
 
 	})
 }
