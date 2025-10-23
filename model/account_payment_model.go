@@ -631,10 +631,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		}
 
+		pointsPerPayout := EnvSubsidyConfig().AccountPointsPerPayout
+
 		// this is the total number of points allocated per payout
 		// should this factor in how frequent the payouts are?
 		// todo: should be moved into config
-		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+		nanoPointsPerPayout := PointsToNanoPoints(float64(pointsPerPayout))
 
 		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
 		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
@@ -644,6 +646,41 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		)
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+
+			/**
+			 * create report
+			 * todo - add min data threshold for payout
+			 */
+			batch.Queue(
+				`
+				INSERT INTO payment_report (
+						payment_plan_id,
+						total_payout_nano_cents,
+						total_nano_points,
+						scale_factor,
+						payout_points_per_payout
+
+				)
+				VALUES ($1, $2, $3, $4, $5)
+				`,
+				paymentPlanId,
+				totalPayout,
+				totalPayoutAccountNanoPoints,
+				pointsScaleFactor,
+				pointsPerPayout,
+			)
+
+			/**
+			 * Safeguard against division by zero
+			 */
+			if totalPayout <= 0 {
+				return
+			}
+
+			if pointsScaleFactor <= 0 {
+				return
+			}
+
 			for _, payment := range networkPayments {
 
 				/**
@@ -658,18 +695,22 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.Payout,
 				)
 
-				accountPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:        payment.NetworkId,
-					Event:            AccountPointEventPayout,
-					PointValue:       scaledAccountPoints,
-					PaymentPlanId:    &payment.PaymentPlanId,
-					AccountPaymentId: &payment.PaymentId,
-				}
+				if scaledAccountPoints > 0 {
 
-				ApplyAccountPoints(
-					ctx,
-					accountPointsArgs,
-				)
+					accountPointsArgs := ApplyAccountPointsArgs{
+						NetworkId:        payment.NetworkId,
+						Event:            AccountPointEventPayout,
+						PointValue:       scaledAccountPoints,
+						PaymentPlanId:    &payment.PaymentPlanId,
+						AccountPaymentId: &payment.PaymentId,
+					}
+
+					ApplyAccountPoints(
+						ctx,
+						accountPointsArgs,
+					)
+
+				}
 
 				/**
 				 * Seeker bonus
@@ -682,7 +723,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					seekerBonus += networkReliabilitySubsidies[payment.NetworkId].Points
 					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
-					accountPointsArgs = ApplyAccountPointsArgs{
+					accountPointsArgs := ApplyAccountPointsArgs{
 						NetworkId:        payment.NetworkId,
 						Event:            AccountPointEventPayoutMultiplier,
 						PointValue:       seekerBonus,
@@ -705,7 +746,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 
-						accountPointsArgs = ApplyAccountPointsArgs{
+						accountPointsArgs := ApplyAccountPointsArgs{
 							NetworkId:        parentReferralNetworkId,
 							Event:            AccountPointEventPayoutLinkedAccount,
 							PointValue:       parentReferralPoints,
