@@ -2465,8 +2465,9 @@ var migrations = []any{
 			payment_plan_id uuid NOT NULL,
 			total_payout_nano_cents bigint NOT NULL,
 			total_nano_points bigint NOT NULL,
-			scale_factor double precision NOT NULL,
+			point_scale_factor double precision NOT NULL,
 			payout_points_per_payout int NOT NULL,
+			time_scale_factor double precision NOT NULL,
 			create_time timestamp NOT NULL DEFAULT now(),
 
             PRIMARY KEY (payment_plan_id)

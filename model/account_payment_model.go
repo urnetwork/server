@@ -666,16 +666,18 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 						payment_plan_id,
 						total_payout_nano_cents,
 						total_nano_points,
-						scale_factor,
+						point_scale_factor,
+						time_scale_factor,
 						payout_points_per_payout
 
 				)
-				VALUES ($1, $2, $3, $4, $5)
+				VALUES ($1, $2, $3, $4, $5, $6)
 				`,
 				paymentPlanId,
 				totalPayout,
 				totalPayoutAccountNanoPoints,
 				pointsScaleFactor,
+				subsidyScale,
 				pointsPerPayout,
 			)
 
