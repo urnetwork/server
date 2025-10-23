@@ -503,6 +503,7 @@ func TestReliabilityPoints(t *testing.T) {
 		reliabilitySubsidies := calculateReliabilityPayout(
 			ctx,
 			lastPaymentTime,
+			1.0,
 		)
 
 		networkScores := GetAllNetworkReliabilityScores(ctx)

@@ -333,6 +333,7 @@ type SubsidyPayment struct {
 	NetPayoutByteCountUnpaid ByteCount
 	NetRevenue               NanoCents
 	NetPayout                NanoCents
+	SubsidyScale             float64
 }
 
 const SeekerHolderMultiplier = 2.0
@@ -475,10 +476,17 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		}
 
 		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentPlanId, networkPayments)
+
+		subsidyScale := 1.0
+		if subsidyPayment != nil && subsidyPayment.SubsidyScale != 0 {
+			subsidyScale = subsidyPayment.SubsidyScale
+		}
+
 		if err != nil {
 			returnErr = err
 			return
 		}
+
 		// note `subsidyPayment` will be nil if the subsidy cannot be paid
 		// this will be the case if there was already a subsidy payment to overlap this time range
 
@@ -534,6 +542,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			ctx,
 			tx,
 			lastPaymentTime,
+			subsidyScale,
 		)
 
 		/**
@@ -636,7 +645,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		// this is the total number of points allocated per payout
 		// should this factor in how frequent the payouts are?
 		// todo: should be moved into config
-		nanoPointsPerPayout := PointsToNanoPoints(float64(pointsPerPayout))
+		nanoPointsPerPayout := PointsToNanoPoints(float64(pointsPerPayout) * subsidyScale)
 
 		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
 		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
@@ -848,12 +857,14 @@ type NetworkReliabilitySubsidy struct {
 func calculateReliabilityPayout(
 	ctx context.Context,
 	lastPaymentTime time.Time,
+	subsidyScale float64,
 ) (networkSubsidyAmounts map[server.Id]NetworkReliabilitySubsidy) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		networkSubsidyAmounts = calculateReliabilityPayoutInTx(
 			ctx,
 			tx,
 			lastPaymentTime,
+			subsidyScale,
 		)
 	})
 	return
@@ -867,6 +878,7 @@ func calculateReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	lastPaymentTime time.Time,
+	subsidyScale float64,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
 	now := server.NowUtc()
@@ -877,7 +889,7 @@ func calculateReliabilityPayoutInTx(
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
 
-	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout))
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout) * subsidyScale)
 
 	totalReliabilityWeight := 0.0
 
@@ -1350,6 +1362,7 @@ func planSubsidyPaymentInTx(
 		NetPayoutByteCountUnpaid: netPayoutByteCountUnpaid,
 		NetRevenue:               netRevenue,
 		NetPayout:                netPayout,
+		SubsidyScale:             subsidyScale,
 	}
 	return
 }
