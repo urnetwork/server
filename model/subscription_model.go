@@ -831,7 +831,6 @@ func createTransferEscrowInTx(
                 $2 < end_time
 
             ORDER BY end_time
-            FOR UPDATE
         `,
 		payerNetworkId,
 		now,
