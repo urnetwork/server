@@ -259,11 +259,11 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		/**
 		 * total payout: 5.00 USDC
-		 * ppp = 250_000 points per payout
+		 * ppp = 1_000_000 points per payout
 		 * (ppp / sum(accountPoints)) * ((payout / totalPayout) * 1m)
-		 * network A points should be 2 / 5 * ppp = 100_000 points
+		 * network A points should be 2 / 5 * ppp = 400_000 points
 		 * network A is a Seeker holder, so it gets x2 points
-		 * network B points should be 3 / 5 * ppp = 150_000 points
+		 * network B points should be 3 / 5 * ppp = 600_000 points
 		 */
 
 		/**
@@ -280,7 +280,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		totalPoints := networkPointsA[0].PointValue + networkPointsB[0].PointValue
 		assert.Equal(t, NanoPoints(totalPoints), PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout)))
 
-		expectedPointsA := int(PointsToNanoPoints(float64(100_000)))
+		expectedPointsA := int(PointsToNanoPoints(float64(400_000)))
 
 		assert.Equal(t, len(networkPointsA), 2)
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
@@ -302,7 +302,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * Network B is not a Seeker holder, so it gets the normal points
 		 * No parent or child referrals
 		 */
-		expectedPointsB := int(PointsToNanoPoints(float64(150_000)))
+		expectedPointsB := int(PointsToNanoPoints(float64(600_000)))
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
 		assert.Equal(t, networkPointsB[0].Event, string(AccountPointEventPayout))
