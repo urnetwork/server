@@ -711,13 +711,13 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 }
 
 func (self *Exchange) Drain() {
-	for {
+	for i := 0; ; i += 1 {
 		select {
 		case <-self.ctx.Done():
 			return
 		default:
 		}
-		clientId, resident, handleCancels, remainingCount, ok := func() (server.Id, *Resident, []context.CancelFunc, int, bool) {
+		resident, handleCancels, remainingCount, ok := func() (*Resident, []context.CancelFunc, int, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 
@@ -726,18 +726,21 @@ func (self *Exchange) Drain() {
 			// active connections with potential residents
 			for clientId, handleCancels := range self.connections {
 				resident := self.residents[clientId]
-				return clientId, resident, maps.Values(handleCancels), n - 1, true
+				return resident, maps.Values(handleCancels), n - 1, true
 			}
 			// residents without active connections
 			for _, resident := range self.residents {
-				return resident.clientId, resident, nil, n - 1, true
+				return resident, nil, n - 1, true
 			}
-			return server.Id{}, nil, nil, 0, false
+			return nil, nil, 0, false
 		}()
 		if !ok {
+			glog.Infof("[c]drain complete\n")
 			break
 		}
-		glog.Infof("[c][%s]drain one (at least %d remaining)\n", clientId, remainingCount)
+		if i%100 == 0 {
+			glog.Infof("[c][%d]drain in progress (at least %d remaining)\n", i, remainingCount)
+		}
 		if resident != nil {
 			resident.Close()
 		}
