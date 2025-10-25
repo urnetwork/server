@@ -136,12 +136,12 @@ func (self *SearchLocal) index(update *SearchValueUpdate) {
 	defer self.stateLock.Unlock()
 
 	if update.Remove {
-		glog.Infof("[s][%s][%s]index update[%d] remove\n", self.Realm(), update.ValueId, update.UpdateId)
+		glog.V(1).Infof("[s][%s][%s]index update[%d] remove\n", self.Realm(), update.ValueId, update.UpdateId)
 		delete(self.valueIdVariantProjections, update.ValueId)
 	} else {
 		// update the value
 
-		glog.Infof("[s][%s][%s/%d]index update[%d] add %s\n", self.Realm(), update.ValueId, update.ValueVariant, update.UpdateId, server.MaskValue(update.Value))
+		glog.V(1).Infof("[s][%s][%s/%d]index update[%d] add %s\n", self.Realm(), update.ValueId, update.ValueVariant, update.UpdateId, server.MaskValue(update.Value))
 
 		lenValueHistos := map[int]map[string]aliasHisto{}
 

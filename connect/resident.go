@@ -1197,7 +1197,7 @@ func (self *ResidentTransport) Run() {
 			)
 
 			if err != nil {
-				glog.Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				glog.V(1).Infof("[rt]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
 			}
 
 			if err == nil {
@@ -1370,7 +1370,7 @@ func (self *ResidentForward) Run() {
 				self.exchange.settings,
 			)
 			if err != nil {
-				glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+				glog.V(1).Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
 			}
 			if err == nil {
 				c := func() {
