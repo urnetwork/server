@@ -153,7 +153,7 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 	if int64(self.settings.BurstConnectionCount) < burstCount {
 		// delay connections above the burst limit
 		delay := time.Duration(burstCount-int64(self.settings.BurstConnectionCount)) * self.settings.BurstConnectionDelay
-		glog.Infof("[t][%s]burst rate limit @%d (+%.2fs delay)\n", self.clientIpHashHex, burstCount, float64(delay/time.Millisecond)/1000.0)
+		glog.V(1).Infof("[t][%s]burst rate limit @%d (+%.2fs delay)\n", self.clientIpHashHex, burstCount, float64(delay/time.Millisecond)/1000.0)
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")
