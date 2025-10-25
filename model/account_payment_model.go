@@ -333,6 +333,7 @@ type SubsidyPayment struct {
 	NetPayoutByteCountUnpaid ByteCount
 	NetRevenue               NanoCents
 	NetPayout                NanoCents
+	SubsidyScale             float64
 }
 
 const SeekerHolderMultiplier = 2.0
@@ -478,10 +479,17 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		}
 
 		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentPlanId, networkPayments)
+
+		subsidyScale := 1.0
+		if subsidyPayment != nil && subsidyPayment.SubsidyScale != 0 {
+			subsidyScale = subsidyPayment.SubsidyScale
+		}
+
 		if err != nil {
 			returnErr = err
 			return
 		}
+
 		// note `subsidyPayment` will be nil if the subsidy cannot be paid
 		// this will be the case if there was already a subsidy payment to overlap this time range
 
@@ -537,6 +545,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			ctx,
 			tx,
 			lastPaymentTime,
+			subsidyScale,
 		)
 
 		/**
@@ -634,10 +643,12 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		}
 
+		pointsPerPayout := EnvSubsidyConfig().AccountPointsPerPayout
+
 		// this is the total number of points allocated per payout
 		// should this factor in how frequent the payouts are?
 		// todo: should be moved into config
-		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+		nanoPointsPerPayout := PointsToNanoPoints(float64(pointsPerPayout) * subsidyScale)
 
 		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
 		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
@@ -647,6 +658,43 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 		)
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+
+			/**
+			 * create report
+			 * todo - add min data threshold for payout
+			 */
+			batch.Queue(
+				`
+				INSERT INTO payment_report (
+						payment_plan_id,
+						total_payout_nano_cents,
+						total_nano_points,
+						point_scale_factor,
+						time_scale_factor,
+						payout_points_per_payout
+
+				)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				`,
+				paymentPlanId,
+				totalPayout,
+				totalPayoutAccountNanoPoints,
+				pointsScaleFactor,
+				subsidyScale,
+				pointsPerPayout,
+			)
+
+			/**
+			 * Safeguard against division by zero
+			 */
+			if totalPayout <= 0 {
+				return
+			}
+
+			if pointsScaleFactor <= 0 {
+				return
+			}
+
 			for _, payment := range networkPayments {
 
 				/**
@@ -661,18 +709,22 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.Payout,
 				)
 
-				accountPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:        payment.NetworkId,
-					Event:            AccountPointEventPayout,
-					PointValue:       scaledAccountPoints,
-					PaymentPlanId:    &payment.PaymentPlanId,
-					AccountPaymentId: &payment.PaymentId,
-				}
+				if scaledAccountPoints > 0 {
 
-				ApplyAccountPoints(
-					ctx,
-					accountPointsArgs,
-				)
+					accountPointsArgs := ApplyAccountPointsArgs{
+						NetworkId:        payment.NetworkId,
+						Event:            AccountPointEventPayout,
+						PointValue:       scaledAccountPoints,
+						PaymentPlanId:    &payment.PaymentPlanId,
+						AccountPaymentId: &payment.PaymentId,
+					}
+
+					ApplyAccountPoints(
+						ctx,
+						accountPointsArgs,
+					)
+
+				}
 
 				/**
 				 * Seeker bonus
@@ -685,7 +737,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					seekerBonus += networkReliabilitySubsidies[payment.NetworkId].Points
 					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
-					accountPointsArgs = ApplyAccountPointsArgs{
+					accountPointsArgs := ApplyAccountPointsArgs{
 						NetworkId:        payment.NetworkId,
 						Event:            AccountPointEventPayoutMultiplier,
 						PointValue:       seekerBonus,
@@ -708,7 +760,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
 
-						accountPointsArgs = ApplyAccountPointsArgs{
+						accountPointsArgs := ApplyAccountPointsArgs{
 							NetworkId:        parentReferralNetworkId,
 							Event:            AccountPointEventPayoutLinkedAccount,
 							PointValue:       parentReferralPoints,
@@ -810,6 +862,7 @@ type NetworkReliabilitySubsidy struct {
 func calculateReliabilityPayout(
 	ctx context.Context,
 	lastPaymentTime time.Time,
+	subsidyScale float64,
 ) (networkSubsidyAmounts map[server.Id]NetworkReliabilitySubsidy) {
 	now := server.NowUtc()
 	UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
@@ -819,6 +872,7 @@ func calculateReliabilityPayout(
 			ctx,
 			tx,
 			lastPaymentTime,
+			subsidyScale,
 		)
 	})
 	return
@@ -832,6 +886,7 @@ func calculateReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	lastPaymentTime time.Time,
+	subsidyScale float64,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
 	now := server.NowUtc()
@@ -842,7 +897,7 @@ func calculateReliabilityPayoutInTx(
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
 
-	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout))
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout) * subsidyScale)
 
 	totalReliabilityWeight := 0.0
 
@@ -1315,6 +1370,7 @@ func planSubsidyPaymentInTx(
 		NetPayoutByteCountUnpaid: netPayoutByteCountUnpaid,
 		NetRevenue:               netRevenue,
 		NetPayout:                netPayout,
+		SubsidyScale:             subsidyScale,
 	}
 	return
 }
