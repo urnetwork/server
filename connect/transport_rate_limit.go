@@ -139,7 +139,7 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 
 	if int64(self.settings.MaxTotalConnectionCount) < totalCount {
 		delay := self.settings.TotalConnectionDelay
-		glog.Infof("[t][%s]total rate limit @%d (+%2.fs delay)\n", self.clientIpHashHex, totalCount, float64(delay/time.Millisecond)/1000.0)
+		glog.V(1).Infof("[t][%s]total rate limit @%d (+%2.fs delay)\n", self.clientIpHashHex, totalCount, float64(delay/time.Millisecond)/1000.0)
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")

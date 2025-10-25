@@ -208,7 +208,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
 	if err != nil {
-		glog.Infof("[t]rate limit err = %s\n", err)
+		glog.V(1).Infof("[t]rate limit err = %s\n", err)
 		return
 	}
 

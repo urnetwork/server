@@ -1776,7 +1776,7 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 		if err == nil {
 			r.Expire(ctx, networkKey, ttl)
 			if networkCount%warnThreshold == 0 {
-				glog.Infof("[ncm][%s]network has a significant amount of connection errors (%d)\n", networkId, networkCount)
+				glog.V(1).Infof("[ncm][%s]network has a significant amount of connection errors (%d)\n", networkId, networkCount)
 			}
 		}
 
@@ -1784,7 +1784,7 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 		if err == nil {
 			r.Expire(ctx, clientKey, ttl)
 			if clientCount%warnThreshold == 0 {
-				glog.Infof("[ncm][%s]client has a significant amount of connection errors (%d)\n", clientId, clientCount)
+				glog.V(1).Infof("[ncm][%s]client has a significant amount of connection errors (%d)\n", clientId, clientCount)
 			}
 		}
 
@@ -1792,7 +1792,7 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 		if err == nil {
 			r.Expire(ctx, networkErrorMessageKey, ttl)
 			if networkErrorMessageCount%warnThreshold == 0 {
-				glog.Infof("[ncm][%s]network has a significant count of connection error message (%d): %s\n", networkId, networkErrorMessageCount, errorMessage)
+				glog.V(1).Infof("[ncm][%s]network has a significant count of connection error message (%d): %s\n", networkId, networkErrorMessageCount, errorMessage)
 			}
 		}
 
@@ -1800,7 +1800,7 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 		if err == nil {
 			r.Expire(ctx, clientErrorMessageKey, ttl)
 			if clientErrorMessageCount%warnThreshold == 0 {
-				glog.Infof("[ncm][%s]client has a significant count of connection error message (%d): %s\n", clientId, clientErrorMessageCount, errorMessage)
+				glog.V(1).Infof("[ncm][%s]client has a significant count of connection error message (%d): %s\n", clientId, clientErrorMessageCount, errorMessage)
 			}
 		}
 
