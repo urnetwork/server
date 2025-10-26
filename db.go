@@ -114,9 +114,8 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// https://github.com/jackc/pgx/blob/master/pgxpool/pool.go#L103
 		// https://github.com/jackc/pgx/blob/master/pgconn/config.go#L445
 		options := map[string]string{
-			"sslmode":         "disable",
-			"connect_timeout": "60",
-			// FIXME perf move to config
+			"sslmode":                       "disable",
+			"connect_timeout":               "60",
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
 			"pool_max_conn_lifetime":        connectionMaxLifetime,
@@ -124,8 +123,8 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			"pool_max_conn_idle_time":       connectionMaxIdleTime,
 			"pool_health_check_period":      healthCheckPeriod,
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
-			"default_transaction_read_only": "on",
-			"default_transaction_isolation": "read committed",
+			// "default_transaction_read_only": "on",
+			// "default_transaction_isolation": "read committed",
 		}
 		glog.Infof("[db]options = %s\n", options)
 		optionsPairs := []string{}
