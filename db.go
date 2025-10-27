@@ -115,7 +115,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// https://github.com/jackc/pgx/blob/master/pgconn/config.go#L445
 		options := map[string]string{
 			"sslmode":                       "disable",
-			"connect_timeout":               "60",
+			"connect_timeout":               "300",
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
 			"pool_max_conn_lifetime":        connectionMaxLifetime,
