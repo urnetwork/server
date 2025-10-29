@@ -1740,23 +1740,20 @@ type ClientScore struct {
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
 
-// FIXME store gob lists randomly allocated to bucket sizes N
-// FIXME store the list[i] and total bucket size per location_id, location_group_id
-
-func clientScoreLocationCountsKey(locationId server.Id) string {
-	return fmt.Sprintf("client_score_l_%s", locationId)
+func clientScoreLocationCountsKey(locationId server.Id, callerLocationId server.Id) string {
+	return fmt.Sprintf("client_score_l_%s_%s", locationId, callerLocationId)
 }
 
-func clientScoreLocationGroupCountsKey(locationGroupId server.Id) string {
-	return fmt.Sprintf("client_score_g_%s", locationGroupId)
+func clientScoreLocationGroupCountsKey(locationGroupId server.Id, callerLocationId server.Id) string {
+	return fmt.Sprintf("client_score_g_%s_%s", locationGroupId, callerLocationId)
 }
 
-func clientScoreLocationSampleKey(locationId server.Id, index int) string {
-	return fmt.Sprintf("client_score_g_%s_%d", locationId, index)
+func clientScoreLocationSampleKey(locationId server.Id, callerLocationId server.Id, index int) string {
+	return fmt.Sprintf("client_score_g_%s_%s_%d", locationId, callerLocationId, index)
 }
 
-func clientScoreLocationGroupSampleKey(locationGroupId server.Id, index int) string {
-	return fmt.Sprintf("client_score_g_%s_%d", locationGroupId, index)
+func clientScoreLocationGroupSampleKey(locationGroupId server.Id, callerLocationId server.Id, index int) string {
+	return fmt.Sprintf("client_score_g_%s_%s_%d", locationGroupId, callerLocationId, index)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
@@ -2081,24 +2078,75 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		return
 	}
 
+	filterActive := func(clientScores map[server.Id]*ClientScore, clientLocationId server.Id) map[server.Id]*ClientScore {
+		clientNetworks := map[server.Id]server.Id{}
+		for clientId, clientScore := range clientScores {
+			clientNetworks[clientId] = clientScore.NetworkId
+		}
+
+		activeClientScores := map[server.Id]*ClientScore{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.CreateTempJoinTableInTx(
+				ctx,
+				tx,
+				"temp_client_networks(client_id uuid -> network_id uuid)",
+				clientNetworks,
+			)
+
+			result, err := tx.Query(
+				ctx,
+				`
+				SELECT
+					temp_client_networks.client_id
+				FROM temp_client_networks
+		        LEFT JOIN exclude_network_client_location ON
+	            	exclude_network_client_location.client_location_id = $1 AND
+	                exclude_network_client_location.network_id = temp_client_networks.network_id
+	            WHERE
+	            	exclude_network_client_location.network_id IS NULL
+				`,
+				clientLocationId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					activeClientScores[clientId] = clientScores[clientId]
+				}
+			})
+		})
+		return activeClientScores
+	}
+
+	clientLocationIds := []server.Id{
+		// no client location match
+		server.Id{},
+	}
+	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
+
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
 
-		for locationId, clientScores := range locationClientScores {
-			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
-			pipe.Set(ctx, clientScoreLocationCountsKey(locationId), countsBytes, ttl)
-			for i, sampleBytes := range samplesBytes {
-				pipe.Set(ctx, clientScoreLocationSampleKey(locationId, i), sampleBytes, ttl)
+		for _, clientLocationId := range clientLocationIds {
+			for locationId, clientScores := range locationClientScores {
+				activeClientScores := filterActive(clientScores, clientLocationId)
+				countsBytes, samplesBytes, counts, _ := exportClientScores(activeClientScores)
+				pipe.Set(ctx, clientScoreLocationCountsKey(locationId, clientLocationId), countsBytes, ttl)
+				for i, sampleBytes := range samplesBytes {
+					pipe.Set(ctx, clientScoreLocationSampleKey(locationId, clientLocationId, i), sampleBytes, ttl)
+				}
+				glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
 			}
-			glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
-		}
-		for locationGroupId, clientScores := range locationGroupClientScores {
-			countsBytes, samplesBytes, counts, _ := exportClientScores(clientScores)
-			pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId), countsBytes, ttl)
-			for i, sampleBytes := range samplesBytes {
-				pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, i), sampleBytes, ttl)
+			for locationGroupId, clientScores := range locationGroupClientScores {
+				activeClientScores := filterActive(clientScores, clientLocationId)
+				countsBytes, samplesBytes, counts, _ := exportClientScores(activeClientScores)
+				pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId, clientLocationId), countsBytes, ttl)
+				for i, sampleBytes := range samplesBytes {
+					pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, clientLocationId, i), sampleBytes, ttl)
+				}
+				glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 			}
-			glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
+
 		}
 
 		_, returnErr = pipe.Exec(ctx)
@@ -2113,6 +2161,7 @@ func loadClientScores(
 	ctx context.Context,
 	locationIds map[server.Id]bool,
 	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
 	n int,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
@@ -2120,12 +2169,12 @@ func loadClientScores(
 
 		locationCounts := map[server.Id]*redis.StringCmd{}
 		for locationId, _ := range locationIds {
-			v := pipe.Get(ctx, clientScoreLocationCountsKey(locationId))
+			v := pipe.Get(ctx, clientScoreLocationCountsKey(locationId, clientLocationId))
 			locationCounts[locationId] = v
 		}
 		locationGroupCounts := map[server.Id]*redis.StringCmd{}
 		for locationGroupId, _ := range locationGroupIds {
-			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(locationGroupId))
+			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(locationGroupId, clientLocationId))
 			locationGroupCounts[locationGroupId] = v
 		}
 
@@ -2146,7 +2195,7 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationSampleKey(locationId, i)] = count
+				sampleKeyCounts[clientScoreLocationSampleKey(locationId, clientLocationId, i)] = count
 			}
 		}
 		for locationGroupId, countsCmd := range locationGroupCounts {
@@ -2162,7 +2211,7 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationGroupSampleKey(locationGroupId, i)] = count
+				sampleKeyCounts[clientScoreLocationGroupSampleKey(locationGroupId, clientLocationId, i)] = count
 			}
 		}
 
@@ -2234,7 +2283,6 @@ func FindProviders2(
 			providers = append(providers, provider)
 		}
 		if spec.BestAvailable != nil && *spec.BestAvailable {
-			// homeLocationId, found := findHomeLocationIdInTx(tx, session)
 			homeLocationId, ok := countryCodeLocationIds()["us"]
 			if ok {
 				locationIds[homeLocationId] = true
@@ -2263,11 +2311,25 @@ func FindProviders2(
 			rankMode = findProviders2.RankMode
 		}
 
+		// the caller ip is used to match against provider excluded lists
+		clientIp, _, err := session.ParseClientIpPort()
+		if err != nil {
+			return nil, err
+		}
+
+		ipInfo, err := server.GetIpInfo(clientIp)
+		if err != nil {
+			return nil, err
+		}
+
+		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
+
 		loadStartTime := time.Now()
 		clientScores, err := loadClientScores(
 			session.Ctx,
 			locationIds,
 			locationGroupIds,
+			clientLocationId,
 			max(loadMultiplier*count, minLoadCount),
 		)
 		if err != nil {
@@ -2314,96 +2376,16 @@ func FindProviders2(
 			return clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]
 		})
 
-		// the caller ip is used to match against provider excluded lists
-		clientIp, _, err := session.ParseClientIpPort()
-		if err != nil {
-			return nil, err
-		}
-
-		ipInfo, err := server.GetIpInfo(clientIp)
-		if err != nil {
-			return nil, err
-		}
-
-		clientLocationId, ok := countryCodeLocationIds()[ipInfo.CountryCode]
-		if !ok {
-			glog.Warningf("[nclm]country code \"%s\" is not mapped to a location id.\n", ipInfo.CountryCode)
-
-			// output in order of `clientIds`
-			for _, clientId := range clientIds {
-				clientScore := clientScores[clientId]
-				provider := &FindProvidersProvider{
-					ClientId:                   clientId,
-					Tier:                       clientScore.Tiers[rankMode],
-					EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
-					HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
-				}
-				providers = append(providers, provider)
+		// output in order of `clientIds`
+		for _, clientId := range clientIds {
+			clientScore := clientScores[clientId]
+			provider := &FindProvidersProvider{
+				ClientId:                   clientId,
+				Tier:                       clientScore.Tiers[rankMode],
+				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 			}
-		} else {
-			filterActive := func(clientNetworks map[server.Id]server.Id) map[server.Id]bool {
-				activeClientIds := map[server.Id]bool{}
-				server.Tx(session.Ctx, func(tx server.PgTx) {
-					server.CreateTempJoinTableInTx(
-						session.Ctx,
-						tx,
-						"temp_client_networks(client_id uuid -> network_id uuid)",
-						clientNetworks,
-					)
-
-					result, err := tx.Query(
-						session.Ctx,
-						`
-						SELECT
-							temp_client_networks.client_id
-						FROM temp_client_networks
-						INNER JOIN provide_key ON
-				            provide_key.provide_mode = $1 AND
-				            provide_key.client_id = temp_client_networks.client_id
-				        INNER JOIN network_client_connection ON
-				        	network_client_connection.connected = true AND
-				        	network_client_connection.client_id = temp_client_networks.client_id
-				        LEFT JOIN exclude_network_client_location ON
-			            	exclude_network_client_location.client_location_id = $2 AND
-			                exclude_network_client_location.network_id = temp_client_networks.network_id
-			            WHERE
-			            	exclude_network_client_location.network_id IS NULL
-						`,
-						ProvideModePublic,
-						clientLocationId,
-					)
-					server.WithPgResult(result, err, func() {
-						for result.Next() {
-							var clientId server.Id
-							server.Raise(result.Scan(&clientId))
-							activeClientIds[clientId] = true
-						}
-					})
-				})
-				return activeClientIds
-			}
-
-			// filter the list to include only clients that are actively connected and providing
-			clientNetworks := map[server.Id]server.Id{}
-			for _, clientId := range clientIds {
-				clientScore := clientScores[clientId]
-				clientNetworks[clientId] = clientScore.NetworkId
-			}
-			activeClientIds := filterActive(clientNetworks)
-
-			// output in order of `clientIds`
-			for _, clientId := range clientIds {
-				if activeClientIds[clientId] {
-					clientScore := clientScores[clientId]
-					provider := &FindProvidersProvider{
-						ClientId:                   clientId,
-						Tier:                       clientScore.Tiers[rankMode],
-						EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
-						HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
-					}
-					providers = append(providers, provider)
-				}
-			}
+			providers = append(providers, provider)
 		}
 	}
 
