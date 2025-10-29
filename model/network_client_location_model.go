@@ -2152,7 +2152,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		_, returnErr = pipe.Exec(ctx)
 	})
 
-	glog.Infof("[nclm]update %d location scores, %d location group scores\n", len(locationClientScores), len(locationGroupClientScores))
+	glog.Infof(
+		"[nclm]update %d client locations x %d location scores, %d location group scores\n",
+		len(clientLocationIds),
+		len(locationClientScores),
+		len(locationGroupClientScores),
+	)
 
 	return
 }

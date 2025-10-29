@@ -1009,7 +1009,7 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 		AddAuditContractEvent(ctx, v)
 	default:
 		// panic(fmt.Sprintf("Event type not recognized: %T", v))
-		glog.Warningf("[audit]event type not recognized: %T", v)
+		glog.V(2).Infof("[audit]event type not recognized: %T", v)
 	}
 }
 
