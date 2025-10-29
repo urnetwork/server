@@ -2050,24 +2050,26 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		})
 
 		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
-		c := (len(clientScores) + n - 1) / n
 
 		counts = make([]int, n)
 		samples = make([][]*ClientScore, n)
 		samplesBytes = make([][]byte, n)
 
-		for i := range n {
-			i0 := i * c
-			i1 := min((i+1)*c, len(clientScores))
-			sample := clientScores[i0:i1]
+		if 0 < n {
+			c := (len(clientScores) + n - 1) / n
+			for i := range n {
+				i0 := i * c
+				i1 := min((i+1)*c, len(clientScores))
+				sample := clientScores[i0:i1]
 
-			counts[i] = len(sample)
-			samples[i] = sample
+				counts[i] = len(sample)
+				samples[i] = sample
 
-			b := bytes.NewBuffer(nil)
-			e := gob.NewEncoder(b)
-			e.Encode(sample)
-			samplesBytes[i] = b.Bytes()
+				b := bytes.NewBuffer(nil)
+				e := gob.NewEncoder(b)
+				e.Encode(sample)
+				samplesBytes[i] = b.Bytes()
+			}
 		}
 
 		b := bytes.NewBuffer(nil)
@@ -2078,43 +2080,47 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		return
 	}
 
-	filterActive := func(clientScores map[server.Id]*ClientScore, clientLocationId server.Id) map[server.Id]*ClientScore {
-		clientNetworks := map[server.Id]server.Id{}
-		for clientId, clientScore := range clientScores {
-			clientNetworks[clientId] = clientScore.NetworkId
-		}
-
-		activeClientScores := map[server.Id]*ClientScore{}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.CreateTempJoinTableInTx(
-				ctx,
-				tx,
-				"temp_client_networks(client_id uuid -> network_id uuid)",
-				clientNetworks,
-			)
-
-			result, err := tx.Query(
-				ctx,
-				`
-				SELECT
-					temp_client_networks.client_id
-				FROM temp_client_networks
-		        LEFT JOIN exclude_network_client_location ON
-	            	exclude_network_client_location.client_location_id = $1 AND
-	                exclude_network_client_location.network_id = temp_client_networks.network_id
-	            WHERE
-	            	exclude_network_client_location.network_id IS NULL
-				`,
-				clientLocationId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
-					activeClientScores[clientId] = clientScores[clientId]
+	// location id -> network id
+	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_id,
+				client_location_id
+			FROM exclude_network_client_location
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId server.Id
+				var clientLocationId server.Id
+				server.Raise(result.Scan(
+					&networkId,
+					&clientLocationId,
+				))
+				networkIds, ok := excludeLocationNetworkIds[clientLocationId]
+				if !ok {
+					networkIds = map[server.Id]bool{}
+					excludeLocationNetworkIds[clientLocationId] = networkIds
 				}
-			})
+				networkIds[networkId] = true
+			}
 		})
+	})
+
+	filterActive := func(clientScores map[server.Id]*ClientScore, clientLocationId server.Id) map[server.Id]*ClientScore {
+		excludeNetworkIds := excludeLocationNetworkIds[clientLocationId]
+		if len(excludeNetworkIds) == 0 {
+			return clientScores
+		}
+		activeClientScores := map[server.Id]*ClientScore{}
+		for clientId, clientScore := range clientScores {
+			if !excludeNetworkIds[clientScore.NetworkId] {
+				activeClientScores[clientId] = clientScore
+			}
+		}
 		return activeClientScores
 	}
 
@@ -2125,9 +2131,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
+		for j, clientLocationId := range clientLocationIds {
+			pipe := r.TxPipeline()
 
-		for _, clientLocationId := range clientLocationIds {
+			glog.Infof("[nclm]export client location[%d/%d] %s\n", j+1, len(clientLocationIds), clientLocationId)
 			for locationId, clientScores := range locationClientScores {
 				activeClientScores := filterActive(clientScores, clientLocationId)
 				countsBytes, samplesBytes, counts, _ := exportClientScores(activeClientScores)
@@ -2147,17 +2154,23 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 			}
 
+			_, returnErr = pipe.Exec(ctx)
+			if returnErr != nil {
+				return
+			}
 		}
-
-		_, returnErr = pipe.Exec(ctx)
 	})
 
-	glog.Infof(
-		"[nclm]update %d client locations x %d location scores, %d location group scores\n",
-		len(clientLocationIds),
-		len(locationClientScores),
-		len(locationGroupClientScores),
-	)
+	if returnErr == nil {
+		glog.Infof(
+			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
+			len(clientLocationIds),
+			len(locationClientScores),
+			len(locationGroupClientScores),
+		)
+	} else {
+		glog.Infof("[nclm]update err = %s\n", returnErr)
+	}
 
 	return
 }
