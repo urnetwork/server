@@ -808,47 +808,96 @@ func createTransferEscrowInTx(
 		balanceId        server.Id
 		paid             bool
 		balanceByteCount ByteCount
+		debited          bool
 	}
+
+	now := server.NowUtc()
 
 	// add up the balance_byte_count until >= contractTransferByteCount
 	// if not enough, error
 	balanceEscrows := map[server.Id]*escrow{}
 
-	now := server.NowUtc()
-
+	// typically the entire amount can come out of a single balance
+	// try this first
 	result, err := tx.Query(
 		ctx,
 		`
-            SELECT
-                balance_id,
-                paid,
-                balance_byte_count,
-                start_time
-            FROM transfer_balance
+			WITH t AS (
+				SELECT
+	                balance_id,
+	                paid,
+	                balance_byte_count
+	            FROM transfer_balance
+	            WHERE
+	                network_id = $1 AND
+	                active = true AND
+	                start_time <= $2 AND
+	                $2 < end_time AND
+	                $3 <= balance_byte_count
+	            ORDER BY end_time
+	            LIMIT 1
+			)
+            UPDATE transfer_balance
+            SET
+                balance_byte_count = transfer_balance.balance_byte_count - $3
+            FROM t
             WHERE
-                network_id = $1 AND
-                active = true AND
-                $2 < end_time
-
-            ORDER BY end_time
+            	transfer_balance.balance_id = t.balance_id
+            RETURNING t.balance_id, t.paid
         `,
 		payerNetworkId,
 		now,
+		contractTransferByteCount,
 	)
-	netEscrowBalanceByteCount := ByteCount(0)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var balanceId server.Id
 			var paid bool
-			var balanceByteCount ByteCount
-			var startTime time.Time
 			server.Raise(result.Scan(
 				&balanceId,
 				&paid,
-				&balanceByteCount,
-				&startTime,
 			))
-			if startTime.Before(now) {
+			balanceEscrows[balanceId] = &escrow{
+				balanceId:        balanceId,
+				paid:             paid,
+				balanceByteCount: contractTransferByteCount,
+				debited:          true,
+			}
+		}
+	})
+
+	if len(balanceEscrows) == 0 {
+		// attempt to split up across remaining transfer balances
+
+		result, err := tx.Query(
+			ctx,
+			`
+	            SELECT
+	                balance_id,
+	                paid,
+	                balance_byte_count
+	            FROM transfer_balance
+	            WHERE
+	                network_id = $1 AND
+	                active = true AND
+	                start_time <= $2 AND
+	                $2 < end_time
+	            ORDER BY end_time
+	        `,
+			payerNetworkId,
+			now,
+		)
+		netEscrowBalanceByteCount := ByteCount(0)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var paid bool
+				var balanceByteCount ByteCount
+				server.Raise(result.Scan(
+					&balanceId,
+					&paid,
+					&balanceByteCount,
+				))
 				escrowBalanceByteCount := min(contractTransferByteCount-netEscrowBalanceByteCount, balanceByteCount)
 				balanceEscrows[balanceId] = &escrow{
 					balanceId:        balanceId,
@@ -861,12 +910,12 @@ func createTransferEscrowInTx(
 					break
 				}
 			}
-		}
-	})
+		})
 
-	if netEscrowBalanceByteCount < contractTransferByteCount {
-		returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
-		return
+		if netEscrowBalanceByteCount < contractTransferByteCount {
+			returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
+			return
+		}
 	}
 
 	// the priority is blended between 0 and 100 depending on escrows
@@ -884,69 +933,66 @@ func createTransferEscrowInTx(
 		priority = UnpaidPriority
 	}
 
-	for balanceId, escrow := range balanceEscrows {
-		result := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                UPDATE transfer_balance
-                SET
-                    balance_byte_count = transfer_balance.balance_byte_count - $2
-                WHERE
-                    transfer_balance.balance_id = $1 AND
-                    $2 <= transfer_balance.balance_byte_count
-            `,
-			balanceId,
-			escrow.balanceByteCount,
-		))
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		for balanceId, escrow := range balanceEscrows {
+			if !escrow.debited {
+				// note with repeatable read we do not need to check the balance on update
+				batch.Queue(
+					`
+		                UPDATE transfer_balance
+		                SET
+		                    balance_byte_count = transfer_balance.balance_byte_count - $2
+		                WHERE
+		                    transfer_balance.balance_id = $1
+		            `,
+					balanceId,
+					escrow.balanceByteCount,
+				)
+			}
 
-		if result.RowsAffected() != 1 {
-			panic(&server.PgRetry{})
+			batch.Queue(
+				`
+	                INSERT INTO transfer_escrow (
+	                    contract_id,
+	                    balance_id,
+	                    balance_byte_count
+	                )
+	                VALUES ($1, $2, $3)
+	            `,
+				contractId,
+				balanceId,
+				escrow.balanceByteCount,
+			)
 		}
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
+		batch.Queue(
 			`
-                INSERT INTO transfer_escrow (
-                    contract_id,
-                    balance_id,
-                    balance_byte_count
-                )
-                VALUES ($1, $2, $3)
-            `,
+	            INSERT INTO transfer_contract (
+	                contract_id,
+	                source_network_id,
+	                source_id,
+	                destination_network_id,
+	                destination_id,
+	                transfer_byte_count,
+	                companion_contract_id,
+	                payer_network_id,
+	                create_time,
+	                priority
+	            )
+	            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	        `,
 			contractId,
-			balanceId,
-			escrow.balanceByteCount,
-		))
-	}
-
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-            INSERT INTO transfer_contract (
-                contract_id,
-                source_network_id,
-                source_id,
-                destination_network_id,
-                destination_id,
-                transfer_byte_count,
-                companion_contract_id,
-                payer_network_id,
-                create_time,
-                priority
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        `,
-		contractId,
-		sourceNetworkId,
-		sourceId,
-		destinationNetworkId,
-		destinationId,
-		contractTransferByteCount,
-		companionContractId,
-		payerNetworkId,
-		server.NowUtc(),
-		priority,
-	))
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+			companionContractId,
+			payerNetworkId,
+			now,
+			priority,
+		)
+	})
 
 	balances := []*TransferEscrowBalance{}
 	for balanceId, escrow := range balanceEscrows {

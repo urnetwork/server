@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	// "strconv"
+	mathrand "math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -181,9 +182,16 @@ type DbRetryOptions struct {
 	// this only works if the conflict, e.g. an ID, is changed on each run
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
 	rerunOnTransientError bool
-	retryTimeout          time.Duration
+	retryMinTimeout       time.Duration
+	retryMaxTimeout       time.Duration
 	endRetryTimeout       time.Duration
 	// debugRetryTimeout time.Duration
+}
+
+func (self *DbRetryOptions) retryTimeout() time.Duration {
+	return self.retryMinTimeout + time.Duration(
+		mathrand.Int63n(int64(self.retryMaxTimeout-self.retryMinTimeout)),
+	)
 }
 
 // this is the default for `Db` and `Tx`
@@ -192,7 +200,8 @@ func OptRetryDefault() DbRetryOptions {
 		rerunOnCommitError:     true,
 		rerunOnConnectionError: true,
 		rerunOnTransientError:  true,
-		retryTimeout:           200 * time.Millisecond,
+		retryMinTimeout:        100 * time.Millisecond,
+		retryMaxTimeout:        1000 * time.Millisecond,
 		endRetryTimeout:        60 * time.Second,
 		// debugRetryTimeout: 90 * time.Second,
 	}
@@ -335,7 +344,7 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 			}
 			panic(connErr)
@@ -352,7 +361,7 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 			}
 			panic(connErr)
@@ -398,7 +407,7 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -417,7 +426,7 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 				continue
 			}
@@ -525,7 +534,7 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -544,7 +553,7 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout):
+				case <-time.After(retryOptions.retryTimeout()):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)
@@ -634,10 +643,13 @@ func RaisePgResult[T any](result T, err error) T {
 	return result
 }
 
-func BatchInTx(ctx context.Context, tx PgTx, callback func(PgBatch)) {
+func BatchInTx(ctx context.Context, tx PgTx, callback func(PgBatch), resultsCallbacks ...func(PgBatchResults)) {
 	batch := &pgx.Batch{}
 	callback(batch)
 	results := tx.SendBatch(ctx, batch)
+	for _, resultsCallback := range resultsCallbacks {
+		resultsCallback(results)
+	}
 	err := results.Close()
 	if err != nil {
 		panic(err)
