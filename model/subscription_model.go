@@ -831,21 +831,23 @@ func createTransferEscrowInTx(
 	            WHERE
 	                network_id = $1 AND
 	                active = true AND
-	                $2 <= balance_byte_count
+	                start_time <= $2 AND
+	                $2 < end_time AND
+	                $3 <= balance_byte_count
 	            ORDER BY end_time
 	            LIMIT 1
 			)
             UPDATE transfer_balance
             SET
-                balance_byte_count = transfer_balance.balance_byte_count - $2
+                balance_byte_count = transfer_balance.balance_byte_count - $3
             FROM t
             WHERE
             	transfer_balance.balance_id = t.balance_id
             RETURNING t.balance_id, t.paid
         `,
 		payerNetworkId,
+		now,
 		contractTransferByteCount,
-		// now,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -877,11 +879,13 @@ func createTransferEscrowInTx(
 	            FROM transfer_balance
 	            WHERE
 	                network_id = $1 AND
-	                active = true
+	                active = true AND
+	                start_time <= $2 AND
+	                $2 < end_time
 	            ORDER BY end_time
 	        `,
 			payerNetworkId,
-			// now,
+			now,
 		)
 		netEscrowBalanceByteCount := ByteCount(0)
 		server.WithPgResult(result, err, func() {
