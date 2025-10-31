@@ -800,6 +800,12 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	// *important note* this function is one of the hotspots in the system,
+	// since it is called before every transfer pair.
+	// a small regression here can cause a backlog in the overall throughput of the network.
+	// You must make sure the queries here are optimized correctly.
+	// TODO we need better performance regression tools to measure small regressions in hotspots like this
+
 	// note it is possible to create a contract with `contractTransferByteCount = 0`
 
 	contractId := server.NewId()
