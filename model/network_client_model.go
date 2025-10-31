@@ -453,7 +453,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 			session.Ctx,
 			`
 				SELECT
-					network_client_resident_port.client_id,
+					network_client.client_id,
 					network_client_resident_port.resident_internal_port
 
 				FROM network_client
@@ -462,7 +462,6 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client.client_id = network_client_resident.client_id
 
 				INNER JOIN network_client_resident_port ON
-					network_client_resident_port.client_id = network_client_resident.client_id AND
 					network_client_resident_port.resident_id = network_client_resident.resident_id
 				
 				WHERE
@@ -1311,10 +1310,8 @@ func dbGetResidentInTx(
 				resident_internal_port
 			FROM network_client_resident_port
 			WHERE
-				client_id = $1 AND
-				resident_id = $2
+				resident_id = $1
 		`,
-		clientId,
 		resident.ResidentId,
 	)
 	server.WithPgResult(result, err, func() {
@@ -1532,10 +1529,8 @@ func NominateResident(
 			`
 				DELETE FROM network_client_resident_port
 				WHERE
-					client_id = $1 AND
-					resident_id = $2
+					resident_id = $1
 			`,
-			nomination.ClientId,
 			nomination.ResidentId,
 		))
 
@@ -1544,13 +1539,11 @@ func NominateResident(
 				batch.Queue(
 					`
 						INSERT INTO network_client_resident_port (
-							client_id,
 							resident_id,
 							resident_internal_port
 						)
-						VALUES ($1, $2, $3)
+						VALUES ($1, $2)
 					`,
-					nomination.ClientId,
 					nomination.ResidentId,
 					port,
 				)
@@ -1582,7 +1575,6 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 				FROM network_client_resident
 
 				INNER JOIN network_client_resident_port ON
-					network_client_resident_port.client_id = network_client_resident.client_id AND
 					network_client_resident_port.resident_id = network_client_resident.resident_id
 
 				INNER JOIN resident_ports ON
@@ -1635,10 +1627,8 @@ func RemoveResident(
 			`
 			DELETE FROM network_client_resident_port
 			WHERE
-				client_id = $1 AND
-				resident_id = $2
+				resident_id = $1
 			`,
-			clientId,
 			residentId,
 		)
 		server.Raise(err)
