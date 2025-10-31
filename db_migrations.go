@@ -1715,28 +1715,28 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_user
         ADD COLUMN wallet_address text,
-        ADD COLUMN wallet_blockchain text;
+        ADD COLUMN wallet_blockchain text
     `),
 
 	newSqlMigration(`
         CREATE UNIQUE INDEX network_user_wallet_address_unique ON network_user (wallet_address)
-        WHERE wallet_address IS NOT NULL;
+        WHERE wallet_address IS NOT NULL
     `),
 
 	newSqlMigration(`
         ALTER TABLE account_wallet
         ADD CONSTRAINT unique_network_wallet_address
-        UNIQUE (network_id, wallet_address);
+        UNIQUE (network_id, wallet_address)
     `),
 
 	newSqlMigration(`
         ALTER TABLE account_wallet
-        ADD COLUMN has_seeker_token boolean NOT NULL DEFAULT false;
+        ADD COLUMN has_seeker_token boolean NOT NULL DEFAULT false
     `),
 
 	newSqlMigration(`
         ALTER TABLE network
-        ADD COLUMN leaderboard_public boolean NOT NULL DEFAULT false;
+        ADD COLUMN leaderboard_public boolean NOT NULL DEFAULT false
     `),
 
 	newSqlMigration(`
@@ -1744,8 +1744,9 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-		ALTER TABLE network_referral DROP CONSTRAINT network_referral_pkey;
-		ALTER TABLE network_referral ADD PRIMARY KEY (network_id);
+		ALTER TABLE network_referral
+        DROP CONSTRAINT network_referral_pkey,
+	    ADD PRIMARY KEY (network_id)
 	`),
 
 	newSqlMigration(`
@@ -1797,11 +1798,11 @@ var migrations = []any{
 		ALTER TABLE account_point
 	    ALTER COLUMN point_value TYPE bigint,
 	    ADD COLUMN payment_plan_id uuid NULL,
-	    ADD COLUMN linked_network_id uuid NULL;
+	    ADD COLUMN linked_network_id uuid NULL
 	`),
 	newSqlMigration(`
 		ALTER TABLE account_point
-		ADD COLUMN account_payment_id uuid NULL;
+		ADD COLUMN account_payment_id uuid NULL
 	`),
 	newSqlMigration(`
 		ALTER TABLE account_payment
@@ -2333,16 +2334,20 @@ var migrations = []any{
 		    created_at timestamp NOT NULL DEFAULT now(),
 		    expires_at timestamp,
 		    tx_signature text
-		);
-
-		CREATE INDEX IF NOT EXISTS solana_payment_intent_payment_reference
-		    ON solana_payment_intent (payment_reference)
-		    WHERE tx_signature IS NULL;
-
-		CREATE UNIQUE INDEX IF NOT EXISTS solana_payment_intent_tx_signature
-		    ON solana_payment_intent (tx_signature)
-		    WHERE tx_signature IS NOT NULL;
+		)
 	`),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS solana_payment_intent_payment_reference
+            ON solana_payment_intent (payment_reference)
+            WHERE tx_signature IS NULL
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX IF NOT EXISTS solana_payment_intent_tx_signature
+            ON solana_payment_intent (tx_signature)
+            WHERE tx_signature IS NOT NULL
+    `),
 
 	newSqlMigration(`
         ALTER TABLE network_user_auth_sso
@@ -2387,11 +2392,12 @@ var migrations = []any{
 		    stripe_customer_id varchar(64) NOT NULL UNIQUE,
 		    create_time timestamp NOT NULL DEFAULT now(),
 		    PRIMARY KEY (network_id, stripe_customer_id)
-		);
+		)
     `),
 
 	newSqlMigration(`
-	    ALTER TABLE stripe_customer ADD CONSTRAINT stripe_customer_network_id_unique UNIQUE (network_id);
+	    ALTER TABLE stripe_customer
+        ADD CONSTRAINT stripe_customer_network_id_unique UNIQUE (network_id)
 	`),
 
 	newSqlMigration(`
@@ -2473,4 +2479,41 @@ var migrations = []any{
             PRIMARY KEY (payment_plan_id)
         )
     `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_balance_active_network_id ON transfer_balance (active, network_id, end_time, start_time, balance_byte_count, balance_id, paid)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_balance_network_id_active_end_time
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_open_source_id_companion_contract_id
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_city_client_id
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_country_client_id
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_location_region_client_id
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident_port
+        DROP CONSTRAINT network_client_resident_port_pkey,
+        ADD PRIMARY KEY (resident_id, resident_internal_port),
+        ALTER COLUMN client_id DROP NOT NULL
+    `),
+
+	// newSqlMigration(`
+	//     ALTER TABLE network_client_resident_port
+	//     DROP COLUMN client_id
+	// `),
+
 }
