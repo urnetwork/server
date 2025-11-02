@@ -2477,10 +2477,6 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        CREATE INDEX IF NOT EXISTS transfer_balance_active_network_id ON transfer_balance (active, network_id, end_time, start_time, balance_byte_count, balance_id, paid)
-    `),
-
-	newSqlMigration(`
         DROP INDEX IF EXISTS transfer_balance_network_id_active_end_time
     `),
 
