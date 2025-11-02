@@ -2523,10 +2523,8 @@ var migrations = []any{
         DROP INDEX IF EXISTS network_client_connection_connected_connection_id
     `),
 
-	// apply this after new services have been deployed
-	// newSqlMigration(`
-	//     ALTER TABLE network_client_resident_port
-	//     DROP COLUMN client_id
-	// `),
-
+	newSqlMigration(`
+	    ALTER TABLE network_client_resident_port
+	    DROP COLUMN client_id
+	`),
 }
