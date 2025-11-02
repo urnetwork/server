@@ -2334,19 +2334,15 @@ var migrations = []any{
 		    created_at timestamp NOT NULL DEFAULT now(),
 		    expires_at timestamp,
 		    tx_signature text
-		)
-	`),
+		);
 
-	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS solana_payment_intent_payment_reference
             ON solana_payment_intent (payment_reference)
-            WHERE tx_signature IS NULL
-    `),
+            WHERE tx_signature IS NULL;
 
-	newSqlMigration(`
         CREATE UNIQUE INDEX IF NOT EXISTS solana_payment_intent_tx_signature
             ON solana_payment_intent (tx_signature)
-            WHERE tx_signature IS NOT NULL
+            WHERE tx_signature IS NOT NULL;
     `),
 
 	newSqlMigration(`
