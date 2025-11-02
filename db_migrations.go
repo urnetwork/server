@@ -2511,6 +2511,27 @@ var migrations = []any{
         ALTER COLUMN client_id DROP NOT NULL
     `),
 
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_resident_host
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident
+        DROP CONSTRAINT network_client_resident_pkey,
+        ADD PRIMARY KEY (resident_id),
+        DROP CONSTRAINT network_client_resident_resident_id_key,
+        ADD UNIQUE (client_id)
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_client_id_connected
+    `),
+
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_connected_connection_id
+    `),
+
+	// apply this after new services have been deployed
 	// newSqlMigration(`
 	//     ALTER TABLE network_client_resident_port
 	//     DROP COLUMN client_id
