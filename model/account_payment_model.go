@@ -38,6 +38,8 @@ type SubsidyConfig struct {
 	// hold onto unpaid amounts for up to this time
 	// after this time, even if the value is below the threshold, the payment is created
 	WalletPayoutTimeoutHumanReadable string `yaml:"wallet_payout_timeout"`
+
+	ForcePoints bool
 }
 
 func (self *SubsidyConfig) ActiveUserByteCountThreshold() ByteCount {
@@ -323,6 +325,26 @@ type PaymentPlan struct {
 	WithheldNetworkIds []server.Id
 }
 
+type PaymentState struct {
+	networkReferrals       map[server.Id][]server.Id
+	seekerHolderNetworkIds map[server.Id]bool
+
+	paymentPlanId server.Id
+
+	// networkId -> AccountPayment
+	networkPayments map[server.Id]*AccountPayment
+
+	networkEscrowIds map[server.Id][]*EscrowId
+
+	// escrow ids -> payment id
+	escrowPaymentIds map[EscrowId]server.Id
+
+	// networkId -> parent referralNetworkId
+	referralNetworks map[server.Id]server.Id
+
+	networkReliabilitySubsidies map[server.Id]NetworkReliabilitySubsidy
+}
+
 type SubsidyPayment struct {
 	PaymentPlanId            server.Id
 	StartTime                time.Time
@@ -350,158 +372,88 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	now := server.NowUtc()
 	UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
 
+	// network_id -> list of child referral networks
+	networkReferrals := GetNetworkReferralsMap(ctx)
+
+	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
+
 	server.Tx(ctx, func(tx server.PgTx) {
-
 		paymentPlanId := server.NewId()
-		// networkId -> AccountPayment
-		networkPayments := map[server.Id]*AccountPayment{}
-		networkEscrowIds := map[server.Id][]*EscrowId{}
 
-		// escrow ids -> payment id
-		escrowPaymentIds := map[EscrowId]server.Id{}
-
-		// networkId -> parent referralNetworkId
-		referralNetworks := map[server.Id]server.Id{}
-
-		// network_id -> list of child referral networks
-		networkReferrals := GetNetworkReferralsMap(ctx)
-
-		seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-            CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
-
-            AS
-
-            SELECT
-                transfer_escrow_sweep.contract_id,
-                transfer_escrow_sweep.balance_id
-
-            FROM transfer_escrow_sweep
-
-            LEFT JOIN account_payment ON
-                account_payment.payment_id = transfer_escrow_sweep.payment_id
-
-            WHERE
-                account_payment.payment_id IS NULL OR
-                account_payment.canceled = true
-            `,
-		))
-
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					transfer_escrow_sweep.network_id,
-					network_referral.referral_network_id,
-					transfer_escrow_sweep.contract_id,
-					transfer_escrow_sweep.balance_id,
-					transfer_escrow_sweep.payout_byte_count,
-					transfer_escrow_sweep.payout_net_revenue_nano_cents,
-					transfer_escrow_sweep.sweep_time
-
-				FROM transfer_escrow_sweep
-
-				LEFT JOIN network_referral
-          ON transfer_escrow_sweep.network_id = network_referral.network_id
-
-				INNER JOIN temp_account_payment ON
-						temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
-						temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
-
-				FOR UPDATE OF transfer_escrow_sweep
-      `,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				var referralNetworkId *server.Id
-				var contractId server.Id
-				var balanceId server.Id
-				var payoutByteCount ByteCount
-				var payoutNetRevenue NanoCents
-				var sweepTime time.Time
-				// var walletId *server.Id
-				server.Raise(result.Scan(
-					&networkId,
-					&referralNetworkId,
-					&contractId,
-					&balanceId,
-					&payoutByteCount,
-					&payoutNetRevenue,
-					&sweepTime,
-					// &walletId,
-				))
-
-				/**
-				 * Assign the network referral, if a referring network exists
-				 */
-				if referralNetworkId != nil && *referralNetworkId != networkId {
-					referralNetworks[networkId] = *referralNetworkId
-				}
-
-				payment, ok := networkPayments[networkId]
-				if !ok {
-					paymentId := server.NewId()
-					payment = &AccountPayment{
-						PaymentId:     paymentId,
-						PaymentPlanId: paymentPlanId,
-						NetworkId:     networkId,
-						// WalletId:      walletId,
-						CreateTime: server.NowUtc(),
-					}
-					networkPayments[networkId] = payment
-				}
-				payment.PayoutByteCount += payoutByteCount
-				payment.Payout += payoutNetRevenue
-
-				if payment.MinSweepTime.IsZero() {
-					payment.MinSweepTime = sweepTime
-				} else {
-					payment.MinSweepTime = server.MinTime(payment.MinSweepTime, sweepTime)
-				}
-
-				escrowId := EscrowId{
-					ContractId: contractId,
-					BalanceId:  balanceId,
-				}
-				escrowPaymentIds[escrowId] = payment.PaymentId
-				networkEscrowIds[networkId] = append(networkEscrowIds[networkId], &escrowId)
-			}
-		})
-
-		// log the network referral map
-		glog.Infof("[plan]network referrals count: %d\n", len(referralNetworks))
-		for networkId, referralNetworkId := range referralNetworks {
-			glog.Infof("[plan]network %s referred by %s\n", networkId, referralNetworkId)
+		paymentState, err := planPaymentInTx(ctx, tx, paymentPlanId)
+		if err != nil {
+			returnErr = err
+			return
 		}
+		paymentState.networkReferrals = networkReferrals
+		paymentState.seekerHolderNetworkIds = seekerHolderNetworkIds
 
-		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentPlanId, networkPayments)
-
-		subsidyScale := 1.0
-		if subsidyPayment != nil && subsidyPayment.SubsidyScale != 0 {
-			subsidyScale = subsidyPayment.SubsidyScale
-		}
-
+		// note `subsidyPayment` will be nil if the subsidy cannot be paid
+		// this will be the case if there was already a subsidy payment to overlap this time range
+		subsidyPayment, err := planSubsidyPaymentInTx(ctx, tx, subsidyConfig, paymentState)
 		if err != nil {
 			returnErr = err
 			return
 		}
 
-		// note `subsidyPayment` will be nil if the subsidy cannot be paid
-		// this will be the case if there was already a subsidy payment to overlap this time range
+		// apply wallet minimum payout threshold
+		// any wallet that does not meet the threshold will not be included in this plan
+		networkIdsToRemove := []server.Id{}
+
+		totalPayout := NanoCents(0)
+
+		payoutExpirationTime := server.NowUtc().Add(-subsidyConfig.WalletPayoutTimeout())
+		for networkId, payment := range paymentState.networkPayments {
+			// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
+			if payment.Payout < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
+				networkIdsToRemove = append(networkIdsToRemove, networkId)
+			} else {
+				// this payment will be included in the plan
+				// note that the `MinSweepTime` is not used for the subsidy payment,
+				// but it is used to determine the minimum sweep time for the payment
+				totalPayout += payment.Payout
+			}
+		}
+		removedSubsidyNetPayout := NanoCents(0)
+		for _, networkId := range networkIdsToRemove {
+			// remove the escrow payments for this wallet
+			// so that the contracts do not have a dangling payment_id
+			for _, escrowId := range paymentState.networkEscrowIds[networkId] {
+				delete(paymentState.escrowPaymentIds, *escrowId)
+			}
+
+			// note the subsidy payments for this payment plan will be dropped
+			// however, since the underlying contracts won't be marked as paid,
+			// they will be included in the next subsidy payment plan,
+			// although the subsidy payment amounts might not be the same
+			payment := paymentState.networkPayments[networkId]
+			removedSubsidyNetPayout += payment.SubsidyPayout
+			delete(paymentState.networkPayments, networkId)
+		}
+		if subsidyPayment != nil {
+			// adjust the subsidy payout to reflect removed payments
+			subsidyPayment.NetPayout -= removedSubsidyNetPayout
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE subsidy_payment
+					SET net_payout_nano_cents = net_payout_nano_cents - $2
+					WHERE payment_plan_id = $1
+				`,
+				subsidyPayment.PaymentPlanId,
+				removedSubsidyNetPayout,
+			))
+		}
 
 		// fill in the payment wallet ids
 		server.CreateTempTableInTx(
 			ctx,
 			tx,
 			"temp_payment_network_ids(network_id uuid)",
-			maps.Keys(networkPayments)...,
+			maps.Keys(paymentState.networkPayments)...,
 		)
 
-		result, err = tx.Query(
+		result, err := tx.Query(
 			ctx,
 			`
 			SELECT
@@ -526,270 +478,35 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					&walletId,
 				))
 
-				if payment, ok := networkPayments[networkId]; ok {
+				if payment, ok := paymentState.networkPayments[networkId]; ok {
 					payment.WalletId = walletId
 				}
 			}
 		})
 
-		// 7 days ago as default value if no subsidy payment exists
-		lastPaymentTime := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		if subsidyPayment != nil {
-			lastPaymentTime = subsidyPayment.StartTime
-		}
-
-		/**
-		 * reliability payout
-		 */
-		networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
-			ctx,
-			tx,
-			lastPaymentTime,
-			subsidyScale,
-		)
-
-		/**
-		 * Apply reliability points
-		 */
-		for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
-
-			payment, ok := networkPayments[networkId]
-			if !ok {
-				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
-				continue
-			}
-
-			if networkReliabilitySubsidies[networkId].Points > 0 {
-				reliabilityPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:        payment.NetworkId,
-					Event:            AccountPointEventReliability,
-					PointValue:       NanoPoints(networkReliabilitySubsidies[payment.NetworkId].Points),
-					AccountPaymentId: &payment.PaymentId,
-					PaymentPlanId:    &paymentPlanId,
-				}
-				ApplyAccountPoints(ctx, reliabilityPointsArgs)
-			}
-		}
-
-		// apply wallet minimum payout threshold
-		// any wallet that does not meet the threshold will not be included in this plan
-		networkIdsToRemove := []server.Id{}
-
-		totalPayout := NanoCents(0)
-
-		payoutExpirationTime := server.NowUtc().Add(-subsidyConfig.WalletPayoutTimeout())
-		for networkId, payment := range networkPayments {
-			// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
-			if payment.Payout+networkReliabilitySubsidies[networkId].Usdc < UsdToNanoCents(subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
-				networkIdsToRemove = append(networkIdsToRemove, networkId)
-			} else {
-				// this payment will be included in the plan
-				// note that the `MinSweepTime` is not used for the subsidy payment,
-				// but it is used to determine the minimum sweep time for the payment
-				totalPayout += payment.Payout
-			}
-		}
-		removedSubsidyNetPayout := NanoCents(0)
-		for _, networkId := range networkIdsToRemove {
-			// remove the escrow payments for this wallet
-			// so that the contracts do not have a dangling payment_id
-			for _, escrowId := range networkEscrowIds[networkId] {
-				delete(escrowPaymentIds, *escrowId)
-			}
-
-			// note the subsidy payments for this payment plan will be dropped
-			// however, since the underlying contracts won't be marked as paid,
-			// they will be included in the next subsidy payment plan,
-			// although the subsidy payment amounts might not be the same
-			payment := networkPayments[networkId]
-			removedSubsidyNetPayout += payment.SubsidyPayout
-			delete(networkPayments, networkId)
-		}
-		if subsidyPayment != nil {
-			// adjust the subsidy payout to reflect removed payments
-			subsidyPayment.NetPayout -= removedSubsidyNetPayout
-			server.RaisePgResult(tx.Exec(
+		if subsidyPayment != nil && 0 < subsidyPayment.SubsidyScale && 0 < totalPayout {
+			applyPayoutPointsInTx(
 				ctx,
-				`
-					UPDATE subsidy_payment
-					SET net_payout_nano_cents = net_payout_nano_cents - $2
-					WHERE payment_plan_id = $1
-				`,
-				subsidyPayment.PaymentPlanId,
-				removedSubsidyNetPayout,
-			))
+				tx,
+				subsidyConfig,
+				paymentState,
+				subsidyPayment.SubsidyScale,
+				totalPayout,
+			)
+			// `ForcePoints` can be set to test points when there is no subsidy
+		} else if subsidyConfig.ForcePoints {
+			applyPayoutPointsInTx(
+				ctx,
+				tx,
+				subsidyConfig,
+				paymentState,
+				1.0,
+				totalPayout,
+			)
 		}
-
-		totalPayoutAccountNanoPoints := NanoPoints(0)
-
-		// get total points
-		for _, payment := range networkPayments {
-			totalPayoutAccountNanoPoints += PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
-		}
-
-		/**
-		 * Add the reliability subsidies
-		 * We do this after calculating totalPayoutAccountNanoPoints and totalPayout so the bonus doesn't skew the points
-		 */
-		for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
-			payment, ok := networkPayments[networkId]
-			if !ok {
-				glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
-				continue
-			}
-
-			// add the reliability subsidy to the payment
-			payment.Payout += reliabilitySubsidy.Usdc
-
-		}
-
-		pointsPerPayout := EnvSubsidyConfig().AccountPointsPerPayout
-
-		// this is the total number of points allocated per payout
-		// should this factor in how frequent the payouts are?
-		// todo: should be moved into config
-		nanoPointsPerPayout := PointsToNanoPoints(float64(pointsPerPayout) * subsidyScale)
-
-		pointsScaleFactor := (float64(nanoPointsPerPayout) / float64(totalPayoutAccountNanoPoints))
-		glog.Infof("[plan]total payout %d nano cents, total account points %d nano points, points scale factor %f\n",
-			totalPayout,
-			totalPayoutAccountNanoPoints,
-			pointsScaleFactor,
-		)
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-
-			/**
-			 * create report
-			 * todo - add min data threshold for payout
-			 */
-			batch.Queue(
-				`
-				INSERT INTO payment_report (
-						payment_plan_id,
-						total_payout_nano_cents,
-						total_nano_points,
-						point_scale_factor,
-						time_scale_factor,
-						payout_points_per_payout
-
-				)
-				VALUES ($1, $2, $3, $4, $5, $6)
-				`,
-				paymentPlanId,
-				totalPayout,
-				totalPayoutAccountNanoPoints,
-				pointsScaleFactor,
-				subsidyScale,
-				pointsPerPayout,
-			)
-
-			/**
-			 * Safeguard against division by zero
-			 */
-			if totalPayout <= 0 {
-				return
-			}
-
-			if pointsScaleFactor <= 0 {
-				return
-			}
-
-			for _, payment := range networkPayments {
-
-				/**
-				 * Payout account points
-				 */
-				accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
-
-				scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
-				glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
-					payment.NetworkId,
-					scaledAccountPoints,
-					payment.Payout,
-				)
-
-				if scaledAccountPoints > 0 {
-
-					accountPointsArgs := ApplyAccountPointsArgs{
-						NetworkId:        payment.NetworkId,
-						Event:            AccountPointEventPayout,
-						PointValue:       scaledAccountPoints,
-						PaymentPlanId:    &payment.PaymentPlanId,
-						AccountPaymentId: &payment.PaymentId,
-					}
-
-					ApplyAccountPoints(
-						ctx,
-						accountPointsArgs,
-					)
-
-				}
-
-				/**
-				 * Seeker bonus
-				 */
-				if seekerHolderNetworkIds[payment.NetworkId] {
-					seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
-					scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
-
-					// double reliability points for seeker holders
-					seekerBonus += networkReliabilitySubsidies[payment.NetworkId].Points
-					glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
-
-					accountPointsArgs := ApplyAccountPointsArgs{
-						NetworkId:        payment.NetworkId,
-						Event:            AccountPointEventPayoutMultiplier,
-						PointValue:       seekerBonus,
-						PaymentPlanId:    &payment.PaymentPlanId,
-						AccountPaymentId: &payment.PaymentId,
-					}
-
-					ApplyAccountPoints(ctx, accountPointsArgs)
-				}
-
-				/**
-				 * Apply bonus points to parent referral network
-				 */
-				parentReferralNetworkId, ok := referralNetworks[payment.NetworkId]
-
-				if ok {
-					if parentReferralNetworkId != payment.NetworkId {
-
-						glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
-
-						parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
-
-						accountPointsArgs := ApplyAccountPointsArgs{
-							NetworkId:        parentReferralNetworkId,
-							Event:            AccountPointEventPayoutLinkedAccount,
-							PointValue:       parentReferralPoints,
-							PaymentPlanId:    &payment.PaymentPlanId,
-							LinkedNetworkId:  &payment.NetworkId,
-							AccountPaymentId: &payment.PaymentId,
-						}
-
-						ApplyAccountPoints(ctx, accountPointsArgs)
-					}
-				}
-
-				/**
-				 * Apply bonus points to child referral networks
-				 */
-				visited := make(map[server.Id]struct{})
-				payoutChildrenReferralNetworks(
-					ctx,
-					scaledAccountPoints,
-					EnvSubsidyConfig().ReferralChildPayoutFraction,
-					payment.NetworkId,
-					networkReferrals,
-					payment.PaymentPlanId,
-					&payment.PaymentId,
-					nil,
-					0,
-					visited,
-				)
-
+			for _, payment := range paymentState.networkPayments {
 				batch.Queue(
 					`
 							INSERT INTO account_payment (
@@ -815,7 +532,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 					payment.SubsidyPayout,
 					payment.MinSweepTime,
 					payment.CreateTime,
-					networkReliabilitySubsidies[payment.NetworkId].Usdc,
+					paymentState.networkReliabilitySubsidies[payment.NetworkId].Usdc,
 				)
 			}
 		})
@@ -824,7 +541,7 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 			ctx,
 			tx,
 			"payment_escrow_ids(contract_id uuid, balance_id uuid -> payment_id uuid)",
-			escrowPaymentIds,
+			paymentState.escrowPaymentIds,
 		)
 
 		server.RaisePgResult(tx.Exec(
@@ -842,16 +559,193 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 
 		paymentPlan = &PaymentPlan{
 			PaymentPlanId:      paymentPlanId,
-			NetworkPayments:    networkPayments,
+			NetworkPayments:    paymentState.networkPayments,
 			SubsidyPayment:     subsidyPayment,
 			WithheldNetworkIds: networkIdsToRemove,
 		}
 
 		// set the bonus weights for next payout
 		UpdateClientLocationReliabilityMultipliersWithDefaultsInTx(tx, ctx)
+
 	}, server.TxReadCommitted)
 
 	return
+}
+
+// points are proportional to payout
+func applyPayoutPointsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	subsidyConfig *SubsidyConfig,
+	paymentState *PaymentState,
+	subsidyScale float64,
+	totalPayout NanoCents,
+) {
+	/**
+	 * Safeguard against division by zero
+	 */
+	if totalPayout <= 0 {
+		return
+	}
+
+	pointsPerPayout := subsidyConfig.AccountPointsPerPayout
+
+	// this is the total number of points for this payment plan
+	totalPoints := float64(pointsPerPayout) * subsidyScale
+	glog.Infof("[plan]total payout %d nano cents, total points %.2f\n",
+		totalPayout,
+		totalPoints,
+	)
+
+	/**
+	 * create report
+	 * todo - add min data threshold for payout
+	 */
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO payment_report (
+				payment_plan_id,
+				total_payout_nano_cents,
+				total_nano_points,
+				point_scale_factor,
+				time_scale_factor,
+				payout_points_per_payout
+
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		`,
+		paymentState.paymentPlanId,
+		totalPayout,
+		PointsToNanoPoints(totalPoints),
+		totalPoints,
+		subsidyScale,
+		pointsPerPayout,
+	))
+
+	// TODO the `ApplyAccountPointsInTx` could be done in a batch to speed up the plan
+
+	/**
+	 * Apply reliability points
+	 */
+	for networkId, reliabilitySubsidy := range paymentState.networkReliabilitySubsidies {
+
+		payment, ok := paymentState.networkPayments[networkId]
+		if !ok {
+			glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
+			continue
+		}
+
+		if reliabilitySubsidy.Points > 0 {
+			reliabilityPointsArgs := ApplyAccountPointsArgs{
+				NetworkId:        payment.NetworkId,
+				Event:            AccountPointEventReliability,
+				PointValue:       reliabilitySubsidy.Points,
+				AccountPaymentId: &payment.PaymentId,
+				PaymentPlanId:    &paymentState.paymentPlanId,
+			}
+			ApplyAccountPointsInTx(ctx, tx, reliabilityPointsArgs)
+		}
+	}
+
+	for _, payment := range paymentState.networkPayments {
+
+		/**
+		 * Payout account points
+		 */
+		// accountNanoPoints := PointsToNanoPoints(float64(payment.Payout) / float64(totalPayout))
+
+		// scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
+
+		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout) / float64(totalPayout)))
+		glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
+			payment.NetworkId,
+			scaledAccountPoints,
+			payment.Payout,
+		)
+
+		if scaledAccountPoints > 0 {
+
+			accountPointsArgs := ApplyAccountPointsArgs{
+				NetworkId:        payment.NetworkId,
+				Event:            AccountPointEventPayout,
+				PointValue:       scaledAccountPoints,
+				PaymentPlanId:    &payment.PaymentPlanId,
+				AccountPaymentId: &payment.PaymentId,
+			}
+
+			ApplyAccountPointsInTx(
+				ctx,
+				tx,
+				accountPointsArgs,
+			)
+
+		}
+
+		/**
+		 * Seeker bonus
+		 */
+		if paymentState.seekerHolderNetworkIds[payment.NetworkId] {
+			seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
+			scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+
+			// double reliability points for seeker holders
+			seekerBonus += paymentState.networkReliabilitySubsidies[payment.NetworkId].Points
+			glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
+
+			accountPointsArgs := ApplyAccountPointsArgs{
+				NetworkId:        payment.NetworkId,
+				Event:            AccountPointEventPayoutMultiplier,
+				PointValue:       seekerBonus,
+				PaymentPlanId:    &payment.PaymentPlanId,
+				AccountPaymentId: &payment.PaymentId,
+			}
+
+			ApplyAccountPointsInTx(ctx, tx, accountPointsArgs)
+		}
+
+		/**
+		 * Apply bonus points to parent referral network
+		 */
+		parentReferralNetworkId, ok := paymentState.referralNetworks[payment.NetworkId]
+
+		if ok {
+			if parentReferralNetworkId != payment.NetworkId {
+				parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * subsidyConfig.ReferralParentPayoutFraction)
+
+				glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, scaledAccountPoints)
+
+				accountPointsArgs := ApplyAccountPointsArgs{
+					NetworkId:        parentReferralNetworkId,
+					Event:            AccountPointEventPayoutLinkedAccount,
+					PointValue:       parentReferralPoints,
+					PaymentPlanId:    &payment.PaymentPlanId,
+					LinkedNetworkId:  &payment.NetworkId,
+					AccountPaymentId: &payment.PaymentId,
+				}
+
+				ApplyAccountPointsInTx(ctx, tx, accountPointsArgs)
+			}
+		}
+
+		/**
+		 * Apply bonus points to child referral networks
+		 */
+		visited := make(map[server.Id]struct{})
+		payoutChildrenReferralNetworks(
+			ctx,
+			scaledAccountPoints,
+			EnvSubsidyConfig().ReferralChildPayoutFraction,
+			payment.NetworkId,
+			paymentState.networkReferrals,
+			payment.PaymentPlanId,
+			&payment.PaymentId,
+			nil,
+			0,
+			visited,
+		)
+	}
+
 }
 
 type NetworkReliabilitySubsidy struct {
@@ -885,14 +779,14 @@ func calculateReliabilityPayout(
 func calculateReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
-	lastPaymentTime time.Time,
+	subsidyStartTime time.Time,
 	subsidyScale float64,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
 	now := server.NowUtc()
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, lastPaymentTime, now, false)
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, now, false)
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
@@ -1032,13 +926,143 @@ func payoutChildrenReferralNetworks(
 
 }
 
+func planPaymentInTx(ctx context.Context, tx server.PgTx, paymentPlanId server.Id) (paymentState *PaymentState, returnErr error) {
+	// networkId -> AccountPayment
+	networkPayments := map[server.Id]*AccountPayment{}
+	networkEscrowIds := map[server.Id][]*EscrowId{}
+
+	// escrow ids -> payment id
+	escrowPaymentIds := map[EscrowId]server.Id{}
+
+	// networkId -> parent referralNetworkId
+	referralNetworks := map[server.Id]server.Id{}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+        CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
+
+        AS
+
+        SELECT
+            transfer_escrow_sweep.contract_id,
+            transfer_escrow_sweep.balance_id
+
+        FROM transfer_escrow_sweep
+
+        LEFT JOIN account_payment ON
+            account_payment.payment_id = transfer_escrow_sweep.payment_id
+
+        WHERE
+            account_payment.payment_id IS NULL OR
+            account_payment.canceled = true
+        `,
+	))
+
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT
+			transfer_escrow_sweep.network_id,
+			network_referral.referral_network_id,
+			transfer_escrow_sweep.contract_id,
+			transfer_escrow_sweep.balance_id,
+			transfer_escrow_sweep.payout_byte_count,
+			transfer_escrow_sweep.payout_net_revenue_nano_cents,
+			transfer_escrow_sweep.sweep_time
+
+		FROM transfer_escrow_sweep
+
+		LEFT JOIN network_referral
+      	ON transfer_escrow_sweep.network_id = network_referral.network_id
+
+		INNER JOIN temp_account_payment ON
+				temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
+				temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
+
+		FOR UPDATE OF transfer_escrow_sweep
+  		`,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			var referralNetworkId *server.Id
+			var contractId server.Id
+			var balanceId server.Id
+			var payoutByteCount ByteCount
+			var payoutNetRevenue NanoCents
+			var sweepTime time.Time
+			// var walletId *server.Id
+			server.Raise(result.Scan(
+				&networkId,
+				&referralNetworkId,
+				&contractId,
+				&balanceId,
+				&payoutByteCount,
+				&payoutNetRevenue,
+				&sweepTime,
+				// &walletId,
+			))
+
+			/**
+			 * Assign the network referral, if a referring network exists
+			 */
+			if referralNetworkId != nil && *referralNetworkId != networkId {
+				referralNetworks[networkId] = *referralNetworkId
+			}
+
+			payment, ok := networkPayments[networkId]
+			if !ok {
+				paymentId := server.NewId()
+				payment = &AccountPayment{
+					PaymentId:     paymentId,
+					PaymentPlanId: paymentPlanId,
+					NetworkId:     networkId,
+					// WalletId:      walletId,
+					CreateTime: server.NowUtc(),
+				}
+				networkPayments[networkId] = payment
+			}
+			payment.PayoutByteCount += payoutByteCount
+			payment.Payout += payoutNetRevenue
+
+			if payment.MinSweepTime.IsZero() {
+				payment.MinSweepTime = sweepTime
+			} else {
+				payment.MinSweepTime = server.MinTime(payment.MinSweepTime, sweepTime)
+			}
+
+			escrowId := EscrowId{
+				ContractId: contractId,
+				BalanceId:  balanceId,
+			}
+			escrowPaymentIds[escrowId] = payment.PaymentId
+			networkEscrowIds[networkId] = append(networkEscrowIds[networkId], &escrowId)
+		}
+	})
+
+	// log the network referral map
+	glog.Infof("[plan]network referrals count: %d\n", len(referralNetworks))
+	for networkId, referralNetworkId := range referralNetworks {
+		glog.Infof("[plan]network %s referred by %s\n", networkId, referralNetworkId)
+	}
+
+	paymentState = &PaymentState{
+		paymentPlanId:    paymentPlanId,
+		networkPayments:  networkPayments,
+		networkEscrowIds: networkEscrowIds,
+		escrowPaymentIds: escrowPaymentIds,
+		referralNetworks: referralNetworks,
+	}
+	return
+}
+
 // this assumes the table `temp_account_payment` exists in the transaction
 func planSubsidyPaymentInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	subsidyConfig *SubsidyConfig,
-	paymentPlanId server.Id,
-	networkPayments map[server.Id]*AccountPayment,
+	paymentState *PaymentState,
 ) (subsidyPayment *SubsidyPayment, returnErr error) {
 	// roll up all the sweeps per payer network, payee network
 	type networkSweep struct {
@@ -1298,17 +1322,17 @@ func planSubsidyPaymentInTx(
 		for _, sweep := range payeeNetworkSweeps {
 			if 0 < sweep.payout {
 
-				payment, ok := networkPayments[sweep.payeeNetworkId]
+				payment, ok := paymentState.networkPayments[sweep.payeeNetworkId]
 				if !ok {
 					paymentId := server.NewId()
 					payment = &AccountPayment{
 						PaymentId:     paymentId,
-						PaymentPlanId: paymentPlanId,
+						PaymentPlanId: paymentState.paymentPlanId,
 						NetworkId:     sweep.payeeNetworkId,
 						// WalletId:      sweep.payoutWalletId,
 						CreateTime: server.NowUtc(),
 					}
-					networkPayments[sweep.payeeNetworkId] = payment
+					paymentState.networkPayments[sweep.payeeNetworkId] = payment
 				}
 				payment.Payout += sweep.payout
 				payment.SubsidyPayout += sweep.payout
@@ -1320,6 +1344,32 @@ func planSubsidyPaymentInTx(
 				}
 			}
 		}
+	}
+
+	/**
+	 * reliability payout
+	 */
+	networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
+		ctx,
+		tx,
+		subsidyStartTime,
+		subsidyScale,
+	)
+	paymentState.networkReliabilitySubsidies = networkReliabilitySubsidies
+
+	/**
+	 * Add the reliability subsidies
+	 * We do this after calculating totalPayoutAccountNanoPoints and totalPayout so the bonus doesn't skew the points
+	 */
+	for networkId, reliabilitySubsidy := range networkReliabilitySubsidies {
+		payment, ok := paymentState.networkPayments[networkId]
+		if !ok {
+			glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
+			continue
+		}
+
+		// add the reliability subsidy to the payment
+		payment.Payout += reliabilitySubsidy.Usdc
 	}
 
 	server.RaisePgResult(tx.Exec(
@@ -1337,7 +1387,7 @@ func planSubsidyPaymentInTx(
 		        net_payout_nano_cents
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		`,
-		paymentPlanId,
+		paymentState.paymentPlanId,
 		subsidyStartTime,
 		subsidyEndTime,
 		activeUserCount,
@@ -1350,7 +1400,7 @@ func planSubsidyPaymentInTx(
 
 	glog.Infof(
 		"[plan][%s]subsidy %.2fd paid=%du/active=%du paid=%s+unpaid=%s: $%.2f revenue -> $%.2f paid\n",
-		paymentPlanId,
+		paymentState.paymentPlanId,
 		float64(subsidyEndTime.Sub(subsidyStartTime))/float64(time.Hour*24),
 		paidUserCount,
 		activeUserCount,
@@ -1361,7 +1411,7 @@ func planSubsidyPaymentInTx(
 	)
 
 	subsidyPayment = &SubsidyPayment{
-		PaymentPlanId:            paymentPlanId,
+		PaymentPlanId:            paymentState.paymentPlanId,
 		StartTime:                subsidyStartTime,
 		EndTime:                  subsidyEndTime,
 		ActiveUserCount:          activeUserCount,

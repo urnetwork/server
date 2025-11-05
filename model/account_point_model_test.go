@@ -245,7 +245,9 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		/**
 		 * Plan payments
 		 */
-		paymentPlan, err := PlanPayments(ctx)
+		subsidyConfigCopy := *EnvSubsidyConfig()
+		subsidyConfigCopy.ForcePoints = true
+		paymentPlan, err := PlanPaymentsWithConfig(ctx, &subsidyConfigCopy)
 		assert.Equal(t, err, nil)
 
 		assert.Equal(t, len(paymentPlan.NetworkPayments), 2)

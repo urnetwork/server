@@ -45,30 +45,41 @@ type ApplyAccountPointsArgs struct {
 func ApplyAccountPoints(
 	ctx context.Context,
 	args ApplyAccountPointsArgs,
-) error {
+) (returnErr error) {
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO account_point (
-						network_id,
-						event,
-						point_value,
-						payment_plan_id,
-						linked_network_id,
-						account_payment_id
-				)
-				VALUES ($1, $2, $3, $4, $5, $6)
-			`,
-			args.NetworkId,
-			args.Event,
-			args.PointValue,
-			args.PaymentPlanId,
-			args.LinkedNetworkId,
-			args.AccountPaymentId,
-		))
+		returnErr = ApplyAccountPointsInTx(ctx, tx, args)
 	})
+
+	return
+}
+
+func ApplyAccountPointsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	args ApplyAccountPointsArgs,
+) error {
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO account_point (
+					network_id,
+					event,
+					point_value,
+					payment_plan_id,
+					linked_network_id,
+					account_payment_id
+			)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`,
+		args.NetworkId,
+		args.Event,
+		args.PointValue,
+		args.PaymentPlanId,
+		args.LinkedNetworkId,
+		args.AccountPaymentId,
+	))
 
 	return nil
 }
