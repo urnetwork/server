@@ -48,11 +48,11 @@ func TestAccountPoints(t *testing.T) {
 		networkPoints = FetchAccountPoints(ctx, networkId)
 		assert.Equal(t, len(networkPoints), 2)
 
-		totalPoints := 0
+		totalPoints := NanoPoints(0)
 		for _, point := range networkPoints {
 			totalPoints += point.PointValue
 		}
-		assert.Equal(t, totalPoints, 15)
+		assert.Equal(t, totalPoints, NanoPoints(15))
 
 	})
 }
@@ -62,6 +62,9 @@ func TestAccountPoints(t *testing.T) {
  */
 func TestAccountPointsPerPayout(t *testing.T) {
 	server.DefaultTestEnv().Run(func() {
+		subsidyConfigCopy := *EnvSubsidyConfig()
+		subsidyConfigCopy.ForcePoints = true
+		subsidyConfig := &subsidyConfigCopy
 
 		ctx := context.Background()
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
@@ -245,9 +248,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		/**
 		 * Plan payments
 		 */
-		subsidyConfigCopy := *EnvSubsidyConfig()
-		subsidyConfigCopy.ForcePoints = true
-		paymentPlan, err := PlanPaymentsWithConfig(ctx, &subsidyConfigCopy)
+		paymentPlan, err := PlanPaymentsWithConfig(ctx, subsidyConfig)
 		assert.Equal(t, err, nil)
 
 		assert.Equal(t, len(paymentPlan.NetworkPayments), 2)
@@ -282,7 +283,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		totalPoints := networkPointsA[0].PointValue + networkPointsB[0].PointValue
 		assert.Equal(t, NanoPoints(totalPoints), PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout)))
 
-		expectedPointsA := int(PointsToNanoPoints(float64(400_000)))
+		expectedPointsA := PointsToNanoPoints(float64(400_000))
 
 		assert.Equal(t, len(networkPointsA), 2)
 		assert.Equal(t, networkPointsA[0].NetworkId, networkIdA)
@@ -293,7 +294,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, networkPointsA[0].LinkedNetworkId, nil)
 		assert.Equal(t, networkPointsA[1].NetworkId, networkIdA)
 		assert.Equal(t, networkPointsA[1].Event, string(AccountPointEventPayoutMultiplier))
-		assert.Equal(t, networkPointsA[1].PointValue, expectedPointsA*SeekerHolderMultiplier-expectedPointsA)
+		assert.Equal(t, networkPointsA[1].PointValue, NanoPoints(float64(expectedPointsA)*subsidyConfig.SeekerHolderMultiplier)-expectedPointsA)
 		assert.Equal(t, networkPointsA[1].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsA[1].AccountPaymentId, &paymentNetworkA.PaymentId)
 		assert.Equal(t, networkPointsA[1].LinkedNetworkId, nil)
@@ -304,7 +305,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		 * Network B is not a Seeker holder, so it gets the normal points
 		 * No parent or child referrals
 		 */
-		expectedPointsB := int(PointsToNanoPoints(float64(600_000)))
+		expectedPointsB := PointsToNanoPoints(float64(600_000))
 		assert.Equal(t, len(networkPointsB), 1)
 		assert.Equal(t, networkPointsB[0].NetworkId, networkIdB)
 		assert.Equal(t, networkPointsB[0].Event, string(AccountPointEventPayout))
@@ -321,7 +322,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(networkPointsD), 1)
 		assert.Equal(t, networkPointsD[0].NetworkId, networkIdD)
 		assert.Equal(t, networkPointsD[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		assert.Equal(t, networkPointsD[0].PointValue, int(float64(expectedPointsA)*0.25*SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsD[0].PointValue, NanoPoints(float64(expectedPointsA)*0.25*subsidyConfig.SeekerHolderMultiplier))
 		assert.Equal(t, networkPointsD[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsD[0].LinkedNetworkId, networkIdA)
 		assert.Equal(t, networkPointsD[0].AccountPaymentId, &paymentNetworkA.PaymentId)
@@ -329,7 +330,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		/**
 		 * Network A child Network E should get expectedPointsA (150_000) * 0.25 * seeker multiplier = 75_000 points
 		 */
-		expectedPointsE := int(float64(expectedPointsA) * 0.25 * SeekerHolderMultiplier)
+		expectedPointsE := NanoPoints(float64(expectedPointsA) * 0.25 * subsidyConfig.SeekerHolderMultiplier)
 		glog.Infof("Expected points E: %d", expectedPointsE)
 		networkPointsE := FetchAccountPoints(ctx, networkIdE)
 		assert.Equal(t, len(networkPointsE), 1)
@@ -347,7 +348,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(networkPointsF), 1)
 		assert.Equal(t, networkPointsF[0].NetworkId, networkIdF)
 		assert.Equal(t, networkPointsF[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		assert.Equal(t, networkPointsF[0].PointValue, int(float64(expectedPointsA)*0.25*SeekerHolderMultiplier))
+		assert.Equal(t, networkPointsF[0].PointValue, NanoPoints(float64(expectedPointsA)*0.25*subsidyConfig.SeekerHolderMultiplier))
 		assert.Equal(t, networkPointsF[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsF[0].LinkedNetworkId, networkIdA)
 		assert.Equal(t, networkPointsF[0].AccountPaymentId, &paymentNetworkA.PaymentId)
@@ -355,7 +356,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		/**
 		 * Network E child Network G should get expectedPointsA * seeker multipler * 0.125
 		 */
-		expectedPointsG := int(float64(expectedPointsA) * SeekerHolderMultiplier * 0.125)
+		expectedPointsG := NanoPoints(float64(expectedPointsA) * subsidyConfig.SeekerHolderMultiplier * 0.125)
 		networkPointsG := FetchAccountPoints(ctx, networkIdG)
 		assert.Equal(t, len(networkPointsG), 1)
 		assert.Equal(t, networkPointsG[0].NetworkId, networkIdG)
@@ -372,7 +373,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		assert.Equal(t, len(networkPointsH), 1)
 		assert.Equal(t, networkPointsH[0].NetworkId, networkIdH)
 		assert.Equal(t, networkPointsH[0].Event, string(AccountPointEventPayoutLinkedAccount))
-		assert.Equal(t, networkPointsH[0].PointValue, int(float64(expectedPointsB)*0.25))
+		assert.Equal(t, networkPointsH[0].PointValue, NanoPoints(float64(expectedPointsB)*0.25))
 		assert.Equal(t, networkPointsH[0].PaymentPlanId, &paymentPlan.PaymentPlanId)
 		assert.Equal(t, networkPointsH[0].LinkedNetworkId, networkIdB)
 		assert.Equal(t, networkPointsH[0].AccountPaymentId, &paymentNetworkB.PaymentId)
@@ -543,10 +544,10 @@ func TestReliabilityPoints(t *testing.T) {
 		 * Network B
 		 * 62_500 * (0.4 / 0.6) = 41666.6666667 * 10^6 = 41666666667 nano points
 		 */
-		expectedPointsA := int(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightA / totalWeight)
+		expectedPointsA := NanoPoints(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightA / totalWeight)
 		assert.Equal(t, reliabilitySubsidies[networkIdA].Points, NanoPoints(expectedPointsA))
 
-		expectedPointsB := int(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightB / totalWeight)
+		expectedPointsB := NanoPoints(float64(reliabilityPointsPerPayout) * expectedReliabilityWeightB / totalWeight)
 		assert.Equal(t, reliabilitySubsidies[networkIdB].Points, NanoPoints(expectedPointsB))
 
 		totalPoints := NanoPointsToPoints(NanoPoints(reliabilitySubsidies[networkIdA].Points) + NanoPoints(reliabilitySubsidies[networkIdB].Points))

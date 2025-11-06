@@ -26,7 +26,7 @@ const (
 type AccountPoint struct {
 	NetworkId        server.Id  `json:"network_id"`
 	Event            string     `json:"event"`
-	PointValue       int        `json:"point_value"`
+	PointValue       NanoPoints `json:"point_value"`
 	PaymentPlanId    *server.Id `json:"payment_plan_id,omitempty"`
 	AccountPaymentId *server.Id `json:"account_payment_id,omitempty"`
 	LinkedNetworkId  *server.Id `json:"linked_network_id,omitempty"`
@@ -170,6 +170,8 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 	scaleFactor := float64(0.0)
 	accountPointReports := []AccountPointReport{}
 
+	subsidyConfig := EnvSubsidyConfig()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		result, err := tx.Query(
@@ -232,7 +234,7 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			totalPayoutUnscaledNanoPoints += PointsToNanoPoints(float64(accountPayment.Payout) / float64(totalPayoutNanoCents))
 		}
 
-		nanoPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().AccountPointsPerPayout))
+		nanoPointsPerPayout := PointsToNanoPoints(float64(subsidyConfig.AccountPointsPerPayout))
 		scaleFactor = (float64(nanoPointsPerPayout) / float64(totalPayoutUnscaledNanoPoints))
 
 		for i, payment := range accountPayments {
@@ -278,8 +280,8 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			 * Check seeker multipler
 			 */
 			if seekerHolderNetworkIds[payment.NetworkId] {
-				seekerBonus := scaledAccountPoints*SeekerHolderMultiplier - scaledAccountPoints
-				scaledAccountPoints *= SeekerHolderMultiplier // apply the multiplier to the account points
+				seekerBonus := NanoPoints(float64(scaledAccountPoints)*subsidyConfig.SeekerHolderMultiplier) - scaledAccountPoints
+				scaledAccountPoints = NanoPoints(float64(scaledAccountPoints) * subsidyConfig.SeekerHolderMultiplier) // apply the multiplier to the account points
 				glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
 
 				accountPointsArgs = ApplyAccountPointsArgs{
@@ -315,7 +317,7 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 
 					glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, accountNanoPoints)
 
-					parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * EnvSubsidyConfig().ReferralParentPayoutFraction)
+					parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * subsidyConfig.ReferralParentPayoutFraction)
 
 					accountPointsArgs = ApplyAccountPointsArgs{
 						NetworkId:        parentReferralNetworkId,
@@ -349,10 +351,11 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			 * Apply bonus points to child referral networks
 			 */
 			visited := make(map[server.Id]struct{})
-			reports := payoutChildrenReferralNetworks(
+			reports := payoutChildrenReferralNetworksInTx(
 				ctx,
+				tx,
 				scaledAccountPoints,
-				EnvSubsidyConfig().ReferralChildPayoutFraction,
+				subsidyConfig.ReferralChildPayoutFraction,
 				payment.NetworkId,
 				networkReferrals,
 				payment.PaymentPlanId,
@@ -400,4 +403,185 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 	}
 
 	glog.Infof("Successfully wrote PlanPointsPayoutReport to %s", filename)
+}
+
+type NetworkReliabilitySubsidy struct {
+	Usdc   NanoCents
+	Points NanoPoints
+}
+
+func calculateReliabilityPayout(
+	ctx context.Context,
+	subsidyStartTime time.Time,
+	subsidyScale float64,
+) (networkSubsidyAmounts map[server.Id]NetworkReliabilitySubsidy) {
+	now := server.NowUtc()
+	UpdateClientLocationReliabilities(ctx, subsidyStartTime, now)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		networkSubsidyAmounts = calculateReliabilityPayoutInTx(
+			ctx,
+			tx,
+			subsidyStartTime,
+			subsidyScale,
+		)
+	})
+	return
+}
+
+/**
+ * Returns map networkId -> NetworkReliabilitySubsidy
+ * This is the amount of subsidy paid to each network for reliability
+ */
+func calculateReliabilityPayoutInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	subsidyStartTime time.Time,
+	subsidyScale float64,
+) map[server.Id]NetworkReliabilitySubsidy {
+
+	now := server.NowUtc()
+	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
+
+	// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
+	UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, now, false)
+
+	// get reliability scores
+	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
+
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout) * subsidyScale)
+
+	totalReliabilityWeight := 0.0
+
+	for _, score := range reliabilityScores {
+		totalReliabilityWeight += score.ReliabilityWeight
+	}
+
+	if totalReliabilityWeight == 0 {
+		glog.Infof("[plan]no reliability scores found, skipping reliability payout")
+		return networkReliabilitySubsidies
+	}
+
+	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
+
+	for networkId, score := range reliabilityScores {
+
+		subsidy := NetworkReliabilitySubsidy{}
+		weight := score.ReliabilityWeight
+
+		/**
+		 * Account Points
+		 */
+		if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
+			subsidy.Points = NanoPoints(reliabilityPoints)
+		}
+
+		/*
+		 * USDC subsidy
+		 */
+
+		if reliabilitySubsidyPerPayout > 0 {
+
+			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
+			if reliabilitySubsidy >= 0 {
+				subsidy.Usdc = reliabilitySubsidy
+			}
+		}
+
+		networkReliabilitySubsidies[networkId] = subsidy
+
+	}
+
+	return networkReliabilitySubsidies
+
+}
+
+func payoutChildrenReferralNetworksInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	basePayoutAmount NanoPoints,
+	payoutFraction float64,
+	networkId server.Id,
+	networkReferrals map[server.Id][]server.Id,
+	paymentPlanId server.Id,
+	accountPaymentId *server.Id,
+	accountPointsReports []AccountPointReport,
+	depth int,
+	visited map[server.Id]struct{},
+) []AccountPointReport {
+
+	glog.Infof("payout recursion depth is: %d", depth)
+	glog.Infof("report count is: %d", len(accountPointsReports))
+
+	if _, alreadyVisited := visited[networkId]; alreadyVisited {
+		return accountPointsReports // Prevent cycles and double payouts
+	}
+	visited[networkId] = struct{}{}
+
+	glog.Infof("[plan]payout %s for referral network %s has %d referrals with fraction %f\n",
+		accountPaymentId,
+		networkId,
+		len(networkReferrals[networkId]),
+		payoutFraction,
+	)
+
+	if len(networkReferrals[networkId]) == 0 {
+		glog.Infof("[plan]payout referral network %s has no referrals, skipping\n", networkId)
+		return accountPointsReports
+	}
+
+	childPayoutAmount := NanoPoints(float64(basePayoutAmount) * payoutFraction)
+	if childPayoutAmount <= 0 {
+		glog.Infof("[plan]payout referral network %s with 0 points, skipping\n", networkId)
+		return accountPointsReports
+	}
+
+	for _, childNetworkId := range networkReferrals[networkId] {
+
+		glog.Infof("[plan]child payout referral network %s with %d points\n", childNetworkId, childPayoutAmount)
+
+		args := ApplyAccountPointsArgs{
+			NetworkId:        childNetworkId,
+			Event:            AccountPointEventPayoutLinkedAccount,
+			PointValue:       childPayoutAmount,
+			LinkedNetworkId:  &networkId,
+			PaymentPlanId:    &paymentPlanId,
+			AccountPaymentId: accountPaymentId,
+		}
+
+		err := ApplyAccountPointsInTx(ctx, tx, args)
+		if err != nil {
+			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
+		}
+
+		accountPointsReports = append(accountPointsReports, AccountPointReport{
+			NetworkId:         childNetworkId,
+			Event:             string(AccountPointEventPayoutLinkedAccount),
+			ScaledNanoPoints:  childPayoutAmount,
+			ReferralNetworkId: &networkId,
+			PaymentId:         *accountPaymentId,
+			// PaymentPlanId:   &paymentPlanId,
+		})
+
+		// recursively payout to child referral networks
+		reports := payoutChildrenReferralNetworksInTx(
+			ctx,
+			tx,
+			basePayoutAmount,
+			payoutFraction*0.5, // reduce the payout fraction for each level of referral
+			childNetworkId,
+			networkReferrals,
+			paymentPlanId,
+			accountPaymentId,
+			[]AccountPointReport{},
+			depth+1,
+			visited,
+		)
+
+		accountPointsReports = append(accountPointsReports, reports...)
+
+	}
+
+	return accountPointsReports
+
 }
