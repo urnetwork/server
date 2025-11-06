@@ -131,10 +131,10 @@ var playSkus = sync.OnceValue(func() map[string]*Sku {
 	return skus.Skus
 })
 
-var companySenderEmail = sync.OnceValue(func() string {
-	c := server.Config.RequireSimpleResource("email.yml").Parse()
-	return c["company_sender_email"].(string)
-})
+// var companySenderEmail = sync.OnceValue(func() string {
+// 	c := server.Config.RequireSimpleResource("email.yml").Parse()
+// 	return c["company_sender_email"].(string)
+// })
 
 var playClientId = sync.OnceValue(func() string {
 	c := server.Vault.RequireSimpleResource("google.yml").Parse()
@@ -422,7 +422,7 @@ func stripeHandleCheckoutSessionCompleted(
 						&SubscriptionTransferBalanceCompanyTemplate{
 							BalanceByteCount: sku.BalanceByteCount(),
 						},
-						SenderEmail(companySenderEmail()),
+						SenderEmail(EnvEmailConfig().CompanySenderEmail),
 					)
 					if err != nil {
 						return nil, err

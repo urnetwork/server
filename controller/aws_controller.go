@@ -31,7 +31,7 @@ type EmailConfig struct {
 	CompanySenderEmail string `yaml:"company_sender_email"`
 }
 
-var CompanySenderEmail = sync.OnceValue(func() *EmailConfig {
+var EnvEmailConfig = sync.OnceValue(func() *EmailConfig {
 	var email EmailConfig
 	server.Config.RequireSimpleResource("email.yml").UnmarshalYaml(&email)
 	return &email
@@ -340,7 +340,7 @@ func sendAccountEmail(emailAddress string, subject string, bodyHtml string, body
 	charSet := "UTF-8"
 
 	// note any sender email domain will need to be registed as an identity in SES
-	senderEmail := CompanySenderEmail().CompanySenderEmail
+	senderEmail := EnvEmailConfig().CompanySenderEmail
 	for _, sendOpt := range sendOpts {
 		switch v := sendOpt.(type) {
 		case SendAccountEmailSenderEmail:

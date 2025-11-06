@@ -50,9 +50,9 @@ func TestAccountPoints(t *testing.T) {
 		assert.Equal(t, len(result.AccountPoints), 1)
 		assert.Equal(t, result.AccountPoints[0].NetworkId, networkId)
 		assert.Equal(t, result.AccountPoints[0].Event, string(model.AccountPointEventPayoutLinkedAccount))
-		assert.NotEqual(t, result.AccountPoints[0].PointValue, 0)
+		assert.NotEqual(t, result.AccountPoints[0].PointValue, model.NanoPoints(0))
 		assert.Equal(t, result.AccountPoints[0].CreateTime.IsZero(), false)
-		assert.Equal(t, result.AccountPoints[0].PointValue, 10)
+		assert.Equal(t, result.AccountPoints[0].PointValue, model.NanoPoints(10))
 
 		applyAccountPointsArgs = model.ApplyAccountPointsArgs{
 			NetworkId:  networkId,
