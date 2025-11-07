@@ -297,9 +297,7 @@ func RemoveNetworkClient(
 		tag, err := tx.Exec(
 			session.Ctx,
 			`
-				UPDATE network_client
-				SET
-					active = false
+				DELETE FROM network_client
 				WHERE
 					client_id = $1 AND
 					network_id = $2
@@ -924,19 +922,14 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 	var disconnectErr error
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		disconnectTime := server.NowUtc()
 		tag, err := tx.Exec(
 			ctx,
 			`
-				UPDATE network_client_connection
-				SET
-					connected = false,
-					disconnect_time = $2
+				DELETE FROM network_client_connection
 				WHERE
 					connection_id = $1
 			`,
 			connectionId,
-			disconnectTime,
 		)
 		server.Raise(err)
 		if tag.RowsAffected() != 1 {
@@ -1179,16 +1172,12 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				UPDATE network_client_connection
-				SET
-					connected = false,
-					disconnect_time = $1
-				FROM temp_handler_ids
+				DELETE FROM network_client_connection
+				USING temp_handler_ids
 				WHERE
 					temp_handler_ids.handler_id = network_client_connection.handler_id
 
 			`,
-			server.NowUtc(),
 		))
 
 		server.RaisePgResult(tx.Exec(
@@ -1417,44 +1406,6 @@ func NominateResident(
 	nomination *NetworkClientResident,
 ) (nominated bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		/*
-			result, err := tx.Query(
-				ctx,
-				`
-					SELECT
-						resident_id
-					FROM network_client_resident
-					WHERE
-						client_id = $1 AND
-						instance_id = $2
-					FOR UPDATE
-				`,
-				nomination.ClientId,
-				nomination.InstanceId,
-			)
-
-			hasResident := false
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					var residentId server.Id
-					server.Raise(result.Scan(&residentId))
-					if residentIdToReplace != nil && *residentIdToReplace == residentId {
-						hasResident = true
-					}
-				} else if residentIdToReplace == nil {
-					hasResident = true
-				}
-			})
-
-			// fmt.Printf("hasResident=%t test=%t\n", hasResident, hasResident && (residentIdToReplace == nil || residentId != *residentIdToReplace))
-
-			if !hasResident {
-				// already replaced
-				nominated = false
-				return
-			}
-		*/
-
 		var tag server.PgTag
 		if residentIdToReplace == nil {
 			tag = server.RaisePgResult(tx.Exec(
