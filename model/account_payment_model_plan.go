@@ -175,8 +175,6 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 		INNER JOIN temp_account_payment ON
 				temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
 				temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
-
-		FOR UPDATE OF transfer_escrow_sweep
   		`,
 	)
 	server.WithPgResult(result, err, func() {
