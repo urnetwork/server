@@ -422,7 +422,7 @@ func handleLoginParsedAuthJwt(
 func handleLoginWallet(
 	walletAuth *WalletAuthArgs,
 	ctx context.Context,
-) (*AuthLoginResult, error) {
+) (result *AuthLoginResult, returnErr error) {
 	/**
 	 * Handle wallet login
 	 */
@@ -433,11 +433,13 @@ func handleLoginWallet(
 		walletAuth.Signature,
 	)
 	if err != nil {
-		return nil, err
+		returnErr = err
+		return
 	}
 
 	if !isValid {
-		return nil, errors.New("invalid signature")
+		returnErr = errors.New("invalid signature")
+		return
 	}
 
 	walletAuths, err := getWalletAuthsByAddress(
@@ -446,7 +448,8 @@ func handleLoginWallet(
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet auths: %w", err)
+		returnErr = fmt.Errorf("failed to get wallet auths: %w", err)
+		return
 	}
 
 	if len(walletAuths) <= 0 {
@@ -462,7 +465,8 @@ func handleLoginWallet(
 	userId := walletAuths[0].UserId
 
 	if userId == nil {
-		return nil, errors.New("user ID not found for wallet auth")
+		returnErr = errors.New("user ID not found for wallet auth")
+		return
 	}
 
 	/**
@@ -471,6 +475,7 @@ func handleLoginWallet(
 
 	// var userId *server.Id
 	// var authType string
+	found := false
 	var networkId server.Id
 	var networkName string
 	server.Db(ctx, func(conn server.PgConn) {
@@ -479,7 +484,6 @@ func handleLoginWallet(
 			ctx,
 			`
 				SELECT
-					network_user.user_id,
 					network.network_id,
 					network.network_name
 				FROM network_user
@@ -491,41 +495,36 @@ func handleLoginWallet(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(
-					&userId,
 					&networkId,
 					&networkName,
 				))
+				found = true
 			}
 		})
 	})
 
-	// 	/**
-	// 	 * New wallet user
-	// 	 */
-	// 	return &AuthLoginResult{
-	// 		WalletAuth: login.WalletAuth,
-	// 	}, nil
-
-	// } else {
-
-	/**
-	 * Existing wallet user
-	 */
-
-	byJwt := jwt.NewByJwt(
-		networkId,
-		*userId,
-		networkName,
-		false,
-	)
-	result := &AuthLoginResult{
-		Network: &AuthLoginResultNetwork{
-			ByJwt: byJwt.Sign(),
-		},
+	if found {
+		byJwt := jwt.NewByJwt(
+			networkId,
+			*userId,
+			networkName,
+			false,
+		)
+		result = &AuthLoginResult{
+			Network: &AuthLoginResultNetwork{
+				ByJwt: byJwt.Sign(),
+			},
+		}
+		return
+	} else {
+		/**
+		 * New wallet user
+		 */
+		result = &AuthLoginResult{
+			WalletAuth: walletAuth,
+		}
+		return
 	}
-
-	return result, nil
-
 }
 
 // Function to verify a Solana wallet signature
@@ -1336,8 +1335,6 @@ func AuthCodeLogin(
 					auth_code.auth_code = $1 AND
 					auth_code.active = true AND
 					$2 < auth_code.end_time
-
-				FOR UPDATE
 			`,
 			codeLogin.AuthCode,
 			server.NowUtc(),
