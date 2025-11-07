@@ -175,6 +175,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// }
 	defer handleCancel()
 
+	go func() {
+		defer handleCancel()
+		select {
+		case <-r.Context().Done():
+		case <-handleCtx.Done():
+		}
+	}()
+
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
 
@@ -291,7 +299,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
+	byJwt, err := jwt.ParseByJwt(handleCtx, auth.ByJwt)
 	if err != nil {
 		glog.Infof("[t]auth jwt err = %s\n", err)
 		return
@@ -665,6 +673,14 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
+	go func() {
+		defer handleCancel()
+		select {
+		case <-conn.Context().Done():
+		case <-handleCtx.Done():
+		}
+	}()
+
 	// find the client ip:port from the addr
 	clientAddress := conn.RemoteAddr().String()
 
@@ -721,7 +737,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return err
 	}
 
-	byJwt, err := jwt.ParseByJwt(auth.ByJwt)
+	byJwt, err := jwt.ParseByJwt(handleCtx, auth.ByJwt)
 	if err != nil {
 		return err
 	}
