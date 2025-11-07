@@ -102,6 +102,12 @@ func NewByJwt(
 	guestMode bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
+	if networkId == (server.Id{}) {
+		panic(fmt.Errorf("network_id must be set"))
+	}
+	if userId == (server.Id{}) {
+		panic(fmt.Errorf("user_id must be set"))
+	}
 	return NewByJwtWithCreateTime(
 		networkId,
 		userId,
@@ -120,6 +126,12 @@ func NewByJwtWithCreateTime(
 	guestMode bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
+	if networkId == (server.Id{}) {
+		panic(fmt.Errorf("network_id must be set"))
+	}
+	if userId == (server.Id{}) {
+		panic(fmt.Errorf("user_id must be set"))
+	}
 	return &ByJwt{
 		NetworkId:   networkId,
 		UserId:      userId,
@@ -131,7 +143,7 @@ func NewByJwtWithCreateTime(
 	}
 }
 
-func ParseByJwt(jwtSigned string) (*ByJwt, error) {
+func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	var token *gojwt.Token
 	var err error
 	// attempt all signing keys
@@ -160,10 +172,15 @@ func ParseByJwt(jwtSigned string) (*ByJwt, error) {
 		return nil, err
 	}
 
+	err = fixByJwt(ctx, byJwt)
+	if err != nil {
+		return nil, err
+	}
+
 	return byJwt, nil
 }
 
-func ParseByJwtUnverified(jwtStr string) (*ByJwt, error) {
+func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
 	if err != nil {
 		return nil, err
@@ -178,6 +195,11 @@ func ParseByJwtUnverified(jwtStr string) (*ByJwt, error) {
 
 	byJwt := &ByJwt{}
 	err = json.Unmarshal(claimsJson, byJwt)
+	if err != nil {
+		return nil, err
+	}
+
+	err = fixByJwt(ctx, byJwt)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +251,131 @@ func (self *ByJwt) User() *ByJwt {
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
 	}
+}
+
+// in some cases, the byJwt might be corrupt
+// in some of those cases, we can still recover it
+func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
+	if byJwt.NetworkId == (server.Id{}) {
+		// the NetworkId is missing (FIXME why?)
+		// it can be recovered from the client id or the user id
+
+		if byJwt.UserId != (server.Id{}) {
+			var cachedValue string
+			key := jwtNetworkIdByUserIdKey(byJwt.UserId)
+			server.Redis(ctx, func(r server.RedisClient) {
+				cachedValue, _ = r.Get(ctx, key).Result()
+			})
+			if cachedValue != "" {
+				networkId, err := server.ParseId(cachedValue)
+				if err == nil {
+					byJwt.NetworkId = networkId
+					glog.Infof("[jwt]fixed network_id with user_id (cached)\n")
+				}
+			} else {
+				networkId, err := getNetworkIdForUser(ctx, byJwt.UserId)
+				if err == nil {
+					byJwt.NetworkId = networkId
+					glog.Infof("[jwt]fixed network_id with user_id\n")
+					storeCtx := context.Background()
+					ttl := 15 * time.Minute
+					go server.Redis(storeCtx, func(r server.RedisClient) {
+						// ignore the error
+						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					})
+				}
+			}
+		} else if byJwt.ClientId != nil {
+			var cachedValue string
+			key := jwtNetworkIdByClientIdKey(*byJwt.ClientId)
+			server.Redis(ctx, func(r server.RedisClient) {
+				cachedValue, _ = r.Get(ctx, key).Result()
+			})
+			if cachedValue != "" {
+				networkId, err := server.ParseId(cachedValue)
+				if err == nil {
+					byJwt.NetworkId = networkId
+					glog.Infof("[jwt]fixed network_id with client_id (cached)\n")
+				}
+			} else {
+				networkId, err := getNetworkIdForClient(ctx, *byJwt.ClientId)
+				if err == nil {
+					byJwt.NetworkId = networkId
+					glog.Infof("[jwt]fixed network_id with client_id\n")
+					storeCtx := context.Background()
+					ttl := 15 * time.Minute
+					go server.Redis(storeCtx, func(r server.RedisClient) {
+						// ignore the error
+						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					})
+				}
+			}
+		}
+
+		if byJwt.NetworkId == (server.Id{}) {
+			return fmt.Errorf("Missing network_id")
+		}
+	}
+
+	if byJwt.UserId == (server.Id{}) {
+		return fmt.Errorf("Missing user_id")
+	}
+
+	return nil
+}
+
+func jwtNetworkIdByUserIdKey(userId server.Id) string {
+	return fmt.Sprintf("jwt_network_id_u_%s", userId)
+}
+
+func getNetworkIdForUser(ctx context.Context, userId server.Id) (networkId server.Id, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+			    network_id
+			FROM network
+			WHERE admin_user_id = $1
+			`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+			} else {
+				returnErr = fmt.Errorf("network_id not found for user_id=%s", userId)
+			}
+		})
+	})
+	return
+}
+
+func jwtNetworkIdByClientIdKey(clientId server.Id) string {
+	return fmt.Sprintf("jwt_network_id_c_%s", clientId)
+}
+
+func getNetworkIdForClient(ctx context.Context, clientId server.Id) (networkId server.Id, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+			    network_id
+			FROM network_client
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+			} else {
+				returnErr = fmt.Errorf("network_id not found for client_id=%s", clientId)
+			}
+		})
+	})
+	return
 }
 
 func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {

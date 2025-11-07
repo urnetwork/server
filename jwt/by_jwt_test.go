@@ -20,7 +20,7 @@ func TestByJwtLegacy(t *testing.T) {
 		byJwt := NewByJwt(networkId, userId, networkName, guestMode)
 		jwtSigned := byJwt.Sign()
 
-		parsedByJwt, err := ParseByJwt(jwtSigned)
+		parsedByJwt, err := ParseByJwt(ctx, jwtSigned)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, parsedByJwt, nil)
 
@@ -49,7 +49,7 @@ func TestByJwtFull(t *testing.T) {
 		byJwt := NewByJwt(networkId, userId, networkName, guestMode, sessionIds...)
 		jwtSigned := byJwt.Sign()
 
-		parsedByJwt, err := ParseByJwt(jwtSigned)
+		parsedByJwt, err := ParseByJwt(ctx, jwtSigned)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, parsedByJwt, nil)
 
@@ -85,7 +85,7 @@ func TestByJwtFullWithClientId(t *testing.T) {
 
 		clientJwtSigned := byClientJwt.Sign()
 
-		parsedByClientJwt, err := ParseByJwt(clientJwtSigned)
+		parsedByClientJwt, err := ParseByJwt(ctx, clientJwtSigned)
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, parsedByClientJwt, nil)
 

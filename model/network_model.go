@@ -1137,7 +1137,7 @@ func UpgradeFromGuestExisting(
 			}, nil
 		}
 
-		network, err := jwt.ParseByJwt(*loginResult.Network.ByJwt)
+		network, err := jwt.ParseByJwt(session.Ctx, *loginResult.Network.ByJwt)
 		if err != nil {
 			return &UpgradeGuestExistingResult{
 				Error: &UpgradeGuestExistingError{
@@ -1229,7 +1229,7 @@ func handleAuthLoginUpgrade(
 		return &UpgradeGuestExistingResult{}, nil
 	}
 
-	network, err := jwt.ParseByJwt(loginResult.Network.ByJwt)
+	network, err := jwt.ParseByJwt(session.Ctx, loginResult.Network.ByJwt)
 	if err != nil {
 		return &UpgradeGuestExistingResult{
 			Error: &UpgradeGuestExistingError{
