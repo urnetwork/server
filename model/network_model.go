@@ -140,7 +140,6 @@ func NetworkCreate(
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			var err error
 
-			created = true
 			createdUserId = server.NewId()
 			createdNetworkId = server.NewId()
 
@@ -175,6 +174,8 @@ func NetworkCreate(
 				createdUserId,
 			)
 			server.Raise(err)
+
+			created = true
 		})
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
@@ -281,7 +282,6 @@ func NetworkCreate(
 				return
 			}
 
-			created = true
 			createdUserId := server.NewId()
 			createdNetworkId = server.NewId()
 
@@ -329,6 +329,8 @@ func NetworkCreate(
 				containsProfanity,
 			)
 			server.Raise(err)
+
+			created = true
 		})
 		if created {
 			auditNetworkCreate(networkCreate, createdNetworkId, session)
@@ -394,7 +396,6 @@ func NetworkCreate(
 
 				// server.Logger().Printf("JWT Creating a new network\n")
 
-				created = true
 				createdUserId = server.NewId()
 				createdNetworkId = server.NewId()
 
@@ -449,6 +450,8 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
+
+				created = true
 			})
 			if created {
 				auditNetworkCreate(networkCreate, createdNetworkId, session)
@@ -528,7 +531,6 @@ func NetworkCreate(
 				return
 			}
 
-			created = true
 			createdUserId = server.NewId()
 			createdNetworkId = server.NewId()
 
@@ -583,6 +585,8 @@ func NetworkCreate(
 			if err != nil {
 				panic(err)
 			}
+
+			created = true
 		})
 		if created {
 
