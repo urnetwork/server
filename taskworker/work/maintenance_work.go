@@ -22,8 +22,20 @@ func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx,
 	runAt := func() time.Time {
 		now := server.NowUtc()
 		year, month, day := now.Date()
-		// start maintenance at 4:00 UTC daily
-		return time.Date(year, month, day+1, 4, 0, 0, 0, time.UTC)
+		// start maintenance at the earliest available of 3:00 UTC daily or 23:00 PST (7:00 UTC)
+		orderedOptions := []time.Time{
+			time.Date(year, month, day, 3, 0, 0, 0, time.UTC),
+			time.Date(year, month, day, 7, 0, 0, 0, time.UTC),
+			time.Date(year, month, day+1, 3, 0, 0, 0, time.UTC),
+			time.Date(year, month, day+1, 7, 0, 0, 0, time.UTC),
+		}
+		// first in the future
+		for _, t := range orderedOptions {
+			if now.Before(t) {
+				return t
+			}
+		}
+		return orderedOptions[len(orderedOptions)-1]
 	}()
 
 	task.ScheduleTaskInTx(
@@ -50,7 +62,7 @@ func DbMaintenancePost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleDbMaintenance(clientSession, tx, dbMaintenance.Epoch + 1)
+	ScheduleDbMaintenance(clientSession, tx, dbMaintenance.Epoch+1)
 	return nil
 }
 

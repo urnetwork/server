@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
-	"hash/maphash"
+	"encoding/binary"
+	"hash/fnv"
 	mathrand "math/rand"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/golang/glog"
 )
@@ -47,10 +49,12 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			tableName,
 		)
 		WithPgResult(result, err, func() {
-			var indexName string
-			Raise(result.Scan(&indexName))
-			if incompleteIndexNamePattern.MatchString(indexName) {
-				incompleteIndexNames = append(incompleteIndexNames, indexName)
+			for result.Next() {
+				var indexName string
+				Raise(result.Scan(&indexName))
+				if incompleteIndexNamePattern.MatchString(indexName) {
+					incompleteIndexNames = append(incompleteIndexNames, indexName)
+				}
 			}
 		})
 
@@ -94,8 +98,12 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 
 		reindexTableNames := []string{}
 		for _, tableName := range tableNames {
-			var hash maphash.Hash
+			hash := fnv.New64()
 			hash.Write([]byte(tableName))
+			b := make([]byte, 8)
+			// cycle the hash each generation
+			binary.BigEndian.PutUint64(b, epoch/DbReindexEpochs)
+			hash.Write(b)
 			h := hash.Sum64()
 			if h%DbReindexEpochs == epoch%DbReindexEpochs {
 				reindexTableNames = append(reindexTableNames, tableName)
@@ -103,7 +111,12 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 		}
 		slices.Sort(reindexTableNames)
 
-		glog.Infof("[db]maintenance reindex %d/%d tables (in random order): %s\n", len(reindexTableNames), len(tableNames), strings.Join(reindexTableNames, ", "))
+		glog.Infof(
+			"[db]maintenance reindex %d/%d tables (in random order): %s\n",
+			len(reindexTableNames),
+			len(tableNames),
+			strings.Join(reindexTableNames, ", "),
+		)
 
 		mathrand.Shuffle(len(reindexTableNames), func(i int, j int) {
 			reindexTableNames[i], reindexTableNames[j] = reindexTableNames[j], reindexTableNames[i]
@@ -111,24 +124,52 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 
 		// reindex concurrently
 		for i, reindexTableName := range reindexTableNames {
-			glog.Infof("[db]maintenance reindex[%d/%d] %s\n", i+1, len(reindexTableNames), reindexTableName)
+			glog.Infof(
+				"[db]maintenance reindex[%d/%d] %s\n",
+				i+1,
+				len(reindexTableNames),
+				reindexTableName,
+			)
+
+			startTime := time.Now()
+			cleanUpIncompleteIdexes(conn, reindexTableName)
+			endTime := time.Now()
+			glog.Infof(
+				"[db]maintenance reindex[%d/%d] %s cleanup took %.2fms\n",
+				i+1,
+				len(reindexTableNames),
+				reindexTableName,
+				float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+			)
 
 			// reindex
+			startTime = time.Now()
 			RaisePgResult(conn.Exec(
 				ctx,
 				`
-				REINDEX CONCURRENTLY TABLE $1
-				`,
-				reindexTableName,
+				REINDEX TABLE CONCURRENTLY 
+				`+reindexTableName,
 			))
-
-			cleanUpIncompleteIdexes(conn, reindexTableName)
+			endTime = time.Now()
+			glog.Infof(
+				"[db]maintenance reindex[%d/%d] %s reindex took %.2fms\n",
+				i+1,
+				len(reindexTableNames),
+				reindexTableName,
+				float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+			)
 		}
 
 		// final analyze
+		startTime := time.Now()
 		RaisePgResult(conn.Exec(
 			ctx,
 			`ANALYZE`,
 		))
+		endTime := time.Now()
+		glog.Infof(
+			"[db]maintenance reindex final analyze took %.2fms\n",
+			float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+		)
 	})
 }
