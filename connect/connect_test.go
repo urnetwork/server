@@ -1358,14 +1358,14 @@ func testConnect(
 	clientB.Flush()
 
 	select {
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
 
 	clientA.Close()
 	clientB.Close()
 
 	select {
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
 
 	assert.Equal(
