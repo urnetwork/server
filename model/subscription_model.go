@@ -1932,6 +1932,8 @@ func GetOpenContractIds(
 					contractIdPartialCloseParties[contractId] = append(contractIdPartialCloseParties[contractId], ContractPartyCheckpoint)
 				} else if party != "" {
 					contractIdPartialCloseParties[contractId] = append(contractIdPartialCloseParties[contractId], party)
+				} else if _, ok := contractIdPartialCloseParties[contractId]; !ok {
+					contractIdPartialCloseParties[contractId] = []ContractParty{}
 				}
 			}
 		})
