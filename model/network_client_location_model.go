@@ -1787,8 +1787,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 
 	setScore := func(
 		clientScore *ClientScore,
-		netTypeScore int,
-		netTypeScoreSpeed int,
+		netTypeScores map[RankMode]int,
 		minRelativeLatencyMillis int,
 		maxBytesPerSecond ByteCount,
 		hasLatencyTest bool,
@@ -1814,7 +1813,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			}
 
 			score := min(
-				scorePerTier*netTypeScoreSpeed+scoreAdjust,
+				scorePerTier*netTypeScores[rankMode]+scoreAdjust,
 				MaxClientScore,
 			)
 			clientScore.Scores[rankMode] = score
@@ -1890,10 +1889,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					Tiers:                    map[string]int{},
 				}
 
+				netTypeScores := map[RankMode]int{
+					RankModeQuality: netTypeScore,
+					RankModeSpeed:   netTypeScoreSpeed,
+				}
+
 				setScore(
 					clientScore,
-					netTypeScore,
-					netTypeScoreSpeed,
+					netTypeScores,
 					minRelativeLatencyMillis,
 					maxBytesPerSecond,
 					hasLatencyTest,
@@ -1998,10 +2001,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					Tiers:                    map[string]int{},
 				}
 
+				netTypeScores := map[RankMode]int{
+					RankModeQuality: netTypeScore,
+					RankModeSpeed:   netTypeScoreSpeed,
+				}
+
 				setScore(
 					clientScore,
-					netTypeScore,
-					netTypeScoreSpeed,
+					netTypeScores,
 					minRelativeLatencyMillis,
 					maxBytesPerSecond,
 					hasLatencyTest,
