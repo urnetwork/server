@@ -100,7 +100,7 @@ func TestDeviceAdopt(t *testing.T) {
 		assert.Equal(t, result4.Error, nil)
 		// assert.Equal(t, result4.AssociatedNetworkName, "a")
 		assert.NotEqual(t, result4.ByClientJwt, "")
-		byJwt, err := jwt.ParseByJwt(result4.ByClientJwt)
+		byJwt, err := jwt.ParseByJwt(ctx, result4.ByClientJwt)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, byJwt.NetworkId, networkIdA)
 		assert.Equal(t, byJwt.NetworkName, "a")

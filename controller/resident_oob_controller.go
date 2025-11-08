@@ -24,9 +24,16 @@ var ControlId = server.Id(connect.ControlId)
 var MinContractTransferByteCount = func() model.ByteCount {
 	settings := connect.DefaultClientSettings()
 	return max(
-		settings.ContractManagerSettings.StandardContractTransferByteCount,
+		settings.ContractManagerSettings.InitialContractTransferByteCount,
 		settings.SendBufferSettings.MinMessageByteCount,
 		settings.ReceiveBufferSettings.MinMessageByteCount,
+	)
+}()
+
+var MaxContractTransferByteCount = func() model.ByteCount {
+	settings := connect.DefaultClientSettings()
+	return max(
+		2 * settings.ContractManagerSettings.StandardContractTransferByteCount,
 	)
 }()
 
@@ -268,22 +275,24 @@ func nextContract(
 ) (server.Id, model.ByteCount, model.Priority, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
-	// look for existing open contracts that the requestor does not have
-	usedContractIds := map[server.Id]bool{}
-	for _, contractIdBytes := range createContract.UsedContractIds {
-		if contractId, err := server.IdFromBytes(contractIdBytes); err == nil {
-			usedContractIds[contractId] = true
+	if createContract.UsedContractIds != nil {
+		// look for existing open contracts that the requestor does not have
+		usedContractIds := map[server.Id]bool{}
+		for _, contractIdBytes := range createContract.UsedContractIds {
+			if contractId, err := server.IdFromBytes(contractIdBytes); err == nil {
+				usedContractIds[contractId] = true
+			}
 		}
-	}
-	escrows := model.GetOpenTransferEscrowsOrderedByPriorityCreateTime(
-		ctx,
-		clientId,
-		destinationId,
-		model.ByteCount(createContract.TransferByteCount),
-	)
-	for _, escrow := range escrows {
-		if !usedContractIds[escrow.ContractId] {
-			return escrow.ContractId, escrow.TransferByteCount, escrow.Priority, nil
+		escrows := model.GetOpenTransferEscrowsOrderedByPriorityCreateTime(
+			ctx,
+			clientId,
+			destinationId,
+			model.ByteCount(createContract.TransferByteCount),
+		)
+		for _, escrow := range escrows {
+			if !usedContractIds[escrow.ContractId] {
+				return escrow.ContractId, escrow.TransferByteCount, escrow.Priority, nil
+			}
 		}
 	}
 
@@ -320,7 +329,10 @@ func newContract(
 		return
 	}
 
-	contractTransferByteCount = max(MinContractTransferByteCount, transferByteCount)
+	contractTransferByteCount = min(
+		max(MinContractTransferByteCount, transferByteCount),
+		MaxContractTransferByteCount,
+	)
 
 	if provideMode < model.ProvideModePublic {
 		contractId, err = model.CreateContractNoEscrow(

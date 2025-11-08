@@ -1300,7 +1300,6 @@ func (self *TaskWorker) EvalTasks(n int) (
 					
 					FROM pending_task
 					WHERE task_id = $1
-					FOR UPDATE
 					`,
 					taskId,
 					finished.runStartTime,

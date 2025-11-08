@@ -57,7 +57,8 @@ stream {
 
 	nginxCmd := exec.Command("nginx", "-c", configPath)
 	nginxCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	nginxCmd.Start()
+	err = nginxCmd.Start()
+	assert.Equal(t, err, nil)
 	// defer nginxCmd.Process.Kill()
 	defer syscall.Kill(-nginxCmd.Process.Pid, syscall.SIGKILL)
 

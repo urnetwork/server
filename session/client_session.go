@@ -81,7 +81,7 @@ func (self *ClientSession) Auth(req *http.Request) error {
 			// 2. test the create time and sessions against
 			//    inactive sessions. For various security reasons sessions may be expired.
 
-			byJwt, err := jwt.ParseByJwt(jwtStr)
+			byJwt, err := jwt.ParseByJwt(self.Ctx, jwtStr)
 			if err != nil {
 				return err
 			}

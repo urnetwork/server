@@ -91,6 +91,7 @@ func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx serv
 		&ProcessPendingPayoutsArgs{},
 		clientSession,
 		task.RunOnce("process_pending_payouts"),
+		task.MaxTime(1*time.Hour),
 	)
 }
 

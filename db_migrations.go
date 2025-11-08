@@ -2527,4 +2527,24 @@ var migrations = []any{
 	    ALTER TABLE network_client_resident_port
 	    DROP COLUMN client_id
 	`),
+
+	newSqlMigration(`
+        DROP TABLE privacy_agent_request
+    `),
+
+	newSqlMigration(`
+        DROP TABLE complete_privacy_policy
+    `),
+
+	newSqlMigration(`
+        DROP TABLE complete_privacy_policy_service_url
+    `),
+
+	newSqlMigration(`
+        DROP TABLE complete_privacy_policy_extracted_url
+    `),
+
+	newSqlMigration(`
+        DROP TABLE latest_complete_privacy_policy
+    `),
 }

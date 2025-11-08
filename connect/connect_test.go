@@ -1317,6 +1317,26 @@ func testConnect(
 		}
 	}
 
+	// clientA.Cancel()
+	// clientB.Cancel()
+
+	// close(receiveA)
+	// close(receiveB)
+
+	clientA.Flush()
+	clientB.Flush()
+
+	select {
+	case <-time.After(5 * time.Second):
+	}
+
+	clientA.Close()
+	clientB.Close()
+
+	select {
+	case <-time.After(5 * time.Second):
+	}
+
 	select {
 	case <-time.After(1 * time.Second):
 	}
@@ -1328,41 +1348,12 @@ func testConnect(
 		transportB.Close()
 	}
 
-	clientA.Cancel()
-	clientB.Cancel()
-
-	// close(receiveA)
-	// close(receiveB)
-
 	for _, server := range servers {
 		server.Close()
 	}
 	for _, exchange := range exchanges {
 		exchange.Close()
 	}
-
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	flushedContractIdsA := []server.Id{}
-	for _, contractId := range clientA.ContractManager().Flush(false) {
-		flushedContractIdsA = append(flushedContractIdsA, server.Id(contractId))
-	}
-	flushedContractIdsB := []server.Id{}
-	for _, contractId := range clientB.ContractManager().Flush(false) {
-		flushedContractIdsB = append(flushedContractIdsB, server.Id(contractId))
-	}
-
-	clientA.Flush()
-	clientB.Flush()
-
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	clientA.Close()
-	clientB.Close()
 
 	select {
 	case <-time.After(1 * time.Second):
@@ -1389,12 +1380,16 @@ func testConnect(
 		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdB, 0, false)
 			delete(contractIdPartialClosePartiesAToB, contractId)
+		} else {
+			fmt.Printf("A->B PARTY: %s\n", party)
 		}
 	}
 	for contractId, party := range contractIdPartialClosePartiesBToA {
 		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdA, 0, false)
 			delete(contractIdPartialClosePartiesBToA, contractId)
+		} else {
+			fmt.Printf("B->A PARTY: %s\n", party)
 		}
 	}
 
@@ -1408,6 +1403,15 @@ func testConnect(
 	// for _, party := range contractIdPartialClosePartiesBToA {
 	// 	assert.Equal(t, model.ContractPartySource, party)
 	// }
+
+	flushedContractIdsA := []server.Id{}
+	for _, contractId := range clientA.ContractManager().Flush(false) {
+		flushedContractIdsA = append(flushedContractIdsA, server.Id(contractId))
+	}
+	flushedContractIdsB := []server.Id{}
+	for _, contractId := range clientB.ContractManager().Flush(false) {
+		flushedContractIdsB = append(flushedContractIdsB, server.Id(contractId))
+	}
 
 	// SendSequence now flushes pending contracts when closed
 	assert.Equal(t, len(flushedContractIdsA), 0)

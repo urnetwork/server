@@ -67,7 +67,7 @@ func NetworkCreate(
 			)
 		}
 
-		byJwt, err := jwt.ParseByJwt(*(result.Network.ByJwt))
+		byJwt, err := jwt.ParseByJwt(session.Ctx, *(result.Network.ByJwt))
 		if err == nil {
 			AccountPreferencesSet(
 				&model.AccountPreferencesSetArgs{
