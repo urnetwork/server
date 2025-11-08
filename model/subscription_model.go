@@ -1855,8 +1855,8 @@ func GetOpenContractIdsWithNoPartialClose(
 	destinationId server.Id,
 ) map[server.Id]bool {
 	contractIds := map[server.Id]bool{}
-	for contractId, party := range GetOpenContractIds(ctx, sourceId, destinationId) {
-		if party == "" {
+	for contractId, parties := range GetOpenContractIds(ctx, sourceId, destinationId) {
+		if len(parties) == 0 {
 			contractIds[contractId] = true
 		}
 	}
@@ -1869,9 +1869,9 @@ func GetOpenContractIdsWithPartialClose(
 	destinationId server.Id,
 ) map[server.Id]ContractParty {
 	contractIdPartialCloseParties := map[server.Id]ContractParty{}
-	for contractId, party := range GetOpenContractIds(ctx, sourceId, destinationId) {
-		if party != "" {
-			contractIdPartialCloseParties[contractId] = party
+	for contractId, parties := range GetOpenContractIds(ctx, sourceId, destinationId) {
+		if len(parties) == 1 {
+			contractIdPartialCloseParties[contractId] = parties[0]
 		}
 	}
 	return contractIdPartialCloseParties
@@ -1882,8 +1882,8 @@ func GetOpenContractIds(
 	ctx context.Context,
 	sourceId server.Id,
 	destinationId server.Id,
-) map[server.Id]ContractParty {
-	contractIdPartialCloseParties := map[server.Id]ContractParty{}
+) map[server.Id][]ContractParty {
+	contractIdPartialCloseParties := map[server.Id][]ContractParty{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
@@ -1921,12 +1921,17 @@ func GetOpenContractIds(
 				}
 				// there can be up to two rows per contractId (one checkpoint)
 				// non-checkpoint takes precedence
+				// if checkpoint {
+				// 	if contractIdPartialCloseParties[contractId] == "" {
+				// 		contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
+				// 	}
+				// } else {
+				// 	contractIdPartialCloseParties[contractId] = party
+				// }
 				if checkpoint {
-					if contractIdPartialCloseParties[contractId] == "" {
-						contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
-					}
-				} else {
-					contractIdPartialCloseParties[contractId] = party
+					contractIdPartialCloseParties[contractId] = append(contractIdPartialCloseParties[contractId], ContractPartyCheckpoint)
+				} else if party != "" {
+					contractIdPartialCloseParties[contractId] = append(contractIdPartialCloseParties[contractId], party)
 				}
 			}
 		})
