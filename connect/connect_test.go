@@ -1389,12 +1389,16 @@ func testConnect(
 		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdB, 0, false)
 			delete(contractIdPartialClosePartiesAToB, contractId)
+		} else {
+			fmt.Printf("A->B PARTY: %s\n", party)
 		}
 	}
 	for contractId, party := range contractIdPartialClosePartiesBToA {
 		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
 			model.CloseContract(ctx, contractId, clientIdA, 0, false)
 			delete(contractIdPartialClosePartiesBToA, contractId)
+		} else {
+			fmt.Printf("B->A PARTY: %s\n", party)
 		}
 	}
 
