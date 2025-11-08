@@ -142,8 +142,8 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
-		assert.Equal(t, contractIds, map[server.Id]ContractParty{
-			transferEscrow.ContractId: "",
+		assert.Equal(t, contractIds, map[server.Id][]ContractParty{
+			transferEscrow.ContractId: []ContractParty{},
 		})
 
 		usedTransferByteCount := ByteCount(1024)
@@ -388,8 +388,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
-		assert.Equal(t, contractIds, map[server.Id]ContractParty{
-			transferEscrow.ContractId: "",
+		assert.Equal(t, contractIds, map[server.Id][]ContractParty{
+			transferEscrow.ContractId: []ContractParty{},
 		})
 
 		usedTransferByteCount := ByteCount(1024)
