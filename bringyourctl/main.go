@@ -30,6 +30,7 @@ func main() {
 Usage:
     bringyourctl db version
     bringyourctl db migrate
+    bringyourctl db maintenance <epoch>
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -102,6 +103,8 @@ Options:
 			dbVersion(opts)
 		} else if migrate, _ := opts.Bool("migrate"); migrate {
 			dbMigrate(opts)
+		} else if maintenance, _ := opts.Bool("maintenance"); maintenance {
+			dbMaintenance(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -236,6 +239,14 @@ func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
+}
+
+func dbMaintenance(opts docopt.Opts) {
+	epoch, _ := opts.Int("<epoch>")
+
+	fmt.Printf("Running DB maintenance ...\n")
+	// server.DbMigrationVerbose = true
+	server.DbMaintenance(context.Background(), uint64(epoch))
 }
 
 func searchAdd(opts docopt.Opts) {

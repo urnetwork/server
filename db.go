@@ -917,20 +917,3 @@ func parseSpec(spec string) (columnNames []string, pgTypes []string, nullables [
 
 	return
 }
-
-func DbMaintenance(ctx context.Context) {
-	/*
-		Tx(ctx, func(tx PgTx) {
-
-			RaisePgResult(tx.Exec(
-				ctx,
-				`VACUUM ANALYZE`,
-			))
-
-			// RaisePgResult(tx.Exec(
-			// 	ctx,
-			// 	`VACUUM FULL`,
-			// ))
-		})
-	*/
-}
