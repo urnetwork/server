@@ -22,7 +22,7 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
+	// model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
 
 	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 

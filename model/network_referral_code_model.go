@@ -29,31 +29,40 @@ func generateAlphanumericCode(length int) string {
 	return string(code)
 }
 
+func CreateNetworkReferralCodeInTx(ctx context.Context, tx server.PgTx, networkId server.Id) *NetworkReferralCode {
+
+	code := generateAlphanumericCode(6)
+
+	networkReferralCode := &NetworkReferralCode{
+		NetworkId:    networkId,
+		ReferralCode: code,
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+					INSERT INTO network_referral_code (
+							network_id,
+							referral_code
+					)
+					VALUES ($1, $2)
+			`,
+		networkReferralCode.NetworkId,
+		networkReferralCode.ReferralCode,
+	))
+
+	return networkReferralCode
+
+}
+
 func CreateNetworkReferralCode(ctx context.Context, networkId server.Id) *NetworkReferralCode {
 
 	var networkReferralCode *NetworkReferralCode
 
-	code := generateAlphanumericCode(6)
-
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		networkReferralCode = &NetworkReferralCode{
-			NetworkId:    networkId,
-			ReferralCode: code,
-		}
+		networkReferralCode = CreateNetworkReferralCodeInTx(ctx, tx, networkId)
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-						INSERT INTO network_referral_code (
-								network_id,
-								referral_code
-						)
-						VALUES ($1, $2)
-				`,
-			networkReferralCode.NetworkId,
-			networkReferralCode.ReferralCode,
-		))
 	})
 
 	return networkReferralCode

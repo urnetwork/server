@@ -52,6 +52,10 @@ func TestNetworkCreate(t *testing.T) {
 			NetworkId: result.Network.NetworkId,
 		}
 
+		// ensure referral code has been created for this network
+		networkReferralCode := model.GetNetworkReferralCode(session.Ctx, result.Network.NetworkId)
+		assert.NotEqual(t, networkReferralCode, nil)
+
 		// check referral network has points applied
 		// networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
 		// assert.Equal(t, len(networkPoints), 1)

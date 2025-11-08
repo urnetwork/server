@@ -175,6 +175,8 @@ func NetworkCreate(
 			)
 			server.Raise(err)
 
+			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
+
 			created = true
 		})
 		if created {
@@ -330,6 +332,8 @@ func NetworkCreate(
 			)
 			server.Raise(err)
 
+			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
+
 			created = true
 		})
 		if created {
@@ -450,6 +454,8 @@ func NetworkCreate(
 				if err != nil {
 					panic(err)
 				}
+
+				CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
 
 				created = true
 			})
@@ -585,6 +591,8 @@ func NetworkCreate(
 			if err != nil {
 				panic(err)
 			}
+
+			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
 
 			created = true
 		})
