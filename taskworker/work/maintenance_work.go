@@ -12,22 +12,26 @@ import (
 )
 
 type DbMaintenanceArgs struct {
+	Epoch uint64 `json:"epoch"`
 }
 
 type DbMaintenanceResult struct {
 }
 
-func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx) {
+func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx, epoch uint64) {
 	runAt := func() time.Time {
 		now := server.NowUtc()
 		year, month, day := now.Date()
-		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
+		// start maintenance at 4:00 UTC daily
+		return time.Date(year, month, day+1, 4, 0, 0, 0, time.UTC)
 	}()
 
 	task.ScheduleTaskInTx(
 		tx,
 		DbMaintenance,
-		&DbMaintenanceArgs{},
+		&DbMaintenanceArgs{
+			Epoch: epoch,
+		},
 		clientSession,
 		task.RunOnce("db_maintenance"),
 		task.RunAt(runAt),
@@ -36,7 +40,7 @@ func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx)
 }
 
 func DbMaintenance(dbMaintenance *DbMaintenanceArgs, clientSession *session.ClientSession) (*DbMaintenanceResult, error) {
-	server.DbMaintenance(clientSession.Ctx)
+	server.DbMaintenance(clientSession.Ctx, dbMaintenance.Epoch)
 	return &DbMaintenanceResult{}, nil
 }
 
@@ -46,7 +50,7 @@ func DbMaintenancePost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleDbMaintenance(clientSession, tx)
+	ScheduleDbMaintenance(clientSession, tx, dbMaintenance.Epoch + 1)
 	return nil
 }
 

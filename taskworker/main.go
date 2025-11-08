@@ -138,7 +138,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
-		work.ScheduleDbMaintenance(clientSession, tx)
+		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
