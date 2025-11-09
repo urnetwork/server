@@ -115,7 +115,7 @@ func UpdateNetworkReliabilityWindow(
 ) (*UpdateNetworkReliabilityWindowResult, error) {
 	minTime := server.NowUtc().Add(-1 * time.Hour)
 	maxTime := server.NowUtc()
-	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime, false)
+	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateNetworkReliabilityWindowResult{}, nil
 }
