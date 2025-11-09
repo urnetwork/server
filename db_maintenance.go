@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/glog"
@@ -15,10 +16,13 @@ import (
 
 const DbReindexEpochs = uint64(8)
 
+// per the posgres docs, remove indexes that end in _ccnew\d* or _ccold\d*
+var incompleteIndexNamePattern = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile("^(?:.*_ccnew\\d*|.*_ccold\\d*)$")
+})
+
 func isIncompleteIndexName(indexName string) bool {
-	// per the posgres docs, remove indexes that end in _ccnew\d* or _ccold\d*
-	incompleteIndexNamePattern := regexp.MustCompile("^(?:.*_ccnew\\d*|.*_ccold\\d*)$")
-	return incompleteIndexNamePattern.MatchString(indexName)
+	return incompleteIndexNamePattern().MatchString(indexName)
 }
 
 func DbMaintenance(ctx context.Context, epoch uint64) {
