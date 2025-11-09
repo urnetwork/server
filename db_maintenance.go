@@ -144,21 +144,6 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			reindexTableName,
 		)
 
-		HandleError(func() {
-			Db(ctx, func(conn PgConn) {
-				startTime := time.Now()
-				cleanUpIncompleteIndexes(conn, reindexTableName)
-				endTime := time.Now()
-				glog.Infof(
-					"[db]maintenance reindex[%d/%d] %s cleanup took %.2fms\n",
-					i+1,
-					len(reindexTableNames),
-					reindexTableName,
-					float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
-				)
-			})
-		})
-
 		// pg might raise a deadlock or other unrecoverable error during reindex
 		HandleError(func() {
 			Db(ctx, func(conn PgConn) {
@@ -168,6 +153,30 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 				endTime := time.Now()
 				glog.Infof(
 					"[db]maintenance reindex[%d/%d] %s reindex took %.2fms\n",
+					i+1,
+					len(reindexTableNames),
+					reindexTableName,
+					float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+				)
+			})
+		})
+	}
+
+	for i, reindexTableName := range reindexTableNames {
+		glog.Infof(
+			"[db]maintenance reindex[%d/%d] cleanup %s\n",
+			i+1,
+			len(reindexTableNames),
+			reindexTableName,
+		)
+
+		HandleError(func() {
+			Db(ctx, func(conn PgConn) {
+				startTime := time.Now()
+				cleanUpIncompleteIndexes(conn, reindexTableName)
+				endTime := time.Now()
+				glog.Infof(
+					"[db]maintenance reindex[%d/%d] %s cleanup took %.2fms\n",
 					i+1,
 					len(reindexTableNames),
 					reindexTableName,
