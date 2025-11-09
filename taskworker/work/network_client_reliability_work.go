@@ -75,10 +75,8 @@ func UpdateClientReliabilityScores(
 	// the use case for these stats is match making, which values near term data over long term data
 	minTime := server.NowUtc().Add(-15 * time.Minute)
 	maxTime := server.NowUtc()
-
 	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateClientReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
-	model.UpdateNetworkReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateClientReliabilityScoresResult{}, nil
 }
 
@@ -117,7 +115,8 @@ func UpdateNetworkReliabilityWindow(
 ) (*UpdateNetworkReliabilityWindowResult, error) {
 	minTime := server.NowUtc().Add(-1 * time.Hour)
 	maxTime := server.NowUtc()
-	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime)
+	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime, false)
+	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateNetworkReliabilityWindowResult{}, nil
 }
 

@@ -11,6 +11,25 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// reliability data is materialized from the core `client_reliability` table
+// which merged in other tables.
+// there are several materialized tables that each have different update expectations.
+// - `client_reliability` (`*ClientReliabilityStats*`):
+//     can be updated in parallel
+// - `network_client_location_reliability` (`*ClientLocationReliabilities*`):
+//     can be updated in parallel
+// - `client_connection_reliability_score` (`*ClientReliabilityScores*`):
+//     must be updated by at most one caller at a time.
+//     a serial task is expected to update this
+// - `network_connection_reliability_score` (`*NetworkReliabilityScores*`) and,
+//   `network_client_location_reliability_multiplier` (`*UpdateClientLocationReliabilityMultipliers*`):
+//     must be updated by at most one caller at a time.
+//     the payout serial task is expected to update this
+// - `network_connection_reliability_window` (`*NetworkReliabilityWindow*`) and,
+//   `network_connection_reliability_window_score` (`*NetworkReliabilityWindowScores*`):
+//     must be updated by at most one caller at a time
+//     a serial task is expected to update this
+
 const ReliabilityBlockDuration = 60 * time.Second
 const ReliabilityWindowBucketDuration = 15 * time.Minute
 
@@ -493,16 +512,16 @@ func getNetworkReliabilityWindow(
 			ctx,
 			`
 			SELECT
-				network_connection_reliability_score.country_location_id,
+				network_connection_reliability_window_score.country_location_id,
 				location.location_name,
 				location.country_code,
 				COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_multiplier
-			FROM network_connection_reliability_score
+			FROM network_connection_reliability_window_score
 			INNER JOIN location ON
-				location.location_id = network_connection_reliability_score.country_location_id
+				location.location_id = network_connection_reliability_window_score.country_location_id
 			LEFT JOIN network_client_location_reliability_multiplier ON
-				network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_score.country_location_id
-			WHERE network_connection_reliability_score.network_id = $1
+				network_client_location_reliability_multiplier.country_location_id = network_connection_reliability_window_score.country_location_id
+			WHERE network_connection_reliability_window_score.network_id = $1
 			`,
 			networkId,
 		)
@@ -598,8 +617,9 @@ func ReliabilityBlockCountPerBucket() int {
 	)
 }
 
-func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time) {
+func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -693,6 +713,69 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, l
 			limit,
 		))
 	}, server.TxReadCommitted)
+}
+
+func UpdateNetworkReliabilityWindowScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
+	}, server.TxReadCommitted)
+}
+
+func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+	if complete {
+		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
+	}
+
+	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM network_connection_reliability_window_score
+		`,
+	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO network_connection_reliability_window_score (
+			network_id,
+			country_location_id,
+			independent_reliability_score,
+			reliability_score,
+			reliability_weight,
+			min_block_number,
+			max_block_number
+		)
+		SELECT
+		    t.network_id,
+		    t.country_location_id,
+		    SUM(1.0) AS independent_reliability_score,
+		    SUM(1.0/t.valid_client_count) AS reliability_score,
+		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    $1 AS min_block_number,
+			$2 AS max_block_number
+		FROM (
+			SELECT
+				client_reliability.network_id,
+				network_client_location_reliability.country_location_id,
+		        COUNT(*) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
+		    FROM client_reliability
+		    INNER JOIN network_client_location_reliability ON
+				network_client_location_reliability.client_id = client_reliability.client_id AND
+				network_client_location_reliability.valid = true
+		    WHERE
+		    	client_reliability.valid = true AND
+		    	$1 <= client_reliability.block_number AND
+		    	client_reliability.block_number < $2
+		) t
+		GROUP BY t.network_id, t.country_location_id
+		ORDER BY t.network_id, t.country_location_id
+		`,
+		minBlockNumber,
+		maxBlockNumber,
+	))
 }
 
 type cityRegionCountry struct {

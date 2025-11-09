@@ -2547,4 +2547,18 @@ var migrations = []any{
 	newSqlMigration(`
         DROP TABLE latest_complete_privacy_policy
     `),
+
+	newSqlMigration(`
+        CREATE TABLE network_connection_reliability_window_score (
+            network_id uuid NOT NULL,
+            independent_reliability_score double precision NOT NULL,
+            reliability_score double precision NOT NULL,
+            reliability_weight double precision NOT NULL,
+            min_block_number bigint NOT NULL DEFAULT 0,
+            max_block_number bigint NOT NULL DEFAULT 0,
+            country_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            
+            PRIMARY KEY (network_id, country_location_id)
+        )
+    `),
 }
