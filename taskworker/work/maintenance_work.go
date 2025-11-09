@@ -47,7 +47,7 @@ func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx,
 		clientSession,
 		task.RunOnce("db_maintenance"),
 		task.RunAt(runAt),
-		task.MaxTime(12*time.Hour),
+		task.MaxTime(24*time.Hour),
 	)
 }
 

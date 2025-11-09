@@ -13,7 +13,13 @@ import (
 	"github.com/golang/glog"
 )
 
-const DbReindexEpochs = uint64(4)
+const DbReindexEpochs = uint64(8)
+
+func isIncompleteIndexName(indexName string) bool {
+	// per the posgres docs, remove indexes that end in _ccnew\d* or _ccold\d*
+	incompleteIndexNamePattern := regexp.MustCompile("^(?:.*_ccnew\\d*|.*_ccold\\d*)$")
+	return incompleteIndexNamePattern.MatchString(indexName)
+}
 
 func DbMaintenance(ctx context.Context, epoch uint64) {
 
@@ -26,9 +32,6 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 	// see https://www.postgresql.org/docs/current/sql-reindex.html
 
 	cleanUpIncompleteIdexes := func(conn PgConn, tableName string) {
-		// per the posgres docs, remove indexes that end in _ccnew\d* or _ccold\d*
-		incompleteIndexNamePattern := regexp.MustCompile("^(?:.*_ccnew\\d*|.*_ccold\\d*)$")
-
 		incompleteIndexNames := []string{}
 
 		result, err := conn.Query(
@@ -52,25 +55,21 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			for result.Next() {
 				var indexName string
 				Raise(result.Scan(&indexName))
-				if incompleteIndexNamePattern.MatchString(indexName) {
+				if isIncompleteIndexName(indexName) {
 					incompleteIndexNames = append(incompleteIndexNames, indexName)
 				}
 			}
 		})
 
-		if 0 < len(incompleteIndexNames) {
-
-			for _, incompleteIndexName := range incompleteIndexNames {
-				glog.Infof("[db]maintenance found incomplete index %s on table %s\n", incompleteIndexName, tableName)
-				// FIXME for now just report the indexex, do not drop
-				// RaisePgResult(conn.Exec(
-				// 	ctx,
-				// 	`
-				// 	DROP INDEX $1
-				// 	`,
-				// 	incompleteIndexName,
-				// ))
-			}
+		for _, incompleteIndexName := range incompleteIndexNames {
+			glog.Infof("[db]maintenance found incomplete index %s on table %s\n", incompleteIndexName, tableName)
+			RaisePgResult(conn.Exec(
+				ctx,
+				`
+				DROP INDEX $1
+				`,
+				incompleteIndexName,
+			))
 		}
 	}
 
