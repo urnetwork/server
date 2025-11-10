@@ -8,7 +8,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
-	// "time"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
@@ -150,6 +150,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
 		work.ScheduleUpdateClientLocations(clientSession, tx)
+		work.ScheduleUpdateClientLocationReliabilities(clientSession, tx, server.NowUtc().Add(-1*time.Hour))
 	})
 }
 
@@ -302,6 +303,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.UpdateClientLocations,
 			work.UpdateClientLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.UpdateClientLocationReliabilities,
+			work.UpdateClientLocationReliabilitiesPost,
 		),
 	)
 

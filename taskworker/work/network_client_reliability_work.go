@@ -75,7 +75,6 @@ func UpdateClientReliabilityScores(
 	// the use case for these stats is match making, which values near term data over long term data
 	minTime := server.NowUtc().Add(-15 * time.Minute)
 	maxTime := server.NowUtc()
-	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateClientReliabilityScores(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateClientReliabilityScoresResult{}, nil
 }
@@ -115,7 +114,6 @@ func UpdateNetworkReliabilityWindow(
 ) (*UpdateNetworkReliabilityWindowResult, error) {
 	minTime := server.NowUtc().Add(-1 * time.Hour)
 	maxTime := server.NowUtc()
-	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 	return &UpdateNetworkReliabilityWindowResult{}, nil
 }
@@ -127,6 +125,50 @@ func UpdateNetworkReliabilityWindowPost(
 	tx server.PgTx,
 ) error {
 	ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
+	return nil
+}
+
+type UpdateClientLocationReliabilitiesArgs struct {
+	MinTime time.Time `json:"min_time"`
+}
+
+type UpdateClientLocationReliabilitiesResult struct {
+	MaxTime time.Time `json:"max_time"`
+}
+
+func ScheduleUpdateClientLocationReliabilities(clientSession *session.ClientSession, tx server.PgTx, minTime time.Time) {
+	task.ScheduleTaskInTx(
+		tx,
+		UpdateClientLocationReliabilities,
+		&UpdateClientLocationReliabilitiesArgs{
+			MinTime: minTime,
+		},
+		clientSession,
+		task.RunOnce("update_client_location_reliabilities"),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(30*time.Minute),
+		task.Priority(task.TaskPriorityFastest),
+	)
+}
+
+func UpdateClientLocationReliabilities(
+	updateClientLocationReliabilities *UpdateClientLocationReliabilitiesArgs,
+	clientSession *session.ClientSession,
+) (*UpdateClientLocationReliabilitiesResult, error) {
+	maxTime := server.NowUtc()
+	model.UpdateClientLocationReliabilities(clientSession.Ctx, updateClientLocationReliabilities.MinTime, maxTime)
+	return &UpdateClientLocationReliabilitiesResult{
+		MaxTime: maxTime,
+	}, nil
+}
+
+func UpdateClientLocationReliabilitiesPost(
+	updateClientLocationReliabilities *UpdateClientLocationReliabilitiesArgs,
+	updateClientLocationReliabilitiesResult *UpdateClientLocationReliabilitiesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleUpdateClientLocationReliabilities(clientSession, tx, updateClientLocationReliabilitiesResult.MaxTime)
 	return nil
 }
 
