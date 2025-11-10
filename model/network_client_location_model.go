@@ -1774,14 +1774,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		RankModeQuality: performanceTarget{
 			relativeLatencyMillisThreshold: 100,
 			relativeLatencyMillisPerScore:  20,
-			bytesPerSecondThreshold:        2 * Mib,
-			bytesPerSecondPerScore:         100 * Kib,
+			bytesPerSecondThreshold:        8 * Mib,
+			bytesPerSecondPerScore:         200 * Kib,
 		},
 		RankModeSpeed: performanceTarget{
 			relativeLatencyMillisThreshold: 20,
 			relativeLatencyMillisPerScore:  5,
-			bytesPerSecondThreshold:        20 * Mib,
-			bytesPerSecondPerScore:         500 * Kib,
+			bytesPerSecondThreshold:        40 * Mib,
+			bytesPerSecondPerScore:         1 * Mib,
 		},
 	}
 
