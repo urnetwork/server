@@ -70,9 +70,8 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			RaisePgResult(conn.Exec(
 				ctx,
 				`
-				DROP INDEX $1
-				`,
-				incompleteIndexName,
+				DROP INDEX
+				`+incompleteIndexName,
 			))
 		}
 	}
