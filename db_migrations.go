@@ -2568,13 +2568,13 @@ var migrations = []any{
         ADD COLUMN account_point_id uuid NOT NULL default gen_random_uuid()
     `),
 
-	// newSqlMigration(`
-	//     CREATE INDEX IF NOT EXISTS account_point_network_id_event ON account_point (network_id, event, create_time, account_point_id)
-	// `),
+	newSqlMigration(`
+	    CREATE INDEX IF NOT EXISTS account_point_network_id_event ON account_point (network_id, event, create_time, account_point_id)
+	`),
 
-	// newSqlMigration(`
-	//     ALTER TABLE account_point
-	//     DROP CONSTRAINT network_point_pkey,
-	//     ADD PRIMARY KEY (account_point_id)
-	// `),
+	newSqlMigration(`
+	    ALTER TABLE account_point
+	    DROP CONSTRAINT network_point_pkey,
+	    ADD PRIMARY KEY (account_point_id)
+	`),
 }
