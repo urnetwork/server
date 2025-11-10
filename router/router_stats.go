@@ -19,6 +19,8 @@ type routeStat struct {
 	successDurations   []time.Duration
 	successCount       int64
 	errorCount         int64
+	minBucket          int
+	maxBucket          int
 }
 
 func (self *routeStat) computeStats() {
@@ -102,8 +104,9 @@ func (self *RouterStats) run() {
 		host := server.RequireHost()
 		service := server.RequireService()
 		block := server.RequireBlock()
+		netSuccessDurationPerBucketDuration := float64(0)
 		for i, route := range routes {
-			stats := routeStats[route]
+			stat := routeStats[route]
 			glog.Infof(
 				"[%s][%s][%s][%02d]%-40s %.fms %d/%d\n",
 				host,
@@ -111,11 +114,20 @@ func (self *RouterStats) run() {
 				block,
 				i,
 				route,
-				float64(stats.pSuccessDuration(50)/time.Microsecond)/1000.0,
-				stats.errorCount,
-				stats.errorCount+stats.successCount,
+				float64(stat.pSuccessDuration(50)/time.Microsecond)/1000.0,
+				stat.errorCount,
+				stat.errorCount+stat.successCount,
 			)
+			netSuccessDurationPerBucketDuration += float64(stat.netSuccessDuration/time.Millisecond) / (float64(self.bucketDuration/time.Millisecond) * float64(stat.maxBucket-stat.minBucket))
 		}
+		glog.Infof(
+			"[%s][%s][%s] ++ %-40s %.2f\n",
+			host,
+			service,
+			block,
+			"net concurrent db connections",
+			netSuccessDurationPerBucketDuration,
+		)
 	}
 }
 
@@ -140,9 +152,14 @@ func (self *RouterStats) currentRouteStats() map[string]*routeStat {
 			for route, stat := range routeStats {
 				netStat, ok := netRouteStats[route]
 				if !ok {
-					netStat = &routeStat{}
+					netStat = &routeStat{
+						minBucket: bucket,
+						maxBucket: bucket + 1,
+					}
 					netRouteStats[route] = netStat
 				}
+				netStat.minBucket = min(netStat.minBucket, stat.minBucket)
+				netStat.maxBucket = min(netStat.maxBucket, stat.maxBucket)
 				netStat.netSuccessDuration += stat.netSuccessDuration
 				netStat.successDurations = append(netStat.successDurations, stat.successDurations...)
 				netStat.successCount += stat.successCount
@@ -186,7 +203,10 @@ func (self *RouterStats) Success(route string, duration time.Duration) {
 	}
 	stat, ok := routeStats[route]
 	if !ok {
-		stat = &routeStat{}
+		stat = &routeStat{
+			minBucket: bucket,
+			maxBucket: bucket + 1,
+		}
 		routeStats[route] = stat
 	}
 	stat.netSuccessDuration += duration
@@ -207,7 +227,10 @@ func (self *RouterStats) Error(route string) {
 	}
 	stat, ok := routeStats[route]
 	if !ok {
-		stat = &routeStat{}
+		stat = &routeStat{
+			minBucket: bucket,
+			maxBucket: bucket + 1,
+		}
 		routeStats[route] = stat
 	}
 	stat.errorCount += 1
