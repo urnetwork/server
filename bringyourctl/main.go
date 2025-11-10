@@ -71,6 +71,7 @@ Usage:
     bringyourctl reliability set-multipliers
     bringyourctl product-updates sync
     bringyourctl query location <query>
+    bringyourctl upgrade-plan --network_id=<network_id>
 
 Options:
     -h --help     Show this screen.
@@ -225,6 +226,8 @@ Options:
 		}
 	} else if search_, _ := opts.Bool("query"); search_ {
 		searchQuery(opts)
+	} else if upgradePlan_, _ := opts.Bool("upgrade-plan"); upgradePlan_ {
+		upgradePlan(opts)
 	} else {
 		fmt.Println(usage)
 	}
@@ -997,4 +1000,37 @@ func searchQuery(opts docopt.Opts) {
 	for i, r := range rs {
 		fmt.Printf("[%d] %s\n", i, r.Value)
 	}
+}
+
+func upgradePlan(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+
+	ctx := context.Background()
+
+	startTime := server.NowUtc()
+
+	subscriptionGracePeriod := 24 * time.Hour
+
+	subscriptionYearDuration := 365 * 24 * time.Hour
+
+	endTime := startTime.Add(subscriptionYearDuration + subscriptionGracePeriod)
+
+	subscriptionRenewal := model.SubscriptionRenewal{
+		NetworkId:          networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         0,
+		SubscriptionMarket: model.SubscriptionMarketManual,
+		// TransactionId:      paymentSearchResult.PaymentReference,
+	}
+
+	model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
+
+	controller.AddRefreshTransferBalance(ctx, networkId)
 }
