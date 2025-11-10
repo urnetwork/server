@@ -16,8 +16,28 @@ import (
 
 type routeStat struct {
 	netSuccessDuration time.Duration
+	successDurations   []time.Duration
 	successCount       int64
 	errorCount         int64
+}
+
+func (self *routeStat) computeStats() {
+	slices.Sort(self.successDurations)
+}
+
+func (self *routeStat) meanSuccessDuration() time.Duration {
+	if self.successCount == 0 {
+		return 0
+	}
+	return self.netSuccessDuration / time.Duration(self.successCount)
+}
+
+func (self *routeStat) pSuccessDuration(p int) time.Duration {
+	if len(self.successDurations) == 0 {
+		return 0
+	}
+	p = min(100, max(0, p))
+	return self.successDurations[(p*len(self.successDurations))/100]
 }
 
 type RouterStats struct {
@@ -70,9 +90,9 @@ func (self *RouterStats) run() {
 				return -1
 			}
 
-			if statsA.netSuccessDuration < statsB.netSuccessDuration {
+			if statsA.pSuccessDuration(50) < statsB.pSuccessDuration(50) {
 				return 1
-			} else if statsB.netSuccessDuration < statsA.netSuccessDuration {
+			} else if statsB.pSuccessDuration(50) < statsA.pSuccessDuration(50) {
 				return -1
 			}
 
@@ -91,7 +111,7 @@ func (self *RouterStats) run() {
 				block,
 				i,
 				route,
-				(float64(stats.netSuccessDuration/time.Nanosecond)/(1000.0*1000.0))/float64(stats.successCount),
+				float64(stats.pSuccessDuration(50)/time.Microsecond)/1000.0,
 				stats.errorCount,
 				stats.errorCount+stats.successCount,
 			)
@@ -124,10 +144,15 @@ func (self *RouterStats) currentRouteStats() map[string]*routeStat {
 					netRouteStats[route] = netStat
 				}
 				netStat.netSuccessDuration += stat.netSuccessDuration
+				netStat.successDurations = append(netStat.successDurations, stat.successDurations...)
 				netStat.successCount += stat.successCount
 				netStat.errorCount += stat.errorCount
 			}
 		}
+	}
+
+	for _, netStat := range netRouteStats {
+		netStat.computeStats()
 	}
 
 	return netRouteStats
@@ -165,6 +190,7 @@ func (self *RouterStats) Success(route string, duration time.Duration) {
 		routeStats[route] = stat
 	}
 	stat.netSuccessDuration += duration
+	stat.successDurations = append(stat.successDurations, duration)
 	stat.successCount += 1
 }
 
