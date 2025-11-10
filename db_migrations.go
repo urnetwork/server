@@ -1679,6 +1679,7 @@ var migrations = []any{
 		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
 	),
 
+	// RENAMED: account_point
 	newSqlMigration(`
       CREATE TABLE network_point (
             network_id uuid NOT NULL,
@@ -2561,4 +2562,19 @@ var migrations = []any{
             PRIMARY KEY (network_id, country_location_id)
         )
     `),
+
+	newSqlMigration(`
+        ALTER TABLE account_point
+        ADD COLUMN account_point_id uuid NOT NULL default gen_random_uuid()
+    `),
+
+	// newSqlMigration(`
+	//     CREATE INDEX IF NOT EXISTS account_point_network_id_event ON account_point (network_id, event, create_time, account_point_id)
+	// `),
+
+	// newSqlMigration(`
+	//     ALTER TABLE account_point
+	//     DROP CONSTRAINT network_point_pkey,
+	//     ADD PRIMARY KEY (account_point_id)
+	// `),
 }

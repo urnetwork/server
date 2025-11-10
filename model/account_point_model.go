@@ -24,6 +24,7 @@ const (
 )
 
 type AccountPoint struct {
+	AccountPointId   server.Id  `json:"account_point_id"`
 	NetworkId        server.Id  `json:"network_id"`
 	Event            string     `json:"event"`
 	PointValue       NanoPoints `json:"point_value"`
@@ -60,10 +61,13 @@ func ApplyAccountPointsInTx(
 	args ApplyAccountPointsArgs,
 ) error {
 
+	accountPointId := server.NewId()
+
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			INSERT INTO account_point (
+					account_point_id,
 					network_id,
 					event,
 					point_value,
@@ -71,8 +75,9 @@ func ApplyAccountPointsInTx(
 					linked_network_id,
 					account_payment_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		`,
+		accountPointId,
 		args.NetworkId,
 		args.Event,
 		args.PointValue,
@@ -91,6 +96,7 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 			ctx,
 			`
 				SELECT
+						account_point_id,
 						network_id,
 						event,
 						point_value,
@@ -110,6 +116,7 @@ func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints
 
 				accountPoint := AccountPoint{}
 				server.Raise(result.Scan(
+					&accountPoint.AccountPointId,
 					&accountPoint.NetworkId,
 					&accountPoint.Event,
 					&accountPoint.PointValue,
