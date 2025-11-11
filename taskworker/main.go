@@ -222,7 +222,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,
-			"github.com/urnetwork/server/model.IndexSearchLocations"
+			"github.com/urnetwork/server/model.IndexSearchLocations",
 		),
 		task.NewTaskTargetWithPost(
 			controller.RefreshTransferBalances,
