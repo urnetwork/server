@@ -2027,7 +2027,7 @@ type HeliusWebhookResult struct {
 }
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-const solanaReceiverAddress = "74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7"
+const solanaReceiverAddress = "4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM"
 
 func HeliusWebhook(
 	transactions []*SolanaTransaction,
