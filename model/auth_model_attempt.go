@@ -157,7 +157,7 @@ func SetUserAuthAttemptSuccess(
 }
 
 func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

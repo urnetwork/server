@@ -103,7 +103,7 @@ func AddClientReliabilityStats(
 func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time, limit int) {
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -687,7 +687,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 }
 
 func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, limit int) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - 1
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
@@ -1206,7 +1206,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 }
 
 func RemoveOldClientLocationReliabilities(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 		server.RaisePgResult(tx.Exec(

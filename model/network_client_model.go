@@ -793,7 +793,7 @@ func GetProvideKeyChanges(
 }
 
 func RemoveOldProvideKeyChanges(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -949,7 +949,7 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 }
 
 func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -962,7 +962,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		// (cascade) clean up network_client_location
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -982,7 +982,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		// (cascade) clean up network_client_latency
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1001,7 +1001,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		// (cascade) clean up network_client_speed
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1020,7 +1020,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1050,7 +1050,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 	// 	minTime.UTC(),
 	// ))
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove provide keys without a network client
 		server.RaisePgResult(tx.Exec(
@@ -1069,7 +1069,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove devices without a network client
 		server.RaisePgResult(tx.Exec(
@@ -1087,7 +1087,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove residents without a network client
 		server.RaisePgResult(tx.Exec(
@@ -1152,7 +1152,7 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 }
 
 func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		handlerIds := []server.Id{}
 
 		result, err := tx.Query(

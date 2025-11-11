@@ -31,6 +31,8 @@ import (
 
 var DbContextDoneError = errors.New("Done")
 
+const PgConnectTimeout = 30 * time.Second
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
@@ -44,6 +46,7 @@ const TxSerializable = pgx.Serializable
 const TxReadCommitted = pgx.ReadCommitted
 
 var safePool = &safePgPool{
+	statementTimeout:   5 * time.Second,
 	ctx:                context.Background(),
 	vaultResourceName:  DefaultPgVaultResourceName,
 	configResourceName: DefaultPgConfigResourceName,
@@ -79,6 +82,8 @@ const MaintenancePgConfigResourceName = "db_maintenance.yml"
 type safePgPool struct {
 	vaultResourceName  string
 	configResourceName string
+	connectTimeout     time.Duration
+	statementTimeout   time.Duration
 	ctx                context.Context
 	mutex              sync.Mutex
 	pool               *pgxpool.Pool
@@ -137,8 +142,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		// https://github.com/jackc/pgx/blob/master/pgconn/config.go#L445
 		options := map[string]string{
 			"sslmode":                       "disable",
-			"connect_timeout":               "300",
-			"statement_timeout":             "60000",
+			"connect_timeout":               fmt.Sprintf("%d", PgConnectTimeout/time.Second),
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
 			"pool_max_conn_lifetime":        connectionMaxLifetime,
@@ -148,6 +152,9 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			// must use `Tx` to write, which sets `AccessMode: pgx.ReadWrite`
 			// "default_transaction_read_only": "on",
 			// "default_transaction_isolation": "read committed",
+		}
+		if 0 < self.statementTimeout {
+			options["statement_timeout"] = fmt.Sprintf("%d", self.statementTimeout/time.Millisecond)
 		}
 		glog.Infof("[db]options = %s\n", options)
 		optionsPairs := []string{}

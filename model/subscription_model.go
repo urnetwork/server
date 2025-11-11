@@ -2845,7 +2845,7 @@ func AddRefreshTransferBalanceToAllNetworks(
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	maxRowCount := 50000
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// remove completed transfer balances
 		server.RaisePgResult(tx.Exec(
@@ -2860,7 +2860,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// remove completed transfer contracts
 		server.RaisePgResult(tx.Exec(
@@ -2887,7 +2887,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// remove closed transfer contracts that do not have a corresponding sweep
 		// these are the result of some db corruption and we cannot recover them
@@ -2915,7 +2915,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove contract close where the transfer contract no longer exists
 		server.RaisePgResult(tx.Exec(
@@ -2938,7 +2938,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove contract escrow where the transfer contract no longer exists
 		server.RaisePgResult(tx.Exec(
@@ -2961,7 +2961,7 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// (cascade) remove contract escrow sweep where the transfer contract no longer exists
 		server.RaisePgResult(tx.Exec(

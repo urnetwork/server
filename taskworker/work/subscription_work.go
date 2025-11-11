@@ -138,3 +138,45 @@ func RemoveCompletedContractsPost(
 	ScheduleRemoveCompletedContracts(clientSession, tx)
 	return nil
 }
+
+type CleanupExpiredPaymentIntentsArgs struct {
+}
+
+type CleanupExpiredPaymentIntentsResult struct {
+}
+
+func ScheduleCleanupExpiredPaymentIntents(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		CleanupExpiredPaymentIntents,
+		&CleanupExpiredPaymentIntentsArgs{},
+		clientSession,
+		// legacy key
+		task.RunOnce("cleanup_expired_payment_intents"),
+		task.RunAt(server.NowUtc().Add(15*time.Minute)),
+		task.MaxTime(30*time.Minute),
+	)
+}
+
+func CleanupExpiredPaymentIntents(
+	cleanupExpiredPaymentIntents *CleanupExpiredPaymentIntentsArgs,
+	clientSession *session.ClientSession,
+) (*CleanupExpiredPaymentIntentsResult, error) {
+	minTime := server.NowUtc().Add(-60 * time.Minute)
+	err := model.CleanupExpiredPaymentIntents(
+		clientSession.Ctx,
+		minTime,
+	)
+
+	return &CleanupExpiredPaymentIntentsResult{}, err
+}
+
+func CleanupExpiredPaymentIntentsPost(
+	cleanupExpiredPaymentIntents *CleanupExpiredPaymentIntentsArgs,
+	cleanupExpiredPaymentIntentsResult *CleanupExpiredPaymentIntentsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleCleanupExpiredPaymentIntents(clientSession, tx)
+	return nil
+}

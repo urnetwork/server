@@ -117,9 +117,10 @@ func MarkPaymentIntentCompleted(
 // todo - create a task to cleanup expired intents without a tx_signature
 func CleanupExpiredPaymentIntents(
 	ctx context.Context,
+	minTime time.Time,
 ) (err error) {
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		_, err = tx.Exec(
 			ctx,
@@ -128,7 +129,7 @@ func CleanupExpiredPaymentIntents(
 			WHERE expires_at < $1
 			  AND tx_signature IS NULL
 			`,
-			server.NowUtc(),
+			minTime,
 		)
 		server.Raise(err)
 

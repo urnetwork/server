@@ -151,6 +151,7 @@ func initTasks(ctx context.Context) {
 		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
 		work.ScheduleUpdateClientLocations(clientSession, tx)
 		work.ScheduleUpdateReliabilities(clientSession, tx, server.NowUtc().Add(-1*time.Hour))
+		work.ScheduleCleanupExpiredPaymentIntents(clientSession, tx)
 	})
 }
 
@@ -221,6 +222,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,
+			"github.com/urnetwork/server/model.IndexSearchLocations"
 		),
 		task.NewTaskTargetWithPost(
 			controller.RefreshTransferBalances,
@@ -307,6 +309,10 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.UpdateReliabilities,
 			work.UpdateReliabilitiesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.CleanupExpiredPaymentIntents,
+			work.CleanupExpiredPaymentIntentsPost,
 		),
 	)
 
