@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2027,7 +2028,11 @@ type HeliusWebhookResult struct {
 }
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-const solanaReceiverAddress = "4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM"
+
+var solanaReceiverAddresses = []string{
+	"4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM", // coinbase account address
+	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
+}
 
 func HeliusWebhook(
 	transactions []*SolanaTransaction,
@@ -2059,7 +2064,7 @@ func HeliusWebhook(
 		for _, tokenTransfer := range transaction.TokenTransfers {
 
 			if tokenTransfer.Mint == solanaUsdcMint &&
-				tokenTransfer.ToUserAccount == solanaReceiverAddress &&
+				slices.Contains(solanaReceiverAddresses, tokenTransfer.ToUserAccount) &&
 				tokenTransfer.TokenAmount >= 40 {
 				paymentReceived = true
 				tokenAmountReceived = tokenTransfer.TokenAmount
