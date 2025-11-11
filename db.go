@@ -44,23 +44,44 @@ const TxSerializable = pgx.Serializable
 const TxReadCommitted = pgx.ReadCommitted
 
 var safePool = &safePgPool{
-	ctx: context.Background(),
+	ctx:                context.Background(),
+	vaultResourceName:  DefaultPgVaultResourceName,
+	configResourceName: DefaultPgConfigResourceName,
 }
 
-func pool() *pgxpool.Pool {
-	return safePool.open()
+// func pool() *pgxpool.Pool {
+// 	return safePool.open()
+// }
+
+var safeMaintenancePool = &safePgPool{
+	ctx:                context.Background(),
+	vaultResourceName:  MaintenancePgVaultResourceName,
+	configResourceName: MaintenancePgConfigResourceName,
 }
+
+// func maintenancePool() *pgxpool.Pool {
+// 	return safeMaintenancePool.open()
+// }
 
 // resets the connection pool
 // call this after changes to the env
 func PgReset() {
 	safePool.reset()
+	safeMaintenancePool.reset()
 }
 
+const DefaultPgVaultResourceName = "pg.yml"
+const DefaultPgConfigResourceName = "db.yml"
+
+const MaintenancePgVaultResourceName = "pg_maintenance.yml"
+const MaintenancePgConfigResourceName = "db_maintenance.yml"
+
 type safePgPool struct {
-	ctx   context.Context
-	mutex sync.Mutex
-	pool  *pgxpool.Pool
+	vaultResourceName  string
+	configResourceName string
+	ctx                context.Context
+	mutex              sync.Mutex
+	pool               *pgxpool.Pool
 }
 
 func (self *safePgPool) open() *pgxpool.Pool {
@@ -117,6 +138,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		options := map[string]string{
 			"sslmode":                       "disable",
 			"connect_timeout":               "300",
+			"statement_timeout":             "60000",
 			"pool_max_conns":                fmt.Sprintf("%d", maxConnections),
 			"pool_min_conns":                fmt.Sprintf("%d", minConnections),
 			"pool_max_conn_lifetime":        connectionMaxLifetime,
@@ -302,9 +324,10 @@ func isConnectionError(err error) bool {
 	}
 }
 
-func Db(ctx context.Context, callback func(PgConn), options ...any) {
+// maintenance connection
+func MaintenanceDb(ctx context.Context, callback func(PgConn), options ...any) {
 	c := func() {
-		db(ctx, callback, options...)
+		dbWithPool(ctx, safeMaintenancePool, callback, options...)
 	}
 	if glog.V(2) {
 		pc, filename, line, _ := runtime.Caller(1)
@@ -319,7 +342,24 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
-func db(ctx context.Context, callback func(PgConn), options ...any) {
+func Db(ctx context.Context, callback func(PgConn), options ...any) {
+	c := func() {
+		dbWithPool(ctx, safePool, callback, options...)
+	}
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
+func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	// debugOptions := OptNoDebug()
@@ -338,7 +378,7 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	for {
 		var pgErr error
-		conn, connErr := pool().Acquire(ctx)
+		conn, connErr := pool.open().Acquire(ctx)
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
 				select {
@@ -437,9 +477,9 @@ func db(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
-func Tx(ctx context.Context, callback func(PgTx), options ...any) {
+func MaintenanceTx(ctx context.Context, callback func(PgTx), options ...any) {
 	c := func() {
-		tx(ctx, callback, options...)
+		txWithPool(ctx, safeMaintenancePool, callback, options...)
 	}
 	if glog.V(2) {
 		pc, filename, line, _ := runtime.Caller(1)
@@ -454,7 +494,24 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 	}
 }
 
-func tx(ctx context.Context, callback func(PgTx), options ...any) {
+func Tx(ctx context.Context, callback func(PgTx), options ...any) {
+	c := func() {
+		txWithPool(ctx, safePool, callback, options...)
+	}
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[tx] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
+func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
@@ -486,7 +543,7 @@ func tx(ctx context.Context, callback func(PgTx), options ...any) {
 	for {
 		var pgErr error
 		var commitErr error
-		db(ctx, func(conn PgConn) {
+		dbWithPool(ctx, pool, func(conn PgConn) {
 			tx, err := conn.BeginTx(ctx, txOptions)
 			if err != nil {
 				panic(err)

@@ -70,7 +70,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			RaisePgResult(conn.Exec(
 				ctx,
 				`
-				DROP INDEX
+				DROP INDEX CONCURRENTLY IF EXISTS 
 				`+incompleteIndexName,
 			))
 		}
@@ -88,7 +88,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 	tableNames := []string{}
 	reindexTableNames := []string{}
 
-	Db(ctx, func(conn PgConn) {
+	MaintenanceDb(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -145,7 +145,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 
 		// pg might raise a deadlock or other unrecoverable error during reindex
 		HandleError(func() {
-			Db(ctx, func(conn PgConn) {
+			MaintenanceDb(ctx, func(conn PgConn) {
 				// reindex
 				startTime := time.Now()
 				reindex(conn, reindexTableName)
@@ -170,7 +170,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 		)
 
 		HandleError(func() {
-			Db(ctx, func(conn PgConn) {
+			MaintenanceDb(ctx, func(conn PgConn) {
 				startTime := time.Now()
 				cleanUpIncompleteIndexes(conn, reindexTableName)
 				endTime := time.Now()
@@ -186,7 +186,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 	}
 
 	HandleError(func() {
-		Db(ctx, func(conn PgConn) {
+		MaintenanceDb(ctx, func(conn PgConn) {
 
 			// final analyze
 			startTime := time.Now()

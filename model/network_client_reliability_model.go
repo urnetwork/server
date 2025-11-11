@@ -140,7 +140,7 @@ type ReliabilityScore struct {
 // FIXME support country_location_id
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		if complete {
 			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 		}
@@ -238,7 +238,7 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 }
 
 func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		UpdateNetworkReliabilityScoresInTx(tx, ctx, minTime, maxTime, complete)
 	}, server.TxReadCommitted)
 }
@@ -618,7 +618,7 @@ func ReliabilityBlockCountPerBucket() int {
 }
 
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
@@ -716,7 +716,7 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, l
 }
 
 func UpdateNetworkReliabilityWindowScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
 	}, server.TxReadCommitted)
 }
@@ -866,7 +866,7 @@ func (self *clientLocationReliability) Values() []any {
 }
 
 func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, maxTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 	}, server.TxReadCommitted)
 }
