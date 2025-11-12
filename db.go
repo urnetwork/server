@@ -223,8 +223,8 @@ func OptRetryDefault() DbRetryOptions {
 		rerunOnCommitError:     true,
 		rerunOnConnectionError: true,
 		rerunOnTransientError:  true,
-		retryMinTimeout:        20 * time.Millisecond,
-		retryMaxTimeout:        2000 * time.Millisecond,
+		retryMinTimeout:        100 * time.Millisecond,
+		retryMaxTimeout:        10 * time.Second,
 		endRetryTimeout:        60 * time.Second,
 		// debugRetryTimeout: 90 * time.Second,
 	}
