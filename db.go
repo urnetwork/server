@@ -23,8 +23,12 @@ import (
 )
 
 /*
-`Db` runs in read-only mode
-`Tx` runs in read-write mode by default, which can be changed with `pgx.TxOptions`
+uses the shared transaction pool across all services:
+- `Db` runs in raw connection mode (no transaction)
+- `Tx` runs in read-write mode by default, which can be changed with `pgx.TxOptions`
+uses a private connection pool local to the current service:
+- `MaintenanceDb`
+- `MaintenanceTx`
 */
 
 // note all times in the db should be `timestamp` UTC. Do not use `timestamp with time zone`. See `NowUtc`
@@ -43,6 +47,7 @@ type PgBatch = *pgx.Batch
 type PgBatchResults = pgx.BatchResults
 
 const TxSerializable = pgx.Serializable
+const TxRepeatableRead = pgx.RepeatableRead
 const TxReadCommitted = pgx.ReadCommitted
 
 var safePool = &safePgPool{

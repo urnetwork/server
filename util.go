@@ -105,6 +105,9 @@ func MaskValue(v string) string {
 var portRangeRegex = sync.OnceValue(func() *regexp.Regexp {
 	return regexp.MustCompile("^\\s*(\\d+)\\s*-\\s*(\\d+)\\s*$")
 })
+var portRange2Regex = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile("^\\s*(\\d+)\\s*\\+\\s*(\\d+)\\s*$")
+})
 var portRegex = sync.OnceValue(func() *regexp.Regexp {
 	return regexp.MustCompile("^\\s*(\\d+)\\s*$")
 })
@@ -125,6 +128,19 @@ func ExpandPorts(portsListStr string) ([]int, error) {
 			if err != nil {
 				panic(err)
 			}
+			for port := minPort; port <= maxPort; port += 1 {
+				ports = append(ports, port)
+			}
+		} else if portStrs := portRange2Regex().FindStringSubmatch(portsStr); portStrs != nil {
+			minPort, err := strconv.Atoi(portStrs[1])
+			if err != nil {
+				panic(err)
+			}
+			n, err := strconv.Atoi(portStrs[2])
+			if err != nil {
+				panic(err)
+			}
+			maxPort := minPort + n
 			for port := minPort; port <= maxPort; port += 1 {
 				ports = append(ports, port)
 			}
