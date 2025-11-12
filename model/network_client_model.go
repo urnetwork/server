@@ -1231,7 +1231,7 @@ type NetworkClientResident struct {
 	ResidentInternalPorts []int     `json:"resident_internal_ports"`
 }
 
-func dbGetResidentInTx(
+func dbGetResidentForClientInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	clientId server.Id,
@@ -1302,24 +1302,24 @@ func dbGetResidentInTx(
 	return resident
 }
 
-func dbGetResidentWithInstanceInTx(
+func dbGetResidentForClientWithInstanceInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	clientId server.Id,
 	instanceId server.Id,
 ) *NetworkClientResident {
-	resident := dbGetResidentInTx(ctx, tx, clientId)
+	resident := dbGetResidentForClientInTx(ctx, tx, clientId)
 	if resident != nil && resident.InstanceId == instanceId {
 		return resident
 	}
 	return nil
 }
 
-func GetResident(ctx context.Context, clientId server.Id) *NetworkClientResident {
+func GetResidentForClient(ctx context.Context, clientId server.Id) *NetworkClientResident {
 	var resident *NetworkClientResident
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		resident = dbGetResidentInTx(ctx, tx, clientId)
+		resident = dbGetResidentForClientInTx(ctx, tx, clientId)
 	})
 
 	return resident
@@ -1329,13 +1329,13 @@ func GetResidentWithInstance(ctx context.Context, clientId server.Id, instanceId
 	var resident *NetworkClientResident
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		resident = dbGetResidentWithInstanceInTx(ctx, tx, clientId, instanceId)
+		resident = dbGetResidentForClientWithInstanceInTx(ctx, tx, clientId, instanceId)
 	})
 
 	return resident
 }
 
-func GetResidentId(ctx context.Context, clientId server.Id) (residentId server.Id, returnErr error) {
+func GetResidentIdForClient(ctx context.Context, clientId server.Id) (residentId server.Id, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -1588,7 +1588,7 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 				return false
 			}()
 			if intersects {
-				resident := dbGetResidentInTx(ctx, tx, clientId)
+				resident := dbGetResidentForClientInTx(ctx, tx, clientId)
 				residents = append(residents, resident)
 			}
 		}
@@ -1599,7 +1599,6 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 
 func RemoveResident(
 	ctx context.Context,
-	clientId server.Id,
 	residentId server.Id,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -1608,10 +1607,8 @@ func RemoveResident(
 			`
 			DELETE FROM network_client_resident
 			WHERE
-				client_id = $1 AND
-				resident_id = $2
+				resident_id = $1
 			`,
-			clientId,
 			residentId,
 		)
 		server.Raise(err)
