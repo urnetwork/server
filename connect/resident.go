@@ -109,7 +109,7 @@ type ExchangeChaosSettings struct {
 
 func DefaultExchangeSettings() *ExchangeSettings {
 	connectionHandlerSettings := DefaultConnectHandlerSettings()
-	exchangeResidentWaitTimeout := 15 * time.Second
+	exchangeResidentWaitTimeout := 30 * time.Second
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
 
@@ -135,10 +135,10 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
-		ExchangeConnectionResidentPollTimeout: 5 * time.Second,
+		ExchangeConnectionResidentPollTimeout: 15 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
-		ExchangeResidentPollTimeout: exchangeResidentWaitTimeout / 4,
+		ExchangeResidentPollTimeout: 15 * time.Second,
 
 		ForwardEnforceActiveContracts: false,
 
@@ -306,7 +306,6 @@ func (self *Exchange) NominateLocalResident(
 		// it will always clear ports associated with the resident
 		model.RemoveResident(
 			cleanupCtx,
-			resident.clientId,
 			resident.residentId,
 		)
 	})
@@ -407,7 +406,6 @@ func (self *Exchange) removeOldResidents() {
 		if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
 			model.RemoveResident(
 				self.ctx,
-				residentForHostPort.ClientId,
 				residentForHostPort.ResidentId,
 			)
 		}
@@ -1359,7 +1357,7 @@ func (self *ResidentForward) Run() {
 
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResident(self.ctx, self.clientId)
+		resident := model.GetResidentForClient(self.ctx, self.clientId)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1379,7 +1377,7 @@ func (self *ResidentForward) Run() {
 				c := func() {
 					// handleCtx, handleCancel := context.WithCancel(self.ctx)
 					handle(exchangeConnection, func() bool {
-						currentResidentId, err := model.GetResidentId(self.ctx, self.clientId)
+						currentResidentId, err := model.GetResidentIdForClient(self.ctx, self.clientId)
 						if err != nil {
 							return false
 						}
