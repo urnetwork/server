@@ -35,6 +35,15 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 	// note `REINDEX CONCURRENTLY` can be safely run in the background
 	// see https://www.postgresql.org/docs/current/sql-reindex.html
 
+	reindex := func(conn PgConn, tableName string) {
+		RaisePgResult(conn.Exec(
+			ctx,
+			`
+			REINDEX TABLE CONCURRENTLY 
+			`+tableName,
+		))
+	}
+
 	cleanUpIncompleteIndexes := func(conn PgConn, tableName string) {
 		incompleteIndexNames := []string{}
 
@@ -65,8 +74,14 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			}
 		})
 
-		for _, incompleteIndexName := range incompleteIndexNames {
-			glog.Infof("[db]maintenance found incomplete index %s on table %s\n", incompleteIndexName, tableName)
+		for i, incompleteIndexName := range incompleteIndexNames {
+			glog.Infof(
+				"[db]maintenance found incomplete index[%d/%d] %s on table %s\n",
+				i+1,
+				len(incompleteIndexNames),
+				incompleteIndexName,
+				tableName,
+			)
 			RaisePgResult(conn.Exec(
 				ctx,
 				`
@@ -74,15 +89,6 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 				`+incompleteIndexName,
 			))
 		}
-	}
-
-	reindex := func(conn PgConn, tableName string) {
-		RaisePgResult(conn.Exec(
-			ctx,
-			`
-			REINDEX TABLE CONCURRENTLY 
-			`+tableName,
-		))
 	}
 
 	tableNames := []string{}
@@ -151,11 +157,11 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 				reindex(conn, reindexTableName)
 				endTime := time.Now()
 				glog.Infof(
-					"[db]maintenance reindex[%d/%d] %s reindex took %.2fms\n",
+					"[db]maintenance reindex[%d/%d] %s reindex took %.2fs\n",
 					i+1,
 					len(reindexTableNames),
 					reindexTableName,
-					float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 				)
 			})
 		})
@@ -175,11 +181,11 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 				cleanUpIncompleteIndexes(conn, reindexTableName)
 				endTime := time.Now()
 				glog.Infof(
-					"[db]maintenance reindex[%d/%d] %s cleanup took %.2fms\n",
+					"[db]maintenance reindex[%d/%d] cleanup %s took %.2fs\n",
 					i+1,
 					len(reindexTableNames),
 					reindexTableName,
-					float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 				)
 			})
 		})
@@ -196,8 +202,8 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			))
 			endTime := time.Now()
 			glog.Infof(
-				"[db]maintenance reindex final analyze took %.2fms\n",
-				float64(endTime.Sub(startTime)/time.Microsecond)/1000.0,
+				"[db]maintenance reindex final analyze took %.2fs\n",
+				float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 			)
 		})
 	})
