@@ -2577,4 +2577,9 @@ var migrations = []any{
 	    DROP CONSTRAINT network_point_pkey,
 	    ADD PRIMARY KEY (account_point_id)
 	`),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident
+        ADD COLUMN internal_ports VARCHAR(128) NOT NULL DEFAULT ''
+    `),
 }
