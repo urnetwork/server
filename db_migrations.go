@@ -44,7 +44,7 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 }
 
 func DbVersion(ctx context.Context) int {
-	Tx(ctx, func(tx PgTx) {
+	MaintenanceTx(ctx, func(tx PgTx) {
 		RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -59,7 +59,7 @@ func DbVersion(ctx context.Context) int {
 	})
 
 	var endVersionNumber int
-	Db(ctx, func(conn PgConn) {
+	MaintenanceDb(ctx, func(conn PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -80,7 +80,7 @@ func DbVersion(ctx context.Context) int {
 
 func ApplyDbMigrations(ctx context.Context) {
 	for i := DbVersion(ctx); i < len(migrations); i += 1 {
-		Tx(ctx, func(tx PgTx) {
+		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(
 				ctx,
 				`INSERT INTO migration_audit (start_version_number, status) VALUES ($1, 'start')`,
@@ -92,7 +92,7 @@ func ApplyDbMigrations(ctx context.Context) {
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]sql = %s\n", i+1, len(migrations), v.sql)
 			}
-			Tx(ctx, func(tx PgTx) {
+			MaintenanceTx(ctx, func(tx PgTx) {
 				defer func() {
 					if err := recover(); err != nil {
 						// print the sql for debugging
@@ -110,7 +110,7 @@ func ApplyDbMigrations(ctx context.Context) {
 		default:
 			panic(fmt.Errorf("Unknown migration type %T", v))
 		}
-		Tx(ctx, func(tx PgTx) {
+		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(
 				ctx,
 				`INSERT INTO migration_audit (start_version_number, end_version_number, status) VALUES ($1, $2, 'success')`,
@@ -2581,5 +2581,10 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_client_resident
         ADD COLUMN internal_ports VARCHAR(128) NOT NULL DEFAULT ''
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident
+        ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
     `),
 }

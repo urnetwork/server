@@ -309,61 +309,64 @@ func (self *ConnectionAnnounce) run() {
 				SendByteCount:       sendByteCount,
 			}
 
-			if established {
-				changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
-				provideEnabled := currentProvideModes[model.ProvideModePublic]
+			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
+			provideEnabled := currentProvideModes[model.ProvideModePublic]
+			// stats only matter for providers
+			// avoid populating stats for non-providers
+			if provideEnabled || 0 < changedCount {
+				if established {
+					nextLatency := false
+					nextSpeed := false
+					func() {
+						self.stateLock.Lock()
+						defer self.stateLock.Unlock()
+						if self.latencyTest == nil && self.speedTest == nil {
 
-				nextLatency := false
-				nextSpeed := false
-				func() {
-					self.stateLock.Lock()
-					defer self.stateLock.Unlock()
-					if self.latencyTest == nil && self.speedTest == nil {
+						}
+						if self.testConfig.AllowLatency() {
+							nextLatency = (self.latencyCount == 0)
+						}
+						if !nextLatency && self.testConfig.AllowSpeed() {
+							nextSpeed = (self.speedCount == 0)
+						}
+					}()
+					if provideEnabled {
+						if nextLatency {
+							self.nextLatency()
+						} else if nextSpeed {
+							self.nextSpeed()
+						}
+					}
 
+					// add reliability stats if all of:
+					// 1. established provide public (no changes in block)
+					// 2. established connection
+					// 3. at least one message count
+					// OR
+					// 1. new connection (this will invalidate the block)
+					// OR
+					// 1. provide change (this will invalidate the block)
+
+					stats.ConnectionEstablishedCount = 1
+					if provideEnabled {
+						stats.ProvideEnabledCount = 1
 					}
-					if self.testConfig.AllowLatency() {
-						nextLatency = (self.latencyCount == 0)
+					if 0 < changedCount {
+						stats.ProvideChangedCount = 1
 					}
-					if !nextLatency && self.testConfig.AllowSpeed() {
-						nextSpeed = (self.speedCount == 0)
-					}
-				}()
-				if provideEnabled {
-					if nextLatency {
-						self.nextLatency()
-					} else if nextSpeed {
-						self.nextSpeed()
-					}
+				} else {
+					established = provideEnabled
+					stats.ConnectionNewCount = 1
 				}
-
-				// add reliability stats if all of:
-				// 1. established provide public (no changes in block)
-				// 2. established connection
-				// 3. at least one message count
-				// OR
-				// 1. new connection (this will invalidate the block)
-				// OR
-				// 1. provide change (this will invalidate the block)
-
-				stats.ConnectionEstablishedCount = 1
-				if provideEnabled {
-					stats.ProvideEnabledCount = 1
-				}
-				if 0 < changedCount {
-					stats.ProvideChangedCount = 1
-				}
-			} else {
-				established = true
-				stats.ConnectionNewCount = 1
+				model.AddClientReliabilityStats(
+					self.ctx,
+					self.networkId,
+					self.clientId,
+					clientAddressHash,
+					startTime,
+					stats,
+				)
 			}
-			model.AddClientReliabilityStats(
-				self.ctx,
-				self.networkId,
-				self.clientId,
-				clientAddressHash,
-				startTime,
-				stats,
-			)
 		}
 	}
 }

@@ -193,7 +193,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 
 	HandleError(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
-
+			glog.Infof("[db]maintenance final analyze\n")
 			// final analyze
 			startTime := time.Now()
 			RaisePgResult(conn.Exec(
@@ -202,7 +202,7 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 			))
 			endTime := time.Now()
 			glog.Infof(
-				"[db]maintenance reindex final analyze took %.2fs\n",
+				"[db]maintenance final analyze took %.2fs\n",
 				float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 			)
 		})
