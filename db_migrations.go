@@ -2582,4 +2582,9 @@ var migrations = []any{
         ALTER TABLE network_client_resident
         ADD COLUMN internal_ports VARCHAR(128) NOT NULL DEFAULT ''
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident
+        ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
+    `),
 }
