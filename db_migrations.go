@@ -2587,4 +2587,12 @@ var migrations = []any{
         ALTER TABLE network_client_resident
         ADD COLUMN create_time timestamp NOT NULL DEFAULT now()
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_resident
+        DROP CONSTRAINT network_client_resident_pkey,
+        ADD PRIMARY KEY (client_id),
+        DROP CONSTRAINT network_client_resident_client_id_key,
+        ADD UNIQUE (resident_id)
+    `),
 }
