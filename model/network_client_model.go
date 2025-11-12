@@ -382,6 +382,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client_resident.resident_host,
 					network_client_resident.resident_service,
 					network_client_resident.resident_block,
+					network_client_resident.internal_ports,
 					provide_key.provide_mode
 				FROM network_client
 				LEFT JOIN network_client_resident ON
@@ -410,6 +411,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				clientInfo := &NetworkClientInfo{}
 				var deviceName_ *string
 				var deviceSpec_ *string
+				var internalPortsStr string
 				server.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.SourceClientId,
@@ -423,6 +425,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					&residentHost_,
 					&residentService_,
 					&residentBlock_,
+					&internalPortsStr,
 					// &clientInfo.ResidentId,
 					// &clientInfo.ResidentHost,
 					// &clientInfo.ResidentService,
@@ -437,49 +440,15 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				}
 				if residentId_ != nil {
 					clientInfo.Resident = &NetworkClientResident{
-						ClientId:        clientInfo.ClientId,
-						ResidentId:      *residentId_,
-						ResidentHost:    *residentHost_,
-						ResidentService: *residentService_,
-						ResidentBlock:   *residentBlock_,
+						ClientId:              clientInfo.ClientId,
+						ResidentId:            *residentId_,
+						ResidentHost:          *residentHost_,
+						ResidentService:       *residentService_,
+						ResidentBlock:         *residentBlock_,
+						ResidentInternalPorts: server.RequireExpandPorts(internalPortsStr),
 					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
-			}
-		})
-
-		// join in internal ports
-		result, err = conn.Query(
-			session.Ctx,
-			`
-				SELECT
-					network_client.client_id,
-					network_client_resident_port.resident_internal_port
-
-				FROM network_client
-
-				INNER JOIN network_client_resident ON
-					network_client.client_id = network_client_resident.client_id
-
-				INNER JOIN network_client_resident_port ON
-					network_client_resident_port.resident_id = network_client_resident.resident_id
-				
-				WHERE
-					network_client.network_id = $1 AND
-					network_client.active = true
-			`,
-			session.ByJwt.NetworkId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var port int
-				server.Raise(result.Scan(&clientId, &port))
-				if clientInfo, ok := clientInfos[clientId]; ok {
-					if resident := clientInfo.Resident; resident != nil {
-						resident.ResidentInternalPorts = append(resident.ResidentInternalPorts, port)
-					}
-				}
 			}
 		})
 
@@ -1277,7 +1246,8 @@ func dbGetResidentInTx(
 				resident_id,
 				resident_host,
 				resident_service,
-				resident_block
+				resident_block,
+				internal_ports
 			FROM network_client_resident
 			WHERE
 				client_id = $1
@@ -1289,40 +1259,45 @@ func dbGetResidentInTx(
 			resident = &NetworkClientResident{
 				ClientId: clientId,
 			}
+			var internalPortsStr string
 			server.Raise(result.Scan(
 				&resident.InstanceId,
 				&resident.ResidentId,
 				&resident.ResidentHost,
 				&resident.ResidentService,
 				&resident.ResidentBlock,
+				&internalPortsStr,
 			))
+			resident.ResidentInternalPorts = server.RequireExpandPorts(internalPortsStr)
 		}
 	})
 	if resident == nil {
 		return nil
 	}
 
-	// join in internal ports
-	result, err = tx.Query(
-		ctx,
-		`
-			SELECT
-				resident_internal_port
-			FROM network_client_resident_port
-			WHERE
-				resident_id = $1
-		`,
-		resident.ResidentId,
-	)
-	server.WithPgResult(result, err, func() {
-		ports := []int{}
-		for result.Next() {
-			var port int
-			server.Raise(result.Scan(&port))
-			ports = append(ports, port)
-		}
-		resident.ResidentInternalPorts = ports
-	})
+	// join in legacy internal ports
+	if len(resident.ResidentInternalPorts) == 0 {
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT
+					resident_internal_port
+				FROM network_client_resident_port
+				WHERE
+					resident_id = $1
+			`,
+			resident.ResidentId,
+		)
+		server.WithPgResult(result, err, func() {
+			ports := []int{}
+			for result.Next() {
+				var port int
+				server.Raise(result.Scan(&port))
+				ports = append(ports, port)
+			}
+			resident.ResidentInternalPorts = ports
+		})
+	}
 
 	return resident
 }
@@ -1466,16 +1441,18 @@ func NominateResident(
 						resident_id,
 						resident_host,
 						resident_service,
-						resident_block
+						resident_block,
+						internal_ports
 					)
-					VALUES ($1, $2, $3, $4, $5, $6)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
 					ON CONFLICT (client_id) DO UPDATE
 					SET
 						instance_id = $2,
 						resident_id = $3,
 						resident_host = $4,
 						resident_service = $5,
-						resident_block = $6
+						resident_block = $6,
+						internal_ports = $7
 					WHERE
 						network_client_resident.instance_id != $2
 				`,
@@ -1485,6 +1462,7 @@ func NominateResident(
 				nomination.ResidentHost,
 				nomination.ResidentService,
 				nomination.ResidentBlock,
+				server.CollapsePorts(nomination.ResidentInternalPorts),
 			))
 		} else {
 			tag = server.RaisePgResult(tx.Exec(
@@ -1496,19 +1474,21 @@ func NominateResident(
 						resident_id,
 						resident_host,
 						resident_service,
-						resident_block
+						resident_block,
+						internal_ports
 					)
-					VALUES ($1, $2, $3, $4, $5, $6)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
 					ON CONFLICT (client_id) DO UPDATE
 					SET
 						instance_id = $2,
 						resident_id = $3,
 						resident_host = $4,
 						resident_service = $5,
-						resident_block = $6
+						resident_block = $6,
+						internal_ports = $7
 					WHERE
 						network_client_resident.instance_id != $2 OR
-							network_client_resident.resident_id = $7
+							network_client_resident.resident_id = $8
 				`,
 				nomination.ClientId,
 				nomination.InstanceId,
@@ -1516,6 +1496,7 @@ func NominateResident(
 				nomination.ResidentHost,
 				nomination.ResidentService,
 				nomination.ResidentBlock,
+				server.CollapsePorts(nomination.ResidentInternalPorts),
 				residentIdToReplace,
 			))
 		}
@@ -1523,32 +1504,6 @@ func NominateResident(
 			nominated = false
 			return
 		}
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_client_resident_port
-				WHERE
-					resident_id = $1
-			`,
-			nomination.ResidentId,
-		))
-
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for _, port := range nomination.ResidentInternalPorts {
-				batch.Queue(
-					`
-						INSERT INTO network_client_resident_port (
-							resident_id,
-							resident_internal_port
-						)
-						VALUES ($1, $2)
-					`,
-					nomination.ResidentId,
-					port,
-				)
-			}
-		})
 
 		nominated = true
 	})
@@ -1560,43 +1515,82 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 	residents := []*NetworkClientResident{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.CreateTempTableInTx(
-			ctx,
-			tx,
-			"resident_ports(resident_internal_port int)",
-			ports...,
-		)
-
 		result, err := tx.Query(
 			ctx,
 			`
 				SELECT
-					DISTINCT network_client_resident.client_id
+					resident_id,
+					client_id,
+					internal_ports
 				FROM network_client_resident
-
-				INNER JOIN network_client_resident_port ON
-					network_client_resident_port.resident_id = network_client_resident.resident_id
-
-				INNER JOIN resident_ports ON
-					resident_ports.resident_internal_port = network_client_resident_port.resident_internal_port
-
 				WHERE
 					resident_host = $1
 				`,
 			host,
 		)
-		clientIds := []server.Id{}
+		clientIdPorts := map[server.Id][]int{}
+		// resident_id -> client_id
+		legacyClientIds := map[server.Id]server.Id{}
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				var residentId server.Id
 				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
+				var internalPortsStr string
+				server.Raise(result.Scan(
+					&residentId,
+					&clientId,
+					&internalPortsStr,
+				))
+				internalPorts := server.RequireExpandPorts(internalPortsStr)
+				if len(internalPorts) == 0 {
+					legacyClientIds[residentId] = clientId
+				} else {
+					clientIdPorts[clientId] = internalPorts
+				}
 			}
 		})
 
-		for _, clientId := range clientIds {
-			resident := dbGetResidentInTx(ctx, tx, clientId)
-			residents = append(residents, resident)
+		// join in legacy internal ports
+		if 0 < len(legacyClientIds) {
+			server.CreateTempJoinTableInTx(ctx, tx, "temp_client_id(resident_id uuid, client_id uuid)", legacyClientIds)
+
+			result, err := tx.Query(
+				ctx,
+				`
+				SELECT
+					temp_client_id.client_id,
+					internal_port
+				FROM network_client_resident_port
+				INNER JOIN temp_client_id ON temp_client_id.resident_id = network_client_resident_port.resident_id
+				`,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					var internalPort int
+					server.Raise(result.Scan(&clientId, &internalPort))
+					clientIdPorts[clientId] = append(clientIdPorts[clientId], internalPort)
+				}
+			})
+		}
+
+		targetInternalPorts := map[int]bool{}
+		for _, port := range ports {
+			targetInternalPorts[port] = true
+		}
+		for clientId, internalPorts := range clientIdPorts {
+			intersects := func() bool {
+				for _, internalPort := range internalPorts {
+					if targetInternalPorts[internalPort] {
+						return true
+					}
+				}
+				return false
+			}()
+			if intersects {
+				resident := dbGetResidentInTx(ctx, tx, clientId)
+				residents = append(residents, resident)
+			}
 		}
 	})
 
@@ -1618,17 +1612,6 @@ func RemoveResident(
 				resident_id = $2
 			`,
 			clientId,
-			residentId,
-		)
-		server.Raise(err)
-
-		_, err = tx.Exec(
-			ctx,
-			`
-			DELETE FROM network_client_resident_port
-			WHERE
-				resident_id = $1
-			`,
 			residentId,
 		)
 		server.Raise(err)

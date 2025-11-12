@@ -2,15 +2,17 @@ package server
 
 import (
 	"fmt"
-	// "regexp"
-	// "strconv"
+	"regexp"
+	"strconv"
 	"time"
 	// "runtime/debug"
-	// "strings"
 	"bytes"
 	"encoding/json"
+	"strings"
 	// "reflect"
 	// "runtime"
+	"slices"
+	"sync"
 )
 
 // func Ptr[T any](value T) *T {
@@ -98,4 +100,71 @@ func MaskValue(v string) string {
 	} else {
 		return fmt.Sprintf("%s***%s", v[:2], v[len(v)-2:])
 	}
+}
+
+var portRangeRegex = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile("^\\s*(\\d+)\\s*-\\s*(\\d+)\\s*$")
+})
+var portRegex = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile("^\\s*(\\d+)\\s*$")
+})
+
+func ExpandPorts(portsListStr string) ([]int, error) {
+	if portsListStr == "" {
+		return []int{}, nil
+	}
+
+	ports := []int{}
+	for _, portsStr := range strings.Split(portsListStr, ",") {
+		if portStrs := portRangeRegex().FindStringSubmatch(portsStr); portStrs != nil {
+			minPort, err := strconv.Atoi(portStrs[1])
+			if err != nil {
+				panic(err)
+			}
+			maxPort, err := strconv.Atoi(portStrs[2])
+			if err != nil {
+				panic(err)
+			}
+			for port := minPort; port <= maxPort; port += 1 {
+				ports = append(ports, port)
+			}
+		} else if portStrs := portRegex().FindStringSubmatch(portsStr); portStrs != nil {
+			port, err := strconv.Atoi(portStrs[1])
+			if err != nil {
+				panic(err)
+			}
+			ports = append(ports, port)
+		} else {
+			return nil, fmt.Errorf("Port must be either int min-max or int port (%s)", portsStr)
+		}
+	}
+	return ports, nil
+}
+
+func RequireExpandPorts(portsListStr string) []int {
+	ports, err := ExpandPorts(portsListStr)
+	if err != nil {
+		panic(err)
+	}
+	return ports
+}
+
+func CollapsePorts(ports []int) string {
+	parts := []string{}
+
+	slices.Sort(ports)
+	for i := 0; i < len(ports); {
+		j := i + 1
+		for j < len(ports) && (ports[j] == ports[j-1]+1 || ports[j] == ports[j-1]) {
+			j += 1
+		}
+		if ports[i] == ports[j-1] {
+			parts = append(parts, fmt.Sprintf("%d", ports[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", ports[i], ports[j-1]))
+		}
+		i = j
+	}
+
+	return strings.Join(parts, ",")
 }
