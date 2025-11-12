@@ -1552,14 +1552,14 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 
 		// join in legacy internal ports
 		if 0 < len(legacyClientIds) {
-			server.CreateTempJoinTableInTx(ctx, tx, "temp_client_id(resident_id uuid, client_id uuid)", legacyClientIds)
+			server.CreateTempJoinTableInTx(ctx, tx, "temp_client_id(resident_id uuid -> client_id uuid)", legacyClientIds)
 
 			result, err := tx.Query(
 				ctx,
 				`
 				SELECT
 					temp_client_id.client_id,
-					internal_port
+					network_client_resident_port.resident_internal_port
 				FROM network_client_resident_port
 				INNER JOIN temp_client_id ON temp_client_id.resident_id = network_client_resident_port.resident_id
 				`,
