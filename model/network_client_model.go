@@ -411,7 +411,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				clientInfo := &NetworkClientInfo{}
 				var deviceName_ *string
 				var deviceSpec_ *string
-				var internalPortsStr string
+				var internalPortsStr_ *string
 				server.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.SourceClientId,
@@ -425,7 +425,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					&residentHost_,
 					&residentService_,
 					&residentBlock_,
-					&internalPortsStr,
+					&internalPortsStr_,
 					// &clientInfo.ResidentId,
 					// &clientInfo.ResidentHost,
 					// &clientInfo.ResidentService,
@@ -445,7 +445,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 						ResidentHost:          *residentHost_,
 						ResidentService:       *residentService_,
 						ResidentBlock:         *residentBlock_,
-						ResidentInternalPorts: server.RequireExpandPorts(internalPortsStr),
+						ResidentInternalPorts: server.RequireExpandPorts(*internalPortsStr_),
 					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
