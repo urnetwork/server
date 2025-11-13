@@ -1511,8 +1511,8 @@ func NominateResident(
 }
 
 // if any of the ports overlap
-func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*NetworkClientResident {
-	residents := []*NetworkClientResident{}
+func GetResidentIdsForHostPorts(ctx context.Context, host string, ports []int) []server.Id {
+	residentIds := []server.Id{}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
@@ -1528,9 +1528,8 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 				`,
 			host,
 		)
-		clientIdPorts := map[server.Id][]int{}
-		// resident_id -> client_id
-		legacyClientIds := map[server.Id]server.Id{}
+		residentIdPorts := map[server.Id][]int{}
+		legacyResidentIds := []server.Id{}
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var residentId server.Id
@@ -1543,22 +1542,22 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 				))
 				internalPorts := server.RequireExpandPorts(internalPortsStr)
 				if len(internalPorts) == 0 {
-					legacyClientIds[residentId] = clientId
+					legacyResidentIds = append(legacyResidentIds, residentId)
 				} else {
-					clientIdPorts[clientId] = internalPorts
+					residentIdPorts[residentId] = internalPorts
 				}
 			}
 		})
 
 		// join in legacy internal ports
-		if 0 < len(legacyClientIds) {
-			server.CreateTempJoinTableInTx(ctx, tx, "temp_client_id(resident_id uuid -> client_id uuid)", legacyClientIds)
+		if 0 < len(legacyResidentIds) {
+			server.CreateTempTableInTx(ctx, tx, "temp_client_id(resident_id uuid)", legacyResidentIds)
 
 			result, err := tx.Query(
 				ctx,
 				`
 				SELECT
-					temp_client_id.client_id,
+					temp_client_id.resident_id,
 					network_client_resident_port.resident_internal_port
 				FROM network_client_resident_port
 				INNER JOIN temp_client_id ON temp_client_id.resident_id = network_client_resident_port.resident_id
@@ -1566,10 +1565,10 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					var clientId server.Id
+					var residentId server.Id
 					var internalPort int
-					server.Raise(result.Scan(&clientId, &internalPort))
-					clientIdPorts[clientId] = append(clientIdPorts[clientId], internalPort)
+					server.Raise(result.Scan(&residentId, &internalPort))
+					residentIdPorts[residentId] = append(residentIdPorts[residentId], internalPort)
 				}
 			})
 		}
@@ -1578,7 +1577,7 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 		for _, port := range ports {
 			targetInternalPorts[port] = true
 		}
-		for clientId, internalPorts := range clientIdPorts {
+		for residentId, internalPorts := range residentIdPorts {
 			intersects := func() bool {
 				for _, internalPort := range internalPorts {
 					if targetInternalPorts[internalPort] {
@@ -1588,13 +1587,12 @@ func GetResidentsForHostPorts(ctx context.Context, host string, ports []int) []*
 				return false
 			}()
 			if intersects {
-				resident := dbGetResidentForClientInTx(ctx, tx, clientId)
-				residents = append(residents, resident)
+				residentIds = append(residentIds, residentId)
 			}
 		}
 	})
 
-	return residents
+	return residentIds
 }
 
 func RemoveResident(
@@ -1602,16 +1600,34 @@ func RemoveResident(
 	residentId server.Id,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
+		current := false
+		result, err := tx.Query(
 			ctx,
 			`
-			DELETE FROM network_client_resident
+			SELECT
+				client_id
+			FROM network_client_resident
 			WHERE
 				resident_id = $1
 			`,
 			residentId,
 		)
-		server.Raise(err)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				current = true
+			}
+		})
+		if current {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_resident
+				WHERE
+					resident_id = $1
+				`,
+				residentId,
+			))
+		}
 	})
 }
 
