@@ -46,18 +46,21 @@ func loadResident(residentBytes []byte) (*NetworkClientResident, error) {
 	return &resident, nil
 }
 
-func GetResidentForClient(ctx context.Context, clientId server.Id) (resident *NetworkClientResident) {
+func GetResidentForClient(ctx context.Context, clientId server.Id, ttl time.Duration) (resident *NetworkClientResident) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		key := residentKey(clientId)
 		cmd := r.Get(ctx, key)
 		residentBytes, _ := cmd.Bytes()
 		resident, _ = loadResident(residentBytes)
+		if resident != nil && 0 < ttl {
+			r.Expire(ctx, key, ttl)
+		}
 	})
 	return
 }
 
-func GetResidentForClientWithInstance(ctx context.Context, clientId server.Id, instanceId server.Id) (resident *NetworkClientResident) {
-	resident_ := GetResidentForClient(ctx, clientId)
+func GetResidentForClientWithInstance(ctx context.Context, clientId server.Id, instanceId server.Id, ttl time.Duration) (resident *NetworkClientResident) {
+	resident_ := GetResidentForClient(ctx, clientId, ttl)
 	if resident_ != nil && resident_.InstanceId == instanceId {
 		resident = resident_
 	}

@@ -90,7 +90,7 @@ type ExchangeSettings struct {
 	ExchangeWriteHeaderTimeout         time.Duration
 	ExchangeReconnectAfterErrorTimeout time.Duration
 
-	ExchangeConnectionResidentPollTimeout time.Duration
+	ExchangeResidentTtl time.Duration
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -129,13 +129,13 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		AbuseMinTimeout:     5 * time.Second,
 		ControlMinTimeout:   5 * time.Millisecond,
 
-		ExchangeConnectTimeout:                5 * time.Second,
-		ExchangePingTimeout:                   connectionHandlerSettings.MinPingTimeout,
-		ExchangeReadTimeout:                   connectionHandlerSettings.ReadTimeout,
-		ExchangeReadHeaderTimeout:             exchangeResidentWaitTimeout,
-		ExchangeWriteHeaderTimeout:            exchangeResidentWaitTimeout,
-		ExchangeReconnectAfterErrorTimeout:    1 * time.Second,
-		ExchangeConnectionResidentPollTimeout: 15 * time.Second,
+		ExchangeConnectTimeout:             5 * time.Second,
+		ExchangePingTimeout:                connectionHandlerSettings.MinPingTimeout,
+		ExchangeReadTimeout:                connectionHandlerSettings.ReadTimeout,
+		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
+		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
+		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
+		ExchangeResidentTtl:                15 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -280,7 +280,7 @@ func (self *Exchange) NominateLocalResident(
 		self.ctx,
 		residentIdToReplace,
 		nomination,
-		4*self.settings.ExchangeConnectionResidentPollTimeout,
+		self.settings.ExchangeResidentTtl,
 	)
 	if !nominated {
 		return false
@@ -336,12 +336,12 @@ func (self *Exchange) NominateLocalResident(
 			select {
 			case <-resident.Done():
 				return
-			case <-time.After(self.settings.ExchangeConnectionResidentPollTimeout):
+			case <-time.After(self.settings.ExchangeResidentTtl / 2):
 			}
 
 			pollResident := func() bool {
 				return server.HandleErrorWithReturn(func() bool {
-					currentResident := model.GetResidentForClientWithInstance(self.ctx, clientId, instanceId)
+					currentResident := model.GetResidentForClientWithInstance(self.ctx, clientId, instanceId, self.settings.ExchangeResidentTtl)
 					if currentResident == nil {
 						return false
 					}
@@ -1095,7 +1095,7 @@ func (self *ResidentTransport) Run() {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-time.After(self.exchange.settings.ExchangeConnectionResidentPollTimeout):
+				case <-time.After(self.exchange.settings.ExchangeResidentTtl / 2):
 				}
 				if !pollResident() {
 					return
@@ -1161,7 +1161,7 @@ func (self *ResidentTransport) Run() {
 
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId)
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1186,7 +1186,7 @@ func (self *ResidentTransport) Run() {
 						exchangeConnection,
 						func() bool {
 							return server.HandleErrorWithReturn(func() bool {
-								currentResident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId)
+								currentResident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
 								if currentResident == nil {
 									return false
 								}
@@ -1305,7 +1305,7 @@ func (self *ResidentForward) Run() {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-time.After(self.exchange.settings.ExchangeConnectionResidentPollTimeout):
+				case <-time.After(self.exchange.settings.ExchangeResidentTtl / 2):
 				}
 				if !pollResident() {
 					return
@@ -1338,7 +1338,7 @@ func (self *ResidentForward) Run() {
 
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClient(self.ctx, self.clientId)
+		resident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1358,7 +1358,7 @@ func (self *ResidentForward) Run() {
 				c := func() {
 					// handleCtx, handleCancel := context.WithCancel(self.ctx)
 					handle(exchangeConnection, func() bool {
-						currentResident := model.GetResidentForClient(self.ctx, self.clientId)
+						currentResident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
 						if currentResident == nil {
 							return false
 						}
