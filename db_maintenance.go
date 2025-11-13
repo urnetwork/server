@@ -25,7 +25,25 @@ func isIncompleteIndexName(indexName string) bool {
 	return incompleteIndexNamePattern().MatchString(indexName)
 }
 
-func DbMaintenance(ctx context.Context, epoch uint64) {
+func DefaultDbMaintenanceOptions() *DbMaintenanceOptions {
+	return &DbMaintenanceOptions{
+		Reindex: true,
+		Cleanup: true,
+		Analyze: true,
+	}
+}
+
+type DbMaintenanceOptions struct {
+	Reindex bool
+	Cleanup bool
+	Analyze bool
+}
+
+func DbMaintenanceWithDefaults(ctx context.Context, epoch uint64) {
+	DbMaintenance(ctx, epoch, DefaultDbMaintenanceOptions())
+}
+
+func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions) {
 
 	// regularly reindex tables to avoid bloat:
 	// 1. tables are reindexed over `DbReindexEpochs` epochs
@@ -140,71 +158,77 @@ func DbMaintenance(ctx context.Context, epoch uint64) {
 		reindexTableNames[i], reindexTableNames[j] = reindexTableNames[j], reindexTableNames[i]
 	})
 
-	// reindex concurrently
-	for i, reindexTableName := range reindexTableNames {
-		glog.Infof(
-			"[db]maintenance reindex[%d/%d] %s\n",
-			i+1,
-			len(reindexTableNames),
-			reindexTableName,
-		)
-
-		// pg might raise a deadlock or other unrecoverable error during reindex
-		HandleError(func() {
-			MaintenanceDb(ctx, func(conn PgConn) {
-				// reindex
-				startTime := time.Now()
-				reindex(conn, reindexTableName)
-				endTime := time.Now()
-				glog.Infof(
-					"[db]maintenance reindex[%d/%d] %s reindex took %.2fs\n",
-					i+1,
-					len(reindexTableNames),
-					reindexTableName,
-					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
-				)
-			})
-		})
-	}
-
-	for i, reindexTableName := range reindexTableNames {
-		glog.Infof(
-			"[db]maintenance reindex[%d/%d] cleanup %s\n",
-			i+1,
-			len(reindexTableNames),
-			reindexTableName,
-		)
-
-		HandleError(func() {
-			MaintenanceDb(ctx, func(conn PgConn) {
-				startTime := time.Now()
-				cleanUpIncompleteIndexes(conn, reindexTableName)
-				endTime := time.Now()
-				glog.Infof(
-					"[db]maintenance reindex[%d/%d] cleanup %s took %.2fs\n",
-					i+1,
-					len(reindexTableNames),
-					reindexTableName,
-					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
-				)
-			})
-		})
-	}
-
-	HandleError(func() {
-		MaintenanceDb(ctx, func(conn PgConn) {
-			glog.Infof("[db]maintenance final analyze\n")
-			// final analyze
-			startTime := time.Now()
-			RaisePgResult(conn.Exec(
-				ctx,
-				`ANALYZE`,
-			))
-			endTime := time.Now()
+	if opts.Reindex {
+		// reindex concurrently
+		for i, reindexTableName := range reindexTableNames {
 			glog.Infof(
-				"[db]maintenance final analyze took %.2fs\n",
-				float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
+				"[db]maintenance reindex[%d/%d] %s\n",
+				i+1,
+				len(reindexTableNames),
+				reindexTableName,
 			)
+
+			// pg might raise a deadlock or other unrecoverable error during reindex
+			HandleError(func() {
+				MaintenanceDb(ctx, func(conn PgConn) {
+					// reindex
+					startTime := time.Now()
+					reindex(conn, reindexTableName)
+					endTime := time.Now()
+					glog.Infof(
+						"[db]maintenance reindex[%d/%d] %s reindex took %.2fs\n",
+						i+1,
+						len(reindexTableNames),
+						reindexTableName,
+						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
+					)
+				})
+			})
+		}
+	}
+
+	if opts.Cleanup {
+		for i, reindexTableName := range reindexTableNames {
+			glog.Infof(
+				"[db]maintenance reindex[%d/%d] cleanup %s\n",
+				i+1,
+				len(reindexTableNames),
+				reindexTableName,
+			)
+
+			HandleError(func() {
+				MaintenanceDb(ctx, func(conn PgConn) {
+					startTime := time.Now()
+					cleanUpIncompleteIndexes(conn, reindexTableName)
+					endTime := time.Now()
+					glog.Infof(
+						"[db]maintenance reindex[%d/%d] cleanup %s took %.2fs\n",
+						i+1,
+						len(reindexTableNames),
+						reindexTableName,
+						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
+					)
+				})
+			})
+		}
+	}
+
+	if opts.Analyze {
+		HandleError(func() {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				glog.Infof("[db]maintenance final analyze\n")
+				// final analyze
+				startTime := time.Now()
+				RaisePgResult(conn.Exec(
+					ctx,
+					`ANALYZE`,
+				))
+				endTime := time.Now()
+				glog.Infof(
+					"[db]maintenance final analyze took %.2fs\n",
+					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
+				)
+			})
 		})
-	})
+	}
 }

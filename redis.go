@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"time"
+	// "strings"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -121,4 +122,14 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 	// context := context.Background()
 	client := client()
 	callback(client)
+}
+
+func RedisSetIfEqual(r RedisClient, ctx context.Context, key string, test []byte, value []byte, ttl time.Duration) *redis.Cmd {
+	script := `local key = KEYS[1] local expected_value = ARGV[1] local new_value = ARGV[2] local ttl = ARGV[3] local current_value = redis.call('GET', key) if current_value == expected_value then redis.call('SET', key, new_value) redis.call('EXPIRE', key, ttl) return 1 else return 0 end`
+	return r.Eval(ctx, script, []string{key}, test, value, (ttl+time.Second/2)/time.Second)
+}
+
+func RedisRemoveIfEqual(r RedisClient, ctx context.Context, key string, test []byte) *redis.Cmd {
+	script := `local key = KEYS[1] local expected_value = ARGV[1] local current_value = redis.call('GET', key) if current_value == expected_value then redis.call('DEL', key) return 1 else return 0 end`
+	return r.Eval(ctx, script, []string{key}, test)
 }

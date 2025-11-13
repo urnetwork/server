@@ -52,7 +52,7 @@ func ScheduleDbMaintenance(clientSession *session.ClientSession, tx server.PgTx,
 }
 
 func DbMaintenance(dbMaintenance *DbMaintenanceArgs, clientSession *session.ClientSession) (*DbMaintenanceResult, error) {
-	server.DbMaintenance(clientSession.Ctx, dbMaintenance.Epoch)
+	server.DbMaintenanceWithDefaults(clientSession.Ctx, dbMaintenance.Epoch)
 	return &DbMaintenanceResult{}, nil
 }
 
