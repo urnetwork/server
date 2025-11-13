@@ -247,9 +247,15 @@ func dbMigrate(opts docopt.Opts) {
 func dbMaintenance(opts docopt.Opts) {
 	epoch, _ := opts.Int("<epoch>")
 
+	dbMaintenanceOpts := &server.DbMaintenanceOptions{
+		Reindex: true,
+		Cleanup: true,
+		Analyze: true,
+	}
+
 	fmt.Printf("Running DB maintenance ...\n")
 	// server.DbMigrationVerbose = true
-	server.DbMaintenance(context.Background(), uint64(epoch))
+	server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts)
 }
 
 func searchAdd(opts docopt.Opts) {
