@@ -267,7 +267,7 @@ func (self *Exchange) NominateLocalResident(
 ) bool {
 	residentId := server.NewId()
 
-	nominated := model.NominateResident(self.ctx, residentIdToReplace, &model.NetworkClientResident{
+	nomination := &model.NetworkClientResident{
 		ClientId:              clientId,
 		InstanceId:            instanceId,
 		ResidentId:            residentId,
@@ -275,7 +275,13 @@ func (self *Exchange) NominateLocalResident(
 		ResidentService:       self.service,
 		ResidentBlock:         self.block,
 		ResidentInternalPorts: maps.Keys(self.hostToServicePorts),
-	})
+	}
+	nominated := model.NominateResident(
+		self.ctx,
+		residentIdToReplace,
+		nomination,
+		4*self.settings.ExchangeConnectionResidentPollTimeout,
+	)
 	if !nominated {
 		return false
 	}
@@ -302,10 +308,9 @@ func (self *Exchange) NominateLocalResident(
 		}()
 
 		cleanupCtx := context.Background()
-		// this will remove the resident only if current
-		// it will always clear ports associated with the resident
-		model.RemoveResident(
+		model.RemoveResidentForClient(
 			cleanupCtx,
+			clientId,
 			resident.residentId,
 		)
 	})
@@ -336,11 +341,11 @@ func (self *Exchange) NominateLocalResident(
 
 			pollResident := func() bool {
 				return server.HandleErrorWithReturn(func() bool {
-					currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, clientId, instanceId)
-					if err != nil {
+					currentResident := model.GetResidentForClientWithInstance(self.ctx, clientId, instanceId)
+					if currentResident == nil {
 						return false
 					}
-					return residentId == currentResidentId
+					return residentId == currentResident.ResidentId
 				})
 			}
 
@@ -369,9 +374,6 @@ func (self *Exchange) NominateLocalResident(
 // runs the exchange to expose local nominated residents
 // there should be one local exchange per service
 func (self *Exchange) Run() {
-	// remove old residents at host:port
-	self.removeOldResidents()
-
 	// start exchange connection servers
 	for _, servicePort := range self.hostToServicePorts {
 		port := servicePort
@@ -385,30 +387,6 @@ func (self *Exchange) Run() {
 
 	select {
 	case <-self.ctx.Done():
-	}
-}
-
-func (self *Exchange) removeOldResidents() {
-	residentIds := map[server.Id]bool{}
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		for _, resident := range self.residents {
-			residentIds[resident.residentId] = true
-		}
-	}()
-	residentsForHostPort := model.GetResidentsForHostPorts(
-		self.ctx,
-		self.host,
-		maps.Keys(self.hostToServicePorts),
-	)
-	for _, residentForHostPort := range residentsForHostPort {
-		if _, ok := residentIds[residentForHostPort.ResidentId]; !ok {
-			model.RemoveResident(
-				self.ctx,
-				residentForHostPort.ResidentId,
-			)
-		}
 	}
 }
 
@@ -1183,7 +1161,7 @@ func (self *ResidentTransport) Run() {
 
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentWithInstance(self.ctx, self.clientId, self.instanceId)
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			exchangeConnection, err := NewExchangeConnection(
@@ -1204,15 +1182,18 @@ func (self *ResidentTransport) Run() {
 			if err == nil {
 				c := func() {
 					// TODO the current test would be more efficient as a model notification instead of polling
-					handle(exchangeConnection, func() bool {
-						return server.HandleErrorWithReturn(func() bool {
-							currentResidentId, err := model.GetResidentIdWithInstance(self.ctx, self.clientId, self.instanceId)
-							if err != nil {
-								return false
-							}
-							return resident.ResidentId == currentResidentId
-						})
-					})
+					handle(
+						exchangeConnection,
+						func() bool {
+							return server.HandleErrorWithReturn(func() bool {
+								currentResident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId)
+								if currentResident == nil {
+									return false
+								}
+								return resident.ResidentId == currentResident.ResidentId
+							})
+						},
+					)
 				}
 				if glog.V(2) {
 					server.Trace(
@@ -1377,11 +1358,11 @@ func (self *ResidentForward) Run() {
 				c := func() {
 					// handleCtx, handleCancel := context.WithCancel(self.ctx)
 					handle(exchangeConnection, func() bool {
-						currentResidentId, err := model.GetResidentIdForClient(self.ctx, self.clientId)
-						if err != nil {
+						currentResident := model.GetResidentForClient(self.ctx, self.clientId)
+						if currentResident == nil {
 							return false
 						}
-						return resident.ResidentId == currentResidentId
+						return resident.ResidentId == currentResident.ResidentId
 					})
 				}
 				if glog.V(2) {
