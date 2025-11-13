@@ -180,9 +180,14 @@ func TestResidentTtl(t *testing.T) {
 				case <-time.After(200 * time.Millisecond):
 				}
 
-				resident := GetResidentForClient(ctx, clientId, ttl)
+				resident = GetResidentForClient(ctx, clientId, ttl)
 				assert.NotEqual(t, resident, nil)
 			}
+
+			RemoveResidentForClient(ctx, clientId, resident.ResidentId)
+
+			resident = GetResidentForClient(ctx, clientId, ttl)
+			assert.Equal(t, resident, nil)
 		}
 	})
 }
