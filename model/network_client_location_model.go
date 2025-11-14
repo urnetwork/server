@@ -1740,20 +1740,20 @@ type ClientScore struct {
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
 
-func clientScoreLocationCountsKey(locationId server.Id, callerLocationId server.Id) string {
-	return fmt.Sprintf("client_score_l_%s_%s", locationId, callerLocationId)
+func clientScoreLocationCountsKey(rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
+	return fmt.Sprintf("cs_%s_l_%s_%s", rankMode, locationId, callerLocationId)
 }
 
-func clientScoreLocationGroupCountsKey(locationGroupId server.Id, callerLocationId server.Id) string {
-	return fmt.Sprintf("client_score_g_%s_%s", locationGroupId, callerLocationId)
+func clientScoreLocationGroupCountsKey(rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
+	return fmt.Sprintf("cs_%s_g_%s_%s", rankMode, locationGroupId, callerLocationId)
 }
 
-func clientScoreLocationSampleKey(locationId server.Id, callerLocationId server.Id, index int) string {
-	return fmt.Sprintf("client_score_g_%s_%s_%d", locationId, callerLocationId, index)
+func clientScoreLocationSampleKey(rankMode RankMode, locationId server.Id, callerLocationId server.Id, index int) string {
+	return fmt.Sprintf("cs_%s_g_%s_%s_%d", rankMode, locationId, callerLocationId, index)
 }
 
-func clientScoreLocationGroupSampleKey(locationGroupId server.Id, callerLocationId server.Id, index int) string {
-	return fmt.Sprintf("client_score_g_%s_%s_%d", locationGroupId, callerLocationId, index)
+func clientScoreLocationGroupSampleKey(rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id, index int) string {
+	return fmt.Sprintf("cs_%s_g_%s_%s_%d", rankMode, locationGroupId, callerLocationId, index)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
@@ -1762,25 +1762,33 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 
 	type performanceTarget struct {
 		relativeLatencyMillisThreshold int
+		relativeLatencyMillisCutoff    int
 		relativeLatencyMillisPerScore  int
 		bytesPerSecondThreshold        ByteCount
+		bytesPerSecondCutoff           ByteCount
 		bytesPerSecondPerScore         ByteCount
 	}
 
 	scorePerTier := 20
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
+	minScore := 1
+	minReliabilityWeight := float32(0.1)
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
-			relativeLatencyMillisThreshold: 100,
+			relativeLatencyMillisThreshold: 50,
+			relativeLatencyMillisCutoff:    200,
 			relativeLatencyMillisPerScore:  20,
 			bytesPerSecondThreshold:        8 * Mib,
+			bytesPerSecondCutoff:           800 * Kib,
 			bytesPerSecondPerScore:         200 * Kib,
 		},
 		RankModeSpeed: performanceTarget{
 			relativeLatencyMillisThreshold: 20,
+			relativeLatencyMillisCutoff:    50,
 			relativeLatencyMillisPerScore:  5,
 			bytesPerSecondThreshold:        40 * Mib,
+			bytesPerSecondCutoff:           4 * Mib,
 			bytesPerSecondPerScore:         1 * Mib,
 		},
 	}
@@ -1794,10 +1802,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		hasSpeedTest bool,
 	) {
 		for rankMode, target := range performanceTargets {
+			exclude := false
 			scoreAdjust := 0
 
 			if hasLatencyTest {
-				if d := minRelativeLatencyMillis - target.relativeLatencyMillisThreshold; 0 < d {
+				if target.relativeLatencyMillisCutoff < minRelativeLatencyMillis {
+					exclude = true
+				} else if d := minRelativeLatencyMillis - target.relativeLatencyMillisThreshold; 0 < d {
 					scoreAdjust += (d + target.relativeLatencyMillisPerScore/2) / target.relativeLatencyMillisPerScore
 				}
 			} else {
@@ -1805,17 +1816,22 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			}
 
 			if hasSpeedTest {
-				if d := target.bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
+				if maxBytesPerSecond < target.bytesPerSecondCutoff {
+					exclude = true
+				} else if d := target.bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
 					scoreAdjust += int((d + target.bytesPerSecondPerScore/2) / target.bytesPerSecondPerScore)
 				}
 			} else {
 				scoreAdjust += missingSpeedScore
 			}
 
-			score := min(
-				scorePerTier*netTypeScores[rankMode]+scoreAdjust,
-				MaxClientScore,
-			)
+			score := 0
+			if !exclude {
+				score = min(
+					scorePerTier*netTypeScores[rankMode]+scoreAdjust,
+					MaxClientScore,
+				)
+			}
 			clientScore.Scores[rankMode] = score
 			clientScore.Tiers[rankMode] = score / scorePerTier
 		}
@@ -2045,13 +2061,18 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		})
 	})
 
-	exportClientScores := func(s map[server.Id]*ClientScore) (
+	exportClientScores := func(rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
 		samplesBytes [][]byte,
 		counts []int,
 		samples [][]*ClientScore,
 	) {
-		clientScores := maps.Values(s)
+		clientScores := []*ClientScore{}
+		for _, clientScore := range s {
+			if minReliabilityWeight <= clientScore.ReliabilityWeight && minScore <= clientScore.Scores[rankMode] {
+				clientScores = append(clientScores, clientScore)
+			}
+		}
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
 			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
 		})
@@ -2138,32 +2159,34 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		for j, clientLocationId := range clientLocationIds {
-			pipe := r.TxPipeline()
+		for rankMode, _ := range performanceTargets {
+			for j, clientLocationId := range clientLocationIds {
+				pipe := r.TxPipeline()
 
-			glog.Infof("[nclm]export client location[%d/%d] %s\n", j+1, len(clientLocationIds), clientLocationId)
-			for locationId, clientScores := range locationClientScores {
-				activeClientScores := filterActive(clientScores, clientLocationId)
-				countsBytes, samplesBytes, counts, _ := exportClientScores(activeClientScores)
-				pipe.Set(ctx, clientScoreLocationCountsKey(locationId, clientLocationId), countsBytes, ttl)
-				for i, sampleBytes := range samplesBytes {
-					pipe.Set(ctx, clientScoreLocationSampleKey(locationId, clientLocationId, i), sampleBytes, ttl)
+				glog.Infof("[nclm]export client location[%d/%d] %s\n", j+1, len(clientLocationIds), clientLocationId)
+				for locationId, clientScores := range locationClientScores {
+					activeClientScores := filterActive(clientScores, clientLocationId)
+					countsBytes, samplesBytes, counts, _ := exportClientScores(rankMode, activeClientScores)
+					pipe.Set(ctx, clientScoreLocationCountsKey(rankMode, locationId, clientLocationId), countsBytes, ttl)
+					for i, sampleBytes := range samplesBytes {
+						pipe.Set(ctx, clientScoreLocationSampleKey(rankMode, locationId, clientLocationId, i), sampleBytes, ttl)
+					}
+					glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
 				}
-				glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
-			}
-			for locationGroupId, clientScores := range locationGroupClientScores {
-				activeClientScores := filterActive(clientScores, clientLocationId)
-				countsBytes, samplesBytes, counts, _ := exportClientScores(activeClientScores)
-				pipe.Set(ctx, clientScoreLocationGroupCountsKey(locationGroupId, clientLocationId), countsBytes, ttl)
-				for i, sampleBytes := range samplesBytes {
-					pipe.Set(ctx, clientScoreLocationGroupSampleKey(locationGroupId, clientLocationId, i), sampleBytes, ttl)
+				for locationGroupId, clientScores := range locationGroupClientScores {
+					activeClientScores := filterActive(clientScores, clientLocationId)
+					countsBytes, samplesBytes, counts, _ := exportClientScores(rankMode, activeClientScores)
+					pipe.Set(ctx, clientScoreLocationGroupCountsKey(rankMode, locationGroupId, clientLocationId), countsBytes, ttl)
+					for i, sampleBytes := range samplesBytes {
+						pipe.Set(ctx, clientScoreLocationGroupSampleKey(rankMode, locationGroupId, clientLocationId, i), sampleBytes, ttl)
+					}
+					glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 				}
-				glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
-			}
 
-			_, returnErr = pipe.Exec(ctx)
-			if returnErr != nil {
-				return
+				_, returnErr = pipe.Exec(ctx)
+				if returnErr != nil {
+					return
+				}
 			}
 		}
 	})
@@ -2183,6 +2206,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 }
 
 func loadClientScores(
+	rankMode RankMode,
 	ctx context.Context,
 	locationIds map[server.Id]bool,
 	locationGroupIds map[server.Id]bool,
@@ -2194,12 +2218,12 @@ func loadClientScores(
 
 		locationCounts := map[server.Id]*redis.StringCmd{}
 		for locationId, _ := range locationIds {
-			v := pipe.Get(ctx, clientScoreLocationCountsKey(locationId, clientLocationId))
+			v := pipe.Get(ctx, clientScoreLocationCountsKey(rankMode, locationId, clientLocationId))
 			locationCounts[locationId] = v
 		}
 		locationGroupCounts := map[server.Id]*redis.StringCmd{}
 		for locationGroupId, _ := range locationGroupIds {
-			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(locationGroupId, clientLocationId))
+			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(rankMode, locationGroupId, clientLocationId))
 			locationGroupCounts[locationGroupId] = v
 		}
 
@@ -2220,7 +2244,7 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationSampleKey(locationId, clientLocationId, i)] = count
+				sampleKeyCounts[clientScoreLocationSampleKey(rankMode, locationId, clientLocationId, i)] = count
 			}
 		}
 		for locationGroupId, countsCmd := range locationGroupCounts {
@@ -2236,7 +2260,7 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationGroupSampleKey(locationGroupId, clientLocationId, i)] = count
+				sampleKeyCounts[clientScoreLocationGroupSampleKey(rankMode, locationGroupId, clientLocationId, i)] = count
 			}
 		}
 
@@ -2351,6 +2375,7 @@ func FindProviders2(
 
 		loadStartTime := time.Now()
 		clientScores, err := loadClientScores(
+			rankMode,
 			session.Ctx,
 			locationIds,
 			locationGroupIds,
