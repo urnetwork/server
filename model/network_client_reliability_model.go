@@ -591,8 +591,12 @@ func getNetworkReliabilityWindow(
 			totalClientCountsSlice[i] = totalClientCounts[bucketNumber]
 		}
 
+		meanReliabilityWeight := float64(0)
+		if 0 < n {
+			meanReliabilityWeight = netReliabilityWeight / float64(n)
+		}
 		reliabilityWindow = &ReliabilityWindow{
-			MeanReliabilityWeight: netReliabilityWeight / float64(maxBucketNumber-minBucketNumber),
+			MeanReliabilityWeight: meanReliabilityWeight,
 			MinTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(minBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
 			MinBucketNumber:       minBucketNumber,
 			MaxTimeUnixMilli:      time.UnixMilli(0).Add(time.Duration(maxBucketNumber) * ReliabilityWindowBucketDuration).UnixMilli(),
