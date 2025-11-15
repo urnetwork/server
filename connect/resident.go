@@ -135,7 +135,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
-		ExchangeResidentTtl:                15 * time.Second,
+		ExchangeResidentTtl:                120 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
