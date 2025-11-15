@@ -2618,4 +2618,14 @@ var migrations = []any{
 	newSqlMigration(`
 	DROP TABLE network_client_resident_port
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+        DROP COLUMN net_type_score_speed,
+        ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+            net_type_privacy +
+            net_type_virtual +
+            net_type_foreign
+        ) STORED
+    `),
 }
