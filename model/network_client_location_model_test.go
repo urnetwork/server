@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/exp/maps"
 
@@ -214,6 +215,7 @@ func TestBestAvailableProviders(t *testing.T) {
 					BestAvailable: &bestAvailable,
 				},
 			},
+			ForceMinimum: true,
 		}
 
 		clientAddressHash, _, err := clientSessionA.ClientAddressHashPort()
@@ -351,7 +353,8 @@ func TestFindProviders2WithExclude(t *testing.T) {
 					LocationGroupId: &createLocationGroup.LocationGroupId,
 				},
 			},
-			Count: 2 * n,
+			Count:        2 * n,
+			ForceMinimum: true,
 		}
 		res, err := FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
@@ -364,7 +367,8 @@ func TestFindProviders2WithExclude(t *testing.T) {
 					BestAvailable: &bestAvailable,
 				},
 			},
-			Count: 2 * n,
+			Count:        2 * n,
+			ForceMinimum: true,
 		}
 		res, err = FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
@@ -378,6 +382,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			},
 			Count:            2 * n,
 			ExcludeClientIds: []server.Id{clientIdA},
+			ForceMinimum:     true,
 		}
 		res, err = FindProviders2(findProviders2Args, clientSessionA)
 		assert.Equal(t, err, nil)
@@ -401,6 +406,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 					clientIds[7], clientIds[8], clientIds[9],
 				},
 			},
+			ForceMinimum: true,
 		}
 
 		// client ids not in the exclude destinations intermediaries will come first
@@ -447,6 +453,17 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		}
 
 	})
+}
+
+func TestRankMode(t *testing.T) {
+	// the first letter of the rank mode is used for various redis keys
+	rankModes := []RankMode{RankModeQuality, RankModeSpeed}
+	firstLetters := map[rune]int{}
+	for _, rankMode := range rankModes {
+		r, _ := utf8.DecodeRuneInString(rankMode)
+		firstLetters[r] += 1
+	}
+	assert.Equal(t, len(rankModes), len(firstLetters))
 }
 
 // func TestFindLocationGroupByName(t *testing.T) {
