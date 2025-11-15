@@ -2611,7 +2611,11 @@ var migrations = []any{
     ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
     `),
 
-	// DROP TABLE network_client_resident
-	// DROP TABLE network_client_resident_port
+	newSqlMigration(`
+	DROP TABLE network_client_resident
+    `),
 
+	newSqlMigration(`
+	DROP TABLE network_client_resident_port
+    `),
 }
