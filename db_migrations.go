@@ -2595,4 +2595,23 @@ var migrations = []any{
         DROP CONSTRAINT network_client_resident_client_id_key,
         ADD UNIQUE (resident_id)
     `),
+
+	newSqlMigration(`
+    ALTER TABLE client_connection_reliability_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+    ALTER TABLE network_connection_reliability_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+    ALTER TABLE network_connection_reliability_window_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	// DROP TABLE network_client_resident
+	// DROP TABLE network_client_resident_port
+
 }
