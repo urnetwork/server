@@ -132,9 +132,10 @@ func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time, lim
 }
 
 type ReliabilityScore struct {
-	IndependentReliabilityScore float64
-	ReliabilityScore            float64
-	ReliabilityWeight           float64
+	IndependentReliabilityScore  float64
+	IndependentReliabilityWeight float64
+	ReliabilityScore             float64
+	ReliabilityWeight            float64
 }
 
 // FIXME support country_location_id
@@ -161,6 +162,7 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			INSERT INTO client_connection_reliability_score (
 				client_id,
 				independent_reliability_score,
+				independent_reliability_weight,
 				reliability_score,
 				reliability_weight,
 				min_block_number,
@@ -172,6 +174,7 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			SELECT
 			    t.client_id,
 			    SUM(1.0) AS independent_reliability_score,
+			    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
 			    SUM(1.0/t.valid_client_count) AS reliability_score,
 			    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 			    $1 AS min_block_number,
@@ -215,6 +218,7 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 			SELECT
 				client_id,
 				independent_reliability_score,
+				independent_reliability_weight,
 				reliability_score,
 				reliability_weight
 			FROM client_connection_reliability_score
@@ -227,6 +231,7 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 				server.Raise(result.Scan(
 					&clientId,
 					&s.IndependentReliabilityScore,
+					&s.IndependentReliabilityWeight,
 					&s.ReliabilityScore,
 					&s.ReliabilityWeight,
 				))
@@ -243,7 +248,6 @@ func UpdateNetworkReliabilityScores(ctx context.Context, minTime time.Time, maxT
 	}, server.TxReadCommitted)
 }
 
-// FIXME support country_location_id
 // this should run on payout to compute the latest
 func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	if complete {
@@ -267,6 +271,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			network_id,
 			country_location_id,
 			independent_reliability_score,
+			independent_reliability_weight,
 			reliability_score,
 			reliability_weight,
 			min_block_number,
@@ -276,6 +281,7 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		    t.network_id,
 		    t.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
+		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
 		    SUM(1.0/t.valid_client_count) AS reliability_score,
 		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 		    $1 AS min_block_number,
@@ -318,6 +324,7 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 		SELECT
 			network_id,
 			independent_reliability_score,
+			independent_reliability_weight,
 			reliability_score,
 			reliability_weight
 		FROM network_connection_reliability_score
@@ -330,11 +337,13 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 			server.Raise(result.Scan(
 				&networkId,
 				&s.IndependentReliabilityScore,
+				&s.IndependentReliabilityWeight,
 				&s.ReliabilityScore,
 				&s.ReliabilityWeight,
 			))
 			if c, ok := networkScores[networkId]; ok {
 				s.IndependentReliabilityScore += c.IndependentReliabilityScore
+				s.IndependentReliabilityWeight += c.IndependentReliabilityWeight
 				s.ReliabilityScore += c.ReliabilityScore
 				s.ReliabilityWeight += c.ReliabilityWeight
 			}
@@ -361,6 +370,7 @@ func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Co
 		SELECT
 			network_id,
 			independent_reliability_score * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS independent_reliability_score,
+			independent_reliability_weight * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS independent_reliability_weight,
 			reliability_score * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_score,
 			reliability_weight * COALESCE(network_client_location_reliability_multiplier.reliability_multiplier, 1.0) AS reliability_weight
 		FROM network_connection_reliability_score
@@ -376,11 +386,13 @@ func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Co
 			server.Raise(result.Scan(
 				&networkId,
 				&s.IndependentReliabilityScore,
+				&s.IndependentReliabilityWeight,
 				&s.ReliabilityScore,
 				&s.ReliabilityWeight,
 			))
 			if c, ok := networkScores[networkId]; ok {
 				s.IndependentReliabilityScore += c.IndependentReliabilityScore
+				s.IndependentReliabilityWeight += c.IndependentReliabilityWeight
 				s.ReliabilityScore += c.ReliabilityScore
 				s.ReliabilityWeight += c.ReliabilityWeight
 			}
@@ -747,6 +759,7 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 			network_id,
 			country_location_id,
 			independent_reliability_score,
+			independent_reliability_weight,
 			reliability_score,
 			reliability_weight,
 			min_block_number,
@@ -756,6 +769,7 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		    t.network_id,
 		    t.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
+		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
 		    SUM(1.0/t.valid_client_count) AS reliability_score,
 		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 		    $1 AS min_block_number,

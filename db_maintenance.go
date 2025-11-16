@@ -53,13 +53,21 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	// note `REINDEX CONCURRENTLY` can be safely run in the background
 	// see https://www.postgresql.org/docs/current/sql-reindex.html
 
+	// these tables are too large are updated too frequently to reindex regularly
+	// each table here should have some alternate management strategy
+	skipReindexTables := map[string]bool{
+		"client_reliability": true,
+	}
+
 	reindex := func(conn PgConn, tableName string) {
-		RaisePgResult(conn.Exec(
-			ctx,
-			`
-			REINDEX TABLE CONCURRENTLY 
-			`+tableName,
-		))
+		if !skipReindexTables[tableName] {
+			RaisePgResult(conn.Exec(
+				ctx,
+				`
+				REINDEX TABLE CONCURRENTLY 
+				`+tableName,
+			))
+		}
 	}
 
 	cleanUpIncompleteIndexes := func(conn PgConn, tableName string) {
@@ -182,7 +190,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 						reindexTableName,
 						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 					)
-				})
+				}, OptNoRetry())
 			})
 		}
 	}
@@ -208,7 +216,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 						reindexTableName,
 						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 					)
-				})
+				}, OptNoRetry())
 			})
 		}
 	}
@@ -228,7 +236,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 					"[db]maintenance final analyze took %.2fs\n",
 					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 				)
-			})
+			}, OptNoRetry())
 		})
 	}
 }

@@ -2595,4 +2595,37 @@ var migrations = []any{
         DROP CONSTRAINT network_client_resident_client_id_key,
         ADD UNIQUE (resident_id)
     `),
+
+	newSqlMigration(`
+    ALTER TABLE client_connection_reliability_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+    ALTER TABLE network_connection_reliability_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+    ALTER TABLE network_connection_reliability_window_score
+    ADD COLUMN independent_reliability_weight double precision NOT NULL DEFAULT 0
+    `),
+
+	newSqlMigration(`
+	DROP TABLE network_client_resident
+    `),
+
+	newSqlMigration(`
+	DROP TABLE network_client_resident_port
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_location
+        DROP COLUMN net_type_score_speed,
+        ADD COLUMN net_type_score_speed smallint GENERATED ALWAYS AS (
+            net_type_privacy +
+            net_type_virtual +
+            net_type_foreign
+        ) STORED
+    `),
 }
