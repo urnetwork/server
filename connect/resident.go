@@ -1085,23 +1085,9 @@ func (self *ResidentTransport) Run() {
 		close(self.receive)
 	}()
 
-	handle := func(connection *ExchangeConnection, pollResident func() bool) {
+	handle := func(connection *ExchangeConnection) {
 		handleCtx, handleCancel := context.WithCancel(self.ctx)
 		defer handleCancel()
-
-		go server.HandleError(func() {
-			defer handleCancel()
-			for {
-				select {
-				case <-handleCtx.Done():
-					return
-				case <-time.After(self.exchange.settings.ExchangeResidentTtl / 2):
-				}
-				if !pollResident() {
-					return
-				}
-			}
-		})
 
 		go server.HandleError(func() {
 			defer func() {
@@ -1181,19 +1167,7 @@ func (self *ResidentTransport) Run() {
 
 			if err == nil {
 				c := func() {
-					// TODO the current test would be more efficient as a model notification instead of polling
-					handle(
-						exchangeConnection,
-						func() bool {
-							return server.HandleErrorWithReturn(func() bool {
-								currentResident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
-								if currentResident == nil {
-									return false
-								}
-								return resident.ResidentId == currentResident.ResidentId
-							})
-						},
-					)
+					handle(exchangeConnection)
 				}
 				if glog.V(2) {
 					server.Trace(
@@ -1292,26 +1266,12 @@ func NewResidentForward(
 func (self *ResidentForward) Run() {
 	defer self.cancel()
 
-	handle := func(connection *ExchangeConnection, pollResident func() bool) {
+	handle := func(connection *ExchangeConnection) {
 		handleCtx, handleCancel := context.WithCancel(self.ctx)
 		defer func() {
 			handleCancel()
 			connection.Close()
 		}()
-
-		go server.HandleError(func() {
-			defer handleCancel()
-			for {
-				select {
-				case <-handleCtx.Done():
-					return
-				case <-time.After(self.exchange.settings.ExchangeResidentTtl / 2):
-				}
-				if !pollResident() {
-					return
-				}
-			}
-		})
 
 		// write
 		for {
@@ -1356,14 +1316,7 @@ func (self *ResidentForward) Run() {
 			}
 			if err == nil {
 				c := func() {
-					// handleCtx, handleCancel := context.WithCancel(self.ctx)
-					handle(exchangeConnection, func() bool {
-						currentResident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
-						if currentResident == nil {
-							return false
-						}
-						return resident.ResidentId == currentResident.ResidentId
-					})
+					handle(exchangeConnection)
 				}
 				if glog.V(2) {
 					server.Trace(
