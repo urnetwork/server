@@ -190,7 +190,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 						reindexTableName,
 						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 					)
-				})
+				}, OptNoRetry())
 			})
 		}
 	}
@@ -216,7 +216,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 						reindexTableName,
 						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 					)
-				})
+				}, OptNoRetry())
 			})
 		}
 	}
@@ -236,7 +236,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 					"[db]maintenance final analyze took %.2fs\n",
 					float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
 				)
-			})
+			}, OptNoRetry())
 		})
 	}
 }
