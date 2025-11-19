@@ -26,17 +26,17 @@ func LogUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	impl := func(sess *session.ClientSession) (*controller.UploadLogFileResult, error) {
+	impl := func(session *session.ClientSession) (*controller.UploadLogFileResult, error) {
 		// r.Body is a streaming reader; DO NOT read it fully here.
 		// Ensure we respect cancellation.
-		ctx := r.Context()
-		return controller.UploadLogFile(ctx, r.Body, controller.UploadLogFileOptions{
+		// ctx := r.Context()
+		return controller.UploadLogFile(session, r.Body, controller.UploadLogFileArgs{
 			// OriginalFilename: originalName,
 			FeedbackId:  feedbackId,
 			ContentType: contentType,
-			NetworkId:   sess.ByJwt.NetworkId,
-			UserId:      sess.ByJwt.UserId,
-			ClientId:    sess.ByJwt.ClientId,
+			NetworkId:   session.ByJwt.NetworkId,
+			UserId:      session.ByJwt.UserId,
+			ClientId:    session.ByJwt.ClientId,
 			Now:         time.Now(),
 		})
 	}
