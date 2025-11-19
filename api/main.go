@@ -6,6 +6,7 @@ import (
 	// "net/http"
 	"os"
 	"syscall"
+
 	// "net"
 	// "errors"
 	"net"
@@ -168,6 +169,7 @@ Options:
 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
 		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
+		router.NewRoute("POST", "/log/upload", handlers.LogUpload),
 	}
 
 	// server.().Printf("%s\n", opts)
