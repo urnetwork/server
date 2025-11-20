@@ -35,6 +35,9 @@ func IndexSearchLocations(
 	indexSearchLocations *IndexSearchLocationsArgs,
 	clientSession *session.ClientSession,
 ) (*IndexSearchLocationsResult, error) {
+	cityLimit := 10000
+	model.AddDefaultLocations(clientSession.Ctx, cityLimit)
+
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
 	})
