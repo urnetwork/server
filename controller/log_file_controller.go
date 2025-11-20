@@ -29,9 +29,8 @@ type UploadLogFileArgs struct {
 type UploadLogFileResult struct{}
 
 var logBucket = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("aws.yml").Parse()
-	// todo - update vault
-	return c["aws"].(map[string]any)["log_bucket"].(string)
+	c := server.Config.RequireSimpleResource("aws.yml").Parse()
+	return c["aws"].(map[string]any)["feedback_log_bucket"].(string)
 })
 
 func UploadLogFile(

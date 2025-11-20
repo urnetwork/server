@@ -17,13 +17,17 @@ func LogUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var feedbackId *server.Id
-	if fid := r.Header.Get("X-UR-Feedback-Id"); fid != "" {
-		if id, err := server.ParseId(fid); err == nil {
-			feedbackId = &id
-		} else {
-			http.Error(w, "invalid X-UR-Feedback-Id", http.StatusBadRequest)
-			return
-		}
+	pathValues := router.GetPathValues(r)
+	if len(pathValues) == 0 {
+		http.Error(w, "missing feedback id in path", http.StatusBadRequest)
+		return
+	}
+
+	if id, err := server.ParseId(pathValues[0]); err == nil {
+		feedbackId = &id
+	} else {
+		http.Error(w, "invalid feedback id passed", http.StatusBadRequest)
+		return
 	}
 
 	impl := func(session *session.ClientSession) (*controller.UploadLogFileResult, error) {
