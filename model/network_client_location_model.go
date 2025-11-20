@@ -1457,7 +1457,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
                 INNER JOIN location_group ON
                 	location_group.location_group_id = location_group_member.location_group_id AND
-                	location_group.name = $1
+                	location_group.location_group_name = $1
             `,
 			StrongPrivacyLaws,
 		)
