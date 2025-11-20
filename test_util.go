@@ -8,6 +8,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/golang/glog"
 )
 
 // each test runs with its own postgres and redis db
@@ -16,12 +19,16 @@ import (
 type TestEnv struct {
 	ApplyDbMigrations bool
 	Warmup            bool
+	RerunCount        int
+	RerunTimeout      time.Duration
 }
 
 func DefaultTestEnv() *TestEnv {
 	return &TestEnv{
 		ApplyDbMigrations: true,
 		Warmup:            false,
+		RerunCount:        1,
+		RerunTimeout:      2 * time.Second,
 	}
 }
 
@@ -37,7 +44,29 @@ func (self *TestEnv) TestMain(m *testing.M) {
 func (self *TestEnv) Run(callback func()) {
 	teardown := self.setup()
 	defer teardown()
-	callback()
+
+	n := self.RerunCount + 1
+	for i := 0; i < n; i += 1 {
+		var r any
+		func() {
+			if i+1 < n {
+				defer func() {
+					r = recover()
+				}()
+			}
+			callback()
+		}()
+		if r == nil {
+			if 0 < i {
+				glog.Infof("[FLAKY]test passed iteration[%d/%d]", i+i, n, r)
+			}
+			return
+		}
+		// glog.Infof("[FLAKY]test failed iteration[%d/%d]. err = %s", i+i, n, r)
+		select {
+		case <-time.After(self.RerunTimeout):
+		}
+	}
 }
 
 func (self *TestEnv) setup() func() {

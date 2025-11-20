@@ -14,9 +14,9 @@ import (
 	"time"
 )
 
-const DefaultHttpTimeout = 30 * time.Second
-const DefaultHttpConnectTimeout = 5 * time.Second
-const DefaultHttpTlsTimeout = 5 * time.Second
+const DefaultHttpTimeout = 60 * time.Second
+const DefaultHttpConnectTimeout = 15 * time.Second
+const DefaultHttpTlsTimeout = 15 * time.Second
 
 func DefaultHttpClient() *http.Client {
 	// see https://medium.com/@nate510/don-t-use-go-s-default-http-client-4804cb19f779
