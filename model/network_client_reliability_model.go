@@ -857,30 +857,48 @@ func (self *clientLocationReliability) Values() []any {
 	}
 	values[7] = maxNetTypeScoreSpeed
 
-	maxBytesPerSecond := ByteCount(0)
-	for bytesPerSecond, _ := range self.allBytesPerSecond {
-		maxBytesPerSecond = max(maxBytesPerSecond, bytesPerSecond)
-	}
+	// use the mean
+	maxBytesPerSecond := sampleMeanByteCount(self.allBytesPerSecond)
 	values[8] = maxBytesPerSecond
 
-	var minRelativeLatencyMillis int
-	if len(self.allRelativeLatencyMillis) == 0 {
-		minRelativeLatencyMillis = 0
-	} else {
-		keys := maps.Keys(self.allRelativeLatencyMillis)
-		minRelativeLatencyMillis = keys[0]
-		if 1 < len(keys) {
-			for _, relativeLatencyMillis := range keys[1:] {
-				minRelativeLatencyMillis = min(minRelativeLatencyMillis, relativeLatencyMillis)
-			}
-		}
-	}
+	// use the mean
+	minRelativeLatencyMillis := sampleMeanInt(self.allRelativeLatencyMillis)
 	values[9] = minRelativeLatencyMillis
 
 	values[10] = 0 < len(self.allBytesPerSecond)
 	values[11] = 0 < len(self.allRelativeLatencyMillis)
 
 	return values
+}
+
+func sampleMeanInt(m map[int]int) int {
+	net := 0
+	n := 0
+	for s, c := range m {
+		if 0 < c {
+			net += s
+			n += c
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return (net + n/2) / n
+}
+
+func sampleMeanByteCount(m map[ByteCount]int) ByteCount {
+	net := ByteCount(0)
+	n := 0
+	for s, c := range m {
+		if 0 < c {
+			net += s
+			n += c
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return (net + ByteCount(n/2)) / ByteCount(n)
 }
 
 func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, maxTime time.Time) {
