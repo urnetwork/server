@@ -42,9 +42,6 @@ func (self *TestEnv) TestMain(m *testing.M) {
 }
 
 func (self *TestEnv) Run(callback func()) {
-	teardown := self.setup()
-	defer teardown()
-
 	n := self.RerunCount + 1
 	for i := 0; i < n; i += 1 {
 		var r any
@@ -54,6 +51,8 @@ func (self *TestEnv) Run(callback func()) {
 					r = recover()
 				}()
 			}
+			teardown := self.setup()
+			defer teardown()
 			callback()
 		}()
 		if r == nil {
