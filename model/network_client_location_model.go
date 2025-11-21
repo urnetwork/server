@@ -1004,7 +1004,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 	                WHERE
 	                	location_group_id = $1
 	            `,
-				locationGroup.LocationGroupId,
+				locationGroupId,
 				locationGroup.Name,
 				locationGroup.Promoted,
 			))
@@ -1032,7 +1032,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 	                )
 	                VALUES ($1, $2, $3)
 	            `,
-				locationGroup.LocationGroupId,
+				locationGroupId,
 				locationGroup.Name,
 				locationGroup.Promoted,
 			))
@@ -1048,7 +1048,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
                         )
                         VALUES ($1, $2)
                     `,
-					locationGroup.LocationGroupId,
+					locationGroupId,
 					locationId,
 				)
 			}
@@ -1276,6 +1276,44 @@ type FindLocationsResult struct {
 	Locations []*LocationResult `json:"locations"`
 	// direct devices
 	Devices []*LocationDeviceResult `json:"devices"`
+
+	// location stats
+	CountryCount       int `json:"country_count"`
+	RegionCount        int `json:"region_count"`
+	CityCount          int `json:"city_count"`
+	StableCount        int `json:"stable_count"`
+	StrongPrivacyCount int `json:"strong_privacy_count"`
+}
+
+func (self *FindLocationsResult) SetStats() {
+	countryCount := 0
+	regionCount := 0
+	cityCount := 0
+	stableCount := 0
+	strongPrivacyCount := 0
+
+	for _, location := range self.Locations {
+		switch location.LocationType {
+		case LocationTypeCountry:
+			countryCount += 1
+		case LocationTypeRegion:
+			regionCount += 1
+		case LocationTypeCity:
+			cityCount += 1
+		}
+		if location.Stable {
+			stableCount += 1
+		}
+		if location.StrongPrivacy {
+			strongPrivacyCount += 1
+		}
+	}
+
+	self.CountryCount = countryCount
+	self.RegionCount = regionCount
+	self.CityCount = cityCount
+	self.StableCount = stableCount
+	self.StrongPrivacyCount = strongPrivacyCount
 }
 
 // used for debugging
@@ -1674,6 +1712,56 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 	return
 }
 
+func loadLocationStables(
+	ctx context.Context,
+	locationIds []server.Id,
+	rankMode RankMode,
+	clientLocationId server.Id,
+) (
+	locationStables map[server.Id]bool,
+	returnErr error,
+) {
+	minStableProviderCount := 30
+
+	locationStables = map[server.Id]bool{}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		locationCountsCmds := map[server.Id]*redis.StringCmd{}
+
+		pipe := r.TxPipeline()
+		for _, locationId := range locationIds {
+			locationCountsCmds[locationId] = pipe.Get(
+				ctx,
+				clientScoreLocationCountsKey(false, rankMode, locationId, clientLocationId),
+			)
+		}
+		// note ignore the error for GET since it will include missing key
+		pipe.Exec(ctx)
+
+		for locationId, countsCmd := range locationCountsCmds {
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
+			}
+			b := bytes.NewBuffer(countsBytes)
+			e := gob.NewDecoder(b)
+			var counts []int
+			returnErr = e.Decode(&counts)
+			if returnErr != nil {
+				return
+			}
+			netCount := 0
+			for _, count := range counts {
+				netCount += count
+			}
+			if minStableProviderCount <= netCount {
+				locationStables[locationId] = true
+			}
+		}
+	})
+	return
+}
+
 func FindProviderLocations(
 	findLocations *FindLocationsArgs,
 	session *session.ClientSession,
@@ -1714,63 +1802,60 @@ func FindProviderLocations(
 
 		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
 
-		maxSearchDistance := 2
-		locationSearchResults := locationSearch().AroundIds(
-			session.Ctx,
-			findLocations.Query,
-			maxSearchDistance,
-			search.OptMostLikley(30),
-		)
+		query := strings.TrimSpace(findLocations.Query)
 
-		locationIds := map[server.Id]bool{}
-		for locationId, _ := range locationSearchResults {
-			locationIds[locationId] = true
-		}
-		clientLocations, err := loadClientLocations(session.Ctx, locationIds)
-		if err != nil {
-			return nil, err
-		}
+		var matchDistances map[server.Id]int
+		var clientLocations map[server.Id]*ClientLocation
+		if query == "" {
+			initialClientLocations, err := loadInitialClientLocations(session.Ctx)
+			if err != nil {
+				return nil, err
+			}
+			matchDistances = map[server.Id]int{}
+			clientLocations = map[server.Id]*ClientLocation{}
+			for _, clientLocation := range initialClientLocations.Locations {
+				clientLocations[clientLocation.LocationId] = clientLocation
+			}
+		} else {
+			maxSearchDistance := 2
+			locationSearchResults := locationSearch().AroundIds(
+				session.Ctx,
+				query,
+				maxSearchDistance,
+				search.OptMostLikley(30),
+			)
 
-		minStableProviderCount := 30
+			locationIds := map[server.Id]bool{}
+			for locationId, _ := range locationSearchResults {
+				locationIds[locationId] = true
+			}
+			var err error
+			clientLocations, err = loadClientLocations(session.Ctx, locationIds)
+			if err != nil {
+				return nil, err
+			}
 
-		locationStables := map[server.Id]bool{}
-		server.Redis(session.Ctx, func(r server.RedisClient) {
-			locationCountsCmds := map[server.Id]*redis.StringCmd{}
-
-			// ignore if this meta data can't be loaded
-			// in that case, all locations will be considered unstable
-
-			pipe := r.TxPipeline()
+			matchDistances = map[server.Id]int{}
 			for locationId, _ := range clientLocations {
-				locationCountsCmds[locationId] = pipe.Get(
-					session.Ctx,
-					clientScoreLocationCountsKey(false, rankMode, locationId, clientLocationId),
-				)
+				if r, ok := locationSearchResults[locationId]; ok {
+					matchDistances[locationId] = r.ValueDistance
+				} else {
+					matchDistances[locationId] = maxSearchDistance + 1
+				}
 			}
-			// note ignore the error for GET since it will include missing key
-			pipe.Exec(session.Ctx)
+		}
 
-			for locationId, countsCmd := range locationCountsCmds {
-				countsBytes, _ := countsCmd.Bytes()
-				if len(countsBytes) == 0 {
-					continue
-				}
-				b := bytes.NewBuffer(countsBytes)
-				e := gob.NewDecoder(b)
-				var counts []int
-				err := e.Decode(&counts)
-				if err != nil {
-					continue
-				}
-				netCount := 0
-				for _, count := range counts {
-					netCount += count
-				}
-				if minStableProviderCount <= netCount {
-					locationStables[locationId] = true
-				}
-			}
-		})
+		// ignore if this meta data can't be loaded
+		// in that case, all locations will be considered unstable
+		locationStables, _ := loadLocationStables(
+			session.Ctx,
+			maps.Keys(clientLocations),
+			rankMode,
+			clientLocationId,
+		)
+		if locationStables == nil {
+			locationStables = map[server.Id]bool{}
+		}
 
 		locationResults := []*LocationResult{}
 
@@ -1786,31 +1871,62 @@ func FindProviderLocations(
 				ProviderCount:     clientLocation.ClientCount,
 				StrongPrivacy:     clientLocation.StrongPrivacy,
 				Stable:            locationStables[locationId],
-			}
-
-			if r, ok := locationSearchResults[locationId]; ok {
-				locationResult.MatchDistance = r.ValueDistance
-			} else {
-				locationResult.MatchDistance = maxSearchDistance + 1
+				MatchDistance:     matchDistances[locationId],
 			}
 
 			locationResults = append(locationResults, locationResult)
 		}
 
-		return &FindLocationsResult{
+		result := &FindLocationsResult{
 			Locations: locationResults,
 			Groups:    []*LocationGroupResult{},
 			Devices:   []*LocationDeviceResult{},
-		}, nil
+		}
+		result.SetStats()
+
+		return result, nil
 	}
 }
 
+// since there are no promoted groups, this call can be replaced with `FindProviderLocations` with an empty query
 func GetProviderLocations(
 	session *session.ClientSession,
 ) (*FindLocationsResult, error) {
+	rankMode := RankModeQuality
+
+	// the caller ip is used to match against provider excluded lists
+	clientIp, _, err := session.ParseClientIpPort()
+	if err != nil {
+		return nil, err
+	}
+
+	ipInfo, err := server.GetIpInfo(clientIp)
+	if err != nil {
+		return nil, err
+	}
+
+	clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
+
 	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	locationIds := []server.Id{}
+	for _, clientLocation := range initialClientLocations.Locations {
+		locationIds = append(locationIds, clientLocation.LocationId)
+	}
+
+	// ignore if this meta data can't be loaded
+	// in that case, all locations will be considered unstable
+	locationStables, _ := loadLocationStables(
+		session.Ctx,
+		locationIds,
+		rankMode,
+		clientLocationId,
+	)
+	if locationStables == nil {
+		locationStables = map[server.Id]bool{}
 	}
 
 	locationResults := []*LocationResult{}
@@ -1826,6 +1942,8 @@ func GetProviderLocations(
 			CountryLocationId: clientLocation.CountryLocationId,
 			CountryCode:       clientLocation.CountryCode,
 			ProviderCount:     clientLocation.ClientCount,
+			StrongPrivacy:     clientLocation.StrongPrivacy,
+			Stable:            locationStables[clientLocation.LocationId],
 		}
 		locationResults = append(locationResults, locationResult)
 	}
@@ -1838,11 +1956,14 @@ func GetProviderLocations(
 		locationGroupResults = append(locationGroupResults, locationGroupResult)
 	}
 
-	return &FindLocationsResult{
+	result := &FindLocationsResult{
 		Locations: locationResults,
 		Groups:    locationGroupResults,
 		Devices:   []*LocationDeviceResult{},
-	}, nil
+	}
+	result.SetStats()
+
+	return result, nil
 }
 
 // no longer supported
