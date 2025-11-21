@@ -2628,4 +2628,14 @@ var migrations = []any{
             net_type_foreign
         ) STORED
     `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_latency
+        ADD COLUMN sample_count bigint NOT NULL DEFAULT 1
+    `),
+
+	newSqlMigration(`
+        ALTER TABLE network_client_speed
+        ADD COLUMN sample_count bigint NOT NULL DEFAULT 1
+    `),
 }
