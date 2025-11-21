@@ -975,44 +975,68 @@ func (self *LocationGroup) SearchStrings() []string {
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-            DELETE FROM location_group_member
-            USING location_group
-            WHERE 
-                location_group.location_group_name = $1 AND 
-                location_group_member.location_group_id = location_group.location_group_id
-            `,
-			locationGroup.Name,
-		))
+		ok := false
+		var locationGroupId server.Id
 
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
-            DELETE FROM location_group
+            SELECT location_group_id FROM location_group
             WHERE location_group_name = $1
             `,
 			locationGroup.Name,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&locationGroupId))
+				ok = true
+			}
+		})
 
-		locationGroupId := server.NewId()
-		locationGroup.LocationGroupId = locationGroupId
+		if ok {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	                UPDATE location_group
+	                SET
+	                	location_group_name = $2,
+	                	promoted = $3
+	                WHERE
+	                	location_group_id = $1
+	            `,
+				locationGroup.LocationGroupId,
+				locationGroup.Name,
+				locationGroup.Promoted,
+			))
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                INSERT INTO location_group (
-                    location_group_id,
-                    location_group_name,
-                    promoted
-                )
-                VALUES ($1, $2, $3)
-            `,
-			locationGroup.LocationGroupId,
-			locationGroup.Name,
-			locationGroup.Promoted,
-		))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	            DELETE FROM location_group_member
+	            WHERE 
+	                location_group_id = $1
+	            `,
+				locationGroupId,
+			))
+
+		} else {
+			locationGroupId = server.NewId()
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	                INSERT INTO location_group (
+	                    location_group_id,
+	                    location_group_name,
+	                    promoted
+	                )
+	                VALUES ($1, $2, $3)
+	            `,
+				locationGroup.LocationGroupId,
+				locationGroup.Name,
+				locationGroup.Promoted,
+			))
+		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, locationId := range locationGroup.MemberLocationIds {
@@ -1029,6 +1053,8 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 				)
 			}
 		})
+
+		locationGroup.LocationGroupId = locationGroupId
 
 		for i, searchStr := range locationGroup.SearchStrings() {
 			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, i, tx)
