@@ -1564,6 +1564,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		glog.V(2).Infof("[nclm]update initial client locations\n")
 
 		_, returnErr = pipe.Exec(ctx)
+		if returnErr != nil {
+			return
+		}
 	})
 
 	glog.Infof("[nclm]updated %d client locations, removed %d, and updated initial\n", len(clientLocations), len(removeClientLocations))
@@ -1577,19 +1580,15 @@ func loadClientLocations(
 ) (clientLocations map[server.Id]*ClientLocation, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
-			pipe := r.TxPipeline()
-
 			clientLocationCmds := map[server.Id]*redis.StringCmd{}
 
+			pipe := r.TxPipeline()
 			for locationId, _ := range locationIds {
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
 			}
-
-			_, err := pipe.Exec(ctx)
-			if err != nil {
-				return err
-			}
+			// note ignore the error for GET since it will include missing key
+			pipe.Exec(ctx)
 
 			for locationId, clientLocationCmd := range clientLocationCmds {
 				clientLocationBytes, _ := clientLocationCmd.Bytes()
@@ -1748,10 +1747,8 @@ func FindProviderLocations(
 					clientScoreLocationCountsKey(false, rankMode, locationId, clientLocationId),
 				)
 			}
-			_, err := pipe.Exec(session.Ctx)
-			if err != nil {
-				return
-			}
+			// note ignore the error for GET since it will include missing key
+			pipe.Exec(session.Ctx)
 
 			for locationId, countsCmd := range locationCountsCmds {
 				countsBytes, _ := countsCmd.Bytes()
@@ -2438,23 +2435,20 @@ func loadClientScores(
 	n int,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
-
 		locationCounts := map[server.Id]*redis.StringCmd{}
+		locationGroupCounts := map[server.Id]*redis.StringCmd{}
+
+		pipe := r.TxPipeline()
 		for locationId, _ := range locationIds {
 			v := pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId))
 			locationCounts[locationId] = v
 		}
-		locationGroupCounts := map[server.Id]*redis.StringCmd{}
 		for locationGroupId, _ := range locationGroupIds {
 			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
 			locationGroupCounts[locationGroupId] = v
 		}
-
-		_, returnErr = pipe.Exec(ctx)
-		if returnErr != nil {
-			return
-		}
+		// note ignore the error for GET since it will include missing key
+		pipe.Exec(ctx)
 
 		sampleKeyCounts := map[string]int{}
 
@@ -2496,10 +2490,10 @@ func loadClientScores(
 			keys[i], keys[j] = keys[j], keys[i]
 		})
 
-		pipe = r.TxPipeline()
-
 		samples := []*redis.StringCmd{}
 		netCount := 0
+
+		pipe = r.TxPipeline()
 		for _, key := range keys {
 			if n <= netCount {
 				break
@@ -2509,11 +2503,8 @@ func loadClientScores(
 			samples = append(samples, v)
 			netCount += c
 		}
-
-		_, returnErr = pipe.Exec(ctx)
-		if returnErr != nil {
-			return
-		}
+		// note ignore the error for GET since it will include missing key
+		pipe.Exec(ctx)
 
 		clientScores = map[server.Id]*ClientScore{}
 
