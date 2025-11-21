@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/golang/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -39,6 +40,15 @@ func UploadLogFile(
 	uploadFile UploadLogFileArgs,
 ) (*UploadLogFileResult, error) {
 	defer body.Close()
+
+	feedback, err := model.GetFeedbackById(uploadFile.FeedbackId, session)
+	if err != nil {
+		return nil, err
+	}
+
+	if feedback.NetworkId != session.ByJwt.NetworkId {
+		return nil, fmt.Errorf("%d Feedback does not belong to your network.", 403)
+	}
 
 	bucket := strings.TrimSpace(logBucket())
 	if bucket == "" {
@@ -90,7 +100,7 @@ func buildLogKey(uploadFile UploadLogFileArgs, sess *session.ClientSession) stri
 	if uploadFile.FeedbackId != nil {
 		parts = append(parts, "feedback_"+uploadFile.FeedbackId.String())
 	}
-	return path.Join(parts...)
+	return path.Join(parts...) + ".zip"
 }
 
 type countingReader struct {
