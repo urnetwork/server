@@ -230,17 +230,24 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		"se",
 	}
 
-	promotedRegions := map[string][]any{
+	customRegions := map[string][]any{
 		// https://www.gov.uk/eu-eea
 		"European Union (EU)": eu,
 		"Nordic":              nordic,
 		StrongPrivacyLaws: []any{
 			eu,
 			nordic,
+			"ch",
 			"jp",
 			"ca",
-			"au",
+			// "au",
+			"kr",
+			"nz",
+			"ar",
+			"br",
+			"sg",
 			// https://www.ncsl.org/technology-and-communication/state-laws-related-to-digital-privacy
+			// https://pro.bloomberglaw.com/insights/privacy/state-privacy-legislation-tracker
 			&Location{
 				LocationType: LocationTypeRegion,
 				Region:       "California",
@@ -261,15 +268,57 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 			},
 			&Location{
 				LocationType: LocationTypeRegion,
+				Region:       "Delaware",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "Maryland",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "Minnesota",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "Oregon",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
 				Region:       "Virginia",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "Texas",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "New Hampshire",
+				Country:      "United States",
+				CountryCode:  "us",
+			},
+			&Location{
+				LocationType: LocationTypeRegion,
+				Region:       "Montana",
 				Country:      "United States",
 				CountryCode:  "us",
 			},
 		},
 	}
-	for name, members := range promotedRegions {
+	for name, members := range customRegions {
 		// server.Logger().Printf("Create promoted group %s\n", name)
-		createLocationGroup(true, name, members...)
+		createLocationGroup(false, name, members...)
 	}
 
 	// subregions
@@ -926,44 +975,68 @@ func (self *LocationGroup) SearchStrings() []string {
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-            DELETE FROM location_group_member
-            USING location_group
-            WHERE 
-                location_group.location_group_name = $1 AND 
-                location_group_member.location_group_id = location_group.location_group_id
-            `,
-			locationGroup.Name,
-		))
+		ok := false
+		var locationGroupId server.Id
 
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
-            DELETE FROM location_group
+            SELECT location_group_id FROM location_group
             WHERE location_group_name = $1
             `,
 			locationGroup.Name,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&locationGroupId))
+				ok = true
+			}
+		})
 
-		locationGroupId := server.NewId()
-		locationGroup.LocationGroupId = locationGroupId
+		if ok {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	                UPDATE location_group
+	                SET
+	                	location_group_name = $2,
+	                	promoted = $3
+	                WHERE
+	                	location_group_id = $1
+	            `,
+				locationGroupId,
+				locationGroup.Name,
+				locationGroup.Promoted,
+			))
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                INSERT INTO location_group (
-                    location_group_id,
-                    location_group_name,
-                    promoted
-                )
-                VALUES ($1, $2, $3)
-            `,
-			locationGroup.LocationGroupId,
-			locationGroup.Name,
-			locationGroup.Promoted,
-		))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	            DELETE FROM location_group_member
+	            WHERE 
+	                location_group_id = $1
+	            `,
+				locationGroupId,
+			))
+
+		} else {
+			locationGroupId = server.NewId()
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+	                INSERT INTO location_group (
+	                    location_group_id,
+	                    location_group_name,
+	                    promoted
+	                )
+	                VALUES ($1, $2, $3)
+	            `,
+				locationGroupId,
+				locationGroup.Name,
+				locationGroup.Promoted,
+			))
+		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, locationId := range locationGroup.MemberLocationIds {
@@ -975,11 +1048,13 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
                         )
                         VALUES ($1, $2)
                     `,
-					locationGroup.LocationGroupId,
+					locationGroupId,
 					locationId,
 				)
 			}
 		})
+
+		locationGroup.LocationGroupId = locationGroupId
 
 		for i, searchStr := range locationGroup.SearchStrings() {
 			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, i, tx)
@@ -1172,6 +1247,9 @@ type LocationResult struct {
 	CountryCode       string     `json:"country_code"`
 	ProviderCount     int        `json:"provider_count,omitempty"`
 	MatchDistance     int        `json:"match_distance,omitempty"`
+
+	Stable        bool `json:"stable"`
+	StrongPrivacy bool `json:"strong_privacy"`
 }
 
 type LocationDeviceResult struct {
@@ -1185,6 +1263,7 @@ type FindLocationsArgs struct {
 	// in other words `len(Query) * (1 - MaxDistanceFraction)` length the query must match
 	MaxDistanceFraction       float32 `json:"max_distance_fraction,omitempty"`
 	EnableMaxDistanceFraction bool    `json:"enable_max_distance_fraction,omitempty"`
+	RankMode                  string  `json:"rank_mode"`
 }
 
 type FindLocationsResult struct {
@@ -1197,6 +1276,44 @@ type FindLocationsResult struct {
 	Locations []*LocationResult `json:"locations"`
 	// direct devices
 	Devices []*LocationDeviceResult `json:"devices"`
+
+	// location stats
+	CountryCount       int `json:"country_count"`
+	RegionCount        int `json:"region_count"`
+	CityCount          int `json:"city_count"`
+	StableCount        int `json:"stable_count"`
+	StrongPrivacyCount int `json:"strong_privacy_count"`
+}
+
+func (self *FindLocationsResult) SetStats() {
+	countryCount := 0
+	regionCount := 0
+	cityCount := 0
+	stableCount := 0
+	strongPrivacyCount := 0
+
+	for _, location := range self.Locations {
+		switch location.LocationType {
+		case LocationTypeCountry:
+			countryCount += 1
+		case LocationTypeRegion:
+			regionCount += 1
+		case LocationTypeCity:
+			cityCount += 1
+		}
+		if location.Stable {
+			stableCount += 1
+		}
+		if location.StrongPrivacy {
+			strongPrivacyCount += 1
+		}
+	}
+
+	self.CountryCount = countryCount
+	self.RegionCount = regionCount
+	self.CityCount = cityCount
+	self.StableCount = stableCount
+	self.StrongPrivacyCount = strongPrivacyCount
 }
 
 // used for debugging
@@ -1232,6 +1349,8 @@ type ClientLocation struct {
 	TopCityLocationIdCounts map[server.Id]int
 	// location id -> client count
 	TopRegionLocationIdCounts map[server.Id]int
+
+	StrongPrivacy bool
 }
 
 type ClientLocationGroup struct {
@@ -1314,13 +1433,13 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			ctx,
 			`
                 SELECT
-                    location.location_id,
-                    location.location_type,
-                    location.location_name,
-                    location.city_location_id,
-                    location.region_location_id,
-                    location.country_location_id,
-                    location.country_code
+                    location_id,
+                    location_type,
+                    location_name,
+                    city_location_id,
+                    region_location_id,
+                    country_location_id,
+                    country_code
                 FROM location
             `,
 		)
@@ -1391,14 +1510,58 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			}
 		}
 
+		// fill in strong privacy flag based on membership in the `StrongPrivacyLaws` group
+		// strong privacy is transitive to all sub-locations
 		result, err = tx.Query(
 			ctx,
 			`
                 SELECT
-                    location_group.location_group_id,
-                    location_group.location_group_name,
-                    location_group.promoted
+                    location_group_member.location_id
+                FROM location_group_member
+
+                INNER JOIN location_group ON
+                	location_group.location_group_id = location_group_member.location_group_id AND
+                	location_group.location_group_name = $1
+            `,
+			StrongPrivacyLaws,
+		)
+		strongPrivacyLocations := map[server.Id]bool{}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var locationId server.Id
+				server.Raise(result.Scan(&locationId))
+				strongPrivacyLocations[locationId] = true
+			}
+		})
+		for _, clientLocation := range clientLocations {
+			strongPrivacy := false
+			if clientLocation.CountryLocationId != nil {
+				if strongPrivacyLocations[*clientLocation.CountryLocationId] {
+					strongPrivacy = true
+				}
+			}
+			if clientLocation.RegionLocationId != nil {
+				if strongPrivacyLocations[*clientLocation.RegionLocationId] {
+					strongPrivacy = true
+				}
+			}
+			if clientLocation.CityLocationId != nil {
+				if strongPrivacyLocations[*clientLocation.CityLocationId] {
+					strongPrivacy = true
+				}
+			}
+			clientLocation.StrongPrivacy = strongPrivacy
+		}
+
+		result, err = tx.Query(
+			ctx,
+			`
+                SELECT
+                    location_group_id,
+                    location_group_name,
+                    promoted
                 FROM location_group
+                WHERE promoted = true
             `,
 		)
 		server.WithPgResult(result, err, func() {
@@ -1439,6 +1602,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		glog.V(2).Infof("[nclm]update initial client locations\n")
 
 		_, returnErr = pipe.Exec(ctx)
+		if returnErr != nil {
+			return
+		}
 	})
 
 	glog.Infof("[nclm]updated %d client locations, removed %d, and updated initial\n", len(clientLocations), len(removeClientLocations))
@@ -1452,15 +1618,14 @@ func loadClientLocations(
 ) (clientLocations map[server.Id]*ClientLocation, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
-			pipe := r.TxPipeline()
-
 			clientLocationCmds := map[server.Id]*redis.StringCmd{}
 
+			pipe := r.TxPipeline()
 			for locationId, _ := range locationIds {
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
 			}
-
+			// note ignore the error for GET since it will include missing key
 			pipe.Exec(ctx)
 
 			for locationId, clientLocationCmd := range clientLocationCmds {
@@ -1547,11 +1712,60 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 	return
 }
 
+func loadLocationStables(
+	ctx context.Context,
+	locationIds []server.Id,
+	rankMode RankMode,
+	clientLocationId server.Id,
+) (
+	locationStables map[server.Id]bool,
+	returnErr error,
+) {
+	minStableProviderCount := 30
+
+	locationStables = map[server.Id]bool{}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		locationCountsCmds := map[server.Id]*redis.StringCmd{}
+
+		pipe := r.TxPipeline()
+		for _, locationId := range locationIds {
+			locationCountsCmds[locationId] = pipe.Get(
+				ctx,
+				clientScoreLocationCountsKey(false, rankMode, locationId, clientLocationId),
+			)
+		}
+		// note ignore the error for GET since it will include missing key
+		pipe.Exec(ctx)
+
+		for locationId, countsCmd := range locationCountsCmds {
+			countsBytes, _ := countsCmd.Bytes()
+			if len(countsBytes) == 0 {
+				continue
+			}
+			b := bytes.NewBuffer(countsBytes)
+			e := gob.NewDecoder(b)
+			var counts []int
+			returnErr = e.Decode(&counts)
+			if returnErr != nil {
+				return
+			}
+			netCount := 0
+			for _, count := range counts {
+				netCount += count
+			}
+			if minStableProviderCount <= netCount {
+				locationStables[locationId] = true
+			}
+		}
+	})
+	return
+}
+
 func FindProviderLocations(
 	findLocations *FindLocationsArgs,
 	session *session.ClientSession,
 ) (*FindLocationsResult, error) {
-
 	if clientId, err := server.ParseId(findLocations.Query); err == nil {
 		device := &LocationDeviceResult{
 			ClientId:   clientId,
@@ -1570,21 +1784,77 @@ func FindProviderLocations(
 	} else {
 		// note group search is no longer supported
 
-		maxSearchDistance := 2
-		locationSearchResults := locationSearch().AroundIds(
-			session.Ctx,
-			findLocations.Query,
-			maxSearchDistance,
-			search.OptMostLikley(30),
-		)
-
-		locationIds := map[server.Id]bool{}
-		for locationId, _ := range locationSearchResults {
-			locationIds[locationId] = true
+		rankMode := RankModeQuality
+		if findLocations.RankMode != "" {
+			rankMode = findLocations.RankMode
 		}
-		clientLocations, err := loadClientLocations(session.Ctx, locationIds)
+
+		// the caller ip is used to match against provider excluded lists
+		clientIp, _, err := session.ParseClientIpPort()
 		if err != nil {
 			return nil, err
+		}
+
+		ipInfo, err := server.GetIpInfo(clientIp)
+		if err != nil {
+			return nil, err
+		}
+
+		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
+
+		query := strings.TrimSpace(findLocations.Query)
+
+		var matchDistances map[server.Id]int
+		var clientLocations map[server.Id]*ClientLocation
+		if query == "" {
+			initialClientLocations, err := loadInitialClientLocations(session.Ctx)
+			if err != nil {
+				return nil, err
+			}
+			matchDistances = map[server.Id]int{}
+			clientLocations = map[server.Id]*ClientLocation{}
+			for _, clientLocation := range initialClientLocations.Locations {
+				clientLocations[clientLocation.LocationId] = clientLocation
+			}
+		} else {
+			maxSearchDistance := 2
+			locationSearchResults := locationSearch().AroundIds(
+				session.Ctx,
+				query,
+				maxSearchDistance,
+				search.OptMostLikley(30),
+			)
+
+			locationIds := map[server.Id]bool{}
+			for locationId, _ := range locationSearchResults {
+				locationIds[locationId] = true
+			}
+			var err error
+			clientLocations, err = loadClientLocations(session.Ctx, locationIds)
+			if err != nil {
+				return nil, err
+			}
+
+			matchDistances = map[server.Id]int{}
+			for locationId, _ := range clientLocations {
+				if r, ok := locationSearchResults[locationId]; ok {
+					matchDistances[locationId] = r.ValueDistance
+				} else {
+					matchDistances[locationId] = maxSearchDistance + 1
+				}
+			}
+		}
+
+		// ignore if this meta data can't be loaded
+		// in that case, all locations will be considered unstable
+		locationStables, _ := loadLocationStables(
+			session.Ctx,
+			maps.Keys(clientLocations),
+			rankMode,
+			clientLocationId,
+		)
+		if locationStables == nil {
+			locationStables = map[server.Id]bool{}
 		}
 
 		locationResults := []*LocationResult{}
@@ -1599,31 +1869,64 @@ func FindProviderLocations(
 				CountryLocationId: clientLocation.CountryLocationId,
 				CountryCode:       clientLocation.CountryCode,
 				ProviderCount:     clientLocation.ClientCount,
-			}
-
-			if r, ok := locationSearchResults[locationId]; ok {
-				locationResult.MatchDistance = r.ValueDistance
-			} else {
-				locationResult.MatchDistance = maxSearchDistance + 1
+				StrongPrivacy:     clientLocation.StrongPrivacy,
+				Stable:            locationStables[locationId],
+				MatchDistance:     matchDistances[locationId],
 			}
 
 			locationResults = append(locationResults, locationResult)
 		}
 
-		return &FindLocationsResult{
+		result := &FindLocationsResult{
 			Locations: locationResults,
 			Groups:    []*LocationGroupResult{},
 			Devices:   []*LocationDeviceResult{},
-		}, nil
+		}
+		result.SetStats()
+
+		return result, nil
 	}
 }
 
+// since there are no promoted groups, this call can be replaced with `FindProviderLocations` with an empty query
 func GetProviderLocations(
 	session *session.ClientSession,
 ) (*FindLocationsResult, error) {
+	rankMode := RankModeQuality
+
+	// the caller ip is used to match against provider excluded lists
+	clientIp, _, err := session.ParseClientIpPort()
+	if err != nil {
+		return nil, err
+	}
+
+	ipInfo, err := server.GetIpInfo(clientIp)
+	if err != nil {
+		return nil, err
+	}
+
+	clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
+
 	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	locationIds := []server.Id{}
+	for _, clientLocation := range initialClientLocations.Locations {
+		locationIds = append(locationIds, clientLocation.LocationId)
+	}
+
+	// ignore if this meta data can't be loaded
+	// in that case, all locations will be considered unstable
+	locationStables, _ := loadLocationStables(
+		session.Ctx,
+		locationIds,
+		rankMode,
+		clientLocationId,
+	)
+	if locationStables == nil {
+		locationStables = map[server.Id]bool{}
 	}
 
 	locationResults := []*LocationResult{}
@@ -1639,6 +1942,8 @@ func GetProviderLocations(
 			CountryLocationId: clientLocation.CountryLocationId,
 			CountryCode:       clientLocation.CountryCode,
 			ProviderCount:     clientLocation.ClientCount,
+			StrongPrivacy:     clientLocation.StrongPrivacy,
+			Stable:            locationStables[clientLocation.LocationId],
 		}
 		locationResults = append(locationResults, locationResult)
 	}
@@ -1651,11 +1956,14 @@ func GetProviderLocations(
 		locationGroupResults = append(locationGroupResults, locationGroupResult)
 	}
 
-	return &FindLocationsResult{
+	result := &FindLocationsResult{
 		Locations: locationResults,
 		Groups:    locationGroupResults,
 		Devices:   []*LocationDeviceResult{},
-	}, nil
+	}
+	result.SetStats()
+
+	return result, nil
 }
 
 // no longer supported
@@ -2248,19 +2556,19 @@ func loadClientScores(
 	n int,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
-
 		locationCounts := map[server.Id]*redis.StringCmd{}
+		locationGroupCounts := map[server.Id]*redis.StringCmd{}
+
+		pipe := r.TxPipeline()
 		for locationId, _ := range locationIds {
 			v := pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId))
 			locationCounts[locationId] = v
 		}
-		locationGroupCounts := map[server.Id]*redis.StringCmd{}
 		for locationGroupId, _ := range locationGroupIds {
 			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
 			locationGroupCounts[locationGroupId] = v
 		}
-
+		// note ignore the error for GET since it will include missing key
 		pipe.Exec(ctx)
 
 		sampleKeyCounts := map[string]int{}
@@ -2303,10 +2611,10 @@ func loadClientScores(
 			keys[i], keys[j] = keys[j], keys[i]
 		})
 
-		pipe = r.TxPipeline()
-
 		samples := []*redis.StringCmd{}
 		netCount := 0
+
+		pipe = r.TxPipeline()
 		for _, key := range keys {
 			if n <= netCount {
 				break
@@ -2316,7 +2624,7 @@ func loadClientScores(
 			samples = append(samples, v)
 			netCount += c
 		}
-
+		// note ignore the error for GET since it will include missing key
 		pipe.Exec(ctx)
 
 		clientScores = map[server.Id]*ClientScore{}

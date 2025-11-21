@@ -17,11 +17,13 @@ import (
 
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
-		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
-		LocationRetryTimeout:  5 * time.Minute,
-		MaxLatencyCount:       16,
-		MinTestTimeout:        60 * time.Minute,
-		MaxTestTimeout:        600 * time.Minute,
+		SyncConnectionTimeout:    model.ReliabilityBlockDuration / 2,
+		LocationRetryTimeout:     5 * time.Minute,
+		MaxLatencyCount:          16,
+		MinTestTimeout:           60 * time.Minute,
+		MaxTestTimeout:           600 * time.Minute,
+		LatencySampleWindowCount: 4,
+		SpeedSampleWindowCount:   4,
 	}
 }
 
@@ -31,6 +33,9 @@ type ConnectionAnnounceSettings struct {
 	MaxLatencyCount       int
 	MinTestTimeout        time.Duration
 	MaxTestTimeout        time.Duration
+
+	LatencySampleWindowCount int
+	SpeedSampleWindowCount   int
 }
 
 type LatencyTest struct {
@@ -475,21 +480,26 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 
 func (self *ConnectionAnnounce) setLatencyWithLock() {
 	if 0 < self.latencyCount && self.connectionId != nil {
+		// average of `LatencySampleWindowCount` samples
 		server.Tx(self.ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				self.ctx,
 				`
 				INSERT INTO network_client_latency (
 					connection_id,
-					latency_ms
+					latency_ms,
+					sample_count
 				)
-				VALUES ($1, $2)
+				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
 				SET
-					latency_ms = LEAST(network_client_latency.latency_ms, $2)
+					latency_ms = ((LEAST(network_client_latency.sample_count + $3, $4) - 1) * network_client_latency.latency_ms + $2) / LEAST(network_client_latency.sample_count + $3, $4),
+					sample_count = network_client_latency.sample_count + $3
 				`,
 				*self.connectionId,
 				self.minLatencyMillis,
+				1,
+				self.settings.LatencySampleWindowCount,
 			))
 		})
 	}
@@ -564,21 +574,26 @@ func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool
 
 func (self *ConnectionAnnounce) setSpeedWithLock() {
 	if 0 < self.speedCount && self.connectionId != nil {
+		// average of `SpeedSampleWindowCount` samples
 		server.Tx(self.ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				self.ctx,
 				`
 				INSERT INTO network_client_speed (
 					connection_id,
-					bytes_per_second
+					bytes_per_second,
+					sample_count
 				)
-				VALUES ($1, $2)
+				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
 				SET
-					bytes_per_second = GREATEST(network_client_speed.bytes_per_second, $2)
+					bytes_per_second = ((LEAST(network_client_speed.sample_count + $3, $4) - 1) * network_client_speed.bytes_per_second + $2) / LEAST(network_client_speed.sample_count + $3, $4),
+					sample_count = network_client_speed.sample_count + $3
 				`,
 				*self.connectionId,
 				self.maxBytesPerSecond,
+				1,
+				self.settings.SpeedSampleWindowCount,
 			))
 		})
 	}
