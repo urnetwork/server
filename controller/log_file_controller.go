@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	awsSession "github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/golang/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -39,6 +38,7 @@ func UploadLogFile(
 	body io.ReadCloser,
 	uploadFile UploadLogFileArgs,
 ) (*UploadLogFileResult, error) {
+
 	defer body.Close()
 
 	feedback, err := model.GetFeedbackById(uploadFile.FeedbackId, session)
@@ -67,7 +67,7 @@ func UploadLogFile(
 
 	uploader := s3manager.NewUploader(awsSess)
 	cr := &countingReader{r: body}
-	out, err := uploader.UploadWithContext(session.Ctx, &s3manager.UploadInput{
+	_, err = uploader.UploadWithContext(session.Ctx, &s3manager.UploadInput{
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(key),
 		Body:        cr,
@@ -77,25 +77,17 @@ func UploadLogFile(
 		return nil, err
 	}
 
-	glog.Infof("[log_upload] uploaded key=%s size=%d etag=%s\n", key, cr.n, aws.StringValue(out.ETag))
-
 	return &UploadLogFileResult{}, nil
 }
 
 /**
- * output will look like logs/<year>/<month>/<day>/<time>/<network_x>/<user_y>/<client_z>/<feedback_id>
+ * output will look like logs/<network_x>/<feedback_id>
  */
 func buildLogKey(uploadFile UploadLogFileArgs, sess *session.ClientSession) string {
-	ts := uploadFile.Now.UTC().Format("2006/01/02/15_04_05")
 
 	parts := []string{
 		"logs",
-		ts,
 		"network_" + sess.ByJwt.NetworkId.String(),
-		"user_" + sess.ByJwt.UserId.String(),
-	}
-	if sess.ByJwt.ClientId != nil {
-		parts = append(parts, "client_"+sess.ByJwt.ClientId.String())
 	}
 	if uploadFile.FeedbackId != nil {
 		parts = append(parts, "feedback_"+uploadFile.FeedbackId.String())

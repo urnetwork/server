@@ -11,10 +11,8 @@ import (
 )
 
 func LogUpload(w http.ResponseWriter, r *http.Request) {
+
 	contentType := r.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "text/plain"
-	}
 
 	var feedbackId *server.Id
 	pathValues := router.GetPathValues(r)
@@ -33,9 +31,7 @@ func LogUpload(w http.ResponseWriter, r *http.Request) {
 	impl := func(session *session.ClientSession) (*controller.UploadLogFileResult, error) {
 		// r.Body is a streaming reader; DO NOT read it fully here.
 		// Ensure we respect cancellation.
-		// ctx := r.Context()
 		return controller.UploadLogFile(session, r.Body, controller.UploadLogFileArgs{
-			// OriginalFilename: originalName,
 			FeedbackId:  feedbackId,
 			ContentType: contentType,
 			NetworkId:   session.ByJwt.NetworkId,
