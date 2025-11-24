@@ -15,7 +15,7 @@ import (
 	// "reflect"
 	// mathrand "math/rand"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 )
 
 func IsDoneError(r any) bool {

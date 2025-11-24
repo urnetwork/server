@@ -23,7 +23,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )

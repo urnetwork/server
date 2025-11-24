@@ -14,7 +14,7 @@ import (
 
 	"github.com/docopt/docopt-go"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"

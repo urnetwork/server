@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"

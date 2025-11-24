@@ -14,11 +14,11 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/coreos/go-semver/semver"
 	"gopkg.in/yaml.v3"
-	// _ "github.com/golang/glog"
+	// _ "github.com/urnetwork/glog"
 )
 
 /*

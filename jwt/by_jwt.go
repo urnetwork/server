@@ -15,7 +15,7 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )

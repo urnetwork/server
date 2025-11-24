@@ -8,10 +8,10 @@ import (
 	"strings"
 	"sync"
 
-	// "github.com/golang/glog"
+	// "github.com/urnetwork/glog"
 
 	goaway "github.com/TwiN/go-away"
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 

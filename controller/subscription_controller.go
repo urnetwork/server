@@ -27,7 +27,7 @@ import (
 	"github.com/stripe/stripe-go/v82/subscription"
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"

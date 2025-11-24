@@ -22,7 +22,7 @@ import (
 	// "github.com/jackc/pgx/v5/pgtype"
 	// "github.com/oklog/ulid/v2"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	mmdb "github.com/oschwald/maxminddb-golang/v2"
 	"github.com/oschwald/maxminddb-golang/v2/mmdbdata"

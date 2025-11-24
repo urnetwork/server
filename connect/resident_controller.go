@@ -11,7 +11,7 @@ import (
 
 	// "google.golang.org/protobuf/proto"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"

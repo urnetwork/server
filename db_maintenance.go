@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 )
 
 const DbReindexEpochs = uint64(8)

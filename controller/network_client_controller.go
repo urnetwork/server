@@ -5,7 +5,7 @@ import (
 	// "strings"
 	"time"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"

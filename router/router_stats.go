@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )

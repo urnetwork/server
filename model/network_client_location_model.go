@@ -16,7 +16,7 @@ import (
 	"slices"
 	"unicode/utf8"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"golang.org/x/exp/maps"
 

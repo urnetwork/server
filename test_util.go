@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 )
 
 // each test runs with its own postgres and redis db

@@ -8,7 +8,7 @@ import (
 	"golang.org/x/exp/maps"
 	// "golang.org/x/sync/semaphore"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )

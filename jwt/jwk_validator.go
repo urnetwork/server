@@ -11,7 +11,7 @@ import (
 	"github.com/go-jose/go-jose/v3"
 	"github.com/pquerna/cachecontrol"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )

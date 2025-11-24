@@ -18,7 +18,7 @@ import (
 	// "github.com/prometheus/client_golang/prometheus"
 	// "github.com/prometheus/client_golang/prometheus/push"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api/handlers"

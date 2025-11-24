@@ -19,7 +19,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/golang/glog"
+	"github.com/urnetwork/glog"
 )
 
 /*

@@ -17,8 +17,8 @@ import (
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
 
-	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
