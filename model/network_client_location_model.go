@@ -107,8 +107,14 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		// member can be a country code, Location, or *Location,
 
 		memberLocationIds := []server.Id{}
-		for _, member := range members {
+
+		var add func(member any)
+		add = func(member any) {
 			switch v := member.(type) {
+			case []any:
+				for _, a := range v {
+					add(a)
+				}
 			case string:
 				// country code
 				location := &Location{
@@ -124,6 +130,9 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 				CreateLocation(ctx, v)
 				memberLocationIds = append(memberLocationIds, v.LocationId)
 			}
+		}
+		for _, member := range members {
+			add(member)
 		}
 
 		locationGroup := &LocationGroup{
