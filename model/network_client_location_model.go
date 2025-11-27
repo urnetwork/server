@@ -983,6 +983,13 @@ func (self *LocationGroup) SearchStrings() []string {
 }
 
 func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
+	uniqueMemberLocationIds := map[server.Id]bool{}
+	for _, memberLocationId := range locationGroup.MemberLocationIds {
+		if uniqueMemberLocationIds[memberLocationId] {
+			glog.Infof("[nclm]duplicate member[%s] found in group \"%s\". Ignoring.\n", memberLocationId, locationGroup.Name)
+		}
+		uniqueMemberLocationIds[memberLocationId] = true
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		ok := false
 		var locationGroupId server.Id
@@ -1048,7 +1055,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for _, locationId := range locationGroup.MemberLocationIds {
+			for memberLocationId, _ := range uniqueMemberLocationIds {
 				batch.Queue(
 					`
                         INSERT INTO location_group_member (
@@ -1058,7 +1065,7 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
                         VALUES ($1, $2)
                     `,
 					locationGroupId,
-					locationId,
+					memberLocationId,
 				)
 			}
 		})
