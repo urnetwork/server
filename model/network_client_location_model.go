@@ -244,17 +244,55 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 		"European Union (EU)": eu,
 		"Nordic":              nordic,
 		StrongPrivacyLaws: []any{
-			eu,
-			nordic,
+			// all EU/EEA countries adhere to the General Data Protection Regulation (GDPR), which establishes a globally recognized high standard for individual privacy and data rights
+			// Strong national framework complementing GDPR, good overall human rights ranking.
+			"at",
+			// Adheres to GDPR, central location for many EU institutions with strong historical focus on privacy.
+			"be",
+			// High ranking in civil liberties and democratic institutions.
+			"cz",
+			// Consistently ranked globally for strong democracy, civil liberties, and robust privacy culture (Nordic model/GDPR).
+			"dk",
+			// Highly digitized state with a strong emphasis on digital freedom, transparency, and data protection via the GDPR.
+			"ee",
+			// Consistently ranked globally for human rights, democracy, and strong national privacy laws (Data Protection Act) supplementing GDPR.
+			"fi",
+			// Strong independent supervisory authority (CNIL) and firm commitment to the GDPR framework.
+			"fr",
+			// The strongest national legal tradition of data protection (Informational Self-Determination) which led to the GDPR; Bundesdatenschutzgesetz (BDSG) reinforces privacy protections.
+			"de",
+			// As the main establishment for many global tech companies, the Data Protection Commission (DPC) has a central role in GDPR enforcement.
+			"ie",
+			// Part of the EEA, adhering to GDPR, and consistently ranked top globally for human rights and press freedom.
+			"is",
+			// Strong privacy law tradition and active national data protection authority (Garante).
+			"it",
+			// High ranking in political rights and civil liberties, strong adherence to GDPR.
+			"lt",
+			// Active role in EU policy and GDPR compliance, high economic stability.
+			"lu",
+			// High ranking in civil liberties and democracy, with an independent and active data protection authority.
+			"nl",
+			// Part of the EEA, adhering to GDPR, and consistently ranked top globally for human rights and rule of law.
+			"no",
+			// High ranking in civil liberties and strong adherence to GDPR.
+			"pt",
+			// Highly active in GDPR enforcement (highest number of fines in EU), strong focus on citizen data protection.
+			"es",
+			// Consistently ranked globally for human rights, transparency, and robust privacy culture (Nordic model/GDPR).
+			"se",
+
+			// these countries also rank high in privacy, human rights, and internet freedom
 			"ch",
 			"jp",
 			"ca",
-			// "au",
 			"kr",
 			"nz",
 			"ar",
 			"br",
 			"sg",
+
+			// Within the US, since there is no national privacy law, strong privacy is at the state level
 			// https://www.ncsl.org/technology-and-communication/state-laws-related-to-digital-privacy
 			// https://pro.bloomberglaw.com/insights/privacy/state-privacy-legislation-tracker
 			&Location{
