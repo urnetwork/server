@@ -19,11 +19,11 @@ require (
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/nyaruka/phonenumbers v1.6.5
 	github.com/oklog/ulid/v2 v2.1.1
-	github.com/oschwald/maxminddb-golang/v2 v2.1.0
+	github.com/oschwald/maxminddb-golang/v2 v2.1.1
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.22.0
-	github.com/quic-go/quic-go v0.57.0
-	github.com/redis/go-redis/v9 v9.17.0
+	github.com/quic-go/quic-go v0.57.1
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/samber/lo v1.51.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v82 v82.5.1
@@ -31,7 +31,7 @@ require (
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	golang.org/x/crypto v0.45.0
-	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6
+	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39
 	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
 )
