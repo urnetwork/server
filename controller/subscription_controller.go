@@ -1483,7 +1483,7 @@ func PlaySubscriptionRenewalPost(
 	return nil
 }
 
-func VerifyStripeBody(req *http.Request) (io.Reader, error) {
+func VerifyStripeBody(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -1502,7 +1502,7 @@ func VerifyStripeBody(req *http.Request) (io.Reader, error) {
 	return bytes.NewReader(bodyBytes), nil
 }
 
-func VerifyCoinbaseBody(req *http.Request) (io.Reader, error) {
+func VerifyCoinbaseBody(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -1533,7 +1533,7 @@ func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
 	return errors.New("Invalid authentication.")
 }
 
-func VerifyPlayBody(req *http.Request) (io.Reader, error) {
+func VerifyPlayBody(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -1941,7 +1941,7 @@ var heliusAuthSecret = sync.OnceValue(func() string {
 	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
 })
 
-func VerifyHeliusBody(req *http.Request) (io.Reader, error) {
+func VerifyHeliusBody(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
