@@ -63,7 +63,10 @@ type ByteCount = model.ByteCount
 var ControlId = server.Id(connect.ControlId)
 
 // use 0 for deadlock testing
-const DefaultExchangeBufferSize = 256
+// the client can suffer from head of queue blocking when the forwards/clients are changing rates
+// (flow control in the application protocol level should establish a steady rate)
+// a larger exchange buffer size helps mitigate this
+const DefaultExchangeBufferSize = 1024
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
