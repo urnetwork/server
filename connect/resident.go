@@ -63,7 +63,7 @@ type ByteCount = model.ByteCount
 var ControlId = server.Id(connect.ControlId)
 
 // use 0 for deadlock testing
-const DefaultExchangeBufferSize = 32
+const DefaultExchangeBufferSize = 256
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
