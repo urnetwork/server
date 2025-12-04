@@ -2558,7 +2558,7 @@ var migrations = []any{
             min_block_number bigint NOT NULL DEFAULT 0,
             max_block_number bigint NOT NULL DEFAULT 0,
             country_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
-            
+
             PRIMARY KEY (network_id, country_location_id)
         )
     `),
@@ -2637,5 +2637,16 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE network_client_speed
         ADD COLUMN sample_count bigint NOT NULL DEFAULT 1
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE subscription_webhook_stripe (
+            id uuid NOT NULL,
+            webhook_body text NOT NULL,
+            network_id uuid,
+            created_at timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (id)
+        )
     `),
 }

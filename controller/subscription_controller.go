@@ -618,6 +618,11 @@ func stripeHandleInvoicePaid(
 
 	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
 
+	id, ok := clientSession.Ctx.Value(stripeWebhookIDKey).(server.Id)
+	if ok {
+		model.MarkStripeWebhookProcessed(clientSession.Ctx, id, *networkId)
+	}
+
 	return &StripeWebhookResult{}, nil
 
 }
@@ -1483,11 +1488,18 @@ func PlaySubscriptionRenewalPost(
 	return nil
 }
 
+const stripeWebhookIDKey = "stripeWebhookID"
+
 func VerifyStripeBody(req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
+
+	id, _ := model.StoreStripeWebhookBody(req.Context(), bodyBytes)
+	// Attach the ID to the context
+	ctx := context.WithValue(req.Context(), stripeWebhookIDKey, id)
+	req = req.WithContext(ctx)
 
 	_, err = stripewebhook.ConstructEventWithOptions(
 		bodyBytes,

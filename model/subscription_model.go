@@ -3020,3 +3020,52 @@ func GetOpenTransferByteCount(
 	return openTransferByteCount
 
 }
+
+func StoreStripeWebhookBody(ctx context.Context, webhookBody []byte) (id server.Id, returnErr error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		id = server.NewId()
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO subscription_webhook_stripe (
+					id,
+			        webhook_body
+				)
+				VALUES ($1, $2)
+			`,
+			id,
+			string(webhookBody),
+		))
+	})
+
+	return
+}
+
+func MarkStripeWebhookProcessed(
+	ctx context.Context,
+	id server.Id,
+	networkId server.Id,
+) (returnErr error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                UPDATE subscription_webhook_stripe
+                SET
+                    network_id = $2
+                WHERE
+                    id = $1
+            `,
+			id,
+			networkId,
+		))
+	})
+
+	return
+
+}

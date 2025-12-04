@@ -1315,6 +1315,28 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 	})
 }
 
+func TestStoreStripeWebhook(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		webhookBody := `{
+		  "id": "evt_1JQY2Y2eZvKYlo2C0q7Z1g5H",
+		  "object": "event",
+		}`
+
+		id, err := StoreStripeWebhookBody(ctx, []byte(webhookBody))
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, id, "")
+
+		networkId := server.NewId()
+
+		err = MarkStripeWebhookProcessed(ctx, id, networkId)
+		assert.Equal(t, err, nil)
+
+	})
+}
+
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
