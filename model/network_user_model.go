@@ -623,7 +623,7 @@ type AddWalletAuthArgs struct {
 func addWalletAuth(
 	addWalletAuth *AddWalletAuthArgs,
 	ctx context.Context,
-) error {
+) (err error) {
 
 	walletAuth := addWalletAuth.WalletAuth
 
@@ -657,11 +657,21 @@ func addWalletAuth(
 			walletAuth.PublicKey,
 			walletAuth.Blockchain,
 		)
-		server.Raise(dbErr)
+		if dbErr != nil {
 
+			glog.Infof(
+				"Error adding wallet auth: %s user_id=%s wallet_address=%s blockchain=%s",
+				dbErr.Error(),
+				addWalletAuth.UserId,
+				walletAuth.PublicKey,
+				walletAuth.Blockchain,
+			)
+
+			err = dbErr
+		}
 	})
 
-	return nil
+	return
 }
 
 func getWalletAuths(
