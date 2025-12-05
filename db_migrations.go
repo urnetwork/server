@@ -2558,7 +2558,7 @@ var migrations = []any{
             min_block_number bigint NOT NULL DEFAULT 0,
             max_block_number bigint NOT NULL DEFAULT 0,
             country_location_id uuid NOT NULL DEFAULT gen_random_uuid(),
-            
+
             PRIMARY KEY (network_id, country_location_id)
         )
     `),
@@ -2638,4 +2638,21 @@ var migrations = []any{
         ALTER TABLE network_client_speed
         ADD COLUMN sample_count bigint NOT NULL DEFAULT 1
     `),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_contract_payer_network_id_open_true
+		ON transfer_contract (payer_network_id)
+		WHERE open = TRUE;
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_balance_network_id_start_end_time_active_true
+		ON transfer_balance (network_id, start_time, end_time)
+		WHERE active = true;
+	`),
+
+	newSqlMigration(`
+		CREATE INDEX subscription_renewal_network_type_start_end
+		ON subscription_renewal (network_id, subscription_type, start_time, end_time);
+	`),
 }
