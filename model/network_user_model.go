@@ -776,7 +776,6 @@ func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.
 			email,
 		)
 		if execErr != nil {
-			// server.Raise(err)
 			err = execErr
 		}
 
