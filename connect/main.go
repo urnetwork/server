@@ -64,11 +64,14 @@ Options:
 				return
 			case <-time.After(model.NetworkClientHandlerHeartbeatTimeout):
 			}
-			err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
-			if err != nil {
-				// shut down
-				cancel()
-			}
+			// try again after unhandled errors. these signal a transient issue such as db load
+			server.HandleError(func() {
+				err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
+				if err != nil {
+					// shut down
+					cancel()
+				}
+			})
 		}
 	}()
 
