@@ -538,6 +538,8 @@ func stripeHandleInvoicePaid(
 	// check subscription metadata for network id
 	if fullInvoice.Subscription != nil {
 
+		glog.Infof("checking subscription metadata for network id")
+
 		glog.Infof("subscription metadata: %v", fullInvoice.Subscription.Metadata)
 
 		if subNetworkId := fullInvoice.Subscription.Metadata["network_id"]; subNetworkId != "" {
@@ -563,6 +565,8 @@ func stripeHandleInvoicePaid(
 	// next, try and associate networkId by email
 	if networkId == nil && fullInvoice != nil && fullInvoice.Customer != nil && fullInvoice.Customer.Email != "" {
 
+		glog.Infof("trying to find network by email: %s", fullInvoice.Customer.Email)
+
 		// search network by email
 		foundId, err := model.FindNetworkIdByEmail(clientSession.Ctx, fullInvoice.Customer.Email)
 
@@ -577,6 +581,8 @@ func stripeHandleInvoicePaid(
 	}
 
 	if networkId == nil {
+
+		glog.Infof("could not find network by email, checking checkout session")
 
 		// could not find network by email
 		// check for client_reference_id in the checkout session
