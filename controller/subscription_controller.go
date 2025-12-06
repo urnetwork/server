@@ -555,6 +555,8 @@ func stripeHandleInvoicePaid(
 				glog.Infof("found network id in subscription metadata: %s", id.String())
 				networkId = &id
 			}
+		} else {
+			glog.Infof("no network id in subscription metadata")
 		}
 	}
 
@@ -564,11 +566,13 @@ func stripeHandleInvoicePaid(
 		// search network by email
 		foundId, err := model.FindNetworkIdByEmail(clientSession.Ctx, fullInvoice.Customer.Email)
 
-		if err != nil || foundId == nil {
+		if err != nil {
 			return nil, fmt.Errorf("failed to find network by email: %v", err)
 		}
 
-		networkId = foundId
+		if foundId != nil {
+			networkId = foundId
+		}
 
 	}
 
@@ -589,7 +593,6 @@ func stripeHandleInvoicePaid(
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
-
 		}
 
 		if dataArray, ok := sessionsResp["data"].([]interface{}); ok && len(dataArray) > 0 {
