@@ -2640,19 +2640,17 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-		CREATE INDEX IF NOT EXISTS transfer_contract_payer_network_id_open_true
-		ON transfer_contract (payer_network_id)
-		WHERE open = TRUE;
+		CREATE INDEX IF NOT EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
+        ON transfer_contract (open, payer_network_id, transfer_byte_count)
 	`),
 
 	newSqlMigration(`
-		CREATE INDEX IF NOT EXISTS transfer_balance_network_id_start_end_time_active_true
-		ON transfer_balance (network_id, start_time, end_time)
-		WHERE active = true;
+		CREATE INDEX IF NOT EXISTS transfer_balance_active_network_id_start_end_time
+        ON transfer_balance (active, network_id, start_time, end_time)
 	`),
 
 	newSqlMigration(`
 		CREATE INDEX IF NOT EXISTS subscription_renewal_network_type_start_end
-		ON subscription_renewal (network_id, subscription_type, start_time, end_time);
+		ON subscription_renewal (network_id, subscription_type, start_time, end_time)
 	`),
 }
