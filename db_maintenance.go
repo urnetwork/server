@@ -56,13 +56,19 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	// these tables are too large are updated too frequently to reindex regularly
 	// each table here should have some alternate management strategy
 	skipReindexTables := map[string]bool{
-		"client_reliability": true,
+		"client_reliability":                  true,
+		"network_client_location_reliability": true,
 	}
 
 	reindex := func(conn PgConn, tableName string) {
 		if !skipReindexTables[tableName] {
+			// note "reindex concurrently" can in some rare cases cause a deadlock with autovacuum
+			// use a timeout to recover from these cases
+			// any reindex taking longer than the timeout should generally be added to `skipReindexTables`
+			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Hour)
+			defer timeoutCancel()
 			RaisePgResult(conn.Exec(
-				ctx,
+				timeoutCtx,
 				`
 				REINDEX TABLE CONCURRENTLY 
 				`+tableName,
