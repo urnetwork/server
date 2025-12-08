@@ -2445,13 +2445,15 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 				default:
 				}
 
-				openContract := openContracts[j]
-				tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
-				err := closeContract(tag, openContracts[j])
-				if err != nil {
-					glog.Infof("%sforce close contract err = %s\n", tag, err)
-					closeMalformedContract(tag, openContract)
-				}
+				server.HandleError(func() {
+					openContract := openContracts[j]
+					tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
+					err := closeContract(tag, openContracts[j])
+					if err != nil {
+						glog.Infof("%sforce close contract err = %s\n", tag, err)
+						closeMalformedContract(tag, openContract)
+					}
+				})
 			}
 		}, workerCancel)
 	}
