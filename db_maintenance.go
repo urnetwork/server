@@ -163,7 +163,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 
 	slices.Sort(reindexTableNames)
 	glog.Infof(
-		"[db]maintenance reindex %d/%d tables (in random order): %s\n",
+		"[db]maintenance %d/%d tables (in random order): %s\n",
 		len(reindexTableNames),
 		len(tableNames),
 		strings.Join(reindexTableNames, ", "),

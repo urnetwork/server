@@ -30,7 +30,7 @@ func main() {
 Usage:
     bringyourctl db version
     bringyourctl db migrate
-    bringyourctl db maintenance <epoch>
+    bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -247,10 +247,14 @@ func dbMigrate(opts docopt.Opts) {
 func dbMaintenance(opts docopt.Opts) {
 	epoch, _ := opts.Int("<epoch>")
 
+	reindex, _ := opts.Bool("--reindex")
+	cleanup, _ := opts.Bool("--cleanup")
+	analyze, _ := opts.Bool("--analyze")
+
 	dbMaintenanceOpts := &server.DbMaintenanceOptions{
-		Reindex: true,
-		Cleanup: true,
-		Analyze: true,
+		Reindex: reindex,
+		Cleanup: cleanup,
+		Analyze: analyze,
 	}
 
 	fmt.Printf("Running DB maintenance ...\n")
