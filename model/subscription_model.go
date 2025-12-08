@@ -2436,7 +2436,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 	for j0 := range parallel {
 		workerCtx, workerCancel := context.WithCancel(ctx)
 		workerCtxs = append(workerCtxs, workerCtx)
-		go func() {
+		go server.HandleError(func() {
 			defer workerCancel()
 			for j := j0; j < len(openContracts); j = getAndIncrNextIndex() {
 				select {
@@ -2453,7 +2453,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 					closeMalformedContract(tag, openContract)
 				}
 			}
-		}()
+		}, workerCancel)
 	}
 
 	// wait for all workers
