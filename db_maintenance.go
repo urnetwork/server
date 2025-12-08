@@ -58,6 +58,7 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	skipReindexTables := map[string]bool{
 		"client_reliability":                  true,
 		"network_client_location_reliability": true,
+		"network_client_connection":           true,
 	}
 
 	reindex := func(conn PgConn, tableName string) {
