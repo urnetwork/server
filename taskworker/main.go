@@ -74,7 +74,17 @@ Options:
 		settings.BatchSize = batchSize
 		taskWorker := initTaskWorker(ctx)
 		for i := 0; i < count; i += 1 {
-			go taskWorker.Run()
+			go func() {
+				for {
+					// try again after unhandled errors. these signal a transient issue such as db load
+					server.HandleError(taskWorker.Run)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(1 * time.Second):
+					}
+				}
+			}()
 		}
 
 		// drain on sigterm
