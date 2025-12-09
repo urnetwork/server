@@ -694,20 +694,19 @@ func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, ex
 	return
 }
 
-// add balance to a network at no cost
-func AddBasicTransferBalance(
+func AddBasicTransferBalanceInTx(
+	tx server.PgTx,
 	ctx context.Context,
 	networkId server.Id,
 	transferBalance ByteCount,
 	startTime time.Time,
 	endTime time.Time,
-) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		balanceId := server.NewId()
+) (returnErr error) {
+	balanceId := server.NewId()
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	_, err := tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -719,14 +718,40 @@ func AddBasicTransferBalance(
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $5)
             `,
-			balanceId,
+		balanceId,
+		networkId,
+		startTime,
+		endTime,
+		transferBalance,
+		NanoCents(0),
+	)
+
+	if err != nil {
+		returnErr = err
+	}
+	return
+}
+
+// add balance to a network at no cost
+func AddBasicTransferBalance(
+	ctx context.Context,
+	networkId server.Id,
+	transferBalance ByteCount,
+	startTime time.Time,
+	endTime time.Time,
+) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = AddBasicTransferBalanceInTx(
+			tx,
+			ctx,
 			networkId,
+			transferBalance,
 			startTime,
 			endTime,
-			transferBalance,
-			NanoCents(0),
-		))
+		)
 	})
+
+	return
 }
 
 // this finds networks with no entries in transfer_balance
@@ -2681,37 +2706,52 @@ type SubscriptionRenewal struct {
 	TransactionId      string             // for tracking on Google Play or Apple App Store
 }
 
-func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) {
+func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *SubscriptionRenewal) (returnErr error) {
+	_, err := tx.Exec(
+		ctx,
+		`
+			INSERT INTO subscription_renewal (
+				network_id,
+		        subscription_type,
+		        start_time,
+		        end_time,
+		        net_revenue_nano_cents,
+		        purchase_token,
+						market,
+						transaction_id
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (network_id, subscription_type, end_time, start_time) DO UPDATE
+			SET
+				net_revenue_nano_cents = $5,
+				purchase_token = $6
+		`,
+		renewal.NetworkId,
+		renewal.SubscriptionType,
+		renewal.StartTime,
+		renewal.EndTime,
+		renewal.NetRevenue,
+		renewal.PurchaseToken,
+		renewal.SubscriptionMarket,
+		renewal.TransactionId,
+	)
+
+	if err != nil {
+		returnErr = err
+	}
+
+	return
+}
+
+func AddSubscriptionRenewal(ctx context.Context, renewal *SubscriptionRenewal) (returnErr error) {
+
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO subscription_renewal (
-					network_id,
-			        subscription_type,
-			        start_time,
-			        end_time,
-			        net_revenue_nano_cents,
-			        purchase_token,
-							market,
-							transaction_id
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-				ON CONFLICT (network_id, subscription_type, end_time, start_time) DO UPDATE
-				SET
-					net_revenue_nano_cents = $5,
-					purchase_token = $6
-			`,
-			renewal.NetworkId,
-			renewal.SubscriptionType,
-			renewal.StartTime,
-			renewal.EndTime,
-			renewal.NetRevenue,
-			renewal.PurchaseToken,
-			renewal.SubscriptionMarket,
-			renewal.TransactionId,
-		))
+
+		returnErr = AddSubscriptionRenewalInTx(tx, ctx, renewal)
+
 	})
+
+	return
 }
 
 func HasSubscriptionRenewal(

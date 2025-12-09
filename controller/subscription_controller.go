@@ -309,6 +309,11 @@ func StripeWebhook(
 
 	if stripeWebhook.Type == "checkout.session.completed" {
 
+		/**
+		 * need to check, but I think this is deprecated?
+		 * used for topping up individual transfer balances, which we don't have in the app atm
+		 */
+
 		glog.Infof("type: checkout.session.completed")
 
 		var checkoutCompleteObject StripeEventCheckoutCompleteObject
@@ -323,6 +328,10 @@ func StripeWebhook(
 		)
 
 	} else if stripeWebhook.Type == "invoice.paid" {
+
+		/**
+		 * new user subscription
+		 */
 
 		glog.Infof("type: invoice.paid")
 
@@ -529,6 +538,8 @@ func stripeHandleInvoicePaid(
 	// check subscription metadata for network id
 	if fullInvoice.Subscription != nil {
 
+		glog.Infof("checking subscription metadata for network id")
+
 		glog.Infof("subscription metadata: %v", fullInvoice.Subscription.Metadata)
 
 		if subNetworkId := fullInvoice.Subscription.Metadata["network_id"]; subNetworkId != "" {
@@ -538,26 +549,40 @@ func stripeHandleInvoicePaid(
 			id, err := server.ParseId(subNetworkId)
 			if err != nil {
 				glog.Infof("Invalid network id format in subscription metadata: %v", err)
+
+				// todo - we should store in the DB webhook errors table
+				return nil, fmt.Errorf("failed to parse id err=%v id=%s", err, subNetworkId)
+
 			} else {
 				glog.Infof("found network id in subscription metadata: %s", id.String())
 				networkId = &id
 			}
+		} else {
+			glog.Infof("no network id in subscription metadata")
 		}
 	}
 
 	// next, try and associate networkId by email
 	if networkId == nil && fullInvoice != nil && fullInvoice.Customer != nil && fullInvoice.Customer.Email != "" {
 
+		glog.Infof("trying to find network by email: %s", fullInvoice.Customer.Email)
+
 		// search network by email
 		foundId, err := model.FindNetworkIdByEmail(clientSession.Ctx, fullInvoice.Customer.Email)
 
-		if err == nil && foundId != nil {
+		if err != nil {
+			return nil, fmt.Errorf("failed to find network by email: %v", err)
+		}
+
+		if foundId != nil {
 			networkId = foundId
 		}
 
 	}
 
 	if networkId == nil {
+
+		glog.Infof("could not find network by email, checking checkout session")
 
 		// could not find network by email
 		// check for client_reference_id in the checkout session
@@ -573,7 +598,6 @@ func stripeHandleInvoicePaid(
 			server.ResponseJsonObject[map[string]interface{}],
 		)
 		if err != nil {
-			glog.Errorf("Failed to fetch checkout session: %v", err)
 			return nil, fmt.Errorf("failed to fetch checkout session: %v", err)
 		}
 
@@ -582,8 +606,7 @@ func stripeHandleInvoicePaid(
 				if clientRefId, ok := session["client_reference_id"].(string); ok {
 					id, err := server.ParseId(clientRefId)
 					if err != nil {
-						glog.Infof("Invalid client_reference_id format: %v", err)
-						return &StripeWebhookResult{}, nil
+						return nil, fmt.Errorf("failed to parse id err=%v id=%s", err, clientRefId)
 					}
 					networkId = &id
 				}
@@ -598,10 +621,7 @@ func stripeHandleInvoicePaid(
 	endTime := time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod)
 
 	if networkId == nil {
-		glog.Infof("Could not find network for invoice")
-		return &StripeWebhookResult{
-			Error: &StripeWebhookResultErr{Message: "Could not find network for invoice"},
-		}, nil
+		return nil, fmt.Errorf("could not find network for invoice %s", invoiceId)
 	}
 
 	subscriptionRenewal := model.SubscriptionRenewal{
@@ -614,9 +634,34 @@ func stripeHandleInvoicePaid(
 		TransactionId:      invoiceId,
 	}
 
-	model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
+	/**
+	 * all db inserts should be in a single a transaction
+	 * if any part fails, return an error response to stripe
+	 * this way stripe will retry the webhook later and we can roll back partial data
+	 */
+	var insertErr error
 
-	AddRefreshTransferBalance(clientSession.Ctx, *networkId)
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+
+		err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
+		if err != nil {
+			glog.Infof("Error adding subscription renewal: %v", err)
+			insertErr = err
+			return
+		}
+
+		err = AddRefreshTransferBalanceInTx(tx, clientSession.Ctx, *networkId)
+		if err != nil {
+			glog.Infof("Error adding refresh transfer balance task: %v", err)
+			insertErr = err
+		}
+
+	})
+
+	if insertErr != nil {
+		glog.Infof("Error processing invoice paid: %v", insertErr)
+		return nil, insertErr
+	}
 
 	return &StripeWebhookResult{}, nil
 
@@ -1582,7 +1627,7 @@ func verifyPlayAuth(ctx context.Context, auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) {
+func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) error {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(RefreshTransferBalanceDuration)
 	var transferBalance model.ByteCount
@@ -1594,13 +1639,41 @@ func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) {
 	} else {
 		transferBalance = RefreshFreeTransferBalance
 	}
-	model.AddBasicTransferBalance(
+	return model.AddBasicTransferBalance(
 		ctx,
 		networkId,
 		transferBalance,
 		startTime,
 		endTime,
 	)
+
+}
+
+func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) error {
+	startTime := server.NowUtc()
+	endTime := startTime.Add(RefreshTransferBalanceDuration)
+	var transferBalance model.ByteCount
+
+	active, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
+
+	if active {
+		transferBalance = RefreshSupporterTransferBalance
+	} else {
+		transferBalance = RefreshFreeTransferBalance
+	}
+	err := model.AddBasicTransferBalanceInTx(
+		tx,
+		ctx,
+		networkId,
+		transferBalance,
+		startTime,
+		endTime,
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Refresh transfer balances
