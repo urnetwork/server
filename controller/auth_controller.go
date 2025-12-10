@@ -222,6 +222,35 @@ type RefreshTokenResult struct {
 func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 	networkId := session.ByJwt.NetworkId
 
+	if session.ByJwt.ClientId == nil {
+		return &RefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "Client ID is required for token refresh.",
+			},
+		}, nil
+	}
+
+	clientNetworkId, err := model.FindClientNetwork(
+		session.Ctx,
+		*session.ByJwt.ClientId,
+	)
+	if err != nil {
+		return &RefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "Client does not exist",
+			},
+		}, nil
+	}
+
+	if clientNetworkId != networkId {
+		// not sure why this would happen, but doesn't hurt to check
+		return &RefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "Client does not belong to the authenticated network.",
+			},
+		}, nil
+	}
+
 	isPro, _ := model.HasSubscriptionRenewal(
 		session.Ctx,
 		networkId,
