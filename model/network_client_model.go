@@ -86,6 +86,16 @@ type AuthNetworkClientArgs struct {
 	SourceClientId *server.Id `json:"source_client_id,omitempty"`
 	Description    string     `json:"description"`
 	DeviceSpec     string     `json:"device_spec"`
+
+	CreateProxy bool         `json:"create_proxy,omitempty"`
+	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
+}
+
+type ProxyConfig struct {
+	LockCallerIp bool     `json:"lock_caller_ip"`
+	LockIpList   []string `json:"lock_ip_list"`
+	AuthUser     string   `json:"auth_user"`
+	AuthPassword string   `json:"auth_password"`
 }
 
 type AuthNetworkClientResult struct {
@@ -95,8 +105,16 @@ type AuthNetworkClientResult struct {
 
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
-	ClientLimitExceeded bool   `json:"client_limit_exceeded"`
-	Message             string `json:"message"`
+	ClientLimitExceeded bool               `json:"client_limit_exceeded"`
+	Message             string             `json:"message"`
+	ProxyConfigResult   *ProxyConfigResult `json:"proxy_config_result,omitempty"`
+}
+
+type ProxyConfigResult struct {
+	ExpirationTime   time.Time `json:"expiration_time"`
+	KeepaliveSeconds int       `json:"keepalive_seconds"`
+	HttpProxyUrl     string    `json:"http_proxy_url,omitempty"`
+	SocksProxyUrl    string    `json:"socks_proxy_url,omitempty"`
 }
 
 func AuthNetworkClient(
