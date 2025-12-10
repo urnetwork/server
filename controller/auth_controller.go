@@ -205,3 +205,38 @@ func AuthVerify(
 	}
 	return result, err
 }
+
+/**
+ * Refresh JWT
+ */
+
+type RefreshTokenError struct {
+	Message string `json:"message"`
+}
+
+type RefreshTokenResult struct {
+	ByJwt string             `json:"by_jwt,omitempty"`
+	Error *RefreshTokenError `json:"error,omitempty"`
+}
+
+func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
+	networkId := session.ByJwt.NetworkId
+
+	isPro, _ := model.HasSubscriptionRenewal(
+		session.Ctx,
+		networkId,
+		model.SubscriptionTypeSupporter,
+	)
+
+	byJwt := jwt.NewByJwt(
+		networkId,
+		session.ByJwt.UserId,
+		session.ByJwt.NetworkName,
+		session.ByJwt.GuestMode,
+		isPro,
+	)
+
+	return &RefreshTokenResult{
+		ByJwt: byJwt.Sign(),
+	}, nil
+}

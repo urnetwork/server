@@ -906,11 +906,18 @@ func DeviceConfirmAdopt(
 
 		isGuestMode := (authType == AuthTypeGuest)
 
+		isPro, _ := HasSubscriptionRenewal(
+			clientSession.Ctx,
+			networkId,
+			SubscriptionTypeSupporter,
+		)
+
 		byJwtWithClientId := jwt.NewByJwt(
 			networkId,
 			userId,
 			networkName,
 			isGuestMode,
+			isPro,
 			authSessionIds...,
 		).Client(deviceId, clientId).Sign()
 

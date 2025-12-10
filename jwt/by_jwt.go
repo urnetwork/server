@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/glog"
@@ -93,6 +94,8 @@ type ByJwt struct {
 	DeviceId       *server.Id  `json:"device_id,omitempty"`
 	ClientId       *server.Id  `json:"client_id,omitempty"`
 	GuestMode      bool        `json:"guest_mode,omitempty"`
+	Pro            bool        `json:"pro,omitempty"`
+	jwt.RegisteredClaims
 }
 
 func NewByJwt(
@@ -100,6 +103,7 @@ func NewByJwt(
 	userId server.Id,
 	networkName string,
 	guestMode bool,
+	pro bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
@@ -114,6 +118,7 @@ func NewByJwt(
 		networkName,
 		server.NowUtc(),
 		guestMode,
+		pro,
 		authSessionIds...,
 	)
 }
@@ -124,6 +129,7 @@ func NewByJwtWithCreateTime(
 	networkName string,
 	createTime time.Time,
 	guestMode bool,
+	pro bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
@@ -137,9 +143,13 @@ func NewByJwtWithCreateTime(
 		UserId:      userId,
 		NetworkName: networkName,
 		GuestMode:   guestMode,
+		Pro:         pro,
 		// round here so that the string representation in the jwt does not lose information
 		CreateTime:     server.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
+		},
 	}
 }
 
