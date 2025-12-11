@@ -2653,4 +2653,8 @@ var migrations = []any{
 		CREATE INDEX IF NOT EXISTS subscription_renewal_network_type_start_end
 		ON subscription_renewal (network_id, subscription_type, start_time, end_time)
 	`),
+
+	newSqlMigration(`
+		ALTER TABLE subscription_renewal ALTER COLUMN transaction_id TYPE VARCHAR(128);
+	`),
 }
