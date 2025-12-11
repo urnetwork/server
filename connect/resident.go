@@ -566,6 +566,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 				if len(message) == 0 {
 					// just a ping
+					resident.UpdateActivity()
 					continue
 				}
 
@@ -602,6 +603,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		// messages from the forward are to be forwarded by the resident
 		// the only route a resident has is to its client_id
 		// a forward is a send where the source id does not match the client
+
+		forward, closeForward := resident.AddForward()
+		defer closeForward()
+
 		go server.HandleError(func() {
 			defer handleCancel()
 
@@ -631,26 +636,20 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 				if len(message) == 0 {
 					// just a ping
+					resident.UpdateActivity()
 					continue
 				}
+
 				select {
 				case <-handleCtx.Done():
 					return
 				case <-resident.Done():
 					return
-				default:
-				}
-
-				c := func() bool {
-					return resident.Forward(message)
-				}
-				if glog.V(2) {
-					server.TraceWithReturn(
-						fmt.Sprintf("[ecrf]forward %s/%s", resident.clientId, resident.residentId),
-						c,
-					)
-				} else {
-					c()
+				case forward <- message:
+					resident.UpdateActivity()
+					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+				case <-time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
 				}
 			}
 		}, handleCancel)
@@ -1748,10 +1747,40 @@ func (self *Resident) AddTransport() (
 	return
 }
 
-func (self *Resident) Forward(transferFrameBytes []byte) bool {
-	self.UpdateActivity()
-	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.WriteTimeout)
+func (self *Resident) AddForward() (
+	forward chan []byte,
+	closeForward func(),
+) {
+	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+
+	forwardCtx, forwardCancel := context.WithCancel(self.ctx)
+
+	go server.HandleError(func() {
+		defer forwardCancel()
+		for {
+			select {
+			case <-forwardCtx.Done():
+				return
+			case message := <-forward:
+				self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
+			}
+		}
+	}, self.cancel)
+
+	closeForward = func() {
+		forwardCancel()
+
+		// note `forward` is not closed. This channel is left open.
+		// it used to be closed after a delay, but it is not needed to close it.
+	}
+
+	return
 }
+
+// func (self *Resident) Forward(transferFrameBytes []byte) bool {
+// 	self.UpdateActivity()
+// 	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.WriteTimeout)
+// }
 
 func (self *Resident) UpdateActivity() {
 	self.stateLock.Lock()
