@@ -87,15 +87,16 @@ type AuthNetworkClientArgs struct {
 	Description    string     `json:"description"`
 	DeviceSpec     string     `json:"device_spec"`
 
-	CreateProxy bool         `json:"create_proxy,omitempty"`
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 }
 
 type ProxyConfig struct {
 	LockCallerIp bool     `json:"lock_caller_ip"`
 	LockIpList   []string `json:"lock_ip_list"`
-	AuthUser     string   `json:"auth_user"`
-	AuthPassword string   `json:"auth_password"`
+
+	EnableSocks     bool `json:"enable_socks"`
+	EnableHttp      bool `json:"enable_http"`
+	HttpRequireAuth bool `json:"http_require_auth"`
 }
 
 type AuthNetworkClientResult struct {
@@ -115,6 +116,14 @@ type ProxyConfigResult struct {
 	KeepaliveSeconds int       `json:"keepalive_seconds"`
 	HttpProxyUrl     string    `json:"http_proxy_url,omitempty"`
 	SocksProxyUrl    string    `json:"socks_proxy_url,omitempty"`
+
+	HttpProxyAuth  *ProxyAuthResult `json:"http_proxy_auth"`
+	SocksProxyAuth *ProxyAuthResult `json:"socks_proxy_auth"`
+}
+
+type ProxyAuthResult struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 func AuthNetworkClient(
