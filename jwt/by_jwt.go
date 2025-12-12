@@ -146,11 +146,16 @@ func NewByJwtWithCreateTime(
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	var token *gojwt.Token
 	var err error
+
+	parserOptions := []gojwt.ParserOption{
+		gojwt.WithoutClaimsValidation(),
+	}
+
 	// attempt all signing keys
 	for _, byPrivateKey := range byPrivateKeys() {
 		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
 			return byPrivateKey.Public(), nil
-		})
+		}, parserOptions...)
 		if err == nil {
 			break
 		}
