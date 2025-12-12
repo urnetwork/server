@@ -85,7 +85,8 @@ func TestCacheWithAuth(t *testing.T) {
 				server.NewId(),
 				server.NewId(),
 				fmt.Sprintf("test%d", i),
-				false,
+				false, // guest
+				false, // pro
 			)
 			byJwt = byJwt.Client(
 				server.NewId(),

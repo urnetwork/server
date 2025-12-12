@@ -185,11 +185,15 @@ func NetworkCreate(
 			// we should disable adding the guest network to name search?
 			// networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
 
+			isPro := false
+			isGuest := true
+
 			byJwt := jwt.NewByJwt(
 				createdNetworkId,
 				createdUserId,
 				networkCreate.NetworkName,
-				true,
+				isGuest,
+				isPro,
 			)
 			byJwtSigned := byJwt.Sign()
 			result := &NetworkCreateResult{
@@ -466,12 +470,15 @@ func NetworkCreate(
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+				isPro := false
+
 				// successful login
 				byJwt := jwt.NewByJwt(
 					createdNetworkId,
 					createdUserId,
 					networkCreate.NetworkName,
 					false,
+					isPro,
 				)
 				byJwtSigned := byJwt.Sign()
 				result := &NetworkCreateResult{
@@ -627,12 +634,16 @@ func NetworkCreate(
 				*walletId,
 			)
 
+			isPro := false
+			isGuest := false
+
 			// successful login
 			byJwt := jwt.NewByJwt(
 				createdNetworkId,
 				createdUserId,
 				networkCreate.NetworkName,
-				false,
+				isGuest,
+				isPro,
 			)
 			byJwtSigned := byJwt.Sign()
 			result := &NetworkCreateResult{
@@ -970,11 +981,19 @@ func UpgradeGuest(
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+				isGuest := false
+				isPro, _ := HasSubscriptionRenewal(
+					session.Ctx,
+					session.ByJwt.NetworkId,
+					SubscriptionTypeSupporter,
+				)
+
 				byJwt := jwt.NewByJwt(
 					session.ByJwt.NetworkId,
 					session.ByJwt.UserId,
 					networkName,
-					false,
+					isGuest,
+					isPro,
 				)
 				byJwtSigned := byJwt.Sign()
 
@@ -1038,11 +1057,19 @@ func UpgradeGuest(
 
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
+			isGuest := false
+			isPro, _ := HasSubscriptionRenewal(
+				session.Ctx,
+				session.ByJwt.NetworkId,
+				SubscriptionTypeSupporter,
+			)
+
 			byJwt := jwt.NewByJwt(
 				session.ByJwt.NetworkId,
 				session.ByJwt.UserId,
 				networkName,
-				false,
+				isGuest,
+				isPro,
 			)
 			byJwtSigned := byJwt.Sign()
 

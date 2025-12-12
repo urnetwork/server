@@ -193,11 +193,14 @@ func TestAddClientReliabilityStats(t *testing.T) {
 					assert.Equal(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
 				}
 
+				isPro := false
+
 				byJwt := jwt.NewByJwt(
 					networkId,
 					server.NewId(),
 					"",
 					false,
+					isPro,
 				).Client(clientIds[0], server.NewId())
 				clientSession := session.Testing_CreateClientSession(
 					ctx,

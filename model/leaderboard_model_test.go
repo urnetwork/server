@@ -22,17 +22,18 @@ func TestLeaderboard(t *testing.T) {
 		 */
 		networkIdA := server.NewId()
 		userIdA := server.NewId()
+		isPro := false
 		// clientIdA := server.NewId()
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", false),
+			jwt.NewByJwt(networkIdA, userIdA, "a", false, isPro),
 		)
 
 		networkIdB := server.NewId()
 		userIdB := server.NewId()
 		clientSessionB := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdB, userIdB, "b", false),
+			jwt.NewByJwt(networkIdB, userIdB, "b", false, isPro),
 		)
 
 		/**
@@ -46,7 +47,7 @@ func TestLeaderboard(t *testing.T) {
 		Testing_CreateNetwork(ctx, networkIdC, "c", userIdC)
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdC, userIdC, "c", false),
+			jwt.NewByJwt(networkIdC, userIdC, "c", false, isPro),
 		)
 
 		/**

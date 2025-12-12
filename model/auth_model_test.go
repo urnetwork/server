@@ -38,10 +38,17 @@ func TestResetPassword(t *testing.T) {
 		userId := server.NewId()
 		networkName := "test"
 		guestMode := false
+		isPro := false
 
 		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(networkId, userId, networkName, guestMode)
+		byJwt := jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			guestMode,
+			isPro,
+		)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		// add a phone user auth to the network user
@@ -105,10 +112,17 @@ func TestAuthCode(t *testing.T) {
 		userId := server.NewId()
 		networkName := "test"
 		guestMode := false
+		isPro := false
 
 		Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
-		byJwt := jwt.NewByJwt(networkId, userId, networkName, guestMode)
+		byJwt := jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			guestMode,
+			isPro,
+		)
 		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
 
 		authCodeCreate := &AuthCodeCreateArgs{}
