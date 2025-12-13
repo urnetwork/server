@@ -674,6 +674,7 @@ func AuthLoginWithPassword(
 				isGuestMode,
 				pro,
 			)
+
 			signedByJwt := byJwt.Sign()
 			result := &AuthLoginWithPasswordResult{
 				Network: &AuthLoginWithPasswordResultNetwork{

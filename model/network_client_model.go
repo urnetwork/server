@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+
 	// "crypto/sha256"
 	"errors"
 	// "net"
@@ -460,7 +461,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					network_client_connection.connection_block
 				FROM network_client
 				INNER JOIN network_client_connection ON
-					network_client.client_id = network_client_connection.client_id AND 
+					network_client.client_id = network_client_connection.client_id AND
 					network_client_connection.connected
 				WHERE
 					network_client.network_id = $1 AND
@@ -1106,7 +1107,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 				SELECT
 					handler_id
 				FROM network_client_handler
-				WHERE 
+				WHERE
 					heartbeat_time < $1
 			`,
 			minTime.UTC(),

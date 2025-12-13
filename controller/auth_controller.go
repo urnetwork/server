@@ -230,6 +230,14 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		}, nil
 	}
 
+	if session.ByJwt.DeviceId == nil {
+		return &RefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "Device ID is required for token refresh.",
+			},
+		}, nil
+	}
+
 	clientNetworkId, err := model.FindClientNetwork(
 		session.Ctx,
 		*session.ByJwt.ClientId,
@@ -266,6 +274,6 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 	)
 
 	return &RefreshTokenResult{
-		ByJwt: byJwt.Sign(),
+		ByJwt: byJwt.Client(*session.ByJwt.DeviceId, *session.ByJwt.ClientId).Sign(),
 	}, nil
 }
