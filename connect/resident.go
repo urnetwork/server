@@ -878,8 +878,16 @@ func NewExchangeConnection(
 	if err != nil {
 		return nil, err
 	}
-	// tcpConn := conn.(*net.TCPConn)
-	// tcpConn.SetNoDelay(false)
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetLinger(0)
+		tcpConn.SetKeepAliveConfig(net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     1 * time.Second,
+			Interval: 1 * time.Second,
+			Count:    15,
+		})
+	}
 
 	success := false
 	defer func() {
