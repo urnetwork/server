@@ -2714,6 +2714,14 @@ func FindProviders2(
 	locationIds := map[server.Id]bool{}
 	locationGroupIds := map[server.Id]bool{}
 
+	excludeFinalDestinations := sync.OnceValue(func() map[server.Id]bool {
+		excludeFinalDestinations := map[server.Id]bool{}
+		for _, destination := range findProviders2.ExcludeDestinations {
+			excludeFinalDestinations[destination[len(destination)-1]] = true
+		}
+		return excludeFinalDestinations
+	})
+
 	for _, spec := range findProviders2.Specs {
 		if spec.LocationId != nil {
 			locationIds[*spec.LocationId] = true
@@ -2722,10 +2730,13 @@ func FindProviders2(
 			locationGroupIds[*spec.LocationGroupId] = true
 		}
 		if spec.ClientId != nil {
-			provider := &FindProvidersProvider{
-				ClientId: *(spec.ClientId),
+			clientId := *(spec.ClientId)
+			if !excludeFinalDestinations()[clientId] {
+				provider := &FindProvidersProvider{
+					ClientId: clientId,
+				}
+				providers = append(providers, provider)
 			}
-			providers = append(providers, provider)
 		}
 		if spec.BestAvailable != nil && *spec.BestAvailable {
 			homeLocationId, ok := countryCodeLocationIds()["us"]
