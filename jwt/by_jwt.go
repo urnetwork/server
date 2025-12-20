@@ -28,6 +28,9 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 	return jwt.RequireStringList("tls_key_paths")
 })
 
+// one month
+const expiryDuration = 30 * 24 * time.Hour
+
 // the first key (most recent version) is used to sign new JWTs
 var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
@@ -151,10 +154,7 @@ func NewByJwtWithCreateTime(
 		CreateTime:     server.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
 		RegisteredClaims: gojwt.RegisteredClaims{
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
-			//
-			// for testing
-			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
 	}
 }
@@ -279,10 +279,7 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		DeviceId:       &deviceId,
 		ClientId:       &clientId,
 		RegisteredClaims: gojwt.RegisteredClaims{
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
-			//
-			// for testing
-			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
 	}
 }
