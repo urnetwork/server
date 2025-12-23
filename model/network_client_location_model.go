@@ -2099,6 +2099,8 @@ type ClientScore struct {
 	MaxBytesPerSecond            ByteCount
 	HasLatencyTest               bool
 	HasSpeedTest                 bool
+
+	LookbackClientScores map[int]*ClientScores
 }
 
 // scores are [0, max], where 0 is best
@@ -2158,7 +2160,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
 	minScore := 10
-	minIndependentReliabilityWeight := float64(0.5)
+	// 1. near minutes must be at the target sla
+	// 2. near hours must be near the target sla
+	// 3. mid hours can account for some minor outage
+	// 4. mid days can account for some larger outage
+	minIndependentReliabilityWeights := map[int]float64{
+		1: float64(0.999),
+		2: float64(0.99),
+		3: float64(0.9),
+		4: float64(0.8),
+	}
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
 			relativeLatencyMillisThreshold: 50,
@@ -2239,6 +2250,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	            network_client_location_reliability.max_bytes_per_second,
 	            network_client_location_reliability.has_latency_test,
 	            network_client_location_reliability.has_speed_test,
+	            client_connection_reliability_score.lookback_index,
 	            client_connection_reliability_score.reliability_weight,
 	            client_connection_reliability_score.independent_reliability_weight
 
@@ -2264,6 +2276,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				var maxBytesPerSecond ByteCount
 				var hasLatencyTest bool
 				var hasSpeedTest bool
+				var lookbackIndex int
 				var reliabilityWeight float64
 				var independentReliabilityWeight float64
 				server.Raise(result.Scan(
@@ -2278,11 +2291,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					&maxBytesPerSecond,
 					&hasLatencyTest,
 					&hasSpeedTest,
+					&lookbackIndex,
 					&reliabilityWeight,
 					&independentReliabilityWeight,
 				))
-				clientScore := &ClientScore{
+				lookbackClientScore := &ClientScore{
 					ClientId:                     clientId,
+					LookbackIndex:                lookbackIndex,
 					NetworkId:                    networkId,
 					ReliabilityWeight:            reliabilityWeight,
 					IndependentReliabilityWeight: independentReliabilityWeight,
@@ -2300,7 +2315,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				}
 
 				setScore(
-					clientScore,
+					lookbackClientScore,
 					netTypeScores,
 					minRelativeLatencyMillis,
 					maxBytesPerSecond,
@@ -2308,7 +2323,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					hasSpeedTest,
 				)
 
-				clientScores, ok := locationClientScores[cityLocationId]
+				clientScore, ok := clientScores[clientId]
+				if !ok {
+					clientScore = &ClientScore{
+						ClientId:             clientId,
+						LookbackClientScores: map[int]ClientScore{},
+					}
+				}
+				clientScore.LookbackClientScores[lookbackIndex] = lookbackClientScore
+
+				clientScores, ok = locationClientScores[cityLocationId]
 				if !ok {
 					clientScores = map[server.Id]*ClientScore{}
 					locationClientScores[cityLocationId] = clientScores
@@ -2453,6 +2477,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			}
 		})
 	})
+
+	// migration: set each client score to the lowest lookback index
+	// FIXME
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,

@@ -2657,4 +2657,11 @@ var migrations = []any{
 	newSqlMigration(`
 		ALTER TABLE subscription_renewal ALTER COLUMN transaction_id TYPE VARCHAR(128);
 	`),
+
+	newSqlMigration(`
+        ALTER TABLE client_connection_reliability_score
+        ADD COLUMN lookback_index integer NOT NULL DEFAULT 0,
+        DROP CONSTRAINT client_connection_reliability_score_pkey,
+        ADD PRIMARY KEY (client_id, lookback_index)
+    `),
 }
