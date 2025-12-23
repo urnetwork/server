@@ -147,7 +147,7 @@ func ScheduleUpdateReliabilities(clientSession *session.ClientSession, tx server
 		clientSession,
 		task.RunOnce("update_reliabilities"),
 		task.RunAt(server.NowUtc().Add(1*time.Minute)),
-		task.MaxTime(30*time.Minute),
+		task.MaxTime(90*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
 }
