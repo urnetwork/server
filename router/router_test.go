@@ -139,6 +139,7 @@ func TestRouterBasic(t *testing.T) {
 			userId,
 			"test",
 			false, // guest mode false
+			false, // pro is false
 		)
 		auth := func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
@@ -148,7 +149,8 @@ func TestRouterBasic(t *testing.T) {
 			networkId,
 			userId,
 			"test",
-			true, // guest mode true
+			true,  // guest mode true
+			false, // pro is false
 		)
 		authGuestMode := func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwtGuestMode.Sign()))

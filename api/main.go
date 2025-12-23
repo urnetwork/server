@@ -82,6 +82,7 @@ Options:
 		router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
 		router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
 		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
+		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),
 		router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
 		router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),
 		router.NewRoute("POST", "/auth/password-set", handlers.AuthPasswordSet),

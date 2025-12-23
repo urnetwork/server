@@ -78,7 +78,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		userIdA := server.NewId()
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", false),
+			jwt.NewByJwt(networkIdA, userIdA, "a", false, false),
 		)
 
 		networkIdB := server.NewId()
@@ -128,7 +128,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 
 		clientSessionC := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdC, userIdC, "c", false),
+			jwt.NewByJwt(networkIdC, userIdC, "c", false, false),
 		)
 
 		/*

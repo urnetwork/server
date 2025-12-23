@@ -138,10 +138,11 @@ func TestBestAvailableProviders(t *testing.T) {
 
 		userIdA := server.NewId()
 		guestMode := false
+		isPro := false
 
 		clientSessionA := session.Testing_CreateClientSession(
 			ctx,
-			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode),
+			jwt.NewByJwt(networkIdA, userIdA, "a", guestMode, isPro),
 		)
 
 		clientId := server.NewId()
@@ -283,10 +284,17 @@ func TestFindProviders2WithExclude(t *testing.T) {
 
 			userId := server.NewId()
 			guestMode := false
+			isPro := false
 
 			clientSession := session.Testing_CreateClientSession(
 				ctx,
-				jwt.NewByJwt(networkId, userId, fmt.Sprintf("network%d", i), guestMode),
+				jwt.NewByJwt(
+					networkId,
+					userId,
+					fmt.Sprintf("network%d", i),
+					guestMode,
+					isPro,
+				),
 			)
 
 			clientId := server.NewId()

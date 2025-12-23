@@ -695,8 +695,15 @@ func testConnect(
 
 	// attach transports
 	guestMode := false
+	isPro := false
 
-	byJwtA := jwt.NewByJwt(networkIdA, userIdA, networkNameA, guestMode).Client(deviceIdA, clientIdA)
+	byJwtA := jwt.NewByJwt(
+		networkIdA,
+		userIdA,
+		networkNameA,
+		guestMode,
+		isPro,
+	).Client(deviceIdA, clientIdA)
 
 	authA := &connect.ClientAuth{
 		ByJwt: byJwtA.Sign(),
@@ -726,7 +733,13 @@ func testConnect(
 		// go transportA.Run(clientA.RouteManager())
 	}
 
-	byJwtB := jwt.NewByJwt(networkIdB, userIdB, networkNameB, guestMode).Client(deviceIdB, clientIdB)
+	byJwtB := jwt.NewByJwt(
+		networkIdB,
+		userIdB,
+		networkNameB,
+		guestMode,
+		isPro,
+	).Client(deviceIdB, clientIdB)
 
 	authB := &connect.ClientAuth{
 		ByJwt: byJwtB.Sign(),

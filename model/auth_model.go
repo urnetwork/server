@@ -404,12 +404,19 @@ func handleLoginParsedAuthJwt(
 
 	isGuestMode := false
 
+	isPro, _ := HasSubscriptionRenewal(
+		ctx,
+		networkId,
+		SubscriptionTypeSupporter,
+	)
+
 	// successful login
 	byJwt := jwt.NewByJwt(
 		networkId,
 		*userId,
 		networkName,
 		isGuestMode,
+		isPro,
 	)
 	result := &AuthLoginResult{
 		Network: &AuthLoginResultNetwork{
@@ -504,11 +511,19 @@ func handleLoginWallet(
 	})
 
 	if found {
+
+		pro, _ := HasSubscriptionRenewal(
+			ctx,
+			networkId,
+			SubscriptionTypeSupporter,
+		)
+
 		byJwt := jwt.NewByJwt(
 			networkId,
 			*userId,
 			networkName,
 			false,
+			pro,
 		)
 		result = &AuthLoginResult{
 			Network: &AuthLoginResultNetwork{
@@ -645,13 +660,21 @@ func AuthLoginWithPassword(
 
 			isGuestMode := false
 
+			pro, _ := HasSubscriptionRenewal(
+				session.Ctx,
+				networkId,
+				SubscriptionTypeSupporter,
+			)
+
 			// success
 			byJwt := jwt.NewByJwt(
 				networkId,
 				*userId,
 				networkName,
 				isGuestMode,
+				pro,
 			)
+
 			signedByJwt := byJwt.Sign()
 			result := &AuthLoginWithPasswordResult{
 				Network: &AuthLoginWithPasswordResultNetwork{
@@ -797,11 +820,18 @@ func AuthVerify(
 
 	isGuestMode := false
 
+	isPro, _ := HasSubscriptionRenewal(
+		session.Ctx,
+		networkId,
+		SubscriptionTypeSupporter,
+	)
+
 	byJwt := jwt.NewByJwt(
 		networkId,
 		userId,
 		networkName,
 		isGuestMode,
+		isPro,
 	)
 	result := &AuthVerifyResult{
 		Network: &AuthVerifyResultNetwork{
@@ -1442,12 +1472,19 @@ func AuthCodeLogin(
 
 		isGuestMode := false
 
+		isPro, _ := HasSubscriptionRenewal(
+			session.Ctx,
+			networkId,
+			SubscriptionTypeSupporter,
+		)
+
 		byJwt := jwt.NewByJwtWithCreateTime(
 			networkId,
 			userId,
 			networkName,
 			createTime,
 			isGuestMode,
+			isPro,
 			authSessionIds...,
 		)
 

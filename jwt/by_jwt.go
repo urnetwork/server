@@ -28,6 +28,9 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 	return jwt.RequireStringList("tls_key_paths")
 })
 
+// one month
+const expiryDuration = 30 * 24 * time.Hour
+
 // the first key (most recent version) is used to sign new JWTs
 var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	keys := []*rsa.PrivateKey{}
@@ -93,6 +96,8 @@ type ByJwt struct {
 	DeviceId       *server.Id  `json:"device_id,omitempty"`
 	ClientId       *server.Id  `json:"client_id,omitempty"`
 	GuestMode      bool        `json:"guest_mode,omitempty"`
+	Pro            bool        `json:"pro,omitempty"`
+	gojwt.RegisteredClaims
 }
 
 func NewByJwt(
@@ -100,6 +105,7 @@ func NewByJwt(
 	userId server.Id,
 	networkName string,
 	guestMode bool,
+	pro bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
@@ -108,12 +114,16 @@ func NewByJwt(
 	if userId == (server.Id{}) {
 		panic(fmt.Errorf("user_id must be set"))
 	}
+
+	// glog.Infof("Creating ByJwt for network_id=%s, user_id=%s, guest_mode=%v, pro=%v", networkId, userId, guestMode, pro)
+
 	return NewByJwtWithCreateTime(
 		networkId,
 		userId,
 		networkName,
 		server.NowUtc(),
 		guestMode,
+		pro,
 		authSessionIds...,
 	)
 }
@@ -124,6 +134,7 @@ func NewByJwtWithCreateTime(
 	networkName string,
 	createTime time.Time,
 	guestMode bool,
+	pro bool,
 	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
@@ -132,14 +143,19 @@ func NewByJwtWithCreateTime(
 	if userId == (server.Id{}) {
 		panic(fmt.Errorf("user_id must be set"))
 	}
+
 	return &ByJwt{
 		NetworkId:   networkId,
 		UserId:      userId,
 		NetworkName: networkName,
 		GuestMode:   guestMode,
+		Pro:         pro,
 		// round here so that the string representation in the jwt does not lose information
 		CreateTime:     server.CodecTime(createTime),
 		AuthSessionIds: authSessionIds,
+		RegisteredClaims: gojwt.RegisteredClaims{
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
+		},
 	}
 }
 
@@ -147,12 +163,15 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	var token *gojwt.Token
 	var err error
 
+	// todo - remove this once clients support refresh
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithoutClaimsValidation(),
 	}
 
 	// attempt all signing keys
 	for _, byPrivateKey := range byPrivateKeys() {
+		// todo - ParseWithClaims instead of jwt.Parse
+		// this will get newly added RegisteredClaims which includes ExipiresAt
 		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
 			return byPrivateKey.Public(), nil
 		}, parserOptions...)
@@ -163,6 +182,10 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	if err != nil {
 		return nil, errors.New("Could not verify signed token.")
 	}
+
+	// if !token.Valid {
+	// 	return nil, errors.New("Invalid token.")
+	// }
 
 	claims := token.Claims.(gojwt.MapClaims)
 
@@ -212,25 +235,35 @@ func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 	return byJwt, nil
 }
 
+// func (self *ByJwt) Sign() string {
+// 	claimsJson, err := json.Marshal(self)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	claims := &gojwt.MapClaims{}
+// 	err = json.Unmarshal(claimsJson, claims)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
+
+// 	jwtSigned, err := token.SignedString(bySigningKey())
+// 	if err != nil {
+// 		panic(err)
+// 	}
+
+// 	return jwtSigned
+// }
+
 func (self *ByJwt) Sign() string {
-	claimsJson, err := json.Marshal(self)
-	if err != nil {
-		panic(err)
-	}
 
-	claims := &gojwt.MapClaims{}
-	err = json.Unmarshal(claimsJson, claims)
-	if err != nil {
-		panic(err)
-	}
-
-	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, claims)
-
+	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, self)
 	jwtSigned, err := token.SignedString(bySigningKey())
 	if err != nil {
 		panic(err)
 	}
-
 	return jwtSigned
 }
 
@@ -242,8 +275,12 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
+		Pro:            self.Pro,
 		DeviceId:       &deviceId,
 		ClientId:       &clientId,
+		RegisteredClaims: gojwt.RegisteredClaims{
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
+		},
 	}
 }
 
@@ -255,6 +292,7 @@ func (self *ByJwt) User() *ByJwt {
 		CreateTime:     self.CreateTime,
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
+		Pro:            self.Pro,
 	}
 }
 
