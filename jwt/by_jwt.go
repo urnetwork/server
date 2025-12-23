@@ -159,6 +159,11 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 		if err == nil {
 			break
 		}
+		// FIXME ignore ExpiredAt validation for now
+		if errors.Is(err, gojwt.ErrTokenExpired) {
+			err = nil
+			break
+		}
 	}
 	if err != nil {
 		return nil, errors.New("Could not verify signed token.")
