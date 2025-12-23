@@ -32,7 +32,7 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx serv
 		// legacy key
 		task.RunOnce("close_expired_contracts"),
 		task.RunAt(server.NowUtc().Add(time.Minute)),
-		task.MaxTime(30*time.Minute),
+		task.MaxTime(1*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
 }
