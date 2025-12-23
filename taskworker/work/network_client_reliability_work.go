@@ -33,9 +33,8 @@ func RemoveOldClientReliabilityStats(
 	removeOldClientReliabilityStats *RemoveOldClientReliabilityStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientReliabilityStatsResult, error) {
-	minTime := server.NowUtc().Add(-10 * 24 * time.Hour)
 	limit := 50000
-	model.RemoveOldClientReliabilityStats(clientSession.Ctx, minTime, limit)
+	model.RemoveOldClientReliabilityStats(clientSession.Ctx, server.NowUtc(), limit)
 	return &RemoveOldClientReliabilityStatsResult{}, nil
 }
 
@@ -163,9 +162,7 @@ func UpdateReliabilities(
 	windowMinTime := maxTime.Add(-1 * time.Hour)
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, windowMinTime, maxTime, false)
 
-	// the use case for these stats is match making, which values near term data over long term data
-	clientMinTime := maxTime.Add(-15 * time.Minute)
-	model.UpdateClientReliabilityScores(clientSession.Ctx, clientMinTime, maxTime, false)
+	model.UpdateClientReliabilityScores(clientSession.Ctx, maxTime, false)
 
 	return &UpdateReliabilitiesResult{
 		MaxTime: maxTime,
@@ -204,9 +201,8 @@ func RemoveOldNetworkReliabilityWindow(
 	removeOldNetworkReliabilityWindow *RemoveOldNetworkReliabilityWindowArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldNetworkReliabilityWindowResult, error) {
-	minTime := server.NowUtc().Add(-10 * 24 * time.Hour)
 	limit := 50000
-	model.RemoveOldNetworkReliabilityWindow(clientSession.Ctx, minTime, limit)
+	model.RemoveOldNetworkReliabilityWindow(clientSession.Ctx, server.NowUtc(), limit)
 	return &RemoveOldNetworkReliabilityWindowResult{}, nil
 }
 
@@ -241,8 +237,7 @@ func RemoveOldClientLocationReliabilities(
 	removeOldClientLocationReliabilities *RemoveOldClientLocationReliabilitiesArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientLocationReliabilitiesResult, error) {
-	minTime := server.NowUtc().Add(-30 * 24 * time.Hour)
-	model.RemoveOldClientLocationReliabilities(clientSession.Ctx, minTime)
+	model.RemoveOldClientLocationReliabilities(clientSession.Ctx, server.NowUtc())
 	return &RemoveOldClientLocationReliabilitiesResult{}, nil
 }
 

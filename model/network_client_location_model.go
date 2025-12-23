@@ -1452,7 +1452,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	        FROM network_client_location_reliability
 
 	        INNER JOIN client_connection_reliability_score ON
-	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id AND
+				client_connection_reliability_score.lookback_index = 0
 
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
@@ -2099,6 +2100,9 @@ type ClientScore struct {
 	MaxBytesPerSecond            ByteCount
 	HasLatencyTest               bool
 	HasSpeedTest                 bool
+
+	LookbackIndex        int
+	LookbackClientScores map[int]*ClientScore
 }
 
 // scores are [0, max], where 0 is best
@@ -2142,6 +2146,20 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
+	addClientScore := func(lookbackClientScore *ClientScore, m map[server.Id]*ClientScore) *ClientScore {
+		clientScore, ok := m[lookbackClientScore.ClientId]
+		if !ok {
+			clientScore = &ClientScore{
+				ClientId:             lookbackClientScore.ClientId,
+				NetworkId:            lookbackClientScore.NetworkId,
+				LookbackClientScores: map[int]*ClientScore{},
+			}
+			m[lookbackClientScore.ClientId] = clientScore
+		}
+		clientScore.LookbackClientScores[lookbackClientScore.LookbackIndex] = lookbackClientScore
+		return clientScore
+	}
+
 	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
@@ -2158,7 +2176,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
 	minScore := 10
-	minIndependentReliabilityWeight := float64(0.5)
+	// 1. near minutes must be perfect
+	// 2. near hours must be at the target sla
+	// 3. mid hours can account for some minor outage
+	// 4. mid days can account for some larger outage
+	minIndependentReliabilityWeights := map[int]float64{
+		1: float64(1.0),
+		2: float64(0.999),
+		3: float64(0.99),
+		4: float64(0.9),
+	}
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
 			relativeLatencyMillisThreshold: 50,
@@ -2222,8 +2249,66 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		}
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
+	loadClientScore := func(result server.PgResult) (lookbackClientScore *ClientScore, cityLocationXId *server.Id, regionLocationXId *server.Id, countryLocationXId *server.Id) {
+		var clientId server.Id
+		var networkId server.Id
+		var netTypeScore int
+		var netTypeScoreSpeed int
+		var minRelativeLatencyMillis int
+		var maxBytesPerSecond ByteCount
+		var hasLatencyTest bool
+		var hasSpeedTest bool
+		var lookbackIndex int
+		var reliabilityWeight float64
+		var independentReliabilityWeight float64
+		server.Raise(result.Scan(
+			&cityLocationXId,
+			&regionLocationXId,
+			&countryLocationXId,
+			&clientId,
+			&networkId,
+			&netTypeScore,
+			&netTypeScoreSpeed,
+			&minRelativeLatencyMillis,
+			&maxBytesPerSecond,
+			&hasLatencyTest,
+			&hasSpeedTest,
+			&lookbackIndex,
+			&reliabilityWeight,
+			&independentReliabilityWeight,
+		))
+		lookbackClientScore = &ClientScore{
+			ClientId:                     clientId,
+			LookbackIndex:                lookbackIndex,
+			NetworkId:                    networkId,
+			ReliabilityWeight:            reliabilityWeight,
+			IndependentReliabilityWeight: independentReliabilityWeight,
+			MinRelativeLatencyMillis:     minRelativeLatencyMillis,
+			MaxBytesPerSecond:            maxBytesPerSecond,
+			HasLatencyTest:               hasLatencyTest,
+			HasSpeedTest:                 hasSpeedTest,
+			Scores:                       map[string]int{},
+			Tiers:                        map[string]int{},
+		}
 
+		netTypeScores := map[RankMode]int{
+			RankModeQuality: netTypeScore,
+			RankModeSpeed:   netTypeScoreSpeed,
+		}
+
+		setScore(
+			lookbackClientScore,
+			netTypeScores,
+			minRelativeLatencyMillis,
+			maxBytesPerSecond,
+			hasLatencyTest,
+			hasSpeedTest,
+		)
+
+		return
+	}
+
+	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -2239,6 +2324,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	            network_client_location_reliability.max_bytes_per_second,
 	            network_client_location_reliability.has_latency_test,
 	            network_client_location_reliability.has_speed_test,
+	            client_connection_reliability_score.lookback_index,
 	            client_connection_reliability_score.reliability_weight,
 	            client_connection_reliability_score.independent_reliability_weight
 
@@ -2253,82 +2339,28 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var cityLocationId server.Id
-				var regionLocationId server.Id
-				var countryLocationId server.Id
-				var clientId server.Id
-				var networkId server.Id
-				var netTypeScore int
-				var netTypeScoreSpeed int
-				var minRelativeLatencyMillis int
-				var maxBytesPerSecond ByteCount
-				var hasLatencyTest bool
-				var hasSpeedTest bool
-				var reliabilityWeight float64
-				var independentReliabilityWeight float64
-				server.Raise(result.Scan(
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
-					&clientId,
-					&networkId,
-					&netTypeScore,
-					&netTypeScoreSpeed,
-					&minRelativeLatencyMillis,
-					&maxBytesPerSecond,
-					&hasLatencyTest,
-					&hasSpeedTest,
-					&reliabilityWeight,
-					&independentReliabilityWeight,
-				))
-				clientScore := &ClientScore{
-					ClientId:                     clientId,
-					NetworkId:                    networkId,
-					ReliabilityWeight:            reliabilityWeight,
-					IndependentReliabilityWeight: independentReliabilityWeight,
-					MinRelativeLatencyMillis:     minRelativeLatencyMillis,
-					MaxBytesPerSecond:            maxBytesPerSecond,
-					HasLatencyTest:               hasLatencyTest,
-					HasSpeedTest:                 hasSpeedTest,
-					Scores:                       map[string]int{},
-					Tiers:                        map[string]int{},
-				}
+				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId := loadClientScore(result)
 
-				netTypeScores := map[RankMode]int{
-					RankModeQuality: netTypeScore,
-					RankModeSpeed:   netTypeScoreSpeed,
-				}
-
-				setScore(
-					clientScore,
-					netTypeScores,
-					minRelativeLatencyMillis,
-					maxBytesPerSecond,
-					hasLatencyTest,
-					hasSpeedTest,
-				)
-
-				clientScores, ok := locationClientScores[cityLocationId]
+				clientScores, ok := locationClientScores[*cityLocationId]
 				if !ok {
 					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[cityLocationId] = clientScores
+					locationClientScores[*cityLocationId] = clientScores
 				}
-				clientScores[clientId] = clientScore
+				addClientScore(lookbackClientScore, clientScores)
 
-				clientScores, ok = locationClientScores[regionLocationId]
+				clientScores, ok = locationClientScores[*regionLocationId]
 				if !ok {
 					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[regionLocationId] = clientScores
+					locationClientScores[*regionLocationId] = clientScores
 				}
-				clientScores[clientId] = clientScore
+				addClientScore(lookbackClientScore, clientScores)
 
-				clientScores, ok = locationClientScores[countryLocationId]
+				clientScores, ok = locationClientScores[*countryLocationId]
 				if !ok {
 					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[countryLocationId] = clientScores
+					locationClientScores[*countryLocationId] = clientScores
 				}
-				clientScores[clientId] = clientScore
-
+				addClientScore(lookbackClientScore, clientScores)
 			}
 		})
 
@@ -2347,6 +2379,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		            network_client_location_reliability.max_bytes_per_second,
 		            network_client_location_reliability.has_latency_test,
 		            network_client_location_reliability.has_speed_test,
+		            client_connection_reliability_score.lookback_index,
 	                client_connection_reliability_score.reliability_weight,
 	                client_connection_reliability_score.independent_reliability_weight
 
@@ -2371,58 +2404,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var cityLocationGroupId *server.Id
-				var regionLocationGroupId *server.Id
-				var countryLocationGroupId *server.Id
-				var clientId server.Id
-				var networkId server.Id
-				var netTypeScore int
-				var netTypeScoreSpeed int
-				var minRelativeLatencyMillis int
-				var maxBytesPerSecond ByteCount
-				var hasLatencyTest bool
-				var hasSpeedTest bool
-				var reliabilityWeight float64
-				var independentReliabilityWeight float64
-				server.Raise(result.Scan(
-					&cityLocationGroupId,
-					&regionLocationGroupId,
-					&countryLocationGroupId,
-					&clientId,
-					&networkId,
-					&netTypeScore,
-					&netTypeScoreSpeed,
-					&minRelativeLatencyMillis,
-					&maxBytesPerSecond,
-					&hasLatencyTest,
-					&hasSpeedTest,
-					&reliabilityWeight,
-					&independentReliabilityWeight,
-				))
-				clientScore := &ClientScore{
-					ClientId:                     clientId,
-					NetworkId:                    networkId,
-					ReliabilityWeight:            reliabilityWeight,
-					IndependentReliabilityWeight: independentReliabilityWeight,
-					MinRelativeLatencyMillis:     minRelativeLatencyMillis,
-					MaxBytesPerSecond:            maxBytesPerSecond,
-					Scores:                       map[string]int{},
-					Tiers:                        map[string]int{},
-				}
-
-				netTypeScores := map[RankMode]int{
-					RankModeQuality: netTypeScore,
-					RankModeSpeed:   netTypeScoreSpeed,
-				}
-
-				setScore(
-					clientScore,
-					netTypeScores,
-					minRelativeLatencyMillis,
-					maxBytesPerSecond,
-					hasLatencyTest,
-					hasSpeedTest,
-				)
+				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := loadClientScore(result)
 
 				if cityLocationGroupId != nil {
 					clientScores, ok := locationGroupClientScores[*cityLocationGroupId]
@@ -2430,7 +2412,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 						clientScores = map[server.Id]*ClientScore{}
 						locationGroupClientScores[*cityLocationGroupId] = clientScores
 					}
-					clientScores[clientId] = clientScore
+					addClientScore(lookbackClientScore, clientScores)
 				}
 
 				if regionLocationGroupId != nil {
@@ -2439,7 +2421,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 						clientScores = map[server.Id]*ClientScore{}
 						locationGroupClientScores[*regionLocationGroupId] = clientScores
 					}
-					clientScores[clientId] = clientScore
+					addClientScore(lookbackClientScore, clientScores)
 				}
 
 				if countryLocationGroupId != nil {
@@ -2448,11 +2430,43 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 						clientScores = map[server.Id]*ClientScore{}
 						locationGroupClientScores[*countryLocationGroupId] = clientScores
 					}
-					clientScores[clientId] = clientScore
+					addClientScore(lookbackClientScore, clientScores)
 				}
 			}
 		})
 	})
+
+	// migration: set each client score to the lowest independent reliability lookback index
+	migrateClientScore := func(clientScore *ClientScore) {
+		lookbackIndexes := maps.Keys(clientScore.LookbackClientScores)
+		minLookbackIndex := lookbackIndexes[0]
+		for _, lookbackIndex := range lookbackIndexes[1:] {
+			if clientScore.LookbackClientScores[lookbackIndex].IndependentReliabilityWeight < clientScore.LookbackClientScores[minLookbackIndex].IndependentReliabilityWeight {
+				minLookbackIndex = lookbackIndex
+			}
+		}
+
+		minClientScore := clientScore.LookbackClientScores[minLookbackIndex]
+
+		clientScore.Scores = minClientScore.Scores
+		clientScore.ReliabilityWeight = minClientScore.ReliabilityWeight
+		clientScore.IndependentReliabilityWeight = minClientScore.IndependentReliabilityWeight
+		clientScore.Tiers = minClientScore.Tiers
+		clientScore.MinRelativeLatencyMillis = minClientScore.MinRelativeLatencyMillis
+		clientScore.MaxBytesPerSecond = minClientScore.MaxBytesPerSecond
+		clientScore.HasLatencyTest = minClientScore.HasLatencyTest
+		clientScore.HasSpeedTest = minClientScore.HasSpeedTest
+	}
+	for _, clientScores := range locationClientScores {
+		for _, clientScore := range clientScores {
+			migrateClientScore(clientScore)
+		}
+	}
+	for _, clientScores := range locationGroupClientScores {
+		for _, clientScore := range clientScores {
+			migrateClientScore(clientScore)
+		}
+	}
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
@@ -2460,9 +2474,21 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		counts []int,
 		samples [][]*ClientScore,
 	) {
+		passesMinimum := func(clientScore *ClientScore) bool {
+			if forceMinimum {
+				return true
+			}
+			// all lookback thresholds must pass
+			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
+				if lookbackClientScore.IndependentReliabilityWeight < minIndependentReliabilityWeights[lookbackIndex] || lookbackClientScore.Scores[rankMode] < minScore {
+					return false
+				}
+			}
+			return true
+		}
 		clientScores := []*ClientScore{}
 		for _, clientScore := range s {
-			if forceMinimum || minIndependentReliabilityWeight <= clientScore.IndependentReliabilityWeight && minScore <= clientScore.Scores[rankMode] {
+			if passesMinimum(clientScore) {
 				clientScores = append(clientScores, clientScore)
 			}
 		}

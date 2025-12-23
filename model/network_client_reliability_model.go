@@ -30,6 +30,20 @@ import (
 //     must be updated by at most one caller at a time
 //     a serial task is expected to update this
 
+const ClientExpiration = 30 * 24 * time.Hour
+
+var ClientLookbacks = []time.Duration{
+	5 * time.Minute,
+	60 * time.Minute,
+	12 * time.Hour,
+	6 * 24 * time.Hour,
+}
+
+const NetworkWindowLookback = 7 * 24 * time.Hour
+const NetworkWindowExpiration = 15 * 24 * time.Hour
+
+const ClientLocationExpiration = 30 * 24 * time.Hour
+
 const ReliabilityBlockDuration = 60 * time.Second
 const ReliabilityWindowBucketDuration = 15 * time.Minute
 
@@ -100,7 +114,8 @@ func AddClientReliabilityStats(
 	})
 }
 
-func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time, limit int) {
+func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) {
+	minTime := maxTime.Add(-ClientExpiration)
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -138,16 +153,14 @@ type ReliabilityScore struct {
 	ReliabilityWeight            float64
 }
 
-// FIXME support country_location_id
 // this should run regulalry to keep the client scores up to date
-func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		if complete {
+			maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
+			minTime := maxTime.Add(-maxLookback)
 			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 		}
-
-		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -156,67 +169,78 @@ func UpdateClientReliabilityScores(ctx context.Context, minTime time.Time, maxTi
 			`,
 		))
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO client_connection_reliability_score (
-				client_id,
-				independent_reliability_score,
-				independent_reliability_weight,
-				reliability_score,
-				reliability_weight,
-				min_block_number,
-				max_block_number,
-				city_location_id,
-				region_location_id,
-				country_location_id
-			)
-			SELECT
-			    t.client_id,
-			    SUM(1.0) AS independent_reliability_score,
-			    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
-			    SUM(1.0/t.valid_client_count) AS reliability_score,
-			    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
-			    $1 AS min_block_number,
-				$2 AS max_block_number,
-				t.city_location_id,
-				t.region_location_id,
-				t.country_location_id
-			FROM (
+		for lookbackIndex, lookback := range ClientLookbacks {
+			minTime := maxTime.Add(-lookback)
+			minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+			maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_connection_reliability_score (
+					client_id,
+					lookback_index,
+					independent_reliability_score,
+					independent_reliability_weight,
+					reliability_score,
+					reliability_weight,
+					min_block_number,
+					max_block_number,
+					city_location_id,
+					region_location_id,
+					country_location_id
+				)
 				SELECT
-					client_reliability.client_id,
-					network_client_location_reliability.city_location_id,
-					network_client_location_reliability.region_location_id,
-					network_client_location_reliability.country_location_id,
-			        COUNT(*) OVER (PARTITION BY client_reliability.block_number, client_reliability.client_address_hash) valid_client_count
-			    FROM client_reliability
-			    INNER JOIN network_client_location_reliability ON
-					network_client_location_reliability.client_id = client_reliability.client_id AND
-					network_client_location_reliability.valid = true
-			    WHERE
-					client_reliability.valid = true AND
-			    	$1 <= client_reliability.block_number AND
-			    	client_reliability.block_number < $2
-			) t
-			GROUP BY t.client_id, t.city_location_id, t.region_location_id, t.country_location_id
-			ORDER BY t.client_id
-			`,
-			minBlockNumber,
-			maxBlockNumber,
-		))
+				    t.client_id,
+				    $3,
+				    SUM(1.0) AS independent_reliability_score,
+				    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
+				    SUM(1.0/t.valid_client_count) AS reliability_score,
+				    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+				    $1 AS min_block_number,
+					$2 AS max_block_number,
+					t.city_location_id,
+					t.region_location_id,
+					t.country_location_id
+				FROM (
+					SELECT
+						client_reliability.client_id,
+						network_client_location_reliability.city_location_id,
+						network_client_location_reliability.region_location_id,
+						network_client_location_reliability.country_location_id,
+				        COUNT(*) OVER (PARTITION BY client_reliability.block_number, client_reliability.client_address_hash) valid_client_count
+				    FROM client_reliability
+				    INNER JOIN network_client_location_reliability ON
+						network_client_location_reliability.client_id = client_reliability.client_id AND
+						network_client_location_reliability.valid = true
+				    WHERE
+						client_reliability.valid = true AND
+				    	$1 <= client_reliability.block_number AND
+				    	client_reliability.block_number < $2
+				) t
+				GROUP BY t.client_id, t.city_location_id, t.region_location_id, t.country_location_id
+				ORDER BY t.client_id
+				`,
+				minBlockNumber,
+				maxBlockNumber,
+				lookbackIndex,
+			))
+
+		}
 
 	}, server.TxReadCommitted)
 }
 
-func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server.Id]ReliabilityScore) {
+func GetAllClientReliabilityScores(ctx context.Context) (lookbackClientScores map[int]map[server.Id]ReliabilityScore) {
 	server.Db(ctx, func(conn server.PgConn) {
-		clientScores = map[server.Id]ReliabilityScore{}
+		lookbackClientScores = map[int]map[server.Id]ReliabilityScore{}
 
 		result, err := conn.Query(
 			ctx,
 			`
 			SELECT
 				client_id,
+				lookback_index,
 				independent_reliability_score,
 				independent_reliability_weight,
 				reliability_score,
@@ -227,14 +251,21 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var clientId server.Id
+				var lookbackIndex int
 				var s ReliabilityScore
 				server.Raise(result.Scan(
 					&clientId,
+					&lookbackIndex,
 					&s.IndependentReliabilityScore,
 					&s.IndependentReliabilityWeight,
 					&s.ReliabilityScore,
 					&s.ReliabilityWeight,
 				))
+				clientScores, ok := lookbackClientScores[lookbackIndex]
+				if !ok {
+					clientScores = map[server.Id]ReliabilityScore{}
+					lookbackClientScores[lookbackIndex] = clientScores
+				}
 				clientScores[clientId] = s
 			}
 		})
@@ -635,7 +666,7 @@ func ReliabilityBlockCountPerBucket() int {
 
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -702,8 +733,9 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 	}, server.TxReadCommitted)
 }
 
-func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, limit int) {
+func RemoveOldNetworkReliabilityWindow(ctx context.Context, maxTime time.Time, limit int) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		minTime := maxTime.Add(-NetworkWindowExpiration)
 		minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - 1
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
@@ -731,13 +763,15 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, l
 	}, server.TxReadCommitted)
 }
 
-func UpdateNetworkReliabilityWindowScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateNetworkReliabilityWindowScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
 	}, server.TxReadCommitted)
 }
 
-func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, complete bool) {
+	minTime := maxTime.Add(-NetworkWindowLookback)
+
 	if complete {
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 	}
@@ -1241,8 +1275,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// })
 }
 
-func RemoveOldClientLocationReliabilities(ctx context.Context, minTime time.Time) {
+func RemoveOldClientLocationReliabilities(ctx context.Context, maxTime time.Time) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		minTime := maxTime.Add(-ClientLocationExpiration)
 		minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 		server.RaisePgResult(tx.Exec(
