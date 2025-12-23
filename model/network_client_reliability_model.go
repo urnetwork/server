@@ -30,20 +30,19 @@ import (
 //     must be updated by at most one caller at a time
 //     a serial task is expected to update this
 
-const ClientExpiration = 30 * time.Day
+const ClientExpiration = 30 * 24 * time.Hour
 
 var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
 	60 * time.Minute,
 	12 * time.Hour,
-	6 * time.Day,
+	6 * 24 * time.Hour,
 }
 
-const NetworkWindowLookback = 6 * time.Day
+const NetworkWindowLookback = 7 * 24 * time.Hour
+const NetworkWindowExpiration = 15 * 24 * time.Hour
 
-const NetworkWindowExpiration = 6 * time.Day
-
-const LocationExpiration = 30 * time.Day
+const ClientLocationExpiration = 30 * 24 * time.Hour
 
 const ReliabilityBlockDuration = 60 * time.Second
 const ReliabilityWindowBucketDuration = 15 * time.Minute
@@ -115,8 +114,8 @@ func AddClientReliabilityStats(
 	})
 }
 
-// FIXME use ClientExpiration
-func RemoveOldClientReliabilityStats(ctx context.Context, minTime time.Time, limit int) {
+func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) {
+	minTime := maxTime.Add(-ClientExpiration)
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -154,7 +153,6 @@ type ReliabilityScore struct {
 	ReliabilityWeight            float64
 }
 
-// FIXME support country_location_id
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -233,9 +231,9 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 	}, server.TxReadCommitted)
 }
 
-func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server.Id]map[int]ReliabilityScore) {
+func GetAllClientReliabilityScores(ctx context.Context) (lookbackClientScores map[int]map[server.Id]ReliabilityScore) {
 	server.Db(ctx, func(conn server.PgConn) {
-		clientScores = map[server.Id]map[int]ReliabilityScore{}
+		lookbackClientScores = map[int]map[server.Id]ReliabilityScore{}
 
 		result, err := conn.Query(
 			ctx,
@@ -263,12 +261,12 @@ func GetAllClientReliabilityScores(ctx context.Context) (clientScores map[server
 					&s.ReliabilityScore,
 					&s.ReliabilityWeight,
 				))
-				m, ok := clientScores[clientId]
+				clientScores, ok := lookbackClientScores[lookbackIndex]
 				if !ok {
-					m = map[int]ReliabilityScore{}
-					clientScores[clientId] = m
+					clientScores = map[server.Id]ReliabilityScore{}
+					lookbackClientScores[lookbackIndex] = clientScores
 				}
-				m[lookbackIndex] = s
+				clientScores[clientId] = s
 			}
 		})
 	})
@@ -668,7 +666,7 @@ func ReliabilityBlockCountPerBucket() int {
 
 func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
 
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
@@ -735,9 +733,9 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 	}, server.TxReadCommitted)
 }
 
-// FIXME use preset expiration
-func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, limit int) {
+func RemoveOldNetworkReliabilityWindow(ctx context.Context, maxTime time.Time, limit int) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		minTime := maxTime.Add(-NetworkWindowExpiration)
 		minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - 1
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
@@ -765,14 +763,15 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, minTime time.Time, l
 	}, server.TxReadCommitted)
 }
 
-func UpdateNetworkReliabilityWindowScores(ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateNetworkReliabilityWindowScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, minTime, maxTime, complete)
+		UpdateNetworkReliabilityWindowScoresInTx(tx, ctx, maxTime, complete)
 	}, server.TxReadCommitted)
 }
 
-// FIXME use default lookback
-func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time, complete bool) {
+func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, complete bool) {
+	minTime := maxTime.Add(-NetworkWindowLookback)
+
 	if complete {
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 	}
@@ -1276,9 +1275,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	// })
 }
 
-// FIXME use preset expiration
-func RemoveOldClientLocationReliabilities(ctx context.Context, minTime time.Time) {
+func RemoveOldClientLocationReliabilities(ctx context.Context, maxTime time.Time) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		minTime := maxTime.Add(-ClientLocationExpiration)
 		minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 		server.RaisePgResult(tx.Exec(

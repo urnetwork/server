@@ -152,9 +152,10 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		}
 		endTime := startTime.Add(time.Duration(n) * ReliabilityBlockDuration)
 
-		UpdateClientReliabilityScores(ctx, startTime, endTime, true)
+		UpdateClientReliabilityScores(ctx, endTime, true)
 
-		clientScores := GetAllClientReliabilityScores(ctx)
+		lookbackClientScores := GetAllClientReliabilityScores(ctx)
+		clientScores := lookbackClientScores[3]
 		for clientId, reliabilityScore := range netReliabilityScores {
 			d := reliabilityScore - clientScores[clientId].ReliabilityScore
 			if d < -eps || eps < d {
