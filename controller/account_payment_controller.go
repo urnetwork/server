@@ -174,7 +174,7 @@ func AdvancePayment(
 ) (*AdvancePaymentResult, error) {
 	model.UpdatePaymentWallet(clientSession.Ctx, advancePaymentArgs.PaymentId)
 	payment, err := model.GetPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
-	if err != nil {
+	if payment == nil || err != nil {
 		// payment doesn't exist
 		return &AdvancePaymentResult{
 			Complete: false,
