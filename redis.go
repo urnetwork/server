@@ -85,6 +85,8 @@ func (self *safeRedisClient) open() *redis.Client {
 			// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 			// see https://uptrace.dev/blog/golang-context-timeout.html
 			ContextTimeoutEnabled: false,
+			ReadTimeout:           30 * time.Second,
+			WriteTimeout:          15 * time.Second,
 		}
 		self.client = redis.NewClient(options)
 	}
