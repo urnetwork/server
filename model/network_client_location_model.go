@@ -2184,7 +2184,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		1: float64(1.0),
 		2: float64(0.999),
 		3: float64(0.99),
-		4: float64(0.9),
+		// 4: float64(0.9),
 	}
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{

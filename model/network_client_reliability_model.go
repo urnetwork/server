@@ -36,7 +36,7 @@ var ClientLookbacks = []time.Duration{
 	5 * time.Minute,
 	60 * time.Minute,
 	12 * time.Hour,
-	6 * 24 * time.Hour,
+	// 6 * 24 * time.Hour,
 }
 
 const NetworkWindowLookback = 7 * 24 * time.Hour
