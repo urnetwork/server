@@ -118,6 +118,12 @@ func WalletValidateAddress(
 	session *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
 
+	if walletValidateAddress.Address == solanaUSDCAddress() {
+		return &WalletValidateAddressResult{
+			Valid: false,
+		}, nil
+	}
+
 	_, err := solana.PublicKeyFromBase58(walletValidateAddress.Address)
 	if err != nil {
 		return &WalletValidateAddressResult{

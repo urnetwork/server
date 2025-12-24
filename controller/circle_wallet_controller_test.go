@@ -85,6 +85,17 @@ func TestWalletValidateAddress(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, validateResult.Valid, false)
+
+		// test passing USDC mint address as wallet address
+		validateResult, err = WalletValidateAddress(
+			&WalletValidateAddressArgs{
+				Address: solanaUSDCAddress(),
+				Chain:   model.SOL.String(),
+			},
+			session,
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, validateResult.Valid, false)
 	})
 }
 
