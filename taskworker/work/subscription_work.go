@@ -45,7 +45,7 @@ func CloseExpiredContracts(
 	_, err := model.ForceCloseOpenContractIds(
 		clientSession.Ctx,
 		minTime,
-		100000,
+		1000000,
 		48,
 	)
 
