@@ -942,6 +942,13 @@ func (self *TaskWorker) RunPost(
 		return
 	}
 
+	// attach the finished task function name and args
+	defer func() {
+		if returnErr != nil {
+			returnErr = fmt.Errorf("%s(%s) = %s", finishedTask.FunctionName, finishedTask.ArgsJson, returnErr.Error())
+		}
+	}()
+
 	// update legacy function names
 	finishedTask.FunctionName = updateFunctionName(finishedTask.FunctionName)
 

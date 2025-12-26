@@ -878,7 +878,7 @@ func taskLs(opts docopt.Opts) {
 		remaining := (task.RunAt.Sub(now) / time.Second) * time.Second
 		runAtStr := fmt.Sprintf("%s", remaining)
 		if task.RescheduleError != "" {
-			fmt.Printf("[%8s]  %s %s: rescheduled err = %s\n", runAtStr, taskId, task.FunctionName, task.RescheduleError)
+			fmt.Printf("[%8s]  %s %s: rescheduled err = %s (%s)\n", runAtStr, taskId, task.FunctionName, task.RescheduleError, task.ArgsJson)
 		} else {
 			fmt.Printf("[%8s]  %s %s\n", runAtStr, taskId, task.FunctionName)
 		}
