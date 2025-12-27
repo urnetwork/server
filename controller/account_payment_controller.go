@@ -337,34 +337,34 @@ func advancePayment(
 
 		payoutAmount := model.NanoCentsToUsd(payment.Payout)
 
-		feeInUSDC, err := func() (float64, error) {
-			estimatedFees, err := circleClient.EstimateTransferFee(
-				clientSession.Ctx,
-				payoutAmount,
-				accountWallet.WalletAddress,
-				formattedBlockchain,
-			)
-			if err != nil {
-				return 0, fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
-			}
+		// feeInUSDC, err := func() (float64, error) {
+		// 	estimatedFees, err := circleClient.EstimateTransferFee(
+		// 		clientSession.Ctx,
+		// 		payoutAmount,
+		// 		accountWallet.WalletAddress,
+		// 		formattedBlockchain,
+		// 	)
+		// 	if err != nil {
+		// 		return 0, fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
+		// 	}
 
-			fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
-			if err != nil {
-				return 0, err
-			}
+		// 	fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
+		// 	if err != nil {
+		// 		return 0, err
+		// 	}
 
-			feeInUSDC, err := ConvertFeeToUSDC(clientSession.Ctx, formattedBlockchain, *fee)
-			if err != nil {
-				return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
-			}
+		// 	feeInUSDC, err := ConvertFeeToUSDC(clientSession.Ctx, formattedBlockchain, *fee)
+		// 	if err != nil {
+		// 		return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
+		// 	}
 
-			return feeInUSDC, nil
-		}()
-		if err != nil {
-			// just choose a reasonable value
-			glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
-			feeInUSDC = 0.01
-		}
+		// 	return feeInUSDC, nil
+		// }()
+		// if err != nil {
+		// just choose a reasonable value
+		// glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
+		feeInUSDC := 0.01
+		// }
 
 		payoutAmount = payoutAmount - feeInUSDC
 
