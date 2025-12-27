@@ -175,6 +175,7 @@ func initTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			task.TaskCleanup,
 			task.TaskCleanupPost,
+			"main.TaskCleanup",
 		),
 		// task.NewTaskTargetWithPost(work.WarmEmail, work.WarmEmailPost),
 		task.NewTaskTargetWithPost(
