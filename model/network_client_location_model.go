@@ -1767,6 +1767,7 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 	return
 }
 
+// a missing entry means the location has no providers
 func loadLocationStables(
 	ctx context.Context,
 	locationIds []server.Id,
@@ -1796,6 +1797,7 @@ func loadLocationStables(
 		for locationId, filterCmd := range locationFilterCmds {
 			filterBytes, _ := filterCmd.Bytes()
 			if len(filterBytes) == 0 {
+				// there are no providers
 				continue
 			}
 			b := bytes.NewBuffer(filterBytes)
@@ -1805,10 +1807,15 @@ func loadLocationStables(
 			if returnErr != nil {
 				return
 			}
-			if filter.MinReliabilityIndex == 0 && minStableProviderCount <= filter.Count {
-				locationStables[locationId] = true
+			if 0 < filter.Count {
+				if filter.Index == 0 && minStableProviderCount <= filter.Count {
+					locationStables[locationId] = true
+				} else {
+					// there are providers, but not the highest quality
+					locationStables[locationId] = false
+				}
 			}
-			// else the providers are using a relaxed reliability filter, or there are not enough providers
+			// else there are no providers
 		}
 	})
 	return
@@ -1912,21 +1919,24 @@ func FindProviderLocations(
 		locationResults := []*LocationResult{}
 
 		for locationId, clientLocation := range clientLocations {
-			locationResult := &LocationResult{
-				LocationId:        clientLocation.LocationId,
-				LocationType:      clientLocation.LocationType,
-				Name:              clientLocation.Name,
-				CityLocationId:    clientLocation.CityLocationId,
-				RegionLocationId:  clientLocation.RegionLocationId,
-				CountryLocationId: clientLocation.CountryLocationId,
-				CountryCode:       clientLocation.CountryCode,
-				ProviderCount:     clientLocation.ClientCount,
-				StrongPrivacy:     clientLocation.StrongPrivacy,
-				Stable:            locationStables[locationId],
-				MatchDistance:     matchDistances[locationId],
-			}
+			stable, ok := locationStables[locationId]
+			if ok {
+				locationResult := &LocationResult{
+					LocationId:        clientLocation.LocationId,
+					LocationType:      clientLocation.LocationType,
+					Name:              clientLocation.Name,
+					CityLocationId:    clientLocation.CityLocationId,
+					RegionLocationId:  clientLocation.RegionLocationId,
+					CountryLocationId: clientLocation.CountryLocationId,
+					CountryCode:       clientLocation.CountryCode,
+					ProviderCount:     clientLocation.ClientCount,
+					StrongPrivacy:     clientLocation.StrongPrivacy,
+					Stable:            stable,
+					MatchDistance:     matchDistances[locationId],
+				}
 
-			locationResults = append(locationResults, locationResult)
+				locationResults = append(locationResults, locationResult)
+			}
 		}
 
 		result := &FindLocationsResult{
@@ -2103,8 +2113,8 @@ type ClientScore struct {
 }
 
 type ClientFilter struct {
-	Count               int
-	MinReliabilityIndex int
+	Count int
+	Index int
 }
 
 // scores are [0, max], where 0 is best
@@ -2195,29 +2205,39 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	scorePerTier := 20
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
-	minScore := 10
-	// if no providers match the first sla targets,
-	// the next targets are used, etc.
-	allMinIndependentReliabilityWeights := []map[int]float64{
-		// 1. near minutes must be perfect
-		// 2. near hours must be the target sla
-		// 3. mid hours can account for some minor outage
-		map[int]float64{
-			1: float64(1.0),
-			2: float64(0.999),
-			3: float64(0.99),
+
+	type filter struct {
+		maxScore                         int
+		minIndependentReliabilityWeights map[int]float64
+	}
+
+	filters := []filter{
+		filter{
+			maxScore: scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(1.0),
+				2: float64(0.999),
+				3: float64(0.99),
+			},
 		},
-		map[int]float64{
-			1: float64(0.99),
-			2: float64(0.9),
-			3: float64(0.9),
+		filter{
+			maxScore: 2 * scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.99),
+				2: float64(0.9),
+				3: float64(0.8),
+			},
 		},
-		map[int]float64{
-			1: float64(0.9),
-			2: float64(0.8),
-			3: float64(0.8),
+		filter{
+			maxScore: 2 * scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.9),
+				2: float64(0.8),
+				3: float64(0.7),
+			},
 		},
 	}
+
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
 			relativeLatencyMillisThreshold: 50,
@@ -2509,14 +2529,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		filter *ClientFilter,
 	) {
 		clientScores := []*ClientScore{}
-		for i, minIndependentReliabilityWeights := range allMinIndependentReliabilityWeights {
+		for i, f := range filters {
 			passesMinimum := func(clientScore *ClientScore) bool {
 				if forceMinimum {
 					return true
 				}
 				// all lookback thresholds must pass
 				for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-					if lookbackClientScore.IndependentReliabilityWeight < minIndependentReliabilityWeights[lookbackIndex] || lookbackClientScore.Scores[rankMode] < minScore {
+					if lookbackClientScore.IndependentReliabilityWeight < f.minIndependentReliabilityWeights[lookbackIndex] || f.maxScore <= lookbackClientScore.Scores[rankMode] {
 						return false
 					}
 				}
@@ -2529,8 +2549,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			}
 			if 0 < len(clientScores) {
 				filter = &ClientFilter{
-					Count:               len(clientScores),
-					MinReliabilityIndex: i,
+					Index: i,
+					Count: len(clientScores),
 				}
 				break
 			}
