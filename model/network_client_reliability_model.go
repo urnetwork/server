@@ -66,50 +66,66 @@ func AddClientReliabilityStats(
 	statsTime time.Time,
 	stats *ClientReliabilityStats,
 ) {
-	blockNumber := statsTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	AddClientReliabilityStatsRange(ctx, networkId, clientId, clientAddressHash, statsTime, statsTime, stats)
+}
+
+func AddClientReliabilityStatsRange(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	clientAddressHash [32]byte,
+	statsStartTime time.Time,
+	statsEndTime time.Time,
+	stats *ClientReliabilityStats,
+) {
+	startBlockNumber := statsStartTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	endBlockNumber := statsEndTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO client_reliability (
-				block_number,
-				client_address_hash,
-				network_id,
-				client_id,
-				connection_new_count,
-		        connection_established_count,
-		        provide_enabled_count,
-		        provide_changed_count,
-		        receive_message_count,
-		        receive_byte_count,
-		        send_message_count,
-		        send_byte_count
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-			ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
-			SET
-				connection_new_count = client_reliability.connection_new_count + $5,
-		        connection_established_count = client_reliability.connection_established_count + $6,
-		        provide_enabled_count = client_reliability.provide_enabled_count + $7,
-		        provide_changed_count = client_reliability.provide_changed_count + $8,
-		        receive_message_count = client_reliability.receive_message_count + $9,
-		        receive_byte_count = client_reliability.receive_byte_count + $10,
-		        send_message_count = client_reliability.send_message_count + $11,
-		        send_byte_count = client_reliability.send_byte_count + $12
-			`,
-			blockNumber,
-			clientAddressHash[:],
-			networkId,
-			clientId,
-			stats.ConnectionNewCount,
-			stats.ConnectionEstablishedCount,
-			stats.ProvideEnabledCount,
-			stats.ProvideChangedCount,
-			stats.ReceiveMessageCount,
-			stats.ReceiveByteCount,
-			stats.SendMessageCount,
-			stats.SendByteCount,
-		))
+		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+			for blockNumber := startBlockNumber; blockNumber <= endBlockNumber; blockNumber += 1 {
+				batch.Queue(
+					`
+					INSERT INTO client_reliability (
+						block_number,
+						client_address_hash,
+						network_id,
+						client_id,
+						connection_new_count,
+				        connection_established_count,
+				        provide_enabled_count,
+				        provide_changed_count,
+				        receive_message_count,
+				        receive_byte_count,
+				        send_message_count,
+				        send_byte_count
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+					ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
+					SET
+						connection_new_count = client_reliability.connection_new_count + $5,
+				        connection_established_count = client_reliability.connection_established_count + $6,
+				        provide_enabled_count = client_reliability.provide_enabled_count + $7,
+				        provide_changed_count = client_reliability.provide_changed_count + $8,
+				        receive_message_count = client_reliability.receive_message_count + $9,
+				        receive_byte_count = client_reliability.receive_byte_count + $10,
+				        send_message_count = client_reliability.send_message_count + $11,
+				        send_byte_count = client_reliability.send_byte_count + $12
+					`,
+					blockNumber,
+					clientAddressHash[:],
+					networkId,
+					clientId,
+					stats.ConnectionNewCount,
+					stats.ConnectionEstablishedCount,
+					stats.ProvideEnabledCount,
+					stats.ProvideChangedCount,
+					stats.ReceiveMessageCount,
+					stats.ReceiveByteCount,
+					stats.SendMessageCount,
+					stats.SendByteCount,
+				)
+			}
+		})
 
 	})
 }

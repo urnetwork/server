@@ -363,12 +363,13 @@ func (self *ConnectionAnnounce) run() {
 					established = provideEnabled
 					stats.ConnectionNewCount = 1
 				}
-				model.AddClientReliabilityStats(
+				model.AddClientReliabilityStatsRange(
 					self.ctx,
 					self.networkId,
 					self.clientId,
 					clientAddressHash,
 					startTime,
+					nextStartTime,
 					stats,
 				)
 			}
