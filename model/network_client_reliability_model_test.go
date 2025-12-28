@@ -5,8 +5,11 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
+
+	"golang.org/x/exp/maps"
 
 	"github.com/go-playground/assert/v2"
 
@@ -155,7 +158,10 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		UpdateClientReliabilityScores(ctx, endTime, true)
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
-		clientScores := lookbackClientScores[3]
+		orderedLookbackIndexes := maps.Keys(lookbackClientScores)
+		slices.Sort(orderedLookbackIndexes)
+		// use the max lookback
+		clientScores := lookbackClientScores[orderedLookbackIndexes[len(orderedLookbackIndexes)-1]]
 		for clientId, reliabilityScore := range netReliabilityScores {
 			d := reliabilityScore - clientScores[clientId].ReliabilityScore
 			if d < -eps || eps < d {
