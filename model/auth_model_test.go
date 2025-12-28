@@ -3,9 +3,13 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
+	"log"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/glog"
 
@@ -177,6 +181,49 @@ func TestVerifySolanaSignature(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 		assert.Equal(t, isValid, false)
 
+	})
+}
+
+func TestVerifyEthereumSignature(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		// Create a test wallet
+		privateKey, err := crypto.GenerateKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		address := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+		messageStr := "Hello signature test"
+		message := []byte(messageStr)
+
+		// EIP-191 compliant message hash
+		hash := accounts.TextHash(message)
+
+		signature, err := crypto.Sign(hash, privateKey)
+		if err != nil {
+			log.Fatal(err)
+		}
+		sigHex := hex.EncodeToString(signature)
+
+		isValid, err := VerifyEthereumSignature(address.String(), messageStr, sigHex)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, isValid, true)
+
+		// Test with an invalid signature (modified signature)
+		invalidSigBytes, _ := hex.DecodeString(sigHex)
+		invalidSigBytes[10] ^= 0xFF // Flip some bits in the R or S part
+		invalidSigHex := hex.EncodeToString(invalidSigBytes)
+
+		isValid, err = VerifyEthereumSignature(address.String(), messageStr, invalidSigHex)
+		assert.Equal(t, isValid, false)
+
+		// Malformed signature (wrong length)
+		malformedSig := "wrongsig"
+		isValid, err = VerifyEthereumSignature(address.String(), messageStr, malformedSig)
+		assert.NotEqual(t, err, nil) // Error expected
+		assert.Equal(t, isValid, false)
 	})
 }
 

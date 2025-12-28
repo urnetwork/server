@@ -34,7 +34,7 @@ func TestAccountWallet(t *testing.T) {
 
 		// invalid chain
 		result, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
-			Blockchain: "ETH",
+			Blockchain: "BTC",
 		}, ownerSession)
 		assert.Equal(t, result, nil)
 		assert.Equal(t, err, ErrInvalidBlockchain)

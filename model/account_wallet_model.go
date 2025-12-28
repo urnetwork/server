@@ -68,10 +68,10 @@ func CreateAccountWalletExternal(
 		existingRow := tx.QueryRow(
 			session.Ctx,
 			`
-							SELECT wallet_id
-							FROM account_wallet
-							WHERE network_id = $1 AND wallet_address = $2
-					`,
+					SELECT wallet_id
+					FROM account_wallet
+					WHERE network_id = $1 AND wallet_address = $2
+			`,
 			createAccountWallet.NetworkId,
 			createAccountWallet.WalletAddress,
 		)
@@ -100,18 +100,18 @@ func CreateAccountWalletExternal(
 		_, err = tx.Exec(
 			session.Ctx,
 			`
-							INSERT INTO account_wallet (
-									wallet_id,
-									network_id,
-									wallet_type,
-									blockchain,
-									wallet_address,
-									active,
-									default_token_type,
-									create_time
-							)
-							VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-					`,
+				INSERT INTO account_wallet (
+						wallet_id,
+						network_id,
+						wallet_type,
+						blockchain,
+						wallet_address,
+						active,
+						default_token_type,
+						create_time
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`,
 			id,
 			createAccountWallet.NetworkId,
 			WalletTypeExternal,
