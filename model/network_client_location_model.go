@@ -1781,37 +1781,34 @@ func loadLocationStables(
 	locationStables = map[server.Id]bool{}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		locationCountsCmds := map[server.Id]*redis.StringCmd{}
+		locationFilterCmds := map[server.Id]*redis.StringCmd{}
 
 		pipe := r.TxPipeline()
 		for _, locationId := range locationIds {
-			locationCountsCmds[locationId] = pipe.Get(
+			locationFilterCmds[locationId] = pipe.Get(
 				ctx,
-				clientScoreLocationCountsKey(false, rankMode, locationId, clientLocationId),
+				clientScoreLocationFilterKey(false, rankMode, locationId, clientLocationId),
 			)
 		}
 		// note ignore the error for GET since it will include missing key
 		pipe.Exec(ctx)
 
-		for locationId, countsCmd := range locationCountsCmds {
-			countsBytes, _ := countsCmd.Bytes()
-			if len(countsBytes) == 0 {
+		for locationId, filterCmd := range locationFilterCmds {
+			filterBytes, _ := filterCmd.Bytes()
+			if len(filterBytes) == 0 {
 				continue
 			}
-			b := bytes.NewBuffer(countsBytes)
+			b := bytes.NewBuffer(filterBytes)
 			e := gob.NewDecoder(b)
-			var counts []int
-			returnErr = e.Decode(&counts)
+			var filter ClientFilter
+			returnErr = e.Decode(&filter)
 			if returnErr != nil {
 				return
 			}
-			netCount := 0
-			for _, count := range counts {
-				netCount += count
-			}
-			if minStableProviderCount <= netCount {
+			if filter.MinReliabilityIndex == 0 && minStableProviderCount <= filter.Count {
 				locationStables[locationId] = true
 			}
+			// else the providers are using a relaxed reliability filter, or there are not enough providers
 		}
 	})
 	return
@@ -2105,6 +2102,11 @@ type ClientScore struct {
 	LookbackClientScores map[int]*ClientScore
 }
 
+type ClientFilter struct {
+	Count               int
+	MinReliabilityIndex int
+}
+
 // scores are [0, max], where 0 is best
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
@@ -2115,7 +2117,7 @@ func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("cs_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
+	return fmt.Sprintf("csc_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
 }
 
 func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
@@ -2124,7 +2126,25 @@ func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("cs_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
+	return fmt.Sprintf("csc_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
+}
+
+func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("csf_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
+}
+
+func clientScoreLocationGroupFilterKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("csf_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
 }
 
 func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id, index int) string {
@@ -2133,7 +2153,7 @@ func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("cs_%d_%c_g_%s_%s_%d", fm, rm, locationId, callerLocationId, index)
+	return fmt.Sprintf("css_%d_%c_l_%s_%s_%d", fm, rm, locationId, callerLocationId, index)
 }
 
 func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id, index int) string {
@@ -2142,7 +2162,7 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("cs_%d_%c_g_%s_%s_%d", fm, rm, locationGroupId, callerLocationId, index)
+	return fmt.Sprintf("css_%d_%c_g_%s_%s_%d", fm, rm, locationGroupId, callerLocationId, index)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
@@ -2176,13 +2196,27 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
 	minScore := 10
-	// 1. near minutes must be perfect
-	// 2. near hours must be the target sla
-	// 3. mid hours can account for some minor outage
-	minIndependentReliabilityWeights := map[int]float64{
-		1: float64(1.0),
-		2: float64(0.999),
-		3: float64(0.99),
+	// if no providers match the first sla targets,
+	// the next targets are used, etc.
+	allMinIndependentReliabilityWeights := []map[int]float64{
+		// 1. near minutes must be perfect
+		// 2. near hours must be the target sla
+		// 3. mid hours can account for some minor outage
+		map[int]float64{
+			1: float64(1.0),
+			2: float64(0.999),
+			3: float64(0.99),
+		},
+		map[int]float64{
+			1: float64(0.99),
+			2: float64(0.9),
+			3: float64(0.9),
+		},
+		map[int]float64{
+			1: float64(0.9),
+			2: float64(0.8),
+			3: float64(0.8),
+		},
 	}
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
@@ -2469,27 +2503,44 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
 		samplesBytes [][]byte,
+		filterBytes []byte,
 		counts []int,
 		samples [][]*ClientScore,
+		filter *ClientFilter,
 	) {
-		passesMinimum := func(clientScore *ClientScore) bool {
-			if forceMinimum {
+		clientScores := []*ClientScore{}
+		for i, minIndependentReliabilityWeights := range allMinIndependentReliabilityWeights {
+			passesMinimum := func(clientScore *ClientScore) bool {
+				if forceMinimum {
+					return true
+				}
+				// all lookback thresholds must pass
+				for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
+					if lookbackClientScore.IndependentReliabilityWeight < minIndependentReliabilityWeights[lookbackIndex] || lookbackClientScore.Scores[rankMode] < minScore {
+						return false
+					}
+				}
 				return true
 			}
-			// all lookback thresholds must pass
-			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-				if lookbackClientScore.IndependentReliabilityWeight < minIndependentReliabilityWeights[lookbackIndex] || lookbackClientScore.Scores[rankMode] < minScore {
-					return false
+			for _, clientScore := range s {
+				if passesMinimum(clientScore) {
+					clientScores = append(clientScores, clientScore)
 				}
 			}
-			return true
-		}
-		clientScores := []*ClientScore{}
-		for _, clientScore := range s {
-			if passesMinimum(clientScore) {
-				clientScores = append(clientScores, clientScore)
+			if 0 < len(clientScores) {
+				filter = &ClientFilter{
+					Count:               len(clientScores),
+					MinReliabilityIndex: i,
+				}
+				break
 			}
+			// else try the next min weights
 		}
+		if filter == nil {
+			// no providers meet the filter
+			return
+		}
+
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
 			clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
 		})
@@ -2521,6 +2572,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		e := gob.NewEncoder(b)
 		e.Encode(counts)
 		countsBytes = b.Bytes()
+
+		b = bytes.NewBuffer(nil)
+		e = gob.NewEncoder(b)
+		e.Encode(filter)
+		filterBytes = b.Bytes()
 
 		return
 	}
@@ -2584,8 +2640,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					glog.Infof("[nclm]export client location[%d/%d] %s\n", j+1, len(clientLocationIds), clientLocationId)
 					for locationId, clientScores := range locationClientScores {
 						activeClientScores := filterActive(clientScores, clientLocationId)
-						countsBytes, samplesBytes, counts, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
+						countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
 						pipe.Set(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId), countsBytes, ttl)
+						pipe.Set(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId), filterBytes, ttl)
 						for i, sampleBytes := range samplesBytes {
 							pipe.Set(ctx, clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i), sampleBytes, ttl)
 						}
@@ -2593,8 +2650,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 					}
 					for locationGroupId, clientScores := range locationGroupClientScores {
 						activeClientScores := filterActive(clientScores, clientLocationId)
-						countsBytes, samplesBytes, counts, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
+						countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
 						pipe.Set(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId), countsBytes, ttl)
+						pipe.Set(ctx, clientScoreLocationGroupFilterKey(forceMinimum, rankMode, locationGroupId, clientLocationId), filterBytes, ttl)
 						for i, sampleBytes := range samplesBytes {
 							pipe.Set(ctx, clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i), sampleBytes, ttl)
 						}
