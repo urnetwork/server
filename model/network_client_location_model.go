@@ -1934,7 +1934,6 @@ func FindProviderLocations(
 					Stable:            stable,
 					MatchDistance:     matchDistances[locationId],
 				}
-
 				locationResults = append(locationResults, locationResult)
 			}
 		}
@@ -1995,19 +1994,22 @@ func GetProviderLocations(
 	locationGroupResults := []*LocationGroupResult{}
 
 	for _, clientLocation := range initialClientLocations.Locations {
-		locationResult := &LocationResult{
-			LocationId:        clientLocation.LocationId,
-			LocationType:      clientLocation.LocationType,
-			Name:              clientLocation.Name,
-			CityLocationId:    clientLocation.CityLocationId,
-			RegionLocationId:  clientLocation.RegionLocationId,
-			CountryLocationId: clientLocation.CountryLocationId,
-			CountryCode:       clientLocation.CountryCode,
-			ProviderCount:     clientLocation.ClientCount,
-			StrongPrivacy:     clientLocation.StrongPrivacy,
-			Stable:            locationStables[clientLocation.LocationId],
+		stable, ok := locationStables[clientLocation.LocationId]
+		if ok {
+			locationResult := &LocationResult{
+				LocationId:        clientLocation.LocationId,
+				LocationType:      clientLocation.LocationType,
+				Name:              clientLocation.Name,
+				CityLocationId:    clientLocation.CityLocationId,
+				RegionLocationId:  clientLocation.RegionLocationId,
+				CountryLocationId: clientLocation.CountryLocationId,
+				CountryCode:       clientLocation.CountryCode,
+				ProviderCount:     clientLocation.ClientCount,
+				StrongPrivacy:     clientLocation.StrongPrivacy,
+				Stable:            stable,
+			}
+			locationResults = append(locationResults, locationResult)
 		}
-		locationResults = append(locationResults, locationResult)
 	}
 	for _, clientLocationGroup := range initialClientLocations.LocationGroups {
 		locationGroupResult := &LocationGroupResult{
