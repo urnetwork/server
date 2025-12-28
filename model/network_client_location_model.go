@@ -2217,9 +2217,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		filter{
 			maxScore: scorePerTier,
 			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(1.0),
-				2: float64(0.999),
-				3: float64(0.99),
+				1: float64(0.999),
+				2: float64(0.99),
+				3: float64(0.9),
 			},
 		},
 		filter{
