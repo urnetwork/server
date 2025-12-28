@@ -14,6 +14,8 @@ import (
 
 	// "github.com/urnetwork/glog"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -434,11 +436,13 @@ func handleLoginWallet(
 	 * Handle wallet login
 	 */
 
-	isValid, err := VerifySolanaSignature(
+	isValid, err := VerifySignature(
+		walletAuth.Blockchain,
 		walletAuth.PublicKey,
 		walletAuth.Message,
 		walletAuth.Signature,
 	)
+
 	if err != nil {
 		returnErr = err
 		return
@@ -542,7 +546,55 @@ func handleLoginWallet(
 	}
 }
 
-// Function to verify a Solana wallet signature
+func VerifySignature(blockchain string, publicKey string, message string, signature string) (bool, error) {
+
+	if blockchain == "" || strings.EqualFold(blockchain, "solana") || strings.EqualFold(blockchain, "sol") {
+		return VerifySolanaSignature(publicKey, message, signature)
+	}
+
+	if strings.EqualFold(blockchain, "ethereum") || strings.EqualFold(blockchain, "eth") || strings.EqualFold(blockchain, "matic") || strings.EqualFold(blockchain, "polygon") || strings.EqualFold(blockchain, "poly") {
+		return VerifyEthereumSignature(publicKey, message, signature)
+	}
+
+	return false, fmt.Errorf("unsupported blockchain: %s", blockchain)
+
+}
+
+/**
+ * Verify Ethereum wallet signature
+ * =================================
+ * publicKey: the wallet address
+ * message:  the signature as a hex string (with or without 0x)
+ * signature: the signature in hex format
+ */
+func VerifyEthereumSignature(publicKey string, message string, signature string) (bool, error) {
+	// Ethereum prefixes messages before signing
+	// https://eips.ethereum.org/EIPS/eip-191
+	prefix := fmt.Sprintf("\x19Ethereum Signed Message:\n%d", len(message))
+	msg := []byte(prefix + message)
+	msgHash := crypto.Keccak256Hash(msg)
+
+	// Decode signature
+	sig := common.FromHex(signature)
+	if len(sig) != 65 {
+		return false, fmt.Errorf("signature must be 65 bytes")
+	}
+	// Ethereum uses v = 27 or 28, Go expects 0 or 1
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(msgHash.Bytes(), sig)
+	if err != nil {
+		return false, err
+	}
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	return recoveredAddr.Hex() == publicKey, nil
+}
+
+/**
+ * Verify a Solana wallet signature
+ */
 func VerifySolanaSignature(publicKeyStr string, message string, signatureStr string) (bool, error) {
 	// Parse the public key from string
 	publicKey, err := solana.PublicKeyFromBase58(publicKeyStr)

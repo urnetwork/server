@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.8
 	github.com/coreos/go-semver v0.3.1
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
+	github.com/ethereum/go-ethereum v1.16.7
 	github.com/go-jose/go-jose/v3 v3.0.4
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
@@ -38,11 +39,20 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
+	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
+	github.com/consensys/gnark-crypto v0.18.0 // indirect
+	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
+	github.com/crate-crypto/go-ipa v0.0.0-20240724233137-53bbb0ceb27a // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
+	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
+	github.com/ethereum/go-verkle v0.2.2 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/gagliardetto/binary v0.8.0 // indirect
 	github.com/gagliardetto/treeout v0.1.4 // indirect
+	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
@@ -55,6 +65,7 @@ require (
 	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20251216203033-fdad0a00f1ca // indirect
+	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	go.mongodb.org/mongo-driver v1.17.6 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect

@@ -2,8 +2,10 @@ package model
 
 import (
 	"context"
+	"log"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -132,5 +134,35 @@ func TestAccountWallet(t *testing.T) {
 		fetchWallet = GetAccountWallet(ctx, fakeId)
 		assert.Equal(t, fetchWallet, nil)
 
+	})
+}
+
+func TestCreateEthereumWallet(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+
+		session := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+		})
+
+		privateKey, err := crypto.GenerateKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		address := crypto.PubkeyToAddress(privateKey.PublicKey)
+
+		args := &CreateAccountWalletExternalArgs{
+			Blockchain:       "ETHEREUM",
+			WalletAddress:    address.String(),
+			DefaultTokenType: "USDC",
+			NetworkId:        networkId,
+		}
+
+		walletId := CreateAccountWalletExternal(session, args)
+		assert.NotEqual(t, walletId, nil)
 	})
 }

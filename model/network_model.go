@@ -505,7 +505,29 @@ func NetworkCreate(
 		 * User is authenticating with a crypto wallet
 		 */
 
-		isValid, err := VerifySolanaSignature(
+		/**
+		 * default empty blockchain to solana
+		 */
+		if networkCreate.WalletAuth.Blockchain == "" {
+			networkCreate.WalletAuth.Blockchain = SOL.String()
+		}
+
+		parsedBlockchain, err := ParseBlockchain(networkCreate.WalletAuth.Blockchain)
+		if err != nil {
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "unsupported blockchain for wallet authentication",
+				},
+			}, nil
+		}
+
+		networkCreate.WalletAuth.Blockchain = parsedBlockchain.String()
+
+		/**
+		 * verify the wallet signature
+		 */
+		isValid, err := VerifySignature(
+			networkCreate.WalletAuth.Blockchain,
 			networkCreate.WalletAuth.PublicKey,
 			networkCreate.WalletAuth.Message,
 			networkCreate.WalletAuth.Signature,
@@ -516,7 +538,11 @@ func NetworkCreate(
 		}
 
 		if !isValid {
-			return nil, errors.New("invalid signature")
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "invalid wallet signature",
+				},
+			}, nil
 		}
 
 		created := false
@@ -546,11 +572,6 @@ func NetworkCreate(
 
 			createdUserId = server.NewId()
 			createdNetworkId = server.NewId()
-
-			/**
-			 * hard set the blockchain to solana for now
-			 */
-			networkCreate.WalletAuth.Blockchain = "solana"
 
 			_, err = tx.Exec(
 				session.Ctx,
@@ -615,24 +636,31 @@ func NetworkCreate(
 			 * Create new payout wallet
 			 */
 
-			walletId := CreateAccountWalletExternal(
-				session,
-				&CreateAccountWalletExternalArgs{
-					NetworkId:        createdNetworkId,
-					Blockchain:       "SOL",
-					WalletAddress:    networkCreate.WalletAuth.PublicKey,
-					DefaultTokenType: "USDC",
-				},
-			)
+			if networkCreate.WalletAuth.Blockchain == SOL.String() || networkCreate.WalletAuth.Blockchain == MATIC.String() {
+				/**
+				 * since we only support payouts on solana and polygon for now
+				 * only create payout wallets for those blockchains
+				 */
 
-			/**
-			 * Set the payout wallet for the network
-			 */
-			SetPayoutWallet(
-				session.Ctx,
-				createdNetworkId,
-				*walletId,
-			)
+				walletId := CreateAccountWalletExternal(
+					session,
+					&CreateAccountWalletExternalArgs{
+						NetworkId:        createdNetworkId,
+						Blockchain:       networkCreate.WalletAuth.Blockchain,
+						WalletAddress:    networkCreate.WalletAuth.PublicKey,
+						DefaultTokenType: "USDC",
+					},
+				)
+
+				/**
+				 * Set the payout wallet for the network
+				 */
+				SetPayoutWallet(
+					session.Ctx,
+					createdNetworkId,
+					*walletId,
+				)
+			}
 
 			isPro := false
 			isGuest := false
