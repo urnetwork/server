@@ -48,7 +48,7 @@ var connectedGauge = prometheus.NewGauge(
 // egress verification and v6 support both need to be addressed in the future
 const AllowOnlyIpv4 = false
 
-var serviceTransitionTime = time.Now().Add(30 * time.Second)
+// var serviceTransitionTime = time.Now().Add(30 * time.Second)
 
 func init() {
 	prometheus.MustRegister(connectedGauge)
@@ -113,7 +113,8 @@ type ConnectHandler struct {
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
 
-	transportTls *TransportTls
+	transportTls          *TransportTls
+	serviceTransitionTime time.Time
 }
 
 func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
@@ -130,12 +131,13 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 	}
 
 	h := &ConnectHandler{
-		ctx:          cancelCtx,
-		cancel:       cancel,
-		handlerId:    handlerId,
-		exchange:     exchange,
-		settings:     settings,
-		transportTls: transportTls,
+		ctx:                   cancelCtx,
+		cancel:                cancel,
+		handlerId:             handlerId,
+		exchange:              exchange,
+		settings:              settings,
+		transportTls:          transportTls,
+		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
 	}
 
 	go h.run()
@@ -330,7 +332,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	c := func() {
 		announceTimeout := time.Duration(0)
-		if serviceTransitionTime.Before(time.Now()) {
+		if self.serviceTransitionTime.Before(time.Now()) {
 			// the service has transitioned all the connections from the old to new
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
@@ -774,7 +776,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	c := func() {
 		announceTimeout := time.Duration(0)
-		if serviceTransitionTime.Before(time.Now()) {
+		if self.serviceTransitionTime.Before(time.Now()) {
 			// the service has transitioned all the connections from the old to new
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout

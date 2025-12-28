@@ -102,6 +102,7 @@ type ExchangeSettings struct {
 
 	ContractManagerCheckTimeout time.Duration
 	DrainOneTimeout             time.Duration
+	DrainAllTimeout             time.Duration
 
 	ExchangeChaosSettings
 }
@@ -148,6 +149,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 		// default drain 300/minute
 		DrainOneTimeout: 200 * time.Millisecond,
+		// this is set by warp
+		DrainAllTimeout: 60 * time.Minute,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
 	}

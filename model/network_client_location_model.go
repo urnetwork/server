@@ -2177,14 +2177,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	missingSpeedScore := scorePerTier
 	minScore := 10
 	// 1. near minutes must be perfect
-	// 2. near hours must be at the target sla
+	// 2. near hours must be the target sla
 	// 3. mid hours can account for some minor outage
-	// 4. mid days can account for some larger outage
 	minIndependentReliabilityWeights := map[int]float64{
 		1: float64(1.0),
 		2: float64(0.999),
 		3: float64(0.99),
-		// 4: float64(0.9),
 	}
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
