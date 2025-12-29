@@ -1777,8 +1777,6 @@ func loadLocationStables(
 	locationStables map[server.Id]bool,
 	returnErr error,
 ) {
-	minStableProviderCount := 30
-
 	locationStables = map[server.Id]bool{}
 
 	server.Redis(ctx, func(r server.RedisClient) {
@@ -1808,12 +1806,8 @@ func loadLocationStables(
 				return
 			}
 			if 0 < filter.Count {
-				if filter.Index == 0 && minStableProviderCount <= filter.Count {
-					locationStables[locationId] = true
-				} else {
-					// there are providers, but not the highest quality
-					locationStables[locationId] = false
-				}
+				stable := MinStableProviderCount <= filter.Count
+				locationStables[locationId] = stable
 			}
 			// else there are no providers
 		}
@@ -2122,6 +2116,8 @@ type ClientFilter struct {
 // scores are [0, max], where 0 is best
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
+
+const MinStableProviderCount = 30
 
 func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
 	fm := 0
@@ -2530,7 +2526,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		samples [][]*ClientScore,
 		filter *ClientFilter,
 	) {
-		clientScores := []*ClientScore{}
+		var clientScores []*ClientScore
 		for i, f := range filters {
 			passesMinimum := func(clientScore *ClientScore) bool {
 				if forceMinimum {
@@ -2544,23 +2540,20 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				}
 				return true
 			}
+			cs := []*ClientScore{}
 			for _, clientScore := range s {
 				if passesMinimum(clientScore) {
-					clientScores = append(clientScores, clientScore)
+					cs = append(cs, clientScore)
 				}
 			}
-			if 0 < len(clientScores) {
-				filter = &ClientFilter{
-					Index: i,
-					Count: len(clientScores),
-				}
+			clientScores = cs
+			filter = &ClientFilter{
+				Index: i,
+				Count: len(cs),
+			}
+			if MinStableProviderCount <= len(cs) {
 				break
 			}
-			// else try the next min weights
-		}
-		if filter == nil {
-			// no providers meet the filter
-			return
 		}
 
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
