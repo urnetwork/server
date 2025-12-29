@@ -1806,7 +1806,7 @@ func loadLocationStables(
 				return
 			}
 			if 0 < filter.Count {
-				stable := MinStableProviderCount <= filter.Count
+				stable := MinStableNetReliabilityWeight <= filter.NetReliabilityWeight
 				locationStables[locationId] = stable
 			}
 			// else there are no providers
@@ -2109,15 +2109,20 @@ type ClientScore struct {
 }
 
 type ClientFilter struct {
-	Count int
-	Index int
+	Count                int
+	NetReliabilityWeight float64
+	Index                int
 }
 
 // scores are [0, max], where 0 is best
 const MaxClientScore = 50
 const ClientScoreSampleCount = 200
 
-const MinStableProviderCount = 30
+// choose a filter that has at least this number of providers
+const MinExportNetReliabilityWeight = float64(200)
+
+// the number of filtered providers to consider a location stable
+const MinStableNetReliabilityWeight = float64(10)
 
 func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
 	fm := 0
@@ -2203,38 +2208,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	scorePerTier := 20
 	missingLatencyScore := scorePerTier
 	missingSpeedScore := scorePerTier
-
-	type filter struct {
-		maxScore                         int
-		minIndependentReliabilityWeights map[int]float64
-	}
-
-	filters := []filter{
-		filter{
-			maxScore: scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.999),
-				2: float64(0.99),
-				3: float64(0.9),
-			},
-		},
-		filter{
-			maxScore: 2 * scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.99),
-				2: float64(0.9),
-				3: float64(0.8),
-			},
-		},
-		filter{
-			maxScore: 2 * scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.9),
-				2: float64(0.8),
-				3: float64(0.7),
-			},
-		},
-	}
 
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
@@ -2518,6 +2491,48 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		}
 	}
 
+	type filter struct {
+		maxScore                         int
+		minIndependentReliabilityWeights map[int]float64
+		minBytesPerSecond                ByteCount
+		maxRelativeLatencyMillis         int
+	}
+	// filters are tested in order of declaration for `MinExportNetReliabilityWeight`
+	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
+	// the last filter represents the worst case the network will expose to users
+	filters := []filter{
+		filter{
+			maxScore: scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.999),
+				2: float64(0.99),
+				3: float64(0.9),
+			},
+			// minBytesPerSecond: Mib * 1,
+			// maxRelativeLatencyMillis: 200,
+		},
+		filter{
+			maxScore: 2 * scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.99),
+				2: float64(0.9),
+				3: float64(0.8),
+			},
+			// minBytesPerSecond: Mib * 1,
+			// maxRelativeLatencyMillis: 400,
+		},
+		filter{
+			maxScore: 2 * scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.9),
+				2: float64(0.8),
+				3: float64(0.7),
+			},
+			// minBytesPerSecond: Kib * 512,
+			// maxRelativeLatencyMillis: 600,
+		},
+	}
+
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
 		samplesBytes [][]byte,
@@ -2534,24 +2549,37 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				}
 				// all lookback thresholds must pass
 				for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-					if lookbackClientScore.IndependentReliabilityWeight < f.minIndependentReliabilityWeights[lookbackIndex] || f.maxScore <= lookbackClientScore.Scores[rankMode] {
+					if lookbackClientScore.IndependentReliabilityWeight < f.minIndependentReliabilityWeights[lookbackIndex] {
+						return false
+					}
+					if f.maxScore <= lookbackClientScore.Scores[rankMode] {
+						return false
+					}
+					if 0 < f.minBytesPerSecond && lookbackClientScore.MaxBytesPerSecond < f.minBytesPerSecond {
+						return false
+					}
+					if 0 < f.maxRelativeLatencyMillis && f.maxRelativeLatencyMillis <= lookbackClientScore.MinRelativeLatencyMillis {
 						return false
 					}
 				}
 				return true
 			}
 			cs := []*ClientScore{}
+			netReliabilityWeight := float64(0)
 			for _, clientScore := range s {
 				if passesMinimum(clientScore) {
+					netReliabilityWeight += clientScore.ReliabilityWeight
 					cs = append(cs, clientScore)
 				}
 			}
+
 			clientScores = cs
 			filter = &ClientFilter{
-				Index: i,
-				Count: len(cs),
+				Index:                i,
+				Count:                len(cs),
+				NetReliabilityWeight: netReliabilityWeight,
 			}
-			if MinStableProviderCount <= len(cs) {
+			if MinExportNetReliabilityWeight <= netReliabilityWeight {
 				break
 			}
 		}
