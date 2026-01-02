@@ -71,3 +71,12 @@ func CreateStripePaymentIntent(w http.ResponseWriter, r *http.Request) {
 func StripeCreateCustomerPortal(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreateCustomerPortal, w, r)
 }
+
+func AppSumoPurchaseWebhook(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyAppSumoBody,
+		controller.AppSumoWebhook,
+		w,
+		r,
+	)
+}
