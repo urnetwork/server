@@ -2228,3 +2228,35 @@ func CreateSolanaPaymentIntent(
 	model.CreateSolanaPaymentIntent(intent.Reference, clientSession)
 	return &SolanaPaymentIntentResult{}, nil
 }
+
+/**
+ * App Sumo Webhook
+ */
+
+func VerifyAppSumoBody(req *http.Request) (io.Reader, error) {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// todo - authenticate the request properly
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+type AppSumoWebhookArgs struct{}
+
+type AppSumoWebhookResult struct{}
+
+func AppSumoWebhook(
+	appSumoWebhook *AppSumoWebhookArgs,
+	clientSession *session.ClientSession,
+) (*AppSumoWebhookResult, error) {
+
+	_, err := model.CreateAccountRedemptionCode(clientSession.Ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AppSumoWebhookResult{}, nil
+}

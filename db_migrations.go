@@ -2664,4 +2664,13 @@ var migrations = []any{
         DROP CONSTRAINT client_connection_reliability_score_pkey,
         ADD PRIMARY KEY (client_id, lookback_index)
     `),
+
+	newSqlMigration(`
+        CREATE TABLE account_redemption_code (
+       		id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         	code varchar(64) NOT NULL UNIQUE,
+          	network_id uuid,
+         	create_time timestamp NOT NULL DEFAULT now()
+        )
+    `),
 }
