@@ -15,7 +15,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
-	github.com/jackc/pgx/v5 v5.7.6
+	github.com/jackc/pgx/v5 v5.8.0
 	github.com/mailgun/proxyproto v1.0.0
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/nyaruka/phonenumbers v1.6.5
@@ -23,7 +23,7 @@ require (
 	github.com/oschwald/maxminddb-golang/v2 v2.1.1
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.22.0
-	github.com/quic-go/quic-go v0.57.1
+	github.com/quic-go/quic-go v0.58.0
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/samber/lo v1.51.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -32,8 +32,8 @@ require (
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	golang.org/x/crypto v0.46.0
-	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39
-	google.golang.org/protobuf v1.36.10
+	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -69,7 +69,7 @@ require (
 	go.mongodb.org/mongo-driver v1.17.6 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
-	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/term v0.38.0 // indirect
 )
 
