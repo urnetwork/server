@@ -39,6 +39,9 @@ Options:
 		panic(err)
 	}
 
+	// use up to a 2gib message pool per instance
+	connect.ResizeMessagePool(connect.Gib(4))
+
 	// server.Logger().Printf("%s\n", opts)
 
 	quitEvent := server.NewEventWithContext(context.Background())
@@ -86,10 +89,13 @@ Options:
 		}
 	}()
 
+	// FIXME multiplex connectHandler.Connect and proxyConnectHandler.Connect
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/", connectHandler.Connect),
 	}
+
+	// FIXME also listen on port 1080 for socks proxy
 
 	port, _ := opts.Int("--port")
 

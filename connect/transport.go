@@ -69,7 +69,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// because message must be serialized/deserialized from memory,
 		// there is a global limit on the size per message
 		// messages above this size will be ignored from clients and the exchange
-		MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
+		MaximumExchangeMessageByteCount: ByteCount(4096),
 
 		QuicConnectTimeout:   15 * time.Second,
 		QuicHandshakeTimeout: 15 * time.Second,

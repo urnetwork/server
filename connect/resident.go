@@ -538,7 +538,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 						return
 					}
 					resident.UpdateActivity()
-					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, message, header.Version); err != nil {
 						return
 					}
 
@@ -546,7 +546,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
 						return
 					}
 				}
@@ -563,7 +563,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			// messages from the transport are to be received by the resident
 			// messages not destined for the control id are handled by the resident forward
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
 				if err != nil {
 					return
 				}
@@ -622,7 +622,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					return
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
 						return
 					}
 				}
@@ -633,7 +633,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
 				if err != nil {
 					return
 				}
@@ -656,6 +656,81 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 			}
 		}, handleCancel)
+
+	case ExchangeOpTunTransport:
+		// FIXME
+		// FIXME write into the resident proxy
+
+		// this must close `receive`
+		send, receive, closeTransport := resident.AddTun()
+		defer closeTransport()
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-resident.Done():
+					return
+				case message, ok := <-send:
+					if !ok {
+						return
+					}
+					resident.UpdateActivity()
+					if err := sendBuffer.WriteMessage(handleCtx, conn, message, header.Version); err != nil {
+						return
+					}
+
+					glog.V(1).Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
+
+				case <-time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
+						return
+					}
+				}
+			}
+		}, handleCancel)
+
+		go server.HandleError(func() {
+			defer func() {
+				handleCancel()
+				close(receive)
+			}()
+
+			// read
+			// messages from the transport are to be received by the resident
+			// messages not destined for the control id are handled by the resident forward
+			for {
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					continue
+				}
+
+				glog.V(2).Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-resident.Done():
+					return
+				case receive <- message:
+					resident.UpdateActivity()
+					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+				case <-time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
+				}
+			}
+		}, handleCancel)
+
 	}
 
 	select {
@@ -743,83 +818,62 @@ func (self *Exchange) Close() {
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
-	buffer   []byte
+
+	framer *connect.MessageFramer
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
+	framerSettings := connect.DefaultFramerSettings()
+	framerSettings.MaxMessageLen = connect.ByteCount(settings.MaximumExchangeMessageByteCount)
 	return &ExchangeBuffer{
 		settings: settings,
-		buffer:   make([]byte, settings.MaximumExchangeMessageByteCount+4),
+		framer:   connect.NewFramer(framerSettings),
 	}
 }
 
 func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
-	return &ExchangeBuffer{
-		settings: settings,
-		buffer:   make([]byte, 33),
-	}
+	return NewDefaultExchangeBuffer(settings)
 }
 
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
-	copy(self.buffer[0:16], header.ClientId.Bytes())
-	copy(self.buffer[16:32], header.ResidentId.Bytes())
-	self.buffer[32] = byte(header.Op)
+	b := bytes.NewBuffer(nil)
+	e := gob.NewEncoder(b)
+	e.Encode(header)
+	headerBytes := b.Bytes()
 
 	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
-	_, err := conn.Write(self.buffer[0:33])
+	self.framer.Write(headerBytes)
+
 	return err
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
-	if _, err := io.ReadFull(conn, self.buffer[0:33]); err != nil {
-		return nil, err
-	}
-
-	return &ExchangeHeader{
-		ClientId:   server.Id(self.buffer[0:16]),
-		ResidentId: server.Id(self.buffer[16:32]),
-		Op:         ExchangeOp(self.buffer[32]),
-	}, nil
-}
-
-func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte) error {
-	n := ByteCount(len(transferFrameBytes))
-
-	if self.settings.MaximumExchangeMessageByteCount < n {
-		return fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
-	}
-
-	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
-
-	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	_, err := conn.Write(self.buffer[0:4])
+	headerBytes, err := self.framer.Read(conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = conn.Write(transferFrameBytes)
-	return err
+	defer MessagePoolReturn(headerBytes)
+
+	var header ExchangeHeader
+
+	b := bytes.NewBuffer(headerBytes)
+	e := gob.NewDecoder(b)
+	err := e.Decode(&header)
+	if err != nil {
+		return nil, err
+	}
+	return &header, err
 }
 
-func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
-	if _, err := io.ReadFull(conn, self.buffer[0:4]); err != nil {
-		return nil, err
-	}
+func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte, version int) error {
+	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	self.framer.Write(conn, transferFrameBytes)
+}
 
-	n := ByteCount(int(binary.LittleEndian.Uint32(self.buffer[0:4])))
-	if self.settings.MaximumExchangeMessageByteCount < n {
-		return nil, fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
-	}
-
-	// read into a new buffer
-	message := make([]byte, n)
-
-	if _, err := io.ReadFull(conn, message); err != nil {
-		return nil, err
-	}
-
-	return message, nil
+func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn, version int) ([]byte, error) {
+	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	return self.framer.Read(conn)
 }
 
 type ExchangeOp byte
@@ -829,9 +883,14 @@ const (
 	// forward does not add a transport to the client
 	// forward calls `Forward` on the resident and does not use routes
 	ExchangeOpForward ExchangeOp = 0x02
+	// tun transport will send/receive raw IP packets to resident managed device
+	ExchangeOpTunTransport ExchangeOp = 0x03
+	// device remote protocol to the managed device
+	ExchangeOpDeviceRemote ExchangeOp = 0x04
 )
 
 type ExchangeHeader struct {
+	Version    int
 	ClientId   server.Id
 	ResidentId server.Id
 	Op         ExchangeOp
@@ -1017,13 +1076,13 @@ func (self *ExchangeConnection) Run() {
 				if !ok {
 					return
 				}
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message, header.Version); err != nil {
 					return
 				}
 				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
 			case <-time.After(self.settings.ExchangePingTimeout):
 				// send a ping
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0)); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0), header.Version); err != nil {
 					return
 				}
 			}

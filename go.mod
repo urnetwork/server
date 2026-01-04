@@ -95,4 +95,6 @@ require (
 
 replace github.com/urnetwork/connect => ../connect
 
+replace github.com/urnetwork/proxy => ../proxy
+
 replace github.com/urnetwork/glog => ../glog
