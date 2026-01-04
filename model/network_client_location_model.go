@@ -2206,8 +2206,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	}
 
 	scorePerTier := 20
-	missingLatencyScore := scorePerTier
-	missingSpeedScore := scorePerTier
+	missingLatencyScore := 2 * scorePerTier
+	missingSpeedScore := 2 * scorePerTier
 
 	performanceTargets := map[RankMode]performanceTarget{
 		RankModeQuality: performanceTarget{
@@ -2501,16 +2501,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
 	// the last filter represents the worst case the network will expose to users
 	filters := []filter{
-		filter{
-			maxScore: scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.999),
-				2: float64(0.99),
-				3: float64(0.9),
-			},
-			// minBytesPerSecond: Mib * 1,
-			// maxRelativeLatencyMillis: 200,
-		},
+		// filter{
+		// 	maxScore: scorePerTier,
+		// 	minIndependentReliabilityWeights: map[int]float64{
+		// 		1: float64(0.999),
+		// 		2: float64(0.99),
+		// 		3: float64(0.9),
+		// 	},
+		// 	// minBytesPerSecond: Mib * 1,
+		// 	// maxRelativeLatencyMillis: 200,
+		// },
 		filter{
 			maxScore: 2 * scorePerTier,
 			minIndependentReliabilityWeights: map[int]float64{
@@ -2521,16 +2521,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 			// minBytesPerSecond: Mib * 1,
 			// maxRelativeLatencyMillis: 400,
 		},
-		filter{
-			maxScore: 2 * scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.9),
-				2: float64(0.8),
-				3: float64(0.7),
-			},
-			// minBytesPerSecond: Kib * 512,
-			// maxRelativeLatencyMillis: 600,
-		},
+		// filter{
+		// 	maxScore: 2 * scorePerTier,
+		// 	minIndependentReliabilityWeights: map[int]float64{
+		// 		1: float64(0.9),
+		// 		2: float64(0.8),
+		// 		3: float64(0.7),
+		// 	},
+		// 	// minBytesPerSecond: Kib * 512,
+		// 	// maxRelativeLatencyMillis: 600,
+		// },
 	}
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
