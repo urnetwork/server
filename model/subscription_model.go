@@ -921,7 +921,7 @@ func createTransferEscrowInTx(
 		for _, transferBalance := range orderedTransferBalances {
 			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
 			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
-			transferBalance.balanceByteCount -= ByteCount(netEscrowBalanceByteCount)
+			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
 
