@@ -2519,9 +2519,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 		filter{
 			maxScore: 2 * scorePerTier,
 			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.8),
+				1: float64(0.7),
 				2: float64(0.8),
-				3: float64(0.8),
+				3: float64(0.9),
 			},
 			// minBytesPerSecond: Kib * 512,
 			// maxRelativeLatencyMillis: 600,
@@ -2694,7 +2694,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 							pipe := r.TxPipeline()
 
 							exportIndex := exportCount.Add(1)
-							glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex+1, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
+							glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
 							for locationId, clientScores := range locationClientScores {
 								activeClientScores := filterActive(clientScores, clientLocationId)
 								countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
