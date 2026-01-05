@@ -144,7 +144,7 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
 
-		ForwardEnforceActiveContracts: false,
+		ForwardEnforceActiveContracts: true,
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 		// default drain 300/minute
@@ -1642,37 +1642,36 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
 
-	if self.exchange.settings.ForwardEnforceActiveContracts {
-		if !isAck(transferFrameBytes) {
-			hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
-			if !hasActiveContract {
-				glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
-				// there is no active contract
-				// drop
-				self.abuseLimiter.delay()
-				return
-			}
-		}
-	}
-
 	c := func() bool {
 
 		nextForward := func() *ResidentForward {
+			if self.exchange.settings.ForwardEnforceActiveContracts {
+				// if !isAck(transferFrameBytes) {
+				hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
+				if !hasActiveContract {
+					glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
+					// there is no active contract
+					// drop
+					self.abuseLimiter.delay()
+					return nil
+				}
+				// }
+			}
+
 			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
 			go server.HandleError(func() {
-				forward.Run()
-
-				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
-
-				// note we don't call close here because only the sender should call close
-				forward.Cancel()
-				func() {
+				defer func() {
 					self.stateLock.Lock()
 					defer self.stateLock.Unlock()
+					forward.Cancel()
 					if currentForward := self.forwards[destinationId]; forward == currentForward {
 						delete(self.forwards, destinationId)
 					}
 				}()
+				forward.Run()
+
+				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
+				// note we don't call close here because only the sender should call close
 			}, forward.Cancel)
 			go server.HandleError(func() {
 				defer forward.Cancel()
@@ -1727,6 +1726,10 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 		if forward == nil || forward.IsDone() {
 			forward = nextForward()
+		}
+
+		if forward == nil {
+			return false
 		}
 
 		select {

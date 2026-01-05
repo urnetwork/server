@@ -16,6 +16,8 @@ import (
 
 	// "golang.org/x/exp/maps"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -560,6 +562,17 @@ func CheckBalanceCode(
 	return
 }
 
+// the escrow model has been updated so that:
+//   - `transfer_balance` tracks the balance not in a `transfer_escrow`
+//   - the net balance in a `transfer_escrow` is tracked approximately in redis `netEscrowKey`
+//     Because redis is not atomic with Postgres, the value in the `netEscrowKey` will
+//     eventually be consistent with the real value, but may be off by some amount at any given time.
+//
+// note: net escrow counters do not have a ttl
+func netEscrowKey(balanceId server.Id) string {
+	return fmt.Sprintf("net_escrow_%s", balanceId)
+}
+
 type TransferBalance struct {
 	BalanceId             server.Id `json:"balance_id"`
 	NetworkId             server.Id `json:"network_id"`
@@ -613,6 +626,21 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 				transferBalances = append(transferBalances, transferBalance)
 			}
 		})
+	})
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		netEscrowCmds := map[server.Id]*redis.StringCmd{}
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, transferBalance := range transferBalances {
+				netEscrowCmds[transferBalance.BalanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.BalanceId))
+			}
+			return nil
+		})
+		for _, transferBalance := range transferBalances {
+			netEscrowCmd := netEscrowCmds[transferBalance.BalanceId]
+			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
+			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-ByteCount(netEscrowBalanceByteCount))
+		}
 	})
 
 	return transferBalances
@@ -822,7 +850,7 @@ func createTransferEscrowInTx(
 	payerNetworkId server.Id,
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
-) (transferEscrow *TransferEscrow, returnErr error) {
+) (transferEscrow *TransferEscrow, posts []func(), returnErr error) {
 	// *important note* this function is one of the hotspots in the system,
 	// since it is called before every transfer pair.
 	// a small regression here can cause a backlog in the overall throughput of the network.
@@ -879,6 +907,21 @@ func createTransferEscrowInTx(
 			if !transferBalance.startTime.After(now) && now.Before(transferBalance.endTime) {
 				orderedTransferBalances = append(orderedTransferBalances, transferBalance)
 			}
+		}
+	})
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		netEscrowCmds := map[server.Id]*redis.StringCmd{}
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, transferBalance := range orderedTransferBalances {
+				netEscrowCmds[transferBalance.balanceId] = r.Get(ctx, netEscrowKey(transferBalance.balanceId))
+			}
+			return nil
+		})
+		for _, transferBalance := range orderedTransferBalances {
+			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
+			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
+			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
 
@@ -940,19 +983,6 @@ func createTransferEscrowInTx(
 
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for balanceId, escrow := range balanceEscrows {
-			// note with repeatable read we do not need to check the balance on update
-			batch.Queue(
-				`
-	                UPDATE transfer_balance
-	                SET
-	                    balance_byte_count = transfer_balance.balance_byte_count - $2
-	                WHERE
-	                    transfer_balance.balance_id = $1
-	            `,
-				balanceId,
-				escrow.balanceByteCount,
-			)
-
 			batch.Queue(
 				`
 	                INSERT INTO transfer_escrow (
@@ -995,6 +1025,17 @@ func createTransferEscrowInTx(
 			now,
 			priority,
 		)
+	})
+
+	posts = append(posts, func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				for balanceId, escrow := range balanceEscrows {
+					pipe.IncrBy(ctx, netEscrowKey(balanceId), escrow.balanceByteCount)
+				}
+				return nil
+			})
+		})
 	})
 
 	balances := []*TransferEscrowBalance{}
@@ -1047,9 +1088,10 @@ func CreateTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+	var posts []func()
 
-		transferEscrow, returnErr = createTransferEscrowInTx(
+	server.Tx(ctx, func(tx server.PgTx) {
+		transferEscrow, posts, returnErr = createTransferEscrowInTx(
 			ctx,
 			tx,
 			sourceNetworkId,
@@ -1061,8 +1103,11 @@ func CreateTransferEscrow(
 			contractTransferByteCount,
 			nil,
 		)
-
 	}, server.TxReadCommitted)
+
+	for _, post := range posts {
+		post()
+	}
 
 	return
 }
@@ -1101,6 +1146,8 @@ func CreateCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	var posts []func()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		// find the earliest open transfer contract in the opposite direction
 		// with null companion_contract_id
@@ -1149,7 +1196,7 @@ func CreateCompanionTransferEscrow(
 			return
 		}
 
-		transferEscrow, returnErr = createTransferEscrowInTx(
+		transferEscrow, posts, returnErr = createTransferEscrowInTx(
 			ctx,
 			tx,
 			sourceNetworkId,
@@ -1162,6 +1209,10 @@ func CreateCompanionTransferEscrow(
 			companionContractId,
 		)
 	}, server.TxReadCommitted)
+
+	for _, post := range posts {
+		post()
+	}
 
 	return
 }
@@ -1336,6 +1387,8 @@ func CloseContract(
 	// settle := false
 	// dispute := false
 
+	var posts []func()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		found := false
 		var sourceId server.Id
@@ -1493,7 +1546,7 @@ func CloseContract(
 					diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
 					if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
 						// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-						returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+						posts, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
 					} else {
 						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
 						// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
@@ -1520,13 +1573,23 @@ func CloseContract(
 		}
 	}, server.TxReadCommitted)
 
+	for _, post := range posts {
+		post()
+	}
+
 	return
 }
 
 func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOutcome) (returnErr error) {
+	var posts []func()
+
 	server.Tx(ctx, func(tx server.PgTx) {
-		returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
+		posts, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
 	}, server.TxReadCommitted)
+
+	for _, post := range posts {
+		post()
+	}
 
 	return
 }
@@ -1536,7 +1599,7 @@ func settleEscrowInTx(
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
-) (returnErr error) {
+) (posts []func(), returnErr error) {
 	var usedTransferByteCount ByteCount
 
 	switch outcome {
@@ -1754,7 +1817,7 @@ func settleEscrowInTx(
 		server.NowUtc(),
 	))
 
-	server.RaisePgResult(tx.Exec(
+	result, err = tx.Query(
 		ctx,
 		`
             UPDATE transfer_escrow
@@ -1766,10 +1829,31 @@ func settleEscrowInTx(
             WHERE
                 transfer_escrow.contract_id = $1 AND
                 transfer_escrow.balance_id = sweep_payout.balance_id
+            RETURNING transfer_escrow.balance_id, transfer_escrow.balance_byte_count
         `,
 		contractId,
 		server.NowUtc(),
-	))
+	)
+	balanceEscrowByteCounts := map[server.Id]ByteCount{}
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			var escrowByteCount ByteCount
+			server.Raise(result.Scan(&balanceId, &escrowByteCount))
+			balanceEscrowByteCounts[balanceId] = escrowByteCount
+		}
+	})
+
+	posts = append(posts, func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				for balanceId, escrowByteCount := range balanceEscrowByteCounts {
+					pipe.DecrBy(ctx, netEscrowKey(balanceId), escrowByteCount)
+				}
+				return nil
+			})
+		})
+	})
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -1801,7 +1885,7 @@ func settleEscrowInTx(
 		`
             UPDATE transfer_balance
             SET
-                balance_byte_count = transfer_balance.balance_byte_count + sweep_payout.return_byte_count
+                balance_byte_count = transfer_balance.balance_byte_count - sweep_payout.payout_byte_count
             FROM sweep_payout
             WHERE
                 transfer_balance.balance_id = sweep_payout.balance_id
@@ -2333,13 +2417,17 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 
 	closeContract := func(tag string, openContract *OpenContract) error {
 		if openContract.dispute {
-			// FIXME
+			// todo: improve this with better detection of th eroot causes
 			glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			var posts []func()
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
 				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
-				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
+			for _, post := range posts {
+				post()
+			}
 			if err != nil {
 				return err
 			}
@@ -2434,10 +2522,14 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 
 		} else {
 			// nothing to settle, just close the transaction
+			var posts []func()
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
-				err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
+			for _, post := range posts {
+				post()
+			}
 			if err != nil {
 				return err
 			}
@@ -2887,20 +2979,40 @@ func AddRefreshTransferBalanceToAllNetworks(
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	maxRowCount := 50000
 
+	var balanceIds []server.Id
+
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
 		// remove completed transfer balances
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM transfer_balance
 			WHERE
 				end_time <= $1
+			RETURNING balance_id
 			`,
 			minTime.UTC(),
-		))
+		)
+		balanceIds = []server.Id{}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				server.Raise(result.Scan(&balanceId))
+				balanceIds = append(balanceIds, balanceId)
+			}
+		})
 
 	}, server.TxReadCommitted)
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, balanceId := range balanceIds {
+				pipe.Del(ctx, netEscrowKey(balanceId))
+			}
+			return nil
+		})
+	})
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 

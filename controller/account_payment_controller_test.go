@@ -141,24 +141,24 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			assert.Equal(t, paymentRecord.WalletAddress, destinationWalletAddress)
 
 			// estimate fee
-			estimatedFees, err := mockCircleClient.EstimateTransferFee(
-				ctx,
-				*paymentRecord.TokenAmount,
-				wallet.WalletAddress,
-				"MATIC",
-			)
-			assert.Equal(t, err, nil)
+			// estimatedFees, err := mockCircleClient.EstimateTransferFee(
+			// 	ctx,
+			// 	*paymentRecord.TokenAmount,
+			// 	wallet.WalletAddress,
+			// 	"MATIC",
+			// )
+			// assert.Equal(t, err, nil)
 
-			// deduct fee from payment amount
-			fee, err := CalculateFee(
-				*estimatedFees.Medium,
-				"MATIC",
-			)
-			assert.Equal(t, err, nil)
+			// // deduct fee from payment amount
+			// fee, err := CalculateFee(
+			// 	*estimatedFees.Medium,
+			// 	"MATIC",
+			// )
+			// assert.Equal(t, err, nil)
 
-			// convert fee to usdc
-			feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", *fee)
-			assert.Equal(t, err, nil)
+			// // convert fee to usdc
+			// feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", *fee)
+			feeInUSDC := 0.01 // this is now hardcoded due to Circle API errors
 
 			assert.Equal(t, err, nil)
 			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)

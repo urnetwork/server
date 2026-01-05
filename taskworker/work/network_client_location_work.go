@@ -24,7 +24,7 @@ func ScheduleUpdateClientScores(clientSession *session.ClientSession, tx server.
 		&UpdateClientScoresArgs{},
 		clientSession,
 		task.RunOnce("update_client_scores"),
-		task.RunAt(server.NowUtc().Add(5*time.Second)),
+		task.RunAt(server.NowUtc().Add(30*time.Second)),
 		task.Priority(task.TaskPriorityFastest),
 		task.MaxTime(120*time.Minute),
 	)
@@ -35,7 +35,7 @@ func UpdateClientScores(
 	clientSession *session.ClientSession,
 ) (*UpdateClientScoresResult, error) {
 	ttl := 300 * time.Minute
-	err := model.UpdateClientScores(clientSession.Ctx, ttl)
+	err := model.UpdateClientScores(clientSession.Ctx, ttl, 48)
 	if err != nil {
 		return nil, err
 	}

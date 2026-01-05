@@ -534,6 +534,8 @@ func testConnect(
 		switch contractTest {
 		case contractTestSymmetric, contractTestAsymmetric:
 			settings.ForwardEnforceActiveContracts = true
+		default:
+			settings.ForwardEnforceActiveContracts = false
 		}
 
 		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
