@@ -2180,7 +2180,7 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 	return fmt.Sprintf("css_%d_%c_g_%s_%s_%d", fm, rm, locationGroupId, callerLocationId, index)
 }
 
-func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error) {
+func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
 	addClientScore := func(lookbackClientScore *ClientScore, m map[server.Id]*ClientScore) *ClientScore {
 		clientScore, ok := m[lookbackClientScore.ClientId]
 		if !ok {
@@ -2669,8 +2669,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	}
 	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
 
-	n := 48
-	m := (len(clientLocationIds) + n - 1) / n
+	m := (len(clientLocationIds) + parallel - 1) / parallel
 	allBlockClientLocationIds := [][]server.Id{}
 	for i := 0; i < len(clientLocationIds); i += m {
 		allBlockClientLocationIds = append(allBlockClientLocationIds, clientLocationIds[i:min(len(clientLocationIds), i+m)])
@@ -2678,7 +2677,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 
 	var wg sync.WaitGroup
 	var exportCount atomic.Uint32
-	returnErrs := make(chan error, n)
+	returnErrs := make(chan error, parallel)
 
 	for i := 0; i < len(clientLocationIds); i += m {
 		blockClientLocationIds := clientLocationIds[i:min(len(clientLocationIds), i+m)]

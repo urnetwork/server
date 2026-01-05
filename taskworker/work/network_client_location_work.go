@@ -35,7 +35,7 @@ func UpdateClientScores(
 	clientSession *session.ClientSession,
 ) (*UpdateClientScoresResult, error) {
 	ttl := 300 * time.Minute
-	err := model.UpdateClientScores(clientSession.Ctx, ttl)
+	err := model.UpdateClientScores(clientSession.Ctx, ttl, 48)
 	if err != nil {
 		return nil, err
 	}
