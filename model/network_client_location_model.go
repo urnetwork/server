@@ -5,11 +5,12 @@ import (
 	// "encoding/hex"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	// "errors"
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	// "math"
 	mathrand "math/rand"
@@ -2119,7 +2120,8 @@ const MaxClientScore = 50
 const ClientScoreSampleCount = 200
 
 // choose a filter that has at least this number of providers
-const MinExportNetReliabilityWeight = float64(200)
+// FIXME this scale based on traffic for region
+const MinExportNetReliabilityWeight = float64(400)
 
 // the number of filtered providers to consider a location stable
 const MinStableNetReliabilityWeight = float64(10)
@@ -2260,15 +2262,17 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 				scoreAdjust += missingSpeedScore
 			}
 
-			score := 0
 			if !exclude {
-				score = min(
+				score := min(
 					scorePerTier*netTypeScores[rankMode]+scoreAdjust,
 					MaxClientScore,
 				)
+				clientScore.Scores[rankMode] = score
+				clientScore.Tiers[rankMode] = score / scorePerTier
+			} else {
+				clientScore.Scores[rankMode] = 0
+				clientScore.Tiers[rankMode] = (MaxClientScore + scorePerTier - 1) / scorePerTier
 			}
-			clientScore.Scores[rankMode] = score
-			clientScore.Tiers[rankMode] = score / scorePerTier
 		}
 	}
 
@@ -2501,36 +2505,27 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
 	// the last filter represents the worst case the network will expose to users
 	filters := []filter{
-		// filter{
-		// 	maxScore: scorePerTier,
-		// 	minIndependentReliabilityWeights: map[int]float64{
-		// 		1: float64(0.999),
-		// 		2: float64(0.99),
-		// 		3: float64(0.9),
-		// 	},
-		// 	// minBytesPerSecond: Mib * 1,
-		// 	// maxRelativeLatencyMillis: 200,
-		// },
 		filter{
 			maxScore: 2 * scorePerTier,
 			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.99),
+				1: float64(0.9),
 				2: float64(0.9),
+				3: float64(0.9),
+			},
+			// minBytesPerSecond: Kib * 512,
+		},
+		// this case allows for some recent outage to otherwise high-SLA providers
+		// this case catches system-wide issues
+		filter{
+			maxScore: 2 * scorePerTier,
+			minIndependentReliabilityWeights: map[int]float64{
+				1: float64(0.8),
+				2: float64(0.8),
 				3: float64(0.8),
 			},
-			// minBytesPerSecond: Mib * 1,
-			// maxRelativeLatencyMillis: 400,
+			// minBytesPerSecond: Kib * 512,
+			// maxRelativeLatencyMillis: 600,
 		},
-		// filter{
-		// 	maxScore: 2 * scorePerTier,
-		// 	minIndependentReliabilityWeights: map[int]float64{
-		// 		1: float64(0.9),
-		// 		2: float64(0.8),
-		// 		3: float64(0.7),
-		// 	},
-		// 	// minBytesPerSecond: Kib * 512,
-		// 	// maxRelativeLatencyMillis: 600,
-		// },
 	}
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
@@ -2674,42 +2669,85 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration) (returnErr error
 	}
 	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
 
-	server.Redis(ctx, func(r server.RedisClient) {
-		for _, forceMinimum := range []bool{false, true} {
-			for rankMode, _ := range performanceTargets {
-				for j, clientLocationId := range clientLocationIds {
-					pipe := r.TxPipeline()
+	n := 48
+	m := (len(clientLocationIds) + n - 1) / n
+	allBlockClientLocationIds := [][]server.Id{}
+	for i := 0; i < len(clientLocationIds); i += m {
+		allBlockClientLocationIds = append(allBlockClientLocationIds, clientLocationIds[i:min(len(clientLocationIds), i+m)])
+	}
 
-					glog.Infof("[nclm]export client location[%d/%d] %s\n", j+1, len(clientLocationIds), clientLocationId)
-					for locationId, clientScores := range locationClientScores {
-						activeClientScores := filterActive(clientScores, clientLocationId)
-						countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
-						pipe.Set(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId), countsBytes, ttl)
-						pipe.Set(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId), filterBytes, ttl)
-						for i, sampleBytes := range samplesBytes {
-							pipe.Set(ctx, clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i), sampleBytes, ttl)
-						}
-						glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
-					}
-					for locationGroupId, clientScores := range locationGroupClientScores {
-						activeClientScores := filterActive(clientScores, clientLocationId)
-						countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
-						pipe.Set(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId), countsBytes, ttl)
-						pipe.Set(ctx, clientScoreLocationGroupFilterKey(forceMinimum, rankMode, locationGroupId, clientLocationId), filterBytes, ttl)
-						for i, sampleBytes := range samplesBytes {
-							pipe.Set(ctx, clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i), sampleBytes, ttl)
-						}
-						glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
-					}
+	var wg sync.WaitGroup
+	var exportCount atomic.Uint32
+	returnErrs := make(chan error, n)
 
-					_, returnErr = pipe.Exec(ctx)
-					if returnErr != nil {
-						return
+	for i := 0; i < len(clientLocationIds); i += m {
+		blockClientLocationIds := clientLocationIds[i:min(len(clientLocationIds), i+m)]
+
+		wg.Add(1)
+		go connect.HandleError(func() {
+			defer wg.Done()
+
+			server.Redis(ctx, func(r server.RedisClient) {
+				for _, forceMinimum := range []bool{false, true} {
+					for rankMode, _ := range performanceTargets {
+						for _, clientLocationId := range blockClientLocationIds {
+							pipe := r.TxPipeline()
+
+							exportIndex := exportCount.Add(1)
+							glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex+1, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
+							for locationId, clientScores := range locationClientScores {
+								activeClientScores := filterActive(clientScores, clientLocationId)
+								countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
+								pipe.Set(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId), countsBytes, ttl)
+								pipe.Set(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId), filterBytes, ttl)
+								for i, sampleBytes := range samplesBytes {
+									pipe.Set(ctx, clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i), sampleBytes, ttl)
+								}
+								glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
+							}
+							for locationGroupId, clientScores := range locationGroupClientScores {
+								activeClientScores := filterActive(clientScores, clientLocationId)
+								countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
+								pipe.Set(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId), countsBytes, ttl)
+								pipe.Set(ctx, clientScoreLocationGroupFilterKey(forceMinimum, rankMode, locationGroupId, clientLocationId), filterBytes, ttl)
+								for i, sampleBytes := range samplesBytes {
+									pipe.Set(ctx, clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i), sampleBytes, ttl)
+								}
+								glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
+							}
+
+							_, err := pipe.Exec(ctx)
+							if err != nil {
+								select {
+								case <-ctx.Done():
+									return
+								case returnErrs <- err:
+									return
+								}
+							}
+						}
 					}
 				}
+			})
+		}, wg.Done)
+	}
+
+	wg.Wait()
+	close(returnErrs)
+
+	func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err, ok := <-returnErrs:
+				if !ok {
+					return
+				}
+				returnErr = errors.Join(returnErr, err)
 			}
 		}
-	})
+	}()
 
 	if returnErr == nil {
 		glog.Infof(
@@ -2841,6 +2879,9 @@ func FindProviders2(
 
 	excludeFinalDestinations := sync.OnceValue(func() map[server.Id]bool {
 		excludeFinalDestinations := map[server.Id]bool{}
+		for _, clientId := range findProviders2.ExcludeClientIds {
+			excludeFinalDestinations[clientId] = true
+		}
 		for _, destination := range findProviders2.ExcludeDestinations {
 			excludeFinalDestinations[destination[len(destination)-1]] = true
 		}
@@ -2924,7 +2965,7 @@ func FindProviders2(
 			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
 		}
 
-		for _, clientId := range findProviders2.ExcludeClientIds {
+		for clientId, _ := range excludeFinalDestinations() {
 			delete(clientScores, clientId)
 		}
 		// the final hop is excluded
@@ -2936,7 +2977,11 @@ func FindProviders2(
 					clientScore.Scores[rankMode] += intermediaryScore
 				}
 			}
-			delete(clientScores, destination[len(destination)-1])
+		}
+
+		adjustedMaxClientScore := MaxClientScore
+		for _, clientScore := range clientScores {
+			adjustedMaxClientScore = max(adjustedMaxClientScore, clientScore.Scores[rankMode])
 		}
 
 		clientIds := maps.Keys(clientScores)
@@ -2946,7 +2991,7 @@ func FindProviders2(
 
 		connect.WeightedSelectFunc(clientIds, count, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]
-			qualityWeight := max(0, MaxClientScore-clientScore.Scores[rankMode])
+			qualityWeight := max(0, adjustedMaxClientScore-clientScore.Scores[rankMode])
 			return float32(clientScore.ReliabilityWeight * float64(qualityWeight))
 		})
 		clientIds = clientIds[:min(count, len(clientIds))]

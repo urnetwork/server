@@ -431,6 +431,11 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		otherClientIds[clientIds[5]] = true
 		otherClientIds[clientIds[7]] = true
 		otherClientIds[clientIds[8]] = true
+		excludeClientIds := map[server.Id]bool{}
+		excludeClientIds[clientIds[0]] = true
+		excludeClientIds[clientIds[3]] = true
+		excludeClientIds[clientIds[6]] = true
+		excludeClientIds[clientIds[9]] = true
 
 		// the match is a weighted shuffle so we should expect over
 		//   sufficient iterations the priority client ids will come first
@@ -452,11 +457,17 @@ func TestFindProviders2WithExclude(t *testing.T) {
 			return netProviderIncludedCounts[b] - netProviderIncludedCounts[a]
 		})
 		for _, clientId := range orderedClientIds[:len(priorityClientIds)] {
-			ok := priorityClientIds[clientId]
+			ok := excludeClientIds[clientId]
+			assert.Equal(t, ok, false)
+			ok = otherClientIds[clientId]
+			assert.Equal(t, ok, false)
+			ok = priorityClientIds[clientId]
 			assert.Equal(t, ok, true)
 		}
 		for _, clientId := range orderedClientIds[len(priorityClientIds):] {
-			ok := otherClientIds[clientId]
+			ok := excludeClientIds[clientId]
+			assert.Equal(t, ok, false)
+			ok = otherClientIds[clientId]
 			assert.Equal(t, ok, true)
 		}
 
