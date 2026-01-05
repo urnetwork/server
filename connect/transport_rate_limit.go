@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -111,25 +113,26 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 	var burstCount int64
 	var totalCount int64
 	server.Redis(self.ctx, func(r server.RedisClient) {
-		burstCount, err = r.Incr(self.ctx, burstKey).Result()
+		var burstCmd *redis.IntCmd
+		var totalCmd *redis.IntCmd
+		r.TxPipelined(self.ctx, func(pipe redis.Pipeliner) error {
+			burstCmd = pipe.Incr(self.ctx, burstKey)
+			pipe.Expire(self.ctx, burstKey, self.settings.BurstDuration)
+
+			totalCmd = pipe.Incr(self.ctx, totalKey)
+			pipe.Expire(self.ctx, totalKey, self.settings.TotalExpiration)
+
+			return nil
+		})
+		burstCount, err = burstCmd.Result()
 		if err != nil {
 			return
 		}
-		if burstCount == 1 {
-			// FIXME put this in an atomic lua script
-			// for now it doesnt matter if a few keys linger
-			r.Expire(self.ctx, burstKey, self.settings.BurstDuration).Err()
-		}
-		totalCount, err = r.Incr(self.ctx, totalKey).Result()
+		totalCount, err = totalCmd.Result()
 		if err != nil {
 			return
 		}
 		totalIncremented = true
-		if totalCount == 1 {
-			// FIXME put this in an atomic lua script
-			// for now it doesnt matter if a few keys linger
-			r.Expire(self.ctx, totalKey, self.settings.TotalExpiration).Err()
-		}
 	})
 	if err != nil {
 		return

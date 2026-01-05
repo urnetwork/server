@@ -19,6 +19,8 @@ import (
 	// "github.com/twmb/murmur3"
 	"golang.org/x/exp/maps"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -1321,33 +1323,49 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 
 	server.Redis(ctx, func(r server.RedisClient) {
 
-		networkCount, err := r.Incr(ctx, networkKey).Result()
+		var networkCountCmd *redis.IntCmd
+		var clientCountCmd *redis.IntCmd
+		var networkErrorMessageCountCmd *redis.IntCmd
+		var clientErrorMessageCountCmd *redis.IntCmd
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			networkCountCmd = pipe.Incr(ctx, networkKey)
+			pipe.Expire(ctx, networkKey, ttl)
+
+			clientCountCmd = pipe.Incr(ctx, clientKey)
+			pipe.Expire(ctx, clientKey, ttl)
+
+			networkErrorMessageCountCmd = pipe.Incr(ctx, networkErrorMessageKey)
+			pipe.Expire(ctx, networkErrorMessageKey, ttl)
+
+			clientErrorMessageCountCmd = pipe.Incr(ctx, clientErrorMessageKey)
+			pipe.Expire(ctx, clientErrorMessageKey, ttl)
+
+			return nil
+		})
+
+		networkCount, err := networkCountCmd.Result()
 		if err == nil {
-			r.Expire(ctx, networkKey, ttl)
 			if networkCount%warnThreshold == 0 {
 				glog.V(1).Infof("[ncm][%s]network has a significant amount of connection errors (%d)\n", networkId, networkCount)
 			}
 		}
 
-		clientCount, err := r.Incr(ctx, clientKey).Result()
+		clientCount, err := clientCountCmd.Result()
 		if err == nil {
-			r.Expire(ctx, clientKey, ttl)
 			if clientCount%warnThreshold == 0 {
 				glog.V(1).Infof("[ncm][%s]client has a significant amount of connection errors (%d)\n", clientId, clientCount)
 			}
 		}
 
-		networkErrorMessageCount, err := r.Incr(ctx, networkErrorMessageKey).Result()
+		networkErrorMessageCount, err := networkErrorMessageCountCmd.Result()
 		if err == nil {
-			r.Expire(ctx, networkErrorMessageKey, ttl)
 			if networkErrorMessageCount%warnThreshold == 0 {
 				glog.V(1).Infof("[ncm][%s]network has a significant count of connection error message (%d): %s\n", networkId, networkErrorMessageCount, errorMessage)
 			}
 		}
 
-		clientErrorMessageCount, err := r.Incr(ctx, clientErrorMessageKey).Result()
+		clientErrorMessageCount, err := clientErrorMessageCountCmd.Result()
 		if err == nil {
-			r.Expire(ctx, clientErrorMessageKey, ttl)
 			if clientErrorMessageCount%warnThreshold == 0 {
 				glog.V(1).Infof("[ncm][%s]client has a significant count of connection error message (%d): %s\n", clientId, clientErrorMessageCount, errorMessage)
 			}
