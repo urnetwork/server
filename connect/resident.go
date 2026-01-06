@@ -1477,6 +1477,7 @@ type Resident struct {
 	clientForwardUnsub func()
 }
 
+// FIXME check for proxy config on (clientId, instanceId) and configure the mode
 func NewResident(
 	ctx context.Context,
 	exchange *Exchange,
@@ -1825,9 +1826,9 @@ func (self *Resident) AddForward() (
 	forward chan []byte,
 	closeForward func(),
 ) {
-	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
-
 	forwardCtx, forwardCancel := context.WithCancel(self.ctx)
+
+	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 
 	go server.HandleError(func() {
 		defer forwardCancel()
@@ -1836,6 +1837,8 @@ func (self *Resident) AddForward() (
 			case <-forwardCtx.Done():
 				return
 			case message := <-forward:
+				// FIXME if proxy mode set, forward to proxy device
+				// FIXME else forward to self (resident transport)
 				self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
 			}
 		}

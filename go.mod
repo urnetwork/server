@@ -30,6 +30,7 @@ require (
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
+	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	golang.org/x/crypto v0.46.0
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
@@ -96,5 +97,7 @@ require (
 replace github.com/urnetwork/connect => ../connect
 
 replace github.com/urnetwork/proxy => ../proxy
+
+replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
