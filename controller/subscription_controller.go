@@ -186,18 +186,26 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 
 	netBalanceByteCount := model.ByteCount(0)
 	startBalanceByteCount := model.ByteCount(0)
+	isPro := false
+
 	for _, transferBalance := range transferBalances {
 		netBalanceByteCount += transferBalance.BalanceByteCount
 		startBalanceByteCount += transferBalance.StartBalanceByteCount
+
+		if !isPro && transferBalance.NetRevenue > 0 {
+			// check if any of the transfer balances are from a pro subscription
+			isPro = true
+		}
+
 	}
 
 	openTransferByteCount := model.GetOpenTransferByteCount(session.Ctx, session.ByJwt.NetworkId)
 
 	var currentSubscription *Subscription
 
-	active, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+	_, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
 
-	if active {
+	if isPro {
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
