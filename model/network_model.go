@@ -1010,10 +1010,9 @@ func UpgradeGuest(
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
 				isGuest := false
-				isPro, _ := HasSubscriptionRenewal(
+				isPro := IsPro(
 					session.Ctx,
-					session.ByJwt.NetworkId,
-					SubscriptionTypeSupporter,
+					&session.ByJwt.NetworkId,
 				)
 
 				byJwt := jwt.NewByJwt(
@@ -1086,10 +1085,9 @@ func UpgradeGuest(
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
 			isGuest := false
-			isPro, _ := HasSubscriptionRenewal(
+			isPro := IsPro(
 				session.Ctx,
-				session.ByJwt.NetworkId,
-				SubscriptionTypeSupporter,
+				&session.ByJwt.NetworkId,
 			)
 
 			byJwt := jwt.NewByJwt(
