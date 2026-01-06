@@ -42,7 +42,7 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
-    bringyourctl balance-code create
+    bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl send network-welcome --user_auth=<user_auth>
     bringyourctl send auth-verify --user_auth=<user_auth>
@@ -387,18 +387,55 @@ func networkRemove(opts docopt.Opts) {
 func balanceCodeCreate(opts docopt.Opts) {
 	ctx := context.Background()
 
-	balanceCode, err := model.CreateBalanceCode(
-		ctx,
-		1024,
-		0,
-		server.NewId().String(),
-		server.NewId().String(),
-		"brien@brienyour.com",
-	)
+	count := 1
+	if countStr, err := opts.String("--count"); err == nil {
+		_, err = fmt.Sscanf(countStr, "%d", &count)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	durationStr, _ := opts.String("--duration")
+
+	duration, err := time.ParseDuration(durationStr)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("%s\n", balanceCode.Secret)
+
+	balanceStr, _ := opts.String("--balance")
+
+	balanceByteCount, err := model.ParseByteCount(balanceStr)
+	if err != nil {
+		panic(err)
+	}
+
+	usdStr, _ := opts.String("--cost")
+
+	var usd float64
+	_, err = fmt.Sscanf(usdStr, "%f", &usd)
+	if err != nil {
+		panic(err)
+	}
+
+	costNanoCents := model.UsdToNanoCents(usd)
+
+	email, _ := opts.String("--email")
+
+	for range count {
+		balanceCode, err := model.CreateBalanceCode(
+			ctx,
+			balanceByteCount,
+			duration,
+			costNanoCents,
+			server.NewId().String(),
+			server.NewId().String(),
+			email,
+		)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("%s\n", balanceCode.Secret)
+	}
 }
 
 func balanceCodeCheck(opts docopt.Opts) {
@@ -517,6 +554,7 @@ func sendSubscriptionTransferBalanceCode(opts docopt.Opts) {
 	balanceCode, err := model.CreateBalanceCode(
 		ctx,
 		balanceByteCount,
+		365*24*time.Hour,
 		netRevenue,
 		server.NewId().String(),
 		server.NewId().String(),

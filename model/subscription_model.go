@@ -157,7 +157,7 @@ func NanoPointsToPoints(nanoPoints NanoPoints) int {
 }
 
 // 12 months
-const BalanceCodeDuration = 365 * 24 * time.Hour
+// const BalanceCodeDuration = 365 * 24 * time.Hour
 
 // up to 16MiB
 const AcceptableTransfersByteDifference = 16 * 1024 * 1024
@@ -278,6 +278,7 @@ func GetBalanceCode(
 func CreateBalanceCode(
 	ctx context.Context,
 	balanceByteCount ByteCount,
+	duration time.Duration,
 	netRevenue NanoCents,
 	purchaseEventId string,
 	purchaseRecord string,
@@ -308,7 +309,7 @@ func CreateBalanceCode(
 
 		balanceCodeId := server.NewId()
 
-		secret, err := newCode()
+		secret, err := newCodeBase32()
 		if err != nil {
 			returnErr = err
 			return
@@ -324,7 +325,7 @@ func CreateBalanceCode(
 			createTime.Location(),
 		)
 		// round up to 00:00 the next day of create time + duration
-		endTime := startTime.Add(24 * time.Hour).Add(BalanceCodeDuration)
+		endTime := startTime.Add(24 * time.Hour).Add(duration)
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
