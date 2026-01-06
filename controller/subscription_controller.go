@@ -416,6 +416,7 @@ func stripeHandleCheckoutSessionCompleted(
 					err = CreateBalanceCode(
 						clientSession.Ctx,
 						sku.BalanceByteCount(),
+						SubscriptionYearDuration,
 						netRevenue,
 						stripeSessionId,
 						string(stripeItemJsonBytes),
@@ -962,6 +963,7 @@ func CoinbaseWebhook(
 			err = CreateBalanceCode(
 				clientSession.Ctx,
 				sku.BalanceByteCount(),
+				SubscriptionYearDuration,
 				netRevenue,
 				coinbaseWebhook.Event.Data.Id,
 				string(coinbaseDataJsonBytes),
@@ -983,6 +985,7 @@ func CoinbaseWebhook(
 func CreateBalanceCode(
 	ctx context.Context,
 	balanceByteCount model.ByteCount,
+	duration time.Duration,
 	netRevenue model.NanoCents,
 	purchaseEventId string,
 	purchaseRecord string,
@@ -1012,6 +1015,7 @@ func CreateBalanceCode(
 		balanceCode, err := model.CreateBalanceCode(
 			ctx,
 			balanceByteCount,
+			duration,
 			netRevenue,
 			purchaseEventId,
 			purchaseRecord,

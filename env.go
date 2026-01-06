@@ -39,7 +39,7 @@ func getenvWithDefault(key string, defaultValue string) string {
 
 func initGlog() {
 	if !slices.Contains(os.Args, "-logtostderr") {
-		fmt.Printf("[env]glog not configured from command line. Using default configuration.\n")
+		fmt.Fprintf(os.Stderr, "[env]glog not configured from command line. Using default configuration.\n")
 
 		flag.Set("logtostderr", getenvWithDefault("BY_LOG_LOGTOSTDERR", "true"))
 		flag.Set("stderrthreshold", getenvWithDefault("BY_LOG_STDERRTHRESHOLD", "INFO"))

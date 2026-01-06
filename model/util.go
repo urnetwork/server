@@ -1,6 +1,7 @@
 package model
 
 import (
+	"crypto/rand"
 	"strings"
 
 	// TODO replace this with fewer works from a larger dictionary
@@ -20,4 +21,8 @@ func newCode() (string, error) {
 	words := strings.Split(mnemonic, " ")
 	code := strings.Join(words[0:6], " ")
 	return code, nil
+}
+
+func newCodeBase32() (string, error) {
+	return rand.Text(), nil
 }
