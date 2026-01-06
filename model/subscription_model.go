@@ -584,6 +584,7 @@ type TransferBalance struct {
 	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
 	BalanceByteCount ByteCount `json:"balance_byte_count"`
 	PurchaseToken    string    `json:"purchase_token,omitempty"`
+	Paid             bool      `json:"paid,omitempty"`
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -601,7 +602,8 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
                     end_time,
                     start_balance_byte_count,
                     net_revenue_nano_cents,
-                    balance_byte_count
+                    balance_byte_count,
+                    paid
                 FROM transfer_balance
                 WHERE
                     network_id = $1 AND
@@ -623,6 +625,7 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 					&transferBalance.StartBalanceByteCount,
 					&transferBalance.NetRevenue,
 					&transferBalance.BalanceByteCount,
+					&transferBalance.Paid,
 				))
 				transferBalances = append(transferBalances, transferBalance)
 			}

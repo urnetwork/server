@@ -192,7 +192,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		netBalanceByteCount += transferBalance.BalanceByteCount
 		startBalanceByteCount += transferBalance.StartBalanceByteCount
 
-		if !isPro && transferBalance.NetRevenue > 0 {
+		if !isPro && transferBalance.Paid {
 			// check if any of the transfer balances are from a pro subscription
 			isPro = true
 		}
