@@ -2886,6 +2886,51 @@ func HasSubscriptionRenewal(
 	return active, market
 }
 
+func IsPro(
+	ctx context.Context,
+	networkId *server.Id,
+) bool {
+
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+            SELECT
+                balance_id,
+                paid
+            FROM transfer_balance
+            WHERE
+                network_id = $1 AND
+                active = true
+        `,
+			networkId,
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var paid bool
+
+				server.Raise(result.Scan(
+					&balanceId,
+					&paid,
+				))
+				if paid {
+					// check if any active paid balance exists
+					isPro = true
+					break
+				}
+			}
+		})
+
+	})
+
+	return isPro
+
+}
+
 func AddRefreshTransferBalanceToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
