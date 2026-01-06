@@ -406,10 +406,9 @@ func handleLoginParsedAuthJwt(
 
 	isGuestMode := false
 
-	isPro, _ := HasSubscriptionRenewal(
+	isPro := IsPro(
 		ctx,
-		networkId,
-		SubscriptionTypeSupporter,
+		&networkId,
 	)
 
 	// successful login
@@ -516,10 +515,9 @@ func handleLoginWallet(
 
 	if found {
 
-		pro, _ := HasSubscriptionRenewal(
+		pro := IsPro(
 			ctx,
-			networkId,
-			SubscriptionTypeSupporter,
+			&networkId,
 		)
 
 		byJwt := jwt.NewByJwt(
@@ -712,10 +710,9 @@ func AuthLoginWithPassword(
 
 			isGuestMode := false
 
-			pro, _ := HasSubscriptionRenewal(
+			pro := IsPro(
 				session.Ctx,
-				networkId,
-				SubscriptionTypeSupporter,
+				&networkId,
 			)
 
 			// success
@@ -872,10 +869,9 @@ func AuthVerify(
 
 	isGuestMode := false
 
-	isPro, _ := HasSubscriptionRenewal(
+	isPro := IsPro(
 		session.Ctx,
-		networkId,
-		SubscriptionTypeSupporter,
+		&networkId,
 	)
 
 	byJwt := jwt.NewByJwt(
@@ -1524,10 +1520,9 @@ func AuthCodeLogin(
 
 		isGuestMode := false
 
-		isPro, _ := HasSubscriptionRenewal(
+		isPro := IsPro(
 			session.Ctx,
-			networkId,
-			SubscriptionTypeSupporter,
+			&networkId,
 		)
 
 		byJwt := jwt.NewByJwtWithCreateTime(

@@ -1317,6 +1317,46 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 	})
 }
 
+func TestAccountIsPro(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+
+		/**
+		 * not pro
+		 */
+		Testing_CreateNetwork(ctx, networkId, "a", userId)
+
+		isPro := IsPro(ctx, &networkId)
+		assert.Equal(t, isPro, false)
+
+		/**
+		 * add paid transfer balance
+		 */
+		startTime := server.NowUtc()
+		endTime := startTime.Add(30 * 24 * time.Hour)
+
+		balanceByteCount := ByteCount(10 * 1024 * 1024 * 1024)
+		transferBalance := &TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: balanceByteCount,
+			NetRevenue:            UsdToNanoCents(40),
+			BalanceByteCount:      balanceByteCount,
+			PurchaseToken:         "paid_test_token",
+		}
+
+		AddTransferBalance(ctx, transferBalance)
+
+		isPro = IsPro(ctx, &networkId)
+		assert.Equal(t, isPro, true)
+	})
+}
+
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data

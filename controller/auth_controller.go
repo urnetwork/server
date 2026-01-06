@@ -259,10 +259,9 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		}, nil
 	}
 
-	isPro, _ := model.HasSubscriptionRenewal(
+	isPro := model.IsPro(
 		session.Ctx,
-		networkId,
-		model.SubscriptionTypeSupporter,
+		&networkId,
 	)
 
 	byJwt := jwt.NewByJwt(

@@ -584,6 +584,7 @@ type TransferBalance struct {
 	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
 	BalanceByteCount ByteCount `json:"balance_byte_count"`
 	PurchaseToken    string    `json:"purchase_token,omitempty"`
+	Paid             bool      `json:"paid,omitempty"`
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -601,7 +602,8 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
                     end_time,
                     start_balance_byte_count,
                     net_revenue_nano_cents,
-                    balance_byte_count
+                    balance_byte_count,
+                    paid
                 FROM transfer_balance
                 WHERE
                     network_id = $1 AND
@@ -623,6 +625,7 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 					&transferBalance.StartBalanceByteCount,
 					&transferBalance.NetRevenue,
 					&transferBalance.BalanceByteCount,
+					&transferBalance.Paid,
 				))
 				transferBalances = append(transferBalances, transferBalance)
 			}
@@ -2884,6 +2887,51 @@ func HasSubscriptionRenewal(
 		})
 	})
 	return active, market
+}
+
+func IsPro(
+	ctx context.Context,
+	networkId *server.Id,
+) bool {
+
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+            SELECT
+                balance_id,
+                paid
+            FROM transfer_balance
+            WHERE
+                network_id = $1 AND
+                active = true
+        `,
+			networkId,
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var paid bool
+
+				server.Raise(result.Scan(
+					&balanceId,
+					&paid,
+				))
+				if paid {
+					// check if any active paid balance exists
+					isPro = true
+					break
+				}
+			}
+		})
+
+	})
+
+	return isPro
+
 }
 
 func AddRefreshTransferBalanceToAllNetworks(
