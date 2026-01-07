@@ -36,7 +36,17 @@ func TestCancelAccountPayment(t *testing.T) {
 			ClientId:  &destinationId,
 		})
 
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -139,7 +149,17 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		// fund the source network
 		netTransferByteCount := ByteCount(1024 * 1024)
 		netRevenue := UsdToNanoCents(10.00)
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -264,7 +284,17 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
