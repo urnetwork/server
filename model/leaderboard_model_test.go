@@ -62,7 +62,16 @@ func TestLeaderboard(t *testing.T) {
 		/**
 		 * Create balance for network C
 		 */
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 24*time.Hour, 2*netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			2*netTransferByteCount,
+			subscriptionYearDuration,
+			2*netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,

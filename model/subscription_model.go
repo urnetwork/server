@@ -437,19 +437,27 @@ func RedeemBalanceCode(
 
 		balanceId := server.NewId()
 
+		now := server.NowUtc()
+		duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
+		endTime := now.Add(duration)
+
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
                 UPDATE transfer_balance_code
                 SET
                     redeem_time = $2,
-                    redeem_balance_id = $3
+                    redeem_balance_id = $3,
+                    start_time = $4,
+                    end_time = $5
                 WHERE
                     balance_code_id = $1
             `,
 			balanceCode.BalanceCodeId,
-			server.NowUtc(),
+			now,
 			balanceId,
+			now,
+			endTime,
 		))
 
 		server.RaisePgResult(tx.Exec(
@@ -468,8 +476,8 @@ func RedeemBalanceCode(
             `,
 			balanceId,
 			session.ByJwt.NetworkId,
-			balanceCode.StartTime,
-			balanceCode.EndTime,
+			now,
+			endTime,
 			balanceCode.BalanceByteCount,
 			balanceCode.NetRevenue,
 		))
