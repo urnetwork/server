@@ -773,9 +773,12 @@ func testConnect(
 
 	initialTransferBalance := ByteCount(1024) * ByteCount(1024) * ByteCount(1024) * ByteCount(1024)
 
+	subscriptionYearDuration := 365 * 24 * time.Hour
+
 	balanceCodeA, err := model.CreateBalanceCode(
 		ctx,
 		initialTransferBalance,
+		subscriptionYearDuration,
 		0,
 		"test-1",
 		"",
@@ -795,6 +798,7 @@ func testConnect(
 	balanceCodeB, err := model.CreateBalanceCode(
 		ctx,
 		initialTransferBalance,
+		subscriptionYearDuration,
 		0,
 		"test-2",
 		"",

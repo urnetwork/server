@@ -103,7 +103,17 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -340,7 +350,17 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			2*netTransferByteCount,
+			subscriptionYearDuration,
+			2*netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -600,9 +620,12 @@ func TestBalanceCode(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, checkResult0.Error, nil)
 
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
 		balanceCode, err := CreateBalanceCode(
 			ctx,
 			1024,
+			subscriptionYearDuration,
 			100,
 			"test-purchase-1",
 			"rest-purchase-1-receipt",
@@ -1275,7 +1298,17 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 			ClientId:  &sourceId,
 		})
 
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			2*netTransferByteCount,
+			subscriptionYearDuration,
+			2*netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,

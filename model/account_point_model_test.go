@@ -6,6 +6,7 @@ import (
 	mathrand "math/rand"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/glog"
@@ -191,7 +192,16 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		/**
 		 * Create balance for network C
 		 */
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		subscriptionYearDuration := 365 * 24 * time.Hour
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			2*netTransferByteCount,
+			subscriptionYearDuration,
+			2*netRevenue,
+			"",
+			"",
+			"",
+		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
