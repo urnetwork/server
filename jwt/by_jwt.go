@@ -51,7 +51,6 @@ var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
 					panic(err)
 				}
 				block, _ := pem.Decode(bytes)
-				fmt.Printf("KEY PATH %s\n", path)
 
 				keyPathErrs := []error{}
 				if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
