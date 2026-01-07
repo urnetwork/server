@@ -2,6 +2,8 @@ package jwt
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
@@ -32,8 +34,8 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 const expiryDuration = 30 * 24 * time.Hour
 
 // the first key (most recent version) is used to sign new JWTs
-var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
-	keys := []*rsa.PrivateKey{}
+var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
+	keys := []crypto.PrivateKey{}
 	glog.Infof("[jwt]paths: %s", byJwtTlsKeyPaths())
 	errs := []error{}
 	for _, jwtTlsKeyPath := range byJwtTlsKeyPaths() {
@@ -49,21 +51,27 @@ var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 					panic(err)
 				}
 				block, _ := pem.Decode(bytes)
+				fmt.Printf("KEY PATH %s\n", path)
 
 				keyPathErrs := []error{}
-				if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-					glog.Errorf("[jwt]loaded pkcs8 key \"%s\"\n", path)
-					keys = append(keys, key.(*rsa.PrivateKey))
+				if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+					glog.Errorf("[jwt]loaded ec key \"%s\"\n", path)
+					keys = append(keys, key)
 				} else {
-					keyPathErrs = append(keyPathErrs, err)
-					if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-						glog.Errorf("[jwt]loaded pkcs1 key \"%s\"\n", path)
+					if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+						glog.Errorf("[jwt]loaded pkcs8 key \"%s\"\n", path)
 						keys = append(keys, key)
 					} else {
 						keyPathErrs = append(keyPathErrs, err)
-						err = errors.Join(keyPathErrs...)
-						glog.Errorf("[jwt]could not load key \"%s\". err = %s\n", path, err)
-						errs = append(errs, err)
+						if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+							glog.Errorf("[jwt]loaded pkcs1 key \"%s\"\n", path)
+							keys = append(keys, key)
+						} else {
+							keyPathErrs = append(keyPathErrs, err)
+							err = errors.Join(keyPathErrs...)
+							glog.Errorf("[jwt]could not load key \"%s\". err = %s\n", path, err)
+							errs = append(errs, err)
+						}
 					}
 				}
 			}
@@ -75,8 +83,24 @@ var byPrivateKeys = sync.OnceValue(func() []*rsa.PrivateKey {
 	return keys
 })
 
-func bySigningKey() *rsa.PrivateKey {
-	return byPrivateKeys()[0]
+func byRsaSigningKey() *rsa.PrivateKey {
+	for _, key := range byPrivateKeys() {
+		switch v := key.(type) {
+		case *rsa.PrivateKey:
+			return v
+		}
+	}
+	return nil
+}
+
+func byEcdsaSigningKey() *ecdsa.PrivateKey {
+	for _, key := range byPrivateKeys() {
+		switch v := key.(type) {
+		case *ecdsa.PrivateKey:
+			return v
+		}
+	}
+	return nil
 }
 
 // the bringyour authorization model is:
@@ -173,13 +197,13 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 		// todo - ParseWithClaims instead of jwt.Parse
 		// this will get newly added RegisteredClaims which includes ExipiresAt
 		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
-			return byPrivateKey.Public(), nil
+			return byPrivateKey.(interface{ Public() crypto.PublicKey }).Public(), nil
 		}, parserOptions...)
 		if err == nil {
 			break
 		}
 	}
-	if err != nil {
+	if token == nil {
 		return nil, errors.New("Could not verify signed token.")
 	}
 
@@ -258,13 +282,7 @@ func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 // }
 
 func (self *ByJwt) Sign() string {
-
-	token := gojwt.NewWithClaims(gojwt.SigningMethodRS512, self)
-	jwtSigned, err := token.SignedString(bySigningKey())
-	if err != nil {
-		panic(err)
-	}
-	return jwtSigned
+	return sign(self)
 }
 
 func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
@@ -490,4 +508,38 @@ func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 	})
 
 	return !hasInactiveSession
+}
+
+func sign(claims gojwt.Claims) string {
+	var signingMethod gojwt.SigningMethod
+	var key any
+
+	if ecdsaKey := byEcdsaSigningKey(); ecdsaKey != nil {
+		switch bitLen := ecdsaKey.Curve.Params().N.BitLen(); bitLen {
+		case 256:
+			signingMethod = gojwt.SigningMethodES256
+		case 384:
+			signingMethod = gojwt.SigningMethodES384
+		case 512:
+			signingMethod = gojwt.SigningMethodES512
+		default:
+			panic(fmt.Errorf("Unsupported ECDSA bit len %d", bitLen))
+		}
+		key = ecdsaKey
+	} else if rsaKey := byRsaSigningKey(); rsaKey != nil {
+		if bitLen := rsaKey.N.BitLen(); 2048 <= bitLen {
+			signingMethod = gojwt.SigningMethodRS512
+		} else {
+			panic(fmt.Errorf("Unsupported RSA bit len %d", bitLen))
+		}
+		key = rsaKey
+	} else {
+		panic(fmt.Errorf("No signing key found"))
+	}
+	token := gojwt.NewWithClaims(signingMethod, claims)
+	jwtSigned, err := token.SignedString(key)
+	if err != nil {
+		panic(err)
+	}
+	return jwtSigned
 }
