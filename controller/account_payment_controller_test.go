@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"golang.org/x/exp/maps"
 
@@ -58,7 +59,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// we don't want to send out messages in our tests
 		SetMessageSender(mockAWSMessageSender)
 
-		balanceCode, err := model.CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		balanceCode, err := model.CreateBalanceCode(ctx, netTransferByteCount, 24*time.Hour, netRevenue, "", "", "")
 		assert.Equal(t, err, nil)
 		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,

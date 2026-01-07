@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
@@ -61,7 +62,7 @@ func TestLeaderboard(t *testing.T) {
 		/**
 		 * Create balance for network C
 		 */
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 24*time.Hour, 2*netRevenue, "", "", "")
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,

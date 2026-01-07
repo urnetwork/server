@@ -776,6 +776,7 @@ func testConnect(
 	balanceCodeA, err := model.CreateBalanceCode(
 		ctx,
 		initialTransferBalance,
+		24*time.Hour,
 		0,
 		"test-1",
 		"",
@@ -795,6 +796,7 @@ func testConnect(
 	balanceCodeB, err := model.CreateBalanceCode(
 		ctx,
 		initialTransferBalance,
+		24*time.Hour,
 		0,
 		"test-2",
 		"",

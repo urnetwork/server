@@ -103,7 +103,7 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, netRevenue, "", "", "")
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 24*time.Hour, netRevenue, "", "", "")
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -340,7 +340,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		assert.Equal(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 24*time.Hour, 2*netRevenue, "", "", "")
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -603,6 +603,7 @@ func TestBalanceCode(t *testing.T) {
 		balanceCode, err := CreateBalanceCode(
 			ctx,
 			1024,
+			24*time.Hour,
 			100,
 			"test-purchase-1",
 			"rest-purchase-1-receipt",
@@ -1275,7 +1276,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 			ClientId:  &sourceId,
 		})
 
-		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 2*netRevenue, "", "", "")
+		balanceCode, err := CreateBalanceCode(ctx, 2*netTransferByteCount, 24*time.Hour, 2*netRevenue, "", "", "")
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
