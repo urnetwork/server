@@ -93,6 +93,7 @@ type AuthNetworkClientArgs struct {
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 }
 
+// FIXME
 type ProxyConfig struct {
 	LockCallerIp bool     `json:"lock_caller_ip"`
 	LockIpList   []string `json:"lock_ip_list"`
@@ -103,15 +104,15 @@ type ProxyConfig struct {
 }
 
 type AuthNetworkClientResult struct {
-	ByClientJwt *string                 `json:"by_client_jwt,omitempty"`
-	Error       *AuthNetworkClientError `json:"error,omitempty"`
+	ByClientJwt       *string                 `json:"by_client_jwt,omitempty"`
+	Error             *AuthNetworkClientError `json:"error,omitempty"`
+	ProxyConfigResult *ProxyConfigResult      `json:"proxy_config_result,omitempty"`
 }
 
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
-	ClientLimitExceeded bool               `json:"client_limit_exceeded"`
-	Message             string             `json:"message"`
-	ProxyConfigResult   *ProxyConfigResult `json:"proxy_config_result,omitempty"`
+	ClientLimitExceeded bool   `json:"client_limit_exceeded"`
+	Message             string `json:"message"`
 }
 
 type ProxyConfigResult struct {
@@ -129,16 +130,18 @@ type ProxyAuthResult struct {
 	Password string `json:"password"`
 }
 
+// FIXME if proxy config, call CreateProxyDeviceConfig
 func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
 ) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
-		// important: use serializable tx for rate limits
+		var clientId server.Id
+
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			createTime := server.NowUtc()
 
-			clientId := server.NewId()
+			clientId = server.NewId()
 			var deviceId server.Id
 
 			if authClient.SourceClientId == nil {
@@ -219,7 +222,24 @@ func AuthNetworkClient(
 				ByClientJwt: &byJwtWithClientId,
 			}
 		})
+
+		if authClientResult != nil && authClientResult.Error == nil && authClient.ProxyConfig != nil {
+			proxyDeviceConfig := &ProxyDeviceConfig{
+				// FIXME
+			}
+			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
+			if err == nil {
+				// FIXME
+				authClientResult.ProxyConfigResult = &ProxyConfigResult{}
+			} else {
+				authClientResult.Error = &AuthNetworkClientError{
+					Message: "Could not create proxy device",
+				}
+			}
+		}
 	} else {
+		// note `ProxyConfig` is ignored in this case
+
 		// important: must check `network_id = session network_id`
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
@@ -1016,6 +1036,25 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 	// 	`,
 	// 	minTime.UTC(),
 	// ))
+
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+
+		// (cascade) remove proxy device config without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM proxy_device_config
+			USING (
+				SELECT proxy_device_config.client_id
+			    FROM proxy_device_config
+			    	LEFT JOIN network_client ON network_client.client_id = proxy_device_config.client_id
+			    WHERE network_client.client_id IS NULL
+			) t
+			WHERE proxy_device_config.client_id = t.client_id
+			`,
+		))
+
+	}, server.TxReadCommitted)
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
