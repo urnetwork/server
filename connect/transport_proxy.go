@@ -1,29 +1,23 @@
 package main
 
-
-// http proxy and socks proxy connections. 
-// 
+// http proxy and socks proxy connections.
+//
 // run the http proxy on the connect service and form the proxy connection via an ExchangeConnection to the resident
-// 
+//
 
 // run the socks proxy on the connect service and form the proxy conenction via an ExchangeConnection to the resident
 
-
-
-type ConnectHandlerSettings struct {
-	WriteTimeout                    time.Duration
-	ReadTimeout                     time.Duration
-	ProxyConnectionIdleTimeout.     time.Duration
-	ListenSocksPort                 int
-	FramerSettings                  *connect.FramerSettings
+type ProxyConnectHandlerSettings struct {
+	WriteTimeout               time.Duration
+	ReadTimeout                time.Duration
+	ProxyConnectionIdleTimeout time.Duration
+	ListenSocksPort            int
+	FramerSettings             *connect.FramerSettings
 }
 
 // FIXME hook up framer to tun device packet write/read
 
-
-
 type ProxyConnectHandler struct {
-
 
 	//
 
@@ -31,8 +25,7 @@ type ProxyConnectHandler struct {
 
 func NewProxyConnectHandler() {
 
-	// FIXME create tnet per client id, route output of tnet to 
-
+	// FIXME create tnet per client id, route output of tnet to
 
 	proxy := goproxy.NewProxyHttpServer()
 
@@ -54,17 +47,15 @@ func NewProxyConnectHandler() {
 		return tnet.DialContext(req.Context(), network, addr)
 	}
 
-
 }
 
 func connectProxy() {
 	// FIXME
-	
+
 	// if not exists, create a new one
 	// each network action, record activity. Close connection if no activity in Timeout
 
 	// the tnet packets are written/read to the exchange transport
-
 
 }
 
@@ -83,9 +74,6 @@ func (self *ProxyConnectHandler) runSocks() {
 
 	// FIXME write to the local SOCKS proxy
 	// FIXME packet output from the local http proxy should be written to a TUN transport to the resident
-
-
-
 
 	server := socks5.NewServer(
 		socks5.WithLogger(self),
@@ -111,17 +99,15 @@ func (self *ProxyConnectHandler) runSocks() {
 				return nil, fmt.Errorf("Unsupported network: %s", network)
 			}
 		}),
-		
 	)
 
 	server.ListenAndServe("tcp", self.settings.ListenSocksPort)
-
 
 }
 
 // socks.Logger
 func (self *SocksLogger) Errorf(format string, args ...any) {
-	glog.Errorf("[tp]" + format, args...)
+	glog.Errorf("[tp]"+format, args...)
 }
 
 // socks.CredentialStore
@@ -142,4 +128,3 @@ func (self *ProxyConnectHandler) Resolve(ctx context.Context, name string) (cont
 	ip := net.Ip(addr.AsSlice())
 	return ctx, ip, nil
 }
-

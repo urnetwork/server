@@ -819,7 +819,7 @@ func (self *Exchange) Close() {
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
 
-	framer *connect.MessageFramer
+	framer *connect.Framer
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {

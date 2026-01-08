@@ -2,21 +2,17 @@ package main
 
 // FIXME have a multi client in the proxy, set proxy as the generator
 
-
 import (
 	"context"
 
 	"github.com/urnetwork/sdk"
-
 )
 
 type ResidentProxyDevice struct {
-	ctx context.Context
-	cancel context.CancelFun
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	deviceLocal *sdk.DeviceLocal
-
-
 }
 
 func CreateResidentProxyDevice(
@@ -52,12 +48,12 @@ func (self *ResidentProxyDevice) AddTun() (
 	send chan []byte,
 	receive chan []byte,
 	closeTun func(),
-) func() {
+) {
 	tunCtx, tunCancel := context.WithCancel(ctx)
 
 	for {
 		select {
-		case packet := <- receive:
+		case packet := <-receive:
 			self.deviceLocal.Write(packet)
 			RELEASE(packet)
 
@@ -83,4 +79,3 @@ func (self *ResidentProxyDevice) Close() {
 
 	self.deviceLocal.Close()
 }
-

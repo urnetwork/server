@@ -30,8 +30,8 @@ require (
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
-	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/glog v0.0.0
+	github.com/urnetwork/sdk v0.0.0
 	golang.org/x/crypto v0.46.0
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
 	google.golang.org/protobuf v1.36.11
@@ -43,6 +43,7 @@ require (
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
+	github.com/btcsuite/btcutil v1.0.2 // indirect
 	github.com/consensys/gnark-crypto v0.18.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20240724233137-53bbb0ceb27a // indirect
