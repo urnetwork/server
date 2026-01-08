@@ -2107,6 +2107,9 @@ type ClientScore struct {
 
 	LookbackIndex        int
 	LookbackClientScores map[int]*ClientScore
+
+	ScaledWeights  map[string]float32
+	PassesMinimums map[string]bool
 }
 
 type ClientFilter struct {
@@ -2121,10 +2124,10 @@ const ClientScoreSampleCount = 200
 
 // choose a filter that has at least this number of providers
 // FIXME this scale based on traffic for region
-const MinExportNetReliabilityWeight = float64(400)
+// const MinExportNetReliabilityWeight = float64(400)
 
 // the number of filtered providers to consider a location stable
-const MinStableNetReliabilityWeight = float64(10)
+const MinStableNetReliabilityWeight = float64(4)
 
 func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
 	fm := 0
@@ -2463,15 +2466,33 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		})
 	})
 
-	// migration: set each client score to the lowest independent reliability lookback index
+	type filter struct {
+		maxScore                         int
+		minIndependentReliabilityWeights map[int]float64
+		// minBytesPerSecond                ByteCount
+		// maxRelativeLatencyMillis         int
+	}
+	// filters are tested in order of declaration for `MinExportNetReliabilityWeight`
+	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
+	// the last filter represents the worst case the network will expose to users
+	minFilter := filter{
+		maxScore: 2 * scorePerTier,
+		minIndependentReliabilityWeights: map[int]float64{
+			1: float64(0.99),
+			2: float64(0.8),
+			3: float64(0.6),
+		},
+	}
+	minReliabilityWeightScale := 0.1
+	maxReliabilityWeightScale := 1.0
+	minScoreScale := 0.1
+	maxScoreScale := 1.0
+
+	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
 		lookbackIndexes := maps.Keys(clientScore.LookbackClientScores)
+		slices.Sort(lookbackIndexes)
 		minLookbackIndex := lookbackIndexes[0]
-		for _, lookbackIndex := range lookbackIndexes[1:] {
-			if clientScore.LookbackClientScores[lookbackIndex].IndependentReliabilityWeight < clientScore.LookbackClientScores[minLookbackIndex].IndependentReliabilityWeight {
-				minLookbackIndex = lookbackIndex
-			}
-		}
 
 		minClientScore := clientScore.LookbackClientScores[minLookbackIndex]
 
@@ -2483,6 +2504,33 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.MaxBytesPerSecond = minClientScore.MaxBytesPerSecond
 		clientScore.HasLatencyTest = minClientScore.HasLatencyTest
 		clientScore.HasSpeedTest = minClientScore.HasSpeedTest
+
+		clientScore.ScaledWeights = map[string]float32{}
+		clientScore.PassesMinimums = map[string]bool{}
+
+		for _, rankMode := range maps.Keys(clientScore.Scores) {
+			passesMinimum := true
+			// all lookback thresholds must pass
+			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
+				if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {
+					passesMinimum = false
+					break
+				}
+				if minFilter.maxScore <= lookbackClientScore.Scores[rankMode] {
+					passesMinimum = false
+					break
+				}
+			}
+
+			if passesMinimum {
+				u := float64(minClientScore.IndependentReliabilityWeight-minFilter.minIndependentReliabilityWeights[minLookbackIndex]) / (1.0 - minFilter.minIndependentReliabilityWeights[minLookbackIndex])
+				reliabilityWeightScale := (1-u)*minReliabilityWeightScale + u*maxReliabilityWeightScale
+				v := float64(minFilter.maxScore-clientScore.Scores[rankMode]) / float64(minFilter.maxScore)
+				scoreScale := (1-v)*minScoreScale + v*maxScoreScale
+				clientScore.ScaledWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale)
+				clientScore.PassesMinimums[rankMode] = true
+			}
+		}
 	}
 	for _, clientScores := range locationClientScores {
 		for _, clientScore := range clientScores {
@@ -2495,39 +2543,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 
-	type filter struct {
-		maxScore                         int
-		minIndependentReliabilityWeights map[int]float64
-		minBytesPerSecond                ByteCount
-		maxRelativeLatencyMillis         int
-	}
-	// filters are tested in order of declaration for `MinExportNetReliabilityWeight`
-	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
-	// the last filter represents the worst case the network will expose to users
-	filters := []filter{
-		filter{
-			maxScore: 2 * scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.9),
-				2: float64(0.9),
-				3: float64(0.9),
-			},
-			// minBytesPerSecond: Kib * 512,
-		},
-		// this case allows for some recent outage to otherwise high-SLA providers
-		// this case catches system-wide issues
-		filter{
-			maxScore: 2 * scorePerTier,
-			minIndependentReliabilityWeights: map[int]float64{
-				1: float64(0.7),
-				2: float64(0.8),
-				3: float64(0.9),
-			},
-			// minBytesPerSecond: Kib * 512,
-			// maxRelativeLatencyMillis: 600,
-		},
-	}
-
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
 		samplesBytes [][]byte,
@@ -2536,47 +2551,18 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		samples [][]*ClientScore,
 		filter *ClientFilter,
 	) {
-		var clientScores []*ClientScore
-		for i, f := range filters {
-			passesMinimum := func(clientScore *ClientScore) bool {
-				if forceMinimum {
-					return true
-				}
-				// all lookback thresholds must pass
-				for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-					if lookbackClientScore.IndependentReliabilityWeight < f.minIndependentReliabilityWeights[lookbackIndex] {
-						return false
-					}
-					if f.maxScore <= lookbackClientScore.Scores[rankMode] {
-						return false
-					}
-					if 0 < f.minBytesPerSecond && lookbackClientScore.MaxBytesPerSecond < f.minBytesPerSecond {
-						return false
-					}
-					if 0 < f.maxRelativeLatencyMillis && f.maxRelativeLatencyMillis <= lookbackClientScore.MinRelativeLatencyMillis {
-						return false
-					}
-				}
-				return true
+		clientScores := []*ClientScore{}
+		netReliabilityWeight := float64(0)
+		for _, clientScore := range s {
+			if clientScore.PassesMinimums[rankMode] || forceMinimum {
+				netReliabilityWeight += clientScore.ReliabilityWeight
+				clientScores = append(clientScores, clientScore)
 			}
-			cs := []*ClientScore{}
-			netReliabilityWeight := float64(0)
-			for _, clientScore := range s {
-				if passesMinimum(clientScore) {
-					netReliabilityWeight += clientScore.ReliabilityWeight
-					cs = append(cs, clientScore)
-				}
-			}
+		}
 
-			clientScores = cs
-			filter = &ClientFilter{
-				Index:                i,
-				Count:                len(cs),
-				NetReliabilityWeight: netReliabilityWeight,
-			}
-			if MinExportNetReliabilityWeight <= netReliabilityWeight {
-				break
-			}
+		filter = &ClientFilter{
+			Count:                len(clientScores),
+			NetReliabilityWeight: netReliabilityWeight,
 		}
 
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
@@ -2967,20 +2953,20 @@ func FindProviders2(
 		for clientId, _ := range excludeFinalDestinations() {
 			delete(clientScores, clientId)
 		}
+		if findProviders2.ForceMinimum {
+			for _, clientScore := range clientScores {
+				clientScore.ScaledWeights[rankMode] = 1.0
+			}
+		}
 		// the final hop is excluded
-		// intermediaries have net score incremented
-		intermediaryScore := MaxClientScore / 10
+		// intermediaries have score reduced
+		intermediaryScale := float32(0.5)
 		for _, destination := range findProviders2.ExcludeDestinations {
 			for _, clientId := range destination[:len(destination)-1] {
 				if clientScore, ok := clientScores[clientId]; ok {
-					clientScore.Scores[rankMode] += intermediaryScore
+					clientScore.ScaledWeights[rankMode] *= intermediaryScale
 				}
 			}
-		}
-
-		adjustedMaxClientScore := MaxClientScore
-		for _, clientScore := range clientScores {
-			adjustedMaxClientScore = max(adjustedMaxClientScore, clientScore.Scores[rankMode])
 		}
 
 		clientIds := maps.Keys(clientScores)
@@ -2990,8 +2976,7 @@ func FindProviders2(
 
 		connect.WeightedSelectFunc(clientIds, count, func(clientId server.Id) float32 {
 			clientScore := clientScores[clientId]
-			qualityWeight := max(0, adjustedMaxClientScore-clientScore.Scores[rankMode])
-			return float32(clientScore.ReliabilityWeight * float64(qualityWeight))
+			return clientScore.ScaledWeights[rankMode]
 		})
 		clientIds = clientIds[:min(count, len(clientIds))]
 
