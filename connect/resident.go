@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
+	// "encoding/binary"
+	"encoding/gob"
 	"fmt"
-	"io"
+	// "io"
 	"math/rand"
 	"net"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	// "errors"
 	// mathrand "math/rand"
+	"bytes"
 	cryptorand "crypto/rand"
 	"slices"
 
@@ -482,10 +484,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			if timeout <= 0 {
 				return nil
 			}
+			timeout = min(timeout, self.settings.ExchangeResidentPollTimeout)
 			select {
 			case <-handleCtx.Done():
 				return nil
-			case <-time.After(self.settings.ExchangeResidentPollTimeout):
 			case <-time.After(timeout):
 			}
 		}
@@ -517,6 +519,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		return
 	}
 
+	go server.HandleError(func() {
+		defer handleCancel()
+		select {
+		case <-handleCtx.Done():
+		case <-resident.Done():
+		}
+	})
+
 	switch header.Op {
 	case ExchangeOpTransport:
 		// this must close `receive`
@@ -531,14 +541,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-resident.Done():
-					return
 				case message, ok := <-send:
 					if !ok {
 						return
 					}
 					resident.UpdateActivity()
-					if err := sendBuffer.WriteMessage(handleCtx, conn, message, header.Version); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
 						return
 					}
 
@@ -546,7 +554,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
 						return
 					}
 				}
@@ -563,7 +571,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			// messages from the transport are to be received by the resident
 			// messages not destined for the control id are handled by the resident forward
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
 				if err != nil {
 					return
 				}
@@ -589,8 +597,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-resident.Done():
 					return
 				case receive <- message:
 					resident.UpdateActivity()
@@ -618,11 +624,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-resident.Done():
-					return
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
 						return
 					}
 				}
@@ -633,7 +637,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
 				if err != nil {
 					return
 				}
@@ -673,14 +677,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-resident.Done():
-					return
 				case message, ok := <-send:
 					if !ok {
 						return
 					}
 					resident.UpdateActivity()
-					if err := sendBuffer.WriteMessage(handleCtx, conn, message, header.Version); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
 						return
 					}
 
@@ -688,7 +690,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0), header.Version); err != nil {
+					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
 						return
 					}
 				}
@@ -705,7 +707,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			// messages from the transport are to be received by the resident
 			// messages not destined for the control id are handled by the resident forward
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn, header.Version)
+				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
 				if err != nil {
 					return
 				}
@@ -719,8 +721,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-resident.Done():
 					return
 				case receive <- message:
 					resident.UpdateActivity()
@@ -736,8 +736,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	select {
 	case <-handleCtx.Done():
 		glog.V(1).Infof("[ecr]handle done\n")
-	case <-resident.Done():
-		glog.V(1).Infof("[ecr]resident done\n")
 	}
 }
 
@@ -824,7 +822,7 @@ type ExchangeBuffer struct {
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 	framerSettings := connect.DefaultFramerSettings()
-	framerSettings.MaxMessageLen = connect.ByteCount(settings.MaximumExchangeMessageByteCount)
+	framerSettings.MaxMessageLen = int(settings.MaximumExchangeMessageByteCount)
 	return &ExchangeBuffer{
 		settings: settings,
 		framer:   connect.NewFramer(framerSettings),
@@ -842,9 +840,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	headerBytes := b.Bytes()
 
 	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
-	self.framer.Write(headerBytes)
-
-	return err
+	return self.framer.Write(conn, headerBytes)
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
@@ -853,25 +849,25 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	if err != nil {
 		return nil, err
 	}
-	defer MessagePoolReturn(headerBytes)
+	defer connect.MessagePoolReturn(headerBytes)
 
 	var header ExchangeHeader
 
 	b := bytes.NewBuffer(headerBytes)
 	e := gob.NewDecoder(b)
-	err := e.Decode(&header)
+	err = e.Decode(&header)
 	if err != nil {
 		return nil, err
 	}
 	return &header, err
 }
 
-func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte, version int) error {
+func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte) error {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	self.framer.Write(conn, transferFrameBytes)
+	return self.framer.Write(conn, transferFrameBytes)
 }
 
-func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn, version int) ([]byte, error) {
+func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]byte, error) {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
 	return self.framer.Read(conn)
 }
@@ -1076,13 +1072,13 @@ func (self *ExchangeConnection) Run() {
 				if !ok {
 					return
 				}
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message, header.Version); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message); err != nil {
 					return
 				}
 				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
 			case <-time.After(self.settings.ExchangePingTimeout):
 				// send a ping
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0), header.Version); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0)); err != nil {
 					return
 				}
 			}
@@ -1344,6 +1340,13 @@ func (self *ResidentForward) Run() {
 			handleCancel()
 			connection.Close()
 		}()
+		go server.HandleError(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-connection.Done():
+			}
+		})
 
 		// write
 		for {
@@ -1357,8 +1360,6 @@ func (self *ResidentForward) Run() {
 				}
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-connection.Done():
 					return
 				case connection.send <- message:
 				case <-time.After(self.exchange.settings.WriteTimeout):
@@ -1683,8 +1684,6 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 					}
 
 					select {
-					case <-self.ctx.Done():
-						return
 					case <-forward.Done():
 						return
 					case <-time.After(self.exchange.settings.ForwardIdleTimeout):
@@ -1734,8 +1733,6 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		}
 
 		select {
-		case <-self.ctx.Done():
-			return false
 		case <-forward.Done():
 			return false
 		case forward.send <- transferFrameBytes:
@@ -1852,6 +1849,15 @@ func (self *Resident) AddForward() (
 	}
 
 	return
+}
+
+func (self *Resident) AddTun() (
+	send chan []byte,
+	receive chan []byte,
+	closeTun func(),
+) {
+	// FIXME
+	return nil, nil, nil
 }
 
 // func (self *Resident) Forward(transferFrameBytes []byte) bool {

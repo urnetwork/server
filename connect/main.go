@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
@@ -39,8 +40,8 @@ Options:
 		panic(err)
 	}
 
-	// use up to a 2gib message pool per instance
-	connect.ResizeMessagePool(connect.Gib(4))
+	// use up to a 4gib message pool per instance
+	connect.ResizeMessagePools(connect.Gib(4))
 
 	// server.Logger().Printf("%s\n", opts)
 

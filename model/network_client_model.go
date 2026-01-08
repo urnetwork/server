@@ -336,7 +336,7 @@ type RemoveNetworkClientError struct {
 }
 
 func RemoveNetworkClient(
-	removeClient RemoveNetworkClientArgs,
+	removeClient *RemoveNetworkClientArgs,
 	session *session.ClientSession,
 ) (*RemoveNetworkClientResult, error) {
 	var removeClientResult *RemoveNetworkClientResult

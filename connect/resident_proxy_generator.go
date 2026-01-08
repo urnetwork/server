@@ -1,53 +1,68 @@
 package main
 
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
+)
+
 type exchangeGenerator struct {
-	specs          []*ProviderSpec
-	clientStrategy *ClientStrategy
-
-	excludeClientIds []Id
-
-	apiUrl      string
-	byJwt       string
-	platformUrl string
-
-	deviceDescription       string
-	deviceSpec              string
-	appVersion              string
-	sourceClientId          *Id
-	clientSettingsGenerator func() *ClientSettings
-	settings                *ApiMultiClientGeneratorSettings
-
-	api *BringYourApi
+	ctx                     context.Context
+	exchange                *Exchange
+	byJwt                   *jwt.ByJwt
+	specs                   []*model.ProviderSpec
+	excludeClientIds        []server.Id
+	sourceClientId          server.Id
+	clientSettingsGenerator func() *connect.ClientSettings
 }
 
 func newExchangeGenerator(
 	ctx context.Context,
 	exchange *Exchange,
+	byJwt *jwt.ByJwt,
+	specs []*connect.ProviderSpec,
+	excludeClientIds []server.Id,
+	sourceClientId server.Id,
+	clientSettingsGenerator func() *connect.ClientSettings,
 ) *exchangeGenerator {
-	return NewApiMultiClientGenerator(
-		ctx,
-		specs,
-		clientStrategy,
-		excludeClientIds,
-		apiUrl,
-		byJwt,
-		platformUrl,
-		deviceDescription,
-		deviceSpec,
-		appVersion,
-		sourceClientId,
-		DefaultClientSettings,
-		DefaultApiMultiClientGeneratorSettings(),
-	)
+	return &exchangeGenerator{
+		ctx:      ctx,
+		exchange: exchange,
+		byJwt:    byJwt,
+		// FIXME
+		specs:                   nil,
+		excludeClientIds:        excludeClientIds,
+		sourceClientId:          sourceClientId,
+		clientSettingsGenerator: clientSettingsGenerator,
+	}
 }
 
-func (self *ApiMultiClientGenerator) NextDestinations(count int, excludeDestinations []MultiHopId, rankMode string) (map[MultiHopId]DestinationStats, error) {
+func (self *exchangeGenerator) clientSession() *session.ClientSession {
+	// FIXME
+	return nil
+}
+
+func (self *exchangeGenerator) NextDestinations(count int, excludeDestinations []connect.MultiHopId, rankMode string) (map[connect.MultiHopId]connect.DestinationStats, error) {
 	excludeClientIds := slices.Clone(self.excludeClientIds)
-	excludeDestinationsIds := [][]Id{}
+	excludeDestinationsIds := [][]server.Id{}
 	for _, excludeDestination := range excludeDestinations {
-		excludeDestinationsIds = append(excludeDestinationsIds, excludeDestination.Ids())
+		excludeDestinationIds := []server.Id{}
+		for _, id := range excludeDestination.Ids() {
+			excludeDestinationIds = append(excludeDestinationIds, server.Id(id))
+		}
+		excludeDestinationsIds = append(excludeDestinationsIds, excludeDestinationIds)
 	}
-	findProviders2 := &FindProviders2Args{
+
+	findProviders2 := &model.FindProviders2Args{
 		Specs:               self.specs,
 		ExcludeClientIds:    excludeClientIds,
 		ExcludeDestinations: excludeDestinationsIds,
@@ -55,26 +70,28 @@ func (self *ApiMultiClientGenerator) NextDestinations(count int, excludeDestinat
 		RankMode:            rankMode,
 	}
 
-	result, err := model.FindProviders2(findProviders2)
+	result, err := model.FindProviders2(findProviders2, self.clientSession())
 	if err != nil {
 		return nil, err
 	}
 
 	// FIXME only use single hop since we are already on the exchange
 
-	destinations := map[MultiHopId]DestinationStats{}
+	destinations := map[connect.MultiHopId]connect.DestinationStats{}
 	for _, provider := range result.Providers {
-		ids := []Id{}
+		ids := []connect.Id{}
 		if 0 < len(provider.IntermediaryIds) {
-			ids = append(ids, provider.IntermediaryIds...)
+			for _, id := range provider.IntermediaryIds {
+				ids = append(ids, connect.Id(id))
+			}
 		}
-		ids = append(ids, provider.ClientId)
+		ids = append(ids, connect.Id(provider.ClientId))
 		// use the tail if the length exceeds the allowed maximum
-		if MaxMultihopLength < len(ids) {
-			ids = ids[len(ids)-MaxMultihopLength:]
+		if connect.MaxMultihopLength < len(ids) {
+			ids = ids[len(ids)-connect.MaxMultihopLength:]
 		}
-		if destination, err := NewMultiHopId(ids...); err == nil {
-			destinations[destination] = DestinationStats{
+		if destination, err := connect.NewMultiHopId(ids...); err == nil {
+			destinations[destination] = connect.DestinationStats{
 				EstimatedBytesPerSecond: provider.EstimatedBytesPerSecond,
 				Tier:                    provider.Tier,
 			}
@@ -84,16 +101,16 @@ func (self *ApiMultiClientGenerator) NextDestinations(count int, excludeDestinat
 	return destinations, nil
 }
 
-func (self *ApiMultiClientGenerator) NewClientArgs() (*MultiClientGeneratorClientArgs, error) {
-	auth := func() (string, error) {
+func (self *exchangeGenerator) NewClientArgs() (*connect.MultiClientGeneratorClientArgs, error) {
+	byJwtStr, err := func() (string, error) {
 		// note the derived client id will be inferred by the api jwt
-		authNetworkClient := &AuthNetworkClientArgs{
-			SourceClientId: self.sourceClientId,
-			Description:    self.deviceDescription,
-			DeviceSpec:     self.deviceSpec,
+		authNetworkClient := &model.AuthNetworkClientArgs{
+			SourceClientId: &self.sourceClientId,
+			Description:    ProxyDeviceDescription,
+			DeviceSpec:     ProxyDeviceSpec,
 		}
 
-		result, err := model.AuthNetworkClient(authNetworkClient)
+		result, err := model.AuthNetworkClient(authNetworkClient, self.clientSession())
 		if err != nil {
 			return "", err
 		}
@@ -102,73 +119,71 @@ func (self *ApiMultiClientGenerator) NewClientArgs() (*MultiClientGeneratorClien
 			return "", errors.New(result.Error.Message)
 		}
 
-		return result.ByClientJwt, nil
-	}
-
-	if byJwtStr, err := auth(); err == nil {
-		byJwt, err := ParseByJwtUnverified(byJwtStr)
-		if err != nil {
-			// in this case we cannot clean up the client because we don't know the client id
-			panic(err)
-		}
-
-		clientAuth := &ClientAuth{
-			ByJwt:      byJwtStr,
-			InstanceId: NewId(),
-			AppVersion: self.appVersion,
-		}
-		return &MultiClientGeneratorClientArgs{
-			ClientId:   byJwt.ClientId,
-			ClientAuth: clientAuth,
-		}, nil
-	} else {
-		return nil, err
-	}
-}
-
-func (self *ApiMultiClientGenerator) RemoveClientArgs(args *MultiClientGeneratorClientArgs) {
-	removeNetworkClient := &RemoveNetworkClientArgs{
-		ClientId: args.ClientId,
-	}
-
-	model.RemoveNetworkClient(removeNetworkClient)
-}
-
-func (self *ApiMultiClientGenerator) RemoveClientWithArgs(client *Client, args *MultiClientGeneratorClientArgs) {
-	self.RemoveClientArgs(args)
-}
-
-func (self *ApiMultiClientGenerator) NewClientSettings() *ClientSettings {
-	return self.clientSettingsGenerator()
-}
-
-func (self *ApiMultiClientGenerator) NewClient(
-	ctx context.Context,
-	args *MultiClientGeneratorClientArgs,
-	clientSettings *ClientSettings,
-) (*Client, error) {
-	// FIXME how to handle client auth and api?
-	byJwt, err := ParseByJwtUnverified(args.ClientAuth.ByJwt)
+		return *result.ByClientJwt, nil
+	}()
 	if err != nil {
 		return nil, err
 	}
-	clientOob := newExchangeOutOfBandControl(ctx, byJwt.ClientId)
-	client := NewClient(ctx, byJwt.ClientId, clientOob, clientSettings)
+
+	byJwt, err := jwt.ParseByJwtUnverified(self.ctx, byJwtStr)
+	if err != nil {
+		// in this case we cannot clean up the client because we don't know the client id
+		panic(err)
+	}
+
+	clientId := *byJwt.ClientId
+
+	clientAuth := &connect.ClientAuth{
+		ByJwt:      byJwtStr,
+		InstanceId: connect.NewId(),
+		AppVersion: server.RequireVersion(),
+	}
+	return &connect.MultiClientGeneratorClientArgs{
+		ClientId:   connect.Id(clientId),
+		ClientAuth: clientAuth,
+	}, nil
+}
+
+func (self *exchangeGenerator) RemoveClientArgs(args *connect.MultiClientGeneratorClientArgs) {
+	removeNetworkClient := &model.RemoveNetworkClientArgs{
+		ClientId: server.Id(args.ClientId),
+	}
+
+	model.RemoveNetworkClient(removeNetworkClient, self.clientSession())
+}
+
+func (self *exchangeGenerator) RemoveClientWithArgs(client *connect.Client, args *connect.MultiClientGeneratorClientArgs) {
+	self.RemoveClientArgs(args)
+}
+
+func (self *exchangeGenerator) NewClientSettings() *connect.ClientSettings {
+	return self.clientSettingsGenerator()
+}
+
+func (self *exchangeGenerator) NewClient(
+	ctx context.Context,
+	args *connect.MultiClientGeneratorClientArgs,
+	clientSettings *connect.ClientSettings,
+) (*connect.Client, error) {
+	clientOob := newExchangeOutOfBandControl(ctx, server.Id(args.ClientId))
+	client := connect.NewClient(ctx, args.ClientId, clientOob, clientSettings)
 
 	transport := NewResidentTransport(
 		client.Ctx(),
-		exchange,
-		clientId,
-		instanceId,
+		self.exchange,
+		server.Id(args.ClientId),
+		server.Id(args.ClientAuth.InstanceId),
 	)
 
 	// the platform can route any destination,
 	// since every client has a platform transport
-	sendTransport := NewSendGatewayTransport()
-	receiveTransport := NewReceiveGatewayTransport()
+	sendTransport := connect.NewSendGatewayTransport()
+	receiveTransport := connect.NewReceiveGatewayTransport()
 
-	self.routeManager.UpdateTransport(sendTransport, []Route{transport.send})
-	self.routeManager.UpdateTransport(receiveTransport, []Route{transport.receive})
+	routeManager := client.RouteManager()
+
+	routeManager.UpdateTransport(sendTransport, []connect.Route{transport.send})
+	routeManager.UpdateTransport(receiveTransport, []connect.Route{transport.receive})
 
 	// defer func() {
 	// 	self.routeManager.RemoveTransport(sendTransport)
@@ -183,8 +198,8 @@ func (self *ApiMultiClientGenerator) NewClient(
 	return client, nil
 }
 
-func (self *ApiMultiClientGenerator) FixedDestinationSize() (int, bool) {
-	specClientIds := []Id{}
+func (self *exchangeGenerator) FixedDestinationSize() (int, bool) {
+	specClientIds := []server.Id{}
 	for _, spec := range self.specs {
 		if spec.ClientId != nil {
 			specClientIds = append(specClientIds, *spec.ClientId)
@@ -196,11 +211,18 @@ func (self *ApiMultiClientGenerator) FixedDestinationSize() (int, bool) {
 
 type exchangeOutOfBandControl struct {
 	ctx      context.Context
-	clientId connect.Id
+	clientId server.Id
 }
 
-func (self *exchangeOutOfBandControl) SendControl(frames []*protocol.Frame, callback OobResultFunction) {
-	go HandleError(func() {
+func newExchangeOutOfBandControl(ctx context.Context, clientId server.Id) *exchangeOutOfBandControl {
+	return &exchangeOutOfBandControl{
+		ctx:      ctx,
+		clientId: clientId,
+	}
+}
+
+func (self *exchangeOutOfBandControl) SendControl(frames []*protocol.Frame, callback connect.OobResultFunction) {
+	go server.HandleError(func() {
 		resultFrames, err := controller.ConnectControlFrames(
 			self.ctx,
 			self.clientId,

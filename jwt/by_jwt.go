@@ -438,6 +438,58 @@ func getNetworkIdForClient(ctx context.Context, clientId server.Id) (networkId s
 	return
 }
 
+func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJwt, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+			    network.network_id,
+			    network.admin_user_id,
+			    network.network_name,
+			    network_client.device_id
+
+			FROM network_client
+
+			INNER JOIN network ON network.network_id = network_client.network_id
+
+			WHERE
+			    network_client.client_id = $1
+		    `,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkId server.Id
+				var userId server.Id
+				var networkName string
+				var deviceId server.Id
+				server.Raise(result.Scan(
+					&networkId,
+					&userId,
+					&networkName,
+					&deviceId,
+				))
+
+				guestMode := false
+				// FIXME
+				pro := false
+
+				byJwt = NewByJwt(
+					networkId,
+					userId,
+					networkName,
+					guestMode,
+					pro,
+				).Client(deviceId, clientId)
+			} else {
+				returnErr = fmt.Errorf("Client not found.")
+			}
+		})
+	})
+	return
+}
+
 func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
 	// test the create time and sessions
 	// - all sessions created before a certain time may be expired (`auth_session_expiration`)
