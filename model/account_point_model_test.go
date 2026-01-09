@@ -204,8 +204,9 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, clientSessionC)
+			Secret:    balanceCode.Secret,
+			NetworkId: clientSessionC.ByJwt.NetworkId,
+		}, clientSessionC.Ctx)
 
 		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
 

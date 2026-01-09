@@ -1045,6 +1045,24 @@ func CreateBalanceCode(
 	}
 }
 
+type RedeemBalanceCodeArgs struct {
+	Secret string `json:"secret"`
+}
+
+func RedeemBalanceCode(
+	redeemBalanceCode RedeemBalanceCodeArgs,
+	session *session.ClientSession,
+) (*model.RedeemBalanceCodeResult, error) {
+
+	return model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret:    redeemBalanceCode.Secret,
+			NetworkId: session.ByJwt.NetworkId,
+		},
+		session.Ctx,
+	)
+}
+
 // https://developers.google.com/android-publisher/authorization
 func playAuth(ctx context.Context) (string, error) {
 	form := url.Values{}

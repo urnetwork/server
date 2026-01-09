@@ -373,7 +373,8 @@ func CreateBalanceCode(
 }
 
 type RedeemBalanceCodeArgs struct {
-	Secret string `json:"secret"`
+	Secret    string    `json:"secret"`
+	NetworkId server.Id `json:"network_id"`
 }
 
 type RedeemBalanceCodeResult struct {
@@ -394,11 +395,11 @@ type RedeemBalanceCodeError struct {
 
 func RedeemBalanceCode(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
-	session *session.ClientSession,
+	ctx context.Context,
 ) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	server.Tx(ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
-			session.Ctx,
+			ctx,
 			`
                 SELECT
                     balance_code_id,
@@ -442,7 +443,7 @@ func RedeemBalanceCode(
 		endTime := now.Add(duration)
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			ctx,
 			`
                 UPDATE transfer_balance_code
                 SET
@@ -461,7 +462,7 @@ func RedeemBalanceCode(
 		))
 
 		server.RaisePgResult(tx.Exec(
-			session.Ctx,
+			ctx,
 			`
                 INSERT INTO transfer_balance (
                     balance_id,
@@ -475,7 +476,9 @@ func RedeemBalanceCode(
                 VALUES ($1, $2, $3, $4, $5, $5, $6)
             `,
 			balanceId,
-			session.ByJwt.NetworkId,
+			// note: we don't use session.Jwt.NetworkId here
+			// users can redeem when creating a network, in which case the jwt is not yet threaded
+			redeemBalanceCode.NetworkId,
 			now,
 			endTime,
 			balanceCode.BalanceByteCount,

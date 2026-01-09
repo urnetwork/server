@@ -25,11 +25,12 @@ func NetworkCreate(
 	if networkCreate.BalanceCode != nil {
 
 		balanceCode := &model.RedeemBalanceCodeArgs{
-			Secret: *networkCreate.BalanceCode,
+			Secret:    *networkCreate.BalanceCode,
+			NetworkId: result.Network.NetworkId,
 		}
 
 		// this will add transfer balance and mark the user as paid if successful
-		_, err := model.RedeemBalanceCode(balanceCode, session)
+		_, err := model.RedeemBalanceCode(balanceCode, session.Ctx)
 
 		if err != nil {
 			// we don't want this to block creating a network

@@ -72,8 +72,9 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, ctx)
 
 		transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
 		assert.Equal(t, err, nil)
