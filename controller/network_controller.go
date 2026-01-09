@@ -22,9 +22,26 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	// model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
+	if networkCreate.BalanceCode != nil {
 
-	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+		balanceCode := &model.RedeemBalanceCodeArgs{
+			Secret: *networkCreate.BalanceCode,
+		}
+
+		// this will add transfer balance and mark the user as paid if successful
+		_, err := model.RedeemBalanceCode(balanceCode, session)
+
+		if err != nil {
+			// we don't want this to block creating a network
+			// users will be able to try and redeem in their account later
+			// add normal balance and continue
+			AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+		}
+
+	} else {
+		// no balance code, add normal balance
+		AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+	}
 
 	if networkCreate.ReferralCode != nil {
 		model.CreateNetworkReferral(
