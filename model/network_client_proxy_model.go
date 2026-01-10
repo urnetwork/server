@@ -53,7 +53,7 @@ func SignProxyId(proxyId server.Id) string {
 	return string(b)
 }
 
-func ParseProxyId(signedProxyId string) (proxyId server.Id, returnErr error) {
+func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr error) {
 	b := make([]byte, 64)
 	var n int
 	n, returnErr = base32.HexEncoding.Decode(b, []byte(signedProxyId))
@@ -92,6 +92,41 @@ func ParseProxyId(signedProxyId string) (proxyId server.Id, returnErr error) {
 	}
 
 	return
+}
+
+func EncodeProxyId(proxyId server.Id) string {
+	proxyIdBytes := proxyId.Bytes()
+
+	var b []byte
+	b = base32.HexEncoding.AppendEncode(b, proxyIdBytes)
+
+	return string(b)
+}
+
+func ParseEncodedProxyId(encodedProxyId string) (proxyId server.Id, returnErr error) {
+	b := make([]byte, 64)
+	var n int
+	n, returnErr = base32.HexEncoding.Decode(b, []byte(encodedProxyId))
+
+	if returnErr != nil {
+		return
+	}
+
+	if n < 16 {
+		returnErr = fmt.Errorf("Invalid input length")
+		return
+	}
+
+	proxyId, returnErr = server.IdFromBytes(b[0:16])
+	return
+}
+
+func RequireEncodedProxyId(encodedProxyId string) server.Id {
+	proxyId, err := ParseEncodedProxyId(encodedProxyId)
+	if err != nil {
+		panic(err)
+	}
+	return proxyId
 }
 
 type ProxyDeviceMode int
@@ -263,7 +298,7 @@ func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceCo
 	return &proxyDeviceConfig
 }
 
-func GetProxyDeviceConfigByClientId(ctx context.Context, clientId server.Id, instanceId server.Id) *ProxyDeviceConfig {
+func GetProxyDeviceConfigForClient(ctx context.Context, clientId server.Id, instanceId server.Id) *ProxyDeviceConfig {
 
 	var proxyDeviceConfigJson string
 
