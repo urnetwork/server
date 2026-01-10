@@ -209,10 +209,10 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
-	}
 
-	if market != nil && currentSubscription != nil {
-		currentSubscription.Store = *market
+		if market != nil {
+			currentSubscription.Store = *market
+		}
 	}
 
 	// FIXME
