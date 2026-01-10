@@ -56,7 +56,7 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, route := range self.routes {
 		matches := route.regex.FindStringSubmatch(r.URL.Path)
 		if 0 < len(matches) {
-			if r.Method != route.method {
+			if r.Method != route.method && route.method != "*" {
 				allow = append(allow, route.method)
 				continue
 			}
