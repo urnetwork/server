@@ -226,8 +226,8 @@ func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDevice
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		proxyId := server.NewId()
-		instanceId := server.NewId()
+		proxyDeviceConfig.ProxyId = server.NewId()
+		proxyDeviceConfig.InstanceId = server.NewId()
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -240,9 +240,9 @@ func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDevice
 			)
 			VALUES ($1, $2, $3, $4)
 			`,
-			proxyId,
+			proxyDeviceConfig.ProxyId,
 			proxyDeviceConfig.ClientId,
-			instanceId,
+			proxyDeviceConfig.InstanceId,
 			proxyDeviceConfigJson,
 		))
 	})

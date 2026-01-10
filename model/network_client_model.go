@@ -6,7 +6,7 @@ import (
 	// "crypto/sha256"
 	"errors"
 	// "net"
-	// "net/netip"
+	"net/netip"
 	// "regexp"
 	"strconv"
 	// "strings"
@@ -93,14 +93,31 @@ type AuthNetworkClientArgs struct {
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 }
 
-// FIXME
 type ProxyConfig struct {
 	LockCallerIp bool     `json:"lock_caller_ip"`
 	LockIpList   []string `json:"lock_ip_list"`
 
-	EnableSocks     bool `json:"enable_socks"`
-	EnableHttp      bool `json:"enable_http"`
-	HttpRequireAuth bool `json:"http_require_auth"`
+	HttpsRequireAuth bool `json:"https_require_auth"`
+
+	InitialDeviceState *InitialDeviceState `json:"initial_device_state,omitempty"`
+}
+
+type InitialDeviceState struct {
+	CountryCode string                      `json:"country_code,omitempty"`
+	Location    *InitialDeviceStateLocation `json:"location,omitempty"`
+}
+
+type InitialDeviceStateLocation struct {
+	ConnectLocationId *ConnectLocationId `json:"connect_location_id"`
+	Name              string             `json:"name"`
+	LocationType      LocationType       `json:"location_type"`
+}
+
+type ConnectLocationId struct {
+	ClientId        server.Id `json:"client_id,omitempty"`
+	LocationId      server.Id `json:"location_id,omitempty"`
+	LocationGroupId server.Id `json:"location_group_id,omitempty"`
+	BestAvailable   bool      `json:"best_available,omitempty"`
 }
 
 type AuthNetworkClientResult struct {
@@ -116,13 +133,11 @@ type AuthNetworkClientError struct {
 }
 
 type ProxyConfigResult struct {
-	ExpirationTime   time.Time `json:"expiration_time"`
 	KeepaliveSeconds int       `json:"keepalive_seconds"`
-	HttpProxyUrl     string    `json:"http_proxy_url,omitempty"`
-	SocksProxyUrl    string    `json:"socks_proxy_url,omitempty"`
-
-	HttpProxyAuth  *ProxyAuthResult `json:"http_proxy_auth"`
-	SocksProxyAuth *ProxyAuthResult `json:"socks_proxy_auth"`
+	HttpProxyUrl     string    `json:"http_proxy_url"`
+	SocksProxyUrl    string    `json:"socks_proxy_url"`
+	AuthToken        string    `json:"auth_token"`
+	InstanceId       server.Id `json:"instance_id"`
 }
 
 type ProxyAuthResult struct {
@@ -130,7 +145,6 @@ type ProxyAuthResult struct {
 	Password string `json:"password"`
 }
 
-// FIXME if proxy config, call CreateProxyDeviceConfig
 func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
@@ -224,13 +238,75 @@ func AuthNetworkClient(
 		})
 
 		if authClientResult != nil && authClientResult.Error == nil && authClient.ProxyConfig != nil {
+			var lockSubnets []netip.Prefix
+			if authClient.ProxyConfig.LockCallerIp {
+				addr, _, err := session.ParseClientIpPort()
+				if err != nil {
+					authClientError = fmt.Errorf("Could not lock caller ip")
+					return
+				}
+				prefix, _ := addr.Prefix(addr.BitLen())
+				lockSubnets = append(lockSubnets, prefix)
+			}
+			for _, lockIp := range authClient.ProxyConfig.LockIpList {
+				addr, err := netip.ParseAddr(lockIp)
+				if err == nil {
+					prefix, _ := addr.Prefix(addr.BitLen())
+					lockSubnets = append(lockSubnets, prefix)
+				} else {
+					prefix, err := netip.ParsePrefix(lockIp)
+					if err != nil {
+						authClientError = fmt.Errorf("Could not parse lock ip %s", lockIp)
+						return
+					}
+					lockSubnets = append(lockSubnets, prefix)
+				}
+			}
+
+			var proxyDeviceState *ProxyDeviceState
+			if initialDeviceState := authClient.ProxyConfig.InitialDeviceState; initialDeviceState != nil {
+				proxyDeviceState = &ProxyDeviceState{}
+
+				if authClient.ProxyConfig.InitialDeviceState.CountryCode != "" {
+					location := GetConnectLocationForCountryCode(session.Ctx, initialDeviceState.CountryCode)
+					if location == nil {
+						authClientError = fmt.Errorf("Could not find proxy location for country code %s", initialDeviceState.CountryCode)
+						return
+					}
+					proxyDeviceState.Location = location
+				} else {
+					// FIXME parse location
+				}
+
+				// FIXME parse performance profile
+			}
+
 			proxyDeviceConfig := &ProxyDeviceConfig{
-				// FIXME
+				ProxyDeviceConnection: ProxyDeviceConnection{
+					ClientId: clientId,
+				},
+				LockSubnets:        lockSubnets,
+				InitialDeviceState: proxyDeviceState,
 			}
 			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 			if err == nil {
-				// FIXME
-				authClientResult.ProxyConfigResult = &ProxyConfigResult{}
+				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
+
+				var httpProxyUrl string
+				if authClient.ProxyConfig.HttpsRequireAuth {
+					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
+					httpProxyUrl = fmt.Sprintf("%s.connect.bringyour.com", EncodeProxyId(proxyDeviceConfig.ProxyId))
+				} else {
+					httpProxyUrl = fmt.Sprintf("%s.connect.bringyour.com", signedProxyId)
+				}
+
+				authClientResult.ProxyConfigResult = &ProxyConfigResult{
+					HttpProxyUrl: httpProxyUrl,
+					// FIXME
+					SocksProxyUrl: "connect.bringyour.com",
+					AuthToken:     signedProxyId,
+					InstanceId:    proxyDeviceConfig.InstanceId,
+				}
 			} else {
 				authClientResult.Error = &AuthNetworkClientError{
 					Message: "Could not create proxy device",
