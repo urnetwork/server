@@ -666,13 +666,12 @@ func GetActiveTransferBalanceByteCount(ctx context.Context, networkId server.Id)
 	return net
 }
 
-func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		balanceId := server.NewId()
+func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance *TransferBalance) {
+	balanceId := server.NewId()
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -685,17 +684,22 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `,
-			balanceId,
-			transferBalance.NetworkId,
-			transferBalance.StartTime,
-			transferBalance.EndTime,
-			transferBalance.StartBalanceByteCount,
-			transferBalance.BalanceByteCount,
-			transferBalance.NetRevenue,
-			transferBalance.PurchaseToken,
-		))
+		balanceId,
+		transferBalance.NetworkId,
+		transferBalance.StartTime,
+		transferBalance.EndTime,
+		transferBalance.StartBalanceByteCount,
+		transferBalance.BalanceByteCount,
+		transferBalance.NetRevenue,
+		transferBalance.PurchaseToken,
+	))
 
-		transferBalance.BalanceId = balanceId
+	transferBalance.BalanceId = balanceId
+}
+
+func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		AddTransferBalanceInTx(ctx, tx, transferBalance)
 	})
 }
 
