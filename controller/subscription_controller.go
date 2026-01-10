@@ -211,7 +211,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		}
 	}
 
-	if market != nil {
+	if market != nil && currentSubscription != nil {
 		currentSubscription.Store = *market
 	}
 
