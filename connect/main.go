@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	// "fmt"
-	// "net/http"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,6 +61,7 @@ Options:
 	handlerId := model.CreateNetworkClientHandler(ctx)
 
 	connectHandler := NewConnectHandlerWithDefaults(ctx, handlerId, exchange)
+	proxyConnectHandler := NewProxyConnectHandlerWithDefaults(ctx, handlerId, exchange)
 	// update the heartbeat
 	go func() {
 		for {
@@ -90,13 +92,27 @@ Options:
 		}
 	}()
 
+	connectRouter := func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			host = r.Header.Get("Host")
+		}
+
+		sub := strings.SplitAfterN(host, ".", 2)[0]
+		if sub == "connect" {
+			// the host is connect.<domain>
+			connectHandler.Connect(w, r)
+		} else {
+			// the host is <auth>.connect.<domain>
+			proxyConnectHandler.Connect(w, r)
+		}
+	}
+
 	// FIXME multiplex connectHandler.Connect and proxyConnectHandler.Connect
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("GET", "/", connectHandler.Connect),
+		router.NewRoute("*", "/", connectRouter),
 	}
-
-	// FIXME also listen on port 1080 for socks proxy
 
 	port, _ := opts.Int("--port")
 

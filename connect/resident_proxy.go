@@ -6,12 +6,12 @@ import (
 	"context"
 	"time"
 
-	"github.com/urnetwork/server"
-	// "github.com/urnetwork/server/model"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sdk"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 )
 
 const ProxyDeviceDescription = "resident proxy"
@@ -21,17 +21,20 @@ type ResidentProxyDevice struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	exchange *Exchange
-	clientId server.Id
+	exchange          *Exchange
+	clientId          server.Id
+	instanceId        server.Id
+	proxyDeviceConfig *model.ProxyDeviceConfig
 
 	deviceLocal *sdk.DeviceLocal
 }
 
-func CreateResidentProxyDevice(
+func NewResidentProxyDevice(
 	ctx context.Context,
 	exchange *Exchange,
 	clientId server.Id,
 	instanceId server.Id,
+	proxyDeviceConfig *model.ProxyDeviceConfig,
 ) (*ResidentProxyDevice, error) {
 
 	// this jwt is used to access the services in the network space
@@ -70,17 +73,17 @@ func CreateResidentProxyDevice(
 	}
 
 	proxyDevice := &ResidentProxyDevice{
-		ctx:         cancelCtx,
-		cancel:      cancel,
-		exchange:    exchange,
-		clientId:    clientId,
-		deviceLocal: deviceLocal,
+		ctx:               cancelCtx,
+		cancel:            cancel,
+		exchange:          exchange,
+		clientId:          clientId,
+		proxyDeviceConfig: proxyDeviceConfig,
+		deviceLocal:       deviceLocal,
 	}
 
 	return proxyDevice, nil
 }
 
-// FIXME
 func (self *ResidentProxyDevice) AddTun() (
 	send chan []byte,
 	receive chan []byte,

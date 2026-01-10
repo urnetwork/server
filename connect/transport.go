@@ -140,7 +140,7 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
 	}
 
-	go h.run()
+	go server.HandleError(h.run, cancel)
 
 	return h
 }
@@ -237,9 +237,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			transportVersion = i
 		}
 
-		bearerPrefix := "Bearer "
+		bearerPrefix := "bearer "
 
-		if strings.HasPrefix(headerAuth, bearerPrefix) {
+		if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
 			jwt := headerAuth[len(bearerPrefix):]
 
 			instanceId, err := server.ParseId(headerInstanceId)
@@ -379,8 +379,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			var speedTest *SpeedTest
 
 			for {
+
 				ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-				messageType, message, err := ws.ReadMessage()
+				messageType, r, err := ws.NextReader()
 				if err != nil {
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -391,6 +392,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 				switch messageType {
 				case websocket.BinaryMessage:
+
+					message, err := connect.MessagePoolReadAll(r)
+					if err != nil {
+						if connectionId := announce.ConnectionId(); connectionId != nil {
+							model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "read", err)
+						}
+						return
+					}
+
 					// reliability tracking
 					announce.ReceiveMessage(ByteCount(len(message)))
 
@@ -416,10 +426,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 								})
 							}
 						}
+						connect.MessagePoolReturn(message)
 						continue
 					}
 					if speedTest != nil {
 						speedTest.TotalByteCount += model.ByteCount(len(message))
+						connect.MessagePoolReturn(message)
 						continue
 					}
 
@@ -427,8 +439,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					select {
 					case <-handleCtx.Done():
+						connect.MessagePoolReturn(message)
 						return
 					case <-residentTransport.Done():
+						connect.MessagePoolReturn(message)
 						return
 					case residentTransport.send <- message:
 						glog.V(2).Infof("[rtr] <-%s\n", clientId)
@@ -445,6 +459,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			write := func(message []byte) error {
 				ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 				err := ws.WriteMessage(websocket.BinaryMessage, message)
+				connect.MessagePoolReturn(message)
 				if err != nil {
 					// note that for websocket a deadline timeout cannot be recovered
 					if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -828,6 +843,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				if 0 == len(message) {
 					// ping
 					pingTracker.ReceivePing()
+					connect.MessagePoolReturn(message)
 					continue
 				}
 
@@ -835,12 +851,15 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 				select {
 				case <-handleCtx.Done():
+					connect.MessagePoolReturn(message)
 					return
 				case <-residentTransport.Done():
+					connect.MessagePoolReturn(message)
 					return
 				case residentTransport.send <- message:
 					glog.V(2).Infof("[rtr] <-%s\n", clientId)
 				case <-time.After(self.settings.ReadTimeout):
+					connect.MessagePoolReturn(message)
 				}
 			}
 		}, handleCancel)
@@ -861,6 +880,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, message)
+					connect.MessagePoolReturn(message)
 					if err != nil {
 						glog.V(2).Infof("[ts]h3 err = %s\n", err)
 						return

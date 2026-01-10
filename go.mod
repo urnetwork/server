@@ -1,6 +1,6 @@
 module github.com/urnetwork/server
 
-go 1.24.6
+go 1.25.5
 
 require (
 	github.com/TwiN/go-away v1.8.0
@@ -29,8 +29,8 @@ require (
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/things-go/go-socks5 v0.0.6
 	github.com/tyler-smith/go-bip39 v1.1.0
-	github.com/urnetwork/connect v0.0.0
-	github.com/urnetwork/glog v0.0.0
+	github.com/urnetwork/connect v0.2.0
+	github.com/urnetwork/glog v1.2.9
 	github.com/urnetwork/proxy v2026.1.7-830288120+incompatible
 	github.com/urnetwork/sdk v0.0.0
 	golang.org/x/crypto v0.46.0
@@ -76,7 +76,7 @@ require (
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/term v0.38.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	gvisor.dev/gvisor v0.0.0-20251209211007-f417d9b6ea17 // indirect
+	gvisor.dev/gvisor v0.0.0-20260109181451-4be7c433dae2 // indirect
 )
 
 require (
@@ -94,9 +94,9 @@ require (
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0
-	golang.org/x/text v0.32.0 // indirect
-	src.agwa.name/tlshacks v0.0.0-20250628001001-c92050511ef4 // indirect
+	golang.org/x/sys v0.40.0
+	golang.org/x/text v0.33.0 // indirect
+	src.agwa.name/tlshacks v0.0.2 // indirect
 )
 
 replace github.com/urnetwork/connect => ../connect
