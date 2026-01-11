@@ -72,6 +72,11 @@ func NewResidentProxyDevice(
 		return nil, err
 	}
 
+	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
+		deviceLocal.SetPerformanceProfile(initialDeviceState.PerformanceProfile)
+		deviceLocal.SetConnectLocation(initialDeviceState.Location)
+	}
+
 	proxyDevice := &ResidentProxyDevice{
 		ctx:               cancelCtx,
 		cancel:            cancel,
