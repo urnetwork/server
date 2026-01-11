@@ -74,7 +74,7 @@ Options:
 		settings.BatchSize = batchSize
 		taskWorker := initTaskWorker(ctx)
 		for i := 0; i < count; i += 1 {
-			go HandleError(func() {
+			go server.HandleError(func() {
 				defer cancel()
 				for {
 					// try again after unhandled errors. these signal a transient issue such as db load
@@ -89,7 +89,7 @@ Options:
 		}
 
 		// drain on sigterm
-		go HandleError(func() {
+		go server.HandleError(func() {
 			defer cancel()
 			select {
 			case <-ctx.Done():
