@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	// "fmt"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -92,17 +92,21 @@ Options:
 		}
 	})
 
+	service := strings.ToLower(server.RequireService())
+	envService := strings.ToLower(fmt.Sprintf("%s-%s", server.RequireEnv(), server.RequireService()))
+
 	connectRouter := func(w http.ResponseWriter, r *http.Request) {
 		host := r.Header.Get("X-Forwarded-Host")
 		if host == "" {
 			host = r.Header.Get("Host")
 		}
 
-		sub := strings.SplitAfterN(host, ".", 2)[0]
-		if sub == "connect" {
-			// the host is connect.<domain>
+		sub := strings.ToLower(strings.SplitN(host, ".", 2)[0])
+		switch sub {
+		case service, envService:
+			// the host is connect.<domain> or <env>-connect.<domain>
 			connectHandler.Connect(w, r)
-		} else {
+		default:
 			// the host is <auth>.connect.<domain>
 			proxyConnectHandler.Connect(w, r)
 		}

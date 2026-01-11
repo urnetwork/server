@@ -185,7 +185,7 @@ func (self *ProxyConnectHandler) Connect(w http.ResponseWriter, r *http.Request)
 		host = r.Header.Get("Host")
 	}
 
-	hostProxyId := strings.SplitAfterN(host, ".", 2)[0]
+	hostProxyId := strings.SplitN(host, ".", 2)[0]
 	proxyId, err := model.ParseSignedProxyId(hostProxyId)
 	if err != nil {
 		proxyId, err = model.ParseEncodedProxyId(hostProxyId)
@@ -213,7 +213,7 @@ func (self *ProxyConnectHandler) Connect(w http.ResponseWriter, r *http.Request)
 					http.Error(w, "Malformed auth", http.StatusInternalServerError)
 					return
 				}
-				signedProxyId := strings.SplitAfterN(string(combinedSignedProxyId), ":", 2)[0]
+				signedProxyId := strings.SplitN(string(combinedSignedProxyId), ":", 2)[0]
 				headerProxyId, err := model.ParseSignedProxyId(signedProxyId)
 				if err != nil || proxyId != headerProxyId {
 					http.Error(w, "Not authorized", http.StatusUnauthorized)
