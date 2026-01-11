@@ -2664,4 +2664,19 @@ var migrations = []any{
         DROP CONSTRAINT client_connection_reliability_score_pkey,
         ADD PRIMARY KEY (client_id, lookback_index)
     `),
+
+	newSqlMigration(`
+        CREATE TABLE proxy_device_config (
+            proxy_id uuid NOT NULL,
+            client_id uuid NOT NULL,
+            instance_id uuid NOT NULL,
+            config_json TEXT NOT NULL,
+
+            PRIMARY KEY (proxy_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX proxy_device_config_client_id_instance_id ON proxy_device_config (client_id, instance_id)
+    `),
 }

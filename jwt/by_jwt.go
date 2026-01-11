@@ -339,9 +339,11 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					glog.Infof("[jwt]fixed network_id with user_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
-					go server.Redis(storeCtx, func(r server.RedisClient) {
-						// ignore the error
-						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					go server.HandleError(func() {
+						server.Redis(storeCtx, func(r server.RedisClient) {
+							// ignore the error
+							r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+						})
 					})
 				}
 			}
@@ -364,9 +366,11 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					glog.Infof("[jwt]fixed network_id with client_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
-					go server.Redis(storeCtx, func(r server.RedisClient) {
-						// ignore the error
-						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					go server.HandleError(func() {
+						server.Redis(storeCtx, func(r server.RedisClient) {
+							// ignore the error
+							r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+						})
 					})
 				}
 			}
@@ -432,6 +436,58 @@ func getNetworkIdForClient(ctx context.Context, clientId server.Id) (networkId s
 				server.Raise(result.Scan(&networkId))
 			} else {
 				returnErr = fmt.Errorf("network_id not found for client_id=%s", clientId)
+			}
+		})
+	})
+	return
+}
+
+func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJwt, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+			    network.network_id,
+			    network.admin_user_id,
+			    network.network_name,
+			    network_client.device_id
+
+			FROM network_client
+
+			INNER JOIN network ON network.network_id = network_client.network_id
+
+			WHERE
+			    network_client.client_id = $1
+		    `,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkId server.Id
+				var userId server.Id
+				var networkName string
+				var deviceId server.Id
+				server.Raise(result.Scan(
+					&networkId,
+					&userId,
+					&networkName,
+					&deviceId,
+				))
+
+				guestMode := false
+				// FIXME
+				pro := false
+
+				byJwt = NewByJwt(
+					networkId,
+					userId,
+					networkName,
+					guestMode,
+					pro,
+				).Client(deviceId, clientId)
+			} else {
+				returnErr = fmt.Errorf("Client not found.")
 			}
 		})
 	})

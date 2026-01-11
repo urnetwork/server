@@ -226,7 +226,7 @@ func (self *ConnectionAnnounce) run() {
 		cleanupCtx := context.Background()
 		model.DisconnectNetworkClient(cleanupCtx, connectionId)
 		glog.V(1).Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
-	}, self.cancel)
+	})
 
 	self.setConnectionId(connectionId)
 	func() {
@@ -420,13 +420,12 @@ func (self *ConnectionAnnounce) nextLatency() {
 		defer self.stateLock.Unlock()
 		self.latencyTest = latencyTest
 	}()
-	go func() {
+	go server.HandleError(func() {
 		select {
 		case <-self.ctx.Done():
-			return
 		case self.PendingLatencyTest <- latencyTest:
 		}
-	}()
+	})
 }
 
 func (self *ConnectionAnnounce) SendLatency(latencyTest *LatencyTest) bool {
@@ -519,13 +518,12 @@ func (self *ConnectionAnnounce) nextSpeed() {
 		self.speedTestId += 1
 		self.speedTest = speedTest
 	}()
-	go func() {
+	go server.HandleError(func() {
 		select {
 		case <-self.ctx.Done():
-			return
 		case self.PendingSpeedTest <- speedTest:
 		}
-	}()
+	})
 }
 
 func (self *ConnectionAnnounce) SendSpeed(speedTest *SpeedTest) bool {

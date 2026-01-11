@@ -45,7 +45,7 @@ func NewJwkValidator(ctx context.Context, name string, jwkUrl string) *JwkValida
 		keySetCond: keySetCond,
 		keySet:     nil,
 	}
-	go validator.refresh()
+	go server.HandleError(validator.refresh, cancel)
 	return validator
 }
 

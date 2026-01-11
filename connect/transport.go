@@ -69,7 +69,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// because message must be serialized/deserialized from memory,
 		// there is a global limit on the size per message
 		// messages above this size will be ignored from clients and the exchange
-		MaximumExchangeMessageByteCount: ByteCount(4 * 1024 * 1024),
+		// MaximumExchangeMessageByteCount: ByteCount(4096),
 
 		QuicConnectTimeout:   15 * time.Second,
 		QuicHandshakeTimeout: 15 * time.Second,
@@ -88,20 +88,20 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
-	MinPingTimeout                  time.Duration
-	MaxPingTimeout                  time.Duration
-	PingTrackerCount                int
-	WriteTimeout                    time.Duration
-	ReadTimeout                     time.Duration
-	MaximumExchangeMessageByteCount ByteCount
-	QuicConnectTimeout              time.Duration
-	QuicHandshakeTimeout            time.Duration
-	ListenH3Port                    int
-	ListenDnsPort                   int
-	EnableProxyProtocol             bool
-	FramerSettings                  *connect.FramerSettings
-	TransportTlsSettings            *TransportTlsSettings
-	ConnectionAnnounceTimeout       time.Duration
+	MinPingTimeout   time.Duration
+	MaxPingTimeout   time.Duration
+	PingTrackerCount int
+	WriteTimeout     time.Duration
+	ReadTimeout      time.Duration
+	// MaximumExchangeMessageByteCount ByteCount
+	QuicConnectTimeout        time.Duration
+	QuicHandshakeTimeout      time.Duration
+	ListenH3Port              int
+	ListenDnsPort             int
+	EnableProxyProtocol       bool
+	FramerSettings            *connect.FramerSettings
+	TransportTlsSettings      *TransportTlsSettings
+	ConnectionAnnounceTimeout time.Duration
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
 }
@@ -140,7 +140,7 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
 	}
 
-	go h.run()
+	go server.HandleError(h.run, cancel)
 
 	return h
 }
@@ -149,10 +149,10 @@ func (self *ConnectHandler) run() {
 	defer self.cancel()
 
 	if server.HasPort(self.settings.ListenH3Port) {
-		go self.runH3()
+		go server.HandleError(self.runH3, self.cancel)
 	}
 	if server.HasPort(self.settings.ListenDnsPort) {
-		go self.runH3Dns()
+		go server.HandleError(self.runH3Dns, self.cancel)
 	}
 
 	select {
@@ -177,13 +177,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// }
 	defer handleCancel()
 
-	go func() {
+	go server.HandleError(func() {
 		defer handleCancel()
 		select {
 		case <-r.Context().Done():
 		case <-handleCtx.Done():
 		}
-	}()
+	})
 
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
@@ -237,9 +237,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			transportVersion = i
 		}
 
-		bearerPrefix := "Bearer "
+		bearerPrefix := "bearer "
 
-		if strings.HasPrefix(headerAuth, bearerPrefix) {
+		if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
 			jwt := headerAuth[len(bearerPrefix):]
 
 			instanceId, err := server.ParseId(headerInstanceId)
@@ -269,7 +269,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	// enforce the message size limit on messages in
-	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
+	ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen))
 
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
@@ -362,11 +362,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			instanceId,
 		)
-		go func() {
+		go server.HandleError(func() {
 			defer handleCancel()
-			server.HandleError(residentTransport.Run)
+			residentTransport.Run()
 			// close is done in the write
-		}()
+		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
@@ -379,8 +379,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			var speedTest *SpeedTest
 
 			for {
+
 				ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-				messageType, message, err := ws.ReadMessage()
+				messageType, r, err := ws.NextReader()
 				if err != nil {
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -391,6 +392,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 				switch messageType {
 				case websocket.BinaryMessage:
+
+					message, err := connect.MessagePoolReadAll(r)
+					if err != nil {
+						if connectionId := announce.ConnectionId(); connectionId != nil {
+							model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "read", err)
+						}
+						return
+					}
+
 					// reliability tracking
 					announce.ReceiveMessage(ByteCount(len(message)))
 
@@ -416,10 +426,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 								})
 							}
 						}
+						connect.MessagePoolReturn(message)
 						continue
 					}
 					if speedTest != nil {
 						speedTest.TotalByteCount += model.ByteCount(len(message))
+						connect.MessagePoolReturn(message)
 						continue
 					}
 
@@ -427,8 +439,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					select {
 					case <-handleCtx.Done():
+						connect.MessagePoolReturn(message)
 						return
 					case <-residentTransport.Done():
+						connect.MessagePoolReturn(message)
 						return
 					case residentTransport.send <- message:
 						glog.V(2).Infof("[rtr] <-%s\n", clientId)
@@ -437,7 +451,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					// else ignore
 				}
 			}
-		}, handleCancel)
+		})
 
 		go server.HandleError(func() {
 			defer handleCancel()
@@ -445,6 +459,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			write := func(message []byte) error {
 				ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 				err := ws.WriteMessage(websocket.BinaryMessage, message)
+				connect.MessagePoolReturn(message)
 				if err != nil {
 					// note that for websocket a deadline timeout cannot be recovered
 					if connectionId := announce.ConnectionId(); connectionId != nil {
@@ -528,13 +543,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 				}
 			}
-		}, handleCancel)
+		})
 
 		select {
 		case <-handleCtx.Done():
-			return
-		case <-residentTransport.Done():
-			glog.Infof("[t]resident transport done\n")
 			return
 		}
 	}
@@ -658,7 +670,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		}
 
 		glog.Infof("[c]h3 accept connection %s:%d\n", listenIpv4, listenPort)
-		go func() {
+		go server.HandleError(func() {
 			defer conn.CloseWithError(0, "")
 
 			err := self.connectQuic(conn)
@@ -667,7 +679,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 			} else {
 				glog.Infof("[c]h3 connection exited %s:%d\n", listenIpv4, listenPort)
 			}
-		}()
+		})
 	}
 }
 
@@ -675,13 +687,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
-	go func() {
+	go server.HandleError(func() {
 		defer handleCancel()
 		select {
 		case <-conn.Context().Done():
 		case <-handleCtx.Done():
 		}
-	}()
+	})
 
 	// find the client ip:port from the addr
 	clientAddress := conn.RemoteAddr().String()
@@ -800,11 +812,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			clientId,
 			instanceId,
 		)
-		go func() {
+		go server.HandleError(func() {
 			defer handleCancel()
-			server.HandleError(residentTransport.Run)
+			residentTransport.Run()
 			// close is done in the write
-		}()
+		})
+		go server.HandleError(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-residentTransport.Done():
+			}
+		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
@@ -828,6 +847,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				if 0 == len(message) {
 					// ping
 					pingTracker.ReceivePing()
+					connect.MessagePoolReturn(message)
 					continue
 				}
 
@@ -835,15 +855,15 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-residentTransport.Done():
+					connect.MessagePoolReturn(message)
 					return
 				case residentTransport.send <- message:
 					glog.V(2).Infof("[rtr] <-%s\n", clientId)
 				case <-time.After(self.settings.ReadTimeout):
+					connect.MessagePoolReturn(message)
 				}
 			}
-		}, handleCancel)
+		})
 
 		go server.HandleError(func() {
 			defer handleCancel()
@@ -852,8 +872,6 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-residentTransport.Done():
-					return
 				case message, ok := <-residentTransport.receive:
 					if !ok {
 						return
@@ -861,6 +879,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, message)
+					connect.MessagePoolReturn(message)
 					if err != nil {
 						glog.V(2).Infof("[ts]h3 err = %s\n", err)
 						return
@@ -879,7 +898,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					announce.SendMessage(0)
 				}
 			}
-		}, handleCancel)
+		})
 
 		select {
 		case <-handleCtx.Done():
