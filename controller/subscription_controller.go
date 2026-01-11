@@ -1832,7 +1832,7 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		var priceNanoCents int64
 
-		if priceFloat, ok := transactionInfo["price"].(float64); ok && priceFloat > 0 {
+		if priceFloat, ok := transactionInfo["price"].(float64); ok {
 
 			// webhook price coming back like "4990" for $4.99
 			priceUsd := priceFloat / 1000
@@ -1840,12 +1840,12 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			priceNanoCents = model.UsdToNanoCents(priceUsd)
 
 		}
-		// else {
 
 		// // note - currently if a TestFlight user subscribes,
 		// // they won't be marked as pro since their price is 0
 		// // in the transaction info
 		// // uncommenting this will mark them as pro, but pollutes net_revenue with false data
+		// // if uncommenting, wrap in check that price is zero
 
 		//
 		// 	// todo - deprecate
@@ -1862,8 +1862,6 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 		// 	} else {
 		// 		priceNanoCents = model.UsdToNanoCents(4.99) // monthly subscription
 		// 	}
-
-		// }
 
 		// fixme: hardcoded fee fraction
 		feeFraction := 0.2
