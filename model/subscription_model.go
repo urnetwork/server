@@ -589,10 +589,11 @@ type TransferBalance struct {
 	EndTime               time.Time `json:"end_time"`
 	StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
 	// how much money the platform made after subtracting fees
-	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
-	BalanceByteCount ByteCount `json:"balance_byte_count"`
-	PurchaseToken    string    `json:"purchase_token,omitempty"`
-	Paid             bool      `json:"paid,omitempty"`
+	NetRevenue        NanoCents `json:"net_revenue_nano_cents"`
+	SubsidyNetRevenue NanoCents `json:"subsidy_net_revenue_nano_cents,omitempty"`
+	BalanceByteCount  ByteCount `json:"balance_byte_count"`
+	PurchaseToken     string    `json:"purchase_token,omitempty"`
+	Paid              bool      `json:"paid,omitempty"`
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -666,13 +667,12 @@ func GetActiveTransferBalanceByteCount(ctx context.Context, networkId server.Id)
 	return net
 }
 
-func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		balanceId := server.NewId()
+func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance *TransferBalance) {
+	balanceId := server.NewId()
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -681,21 +681,28 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                     start_balance_byte_count,
                     balance_byte_count,
                     net_revenue_nano_cents,
-                    purchase_token
+                    purchase_token,
+                    subsidy_net_revenue_nano_cents
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             `,
-			balanceId,
-			transferBalance.NetworkId,
-			transferBalance.StartTime,
-			transferBalance.EndTime,
-			transferBalance.StartBalanceByteCount,
-			transferBalance.BalanceByteCount,
-			transferBalance.NetRevenue,
-			transferBalance.PurchaseToken,
-		))
+		balanceId,
+		transferBalance.NetworkId,
+		transferBalance.StartTime,
+		transferBalance.EndTime,
+		transferBalance.StartBalanceByteCount,
+		transferBalance.BalanceByteCount,
+		transferBalance.NetRevenue,
+		transferBalance.PurchaseToken,
+		transferBalance.SubsidyNetRevenue,
+	))
 
-		transferBalance.BalanceId = balanceId
+	transferBalance.BalanceId = balanceId
+}
+
+func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		AddTransferBalanceInTx(ctx, tx, transferBalance)
 	})
 }
 
@@ -2897,6 +2904,12 @@ func IsPro(
 	ctx context.Context,
 	networkId *server.Id,
 ) bool {
+
+	// todo:
+	// instead of checking if PAID, add a column 'is_pro'
+	//
+	// In some cases, like Apple TestFlight or Stripe promo codes,
+	// we want to mark the user as pro even if payment is 0
 
 	isPro := false
 
