@@ -29,9 +29,9 @@ require (
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/things-go/go-socks5 v0.0.6
 	github.com/tyler-smith/go-bip39 v1.1.0
-	github.com/urnetwork/connect v0.2.0
-	github.com/urnetwork/glog v1.2.9
-	github.com/urnetwork/proxy v2026.1.7-830288120+incompatible
+	github.com/urnetwork/connect v0.0.0
+	github.com/urnetwork/glog v0.0.0
+	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	golang.org/x/crypto v0.46.0
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93
