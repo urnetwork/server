@@ -149,10 +149,10 @@ func (self *ConnectHandler) run() {
 	defer self.cancel()
 
 	if server.HasPort(self.settings.ListenH3Port) {
-		go self.runH3()
+		go server.HandleError(self.runH3, self.cancel)
 	}
 	if server.HasPort(self.settings.ListenDnsPort) {
-		go self.runH3Dns()
+		go server.HandleError(self.runH3Dns, self.cancel)
 	}
 
 	select {
@@ -177,13 +177,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// }
 	defer handleCancel()
 
-	go func() {
+	go server.HandleError(func() {
 		defer handleCancel()
 		select {
 		case <-r.Context().Done():
 		case <-handleCtx.Done():
 		}
-	}()
+	})
 
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
@@ -362,11 +362,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			instanceId,
 		)
-		go func() {
+		go server.HandleError(func() {
 			defer handleCancel()
-			server.HandleError(residentTransport.Run)
+			residentTransport.Run()
 			// close is done in the write
-		}()
+		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
@@ -451,7 +451,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					// else ignore
 				}
 			}
-		}, handleCancel)
+		})
 
 		go server.HandleError(func() {
 			defer handleCancel()
@@ -543,13 +543,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 				}
 			}
-		}, handleCancel)
+		})
 
 		select {
 		case <-handleCtx.Done():
-			return
-		case <-residentTransport.Done():
-			glog.Infof("[t]resident transport done\n")
 			return
 		}
 	}
@@ -673,7 +670,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		}
 
 		glog.Infof("[c]h3 accept connection %s:%d\n", listenIpv4, listenPort)
-		go func() {
+		go server.HandleError(func() {
 			defer conn.CloseWithError(0, "")
 
 			err := self.connectQuic(conn)
@@ -682,7 +679,7 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 			} else {
 				glog.Infof("[c]h3 connection exited %s:%d\n", listenIpv4, listenPort)
 			}
-		}()
+		})
 	}
 }
 
@@ -690,13 +687,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
 
-	go func() {
+	go server.HandleError(func() {
 		defer handleCancel()
 		select {
 		case <-conn.Context().Done():
 		case <-handleCtx.Done():
 		}
-	}()
+	})
 
 	// find the client ip:port from the addr
 	clientAddress := conn.RemoteAddr().String()
@@ -815,11 +812,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			clientId,
 			instanceId,
 		)
-		go func() {
+		go server.HandleError(func() {
 			defer handleCancel()
-			server.HandleError(residentTransport.Run)
+			residentTransport.Run()
 			// close is done in the write
-		}()
+		})
+		go server.HandleError(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-residentTransport.Done():
+			}
+		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
@@ -853,16 +857,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				case <-handleCtx.Done():
 					connect.MessagePoolReturn(message)
 					return
-				case <-residentTransport.Done():
-					connect.MessagePoolReturn(message)
-					return
 				case residentTransport.send <- message:
 					glog.V(2).Infof("[rtr] <-%s\n", clientId)
 				case <-time.After(self.settings.ReadTimeout):
 					connect.MessagePoolReturn(message)
 				}
 			}
-		}, handleCancel)
+		})
 
 		go server.HandleError(func() {
 			defer handleCancel()
@@ -870,8 +871,6 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			for {
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-residentTransport.Done():
 					return
 				case message, ok := <-residentTransport.receive:
 					if !ok {
@@ -899,7 +898,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					announce.SendMessage(0)
 				}
 			}
-		}, handleCancel)
+		})
 
 		select {
 		case <-handleCtx.Done():

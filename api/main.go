@@ -55,7 +55,7 @@ Options:
 	defer cancel()
 
 	// drain on sigterm
-	go func() {
+	go server.HandleError(func() {
 		defer cancel()
 		select {
 		case <-ctx.Done():
@@ -67,7 +67,7 @@ Options:
 			case <-time.After(DrainTimeout):
 			}
 		}
-	}()
+	})
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),

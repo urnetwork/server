@@ -63,7 +63,8 @@ Options:
 	connectHandler := NewConnectHandlerWithDefaults(ctx, handlerId, exchange)
 	proxyConnectHandler := NewProxyConnectHandlerWithDefaults(ctx, handlerId, exchange)
 	// update the heartbeat
-	go func() {
+	go server.HandleError(func() {
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -79,18 +80,17 @@ Options:
 				}
 			})
 		}
-	}()
+	})
 
 	// drain on sigterm
-	go func() {
+	go server.HandleError(func() {
 		defer cancel()
 		select {
 		case <-ctx.Done():
-			return
 		case <-quitEvent.Ctx.Done():
 			exchange.Drain()
 		}
-	}()
+	})
 
 	connectRouter := func(w http.ResponseWriter, r *http.Request) {
 		host := r.Header.Get("X-Forwarded-Host")

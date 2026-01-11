@@ -102,7 +102,9 @@ func NewProxyConnectHandler(
 		proxyConnections: map[server.Id]*ProxyConnection{},
 	}
 
-	go server.HandleError(h.runSocks)
+	if server.HasPort(settings.ListenSocksPort) {
+		go server.HandleError(h.runSocks)
+	}
 
 	return h
 }
@@ -125,7 +127,7 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 			proxyConnection.Run()
 
 			glog.V(1).Infof("[rp]close %s\n", proxyId)
-		}, proxyConnection.Cancel)
+		})
 		go server.HandleError(func() {
 			defer proxyConnection.Cancel()
 			for {
@@ -140,7 +142,7 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 				case <-time.After(self.settings.ProxyConnectionIdleTimeout):
 				}
 			}
-		}, proxyConnection.Cancel)
+		})
 
 		var replacedProxyConnection *ProxyConnection
 		func() {
@@ -470,9 +472,6 @@ func (self *ProxyConnection) Run() {
 				connect.MessagePoolReturn(packet)
 			}
 		}
-	}, func() {
-		self.cancel()
-		exchangeTransport.Close()
 	})
 
 	go server.HandleError(func() {
@@ -489,7 +488,7 @@ func (self *ProxyConnection) Run() {
 				}
 			}
 		}
-	}, self.cancel)
+	})
 
 	select {
 	case <-self.ctx.Done():

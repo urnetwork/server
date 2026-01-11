@@ -339,9 +339,11 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					glog.Infof("[jwt]fixed network_id with user_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
-					go server.Redis(storeCtx, func(r server.RedisClient) {
-						// ignore the error
-						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					go server.HandleError(func() {
+						server.Redis(storeCtx, func(r server.RedisClient) {
+							// ignore the error
+							r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+						})
 					})
 				}
 			}
@@ -364,9 +366,11 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					glog.Infof("[jwt]fixed network_id with client_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
-					go server.Redis(storeCtx, func(r server.RedisClient) {
-						// ignore the error
-						r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+					go server.HandleError(func() {
+						server.Redis(storeCtx, func(r server.RedisClient) {
+							// ignore the error
+							r.SetNX(storeCtx, key, networkId.String(), ttl).Err()
+						})
 					})
 				}
 			}
