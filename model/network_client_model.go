@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	// "regexp"
 	"strconv"
-	// "strings"
+	"strings"
 	// "sync"
 
 	// "bytes"
@@ -292,19 +292,28 @@ func AuthNetworkClient(
 			if err == nil {
 				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
+				host := fmt.Sprintf("%s.%s", server.RequireService(), server.RequireDomain())
+
 				var httpProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
 					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
-					httpProxyUrl = fmt.Sprintf("%s.connect.bringyour.com", EncodeProxyId(proxyDeviceConfig.ProxyId))
+					httpProxyUrl = fmt.Sprintf(
+						"%s.%s",
+						strings.ToLower(EncodeProxyId(proxyDeviceConfig.ProxyId)),
+						host,
+					)
 				} else {
-					httpProxyUrl = fmt.Sprintf("%s.connect.bringyour.com", signedProxyId)
+					httpProxyUrl = fmt.Sprintf(
+						"%s.%s",
+						strings.ToLower(signedProxyId),
+						host,
+					)
 				}
 
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
-					HttpProxyUrl: httpProxyUrl,
-					// FIXME
-					SocksProxyUrl: "connect.bringyour.com",
-					AuthToken:     signedProxyId,
+					HttpProxyUrl:  httpProxyUrl,
+					SocksProxyUrl: host,
+					AuthToken:     strings.ToLower(signedProxyId),
 					InstanceId:    proxyDeviceConfig.InstanceId,
 				}
 			} else {
