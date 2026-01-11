@@ -2906,6 +2906,12 @@ func IsPro(
 	networkId *server.Id,
 ) bool {
 
+	// todo:
+	// instead of checking if PAID, add a column 'is_pro'
+	//
+	// In some cases, like Apple TestFlight or Stripe promo codes,
+	// we want to mark the user as pro even if payment is 0
+
 	isPro := false
 
 	server.Tx(ctx, func(tx server.PgTx) {

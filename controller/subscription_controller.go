@@ -1453,11 +1453,15 @@ func PlaySubscriptionRenewal(
 			skuName := playSubscriptionRenewal.SubscriptionId
 			if sku, ok := skus[skuName]; ok {
 				if sku.Supporter {
+
+					endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+					netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
+
 					renewal := &model.SubscriptionRenewal{
 						NetworkId:          playSubscriptionRenewal.NetworkId,
 						StartTime:          startTime,
-						EndTime:            maxExpiryTime.Add(SubscriptionGracePeriod),
-						NetRevenue:         model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						EndTime:            endTime,
+						NetRevenue:         netRevenue,
 						PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
 						SubscriptionType:   model.SubscriptionTypeSupporter,
 						SubscriptionMarket: model.SubscriptionMarketGoogle,
@@ -1467,16 +1471,13 @@ func PlaySubscriptionRenewal(
 						renewal,
 					)
 
-					// should this be AddTransferBalance too?
-					// AddRefreshTransferBalance(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
-					//
 					transferBalance := &model.TransferBalance{
 						NetworkId:             playSubscriptionRenewal.NetworkId,
 						StartTime:             startTime,
-						EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
-						StartBalanceByteCount: sku.BalanceByteCount(),
-						NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
-						BalanceByteCount:      sku.BalanceByteCount(),
+						EndTime:               endTime,
+						StartBalanceByteCount: RefreshSupporterTransferBalance,
+						NetRevenue:            netRevenue,
+						BalanceByteCount:      RefreshSupporterTransferBalance,
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 					}
 					model.AddTransferBalance(
@@ -1788,9 +1789,9 @@ type AppleNotificationDecodedPayload struct {
 }
 
 func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
-	glog.Infof("[apple] New subscription: %+v", notification.Data)
 
 	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
+
 	if err != nil {
 		glog.Errorf("[apple] Failed to parse signed info: %v", err)
 		return
@@ -1831,7 +1832,7 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		var priceNanoCents int64
 
-		if priceFloat, ok := transactionInfo["price"].(float64); ok {
+		if priceFloat, ok := transactionInfo["price"].(float64); ok && priceFloat > 0 {
 
 			// webhook price coming back like "4990" for $4.99
 			priceUsd := priceFloat / 1000
@@ -1839,6 +1840,30 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			priceNanoCents = model.UsdToNanoCents(priceUsd)
 
 		}
+		// else {
+
+		// // note - currently if a TestFlight user subscribes,
+		// // they won't be marked as pro since their price is 0
+		// // in the transaction info
+		// // uncommenting this will mark them as pro, but pollutes net_revenue with false data
+
+		//
+		// 	// todo - deprecate
+		// 	// we should instead mark transfer balance as PRO
+		// 	// in the case of testflight users, we don't want to pollute net_revenue with false data
+		// 	//
+		// 	// fallback if we can't parse price, hardset price
+		// 	glog.Infof("[apple] price not found in transaction info, using hardset values")
+
+		// 	now := time.Now()
+		// 	twoMonthsFromNow := now.AddDate(0, 2, 0)
+		// 	if expiresDate.After(twoMonthsFromNow) {
+		// 		priceNanoCents = model.UsdToNanoCents(39.99) // year subscription
+		// 	} else {
+		// 		priceNanoCents = model.UsdToNanoCents(4.99) // monthly subscription
+		// 	}
+
+		// }
 
 		// fixme: hardcoded fee fraction
 		feeFraction := 0.2
