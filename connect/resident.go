@@ -772,11 +772,11 @@ type ExchangeBuffer struct {
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
-	framerSettings := connect.DefaultFramerSettings()
-	framerSettings.MaxMessageLen = int(settings.MaximumExchangeMessageByteCount)
+	// framerSettings := connect.DefaultFramerSettings()
+	// framerSettings.MaxMessageLen = int(settings.MaxMessageLen)
 	return &ExchangeBuffer{
 		settings: settings,
-		framer:   connect.NewFramer(framerSettings),
+		framer:   connect.NewFramer(settings.FramerSettings),
 	}
 }
 

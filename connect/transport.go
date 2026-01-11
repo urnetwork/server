@@ -69,7 +69,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		// because message must be serialized/deserialized from memory,
 		// there is a global limit on the size per message
 		// messages above this size will be ignored from clients and the exchange
-		MaximumExchangeMessageByteCount: ByteCount(4096),
+		// MaximumExchangeMessageByteCount: ByteCount(4096),
 
 		QuicConnectTimeout:   15 * time.Second,
 		QuicHandshakeTimeout: 15 * time.Second,
@@ -88,20 +88,20 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 }
 
 type ConnectHandlerSettings struct {
-	MinPingTimeout                  time.Duration
-	MaxPingTimeout                  time.Duration
-	PingTrackerCount                int
-	WriteTimeout                    time.Duration
-	ReadTimeout                     time.Duration
-	MaximumExchangeMessageByteCount ByteCount
-	QuicConnectTimeout              time.Duration
-	QuicHandshakeTimeout            time.Duration
-	ListenH3Port                    int
-	ListenDnsPort                   int
-	EnableProxyProtocol             bool
-	FramerSettings                  *connect.FramerSettings
-	TransportTlsSettings            *TransportTlsSettings
-	ConnectionAnnounceTimeout       time.Duration
+	MinPingTimeout   time.Duration
+	MaxPingTimeout   time.Duration
+	PingTrackerCount int
+	WriteTimeout     time.Duration
+	ReadTimeout      time.Duration
+	// MaximumExchangeMessageByteCount ByteCount
+	QuicConnectTimeout        time.Duration
+	QuicHandshakeTimeout      time.Duration
+	ListenH3Port              int
+	ListenDnsPort             int
+	EnableProxyProtocol       bool
+	FramerSettings            *connect.FramerSettings
+	TransportTlsSettings      *TransportTlsSettings
+	ConnectionAnnounceTimeout time.Duration
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
 }
@@ -269,7 +269,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	// enforce the message size limit on messages in
-	ws.SetReadLimit(self.settings.MaximumExchangeMessageByteCount)
+	ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen))
 
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
