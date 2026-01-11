@@ -1,11 +1,11 @@
 package model
 
 import (
+	mathrand "math/rand"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
 
-	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 )
 

@@ -664,7 +664,7 @@ func stripeHandleInvoicePaid(
 			StartTime:             startTime,
 			EndTime:               endTime,
 			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			NetRevenue:            netRevenue,
+			SubsidyNetRevenue:     netRevenue,
 			BalanceByteCount:      RefreshSupporterTransferBalance,
 		}
 
@@ -1476,7 +1476,7 @@ func PlaySubscriptionRenewal(
 						StartTime:             startTime,
 						EndTime:               endTime,
 						StartBalanceByteCount: RefreshSupporterTransferBalance,
-						NetRevenue:            netRevenue,
+						SubsidyNetRevenue:     netRevenue,
 						BalanceByteCount:      RefreshSupporterTransferBalance,
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 					}
@@ -1491,7 +1491,7 @@ func PlaySubscriptionRenewal(
 						StartTime:             startTime,
 						EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
 						StartBalanceByteCount: sku.BalanceByteCount(),
-						NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
 						BalanceByteCount:      sku.BalanceByteCount(),
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 					}
@@ -1896,7 +1896,7 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			StartTime:             startTime,
 			EndTime:               endTime,
 			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			NetRevenue:            netRevenue,
+			SubsidyNetRevenue:     netRevenue,
 			BalanceByteCount:      RefreshSupporterTransferBalance,
 		}
 		model.AddTransferBalance(
@@ -2265,7 +2265,7 @@ func HeliusWebhook(
 			StartTime:             startTime,
 			EndTime:               endTime,
 			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			NetRevenue:            netRevenue,
+			SubsidyNetRevenue:     netRevenue,
 			BalanceByteCount:      RefreshSupporterTransferBalance,
 		}
 		model.AddTransferBalance(

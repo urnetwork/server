@@ -589,10 +589,11 @@ type TransferBalance struct {
 	EndTime               time.Time `json:"end_time"`
 	StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
 	// how much money the platform made after subtracting fees
-	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
-	BalanceByteCount ByteCount `json:"balance_byte_count"`
-	PurchaseToken    string    `json:"purchase_token,omitempty"`
-	Paid             bool      `json:"paid,omitempty"`
+	NetRevenue        NanoCents `json:"net_revenue_nano_cents"`
+	SubsidyNetRevenue NanoCents `json:"subsidy_net_revenue_nano_cents,omitempty"`
+	BalanceByteCount  ByteCount `json:"balance_byte_count"`
+	PurchaseToken     string    `json:"purchase_token,omitempty"`
+	Paid              bool      `json:"paid,omitempty"`
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -680,9 +681,10 @@ func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance
                     start_balance_byte_count,
                     balance_byte_count,
                     net_revenue_nano_cents,
-                    purchase_token
+                    purchase_token,
+                    subsidy_net_revenue_nano_cents
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             `,
 		balanceId,
 		transferBalance.NetworkId,
@@ -692,6 +694,7 @@ func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance
 		transferBalance.BalanceByteCount,
 		transferBalance.NetRevenue,
 		transferBalance.PurchaseToken,
+		transferBalance.SubsidyNetRevenue,
 	))
 
 	transferBalance.BalanceId = balanceId
