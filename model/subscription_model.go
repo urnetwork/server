@@ -2550,7 +2550,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		return nil
 	}
 
-	nextIndex := parallel
+	nextIndex := 0
 	var nextIndexLock sync.Mutex
 	getAndIncrNextIndex := func() int {
 		nextIndexLock.Lock()
@@ -2561,15 +2561,15 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		return i
 	}
 
-	workerCtxs := []context.Context{}
-	for j0 := range parallel {
-		workerCtx, workerCancel := context.WithCancel(ctx)
-		workerCtxs = append(workerCtxs, workerCtx)
+	var wg sync.WaitGroup
+
+	for range parallel {
+		wg.Add(1)
 		go server.HandleError(func() {
-			defer workerCancel()
-			for j := j0; j < len(openContracts); j = getAndIncrNextIndex() {
+			defer wg.Done()
+			for j := getAndIncrNextIndex(); j < len(openContracts); j = getAndIncrNextIndex() {
 				select {
-				case <-workerCtx.Done():
+				case <-ctx.Done():
 					return
 				default:
 				}
@@ -2584,15 +2584,11 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 					}
 				})
 			}
-		}, workerCancel)
+		})
 	}
 
-	// wait for all workers
-	for _, workerCtx := range workerCtxs {
-		select {
-		case <-workerCtx.Done():
-		}
-	}
+	wg.Wait()
+
 	closeCount += int64(len(openContracts))
 
 	return

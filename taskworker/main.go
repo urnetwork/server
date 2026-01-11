@@ -74,7 +74,8 @@ Options:
 		settings.BatchSize = batchSize
 		taskWorker := initTaskWorker(ctx)
 		for i := 0; i < count; i += 1 {
-			go func() {
+			go HandleError(func() {
+				defer cancel()
 				for {
 					// try again after unhandled errors. these signal a transient issue such as db load
 					server.HandleError(taskWorker.Run)
@@ -84,11 +85,11 @@ Options:
 					case <-time.After(1 * time.Second):
 					}
 				}
-			}()
+			})
 		}
 
 		// drain on sigterm
-		go func() {
+		go HandleError(func() {
 			defer cancel()
 			select {
 			case <-ctx.Done():
@@ -96,7 +97,7 @@ Options:
 			case <-quitEvent.Ctx.Done():
 				taskWorker.Drain()
 			}
-		}()
+		})
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),

@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	// "fmt"
-	// "net/http"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
@@ -39,6 +41,9 @@ Options:
 		panic(err)
 	}
 
+	// use up to a 4gib message pool per instance
+	connect.ResizeMessagePools(connect.Gib(4))
+
 	// server.Logger().Printf("%s\n", opts)
 
 	quitEvent := server.NewEventWithContext(context.Background())
@@ -56,8 +61,10 @@ Options:
 	handlerId := model.CreateNetworkClientHandler(ctx)
 
 	connectHandler := NewConnectHandlerWithDefaults(ctx, handlerId, exchange)
+	proxyConnectHandler := NewProxyConnectHandlerWithDefaults(ctx, handlerId, exchange)
 	// update the heartbeat
-	go func() {
+	go server.HandleError(func() {
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -73,22 +80,38 @@ Options:
 				}
 			})
 		}
-	}()
+	})
 
 	// drain on sigterm
-	go func() {
+	go server.HandleError(func() {
 		defer cancel()
 		select {
 		case <-ctx.Done():
-			return
 		case <-quitEvent.Ctx.Done():
 			exchange.Drain()
 		}
-	}()
+	})
 
+	connectRouter := func(w http.ResponseWriter, r *http.Request) {
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			host = r.Header.Get("Host")
+		}
+
+		sub := strings.SplitAfterN(host, ".", 2)[0]
+		if sub == "connect" {
+			// the host is connect.<domain>
+			connectHandler.Connect(w, r)
+		} else {
+			// the host is <auth>.connect.<domain>
+			proxyConnectHandler.Connect(w, r)
+		}
+	}
+
+	// FIXME multiplex connectHandler.Connect and proxyConnectHandler.Connect
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("GET", "/", connectHandler.Connect),
+		router.NewRoute("*", "/", connectRouter),
 	}
 
 	port, _ := opts.Int("--port")

@@ -114,6 +114,7 @@ func TestEscrow(t *testing.T) {
 			"",
 			"",
 		)
+
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -361,6 +362,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			"",
 			"",
 		)
+
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,
@@ -1309,6 +1311,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 			"",
 			"",
 		)
+
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret: balanceCode.Secret,

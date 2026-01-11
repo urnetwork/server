@@ -249,13 +249,13 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 
 	resultsCtx, resultsCancel := context.WithCancel(ctx)
 	defer resultsCancel()
-	go func() {
+	go server.HandleError(func() {
+		defer resultsCancel()
 		select {
 		case <-resultsCtx.Done():
 		case <-ctx.Done():
-			resultsCancel()
 		}
-	}()
+	})
 
 	add := func(results map[server.Id]*SearchResult, variantProjections map[int]*localProjection) (candidateCount int) {
 		var r *SearchResult
@@ -331,7 +331,7 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 
 	for _, partition := range partitions {
 		wg.Add(1)
-		go func() {
+		go server.HandleError(func() {
 			defer wg.Done()
 
 			localResults := map[server.Id]*SearchResult{}
@@ -355,7 +355,7 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 				maps.Copy(results, localResults)
 				stats.CandidateCount += localCandidateCount
 			}()
-		}()
+		})
 	}
 
 	wg.Wait()

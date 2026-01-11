@@ -230,6 +230,22 @@ func RequireService() string {
 	return service
 }
 
+func Domain() (string, error) {
+	domain := os.Getenv("WARP_DOMAIN")
+	if domain != "" {
+		return domain, nil
+	}
+	return "", errors.New("WARP_DOMAIN not set")
+}
+
+func RequireDomain() string {
+	domain, err := Domain()
+	if err != nil {
+		panic(err)
+	}
+	return domain
+}
+
 // service port -> host port
 func HostPorts() (map[int]int, error) {
 	if ports := os.Getenv("WARP_PORTS"); ports != "" {
