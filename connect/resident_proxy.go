@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -45,7 +46,7 @@ func NewResidentProxyDevice(
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	networkSpace := newExchangeNetworkSpace(exchange)
+	networkSpace := sdk.NewPlatformNetworkSpace(ctx, server.RequireEnv(), server.RequireHost())
 
 	generatorFunc := func(specs []*connect.ProviderSpec) connect.MultiClientGenerator {
 		return newExchangeGenerator(
@@ -99,13 +100,16 @@ func (self *ResidentProxyDevice) AddTun() (
 
 	tunCtx, tunCancel := context.WithCancel(self.ctx)
 
-	server.HandleError(func() {
+	go server.HandleError(func() {
 		defer tunCancel()
 		for {
 			select {
 			case <-tunCtx.Done():
 				return
-			case packet := <-receive:
+			case packet, ok := <-receive:
+				if !ok {
+					return
+				}
 				self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
 			case <-time.After(self.exchange.settings.WriteTimeout):
 				// drop
@@ -129,6 +133,7 @@ func (self *ResidentProxyDevice) AddTun() (
 
 		// note `send` is not closed. This channel is left open.
 	}
+
 	return
 }
 
@@ -138,7 +143,8 @@ func (self *ResidentProxyDevice) Close() {
 	self.deviceLocal.Close()
 }
 
-func newExchangeNetworkSpace(exchange *Exchange) *sdk.NetworkSpace {
-	// FIXME
-	return nil
-}
+// func newExchangeNetworkSpace(exchange *Exchange) *sdk.NetworkSpace {
+// 	// FIXME
+// 	return nil
+
+// }

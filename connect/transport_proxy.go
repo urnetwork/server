@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	mathrand "math/rand"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elazarl/goproxy"
@@ -49,6 +51,8 @@ func DefaultProxyConnectHandlerSettings() *ProxyConnectHandlerSettings {
 		ListenSocksPort:            1080,
 		FramerSettings:             connect.DefaultFramerSettings(),
 		Mtu:                        1440,
+		EnableProxyProtocol:        true,
+		ProxyConnectTimeout:        15 * time.Second,
 	}
 }
 
@@ -58,6 +62,8 @@ type ProxyConnectHandlerSettings struct {
 	ProxyConnectionIdleTimeout time.Duration
 	ListenSocksPort            int
 	FramerSettings             *connect.FramerSettings
+	EnableProxyProtocol        bool
+	ProxyConnectTimeout        time.Duration
 
 	Mtu int
 }
@@ -68,6 +74,8 @@ type ProxyConnectHandler struct {
 	handlerId server.Id
 	exchange  *Exchange
 	settings  *ProxyConnectHandlerSettings
+
+	httpProxy *goproxy.ProxyHttpServer
 
 	stateLock        sync.Mutex
 	proxyConnections map[server.Id]*ProxyConnection
@@ -102,11 +110,130 @@ func NewProxyConnectHandler(
 		proxyConnections: map[server.Id]*ProxyConnection{},
 	}
 
+	httpProxy := goproxy.NewProxyHttpServer()
+
+	// httpProxy.Tr = &http.Transport{
+	// 	Dial: func(network string, addr string) (net.Conn, error) {
+	// 		fmt.Printf("HTTP DIAL 1\n")
+
+	// 		return tnet.DialContext(context.Background(), network, addr)
+	// 	},
+	// 	DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+	// 		fmt.Printf("HTTP DIAL 2\n")
+
+	// 		addrPort, err := netip.ParseAddrPort(addr)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+
+	// 		return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
+	// 	},
+	// }
+
+	httpProxy.Tr = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	httpProxy.AllowHTTP2 = false
+	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (net.Conn, error) {
+		proxyConnection, err := h.connectProxyForRequest(r)
+		if err != nil {
+			return nil, err
+		}
+
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+			network = "tcp4"
+		case "udp", "udp4", "udp6":
+			network = "udp4"
+		default:
+			return nil, fmt.Errorf("Unsupported network: %s", network)
+		}
+
+		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
+		return proxyConnection.tnet.DialContext(cancelCtx, network, addr)
+	}
+
+	h.httpProxy = httpProxy
+
 	if server.HasPort(settings.ListenSocksPort) {
 		go server.HandleError(h.runSocks)
 	}
 
 	return h
+}
+
+func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyConnection *ProxyConnection, returnErr error) {
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Header.Get("Host")
+	}
+
+	hostProxyId := strings.SplitN(host, ".", 2)[0]
+	proxyId, err := model.ParseSignedProxyId(hostProxyId)
+	if err != nil {
+		// validate the proxy id in the host with the authorization header
+		// the signed proxy id can be provided as either:
+		// - Bearer <signed_proxy_id>
+		// - Basic base64(<signed_proxy_id>:) (the signed proxy id is the username)
+		headerAuth := r.Header.Get("Proxy-Authorization")
+		if headerAuth == "" {
+			headerAuth = r.Header.Get("Authorization")
+		}
+
+		bearerPrefix := "bearer "
+		basicPrefix := "basic "
+
+		if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
+			signedProxyId := headerAuth[len(bearerPrefix):]
+			proxyId, err = model.ParseSignedProxyId(signedProxyId)
+			if err != nil {
+				returnErr = err
+				return
+			}
+		} else if len(basicPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(basicPrefix)]) == basicPrefix {
+			// user:pass
+			combinedSignedProxyId, err := base64.StdEncoding.DecodeString(headerAuth[len(basicPrefix):])
+			if err != nil {
+				returnErr = err
+				return
+			}
+			signedProxyId := strings.SplitN(string(combinedSignedProxyId), ":", 2)[0]
+			proxyId, err = model.ParseSignedProxyId(signedProxyId)
+
+			if err != nil {
+				returnErr = err
+				return
+			}
+		} else {
+			returnErr = err
+			return
+		}
+	}
+
+	proxyConnection, returnErr = self.connectProxy(proxyId)
+	if returnErr != nil {
+		return
+	}
+
+	addrPortStr := r.Header.Get("X-Forwarded-For")
+	if addrPortStr == "" {
+		addrPortStr = r.RemoteAddr
+	}
+	addrPort, err := netip.ParseAddrPort(addrPortStr)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
+	if !proxyConnection.ValidCaller(addrPort.Addr()) {
+		returnErr = fmt.Errorf("Invalid caller")
+		return
+	}
+
+	return
 }
 
 func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnection, error) {
@@ -180,77 +307,7 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 
 // http proxy
 func (self *ProxyConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Header.Get("Host")
-	}
-
-	hostProxyId := strings.SplitN(host, ".", 2)[0]
-	proxyId, err := model.ParseSignedProxyId(hostProxyId)
-	if err != nil {
-		proxyId, err = model.ParseEncodedProxyId(hostProxyId)
-		if err == nil {
-			// validate the proxy id in the host with the authorization header
-			// the signed proxy id can be provided as either:
-			// - Bearer <signed_proxy_id>
-			// - Basic base64(<signed_proxy_id>:) (the signed proxy id is the username)
-			headerAuth := r.Header.Get("Authorization")
-
-			bearerPrefix := "bearer "
-			basicPrefix := "basic "
-
-			if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
-				signedProxyId := headerAuth[len(bearerPrefix):]
-				headerProxyId, err := model.ParseSignedProxyId(signedProxyId)
-				if err != nil || proxyId != headerProxyId {
-					http.Error(w, "Not authorized", http.StatusUnauthorized)
-					return
-				}
-			} else if len(basicPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(basicPrefix)]) == basicPrefix {
-				// user:pass
-				combinedSignedProxyId, err := base64.StdEncoding.DecodeString(headerAuth[len(basicPrefix):])
-				if err != nil {
-					http.Error(w, "Malformed auth", http.StatusInternalServerError)
-					return
-				}
-				signedProxyId := strings.SplitN(string(combinedSignedProxyId), ":", 2)[0]
-				headerProxyId, err := model.ParseSignedProxyId(signedProxyId)
-				if err != nil || proxyId != headerProxyId {
-					http.Error(w, "Not authorized", http.StatusUnauthorized)
-					return
-				}
-			} else {
-				http.Error(w, "Not authorized", http.StatusUnauthorized)
-				return
-			}
-		} else {
-			http.Error(w, "Not authorized", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	proxyConnection, err := self.connectProxy(proxyId)
-	if err != nil {
-		http.Error(w, "Could not create proxy connection", http.StatusInternalServerError)
-		return
-	}
-
-	addrPortStr := r.Header.Get("X-Forwarded-For")
-	if addrPortStr == "" {
-		addrPortStr = r.RemoteAddr
-	}
-	addrPort, err := netip.ParseAddrPort(addrPortStr)
-	if err != nil {
-		http.Error(w, "Could not parse caller IP", http.StatusInternalServerError)
-		return
-	}
-
-	if !proxyConnection.ValidCaller(addrPort.Addr()) {
-		http.Error(w, "Not authorized", http.StatusUnauthorized)
-		return
-	}
-
-	proxyConnection.httpProxy.ServeHTTP(w, r)
+	self.httpProxy.ServeHTTP(w, r)
 }
 
 func (self *ProxyConnectHandler) runSocks() {
@@ -308,6 +365,10 @@ func (self *ProxyConnectHandler) runSocks() {
 		return
 	}
 	defer serverConn.Close()
+
+	if self.settings.EnableProxyProtocol {
+		serverConn = NewPpServerConn(serverConn, DefaultWarpPpSettings())
+	}
 
 	socksServer.Serve(serverConn)
 }
@@ -377,13 +438,13 @@ type ProxyConnection struct {
 
 	tnet *proxy.Net
 
-	httpProxy *goproxy.ProxyHttpServer
-
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
 
 	settings *ProxyConnectHandlerSettings
 }
+
+var localIpCounter atomic.Uint32
 
 func NewProxyConnection(
 	ctx context.Context,
@@ -391,6 +452,7 @@ func NewProxyConnection(
 	proxyId server.Id,
 	settings *ProxyConnectHandlerSettings,
 ) (*ProxyConnection, error) {
+	cancelCtx, cancel := context.WithCancel(ctx)
 
 	proxyDeviceConfig := model.GetProxyDeviceConfig(ctx, proxyId)
 	if proxyDeviceConfig == nil {
@@ -398,33 +460,12 @@ func NewProxyConnection(
 	}
 
 	tnet, err := proxy.CreateNetTUN(
-		[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
+		cancelCtx,
+		[]netip.Addr{netip.MustParseAddr(fmt.Sprintf("169.254.2.%d", localIpCounter.Add(1)))},
 		settings.Mtu,
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	cancelCtx, cancel := context.WithCancel(ctx)
-
-	httpProxy := goproxy.NewProxyHttpServer()
-
-	httpProxy.Tr = &http.Transport{
-		Dial: func(network string, addr string) (net.Conn, error) {
-			return tnet.DialContext(context.Background(), network, addr)
-		},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			addrPort, err := netip.ParseAddrPort(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
-		},
-	}
-
-	httpProxy.ConnectDialWithReq = func(req *http.Request, network string, addr string) (net.Conn, error) {
-		return tnet.DialContext(req.Context(), network, addr)
 	}
 
 	proxyConnection := &ProxyConnection{
@@ -433,8 +474,9 @@ func NewProxyConnection(
 		exchange:          exchange,
 		proxyDeviceConfig: proxyDeviceConfig,
 		tnet:              tnet,
-		httpProxy:         httpProxy,
-		lastActivityTime:  time.Now(),
+		// httpProxy:         httpProxy,
+		lastActivityTime: time.Now(),
+		settings:         settings,
 	}
 
 	return proxyConnection, nil
@@ -449,6 +491,18 @@ func (self *ProxyConnection) Run() {
 		self.proxyDeviceConfig.ClientId,
 		self.proxyDeviceConfig.InstanceId,
 	)
+	go server.HandleError(func() {
+		defer self.cancel()
+		exchangeTransport.Run()
+		// close is done in the write
+	})
+	go server.HandleError(func() {
+		defer self.cancel()
+		select {
+		case <-self.ctx.Done():
+		case <-exchangeTransport.Done():
+		}
+	})
 
 	go server.HandleError(func() {
 		defer func() {
@@ -483,6 +537,7 @@ func (self *ProxyConnection) Run() {
 			case packet := <-exchangeTransport.receive:
 				self.UpdateActivity()
 				_, err := self.tnet.Write(packet)
+				connect.MessagePoolReturn(packet)
 				if err != nil {
 					return
 				}

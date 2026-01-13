@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	// "slices"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -29,17 +29,36 @@ func newExchangeGenerator(
 	ctx context.Context,
 	exchange *Exchange,
 	byJwt *jwt.ByJwt,
-	specs []*connect.ProviderSpec,
+	connectSpecs []*connect.ProviderSpec,
 	excludeClientIds []server.Id,
 	sourceClientId server.Id,
 	clientSettingsGenerator func() *connect.ClientSettings,
 ) *exchangeGenerator {
+
+	specs := []*model.ProviderSpec{}
+	for _, connectSpec := range connectSpecs {
+		spec := &model.ProviderSpec{}
+		if connectSpec.LocationId != nil {
+			locationId := server.Id(*connectSpec.LocationId)
+			spec.LocationId = &locationId
+		}
+		if connectSpec.LocationGroupId != nil {
+			locationGroupId := server.Id(*connectSpec.LocationGroupId)
+			spec.LocationGroupId = &locationGroupId
+		}
+		if connectSpec.ClientId != nil {
+			clientId := server.Id(*connectSpec.ClientId)
+			spec.ClientId = &clientId
+		}
+		spec.BestAvailable = connectSpec.BestAvailable
+		specs = append(specs, spec)
+	}
+
 	return &exchangeGenerator{
-		ctx:      ctx,
-		exchange: exchange,
-		byJwt:    byJwt,
-		// FIXME
-		specs:                   nil,
+		ctx:                     ctx,
+		exchange:                exchange,
+		byJwt:                   byJwt,
+		specs:                   specs,
 		excludeClientIds:        excludeClientIds,
 		sourceClientId:          sourceClientId,
 		clientSettingsGenerator: clientSettingsGenerator,
@@ -47,12 +66,10 @@ func newExchangeGenerator(
 }
 
 func (self *exchangeGenerator) clientSession() *session.ClientSession {
-	// FIXME
-	return nil
+	return session.NewLocalClientSession(self.ctx, "127.0.0.1", self.byJwt)
 }
 
 func (self *exchangeGenerator) NextDestinations(count int, excludeDestinations []connect.MultiHopId, rankMode string) (map[connect.MultiHopId]connect.DestinationStats, error) {
-	excludeClientIds := slices.Clone(self.excludeClientIds)
 	excludeDestinationsIds := [][]server.Id{}
 	for _, excludeDestination := range excludeDestinations {
 		excludeDestinationIds := []server.Id{}
@@ -64,7 +81,7 @@ func (self *exchangeGenerator) NextDestinations(count int, excludeDestinations [
 
 	findProviders2 := &model.FindProviders2Args{
 		Specs:               self.specs,
-		ExcludeClientIds:    excludeClientIds,
+		ExcludeClientIds:    self.excludeClientIds,
 		ExcludeDestinations: excludeDestinationsIds,
 		Count:               count,
 		RankMode:            rankMode,
@@ -102,7 +119,7 @@ func (self *exchangeGenerator) NextDestinations(count int, excludeDestinations [
 }
 
 func (self *exchangeGenerator) NewClientArgs() (*connect.MultiClientGeneratorClientArgs, error) {
-	byJwtStr, err := func() (string, error) {
+	byJwtStr, clientId, err := func() (string, server.Id, error) {
 		// note the derived client id will be inferred by the api jwt
 		authNetworkClient := &model.AuthNetworkClientArgs{
 			SourceClientId: &self.sourceClientId,
@@ -112,26 +129,26 @@ func (self *exchangeGenerator) NewClientArgs() (*connect.MultiClientGeneratorCli
 
 		result, err := model.AuthNetworkClient(authNetworkClient, self.clientSession())
 		if err != nil {
-			return "", err
+			return "", server.Id{}, err
 		}
 
 		if result.Error != nil {
-			return "", errors.New(result.Error.Message)
+			return "", server.Id{}, errors.New(result.Error.Message)
 		}
 
-		return *result.ByClientJwt, nil
+		return *result.ByClientJwt, *result.ClientId, nil
 	}()
 	if err != nil {
 		return nil, err
 	}
 
-	byJwt, err := jwt.ParseByJwtUnverified(self.ctx, byJwtStr)
-	if err != nil {
-		// in this case we cannot clean up the client because we don't know the client id
-		panic(err)
-	}
+	// byJwt, err := jwt.ParseByJwtUnverified(self.ctx, byJwtStr)
+	// if err != nil {
+	// 	// in this case we cannot clean up the client because we don't know the client id
+	// 	panic(err)
+	// }
 
-	clientId := *byJwt.ClientId
+	// clientId := *byJwt.ClientId
 
 	clientAuth := &connect.ClientAuth{
 		ByJwt:      byJwtStr,
@@ -174,6 +191,18 @@ func (self *exchangeGenerator) NewClient(
 		server.Id(args.ClientId),
 		server.Id(args.ClientAuth.InstanceId),
 	)
+	go server.HandleError(func() {
+		defer client.Cancel()
+		transport.Run()
+		// close is done in the write
+	})
+	go server.HandleError(func() {
+		defer client.Cancel()
+		select {
+		case <-client.Done():
+		case <-transport.Done():
+		}
+	})
 
 	// the platform can route any destination,
 	// since every client has a platform transport
@@ -195,6 +224,7 @@ func (self *exchangeGenerator) NewClient(
 		map[protocol.ProvideMode]bool{},
 		nil,
 	)
+
 	return client, nil
 }
 
