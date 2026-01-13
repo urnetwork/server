@@ -71,6 +71,7 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	buffer := self.readBuffer
 
 	for range self.settings.MaxDiscardPackets + 1 {
+		fmt.Printf("READ ONE\n")
 		n, addr, err = self.conn.ReadFrom(buffer)
 		if err != nil {
 			return
@@ -85,7 +86,7 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 			// not a pp packet
 			err = ppErr
 		} else {
-			func() {
+			err = func() error {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
 
@@ -97,16 +98,14 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 
 				s := self.proxyQueue.GetByProxyAddr(addr.(*net.UDPAddr).AddrPort())
 				if s == nil {
-					if h == 0 {
+					if header == nil {
 						// not a pp packet
-						err = fmt.Errorf("proxy protocol header required but not found")
-						return
+						return fmt.Errorf("proxy protocol header required but not found")
 					}
 
 					realAddr, ok := header.Source.(*net.UDPAddr)
 					if !ok {
-						err = fmt.Errorf("Proxy protocol header must be UDP")
-						return
+						return fmt.Errorf("Proxy protocol header must be UDP")
 					}
 
 					realAddrPort := realAddr.AddrPort()
@@ -136,6 +135,7 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 				}
 
 				addr = s.realAddr
+				return nil
 			}()
 		}
 
