@@ -460,7 +460,7 @@ func testConnect(
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	service := "testConnect"
+	service := "connect"
 	block := "test"
 
 	clientIdA := server.NewId()
@@ -508,10 +508,6 @@ func testConnect(
 		return server
 	}
 
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
 	hostPorts := map[string]int{}
 	exchanges := map[string]*Exchange{}
 	servers := map[string]*http.Server{}
@@ -549,7 +545,7 @@ func testConnect(
 	}
 
 	select {
-	case <-time.After(1 * time.Second):
+	case <-time.After(2 * time.Second):
 	}
 
 	randServer := func() (string, int) {
@@ -1535,7 +1531,7 @@ func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId server.
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
-	server.HandleError(func() {
+	go server.HandleError(func() {
 		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames)
 		callback(resultFrames, err)
 	})

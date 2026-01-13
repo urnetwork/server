@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
-	"fmt"
+	// "fmt"
 	"net"
-	"net/http"
+	// "net/http"
 	"os"
 	"strconv"
-	"strings"
+	// "strings"
 	"syscall"
-	"time"
+	// "time"
 
 	"github.com/docopt/docopt-go"
 	// "github.com/prometheus/client_golang/prometheus"
@@ -19,7 +19,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
+	// "github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 )
 
@@ -58,30 +58,6 @@ Options:
 	exchange := NewExchangeFromEnvWithDefaults(ctx)
 	defer exchange.Close()
 
-	handlerId := model.CreateNetworkClientHandler(ctx)
-
-	connectHandler := NewConnectHandlerWithDefaults(ctx, handlerId, exchange)
-	proxyConnectHandler := NewProxyConnectHandlerWithDefaults(ctx, handlerId, exchange)
-	// update the heartbeat
-	go server.HandleError(func() {
-		defer cancel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(model.NetworkClientHandlerHeartbeatTimeout):
-			}
-			// try again after unhandled errors. these signal a transient issue such as db load
-			server.HandleError(func() {
-				err := model.HeartbeatNetworkClientHandler(ctx, handlerId)
-				if err != nil {
-					// shut down
-					cancel()
-				}
-			})
-		}
-	})
-
 	// drain on sigterm
 	go server.HandleError(func() {
 		defer cancel()
@@ -92,30 +68,12 @@ Options:
 		}
 	})
 
-	service := strings.ToLower(server.RequireService())
-	envService := strings.ToLower(fmt.Sprintf("%s-%s", server.RequireEnv(), server.RequireService()))
+	connectRouter := NewConnectRouterWithDefaults(ctx, cancel, exchange)
 
-	connectRouter := func(w http.ResponseWriter, r *http.Request) {
-		host := r.Header.Get("X-Forwarded-Host")
-		if host == "" {
-			host = r.Header.Get("Host")
-		}
-
-		sub := strings.ToLower(strings.SplitN(host, ".", 2)[0])
-		switch sub {
-		case service, envService:
-			// the host is connect.<domain> or <env>-connect.<domain>
-			connectHandler.Connect(w, r)
-		default:
-			// the host is <auth>.connect.<domain>
-			proxyConnectHandler.Connect(w, r)
-		}
-	}
-
-	// FIXME multiplex connectHandler.Connect and proxyConnectHandler.Connect
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("*", "/", connectRouter),
+		router.NewRoute("GET", "/", connectRouter.Connect),
+		router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
 	}
 
 	port, _ := opts.Int("--port")

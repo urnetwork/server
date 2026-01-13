@@ -99,29 +99,12 @@ type ProxyConfig struct {
 
 	HttpsRequireAuth bool `json:"https_require_auth"`
 
-	InitialDeviceState *InitialDeviceState `json:"initial_device_state,omitempty"`
-}
-
-type InitialDeviceState struct {
-	CountryCode string                      `json:"country_code,omitempty"`
-	Location    *InitialDeviceStateLocation `json:"location,omitempty"`
-}
-
-type InitialDeviceStateLocation struct {
-	ConnectLocationId *ConnectLocationId `json:"connect_location_id"`
-	Name              string             `json:"name"`
-	LocationType      LocationType       `json:"location_type"`
-}
-
-type ConnectLocationId struct {
-	ClientId        server.Id `json:"client_id,omitempty"`
-	LocationId      server.Id `json:"location_id,omitempty"`
-	LocationGroupId server.Id `json:"location_group_id,omitempty"`
-	BestAvailable   bool      `json:"best_available,omitempty"`
+	InitialDeviceState *ProxyDeviceState `json:"initial_device_state,omitempty"`
 }
 
 type AuthNetworkClientResult struct {
 	ByClientJwt       *string                 `json:"by_client_jwt,omitempty"`
+	ClientId          *server.Id              `json:"client_id,omitempty"`
 	Error             *AuthNetworkClientError `json:"error,omitempty"`
 	ProxyConfigResult *ProxyConfigResult      `json:"proxy_config_result,omitempty"`
 }
@@ -134,7 +117,7 @@ type AuthNetworkClientError struct {
 
 type ProxyConfigResult struct {
 	KeepaliveSeconds int       `json:"keepalive_seconds"`
-	HttpProxyUrl     string    `json:"http_proxy_url"`
+	HttpsProxyUrl    string    `json:"https_proxy_url"`
 	SocksProxyUrl    string    `json:"socks_proxy_url"`
 	AuthToken        string    `json:"auth_token"`
 	InstanceId       server.Id `json:"instance_id"`
@@ -234,6 +217,7 @@ func AuthNetworkClient(
 			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
+				ClientId:    &clientId,
 			}
 		})
 
@@ -263,30 +247,12 @@ func AuthNetworkClient(
 				}
 			}
 
-			var proxyDeviceState *ProxyDeviceState
-			if initialDeviceState := authClient.ProxyConfig.InitialDeviceState; initialDeviceState != nil {
-				proxyDeviceState = &ProxyDeviceState{}
-
-				if authClient.ProxyConfig.InitialDeviceState.CountryCode != "" {
-					location := GetConnectLocationForCountryCode(session.Ctx, initialDeviceState.CountryCode)
-					if location == nil {
-						authClientError = fmt.Errorf("Could not find proxy location for country code %s", initialDeviceState.CountryCode)
-						return
-					}
-					proxyDeviceState.Location = location
-				} else {
-					// FIXME parse location
-				}
-
-				// FIXME parse performance profile
-			}
-
 			proxyDeviceConfig := &ProxyDeviceConfig{
 				ProxyDeviceConnection: ProxyDeviceConnection{
 					ClientId: clientId,
 				},
 				LockSubnets:        lockSubnets,
-				InitialDeviceState: proxyDeviceState,
+				InitialDeviceState: authClient.ProxyConfig.InitialDeviceState,
 			}
 			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 			if err == nil {
@@ -294,25 +260,27 @@ func AuthNetworkClient(
 
 				host := fmt.Sprintf("%s.%s", server.RequireService(), server.RequireDomain())
 
-				var httpProxyUrl string
+				var httpsProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
 					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
-					httpProxyUrl = fmt.Sprintf(
-						"%s.%s",
+					httpsProxyUrl = fmt.Sprintf(
+						"https://%s.%s",
 						strings.ToLower(EncodeProxyId(proxyDeviceConfig.ProxyId)),
 						host,
 					)
 				} else {
-					httpProxyUrl = fmt.Sprintf(
-						"%s.%s",
+					httpsProxyUrl = fmt.Sprintf(
+						"https://%s.%s",
 						strings.ToLower(signedProxyId),
 						host,
 					)
 				}
 
+				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", host, 1080)
+
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
-					HttpProxyUrl:  httpProxyUrl,
-					SocksProxyUrl: host,
+					HttpsProxyUrl: httpsProxyUrl,
+					SocksProxyUrl: socksProxyUrl,
 					AuthToken:     strings.ToLower(signedProxyId),
 					InstanceId:    proxyDeviceConfig.InstanceId,
 				}
@@ -401,6 +369,7 @@ func AuthNetworkClient(
 			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
+				ClientId:    authClient.ClientId,
 			}
 		})
 	}

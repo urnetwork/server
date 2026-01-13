@@ -13,6 +13,8 @@ import (
 	// "runtime"
 	"slices"
 	"sync"
+
+	"github.com/urnetwork/sdk"
 )
 
 // func Ptr[T any](value T) *T {
@@ -183,4 +185,12 @@ func CollapsePorts(ports []int) string {
 	}
 
 	return strings.Join(parts, ",")
+}
+
+func ToSdkId(id Id) *sdk.Id {
+	sdkId, err := sdk.IdFromBytes(id.Bytes())
+	if err != nil {
+		panic(err)
+	}
+	return sdkId
 }

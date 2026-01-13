@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/heap"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -79,13 +80,11 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		// if the last packet from addr was > proxy timeout,
 		// we can trust that the header is from our proxy and the protocol header is used
 		// otherwise the header is discarded because we can't tell if header is from our proxy or the user
-		h, header, ppErr := parsePpHeader(buffer[0:n])
+		h, header, ppErr := parsePpHeaderPacket(buffer[0:n])
 		if ppErr != nil {
 			// not a pp packet
 			err = ppErr
 		} else {
-			// fmt.Printf("parse pp %d %v\n", h, header)
-
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
@@ -104,17 +103,12 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 						return
 					}
 
-					var realAddr *net.UDPAddr
-					switch v := header.Source.(type) {
-					case *net.UDPAddr:
-						realAddr = v
-					case *net.TCPAddr:
-						realAddr = &net.UDPAddr{
-							IP:   v.IP,
-							Port: v.Port,
-							Zone: v.Zone,
-						}
+					realAddr, ok := header.Source.(*net.UDPAddr)
+					if !ok {
+						err = fmt.Errorf("Proxy protocol header must be UDP")
+						return
 					}
+
 					realAddrPort := realAddr.AddrPort()
 					s = &proxyState{
 						proxyAddr:      addr,
@@ -257,16 +251,19 @@ var (
 	V2Identifier = []byte("\r\n\r\n\x00\r\nQUIT\n")
 )
 
-func parsePpHeader(b []byte) (h int, header *proxyproto.Header, err error) {
+func parsePpHeaderPacket(b []byte) (h int, header *proxyproto.Header, err error) {
 	if !(6 <= len(b) && ([6]byte)(V1Identifier) == ([6]byte)(b) ||
 		12 <= len(b) && ([12]byte)(V2Identifier) == ([12]byte)(b)) {
-		// fmt.Printf("pp signature not found %v\n", ([12]byte)(b))
 		return 0, nil, nil
 	}
 	r := bytes.NewReader(b)
 	header, err = proxyproto.ReadHeader(r)
 	h = len(b) - r.Len()
 	return
+}
+
+func parsePpHeader(r io.Reader) (header *proxyproto.Header, err error) {
+	return proxyproto.ReadHeader(r)
 }
 
 type proxyState struct {
@@ -382,4 +379,92 @@ func (self *proxyStateQueue) Swap(i int, j int) {
 	self.orderedStates[i] = b
 	a.heapIndex = j
 	self.orderedStates[j] = a
+}
+
+// implements `net.Listener`
+type PpServerConn struct {
+	listener net.Listener
+	settings *PpSettings
+}
+
+func NewPpServerConn(listener net.Listener, settings *PpSettings) *PpServerConn {
+	return &PpServerConn{
+		listener: listener,
+		settings: settings,
+	}
+}
+
+func (self *PpServerConn) Accept() (net.Conn, error) {
+	conn, err := self.listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return NewPpConn(conn, self.settings)
+}
+
+func (self *PpServerConn) Close() error {
+	return self.listener.Close()
+}
+
+func (self *PpServerConn) Addr() net.Addr {
+	return self.listener.Addr()
+}
+
+// implements `net.Conn`
+type PpConn struct {
+	conn net.Conn
+
+	settings *PpSettings
+
+	realAddr *net.TCPAddr
+}
+
+func NewPpConn(conn net.Conn, settings *PpSettings) (*PpConn, error) {
+	header, err := parsePpHeader(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	realAddr, ok := header.Source.(*net.TCPAddr)
+	if !ok {
+		return nil, fmt.Errorf("Proxy protocol header must be TCP")
+	}
+
+	return &PpConn{
+		conn:     conn,
+		settings: settings,
+		realAddr: realAddr,
+	}, nil
+}
+
+func (self *PpConn) Read(b []byte) (n int, err error) {
+	return self.conn.Read(b)
+}
+
+func (self *PpConn) Write(b []byte) (n int, err error) {
+	return self.conn.Write(b)
+}
+
+func (self *PpConn) Close() error {
+	return self.conn.Close()
+}
+
+func (self *PpConn) LocalAddr() net.Addr {
+	return self.conn.LocalAddr()
+}
+
+func (self *PpConn) RemoteAddr() net.Addr {
+	return self.realAddr
+}
+
+func (self *PpConn) SetDeadline(t time.Time) error {
+	return self.conn.SetDeadline(t)
+}
+
+func (self *PpConn) SetReadDeadline(t time.Time) error {
+	return self.conn.SetReadDeadline(t)
+}
+
+func (self *PpConn) SetWriteDeadline(t time.Time) error {
+	return self.conn.SetWriteDeadline(t)
 }

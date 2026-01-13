@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	// "fmt"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -14,8 +15,19 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-const ProxyDeviceDescription = "resident proxy"
-const ProxyDeviceSpec = "resident proxy"
+func DefaultResidentProxyDeviceSettings() *ResidentProxyDeviceSettings {
+	return &ResidentProxyDeviceSettings{
+		ProxyDeviceDescription: "resident proxy",
+		ProxyDeviceSpec:        "resident proxy",
+	}
+}
+
+type ResidentProxyDeviceSettings struct {
+	ProxyDeviceDescription         string
+	ProxyDeviceSpec                string
+	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+}
 
 type ResidentProxyDevice struct {
 	ctx    context.Context
@@ -27,6 +39,24 @@ type ResidentProxyDevice struct {
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
 	deviceLocal *sdk.DeviceLocal
+	settings    *ResidentProxyDeviceSettings
+}
+
+func NewResidentProxyDeviceWithDefaults(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	proxyDeviceConfig *model.ProxyDeviceConfig,
+) (*ResidentProxyDevice, error) {
+	return NewResidentProxyDevice(
+		ctx,
+		exchange,
+		clientId,
+		instanceId,
+		proxyDeviceConfig,
+		DefaultResidentProxyDeviceSettings(),
+	)
 }
 
 func NewResidentProxyDevice(
@@ -35,6 +65,7 @@ func NewResidentProxyDevice(
 	clientId server.Id,
 	instanceId server.Id,
 	proxyDeviceConfig *model.ProxyDeviceConfig,
+	settings *ResidentProxyDeviceSettings,
 ) (*ResidentProxyDevice, error) {
 
 	// this jwt is used to access the services in the network space
@@ -45,7 +76,7 @@ func NewResidentProxyDevice(
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	networkSpace := newExchangeNetworkSpace(exchange)
+	networkSpace := sdk.NewPlatformNetworkSpace(ctx, server.RequireEnv(), server.RequireHost())
 
 	generatorFunc := func(specs []*connect.ProviderSpec) connect.MultiClientGenerator {
 		return newExchangeGenerator(
@@ -56,6 +87,7 @@ func NewResidentProxyDevice(
 			[]server.Id{clientId},
 			clientId,
 			connect.DefaultClientSettings,
+			settings,
 		)
 	}
 
@@ -63,13 +95,19 @@ func NewResidentProxyDevice(
 		generatorFunc,
 		networkSpace,
 		byJwt.Sign(),
-		ProxyDeviceDescription,
-		ProxyDeviceSpec,
+		settings.ProxyDeviceDescription,
+		settings.ProxyDeviceSpec,
 		server.RequireVersion(),
 		sdk.RequireIdFromBytes(instanceId.Bytes()),
 	)
 	if err != nil {
 		return nil, err
+	}
+	if settings.IngressSecurityPolicyGenerator != nil {
+		deviceLocal.SetIngressSecurityPolicyGenerator(settings.IngressSecurityPolicyGenerator)
+	}
+	if settings.EgressSecurityPolicyGenerator != nil {
+		deviceLocal.SetEgressSecurityPolicyGenerator(settings.EgressSecurityPolicyGenerator)
 	}
 
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
@@ -84,6 +122,7 @@ func NewResidentProxyDevice(
 		clientId:          clientId,
 		proxyDeviceConfig: proxyDeviceConfig,
 		deviceLocal:       deviceLocal,
+		settings:          settings,
 	}
 
 	return proxyDevice, nil
@@ -99,13 +138,16 @@ func (self *ResidentProxyDevice) AddTun() (
 
 	tunCtx, tunCancel := context.WithCancel(self.ctx)
 
-	server.HandleError(func() {
+	go server.HandleError(func() {
 		defer tunCancel()
 		for {
 			select {
 			case <-tunCtx.Done():
 				return
-			case packet := <-receive:
+			case packet, ok := <-receive:
+				if !ok {
+					return
+				}
 				self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
 			case <-time.After(self.exchange.settings.WriteTimeout):
 				// drop
@@ -129,6 +171,7 @@ func (self *ResidentProxyDevice) AddTun() (
 
 		// note `send` is not closed. This channel is left open.
 	}
+
 	return
 }
 
@@ -138,7 +181,8 @@ func (self *ResidentProxyDevice) Close() {
 	self.deviceLocal.Close()
 }
 
-func newExchangeNetworkSpace(exchange *Exchange) *sdk.NetworkSpace {
-	// FIXME
-	return nil
-}
+// func newExchangeNetworkSpace(exchange *Exchange) *sdk.NetworkSpace {
+// 	// FIXME
+// 	return nil
+
+// }
