@@ -23,6 +23,7 @@ type exchangeGenerator struct {
 	excludeClientIds        []server.Id
 	sourceClientId          server.Id
 	clientSettingsGenerator func() *connect.ClientSettings
+	settings                *ResidentProxyDeviceSettings
 }
 
 func newExchangeGenerator(
@@ -33,6 +34,7 @@ func newExchangeGenerator(
 	excludeClientIds []server.Id,
 	sourceClientId server.Id,
 	clientSettingsGenerator func() *connect.ClientSettings,
+	settings *ResidentProxyDeviceSettings,
 ) *exchangeGenerator {
 
 	specs := []*model.ProviderSpec{}
@@ -62,6 +64,7 @@ func newExchangeGenerator(
 		excludeClientIds:        excludeClientIds,
 		sourceClientId:          sourceClientId,
 		clientSettingsGenerator: clientSettingsGenerator,
+		settings:                settings,
 	}
 }
 
@@ -123,8 +126,8 @@ func (self *exchangeGenerator) NewClientArgs() (*connect.MultiClientGeneratorCli
 		// note the derived client id will be inferred by the api jwt
 		authNetworkClient := &model.AuthNetworkClientArgs{
 			SourceClientId: &self.sourceClientId,
-			Description:    ProxyDeviceDescription,
-			DeviceSpec:     ProxyDeviceSpec,
+			Description:    self.settings.ProxyDeviceDescription,
+			DeviceSpec:     self.settings.ProxyDeviceSpec,
 		}
 
 		result, err := model.AuthNetworkClient(authNetworkClient, self.clientSession())

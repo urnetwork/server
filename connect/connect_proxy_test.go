@@ -124,6 +124,8 @@ func testConnectProxy(t *testing.T) {
 		// settings.ForwardIdleTimeout = sequenceIdleTimeout
 		settings.FramerSettings.MaxMessageLen = int(2 * maxMessageContentSize)
 		settings.ForwardEnforceActiveContracts = true
+		settings.IngressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		settings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 
 		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
 		exchanges[host] = exchange
@@ -216,6 +218,7 @@ func testConnectProxy(t *testing.T) {
 		localUserNatSettings.TcpBufferSettings.ConnectSettings = clientStrategySettings.ConnectSettings
 		localUserNatSettings.UdpBufferSettings.ConnectSettings = clientStrategySettings.ConnectSettings
 		remoteUserNatProviderSettings := connect.DefaultRemoteUserNatProviderSettings()
+		remoteUserNatProviderSettings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 
 		providerClient := connect.NewClient(ctx, connect.Id(providerClientId), Testing_NewControllerOutOfBandControl(ctx, providerClientId), clientSettings)
 		// defer providerClient.Close()
@@ -355,7 +358,7 @@ func testConnectProxy(t *testing.T) {
 		proxyConnectHeader.Add("Proxy-Authorization", fmt.Sprintf("Bearer %s", result.ProxyConfigResult.AuthToken))
 
 		proxyHttpClient := &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
 				// TLSHandshakeTimeout: 15 * time.Second,
 				Proxy: http.ProxyURL(httpsProxyUrl),

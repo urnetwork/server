@@ -106,6 +106,9 @@ type ExchangeSettings struct {
 	DrainOneTimeout             time.Duration
 	DrainAllTimeout             time.Duration
 
+	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+
 	ExchangeChaosSettings
 }
 
@@ -1587,12 +1590,16 @@ func (self *Resident) ResidentProxyDevice() *ResidentProxyDevice {
 	defer self.stateLock.Unlock()
 
 	if self.residentProxyDevice == nil {
+		settings := DefaultResidentProxyDeviceSettings()
+		settings.IngressSecurityPolicyGenerator = self.exchange.settings.IngressSecurityPolicyGenerator
+		settings.EgressSecurityPolicyGenerator = self.exchange.settings.EgressSecurityPolicyGenerator
 		residentProxyDevice, err := NewResidentProxyDevice(
 			self.ctx,
 			self.exchange,
 			self.clientId,
 			self.instanceId,
 			self.proxyDeviceConfig,
+			settings,
 		)
 		if err == nil {
 			self.residentProxyDevice = residentProxyDevice
