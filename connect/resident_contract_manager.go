@@ -104,7 +104,9 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 	if entry == nil {
 		entry = next()
 	} else if refresh {
-		go next()
+		go server.HandleError(func() {
+			next()
+		})
 	}
 
 	return entry != nil

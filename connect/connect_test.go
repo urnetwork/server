@@ -487,6 +487,7 @@ func testConnect(
 		settings.ConnectionAnnounceTimeout = 0
 		// settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
 		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
+		// settings.MaximumExchangeMessageByteCount = 2 * int(messageContentSizes[len(messageContentSizes)-1])
 		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
 
 		fmt.Printf("create server :%d (:%d :%d)\n", port, settings.ListenH3Port, settings.ListenDnsPort)

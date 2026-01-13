@@ -712,7 +712,8 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	timeout := false
 
-	go func() {
+	go server.HandleError(func() {
+		defer clientSession.Cancel()
 		select {
 		case <-clientSession.Ctx.Done():
 		case <-time.After(max(
@@ -721,8 +722,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		)):
 			timeout = true
 		}
-		clientSession.Cancel()
-	}()
+	})
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -791,7 +791,8 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	timeout := false
 
-	go func() {
+	go server.HandleError(func() {
+		defer clientSession.Cancel()
 		select {
 		case <-clientSession.Ctx.Done():
 		case <-time.After(max(
@@ -800,8 +801,7 @@ func (self *TaskTarget[T, R]) RunPost(
 		)):
 			timeout = true
 		}
-		clientSession.Cancel()
-	}()
+	})
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -1135,7 +1135,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
 	results := make(chan *result)
 
-	go func() {
+	go server.HandleError(func() {
 		defer func() {
 			taskCancel()
 			close(results)
@@ -1145,7 +1145,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 		for _, task := range tasks {
 			wg.Add(1)
-			go func() {
+			go server.HandleError(func() {
 				defer wg.Done()
 
 				r := &result{
@@ -1192,11 +1192,11 @@ func (self *TaskWorker) EvalTasks(n int) (
 				case <-taskCtx.Done():
 					return
 				}
-			}()
+			})
 		}
 
 		wg.Wait()
-	}()
+	})
 
 	finishedTasks := map[server.Id]*finished{}
 	rescheduledTasks := map[server.Id]error{}

@@ -296,7 +296,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 
 	// new network sync
 	wg.Add(1)
-	go func() {
+	go server.HandleError(func() {
 		defer wg.Done()
 
 		userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
@@ -309,7 +309,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 			i0 := j
 			i1 := min(j+n, len(userEmails))
 			subWg.Add(1)
-			go func() {
+			go server.HandleError(func() {
 				defer subWg.Done()
 
 				networkIdProductUpdatesSync := map[server.Id]bool{}
@@ -326,15 +326,15 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 				}
 
 				model.SetNetworkProductUpdatesSyncForUsers(ctx, networkIdProductUpdatesSync)
-			}()
+			})
 		}
 
 		subWg.Wait()
-	}()
+	})
 
 	// product updates sync
 	wg.Add(1)
-	go func() {
+	go server.HandleError(func() {
 		defer wg.Done()
 
 		userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
@@ -347,7 +347,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 			i0 := j
 			i1 := min(j+n, len(userEmails))
 			subWg.Add(1)
-			go func() {
+			go server.HandleError(func() {
 				defer subWg.Done()
 
 				userIdProductUpdatesSync := map[server.Id]bool{}
@@ -364,11 +364,11 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 				}
 
 				model.SetProductUpdatesSyncForUsers(ctx, userIdProductUpdatesSync)
-			}()
+			})
 		}
 
 		subWg.Wait()
-	}()
+	})
 
 	wg.Wait()
 

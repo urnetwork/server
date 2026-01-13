@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
+	// "encoding/binary"
+	"encoding/gob"
 	"fmt"
-	"io"
+	// "io"
 	"math/rand"
 	"net"
 	"sync"
@@ -12,8 +13,9 @@ import (
 
 	// "errors"
 	// mathrand "math/rand"
+	"bytes"
 	cryptorand "crypto/rand"
-	"slices"
+	// "slices"
 
 	// "runtime/debug"
 
@@ -300,41 +302,42 @@ func (self *Exchange) NominateLocalResident(
 		residentId,
 	)
 	go server.HandleError(func() {
-		server.HandleError(resident.Run)
-		glog.V(1).Infof("[r]close %s\n", clientId)
+		defer func() {
+			cleanupCtx := context.Background()
+			model.RemoveResidentForClient(
+				cleanupCtx,
+				clientId,
+				resident.residentId,
+			)
+		}()
 
-		resident.Close()
-
-		func() {
+		defer func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
+			resident.Close()
 			if currentResident := self.residents[clientId]; resident == currentResident {
 				delete(self.residents, clientId)
 			}
 		}()
 
-		cleanupCtx := context.Background()
-		model.RemoveResidentForClient(
-			cleanupCtx,
-			clientId,
-			resident.residentId,
-		)
+		server.HandleError(resident.Run)
+		glog.V(1).Infof("[r]close %s\n", clientId)
 	})
 	go server.HandleError(func() {
 		defer resident.Cancel()
 		for {
+			if resident.CancelIfIdle() {
+				glog.V(1).Infof("[r]idle %s\n", clientId)
+				return
+			}
+
 			select {
 			case <-resident.Done():
 				return
 			case <-time.After(self.settings.ResidentIdleTimeout):
 			}
-
-			if resident.IsIdle() {
-				glog.V(1).Infof("[r]idle %s\n", clientId)
-				return
-			}
 		}
-	}, resident.Cancel)
+	})
 	// poll the resident the same as exchange connections
 	go server.HandleError(func() {
 		defer resident.Cancel()
@@ -360,7 +363,7 @@ func (self *Exchange) NominateLocalResident(
 				return
 			}
 		}
-	}, resident.Cancel)
+	})
 
 	var replacedResident *Resident
 	func() {
@@ -383,12 +386,9 @@ func (self *Exchange) Run() {
 	// start exchange connection servers
 	for _, servicePort := range self.hostToServicePorts {
 		port := servicePort
-		go server.HandleError(
-			func() {
-				self.serveExchangeConnection(port)
-			},
-			self.cancel,
-		)
+		go server.HandleError(func() {
+			self.serveExchangeConnection(port)
+		}, self.cancel)
 	}
 
 	select {
@@ -437,7 +437,7 @@ func (self *Exchange) serveExchangeConnection(port int) {
 				self.cancel,
 			)
 		}
-	}, self.cancel)
+	})
 
 	select {
 	case <-self.ctx.Done():
@@ -482,10 +482,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			if timeout <= 0 {
 				return nil
 			}
+			timeout = min(timeout, self.settings.ExchangeResidentPollTimeout)
 			select {
 			case <-handleCtx.Done():
 				return nil
-			case <-time.After(self.settings.ExchangeResidentPollTimeout):
 			case <-time.After(timeout):
 			}
 		}
@@ -517,10 +517,76 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		return
 	}
 
-	switch header.Op {
-	case ExchangeOpTransport:
+	go server.HandleError(func() {
+		defer handleCancel()
+		select {
+		case <-handleCtx.Done():
+		case <-resident.Done():
+		}
+	})
+
+	runForward := func(forward chan []byte, closeForward func()) {
+		// messages from the forward are to be forwarded by the resident
+		// the only route a resident has is to its client_id
+		// a forward is a send where the source id does not match the client
+
+		defer closeForward()
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		})
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			for {
+				message, err := receiveBuffer.ReadMessage(conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				select {
+				case <-handleCtx.Done():
+					connect.MessagePoolReturn(message)
+					return
+				case forward <- message:
+					resident.UpdateActivity()
+					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+				case <-time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
+					connect.MessagePoolReturn(message)
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecrf]handle done\n")
+		}
+	}
+
+	runTransport := func(send chan []byte, receive chan []byte, closeTransport func()) {
 		// this must close `receive`
-		send, receive, closeTransport := resident.AddTransport()
+
 		defer closeTransport()
 
 		go server.HandleError(func() {
@@ -531,14 +597,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-resident.Done():
-					return
 				case message, ok := <-send:
 					if !ok {
 						return
 					}
 					resident.UpdateActivity()
-					if err := sendBuffer.WriteMessage(handleCtx, conn, message); err != nil {
+					if err := sendBuffer.WriteMessage(conn, message); err != nil {
 						return
 					}
 
@@ -546,12 +610,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
 						return
 					}
 				}
 			}
-		}, handleCancel)
+		})
 
 		go server.HandleError(func() {
 			defer func() {
@@ -563,106 +627,66 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			// messages from the transport are to be received by the resident
 			// messages not destined for the control id are handled by the resident forward
 			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
+				message, err := receiveBuffer.ReadMessage(conn)
 				if err != nil {
 					return
 				}
 				if len(message) == 0 {
 					// just a ping
 					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
 					continue
-				}
-
-				if glog.V(2) {
-					if resident.IsDone() {
-						glog.Warning("[ecrr] %s/%s done\n", resident.clientId, resident.residentId)
-					}
-
-					multiRouteReader := resident.client.RouteManager().OpenMultiRouteReader(connect.DestinationId(resident.client.ClientId()))
-					if !slices.Contains(multiRouteReader.GetActiveRoutes(), receive) {
-						glog.Warning("[ecrr] %s/%s missing receive route\n", resident.clientId, resident.residentId)
-					}
-					resident.client.RouteManager().CloseMultiRouteReader(multiRouteReader)
 				}
 
 				glog.V(2).Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
 
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-resident.Done():
+					connect.MessagePoolReturn(message)
 					return
 				case receive <- message:
 					resident.UpdateActivity()
 					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
 				case <-time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
+					connect.MessagePoolReturn(message)
 				}
 			}
-		}, handleCancel)
+		})
 
-	case ExchangeOpForward:
-		// read
-		// messages from the forward are to be forwarded by the resident
-		// the only route a resident has is to its client_id
-		// a forward is a send where the source id does not match the client
-
-		forward, closeForward := resident.AddForward()
-		defer closeForward()
-
-		go server.HandleError(func() {
-			defer handleCancel()
-
-			sendBuffer := NewDefaultExchangeBuffer(self.settings)
-			for {
-				select {
-				case <-handleCtx.Done():
-					return
-				case <-resident.Done():
-					return
-				case <-time.After(self.settings.ExchangePingTimeout):
-					// send a ping
-					if err := sendBuffer.WriteMessage(handleCtx, conn, make([]byte, 0)); err != nil {
-						return
-					}
-				}
-			}
-		}, handleCancel)
-
-		go server.HandleError(func() {
-			defer handleCancel()
-
-			for {
-				message, err := receiveBuffer.ReadMessage(handleCtx, conn)
-				if err != nil {
-					return
-				}
-				if len(message) == 0 {
-					// just a ping
-					resident.UpdateActivity()
-					continue
-				}
-
-				select {
-				case <-handleCtx.Done():
-					return
-				case <-resident.Done():
-					return
-				case forward <- message:
-					resident.UpdateActivity()
-					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
-				case <-time.After(self.settings.WriteTimeout):
-					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
-				}
-			}
-		}, handleCancel)
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecr]handle done\n")
+		}
 	}
 
-	select {
-	case <-handleCtx.Done():
-		glog.V(1).Infof("[ecr]handle done\n")
-	case <-resident.Done():
-		glog.V(1).Infof("[ecr]resident done\n")
+	switch header.Op {
+	case ExchangeOpTransport:
+		send, receive, closeTransport, err := resident.AddTransport()
+		if err == nil {
+			runTransport(send, receive, closeTransport)
+		} else {
+			glog.Infof("[ecr]transport connect err = %s", err)
+			handleCancel()
+		}
+
+	case ExchangeOpTunTransport:
+		send, receive, closeTransport, err := resident.AddTun()
+		if err == nil {
+			runTransport(send, receive, closeTransport)
+		} else {
+			glog.Infof("[ecr]tun connect err = %s", err)
+			handleCancel()
+		}
+
+	case ExchangeOpForward:
+		forward, closeForward, err := resident.AddForward()
+		if err == nil {
+			runForward(forward, closeForward)
+		} else {
+			glog.Infof("[ecr]forward connect err = %s", err)
+			handleCancel()
+		}
 	}
 }
 
@@ -743,83 +767,64 @@ func (self *Exchange) Close() {
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
-	buffer   []byte
+
+	framer *connect.Framer
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
+	// framerSettings := connect.DefaultFramerSettings()
+	// framerSettings.MaxMessageLen = int(settings.MaxMessageLen)
 	return &ExchangeBuffer{
 		settings: settings,
-		buffer:   make([]byte, settings.MaximumExchangeMessageByteCount+4),
+		framer:   connect.NewFramer(settings.FramerSettings),
 	}
 }
 
 func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
-	return &ExchangeBuffer{
-		settings: settings,
-		buffer:   make([]byte, 33),
-	}
+	return NewDefaultExchangeBuffer(settings)
 }
 
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
-	copy(self.buffer[0:16], header.ClientId.Bytes())
-	copy(self.buffer[16:32], header.ResidentId.Bytes())
-	self.buffer[32] = byte(header.Op)
+	b := bytes.NewBuffer(nil)
+	e := gob.NewEncoder(b)
+	e.Encode(header)
+	headerBytes := b.Bytes()
 
 	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
-	_, err := conn.Write(self.buffer[0:33])
-	return err
+	return self.framer.Write(conn, headerBytes)
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
-	if _, err := io.ReadFull(conn, self.buffer[0:33]); err != nil {
+	headerBytes, err := self.framer.Read(conn)
+	if err != nil {
 		return nil, err
 	}
+	defer connect.MessagePoolReturn(headerBytes)
 
-	return &ExchangeHeader{
-		ClientId:   server.Id(self.buffer[0:16]),
-		ResidentId: server.Id(self.buffer[16:32]),
-		Op:         ExchangeOp(self.buffer[32]),
-	}, nil
+	var header ExchangeHeader
+
+	b := bytes.NewBuffer(headerBytes)
+	e := gob.NewDecoder(b)
+	err = e.Decode(&header)
+	if err != nil {
+		return nil, err
+	}
+	return &header, nil
 }
 
-func (self *ExchangeBuffer) WriteMessage(ctx context.Context, conn net.Conn, transferFrameBytes []byte) error {
-	n := ByteCount(len(transferFrameBytes))
-
-	if self.settings.MaximumExchangeMessageByteCount < n {
-		return fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
-	}
-
-	binary.LittleEndian.PutUint32(self.buffer[0:4], uint32(n))
-
+func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	_, err := conn.Write(self.buffer[0:4])
-	if err != nil {
-		return err
+	err := self.framer.Write(conn, transferFrameBytes)
+	if err == nil {
+		connect.MessagePoolReturn(transferFrameBytes)
 	}
-	_, err = conn.Write(transferFrameBytes)
 	return err
 }
 
-func (self *ExchangeBuffer) ReadMessage(ctx context.Context, conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
-	if _, err := io.ReadFull(conn, self.buffer[0:4]); err != nil {
-		return nil, err
-	}
-
-	n := ByteCount(int(binary.LittleEndian.Uint32(self.buffer[0:4])))
-	if self.settings.MaximumExchangeMessageByteCount < n {
-		return nil, fmt.Errorf("Maximum message size is %d (%d).", self.settings.MaximumExchangeMessageByteCount, n)
-	}
-
-	// read into a new buffer
-	message := make([]byte, n)
-
-	if _, err := io.ReadFull(conn, message); err != nil {
-		return nil, err
-	}
-
-	return message, nil
+func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
+	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	return self.framer.Read(conn)
 }
 
 type ExchangeOp byte
@@ -829,9 +834,14 @@ const (
 	// forward does not add a transport to the client
 	// forward calls `Forward` on the resident and does not use routes
 	ExchangeOpForward ExchangeOp = 0x02
+	// tun transport will send/receive raw IP packets to resident managed device
+	ExchangeOpTunTransport ExchangeOp = 0x03
+	// device remote protocol to the managed device
+	ExchangeOpDeviceRemote ExchangeOp = 0x04
 )
 
 type ExchangeHeader struct {
+	Version    int
 	ClientId   server.Id
 	ResidentId server.Id
 	Op         ExchangeOp
@@ -949,7 +959,7 @@ func (self *ExchangeConnection) Run() {
 
 	// only a transport connection will receive messages
 	switch self.op {
-	case ExchangeOpTransport:
+	case ExchangeOpTransport, ExchangeOpTunTransport:
 		go server.HandleError(func() {
 			defer func() {
 				self.cancel()
@@ -962,25 +972,28 @@ func (self *ExchangeConnection) Run() {
 					return
 				default:
 				}
-				message, err := self.receiveBuffer.ReadMessage(self.ctx, self.conn)
+				message, err := self.receiveBuffer.ReadMessage(self.conn)
 				if err != nil {
 					return
 				}
 				if len(message) == 0 {
 					// just a ping
+					connect.MessagePoolReturn(message)
 					continue
 				}
 
 				select {
 				case <-self.ctx.Done():
+					connect.MessagePoolReturn(message)
 					return
 				case self.receive <- message:
 					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
 				case <-time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+					connect.MessagePoolReturn(message)
 				}
 			}
-		}, self.cancel)
+		})
 	case ExchangeOpForward:
 		// nothing to receive, but time out on missing pings
 		close(self.receive)
@@ -994,16 +1007,19 @@ func (self *ExchangeConnection) Run() {
 					return
 				default:
 				}
-				message, err := self.receiveBuffer.ReadMessage(self.ctx, self.conn)
+				message, err := self.receiveBuffer.ReadMessage(self.conn)
 				if err != nil {
 					return
 				}
 				if len(message) == 0 {
 					// just a ping
+					connect.MessagePoolReturn(message)
 					continue
 				}
+				// else drop
+				connect.MessagePoolReturn(message)
 			}
-		}, self.cancel)
+		})
 	}
 
 	go server.HandleError(func() {
@@ -1017,18 +1033,18 @@ func (self *ExchangeConnection) Run() {
 				if !ok {
 					return
 				}
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, message); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.conn, message); err != nil {
 					return
 				}
 				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
 			case <-time.After(self.settings.ExchangePingTimeout):
 				// send a ping
-				if err := self.sendBuffer.WriteMessage(self.ctx, self.conn, make([]byte, 0)); err != nil {
+				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
 					return
 				}
 			}
 		}
-	}, self.cancel)
+	})
 
 	select {
 	case <-self.ctx.Done():
@@ -1062,7 +1078,8 @@ type ResidentTransport struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	exchange *Exchange
+	exchange   *Exchange
+	exchangeOp ExchangeOp
 
 	clientId   server.Id
 	instanceId server.Id
@@ -1079,11 +1096,31 @@ func NewResidentTransport(
 	clientId server.Id,
 	instanceId server.Id,
 ) *ResidentTransport {
+	return newResidentTransport(ctx, exchange, ExchangeOpTransport, clientId, instanceId)
+}
+
+func NewResidentProxyTransport(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+) *ResidentTransport {
+	return newResidentTransport(ctx, exchange, ExchangeOpTunTransport, clientId, instanceId)
+}
+
+func newResidentTransport(
+	ctx context.Context,
+	exchange *Exchange,
+	exchangeOp ExchangeOp,
+	clientId server.Id,
+	instanceId server.Id,
+) *ResidentTransport {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentTransport{
 		ctx:        cancelCtx,
 		cancel:     cancel,
 		exchange:   exchange,
+		exchangeOp: exchangeOp,
 		clientId:   clientId,
 		instanceId: instanceId,
 		send:       make(chan []byte, exchange.settings.ExchangeBufferSize),
@@ -1103,6 +1140,14 @@ func (self *ResidentTransport) Run() {
 		defer handleCancel()
 
 		go server.HandleError(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-connection.Done():
+			}
+		})
+
+		go server.HandleError(func() {
 			defer func() {
 				handleCancel()
 				connection.Close()
@@ -1112,8 +1157,6 @@ func (self *ResidentTransport) Run() {
 			for {
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-connection.Done():
 					return
 				case message, ok := <-self.send:
 					if !ok {
@@ -1131,14 +1174,12 @@ func (self *ResidentTransport) Run() {
 					}
 				}
 			}
-		}, self.cancel)
+		})
 
 		// read
 		for {
 			select {
 			case <-handleCtx.Done():
-				return
-			case <-connection.Done():
 				return
 			case message, ok := <-connection.receive:
 				if !ok {
@@ -1169,7 +1210,7 @@ func (self *ResidentTransport) Run() {
 				resident.ResidentId,
 				resident.ResidentHost,
 				port,
-				ExchangeOpTransport,
+				self.exchangeOp,
 				self.exchange.routes,
 				self.exchange.settings,
 			)
@@ -1285,6 +1326,13 @@ func (self *ResidentForward) Run() {
 			handleCancel()
 			connection.Close()
 		}()
+		go server.HandleError(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-connection.Done():
+			}
+		})
 
 		// write
 		for {
@@ -1298,8 +1346,6 @@ func (self *ResidentForward) Run() {
 				}
 				select {
 				case <-handleCtx.Done():
-					return
-				case <-connection.Done():
 					return
 				case connection.send <- message:
 				case <-time.After(self.exchange.settings.WriteTimeout):
@@ -1349,19 +1395,29 @@ func (self *ResidentForward) Run() {
 	}
 }
 
-func (self *ResidentForward) UpdateActivity() {
+func (self *ResidentForward) UpdateActivity() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	self.lastActivityTime = time.Now()
+	select {
+	case <-self.ctx.Done():
+		return false
+	default:
+		self.lastActivityTime = time.Now()
+		return true
+	}
 }
 
-func (self *ResidentForward) IsIdle() bool {
+func (self *ResidentForward) CancelIfIdle() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	idleTimeout := time.Now().Sub(self.lastActivityTime)
-	return self.exchange.settings.ForwardIdleTimeout <= idleTimeout
+	if self.exchange.settings.ForwardIdleTimeout <= idleTimeout {
+		self.cancel()
+		return true
+	}
+	return false
 }
 
 func (self *ResidentForward) IsDone() bool {
@@ -1397,12 +1453,18 @@ type Resident struct {
 	instanceId server.Id
 	residentId server.Id
 
+	// the proxy device configuration for the resident
+	// if this is nil, the resident is not a proxy
+	proxyDeviceConfig *model.ProxyDeviceConfig
+
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
 	residentContractManager *residentContractManager
 	residentController      *residentController
 
 	stateLock sync.Mutex
+
+	residentProxyDevice *ResidentProxyDevice
 
 	transports map[*clientTransport]bool
 
@@ -1418,6 +1480,7 @@ type Resident struct {
 	clientForwardUnsub func()
 }
 
+// FIXME check for proxy config on (clientId, instanceId) and configure the mode
 func NewResident(
 	ctx context.Context,
 	exchange *Exchange,
@@ -1426,6 +1489,8 @@ func NewResident(
 	residentId server.Id,
 ) *Resident {
 	cancelCtx, cancel := context.WithCancel(ctx)
+
+	proxyDeviceConfig := model.GetProxyDeviceConfigForClient(cancelCtx, clientId, instanceId)
 
 	// use a tag with the client so that the logging does not show up as the control id
 	clientTag := fmt.Sprintf("c(%s)", clientId.String())
@@ -1458,6 +1523,7 @@ func NewResident(
 		clientId:                clientId,
 		instanceId:              instanceId,
 		residentId:              residentId,
+		proxyDeviceConfig:       proxyDeviceConfig,
 		client:                  client,
 		residentContractManager: residentContractManager,
 		residentController:      residentController,
@@ -1510,6 +1576,32 @@ func (self *Resident) Run() {
 	case <-self.ctx.Done():
 	case <-self.client.Done():
 	}
+}
+
+func (self *Resident) ResidentProxyDevice() *ResidentProxyDevice {
+	if self.proxyDeviceConfig == nil {
+		return nil
+	}
+
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	if self.residentProxyDevice == nil {
+		residentProxyDevice, err := NewResidentProxyDevice(
+			self.ctx,
+			self.exchange,
+			self.clientId,
+			self.instanceId,
+			self.proxyDeviceConfig,
+		)
+		if err == nil {
+			self.residentProxyDevice = residentProxyDevice
+		} else {
+			glog.Infof("[r]error creating resident proxy = %s", err)
+		}
+	}
+
+	return self.residentProxyDevice
 }
 
 /*
@@ -1604,6 +1696,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				defer func() {
 					self.stateLock.Lock()
 					defer self.stateLock.Unlock()
+					// note we don't call close here because only the sender should call close
 					forward.Cancel()
 					if currentForward := self.forwards[destinationId]; forward == currentForward {
 						delete(self.forwards, destinationId)
@@ -1612,25 +1705,22 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				forward.Run()
 
 				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
-				// note we don't call close here because only the sender should call close
-			}, forward.Cancel)
+			})
 			go server.HandleError(func() {
 				defer forward.Cancel()
 				for {
-					if forward.IsIdle() {
+					if forward.CancelIfIdle() {
 						glog.V(1).Infof("[rf]idle %s->%s\n", sourceId, destinationId)
 						return
 					}
 
 					select {
-					case <-self.ctx.Done():
-						return
 					case <-forward.Done():
 						return
 					case <-time.After(self.exchange.settings.ForwardIdleTimeout):
 					}
 				}
-			}, forward.Cancel)
+			})
 
 			var replacedForward *ResidentForward
 			func() {
@@ -1665,7 +1755,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			return false
 		}
 
-		if forward == nil || forward.IsDone() {
+		if forward == nil || !forward.UpdateActivity() {
 			forward = nextForward()
 		}
 
@@ -1674,12 +1764,9 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		}
 
 		select {
-		case <-self.ctx.Done():
-			return false
 		case <-forward.Done():
 			return false
 		case forward.send <- transferFrameBytes:
-			forward.UpdateActivity()
 			return true
 		case <-time.After(self.exchange.settings.WriteTimeout):
 			glog.V(1).Infof("[rf]drop %s->%s", sourceId, destinationId)
@@ -1723,7 +1810,13 @@ func (self *Resident) AddTransport() (
 	send chan []byte,
 	receive chan []byte,
 	closeTransport func(),
+	returnErr error,
 ) {
+	if self.proxyDeviceConfig != nil {
+		returnErr = fmt.Errorf("Transport does not work with a proxy device")
+		return
+	}
+
 	send = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 	receive = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 
@@ -1765,10 +1858,16 @@ func (self *Resident) AddTransport() (
 func (self *Resident) AddForward() (
 	forward chan []byte,
 	closeForward func(),
+	returnErr error,
 ) {
-	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	if self.proxyDeviceConfig != nil {
+		returnErr = fmt.Errorf("Forward does not work with a proxy device")
+		return
+	}
 
 	forwardCtx, forwardCancel := context.WithCancel(self.ctx)
+
+	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 
 	go server.HandleError(func() {
 		defer forwardCancel()
@@ -1780,7 +1879,7 @@ func (self *Resident) AddForward() (
 				self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
 			}
 		}
-	}, self.cancel)
+	})
 
 	closeForward = func() {
 		forwardCancel()
@@ -1792,25 +1891,50 @@ func (self *Resident) AddForward() (
 	return
 }
 
+func (self *Resident) AddTun() (
+	send chan []byte,
+	receive chan []byte,
+	closeTun func(),
+	returnErr error,
+) {
+	residentProxyDevice := self.ResidentProxyDevice()
+	if residentProxyDevice == nil {
+		returnErr = fmt.Errorf("Tun requires a proxy device")
+		return
+	}
+	send, receive, closeTun = residentProxyDevice.AddTun()
+	return
+}
+
 // func (self *Resident) Forward(transferFrameBytes []byte) bool {
 // 	self.UpdateActivity()
 // 	return self.client.ForwardWithTimeout(transferFrameBytes, self.exchange.settings.WriteTimeout)
 // }
 
-func (self *Resident) UpdateActivity() {
+func (self *Resident) UpdateActivity() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	self.lastActivityTime = time.Now()
+	select {
+	case <-self.ctx.Done():
+		return false
+	default:
+		self.lastActivityTime = time.Now()
+		return true
+	}
 }
 
 // idle if no activity in `ResidentIdleTimeout`
-func (self *Resident) IsIdle() bool {
+func (self *Resident) CancelIfIdle() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	idleTimeout := time.Now().Sub(self.lastActivityTime)
-	return self.exchange.settings.ResidentIdleTimeout <= idleTimeout
+	if self.exchange.settings.ResidentIdleTimeout <= idleTimeout {
+		self.cancel()
+		return true
+	}
+	return false
 }
 
 func (self *Resident) IsDone() bool {
@@ -1846,6 +1970,11 @@ func (self *Resident) Close() {
 		defer self.stateLock.Unlock()
 		forwards = maps.Values(self.forwards)
 		clear(self.forwards)
+
+		if self.residentProxyDevice != nil {
+			self.residentProxyDevice.Close()
+			self.residentProxyDevice = nil
+		}
 	}()
 	for _, forward := range forwards {
 		forward.Cancel()

@@ -393,77 +393,78 @@ type RedeemBalanceCodeError struct {
 	Message string `json:"message"`
 }
 
-func RedeemBalanceCode(
+func RedeemBalanceCodeInTx(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
 	ctx context.Context,
+	tx server.PgTx,
 ) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
-			ctx,
-			`
-                SELECT
-                    balance_code_id,
-                    start_time,
-                    end_time,
-                    balance_byte_count,
-                    net_revenue_nano_cents
-                FROM transfer_balance_code
-                WHERE
-                    balance_code_secret = $1 AND
-                    redeem_balance_id IS NULL
-            `,
-			redeemBalanceCode.Secret,
-		)
-		var balanceCode *BalanceCode
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				balanceCode = &BalanceCode{}
-				server.Raise(result.Scan(
-					&balanceCode.BalanceCodeId,
-					&balanceCode.StartTime,
-					&balanceCode.EndTime,
-					&balanceCode.BalanceByteCount,
-					&balanceCode.NetRevenue,
-				))
-			}
-		})
-		if balanceCode == nil {
-			redeemBalanceCodeResult = &RedeemBalanceCodeResult{
-				Error: &RedeemBalanceCodeError{
-					Message: "Unknown balance code.",
-				},
-			}
-			return
+
+	result, err := tx.Query(
+		ctx,
+		`
+            SELECT
+                balance_code_id,
+                start_time,
+                end_time,
+                balance_byte_count,
+                net_revenue_nano_cents
+            FROM transfer_balance_code
+            WHERE
+                balance_code_secret = $1 AND
+                redeem_balance_id IS NULL
+        `,
+		redeemBalanceCode.Secret,
+	)
+	var balanceCode *BalanceCode
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			balanceCode = &BalanceCode{}
+			server.Raise(result.Scan(
+				&balanceCode.BalanceCodeId,
+				&balanceCode.StartTime,
+				&balanceCode.EndTime,
+				&balanceCode.BalanceByteCount,
+				&balanceCode.NetRevenue,
+			))
 		}
+	})
+	if balanceCode == nil {
+		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+			Error: &RedeemBalanceCodeError{
+				Message: "Unknown balance code.",
+			},
+		}
+		return
+	}
 
-		balanceId := server.NewId()
+	balanceId := server.NewId()
 
-		now := server.NowUtc()
-		duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
-		endTime := now.Add(duration)
+	now := server.NowUtc()
+	duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
+	endTime := now.Add(duration)
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                UPDATE transfer_balance_code
-                SET
-                    redeem_time = $2,
-                    redeem_balance_id = $3,
-                    start_time = $4,
-                    end_time = $5
-                WHERE
-                    balance_code_id = $1
-            `,
-			balanceCode.BalanceCodeId,
-			now,
-			balanceId,
-			now,
-			endTime,
-		))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+            UPDATE transfer_balance_code
+            SET
+                redeem_time = $2,
+                redeem_balance_id = $3,
+                start_time = $4,
+                end_time = $5
+            WHERE
+                balance_code_id = $1
+        `,
+		balanceCode.BalanceCodeId,
+		now,
+		balanceId,
+		now,
+		endTime,
+	))
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -475,24 +476,38 @@ func RedeemBalanceCode(
                 )
                 VALUES ($1, $2, $3, $4, $5, $5, $6)
             `,
-			balanceId,
-			// note: we don't use session.Jwt.NetworkId here
-			// users can redeem when creating a network, in which case the jwt is not yet threaded
-			redeemBalanceCode.NetworkId,
-			now,
-			endTime,
-			balanceCode.BalanceByteCount,
-			balanceCode.NetRevenue,
-		))
+		balanceId,
+		// note: we don't use session.Jwt.NetworkId here
+		// users can redeem when creating a network, in which case the jwt is not yet threaded
+		redeemBalanceCode.NetworkId,
+		now,
+		endTime,
+		balanceCode.BalanceByteCount,
+		balanceCode.NetRevenue,
+	))
 
-		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
-			TransferBalance: &RedeemBalanceCodeTransferBalance{
-				TransferBalanceId: balanceId,
-				StartTime:         balanceCode.StartTime,
-				EndTime:           balanceCode.EndTime,
-				BalanceByteCount:  balanceCode.BalanceByteCount,
-			},
-		}
+	redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+		TransferBalance: &RedeemBalanceCodeTransferBalance{
+			TransferBalanceId: balanceId,
+			StartTime:         balanceCode.StartTime,
+			EndTime:           balanceCode.EndTime,
+			BalanceByteCount:  balanceCode.BalanceByteCount,
+		},
+	}
+
+	return
+}
+
+func RedeemBalanceCode(
+	redeemBalanceCode *RedeemBalanceCodeArgs,
+	ctx context.Context,
+) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		redeemBalanceCodeResult, returnErr = RedeemBalanceCodeInTx(
+			redeemBalanceCode,
+			ctx,
+			tx,
+		)
 	}, server.TxReadCommitted)
 
 	return
@@ -592,10 +607,11 @@ type TransferBalance struct {
 	EndTime               time.Time `json:"end_time"`
 	StartBalanceByteCount ByteCount `json:"start_balance_byte_count"`
 	// how much money the platform made after subtracting fees
-	NetRevenue       NanoCents `json:"net_revenue_nano_cents"`
-	BalanceByteCount ByteCount `json:"balance_byte_count"`
-	PurchaseToken    string    `json:"purchase_token,omitempty"`
-	Paid             bool      `json:"paid,omitempty"`
+	NetRevenue        NanoCents `json:"net_revenue_nano_cents"`
+	SubsidyNetRevenue NanoCents `json:"subsidy_net_revenue_nano_cents,omitempty"`
+	BalanceByteCount  ByteCount `json:"balance_byte_count"`
+	PurchaseToken     string    `json:"purchase_token,omitempty"`
+	Paid              bool      `json:"paid,omitempty"`
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -669,13 +685,12 @@ func GetActiveTransferBalanceByteCount(ctx context.Context, networkId server.Id)
 	return net
 }
 
-func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		balanceId := server.NewId()
+func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance *TransferBalance) {
+	balanceId := server.NewId()
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -684,21 +699,28 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
                     start_balance_byte_count,
                     balance_byte_count,
                     net_revenue_nano_cents,
-                    purchase_token
+                    purchase_token,
+                    subsidy_net_revenue_nano_cents
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             `,
-			balanceId,
-			transferBalance.NetworkId,
-			transferBalance.StartTime,
-			transferBalance.EndTime,
-			transferBalance.StartBalanceByteCount,
-			transferBalance.BalanceByteCount,
-			transferBalance.NetRevenue,
-			transferBalance.PurchaseToken,
-		))
+		balanceId,
+		transferBalance.NetworkId,
+		transferBalance.StartTime,
+		transferBalance.EndTime,
+		transferBalance.StartBalanceByteCount,
+		transferBalance.BalanceByteCount,
+		transferBalance.NetRevenue,
+		transferBalance.PurchaseToken,
+		transferBalance.SubsidyNetRevenue,
+	))
 
-		transferBalance.BalanceId = balanceId
+	transferBalance.BalanceId = balanceId
+}
+
+func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		AddTransferBalanceInTx(ctx, tx, transferBalance)
 	})
 }
 
@@ -2553,7 +2575,7 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		return nil
 	}
 
-	nextIndex := parallel
+	nextIndex := 0
 	var nextIndexLock sync.Mutex
 	getAndIncrNextIndex := func() int {
 		nextIndexLock.Lock()
@@ -2564,15 +2586,15 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 		return i
 	}
 
-	workerCtxs := []context.Context{}
-	for j0 := range parallel {
-		workerCtx, workerCancel := context.WithCancel(ctx)
-		workerCtxs = append(workerCtxs, workerCtx)
+	var wg sync.WaitGroup
+
+	for range parallel {
+		wg.Add(1)
 		go server.HandleError(func() {
-			defer workerCancel()
-			for j := j0; j < len(openContracts); j = getAndIncrNextIndex() {
+			defer wg.Done()
+			for j := getAndIncrNextIndex(); j < len(openContracts); j = getAndIncrNextIndex() {
 				select {
-				case <-workerCtx.Done():
+				case <-ctx.Done():
 					return
 				default:
 				}
@@ -2587,15 +2609,11 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 					}
 				})
 			}
-		}, workerCancel)
+		})
 	}
 
-	// wait for all workers
-	for _, workerCtx := range workerCtxs {
-		select {
-		case <-workerCtx.Done():
-		}
-	}
+	wg.Wait()
+
 	closeCount += int64(len(openContracts))
 
 	return
@@ -2904,6 +2922,12 @@ func IsPro(
 	ctx context.Context,
 	networkId *server.Id,
 ) bool {
+
+	// todo:
+	// instead of checking if PAID, add a column 'is_pro'
+	//
+	// In some cases, like Apple TestFlight or Stripe promo codes,
+	// we want to mark the user as pro even if payment is 0
 
 	isPro := false
 

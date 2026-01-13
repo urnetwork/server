@@ -209,10 +209,10 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
-	}
 
-	if market != nil {
-		currentSubscription.Store = *market
+		if market != nil {
+			currentSubscription.Store = *market
+		}
 	}
 
 	// FIXME
@@ -659,11 +659,20 @@ func stripeHandleInvoicePaid(
 			return
 		}
 
-		err = AddRefreshTransferBalanceInTx(tx, clientSession.Ctx, *networkId)
-		if err != nil {
-			glog.Infof("Error adding refresh transfer balance task: %v", err)
-			insertErr = err
+		transferBalance := &model.TransferBalance{
+			NetworkId:             *networkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
 		}
+
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
 
 	})
 
@@ -1462,11 +1471,15 @@ func PlaySubscriptionRenewal(
 			skuName := playSubscriptionRenewal.SubscriptionId
 			if sku, ok := skus[skuName]; ok {
 				if sku.Supporter {
+
+					endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+					netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
+
 					renewal := &model.SubscriptionRenewal{
 						NetworkId:          playSubscriptionRenewal.NetworkId,
 						StartTime:          startTime,
-						EndTime:            maxExpiryTime.Add(SubscriptionGracePeriod),
-						NetRevenue:         model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						EndTime:            endTime,
+						NetRevenue:         netRevenue,
 						PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
 						SubscriptionType:   model.SubscriptionTypeSupporter,
 						SubscriptionMarket: model.SubscriptionMarketGoogle,
@@ -1475,7 +1488,20 @@ func PlaySubscriptionRenewal(
 						clientSession.Ctx,
 						renewal,
 					)
-					AddRefreshTransferBalance(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+
+					transferBalance := &model.TransferBalance{
+						NetworkId:             playSubscriptionRenewal.NetworkId,
+						StartTime:             startTime,
+						EndTime:               endTime,
+						StartBalanceByteCount: RefreshSupporterTransferBalance,
+						SubsidyNetRevenue:     netRevenue,
+						BalanceByteCount:      RefreshSupporterTransferBalance,
+						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+					}
+					model.AddTransferBalance(
+						clientSession.Ctx,
+						transferBalance,
+					)
 
 				} else {
 					transferBalance := &model.TransferBalance{
@@ -1483,7 +1509,7 @@ func PlaySubscriptionRenewal(
 						StartTime:             startTime,
 						EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
 						StartBalanceByteCount: sku.BalanceByteCount(),
-						NetRevenue:            model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+						SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
 						BalanceByteCount:      sku.BalanceByteCount(),
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 					}
@@ -1781,9 +1807,9 @@ type AppleNotificationDecodedPayload struct {
 }
 
 func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
-	glog.Infof("[apple] New subscription: %+v", notification.Data)
 
 	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
+
 	if err != nil {
 		glog.Errorf("[apple] Failed to parse signed info: %v", err)
 		return
@@ -1833,6 +1859,28 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		}
 
+		// // note - currently if a TestFlight user subscribes,
+		// // they won't be marked as pro since their price is 0
+		// // in the transaction info
+		// // uncommenting this will mark them as pro, but pollutes net_revenue with false data
+		// // if uncommenting, wrap in check that price is zero
+
+		//
+		// 	// todo - deprecate
+		// 	// we should instead mark transfer balance as PRO
+		// 	// in the case of testflight users, we don't want to pollute net_revenue with false data
+		// 	//
+		// 	// fallback if we can't parse price, hardset price
+		// 	glog.Infof("[apple] price not found in transaction info, using hardset values")
+
+		// 	now := time.Now()
+		// 	twoMonthsFromNow := now.AddDate(0, 2, 0)
+		// 	if expiresDate.After(twoMonthsFromNow) {
+		// 		priceNanoCents = model.UsdToNanoCents(39.99) // year subscription
+		// 	} else {
+		// 		priceNanoCents = model.UsdToNanoCents(4.99) // monthly subscription
+		// 	}
+
 		// fixme: hardcoded fee fraction
 		feeFraction := 0.2
 
@@ -1861,7 +1909,18 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
-		AddRefreshTransferBalance(ctx, networkId)
+		transferBalance := &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+		}
+		model.AddTransferBalance(
+			ctx,
+			transferBalance,
+		)
 
 	} else {
 		glog.Infof("[apple] Transaction Info: nil")
@@ -2205,19 +2264,32 @@ func HeliusWebhook(
 		startTime := server.NowUtc()
 		endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
 
+		netRevenue := model.UsdToNanoCents(tokenAmountReceived)
+
 		subscriptionRenewal := model.SubscriptionRenewal{
 			NetworkId:          *paymentSearchResult.NetworkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
 			StartTime:          startTime,
 			EndTime:            endTime,
-			NetRevenue:         model.UsdToNanoCents(tokenAmountReceived),
+			NetRevenue:         netRevenue,
 			SubscriptionMarket: model.SubscriptionMarketSolana,
 			TransactionId:      paymentSearchResult.PaymentReference,
 		}
 
 		model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
 
-		AddRefreshTransferBalance(clientSession.Ctx, *paymentSearchResult.NetworkId)
+		transferBalance := &model.TransferBalance{
+			NetworkId:             *paymentSearchResult.NetworkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+		}
+		model.AddTransferBalance(
+			clientSession.Ctx,
+			transferBalance,
+		)
 
 		model.MarkPaymentIntentCompleted(
 			paymentSearchResult.PaymentReference,

@@ -202,6 +202,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 			"",
 			"",
 		)
+
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,

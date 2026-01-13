@@ -35,7 +35,7 @@ func TestCancelAccountPayment(t *testing.T) {
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
-
+	
 		subscriptionYearDuration := 365 * 24 * time.Hour
 
 		balanceCode, err := CreateBalanceCode(
@@ -47,6 +47,7 @@ func TestCancelAccountPayment(t *testing.T) {
 			"",
 			"",
 		)
+
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,

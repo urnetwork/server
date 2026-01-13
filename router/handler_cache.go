@@ -46,7 +46,7 @@ func WarmCacheNoAuth[R any](
 	}
 
 	// store the value in parallel
-	go func() {
+	go server.HandleError(func() {
 		storeCtx := context.Background()
 		valueJson, err := json.Marshal(value)
 		if err == nil {
@@ -59,7 +59,7 @@ func WarmCacheNoAuth[R any](
 				}
 			})
 		}
-	}()
+	})
 
 	return value, nil
 }
@@ -112,7 +112,7 @@ func WarmCacheWithAuth[R any](
 	}
 
 	// store the value in parallel
-	go func() {
+	go server.HandleError(func() {
 		storeCtx := context.Background()
 		keyWithAuth := KeyWithAuth(clientSession, key)
 		valueJson, err := json.Marshal(value)
@@ -126,7 +126,7 @@ func WarmCacheWithAuth[R any](
 				}
 			})
 		}
-	}()
+	})
 
 	return value, nil
 }

@@ -94,12 +94,14 @@ type NetworkCreateResult struct {
 	UserAuth             *string                          `json:"user_auth,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
+	IsPro                bool                             `json:"is_pro,omitempty"`
 }
 
 type NetworkCreateResultNetwork struct {
 	ByJwt       *string   `json:"by_jwt,omitempty"`
 	NetworkId   server.Id `json:"network_id,omitempty"`
 	NetworkName string    `json:"network_name,omitempty"`
+	IsPro       bool      `json:"is_pro,omitempty"`
 }
 
 type NetworkCreateResultVerification struct {
@@ -133,55 +135,10 @@ func NetworkCreate(
 	// create a guest network
 	if networkCreate.GuestMode {
 
-		created := false
-		var createdNetworkId server.Id
-		var networkName string
-		var createdUserId server.Id
+		resultNetworkCreate := networkCreateGuest(session.Ctx)
 
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			var err error
-
-			createdUserId = server.NewId()
-			createdNetworkId = server.NewId()
-
-			// remove dashes from the network name
-			networkName = fmt.Sprintf(
-				"g%s",
-				strings.ReplaceAll(server.NewId().String(), "-", ""),
-			)
-
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network_user
-					(user_id, user_name, auth_type)
-					VALUES ($1, $2, $3)
-				`,
-				createdUserId,
-				"guest",
-				AuthTypeGuest,
-			)
-			server.Raise(err)
-
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network
-					(network_id, network_name, admin_user_id)
-					VALUES ($1, $2, $3)
-				`,
-				createdNetworkId,
-				networkName,
-				createdUserId,
-			)
-			server.Raise(err)
-
-			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
-
-			created = true
-		})
-		if created {
-			auditNetworkCreate(networkCreate, createdNetworkId, session)
+		if resultNetworkCreate.Created {
+			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
 			// we should disable adding the guest network to name search?
 			// networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
@@ -190,8 +147,8 @@ func NetworkCreate(
 			isGuest := true
 
 			byJwt := jwt.NewByJwt(
-				createdNetworkId,
-				createdUserId,
+				resultNetworkCreate.NetworkId,
+				resultNetworkCreate.UserId,
 				networkCreate.NetworkName,
 				isGuest,
 				isPro,
@@ -200,8 +157,8 @@ func NetworkCreate(
 			result := &NetworkCreateResult{
 				Network: &NetworkCreateResultNetwork{
 					ByJwt:       &byJwtSigned,
-					NetworkName: networkName,
-					NetworkId:   createdNetworkId,
+					NetworkName: resultNetworkCreate.NetworkName,
+					NetworkId:   resultNetworkCreate.NetworkId,
 				},
 			}
 
@@ -244,107 +201,17 @@ func NetworkCreate(
 			return result, nil
 		}
 
-		created := false
-		var createdNetworkId server.Id
+		resultNetworkCreate := networkCreateUserAuth(
+			session.Ctx,
+			&networkCreate,
+			userAuth,
+			containsProfanity,
+		)
 
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			var result server.PgResult
-			var err error
+		if resultNetworkCreate.Created {
+			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-			var userId *server.Id
-
-			result, err = tx.Query(
-				session.Ctx,
-				`
-					SELECT user_id FROM network_user WHERE user_auth = $1
-				`,
-				userAuth,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&userId))
-				}
-			})
-
-			if userId != nil {
-				return
-			}
-
-			var existingNetworkId *server.Id
-
-			result, err = tx.Query(
-				session.Ctx,
-				`
-					SELECT network_id FROM network WHERE network_name = $1
-				`,
-				networkCreate.NetworkName,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&existingNetworkId))
-				}
-			})
-
-			if existingNetworkId != nil {
-				return
-			}
-
-			createdUserId := server.NewId()
-			createdNetworkId = server.NewId()
-
-			passwordSalt := createPasswordSalt()
-			passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
-
-			// todo - cleanup network_user once UIs are updated
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network_user
-					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
-					VALUES ($1, $2, $3, $4, $5, $6)
-				`,
-				createdUserId,
-				networkCreate.UserName,
-				AuthTypePassword,
-				userAuth,
-				passwordHash,
-				passwordSalt,
-			)
-			server.Raise(err)
-
-			// insert into network_user_auth_password
-			addUserAuth(
-				&AddUserAuthArgs{
-					UserId:       createdUserId,
-					UserAuth:     userAuth,
-					PasswordHash: passwordHash,
-					PasswordSalt: passwordSalt,
-				},
-				session.Ctx,
-			)
-
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network
-					(network_id, network_name, admin_user_id, contains_profanity)
-					VALUES ($1, $2, $3, $4)
-				`,
-				createdNetworkId,
-				networkCreate.NetworkName,
-				createdUserId,
-				containsProfanity,
-			)
-			server.Raise(err)
-
-			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
-
-			created = true
-		})
-		if created {
-			auditNetworkCreate(networkCreate, createdNetworkId, session)
-
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -352,7 +219,8 @@ func NetworkCreate(
 				},
 				Network: &NetworkCreateResultNetwork{
 					NetworkName: networkCreate.NetworkName,
-					NetworkId:   createdNetworkId,
+					NetworkId:   resultNetworkCreate.NetworkId,
+					IsPro:       resultNetworkCreate.IsPro,
 				},
 			}
 			return result, nil
@@ -367,126 +235,44 @@ func NetworkCreate(
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
 		// user is creating a network via social login
 
-		// server.Logger().Printf("Parsing JWT\n")
-
 		authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
-		// server.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
+
 		if authJwt != nil {
-			// validate the user does not exist
 
 			normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
 
-			// server.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
+			resultNetworkCreate := networkCreateAuthJwt(
+				session.Ctx,
+				&networkCreate,
+				containsProfanity,
+				*authJwt,
+				normalJwtUserAuth,
+			)
 
-			created := false
-			var createdNetworkId server.Id
-			var createdUserId server.Id
+			if resultNetworkCreate.Created {
+				auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-			server.Tx(session.Ctx, func(tx server.PgTx) {
-				var userId *server.Id
-
-				result, err := tx.Query(
-					session.Ctx,
-					`
-						SELECT user_id FROM network_user WHERE user_auth = $1
-					`,
-					normalJwtUserAuth,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						server.Raise(result.Scan(&userId))
-					}
-				})
-
-				if userId != nil {
-					// server.Logger().Printf("User already exists\n")
-					return
-				}
-
-				// server.Logger().Printf("JWT Creating a new network\n")
-
-				createdUserId = server.NewId()
-				createdNetworkId = server.NewId()
-
-				_, err = tx.Exec(
-					session.Ctx,
-					`
-						INSERT INTO network_user
-						(user_id, user_name, auth_type, user_auth, auth_jwt)
-						VALUES ($1, $2, $3, $4, $5)
-					`,
-					createdUserId,
-					networkCreate.UserName,
-					authJwt.AuthType,
-					normalJwtUserAuth,
-					networkCreate.AuthJwt,
-				)
-				if err != nil {
-					panic(err)
-				}
-
-				// insert into network_user_auth_sso
-				err = addSsoAuthInTx(
-					tx,
-					session.Ctx,
-					&AddSsoAuthArgs{
-						UserId:        createdUserId,
-						AuthJwt:       *networkCreate.AuthJwt,
-						ParsedAuthJwt: *authJwt,
-						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
-					},
-				)
-
-				if err != nil {
-					glog.Infof("Error adding sso auth in tx: %s", err.Error())
-					created = false
-					return
-				}
-
-				_, err = tx.Exec(
-					session.Ctx,
-					`
-						INSERT INTO network
-						(network_id, network_name, admin_user_id, contains_profanity)
-						VALUES ($1, $2, $3, $4)
-					`,
-					createdNetworkId,
-					networkCreate.NetworkName,
-					createdUserId,
-					containsProfanity,
-				)
-
-				if err != nil {
-					panic(err)
-				}
-
-				CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
-
-				created = true
-			})
-			if created {
-				auditNetworkCreate(networkCreate, createdNetworkId, session)
-
-				networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+				networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
-				isPro := false
+				guestMode := false
 
 				// successful login
 				byJwt := jwt.NewByJwt(
-					createdNetworkId,
-					createdUserId,
+					resultNetworkCreate.NetworkId,
+					resultNetworkCreate.UserId,
 					networkCreate.NetworkName,
-					false,
-					isPro,
+					guestMode, // false
+					resultNetworkCreate.IsPro,
 				)
 				byJwtSigned := byJwt.Sign()
 				result := &NetworkCreateResult{
 					Network: &NetworkCreateResultNetwork{
 						ByJwt:       &byJwtSigned,
 						NetworkName: networkCreate.NetworkName,
-						NetworkId:   createdNetworkId,
+						NetworkId:   resultNetworkCreate.NetworkId,
+						IsPro:       resultNetworkCreate.IsPro,
 					},
 					UserAuth: &authJwt.UserAuth,
 				}
@@ -546,90 +332,17 @@ func NetworkCreate(
 			}, nil
 		}
 
-		created := false
-		var createdNetworkId server.Id
-		var createdUserId server.Id
+		networkCreateResult := networkCreateWalletAuth(
+			session.Ctx,
+			&networkCreate,
+			containsProfanity,
+		)
 
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			var userId *server.Id
+		if networkCreateResult.Created {
 
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT user_id FROM network_user WHERE wallet_address = $1
-				`,
-				networkCreate.WalletAuth.PublicKey,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&userId))
-				}
-			})
+			auditNetworkCreate(networkCreate, networkCreateResult.NetworkId, session)
 
-			if userId != nil {
-				glog.Infof("Network user already exists with this wallet address")
-				return
-			}
-
-			createdUserId = server.NewId()
-			createdNetworkId = server.NewId()
-
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network_user
-					(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
-					VALUES ($1, $2, $3, $4, $5)
-				`,
-				createdUserId,
-				AuthTypeSolana,
-				networkCreate.WalletAuth.PublicKey,
-				networkCreate.WalletAuth.Blockchain,
-				networkCreate.UserName,
-			)
-			if err != nil {
-				panic(err)
-			}
-
-			// insert into network_user_auth_wallet
-			addWalletAuth(
-				&AddWalletAuthArgs{
-					WalletAuth: &WalletAuthArgs{
-						PublicKey:  networkCreate.WalletAuth.PublicKey,
-						Blockchain: networkCreate.WalletAuth.Blockchain,
-						Message:    networkCreate.WalletAuth.Message,
-						Signature:  networkCreate.WalletAuth.Signature,
-					},
-					UserId: createdUserId,
-				},
-				session.Ctx,
-			)
-
-			_, err = tx.Exec(
-				session.Ctx,
-				`
-					INSERT INTO network
-					(network_id, network_name, admin_user_id, contains_profanity)
-					VALUES ($1, $2, $3, $4)
-				`,
-				createdNetworkId,
-				networkCreate.NetworkName,
-				createdUserId,
-				containsProfanity,
-			)
-			if err != nil {
-				panic(err)
-			}
-
-			CreateNetworkReferralCodeInTx(session.Ctx, tx, createdNetworkId)
-
-			created = true
-		})
-		if created {
-
-			auditNetworkCreate(networkCreate, createdNetworkId, session)
-
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
+			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, networkCreateResult.NetworkId, 0)
 
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -646,7 +359,7 @@ func NetworkCreate(
 				walletId := CreateAccountWalletExternal(
 					session,
 					&CreateAccountWalletExternalArgs{
-						NetworkId:        createdNetworkId,
+						NetworkId:        networkCreateResult.NetworkId,
 						Blockchain:       networkCreate.WalletAuth.Blockchain,
 						WalletAddress:    networkCreate.WalletAuth.PublicKey,
 						DefaultTokenType: "USDC",
@@ -658,30 +371,29 @@ func NetworkCreate(
 				 */
 				SetPayoutWallet(
 					session.Ctx,
-					createdNetworkId,
+					networkCreateResult.NetworkId,
 					*walletId,
 				)
 			}
 
-			isPro := false
 			isGuest := false
 
 			// successful login
 			byJwt := jwt.NewByJwt(
-				createdNetworkId,
-				createdUserId,
+				networkCreateResult.NetworkId,
+				networkCreateResult.UserId,
 				networkCreate.NetworkName,
 				isGuest,
-				isPro,
+				networkCreateResult.IsPro,
 			)
 			byJwtSigned := byJwt.Sign()
 			result := &NetworkCreateResult{
 				Network: &NetworkCreateResultNetwork{
 					ByJwt:       &byJwtSigned,
 					NetworkName: networkCreate.NetworkName,
-					NetworkId:   createdNetworkId,
+					NetworkId:   networkCreateResult.NetworkId,
+					IsPro:       networkCreateResult.IsPro,
 				},
-				// UserAuth: &authJwt.UserAuth,
 			}
 			return result, nil
 		} else {
@@ -696,6 +408,456 @@ func NetworkCreate(
 	}
 
 	return nil, errors.New("invalid login")
+}
+
+type networkCreateResult struct {
+	Created     bool
+	NetworkId   server.Id
+	NetworkName string
+	UserId      server.Id
+	IsPro       bool
+}
+
+/**
+ * network create wallet auth
+ */
+func networkCreateWalletAuth(
+	ctx context.Context,
+	networkCreate *NetworkCreateArgs,
+	containsProfanity bool,
+) networkCreateResult {
+
+	created := false
+	var createdNetworkId server.Id
+	var createdUserId server.Id
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		var userId *server.Id
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user WHERE wallet_address = $1
+			`,
+			networkCreate.WalletAuth.PublicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&userId))
+			}
+		})
+
+		if userId != nil {
+			glog.Infof("Network user already exists with this wallet address")
+			return
+		}
+
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user
+				(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			createdUserId,
+			AuthTypeSolana,
+			networkCreate.WalletAuth.PublicKey,
+			networkCreate.WalletAuth.Blockchain,
+			networkCreate.UserName,
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		// insert into network_user_auth_wallet
+		addWalletAuth(
+			&AddWalletAuthArgs{
+				WalletAuth: &WalletAuthArgs{
+					PublicKey:  networkCreate.WalletAuth.PublicKey,
+					Blockchain: networkCreate.WalletAuth.Blockchain,
+					Message:    networkCreate.WalletAuth.Message,
+					Signature:  networkCreate.WalletAuth.Signature,
+				},
+				UserId: createdUserId,
+			},
+			ctx,
+		)
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network
+				(network_id, network_name, admin_user_id, contains_profanity)
+				VALUES ($1, $2, $3, $4)
+			`,
+			createdNetworkId,
+			networkCreate.NetworkName,
+			createdUserId,
+			containsProfanity,
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		isPro = networkCreateRedeemBalanceCodeInTx(
+			networkCreate,
+			createdNetworkId,
+			ctx,
+			tx,
+		)
+
+		created = true
+	})
+
+	return networkCreateResult{
+		Created:     created,
+		NetworkId:   createdNetworkId,
+		NetworkName: networkCreate.NetworkName,
+		UserId:      createdUserId,
+		IsPro:       isPro,
+	}
+
+}
+
+/**
+ * network create authjwt (social login)
+ */
+
+func networkCreateAuthJwt(
+	ctx context.Context,
+	networkCreate *NetworkCreateArgs,
+	containsProfanity bool,
+	parsedAuthJwt AuthJwt,
+	normalizedUserAuth string,
+) networkCreateResult {
+
+	created := false
+	var createdNetworkId server.Id
+	var createdUserId server.Id
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		var userId *server.Id
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user WHERE user_auth = $1
+			`,
+			normalizedUserAuth,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&userId))
+			}
+		})
+
+		if userId != nil {
+			// server.Logger().Printf("User already exists\n")
+			return
+		}
+
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user
+				(user_id, user_name, auth_type, user_auth, auth_jwt)
+				VALUES ($1, $2, $3, $4, $5)
+			`,
+			createdUserId,
+			networkCreate.UserName,
+			parsedAuthJwt.AuthType,
+			normalizedUserAuth,
+			networkCreate.AuthJwt,
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		// insert into network_user_auth_sso
+		err = addSsoAuthInTx(
+			tx,
+			ctx,
+			&AddSsoAuthArgs{
+				UserId:        createdUserId,
+				AuthJwt:       *networkCreate.AuthJwt,
+				ParsedAuthJwt: parsedAuthJwt,
+				AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
+			},
+		)
+
+		if err != nil {
+			glog.Infof("Error adding sso auth in tx: %s", err.Error())
+			created = false
+			return
+		}
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network
+				(network_id, network_name, admin_user_id, contains_profanity)
+				VALUES ($1, $2, $3, $4)
+			`,
+			createdNetworkId,
+			networkCreate.NetworkName,
+			createdUserId,
+			containsProfanity,
+		)
+
+		if err != nil {
+			panic(err)
+		}
+
+		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		isPro = networkCreateRedeemBalanceCodeInTx(
+			networkCreate,
+			createdNetworkId,
+			ctx,
+			tx,
+		)
+
+		created = true
+	})
+
+	return networkCreateResult{
+		Created:     created,
+		NetworkId:   createdNetworkId,
+		NetworkName: networkCreate.NetworkName,
+		UserId:      createdUserId,
+		IsPro:       isPro,
+	}
+
+}
+
+/**
+ * network create userauth
+ */
+
+func networkCreateUserAuth(
+	ctx context.Context,
+	networkCreate *NetworkCreateArgs,
+	userAuth *string,
+	containsProfanity bool,
+) networkCreateResult {
+
+	created := false
+	var createdNetworkId server.Id
+	var createdUserId server.Id
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		var result server.PgResult
+		var err error
+
+		var userId *server.Id
+
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user WHERE user_auth = $1
+			`,
+			userAuth,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&userId))
+			}
+		})
+
+		if userId != nil {
+			return
+		}
+
+		var existingNetworkId *server.Id
+
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT network_id FROM network WHERE network_name = $1
+			`,
+			networkCreate.NetworkName,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&existingNetworkId))
+			}
+		})
+
+		if existingNetworkId != nil {
+			return
+		}
+
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
+
+		// todo - cleanup network_user once UIs are updated
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user
+				(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`,
+			createdUserId,
+			networkCreate.UserName,
+			AuthTypePassword,
+			userAuth,
+			passwordHash,
+			passwordSalt,
+		)
+		server.Raise(err)
+
+		// insert into network_user_auth_password
+		addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       createdUserId,
+				UserAuth:     userAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			ctx,
+		)
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network
+				(network_id, network_name, admin_user_id, contains_profanity)
+				VALUES ($1, $2, $3, $4)
+			`,
+			createdNetworkId,
+			networkCreate.NetworkName,
+			createdUserId,
+			containsProfanity,
+		)
+		server.Raise(err)
+
+		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		isPro = networkCreateRedeemBalanceCodeInTx(
+			networkCreate,
+			createdNetworkId,
+			ctx,
+			tx,
+		)
+
+		created = true
+	})
+
+	return networkCreateResult{
+		Created:     created,
+		NetworkId:   createdNetworkId,
+		NetworkName: networkCreate.NetworkName,
+		UserId:      createdUserId,
+		IsPro:       isPro,
+	}
+
+}
+
+/**
+ * network create guest mode
+ */
+
+func networkCreateGuest(
+	ctx context.Context,
+) networkCreateResult {
+
+	created := false
+	var createdNetworkId server.Id
+	var networkName string
+	var createdUserId server.Id
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		var err error
+
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		// remove dashes from the network name
+		networkName = fmt.Sprintf(
+			"g%s",
+			strings.ReplaceAll(server.NewId().String(), "-", ""),
+		)
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user
+				(user_id, user_name, auth_type)
+				VALUES ($1, $2, $3)
+			`,
+			createdUserId,
+			"guest",
+			AuthTypeGuest,
+		)
+		server.Raise(err)
+
+		_, err = tx.Exec(
+			ctx,
+			`
+				INSERT INTO network
+				(network_id, network_name, admin_user_id)
+				VALUES ($1, $2, $3)
+			`,
+			createdNetworkId,
+			networkName,
+			createdUserId,
+		)
+		server.Raise(err)
+
+		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		created = true
+	})
+
+	return networkCreateResult{
+		Created:     created,
+		NetworkId:   createdNetworkId,
+		NetworkName: networkName,
+		UserId:      createdUserId,
+	}
+}
+
+/**
+ * we use this in all flavors of network create to potentially redeem balance code
+ */
+func networkCreateRedeemBalanceCodeInTx(
+	networkCreate *NetworkCreateArgs,
+	createdNetworkId server.Id,
+	ctx context.Context,
+	tx server.PgTx,
+) bool {
+	isPro := false
+	if networkCreate.BalanceCode != nil {
+		balanceCode := &RedeemBalanceCodeArgs{
+			Secret:    *networkCreate.BalanceCode,
+			NetworkId: createdNetworkId,
+		}
+
+		// this will add transfer balance and mark the user as paid if successful
+		redeemBalanceCode, err := RedeemBalanceCodeInTx(balanceCode, ctx, tx)
+
+		if err == nil && redeemBalanceCode.Error == nil {
+			// successfully redeemed balance code
+			isPro = true
+		}
+
+	}
+	return isPro
 }
 
 func auditNetworkCreate(

@@ -2087,10 +2087,11 @@ type FindProviders2Result struct {
 }
 
 type FindProvidersProvider struct {
-	ClientId                   server.Id `json:"client_id"`
-	EstimatedBytesPerSecond    ByteCount `json:"estimated_bytes_per_second"`
-	HasEstimatedBytesPerSecond bool      `json:"has_estimated_bytes_per_second"`
-	Tier                       int       `json:"tier"`
+	ClientId                   server.Id   `json:"client_id"`
+	EstimatedBytesPerSecond    ByteCount   `json:"estimated_bytes_per_second"`
+	HasEstimatedBytesPerSecond bool        `json:"has_estimated_bytes_per_second"`
+	Tier                       int         `json:"tier"`
+	IntermediaryIds            []server.Id `json:"intermediary_ids"`
 }
 
 type ClientScore struct {

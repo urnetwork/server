@@ -22,25 +22,13 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	if networkCreate.BalanceCode != nil {
-
-		balanceCode := &model.RedeemBalanceCodeArgs{
-			Secret:    *networkCreate.BalanceCode,
-			NetworkId: result.Network.NetworkId,
-		}
-
-		// this will add transfer balance and mark the user as paid if successful
-		_, err := model.RedeemBalanceCode(balanceCode, session.Ctx)
-
-		if err != nil {
-			// we don't want this to block creating a network
-			// users will be able to try and redeem in their account later
-			// add normal balance and continue
-			AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
-		}
-
-	} else {
-		// no balance code, add normal balance
+	/**
+	 * we only add transfer balance if the user is not pro (no balance code redeemed)
+	 *
+	 * redeeming a balance code successfully automatically adds paid transfer balance for the network
+	 */
+	if !result.IsPro {
+		// add regular balance
 		AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
 	}
 
