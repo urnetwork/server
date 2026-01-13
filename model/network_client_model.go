@@ -258,7 +258,7 @@ func AuthNetworkClient(
 			if err == nil {
 				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
-				host := fmt.Sprintf("%s.%s", server.RequireService(), server.RequireDomain())
+				host := fmt.Sprintf("%s.%s", "connect", server.RequireDomain())
 
 				var httpsProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
