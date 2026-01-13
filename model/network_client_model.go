@@ -264,8 +264,7 @@ func AuthNetworkClient(
 				if authClient.ProxyConfig.HttpsRequireAuth {
 					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
 					httpsProxyUrl = fmt.Sprintf(
-						"https://%s.%s",
-						strings.ToLower(EncodeProxyId(proxyDeviceConfig.ProxyId)),
+						"https://%s",
 						host,
 					)
 				} else {
