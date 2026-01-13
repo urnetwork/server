@@ -19,7 +19,7 @@ import (
 )
 
 func base32Encoder() *base32.Encoding {
-	return base32.HexEncoding.WithPadding('X')
+	return base32.HexEncoding.WithPadding(base32.NoPadding)
 }
 
 // ordered in precedence

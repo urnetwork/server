@@ -18,18 +18,26 @@ func TestSignProxyId(t *testing.T) {
 	// ensure the signed proxy id can be used as a hostname part
 	assert.Equal(t, len(signedProxyId) < 63, true)
 
-	proxyId2, err := ParseProxyId(signedProxyId)
+	proxyId2, err := ParseSignedProxyId(signedProxyId)
 	assert.Equal(t, err, nil)
 	assert.Equal(t, proxyId, proxyId2)
 
 	// try fuzzed values and make sure they don't parse
 	for range 32 {
 		b := []byte(signedProxyId)
-		i := mathrand.Intn(16)
-		j := (i + 1 + mathrand.Intn(15)) % 16
+		var i int
+		var j int
+		for {
+			i = mathrand.Intn(16)
+			j = (i + 1 + mathrand.Intn(15)) % 16
+			if b[i] != b[j] {
+				break
+			}
+		}
+		assert.NotEqual(t, b[i], b[j])
 		b[i], b[j] = b[j], b[i]
 
-		proxyId3, err := ParseProxyId(string(b))
+		_, err := ParseSignedProxyId(string(b))
 		assert.NotEqual(t, err, nil)
 	}
 }

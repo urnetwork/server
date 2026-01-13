@@ -213,7 +213,7 @@ func TestBestAvailableProviders(t *testing.T) {
 		findProviders2Args := &FindProviders2Args{
 			Specs: []*ProviderSpec{
 				{
-					BestAvailable: &bestAvailable,
+					BestAvailable: bestAvailable,
 				},
 			},
 			ForceMinimum: true,
@@ -372,7 +372,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		findProviders2Args = &FindProviders2Args{
 			Specs: []*ProviderSpec{
 				{
-					BestAvailable: &bestAvailable,
+					BestAvailable: bestAvailable,
 				},
 			},
 			Count:        2 * n,
@@ -385,7 +385,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		findProviders2Args = &FindProviders2Args{
 			Specs: []*ProviderSpec{
 				{
-					BestAvailable: &bestAvailable,
+					BestAvailable: bestAvailable,
 				},
 			},
 			Count:            2 * n,
@@ -399,7 +399,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		findProviders2Args = &FindProviders2Args{
 			Specs: []*ProviderSpec{
 				{
-					BestAvailable: &bestAvailable,
+					BestAvailable: bestAvailable,
 				},
 			},
 			ExcludeClientIds: []server.Id{clientIds[0]},
