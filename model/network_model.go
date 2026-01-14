@@ -722,7 +722,8 @@ func networkCreateUserAuth(
 		server.Raise(err)
 
 		// insert into network_user_auth_password
-		addUserAuth(
+		addUserAuthInTx(
+			tx,
 			&AddUserAuthArgs{
 				UserId:       createdUserId,
 				UserAuth:     userAuth,
@@ -1581,7 +1582,9 @@ func Testing_CreateNetwork(
 	passwordSalt := createPasswordSalt()
 	passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
-	containsProfanity := goaway.IsProfane(networkName)
+	// FIXME this lib is not thread safe
+	// containsProfanity := goaway.IsProfane(networkName)
+	containsProfanity := false
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -1611,7 +1614,8 @@ func Testing_CreateNetwork(
 			passwordSalt,
 		))
 
-		addUserAuth(
+		addUserAuthInTx(
+			tx,
 			&AddUserAuthArgs{
 				UserId:       adminUserId,
 				UserAuth:     &userAuth,

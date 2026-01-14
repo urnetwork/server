@@ -2062,7 +2062,7 @@ type ProviderSpec struct {
 	LocationId      *server.Id `json:"location_id,omitempty"`
 	LocationGroupId *server.Id `json:"location_group_id,omitempty"`
 	ClientId        *server.Id `json:"client_id,omitempty"`
-	BestAvailable   *bool      `json:"best_available,omitempty"`
+	BestAvailable   bool       `json:"best_available,omitempty"`
 }
 
 type RankMode = string
@@ -2890,7 +2890,7 @@ func FindProviders2(
 				providers = append(providers, provider)
 			}
 		}
-		if spec.BestAvailable != nil && *spec.BestAvailable {
+		if spec.BestAvailable {
 			homeLocationId, ok := countryCodeLocationIds()["us"]
 			if ok {
 				locationIds[homeLocationId] = true

@@ -18,6 +18,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
+func base32Encoder() *base32.Encoding {
+	return base32.HexEncoding.WithPadding(base32.NoPadding)
+}
+
 // ordered in precedence
 var proxySigningSecrets = sync.OnceValue(func() [][]byte {
 	proxy := server.Vault.RequireSimpleResource("proxy.yml")
@@ -46,23 +50,23 @@ func SignProxyId(proxyId server.Id) string {
 	h.Write(proxyIdBytes)
 	signature := h.Sum(nil)
 
+	e := base32Encoder()
 	var b []byte
-	b = base32.HexEncoding.AppendEncode(b, proxyIdBytes)
-	b = base32.HexEncoding.AppendEncode(b, signature)
-
-	return string(b)
+	b = append(b, proxyIdBytes...)
+	b = append(b, signature...)
+	return e.EncodeToString(b)
 }
 
 func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr error) {
-	b := make([]byte, 64)
-	var n int
-	n, returnErr = base32.HexEncoding.Decode(b, []byte(signedProxyId))
+	e := base32Encoder()
+	b, err := e.DecodeString(strings.ToUpper(signedProxyId))
 
-	if returnErr != nil {
+	if err != nil {
+		returnErr = err
 		return
 	}
 
-	if n < 16 {
+	if len(b) < 16 {
 		returnErr = fmt.Errorf("Invalid input length")
 		return
 	}
@@ -71,7 +75,7 @@ func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr erro
 	if returnErr != nil {
 		return
 	}
-	signature := b[16:n]
+	signature := b[16:]
 
 	// validate the signature with all known secrets
 	ok := func() bool {
@@ -97,22 +101,22 @@ func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr erro
 func EncodeProxyId(proxyId server.Id) string {
 	proxyIdBytes := proxyId.Bytes()
 
+	e := base32Encoder()
 	var b []byte
-	b = base32.HexEncoding.AppendEncode(b, proxyIdBytes)
-
-	return string(b)
+	b = append(b, proxyIdBytes...)
+	return e.EncodeToString(b)
 }
 
 func ParseEncodedProxyId(encodedProxyId string) (proxyId server.Id, returnErr error) {
-	b := make([]byte, 64)
-	var n int
-	n, returnErr = base32.HexEncoding.Decode(b, []byte(encodedProxyId))
+	e := base32Encoder()
+	b, err := e.DecodeString(strings.ToUpper(encodedProxyId))
 
-	if returnErr != nil {
+	if err != nil {
+		returnErr = err
 		return
 	}
 
-	if n < 16 {
+	if len(b) < 16 {
 		returnErr = fmt.Errorf("Invalid input length")
 		return
 	}
@@ -219,15 +223,17 @@ func GetProxyDeviceConnectionForClient(
 	return
 }
 
-func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDeviceConfig) error {
-	proxyDeviceConfigJson, err := json.Marshal(proxyDeviceConfig)
-	if err != nil {
-		return err
-	}
+func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDeviceConfig) (returnErr error) {
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		proxyDeviceConfig.ProxyId = server.NewId()
 		proxyDeviceConfig.InstanceId = server.NewId()
+
+		proxyDeviceConfigJson, err := json.Marshal(proxyDeviceConfig)
+		if err != nil {
+			returnErr = err
+			return
+		}
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -299,7 +305,6 @@ func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceCo
 }
 
 func GetProxyDeviceConfigForClient(ctx context.Context, clientId server.Id, instanceId server.Id) *ProxyDeviceConfig {
-
 	var proxyDeviceConfigJson string
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -382,7 +387,7 @@ func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *
 
 	return &sdk.ConnectLocation{
 		ConnectLocationId: &sdk.ConnectLocationId{
-			LocationId: toSdkId(c.LocationId),
+			LocationId: server.ToSdkId(c.LocationId),
 		},
 		Name:         c.Country,
 		LocationType: sdk.LocationTypeCountry,
@@ -392,14 +397,6 @@ func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *
 
 		CityLocationId:    nil,
 		RegionLocationId:  nil,
-		CountryLocationId: toSdkId(c.LocationId),
+		CountryLocationId: server.ToSdkId(c.LocationId),
 	}
-}
-
-func toSdkId(id server.Id) *sdk.Id {
-	sdkId, err := sdk.IdFromBytes(id.Bytes())
-	if err != nil {
-		panic(err)
-	}
-	return sdkId
 }

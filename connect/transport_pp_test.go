@@ -20,7 +20,9 @@ import (
 
 // FIXME add counting quic stream through nginx
 
-func TestPpNginx(t *testing.T) {
+// note: nginx appears to not officially support UDP PP at this time
+// see: https://github.com/nginx/nginx/issues/1061
+func DISABLE_TestPpNginx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

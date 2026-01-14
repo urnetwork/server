@@ -106,6 +106,9 @@ type ExchangeSettings struct {
 	DrainOneTimeout             time.Duration
 	DrainAllTimeout             time.Duration
 
+	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+
 	ExchangeChaosSettings
 }
 
@@ -823,7 +826,7 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
 	return self.framer.Read(conn)
 }
 
@@ -1033,7 +1036,8 @@ func (self *ExchangeConnection) Run() {
 				if !ok {
 					return
 				}
-				if err := self.sendBuffer.WriteMessage(self.conn, message); err != nil {
+				err := self.sendBuffer.WriteMessage(self.conn, message)
+				if err != nil {
 					return
 				}
 				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
@@ -1480,7 +1484,6 @@ type Resident struct {
 	clientForwardUnsub func()
 }
 
-// FIXME check for proxy config on (clientId, instanceId) and configure the mode
 func NewResident(
 	ctx context.Context,
 	exchange *Exchange,
@@ -1587,12 +1590,16 @@ func (self *Resident) ResidentProxyDevice() *ResidentProxyDevice {
 	defer self.stateLock.Unlock()
 
 	if self.residentProxyDevice == nil {
+		settings := DefaultResidentProxyDeviceSettings()
+		settings.IngressSecurityPolicyGenerator = self.exchange.settings.IngressSecurityPolicyGenerator
+		settings.EgressSecurityPolicyGenerator = self.exchange.settings.EgressSecurityPolicyGenerator
 		residentProxyDevice, err := NewResidentProxyDevice(
 			self.ctx,
 			self.exchange,
 			self.clientId,
 			self.instanceId,
 			self.proxyDeviceConfig,
+			settings,
 		)
 		if err == nil {
 			self.residentProxyDevice = residentProxyDevice
