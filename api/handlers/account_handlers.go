@@ -35,3 +35,7 @@ func GetReferralNetwork(w http.ResponseWriter, r *http.Request) {
 func UnlinkReferralNetwork(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.UnlinkReferralNetwork, w, r)
 }
+
+func GetNetworkRedeemedBalanceCodes(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetNetworkRedeemedBalanceCodes, w, r)
+}
