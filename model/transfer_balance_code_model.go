@@ -413,6 +413,7 @@ type RedeemedBalanceCode struct {
 	BalanceByteCount ByteCount `json:"balance_byte_count"`
 	RedeemTime       time.Time `json:"redeem_time"`
 	EndTime          time.Time `json:"end_time"`
+	Secret           string    `json:"secret"`
 }
 
 func FetchNetworkRedeemedBalanceCodes(
@@ -429,7 +430,8 @@ func FetchNetworkRedeemedBalanceCodes(
 				balance_code_id,
 				balance_byte_count,
 				redeem_time,
-				end_time
+				end_time,
+				balance_code_secret
 			FROM transfer_balance_code
 			WHERE
 				network_id = $1 AND redeemed = TRUE AND end_time > NOW()
@@ -445,6 +447,7 @@ func FetchNetworkRedeemedBalanceCodes(
 					&balanceCode.BalanceByteCount,
 					&balanceCode.RedeemTime,
 					&balanceCode.EndTime,
+					&balanceCode.Secret,
 				))
 				balanceCodes = append(balanceCodes, balanceCode)
 			}

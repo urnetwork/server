@@ -126,6 +126,7 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(redeemed), 1)
 		assert.Equal(t, redeemed[0].BalanceCodeId, balanceCode.BalanceCodeId)
+		assert.Equal(t, redeemed[0].Secret, balanceCode.Secret)
 
 	})
 }
