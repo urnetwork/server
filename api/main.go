@@ -163,6 +163,7 @@ Options:
 		router.NewRoute("GET", "/account/unlink-referral-network", handlers.UnlinkReferralNetwork),
 		router.NewRoute("POST", "/account/set-referral", handlers.SetNetworkReferral),
 		router.NewRoute("GET", "/account/points", handlers.GetAccountPoints),
+		router.NewRoute("GET", "/account/balance-codes", handlers.GetNetworkRedeemedBalanceCodes),
 		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),
 		router.NewRoute("GET", "/connect", handlers.AuthConnect),

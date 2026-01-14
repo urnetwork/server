@@ -2679,4 +2679,13 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE UNIQUE INDEX proxy_device_config_client_id_instance_id ON proxy_device_config (client_id, instance_id)
     `),
+
+	newSqlMigration(`
+		ALTER TABLE transfer_balance_code ADD COLUMN network_id uuid NULL;
+    `),
+
+	newSqlMigration(`
+		CREATE INDEX transfer_balance_code_network_id_end_time
+		ON transfer_balance_code(network_id, end_time);
+    `),
 }
