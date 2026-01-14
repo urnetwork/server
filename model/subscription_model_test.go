@@ -117,8 +117,9 @@ func TestEscrow(t *testing.T) {
 
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, ctx)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		assert.Equal(t, len(contractIds), 0)
@@ -365,8 +366,9 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, destinationSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: destinationSession.ByJwt.NetworkId,
+		}, ctx)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		assert.Equal(t, len(contractIds), 0)
@@ -658,9 +660,10 @@ func TestBalanceCode(t *testing.T) {
 
 		redeemResult0, err := RedeemBalanceCode(
 			&RedeemBalanceCodeArgs{
-				Secret: balanceCode.Secret,
+				Secret:    balanceCode.Secret,
+				NetworkId: clientSessionA.ByJwt.NetworkId,
 			},
-			clientSessionA,
+			ctx,
 		)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, redeemResult0.Error, nil)
@@ -1314,8 +1317,9 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, ctx)
 
 		paid := NanoCents(0)
 		paidByteCount := ByteCount(0)

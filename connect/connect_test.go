@@ -25,7 +25,6 @@ import (
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
-	"github.com/urnetwork/server/session"
 )
 
 func TestConnectNoNack(t *testing.T) {
@@ -785,9 +784,10 @@ func testConnect(
 
 	result, err := model.RedeemBalanceCode(
 		&model.RedeemBalanceCodeArgs{
-			Secret: balanceCodeA.Secret,
+			Secret:    balanceCodeA.Secret,
+			NetworkId: networkIdA,
 		},
-		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtA),
+		ctx,
 	)
 	assert.Equal(t, nil, err)
 	assert.Equal(t, nil, result.Error)
@@ -805,9 +805,10 @@ func testConnect(
 
 	result, err = model.RedeemBalanceCode(
 		&model.RedeemBalanceCodeArgs{
-			Secret: balanceCodeB.Secret,
+			Secret:    balanceCodeB.Secret,
+			NetworkId: networkIdB,
 		},
-		session.NewLocalClientSession(ctx, "0.0.0.0", byJwtB),
+		ctx,
 	)
 	assert.Equal(t, nil, err)
 	assert.Equal(t, nil, result.Error)

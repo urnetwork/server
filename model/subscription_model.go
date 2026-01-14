@@ -373,7 +373,8 @@ func CreateBalanceCode(
 }
 
 type RedeemBalanceCodeArgs struct {
-	Secret string `json:"secret"`
+	Secret    string    `json:"secret"`
+	NetworkId server.Id `json:"network_id"`
 }
 
 type RedeemBalanceCodeResult struct {
@@ -392,77 +393,78 @@ type RedeemBalanceCodeError struct {
 	Message string `json:"message"`
 }
 
-func RedeemBalanceCode(
+func RedeemBalanceCodeInTx(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
-	session *session.ClientSession,
+	ctx context.Context,
+	tx server.PgTx,
 ) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    balance_code_id,
-                    start_time,
-                    end_time,
-                    balance_byte_count,
-                    net_revenue_nano_cents
-                FROM transfer_balance_code
-                WHERE
-                    balance_code_secret = $1 AND
-                    redeem_balance_id IS NULL
-            `,
-			redeemBalanceCode.Secret,
-		)
-		var balanceCode *BalanceCode
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				balanceCode = &BalanceCode{}
-				server.Raise(result.Scan(
-					&balanceCode.BalanceCodeId,
-					&balanceCode.StartTime,
-					&balanceCode.EndTime,
-					&balanceCode.BalanceByteCount,
-					&balanceCode.NetRevenue,
-				))
-			}
-		})
-		if balanceCode == nil {
-			redeemBalanceCodeResult = &RedeemBalanceCodeResult{
-				Error: &RedeemBalanceCodeError{
-					Message: "Unknown balance code.",
-				},
-			}
-			return
+
+	result, err := tx.Query(
+		ctx,
+		`
+            SELECT
+                balance_code_id,
+                start_time,
+                end_time,
+                balance_byte_count,
+                net_revenue_nano_cents
+            FROM transfer_balance_code
+            WHERE
+                balance_code_secret = $1 AND
+                redeem_balance_id IS NULL
+        `,
+		redeemBalanceCode.Secret,
+	)
+	var balanceCode *BalanceCode
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			balanceCode = &BalanceCode{}
+			server.Raise(result.Scan(
+				&balanceCode.BalanceCodeId,
+				&balanceCode.StartTime,
+				&balanceCode.EndTime,
+				&balanceCode.BalanceByteCount,
+				&balanceCode.NetRevenue,
+			))
 		}
+	})
+	if balanceCode == nil {
+		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+			Error: &RedeemBalanceCodeError{
+				Message: "Unknown balance code.",
+			},
+		}
+		return
+	}
 
-		balanceId := server.NewId()
+	balanceId := server.NewId()
 
-		now := server.NowUtc()
-		duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
-		endTime := now.Add(duration)
+	now := server.NowUtc()
+	duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
+	endTime := now.Add(duration)
 
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-                UPDATE transfer_balance_code
-                SET
-                    redeem_time = $2,
-                    redeem_balance_id = $3,
-                    start_time = $4,
-                    end_time = $5
-                WHERE
-                    balance_code_id = $1
-            `,
-			balanceCode.BalanceCodeId,
-			now,
-			balanceId,
-			now,
-			endTime,
-		))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+            UPDATE transfer_balance_code
+            SET
+                redeem_time = $2,
+                redeem_balance_id = $3,
+                start_time = $4,
+                end_time = $5
+            WHERE
+                balance_code_id = $1
+        `,
+		balanceCode.BalanceCodeId,
+		now,
+		balanceId,
+		now,
+		endTime,
+	))
 
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO transfer_balance (
                     balance_id,
                     network_id,
@@ -474,22 +476,38 @@ func RedeemBalanceCode(
                 )
                 VALUES ($1, $2, $3, $4, $5, $5, $6)
             `,
-			balanceId,
-			session.ByJwt.NetworkId,
-			now,
-			endTime,
-			balanceCode.BalanceByteCount,
-			balanceCode.NetRevenue,
-		))
+		balanceId,
+		// note: we don't use session.Jwt.NetworkId here
+		// users can redeem when creating a network, in which case the jwt is not yet threaded
+		redeemBalanceCode.NetworkId,
+		now,
+		endTime,
+		balanceCode.BalanceByteCount,
+		balanceCode.NetRevenue,
+	))
 
-		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
-			TransferBalance: &RedeemBalanceCodeTransferBalance{
-				TransferBalanceId: balanceId,
-				StartTime:         balanceCode.StartTime,
-				EndTime:           balanceCode.EndTime,
-				BalanceByteCount:  balanceCode.BalanceByteCount,
-			},
-		}
+	redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+		TransferBalance: &RedeemBalanceCodeTransferBalance{
+			TransferBalanceId: balanceId,
+			StartTime:         balanceCode.StartTime,
+			EndTime:           balanceCode.EndTime,
+			BalanceByteCount:  balanceCode.BalanceByteCount,
+		},
+	}
+
+	return
+}
+
+func RedeemBalanceCode(
+	redeemBalanceCode *RedeemBalanceCodeArgs,
+	ctx context.Context,
+) (redeemBalanceCodeResult *RedeemBalanceCodeResult, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		redeemBalanceCodeResult, returnErr = RedeemBalanceCodeInTx(
+			redeemBalanceCode,
+			ctx,
+			tx,
+		)
 	}, server.TxReadCommitted)
 
 	return

@@ -180,3 +180,47 @@ func TestNetworkNameUpdate(t *testing.T) {
 		assert.Equal(t, networkResult.NetworkName, updatedNetworkName)
 	})
 }
+
+func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		ctx := context.Background()
+		session := session.Testing_CreateClientSession(ctx, nil)
+
+		userAuth := "foo@ur.io"
+		password := "bar123456789Foo!"
+
+		netTransferByteCount := model.ByteCount(1024 * 1024)
+		netRevenue := model.UsdToNanoCents(10.00)
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := model.CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
+		assert.Equal(t, err, nil)
+
+		networkCreate := model.NetworkCreateArgs{
+			UserName:    "",
+			UserAuth:    &userAuth,
+			Password:    &password,
+			NetworkName: "foobar",
+			Terms:       true,
+			GuestMode:   false,
+			BalanceCode: &balanceCode.Secret,
+		}
+
+		result, err := NetworkCreate(networkCreate, session)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Error, nil)
+
+		isPro := model.IsPro(ctx, &result.Network.NetworkId)
+		assert.Equal(t, isPro, true)
+
+	})
+}

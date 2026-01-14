@@ -6,11 +6,13 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+
 	// "net"
 	"encoding/json"
 	"fmt"
 	"io"
 	"time"
+
 	// "strings"
 	"crypto/tls"
 	mathrand "math/rand"
@@ -192,9 +194,10 @@ func testConnectProxy(t *testing.T) {
 
 			result, err := model.RedeemBalanceCode(
 				&model.RedeemBalanceCodeArgs{
-					Secret: balanceCode.Secret,
+					Secret:    balanceCode.Secret,
+					NetworkId: session.ByJwt.NetworkId,
 				},
-				session,
+				session.Ctx,
 			)
 			assert.Equal(t, nil, err)
 			assert.Equal(t, nil, result.Error)
@@ -312,9 +315,10 @@ func testConnectProxy(t *testing.T) {
 
 			result, err := model.RedeemBalanceCode(
 				&model.RedeemBalanceCodeArgs{
-					Secret: balanceCode.Secret,
+					Secret:    balanceCode.Secret,
+					NetworkId: session.ByJwt.NetworkId,
 				},
-				session,
+				session.Ctx,
 			)
 			assert.Equal(t, nil, err)
 			assert.Equal(t, nil, result.Error)

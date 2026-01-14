@@ -53,7 +53,7 @@ func SubscriptionCheckBalanceCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(model.RedeemBalanceCode, w, r)
+	router.WrapWithInputRequireAuth(controller.RedeemBalanceCode, w, r)
 }
 
 func SubscriptionCreatePaymentId(w http.ResponseWriter, r *http.Request) {

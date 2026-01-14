@@ -50,8 +50,9 @@ func TestCancelAccountPayment(t *testing.T) {
 
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, sourceSession.Ctx)
 
 		transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
 		assert.Equal(t, err, nil)
@@ -163,8 +164,9 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
 
 		// create a wallet to receive the payout
 		args := &CreateAccountWalletExternalArgs{
@@ -298,8 +300,9 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		)
 		assert.Equal(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret: balanceCode.Secret,
-		}, sourceSession)
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
 
 		contractIds := GetOpenContractIds(ctx, sourceId, destinationId)
 		assert.Equal(t, len(contractIds), 0)

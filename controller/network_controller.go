@@ -22,9 +22,15 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	// model.CreateNetworkReferralCode(session.Ctx, result.Network.NetworkId)
-
-	AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+	/**
+	 * we only add transfer balance if the user is not pro (no balance code redeemed)
+	 *
+	 * redeeming a balance code successfully automatically adds paid transfer balance for the network
+	 */
+	if !result.IsPro {
+		// add regular balance
+		AddRefreshTransferBalance(session.Ctx, result.Network.NetworkId)
+	}
 
 	if networkCreate.ReferralCode != nil {
 		model.CreateNetworkReferral(
