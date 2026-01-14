@@ -259,19 +259,22 @@ func AuthNetworkClient(
 				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
 				host := fmt.Sprintf("%s.%s", "connect", server.RequireDomain())
+				httpsProxyPort := 444
 
 				var httpsProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
 					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
 					httpsProxyUrl = fmt.Sprintf(
-						"https://%s",
+						"https://%s:%d",
 						host,
+						httpsProxyPort,
 					)
 				} else {
 					httpsProxyUrl = fmt.Sprintf(
-						"https://%s.%s",
+						"https://%s.%s:%d",
 						strings.ToLower(signedProxyId),
 						host,
+						httpsProxyPort,
 					)
 				}
 

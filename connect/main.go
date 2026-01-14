@@ -73,7 +73,7 @@ Options:
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/", connectRouter.Connect),
-		router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
+		// router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
 	}
 
 	port, _ := opts.Int("--port")

@@ -49,10 +49,13 @@ func DefaultProxyConnectHandlerSettings() *ProxyConnectHandlerSettings {
 		ReadTimeout:                connectHandlerSettings.ReadTimeout,
 		ProxyConnectionIdleTimeout: 15 * time.Minute,
 		ListenSocksPort:            1080,
+		ListenHttpsPort:            444,
 		FramerSettings:             connect.DefaultFramerSettings(),
-		Mtu:                        1440,
 		EnableProxyProtocol:        true,
 		ProxyConnectTimeout:        15 * time.Second,
+		Mtu:                        1440,
+
+		TransportTlsSettings: DefaultTransportTlsSettings(),
 	}
 }
 
@@ -61,21 +64,22 @@ type ProxyConnectHandlerSettings struct {
 	ReadTimeout                time.Duration
 	ProxyConnectionIdleTimeout time.Duration
 	ListenSocksPort            int
+	ListenHttpsPort            int
 	FramerSettings             *connect.FramerSettings
 	EnableProxyProtocol        bool
 	ProxyConnectTimeout        time.Duration
+	Mtu                        int
 
-	Mtu int
+	TransportTlsSettings *TransportTlsSettings
 }
 
 type ProxyConnectHandler struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	handlerId server.Id
-	exchange  *Exchange
-	settings  *ProxyConnectHandlerSettings
-
-	httpProxy *goproxy.ProxyHttpServer
+	ctx          context.Context
+	cancel       context.CancelFunc
+	handlerId    server.Id
+	exchange     *Exchange
+	transportTls *TransportTls
+	settings     *ProxyConnectHandlerSettings
 
 	stateLock        sync.Mutex
 	proxyConnections map[server.Id]*ProxyConnection
@@ -101,65 +105,28 @@ func NewProxyConnectHandler(
 	settings *ProxyConnectHandlerSettings) *ProxyConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	transportTls, err := NewTransportTlsFromConfig(settings.TransportTlsSettings)
+	if err != nil {
+		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
+		transportTls = NewTransportTls(map[string]bool{}, DefaultTransportTlsSettings())
+	}
+
 	h := &ProxyConnectHandler{
 		ctx:              cancelCtx,
 		cancel:           cancel,
 		handlerId:        handlerId,
 		exchange:         exchange,
+		transportTls:     transportTls,
 		settings:         settings,
 		proxyConnections: map[server.Id]*ProxyConnection{},
 	}
 
-	httpProxy := goproxy.NewProxyHttpServer()
-
-	// httpProxy.Tr = &http.Transport{
-	// 	Dial: func(network string, addr string) (net.Conn, error) {
-	// 		fmt.Printf("HTTP DIAL 1\n")
-
-	// 		return tnet.DialContext(context.Background(), network, addr)
-	// 	},
-	// 	DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-	// 		fmt.Printf("HTTP DIAL 2\n")
-
-	// 		addrPort, err := netip.ParseAddrPort(addr)
-	// 		if err != nil {
-	// 			return nil, err
-	// 		}
-
-	// 		return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
-	// 	},
-	// }
-
-	httpProxy.Tr = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	}
-
-	httpProxy.AllowHTTP2 = false
-	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (net.Conn, error) {
-		proxyConnection, err := h.connectProxyForRequest(r)
-		if err != nil {
-			return nil, err
-		}
-
-		switch network {
-		case "tcp", "tcp4", "tcp6":
-			network = "tcp4"
-		case "udp", "udp4", "udp6":
-			network = "udp4"
-		default:
-			return nil, fmt.Errorf("Unsupported network: %s", network)
-		}
-
-		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
-		return proxyConnection.tnet.DialContext(cancelCtx, network, addr)
-	}
-
-	h.httpProxy = httpProxy
-
 	if server.HasPort(settings.ListenSocksPort) {
 		go server.HandleError(h.runSocks)
+	}
+
+	if server.HasPort(settings.ListenHttpsPort) {
+		go server.HandleError(h.runHttps)
 	}
 
 	return h
@@ -305,9 +272,81 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 	return proxyConnection, nil
 }
 
-// http proxy
-func (self *ProxyConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
-	self.httpProxy.ServeHTTP(w, r)
+func (self *ProxyConnectHandler) runHttps() {
+	httpProxy := goproxy.NewProxyHttpServer()
+
+	// httpProxy.Tr = &http.Transport{
+	// 	Dial: func(network string, addr string) (net.Conn, error) {
+	// 		fmt.Printf("HTTP DIAL 1\n")
+
+	// 		return tnet.DialContext(context.Background(), network, addr)
+	// 	},
+	// 	DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+	// 		fmt.Printf("HTTP DIAL 2\n")
+
+	// 		addrPort, err := netip.ParseAddrPort(addr)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+
+	// 		return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
+	// 	},
+	// }
+
+	// httpProxy.Tr = &http.Transport{
+	// }
+
+	httpProxy.AllowHTTP2 = false
+	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (net.Conn, error) {
+		proxyConnection, err := self.connectProxyForRequest(r)
+		if err != nil {
+			return nil, err
+		}
+
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+			network = "tcp4"
+		case "udp", "udp4", "udp6":
+			network = "udp4"
+		default:
+			return nil, fmt.Errorf("Unsupported network: %s", network)
+		}
+
+		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
+		return proxyConnection.tnet.DialContext(self.ctx, network, addr)
+	}
+
+	addr := fmt.Sprintf(":%d", self.settings.ListenHttpsPort)
+
+	tlsConfig := &tls.Config{
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
+	}
+
+	httpServer := &http.Server{
+		Addr:      addr,
+		Handler:   httpProxy,
+		TLSConfig: tlsConfig,
+	}
+
+	listenIpv4, _, listenPort := server.RequireListenIpPort(self.settings.ListenHttpsPort)
+
+	listenConfig := net.ListenConfig{}
+
+	serverConn, err := listenConfig.Listen(
+		self.ctx,
+		"tcp",
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+	)
+	if err != nil {
+		return
+	}
+	defer serverConn.Close()
+
+	if self.settings.EnableProxyProtocol {
+		serverConn = NewPpServerConn(serverConn, DefaultWarpPpSettings())
+	}
+
+	httpServer.ServeTLS(serverConn, "", "")
 }
 
 func (self *ProxyConnectHandler) runSocks() {

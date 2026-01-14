@@ -77,6 +77,7 @@ func testConnectProxy(t *testing.T) {
 		proxySettings := DefaultProxyConnectHandlerSettings()
 		// settings.EnableTlsSelfSign = true
 		proxySettings.ListenSocksPort = port + 1080
+		proxySettings.ListenHttpsPort = port + 444
 		proxySettings.EnableProxyProtocol = false
 		connectRouter := NewConnectRouter(ctx, cancel, exchange, settings, proxySettings)
 
@@ -94,7 +95,7 @@ func testConnectProxy(t *testing.T) {
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", connectRouter.Connect),
-			router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
+			// router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
 		}
 
 		addr := fmt.Sprintf(":%d", port)
@@ -148,13 +149,19 @@ func testConnectProxy(t *testing.T) {
 	randServerUrl := func() (string, int) {
 		ports := maps.Values(hostPorts)
 		port := ports[mathrand.Intn(len(ports))]
-		return fmt.Sprintf("wss://local-test.bringyour.com:%d", port), port
+		return fmt.Sprintf("wss://local-connect.bringyour.com:%d", port), port
 	}
 
 	randServerHostPort := func() (string, int) {
 		ports := maps.Values(hostPorts)
 		port := ports[mathrand.Intn(len(ports))]
-		return fmt.Sprintf("local-test.bringyour.com:%d", port), port
+		return fmt.Sprintf("local-connect.bringyour.com:%d", port), port
+	}
+
+	randHttpsPoxyServerHostPort := func() (string, int) {
+		ports := maps.Values(hostPorts)
+		port := ports[mathrand.Intn(len(ports))] + 444
+		return fmt.Sprintf("local-connect.bringyour.com:%d", port), port
 	}
 
 	// connect a new provider
@@ -346,7 +353,7 @@ func testConnectProxy(t *testing.T) {
 		// TODO for some reason go does not pass the host header in the proxy
 		// TODO force the auth token
 		// FIXME see ProxyConnectHeader
-		addr, _ := randServerHostPort()
+		addr, _ := randHttpsPoxyServerHostPort()
 		httpsProxyUrlStr := fmt.Sprintf("https://%s", addr)
 		httpsProxyUrl, err := url.Parse(httpsProxyUrlStr)
 		assert.Equal(t, err, nil)

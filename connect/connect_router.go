@@ -86,6 +86,6 @@ func (self *ConnectRouter) Connect(w http.ResponseWriter, r *http.Request) {
 	self.connectHandler.Connect(w, r)
 }
 
-func (self *ConnectRouter) ProxyConnect(w http.ResponseWriter, r *http.Request) {
-	self.proxyConnectHandler.Connect(w, r)
-}
+// func (self *ConnectRouter) ProxyConnect(w http.ResponseWriter, r *http.Request) {
+// 	self.proxyConnectHandler.Connect(w, r)
+// }
