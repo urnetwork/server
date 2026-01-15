@@ -121,22 +121,31 @@ func NewProxyConnectHandler(
 		proxyConnections: map[server.Id]*ProxyConnection{},
 	}
 
-	if server.HasPort(settings.ListenSocksPort) {
-		go server.HandleError(h.runSocks)
-	}
-
 	if server.HasPort(settings.ListenHttpsPort) {
 		go server.HandleError(h.runHttps)
+	}
+
+	if server.HasPort(settings.ListenSocksPort) {
+		go server.HandleError(h.runSocks)
 	}
 
 	return h
 }
 
 func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyConnection *ProxyConnection, returnErr error) {
+	glog.Infof("[tp]found headers: %v\n", r.Header)
 	host := r.Header.Get("X-Forwarded-Host")
 	if host == "" {
 		host = r.Header.Get("Host")
 	}
+	if host == "" && r.TLS != nil {
+		host = r.TLS.ServerName
+	}
+	if host == "" {
+		returnErr = fmt.Errorf("Unknown host")
+		return
+	}
+	glog.Infof("[tp]connect with host=%s\n", host)
 
 	hostProxyId := strings.SplitN(host, ".", 2)[0]
 	proxyId, err := model.ParseSignedProxyId(hostProxyId)
@@ -179,6 +188,7 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 			return
 		}
 	}
+	glog.Infof("[tp]connect with host=%s proxyId=%s\n", host, proxyId)
 
 	proxyConnection, returnErr = self.connectProxy(proxyId)
 	if returnErr != nil {
@@ -189,6 +199,11 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 	if addrPortStr == "" {
 		addrPortStr = r.RemoteAddr
 	}
+	if addrPortStr == "" {
+		returnErr = fmt.Errorf("Unknown peer address")
+		return
+	}
+	glog.Infof("[tp]connect with host=%s proxyId=%s addr=%s\n", host, proxyId, addrPortStr)
 	addrPort, err := netip.ParseAddrPort(addrPortStr)
 	if err != nil {
 		returnErr = err
@@ -296,8 +311,7 @@ func (self *ProxyConnectHandler) runHttps() {
 	// httpProxy.Tr = &http.Transport{
 	// }
 
-	httpProxy.AllowHTTP2 = false
-	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (net.Conn, error) {
+	connectDialWithReq := func(r *http.Request, network string, addr string) (net.Conn, error) {
 		proxyConnection, err := self.connectProxyForRequest(r)
 		if err != nil {
 			return nil, err
@@ -314,6 +328,16 @@ func (self *ProxyConnectHandler) runHttps() {
 
 		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
 		return proxyConnection.tnet.DialContext(self.ctx, network, addr)
+	}
+
+	httpProxy.AllowHTTP2 = false
+	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (conn net.Conn, err error) {
+		server.HandleError(func() {
+			conn, err = connectDialWithReq(r, network, addr)
+		}, func() {
+			err = fmt.Errorf("Could not connect")
+		})
+		return
 	}
 
 	addr := fmt.Sprintf(":%d", self.settings.ListenHttpsPort)

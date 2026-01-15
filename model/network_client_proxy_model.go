@@ -79,11 +79,11 @@ func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr erro
 
 	// validate the signature with all known secrets
 	ok := func() bool {
-		proxyIdBytes := proxyId.Bytes()
 		for _, secret := range proxySigningSecrets() {
 			h := hmac.New(sha1.New, secret)
-			h.Write(proxyIdBytes)
+			h.Write(b[0:16])
 			checkSignature := h.Sum(nil)
+			fmt.Printf("SIGNATURES %v <> %v\n", signature, checkSignature)
 			if slices.Equal(signature, checkSignature) {
 				return true
 			}
