@@ -7,6 +7,8 @@ import (
 	// "fmt"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sdk"
@@ -67,6 +69,7 @@ func NewResidentProxyDevice(
 	proxyDeviceConfig *model.ProxyDeviceConfig,
 	settings *ResidentProxyDeviceSettings,
 ) (*ResidentProxyDevice, error) {
+	glog.Infof("[rp]create")
 
 	// this jwt is used to access the services in the network space
 	byJwt, err := jwt.LoadByJwtFromClientId(ctx, clientId)
@@ -133,6 +136,8 @@ func (self *ResidentProxyDevice) AddTun() (
 	receive chan []byte,
 	closeTun func(),
 ) {
+	glog.Infof("[rp]add tun")
+
 	send = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 	receive = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
 

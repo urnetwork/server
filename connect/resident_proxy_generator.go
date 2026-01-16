@@ -8,6 +8,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/jwt"
@@ -70,6 +71,10 @@ func newExchangeGenerator(
 
 func (self *exchangeGenerator) clientSession() *session.ClientSession {
 	return session.NewLocalClientSession(self.ctx, "127.0.0.1", self.byJwt)
+}
+
+func (self *exchangeGenerator) cleanupSession() *session.ClientSession {
+	return session.NewLocalClientSession(context.Background(), "127.0.0.1", self.byJwt)
 }
 
 func (self *exchangeGenerator) NextDestinations(count int, excludeDestinations []connect.MultiHopId, rankMode string) (map[connect.MultiHopId]connect.DestinationStats, error) {
@@ -169,7 +174,7 @@ func (self *exchangeGenerator) RemoveClientArgs(args *connect.MultiClientGenerat
 		ClientId: server.Id(args.ClientId),
 	}
 
-	model.RemoveNetworkClient(removeNetworkClient, self.clientSession())
+	model.RemoveNetworkClient(removeNetworkClient, self.cleanupSession())
 }
 
 func (self *exchangeGenerator) RemoveClientWithArgs(client *connect.Client, args *connect.MultiClientGeneratorClientArgs) {

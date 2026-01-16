@@ -1491,6 +1491,8 @@ func NewResident(
 	instanceId server.Id,
 	residentId server.Id,
 ) *Resident {
+	glog.V(1).Infof("[r]create")
+
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	proxyDeviceConfig := model.GetProxyDeviceConfigForClient(cancelCtx, clientId, instanceId)
@@ -1682,7 +1684,9 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
 
-	c := func() bool {
+	initForward := func() *ResidentForward {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
 
 		nextForward := func() *ResidentForward {
 			if self.exchange.settings.ForwardEnforceActiveContracts {
@@ -1729,42 +1733,49 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				}
 			})
 
-			var replacedForward *ResidentForward
-			func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				replacedForward = self.forwards[destinationId]
-				self.forwards[destinationId] = forward
-			}()
-			if replacedForward != nil {
-				replacedForward.Cancel()
-			}
-			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
-
 			return forward
 		}
 
 		limit := false
 		var forward *ResidentForward
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			var ok bool
-			forward, ok = self.forwards[destinationId]
-			if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
-				limit = true
-			}
-		}()
+		// func() {
+		// 	self.stateLock.Lock()
+		// 	defer self.stateLock.Unlock()
+		var ok bool
+		forward, ok = self.forwards[destinationId]
+		if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
+			limit = true
+		}
+		// }()
 
 		if forward == nil && limit {
 			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
 			self.abuseLimiter.delay()
-			return false
+			return nil
 		}
 
 		if forward == nil || !forward.UpdateActivity() {
 			forward = nextForward()
+
+			var replacedForward *ResidentForward
+			// func() {
+			// 	self.stateLock.Lock()
+			// 	defer self.stateLock.Unlock()
+			replacedForward = self.forwards[destinationId]
+			self.forwards[destinationId] = forward
+			// }()
+			if replacedForward != nil {
+				replacedForward.Cancel()
+			}
+			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
+
 		}
+
+		return forward
+	}
+
+	c := func() bool {
+		forward := initForward()
 
 		if forward == nil {
 			return false

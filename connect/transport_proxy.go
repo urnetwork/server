@@ -219,6 +219,9 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 }
 
 func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnection, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
 	nextProxyConnection := func() (*ProxyConnection, error) {
 		proxyConnection, err := NewProxyConnection(self.ctx, self.exchange, proxyId, self.settings)
 		if err != nil {
@@ -253,28 +256,14 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 			}
 		})
 
-		var replacedProxyConnection *ProxyConnection
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			replacedProxyConnection = self.proxyConnections[proxyId]
-			self.proxyConnections[proxyId] = proxyConnection
-		}()
-		if replacedProxyConnection != nil {
-			replacedProxyConnection.Cancel()
-		}
-		glog.V(1).Infof("[rp]open %s\n", proxyId)
-
 		return proxyConnection, nil
 	}
 
 	var proxyConnection *ProxyConnection
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
+	// func() {
 
-		proxyConnection = self.proxyConnections[proxyId]
-	}()
+	proxyConnection = self.proxyConnections[proxyId]
+	// }()
 
 	if proxyConnection == nil || !proxyConnection.UpdateActivity() {
 		var err error
@@ -282,64 +271,24 @@ func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnecti
 		if err != nil {
 			return nil, err
 		}
+
+		var replacedProxyConnection *ProxyConnection
+		// func() {
+		// 	self.stateLock.Lock()
+		// 	defer self.stateLock.Unlock()
+		replacedProxyConnection = self.proxyConnections[proxyId]
+		self.proxyConnections[proxyId] = proxyConnection
+		// }()
+		if replacedProxyConnection != nil {
+			replacedProxyConnection.Cancel()
+		}
+		glog.V(1).Infof("[rp]open %s\n", proxyId)
 	}
 
 	return proxyConnection, nil
 }
 
 func (self *ProxyConnectHandler) runHttps() {
-	httpProxy := goproxy.NewProxyHttpServer()
-
-	// httpProxy.Tr = &http.Transport{
-	// 	Dial: func(network string, addr string) (net.Conn, error) {
-	// 		fmt.Printf("HTTP DIAL 1\n")
-
-	// 		return tnet.DialContext(context.Background(), network, addr)
-	// 	},
-	// 	DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-	// 		fmt.Printf("HTTP DIAL 2\n")
-
-	// 		addrPort, err := netip.ParseAddrPort(addr)
-	// 		if err != nil {
-	// 			return nil, err
-	// 		}
-
-	// 		return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
-	// 	},
-	// }
-
-	// httpProxy.Tr = &http.Transport{
-	// }
-
-	connectDialWithReq := func(r *http.Request, network string, addr string) (net.Conn, error) {
-		proxyConnection, err := self.connectProxyForRequest(r)
-		if err != nil {
-			return nil, err
-		}
-
-		switch network {
-		case "tcp", "tcp4", "tcp6":
-			network = "tcp4"
-		case "udp", "udp4", "udp6":
-			network = "udp4"
-		default:
-			return nil, fmt.Errorf("Unsupported network: %s", network)
-		}
-
-		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
-		return proxyConnection.tnet.DialContext(self.ctx, network, addr)
-	}
-
-	httpProxy.AllowHTTP2 = false
-	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (conn net.Conn, err error) {
-		server.HandleError(func() {
-			conn, err = connectDialWithReq(r, network, addr)
-		}, func() {
-			err = fmt.Errorf("Could not connect")
-		})
-		return
-	}
-
 	addr := fmt.Sprintf(":%d", self.settings.ListenHttpsPort)
 
 	tlsConfig := &tls.Config{
@@ -348,7 +297,7 @@ func (self *ProxyConnectHandler) runHttps() {
 
 	httpServer := &http.Server{
 		Addr:      addr,
-		Handler:   httpProxy,
+		Handler:   self,
 		TLSConfig: tlsConfig,
 	}
 
@@ -371,6 +320,16 @@ func (self *ProxyConnectHandler) runHttps() {
 	}
 
 	httpServer.ServeTLS(serverConn, "", "")
+}
+
+func (self *ProxyConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	proxyConnection, err := self.connectProxyForRequest(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	proxyConnection.ServeHTTP(w, r)
 }
 
 func (self *ProxyConnectHandler) runSocks() {
@@ -499,7 +458,8 @@ type ProxyConnection struct {
 	exchange          *Exchange
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
-	tnet *proxy.Net
+	tnet      *proxy.Net
+	httpProxy *goproxy.ProxyHttpServer
 
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
@@ -524,7 +484,6 @@ func NewProxyConnection(
 
 	tnet, err := proxy.CreateNetTUN(
 		cancelCtx,
-		[]netip.Addr{netip.MustParseAddr(fmt.Sprintf("169.254.2.%d", localIpCounter.Add(1)))},
 		settings.Mtu,
 	)
 	if err != nil {
@@ -541,6 +500,38 @@ func NewProxyConnection(
 		lastActivityTime: time.Now(),
 		settings:         settings,
 	}
+
+	connectDialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+			network = "tcp4"
+		case "udp", "udp4", "udp6":
+			network = "udp4"
+		default:
+			return nil, fmt.Errorf("Unsupported network: %s", network)
+		}
+
+		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
+		return tnet.DialContext(ctx, network, addr)
+	}
+
+	httpProxy := goproxy.NewProxyHttpServer()
+
+	httpProxy.Tr = &http.Transport{
+		Dial: func(network string, addr string) (net.Conn, error) {
+			return connectDialContext(proxyConnection.ctx, network, addr)
+		},
+		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+			return connectDialContext(ctx, network, addr)
+		},
+	}
+
+	// httpProxy.AllowHTTP2 = false
+	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (conn net.Conn, err error) {
+		return connectDialContext(r.Context(), network, addr)
+	}
+
+	proxyConnection.httpProxy = httpProxy
 
 	return proxyConnection, nil
 }
@@ -573,8 +564,8 @@ func (self *ProxyConnection) Run() {
 			exchangeTransport.Close()
 		}()
 		for {
-			packet := connect.MessagePoolGet(self.settings.Mtu)
-			n, err := self.tnet.Read(packet)
+			// packet := connect.MessagePoolGet(self.settings.Mtu)
+			packet, err := self.tnet.Read()
 			if err != nil {
 				return
 			}
@@ -583,7 +574,7 @@ func (self *ProxyConnection) Run() {
 			case <-self.ctx.Done():
 				connect.MessagePoolReturn(packet)
 				return
-			case exchangeTransport.send <- packet[0:n]:
+			case exchangeTransport.send <- packet:
 			case <-time.After(self.settings.WriteTimeout):
 				// drop
 				connect.MessagePoolReturn(packet)
@@ -612,6 +603,10 @@ func (self *ProxyConnection) Run() {
 	case <-self.ctx.Done():
 	case <-exchangeTransport.Done():
 	}
+}
+
+func (self *ProxyConnection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	self.httpProxy.ServeHTTP(w, r)
 }
 
 func (self *ProxyConnection) ValidCaller(addr netip.Addr) bool {

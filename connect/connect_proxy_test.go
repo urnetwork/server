@@ -1,3 +1,7 @@
+//go:build !race
+
+// note race detection on this test progressively slows down the test until it stops working
+//
 package main
 
 import (
@@ -11,6 +15,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os/exec"
+	"sync"
 	"time"
 
 	// "strings"
@@ -41,9 +47,24 @@ func testConnectProxy(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	func() {
+		fmt.Printf(`
+
+** This test requires many file descriptions.
+** Setting "ulimit -n 1048576".
+** The value will not be reset when the test ends.
+
+`)
+		_, err := exec.Command("/bin/sh", "-c", "ulimit -n 1048576").CombinedOutput()
+		if err != nil {
+			panic(err)
+		}
+	}()
+
 	maxMessageContentSize := model.ByteCount(4096)
 
-	// sequenceIdleTimeout := 100 * time.Millisecond
+	// clean up lingering residents at this timeout
+	// idleTimeout := 5 * time.Minute
 	// receiveTimeout := 900 * time.Second
 	// minResendInterval := 10 * time.Millisecond
 	// standardContractTransferByteCount := 4 * maxMessageContentSize
@@ -123,8 +144,8 @@ func testConnectProxy(t *testing.T) {
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
-		// settings.ResidentIdleTimeout = sequenceIdleTimeout
-		// settings.ForwardIdleTimeout = sequenceIdleTimeout
+		// settings.ResidentIdleTimeout = idleTimeout
+		// settings.ForwardIdleTimeout = idleTimeout
 		settings.FramerSettings.MaxMessageLen = int(2 * maxMessageContentSize)
 		settings.ForwardEnforceActiveContracts = true
 		settings.IngressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
@@ -244,7 +265,6 @@ func testConnectProxy(t *testing.T) {
 
 		platformUrl, port := randServerUrl()
 		providerTransportSettings := connect.DefaultPlatformTransportSettings()
-		providerTransportSettings.QuicTlsConfig.InsecureSkipVerify = true
 		providerTransportSettings.H3Port = port + 443
 		providerTransportSettings.DnsPort = port + 53
 		providerTransportSettings.FramerSettings.MaxMessageLen = int(2 * maxMessageContentSize)
@@ -273,7 +293,7 @@ func testConnectProxy(t *testing.T) {
 	}
 
 	providerClientIds := []server.Id{}
-	for range 2 {
+	for range 32 {
 		providerClientId := runProvider()
 		// providerClientId := server.NewId()
 		providerClientIds = append(providerClientIds, providerClientId)
@@ -283,7 +303,7 @@ func testConnectProxy(t *testing.T) {
 	case <-time.After(2 * time.Second):
 	}
 
-	for range 2 {
+	for i := range 1024 {
 		// create a proxy client, connect to a random server, and route to a random provider
 
 		providerClientId := providerClientIds[mathrand.Intn(len(providerClientIds))]
@@ -353,10 +373,10 @@ func testConnectProxy(t *testing.T) {
 		// TODO for some reason go does not pass the host header in the proxy
 		// TODO force the auth token
 		// FIXME see ProxyConnectHeader
-		addr, _ := randHttpsPoxyServerHostPort()
-		httpsProxyUrlStr := fmt.Sprintf("https://%s", addr)
-		httpsProxyUrl, err := url.Parse(httpsProxyUrlStr)
-		assert.Equal(t, err, nil)
+		// addr, _ := randHttpsPoxyServerHostPort()
+		// httpsProxyUrlStr := fmt.Sprintf("https://%s", addr)
+		// httpsProxyUrl, err := url.Parse(httpsProxyUrlStr)
+		// assert.Equal(t, err, nil)
 
 		// proxyDialer := &net.Dialer{
 		// 	Timeout: 15 * time.Second,
@@ -369,26 +389,34 @@ func testConnectProxy(t *testing.T) {
 		proxyConnectHeader.Add("Proxy-Authorization", fmt.Sprintf("Bearer %s", result.ProxyConfigResult.AuthToken))
 
 		proxyHttpClient := &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
+				// MaxIdleConns:       1,             // Max idle connections in the pool
+				// IdleConnTimeout:    30 * time.Second, // Max time an idle connection stays open
+				// DisableKeepAlives:  true,
 				// TLSHandshakeTimeout: 15 * time.Second,
-				Proxy: http.ProxyURL(httpsProxyUrl),
+				// Proxy: http.ProxyURL(httpsProxyUrl),
+				Proxy: func(r *http.Request) (*url.URL, error) {
+					addr, _ := randHttpsPoxyServerHostPort()
+					httpsProxyUrlStr := fmt.Sprintf("https://%s", addr)
+					return url.Parse(httpsProxyUrlStr)
+				},
 				// DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 				// 	addr, _ = randServerHostPort()
 				// 	fmt.Printf("DIAL %s VIA %s %s\n", httpsProxyUrl, network, addr)
 				//     return proxyDialer.DialContext(ctx, network, addr)
 				// },
 				ProxyConnectHeader: proxyConnectHeader,
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
 			},
 		}
 
-		for range 2 {
+		runOne := func() {
+			// var err error
+			// for range 2 {
 			addr, _ := randServerHostPort()
 			targetUrlString := fmt.Sprintf("https://%s/status", addr)
 			// targetUrlString := "https://api.bringyour.com/hello"
+			// var r *http.Response
 			r, err := proxyHttpClient.Get(targetUrlString)
 			assert.Equal(t, err, nil)
 			if err == nil {
@@ -399,8 +427,33 @@ func testConnectProxy(t *testing.T) {
 				err = json.Unmarshal(b, &m)
 				assert.Equal(t, err, nil)
 				assert.NotEqual(t, m["client_address"], nil)
+				return
 			}
+			// FIXME
+			// else something flaky about the proxy connection
+			// try again
+			// }
+			// assert.Equal(t, err, nil)
 		}
+
+		// run in serial
+		for j := range 32 {
+			fmt.Printf("[%d][%d][s]start\n", i, j)
+			runOne()
+		}
+
+		// run in parallel
+		var wg sync.WaitGroup
+		for j := range 32 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				fmt.Printf("[%d][%d][p]start\n", i, j)
+				runOne()
+			}()
+		}
+		wg.Wait()
 
 		proxyHttpClient.CloseIdleConnections()
 
