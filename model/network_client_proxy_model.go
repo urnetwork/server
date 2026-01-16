@@ -83,7 +83,6 @@ func ParseSignedProxyId(signedProxyId string) (proxyId server.Id, returnErr erro
 			h := hmac.New(sha1.New, secret)
 			h.Write(b[0:16])
 			checkSignature := h.Sum(nil)
-			fmt.Printf("SIGNATURES %v <> %v\n", signature, checkSignature)
 			if slices.Equal(signature, checkSignature) {
 				return true
 			}

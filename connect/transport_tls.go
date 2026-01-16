@@ -88,15 +88,15 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	glog.Infof("[tls]try %s\n", hostName)
+	glog.V(1).Infof("[tls]try %s\n", hostName)
 
 	if tlsConfig, ok := self.tlsConfigs[hostName]; ok {
 		// note a nil entry might have been entered for a previous key miss
 		if tlsConfig == nil {
-			glog.Infof("[tls]did not find tls config for %s\n", hostName)
+			glog.Errorf("[tls]did not find tls config for %s\n", hostName)
 			return nil, fmt.Errorf("Missing key for server name \"%s\".", hostName)
 		}
-		glog.Infof("[tls]found tls config for %s\n", hostName)
+		glog.V(1).Infof("[tls]found tls config for %s\n", hostName)
 		// make a copy
 		tlsConfigCopy := *tlsConfig
 		return &tlsConfigCopy, nil
@@ -186,7 +186,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 			if self.settings.EnableSelfSign {
 				return selfSigned()
 			} else {
-				glog.Infof("[tls]did not find tls config for %s\n", hostName)
+				glog.Errorf("[tls]did not find tls config for %s\n", hostName)
 				// add a missing entry to avoid future lookups
 				self.tlsConfigs[hostName] = nil
 				return nil, fmt.Errorf("Missing lookup key for server name \"%s\".", hostName)
@@ -212,7 +212,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	}
 	self.tlsConfigs[hostName] = tlsConfig
 
-	glog.Infof("[tls]found tls config for %s\n", hostName)
+	glog.V(1).Infof("[tls]found tls config for %s\n", hostName)
 
 	// make a copy
 	tlsConfigCopy := *tlsConfig
