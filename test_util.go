@@ -7,14 +7,25 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"os"
+	"sync"
 	"time"
+
+	_ "net/http/pprof" // Import for side effects
 
 	"github.com/urnetwork/glog"
 )
 
 // each test runs with its own postgres and redis db
 // the database is dropped at the end of the test
+
+var pprofServer = sync.OnceFunc(func() {
+	go func() {
+		http.ListenAndServe(":6060", nil)
+	}()
+	// e.g. `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
+})
 
 type TestEnv struct {
 	ApplyDbMigrations bool
@@ -69,6 +80,8 @@ func (self *TestEnv) Run(callback func()) {
 }
 
 func (self *TestEnv) setup() func() {
+	pprofServer()
+
 	Reset()
 
 	// tests are allowed only in the `local` env
