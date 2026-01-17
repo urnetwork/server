@@ -495,7 +495,7 @@ func findMostRecentCircleWallet(session *session.ClientSession) (*CircleWalletIn
 	return mostRecentWalletInfo, nil
 }
 
-func VerifyCircleBody(req *http.Request) (io.Reader, error) {
+func VerifyCircleBody(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 
 	// server.Logger().Println("VerifyCircleBody")
 
