@@ -1757,18 +1757,20 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		if forward == nil || !forward.UpdateActivity() {
 			forward = nextForward()
 
-			var replacedForward *ResidentForward
-			// func() {
-			// 	self.stateLock.Lock()
-			// 	defer self.stateLock.Unlock()
-			replacedForward = self.forwards[destinationId]
-			self.forwards[destinationId] = forward
-			// }()
-			if replacedForward != nil {
-				replacedForward.Cancel()
-			}
-			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
+			if forward != nil {
+				var replacedForward *ResidentForward
+				// func() {
+				// 	self.stateLock.Lock()
+				// 	defer self.stateLock.Unlock()
+				replacedForward = self.forwards[destinationId]
+				self.forwards[destinationId] = forward
+				// }()
+				if replacedForward != nil {
+					replacedForward.Cancel()
+				}
+				glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
 
+			}
 		}
 
 		return forward
