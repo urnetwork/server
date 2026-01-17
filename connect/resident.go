@@ -108,7 +108,6 @@ type ExchangeSettings struct {
 
 	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
-	ClientSettingsGenerator        func() *connect.ClientSettings
 
 	ExchangeChaosSettings
 }
@@ -1596,7 +1595,6 @@ func (self *Resident) ResidentProxyDevice() *ResidentProxyDevice {
 		settings := DefaultResidentProxyDeviceSettings()
 		settings.IngressSecurityPolicyGenerator = self.exchange.settings.IngressSecurityPolicyGenerator
 		settings.EgressSecurityPolicyGenerator = self.exchange.settings.EgressSecurityPolicyGenerator
-		settings.ClientSettingsGenerator = self.exchange.settings.ClientSettingsGenerator
 		residentProxyDevice, err := NewResidentProxyDevice(
 			self.ctx,
 			self.exchange,
@@ -1758,9 +1756,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 		if forward == nil || !forward.UpdateActivity() {
 			forward = nextForward()
-		}
 
-		if forward != nil {
 			var replacedForward *ResidentForward
 			// func() {
 			// 	self.stateLock.Lock()
@@ -1772,6 +1768,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				replacedForward.Cancel()
 			}
 			glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
+
 		}
 
 		return forward
