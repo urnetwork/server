@@ -1,0 +1,1490 @@
+{
+  "devices": [],
+  "groups": [
+    {
+      "location_group_id": "018bab1d-81ac-9119-a65b-d29b113a6a9b",
+      "name": "South America",
+      "provider_count": 15
+    },
+    {
+      "location_group_id": "018bab1d-8179-104f-2220-556acb26edbd",
+      "name": "Eastern Europe",
+      "provider_count": 6
+    },
+    {
+      "location_group_id": "018bab1d-7fa7-ef90-c098-328b12574eb7",
+      "name": "Nordic",
+      "promoted": true,
+      "provider_count": 14
+    },
+    {
+      "location_group_id": "018bab1d-818a-a7b8-965c-7840f916636f",
+      "name": "Southeastern Asia",
+      "provider_count": 19
+    },
+    {
+      "location_group_id": "018bab1d-81b9-28e6-f206-4f7c90d223c4",
+      "name": "Northern Europe",
+      "provider_count": 34
+    },
+    {
+      "location_group_id": "018bab1d-818d-abe7-1e0b-67c97c02d368",
+      "name": "Eastern Asia",
+      "provider_count": 44
+    },
+    {
+      "location_group_id": "018bab1d-817d-9319-57ab-96d5e3e77f22",
+      "name": "Western Europe",
+      "provider_count": 51
+    },
+    {
+      "location_group_id": "018bab1d-81b4-8d12-7862-389056b77d08",
+      "name": "Southern Africa",
+      "provider_count": 8
+    },
+    {
+      "location_group_id": "018bab1d-8170-c3de-7872-6155674307cb",
+      "name": "Strong Privacy Laws and Internet Freedom",
+      "promoted": true,
+      "provider_count": 94
+    },
+    {
+      "location_group_id": "018bab1d-817f-c46e-79fe-804f05c375cf",
+      "name": "Northern America",
+      "provider_count": 105
+    },
+    {
+      "location_group_id": "018bab1d-819a-e17a-c05a-c7bfb0f45dca",
+      "name": "Southern Europe",
+      "provider_count": 22
+    },
+    {
+      "location_group_id": "018bab1d-8194-b88c-1a9f-1087115a3150",
+      "name": "Western Asia",
+      "provider_count": 27
+    },
+    {
+      "location_group_id": "018bab1d-7fa3-f40c-7480-f443979a7269",
+      "name": "European Union (EU)",
+      "promoted": true,
+      "provider_count": 84
+    },
+    {
+      "location_group_id": "018bab1d-8174-4e0e-96e9-e57e318bb4c7",
+      "name": "Southern Asia",
+      "provider_count": 20
+    }
+  ],
+  "locations": [
+    {
+      "city_location_id": "018c965a-6ee8-8305-eb47-35a97fcccd26",
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965a-6ee8-8305-eb47-35a97fcccd26",
+      "location_type": "city",
+      "name": "Hyderābād",
+      "provider_count": 4,
+      "region_location_id": "018c965a-6e5b-c81f-4fc6-f288c6eb5dcf"
+    },
+    {
+      "city_location_id": "018c965a-9157-5475-172b-f50c0b156cbb",
+      "country_code": "ie",
+      "country_location_id": "018bab1d-7bbe-afb4-b7a5-828fed714836",
+      "location_id": "018c965a-9157-5475-172b-f50c0b156cbb",
+      "location_type": "city",
+      "name": "Dublin",
+      "provider_count": 8,
+      "region_location_id": "018c965a-90d9-8d58-fffd-368f3a399a7a"
+    },
+    {
+      "city_location_id": "018c965b-712c-de64-7f19-7a238299f651",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-712c-de64-7f19-7a238299f651",
+      "location_type": "city",
+      "name": "The Dalles",
+      "provider_count": 4,
+      "region_location_id": "018c902f-f790-0cdd-62ec-6ccd9840b4d5"
+    },
+    {
+      "city_location_id": "018c8e48-8e95-a2e0-451b-1d6ad035fa17",
+      "country_code": "de",
+      "country_location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_id": "018c8e48-8e95-a2e0-451b-1d6ad035fa17",
+      "location_type": "city",
+      "name": "Berlin",
+      "provider_count": 4,
+      "region_location_id": "018c8e48-8e1e-dc7a-f894-e0824baef39f"
+    },
+    {
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965a-6e5b-c81f-4fc6-f288c6eb5dcf",
+      "location_type": "region",
+      "name": "Telangana",
+      "provider_count": 4,
+      "region_location_id": "018c965a-6e5b-c81f-4fc6-f288c6eb5dcf"
+    },
+    {
+      "country_code": "se",
+      "country_location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_id": "018c965a-921d-a783-2d01-b599d6a8058d",
+      "location_type": "region",
+      "name": "Stockholm",
+      "provider_count": 2,
+      "region_location_id": "018c965a-921d-a783-2d01-b599d6a8058d"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "019123f1-18f7-c8d6-9b81-b2301c492df5",
+      "location_type": "region",
+      "name": "District of Columbia",
+      "provider_count": 4,
+      "region_location_id": "019123f1-18f7-c8d6-9b81-b2301c492df5"
+    },
+    {
+      "country_code": "id",
+      "country_location_id": "018bab1d-63c9-1fe4-a870-30cf6bce95b4",
+      "location_id": "018bab1d-63c9-1fe4-a870-30cf6bce95b4",
+      "location_type": "country",
+      "name": "Indonesia",
+      "provider_count": 8
+    },
+    {
+      "city_location_id": "018c941a-3823-5714-f118-30115512d16e",
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018c941a-3823-5714-f118-30115512d16e",
+      "location_type": "city",
+      "name": "Toronto",
+      "provider_count": 8,
+      "region_location_id": "018c941a-379e-2d84-00be-45d43df4a28d"
+    },
+    {
+      "country_code": "jp",
+      "country_location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_id": "018c9623-c89b-0122-5875-190e62605802",
+      "location_type": "region",
+      "name": "Tokyo",
+      "provider_count": 12,
+      "region_location_id": "018c9623-c89b-0122-5875-190e62605802"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-6132-4723-69b9-2f3c6a5536bd",
+      "location_type": "region",
+      "name": "Iowa",
+      "provider_count": 4,
+      "region_location_id": "018c965b-6132-4723-69b9-2f3c6a5536bd"
+    },
+    {
+      "country_code": "qa",
+      "country_location_id": "018bab1d-73de-c653-82f8-00cbb158b86f",
+      "location_id": "018c965b-697d-9d2c-1ef8-f24ca8928f32",
+      "location_type": "region",
+      "name": "Baladīyat ad Dawḩah",
+      "provider_count": 4,
+      "region_location_id": "018c965b-697d-9d2c-1ef8-f24ca8928f32"
+    },
+    {
+      "country_code": "ie",
+      "country_location_id": "018bab1d-7bbe-afb4-b7a5-828fed714836",
+      "location_id": "018bab1d-7bbe-afb4-b7a5-828fed714836",
+      "location_type": "country",
+      "name": "Ireland",
+      "provider_count": 8
+    },
+    {
+      "city_location_id": "018c8210-ce07-0f65-f306-5338d75314d6",
+      "country_code": "gb",
+      "country_location_id": "018bab1d-6148-7905-b87f-0f9a95d31cac",
+      "location_id": "018c8210-ce07-0f65-f306-5338d75314d6",
+      "location_type": "city",
+      "name": "London",
+      "provider_count": 12,
+      "region_location_id": "018c8210-cd8a-0f91-215b-c4237d5a2a4d"
+    },
+    {
+      "city_location_id": "018c965b-1af0-b469-fb63-fe78f3dc216c",
+      "country_code": "be",
+      "country_location_id": "018bab1d-7754-5656-3316-7100d2a0636b",
+      "location_id": "018c965b-1af0-b469-fb63-fe78f3dc216c",
+      "location_type": "city",
+      "name": "Brussels",
+      "provider_count": 4,
+      "region_location_id": "018c965b-1a43-e385-4c59-07720ab2ef42"
+    },
+    {
+      "city_location_id": "018c965b-331c-6d3d-97b4-a75209964f89",
+      "country_code": "it",
+      "country_location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_id": "018c965b-331c-6d3d-97b4-a75209964f89",
+      "location_type": "city",
+      "name": "Turin",
+      "provider_count": 3,
+      "region_location_id": "018c965b-327d-2228-6237-5e91e9f9021b"
+    },
+    {
+      "city_location_id": "018c965c-17e3-4be5-2dee-69ebdfecb31f",
+      "country_code": "ae",
+      "country_location_id": "018bab1d-6551-2409-247a-0fe165f37f9b",
+      "location_id": "018c965c-17e3-4be5-2dee-69ebdfecb31f",
+      "location_type": "city",
+      "name": "Dubai",
+      "provider_count": 8,
+      "region_location_id": "018c965c-173f-d77e-e207-e91015023ef0"
+    },
+    {
+      "city_location_id": "018bbb0c-1d98-4a81-1513-a2ff79fa8b10",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bbb0c-1d98-4a81-1513-a2ff79fa8b10",
+      "location_type": "city",
+      "name": "Los Angeles",
+      "provider_count": 4,
+      "region_location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc"
+    },
+    {
+      "country_code": "kr",
+      "country_location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_id": "018c965a-4825-fe82-a208-68513023cfb1",
+      "location_type": "region",
+      "name": "Incheon",
+      "provider_count": 4,
+      "region_location_id": "018c965a-4825-fe82-a208-68513023cfb1"
+    },
+    {
+      "city_location_id": "018c965b-184b-3892-9a44-3eed9173f638",
+      "country_code": "fi",
+      "country_location_id": "018bab1d-5338-7ce4-1756-9b0e006d5a3c",
+      "location_id": "018c965b-184b-3892-9a44-3eed9173f638",
+      "location_type": "city",
+      "name": "Lappeenranta",
+      "provider_count": 4,
+      "region_location_id": "018c965b-17b0-a505-c42e-b90cd4254522"
+    },
+    {
+      "city_location_id": "018bd922-f494-681d-42f3-2f0db07d9ccb",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bd922-f494-681d-42f3-2f0db07d9ccb",
+      "location_type": "city",
+      "name": "Redwood City",
+      "provider_count": 5,
+      "region_location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc"
+    },
+    {
+      "city_location_id": "018c965a-6575-ee30-8082-bff73931a0b9",
+      "country_code": "au",
+      "country_location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_id": "018c965a-6575-ee30-8082-bff73931a0b9",
+      "location_type": "city",
+      "name": "Sydney",
+      "provider_count": 12,
+      "region_location_id": "018c965a-64c3-b4ae-d1a2-f6b92b39d678"
+    },
+    {
+      "city_location_id": "018c965a-96a7-69f1-73ee-e4fa46f46831",
+      "country_code": "es",
+      "country_location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_id": "018c965a-96a7-69f1-73ee-e4fa46f46831",
+      "location_type": "city",
+      "name": "Zaragoza",
+      "provider_count": 4,
+      "region_location_id": "018c965a-962d-1b7e-5e39-afb65d996de1"
+    },
+    {
+      "city_location_id": "018c965a-96e5-3db8-bc5e-62f9aaa51af0",
+      "country_code": "it",
+      "country_location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_id": "018c965a-96e5-3db8-bc5e-62f9aaa51af0",
+      "location_type": "city",
+      "name": "Milan",
+      "provider_count": 11,
+      "region_location_id": "018c965a-9669-ac41-4fbc-25f9c0d8c580"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_type": "country",
+      "name": "United States",
+      "provider_count": 88
+    },
+    {
+      "city_location_id": "018c965a-6f7a-4de3-15bb-db6d0167bfa8",
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965a-6f7a-4de3-15bb-db6d0167bfa8",
+      "location_type": "city",
+      "name": "Mumbai",
+      "provider_count": 8,
+      "region_location_id": "018c965a-6eea-ac67-b1f9-7f5fb9653104"
+    },
+    {
+      "city_location_id": "018c965a-b75e-d0f3-6009-4559e09513e2",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965a-b75e-d0f3-6009-4559e09513e2",
+      "location_type": "city",
+      "name": "Boardman",
+      "provider_count": 4,
+      "region_location_id": "018c902f-f790-0cdd-62ec-6ccd9840b4d5"
+    },
+    {
+      "country_code": "tw",
+      "country_location_id": "018bab1d-5794-57ff-bc30-f35d2b9b5df3",
+      "location_id": "018c965a-d957-6ac6-3b2a-d99e8abb3ec1",
+      "location_type": "region",
+      "name": "Taiwan",
+      "provider_count": 4,
+      "region_location_id": "018c965a-d957-6ac6-3b2a-d99e8abb3ec1"
+    },
+    {
+      "country_code": "cl",
+      "country_location_id": "018bab1d-5cd3-d934-895b-a66ace8885b6",
+      "location_id": "018c965b-71fe-093a-55c8-f6f779f3ba19",
+      "location_type": "region",
+      "name": "Santiago Metropolitan",
+      "provider_count": 4,
+      "region_location_id": "018c965b-71fe-093a-55c8-f6f779f3ba19"
+    },
+    {
+      "country_code": "au",
+      "country_location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_type": "country",
+      "name": "Australia",
+      "provider_count": 20
+    },
+    {
+      "country_code": "be",
+      "country_location_id": "018bab1d-7754-5656-3316-7100d2a0636b",
+      "location_id": "018bab1d-7754-5656-3316-7100d2a0636b",
+      "location_type": "country",
+      "name": "Belgium",
+      "provider_count": 4
+    },
+    {
+      "country_code": "kr",
+      "country_location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_type": "country",
+      "name": "Korea, Republic of",
+      "provider_count": 12
+    },
+    {
+      "city_location_id": "018c965a-7d53-d447-eb44-1eb7fcb18b03",
+      "country_code": "de",
+      "country_location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_id": "018c965a-7d53-d447-eb44-1eb7fcb18b03",
+      "location_type": "city",
+      "name": "Frankfurt am Main",
+      "provider_count": 12,
+      "region_location_id": "018c965a-7cce-956c-3e5e-8340cf951182"
+    },
+    {
+      "country_code": "be",
+      "country_location_id": "018bab1d-7754-5656-3316-7100d2a0636b",
+      "location_id": "018c965b-1a43-e385-4c59-07720ab2ef42",
+      "location_type": "region",
+      "name": "Brussels Capital",
+      "provider_count": 4,
+      "region_location_id": "018c965b-1a43-e385-4c59-07720ab2ef42"
+    },
+    {
+      "city_location_id": "018c965b-96e7-3c4e-a6bb-c125cdf66910",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-96e7-3c4e-a6bb-c125cdf66910",
+      "location_type": "city",
+      "name": "Washington",
+      "provider_count": 4,
+      "region_location_id": "018bab1d-8105-4186-bf99-f935e61b05d0"
+    },
+    {
+      "country_code": "cl",
+      "country_location_id": "018bab1d-5cd3-d934-895b-a66ace8885b6",
+      "location_id": "018bab1d-5cd3-d934-895b-a66ace8885b6",
+      "location_type": "country",
+      "name": "Chile",
+      "provider_count": 4
+    },
+    {
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_type": "country",
+      "name": "India",
+      "provider_count": 20
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc",
+      "location_type": "region",
+      "name": "California",
+      "provider_count": 28,
+      "region_location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc"
+    },
+    {
+      "city_location_id": "018c965b-c9a9-6f98-81ab-9d35122a1f89",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-c9a9-6f98-81ab-9d35122a1f89",
+      "location_type": "city",
+      "name": "Chicago",
+      "provider_count": 4,
+      "region_location_id": "018c848c-10d6-3353-a1e4-b47fee57910f"
+    },
+    {
+      "city_location_id": "01902cbb-aad8-f367-527c-f897f32f743a",
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "01902cbb-aad8-f367-527c-f897f32f743a",
+      "location_type": "city",
+      "name": "Terrace",
+      "provider_count": 1,
+      "region_location_id": "018cc0a0-ca99-b670-5faa-42531ea9fc40"
+    },
+    {
+      "city_location_id": "018c965b-71a6-5287-ca49-1a243d97846d",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-71a6-5287-ca49-1a243d97846d",
+      "location_type": "city",
+      "name": "Columbus",
+      "provider_count": 7,
+      "region_location_id": "018c965a-b4cb-4274-7866-1d55b7c17b6b"
+    },
+    {
+      "country_code": "bh",
+      "country_location_id": "018bab1d-6bc3-95f8-9374-57ff852ef9ea",
+      "location_id": "018cdfc5-ae83-1d54-af07-c2cf67684a07",
+      "location_type": "region",
+      "name": "Southern Governorate",
+      "provider_count": 3,
+      "region_location_id": "018cdfc5-ae83-1d54-af07-c2cf67684a07"
+    },
+    {
+      "country_code": "tr",
+      "country_location_id": "018bab1d-4dc7-e509-5691-e8462f7182e0",
+      "location_id": "018bab1d-4dc7-e509-5691-e8462f7182e0",
+      "location_type": "country",
+      "name": "Turkey",
+      "provider_count": 1
+    },
+    {
+      "country_code": "bh",
+      "country_location_id": "018bab1d-6bc3-95f8-9374-57ff852ef9ea",
+      "location_id": "018bab1d-6bc3-95f8-9374-57ff852ef9ea",
+      "location_type": "country",
+      "name": "Bahrain",
+      "provider_count": 3
+    },
+    {
+      "country_code": "se",
+      "country_location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_id": "018c965b-f982-d33a-6b83-24670fbc0fc9",
+      "location_type": "region",
+      "name": "Gävleborg",
+      "provider_count": 4,
+      "region_location_id": "018c965b-f982-d33a-6b83-24670fbc0fc9"
+    },
+    {
+      "city_location_id": "018c965a-929d-762e-30c8-c7036b11a30f",
+      "country_code": "se",
+      "country_location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_id": "018c965a-929d-762e-30c8-c7036b11a30f",
+      "location_type": "city",
+      "name": "Stockholm",
+      "provider_count": 2,
+      "region_location_id": "018c965a-921d-a783-2d01-b599d6a8058d"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-7125-240b-923c-1e0588c0639f",
+      "location_type": "region",
+      "name": "Utah",
+      "provider_count": 4,
+      "region_location_id": "018c965b-7125-240b-923c-1e0588c0639f"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bab1d-8105-4186-bf99-f935e61b05d0",
+      "location_type": "region",
+      "name": "Virginia",
+      "provider_count": 9,
+      "region_location_id": "018bab1d-8105-4186-bf99-f935e61b05d0"
+    },
+    {
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018c941a-379e-2d84-00be-45d43df4a28d",
+      "location_type": "region",
+      "name": "Ontario",
+      "provider_count": 8,
+      "region_location_id": "018c941a-379e-2d84-00be-45d43df4a28d"
+    },
+    {
+      "city_location_id": "018c965a-b6ef-c3ff-052c-0aa6d9b1a9cb",
+      "country_code": "il",
+      "country_location_id": "018bab1d-6f63-9a39-81dc-18ad02ba512f",
+      "location_id": "018c965a-b6ef-c3ff-052c-0aa6d9b1a9cb",
+      "location_type": "city",
+      "name": "Tel Aviv",
+      "provider_count": 11,
+      "region_location_id": "018c965a-b671-8b62-63d1-6bfef7b5271e"
+    },
+    {
+      "country_code": "tw",
+      "country_location_id": "018bab1d-5794-57ff-bc30-f35d2b9b5df3",
+      "location_id": "018bab1d-5794-57ff-bc30-f35d2b9b5df3",
+      "location_type": "country",
+      "name": "Taiwan",
+      "provider_count": 4
+    },
+    {
+      "country_code": "il",
+      "country_location_id": "018bab1d-6f63-9a39-81dc-18ad02ba512f",
+      "location_id": "018bab1d-6f63-9a39-81dc-18ad02ba512f",
+      "location_type": "country",
+      "name": "Israel",
+      "provider_count": 11
+    },
+    {
+      "country_code": "gb",
+      "country_location_id": "018bab1d-6148-7905-b87f-0f9a95d31cac",
+      "location_id": "018c8210-cd8a-0f91-215b-c4237d5a2a4d",
+      "location_type": "region",
+      "name": "England",
+      "provider_count": 12,
+      "region_location_id": "018c8210-cd8a-0f91-215b-c4237d5a2a4d"
+    },
+    {
+      "city_location_id": "018c965b-1854-61a3-1238-41530d410e22",
+      "country_code": "pl",
+      "country_location_id": "018bab1d-510f-72dc-732b-ca31394aec00",
+      "location_id": "018c965b-1854-61a3-1238-41530d410e22",
+      "location_type": "city",
+      "name": "Warsaw",
+      "provider_count": 5,
+      "region_location_id": "018c965b-17d5-42e4-b90b-dd731e21e779"
+    },
+    {
+      "city_location_id": "018c965b-71c1-6959-9ff3-10f449dc9179",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-71c1-6959-9ff3-10f449dc9179",
+      "location_type": "city",
+      "name": "Salt Lake City",
+      "provider_count": 4,
+      "region_location_id": "018c965b-7125-240b-923c-1e0588c0639f"
+    },
+    {
+      "country_code": "ae",
+      "country_location_id": "018bab1d-6551-2409-247a-0fe165f37f9b",
+      "location_id": "018bab1d-6551-2409-247a-0fe165f37f9b",
+      "location_type": "country",
+      "name": "United Arab Emirates",
+      "provider_count": 8
+    },
+    {
+      "country_code": "fr",
+      "country_location_id": "018bab1d-6bf9-39cb-6503-0c129a3a29ba",
+      "location_id": "018bab1d-6bf9-39cb-6503-0c129a3a29ba",
+      "location_type": "country",
+      "name": "France",
+      "provider_count": 12
+    },
+    {
+      "city_location_id": "018c965c-0638-00a4-bad6-fe63da4b2b59",
+      "country_code": "za",
+      "country_location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_id": "018c965c-0638-00a4-bad6-fe63da4b2b59",
+      "location_type": "city",
+      "name": "Johannesburg",
+      "provider_count": 4,
+      "region_location_id": "018c965c-0590-6399-feda-b3a87b160c06"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965a-b4cb-4274-7866-1d55b7c17b6b",
+      "location_type": "region",
+      "name": "Ohio",
+      "provider_count": 7,
+      "region_location_id": "018c965a-b4cb-4274-7866-1d55b7c17b6b"
+    },
+    {
+      "country_code": "br",
+      "country_location_id": "018bab1d-6d7a-aa78-e7ef-960cf3d2e5bc",
+      "location_id": "018c965a-b56b-423d-7e0e-b838ecf46ec8",
+      "location_type": "region",
+      "name": "São Paulo",
+      "provider_count": 11,
+      "region_location_id": "018c965a-b56b-423d-7e0e-b838ecf46ec8"
+    },
+    {
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965a-6eea-ac67-b1f9-7f5fb9653104",
+      "location_type": "region",
+      "name": "Maharashtra",
+      "provider_count": 12,
+      "region_location_id": "018c965a-6eea-ac67-b1f9-7f5fb9653104"
+    },
+    {
+      "country_code": "kr",
+      "country_location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_id": "018c965a-e0f3-20e6-605d-fd3ff469b0bb",
+      "location_type": "region",
+      "name": "Seoul",
+      "provider_count": 8,
+      "region_location_id": "018c965a-e0f3-20e6-605d-fd3ff469b0bb"
+    },
+    {
+      "city_location_id": "018c965a-e16f-c620-0b24-15390237762b",
+      "country_code": "kr",
+      "country_location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_id": "018c965a-e16f-c620-0b24-15390237762b",
+      "location_type": "city",
+      "name": "Seoul",
+      "provider_count": 8,
+      "region_location_id": "018c965a-e0f3-20e6-605d-fd3ff469b0bb"
+    },
+    {
+      "city_location_id": "018c965b-72f0-03f5-6114-c401a5ad3023",
+      "country_code": "cl",
+      "country_location_id": "018bab1d-5cd3-d934-895b-a66ace8885b6",
+      "location_id": "018c965b-72f0-03f5-6114-c401a5ad3023",
+      "location_type": "city",
+      "name": "Santiago",
+      "provider_count": 4,
+      "region_location_id": "018c965b-71fe-093a-55c8-f6f779f3ba19"
+    },
+    {
+      "city_location_id": "018e0e29-54b2-eeca-e54e-df287c85dac7",
+      "country_code": "tr",
+      "country_location_id": "018bab1d-4dc7-e509-5691-e8462f7182e0",
+      "location_id": "018e0e29-54b2-eeca-e54e-df287c85dac7",
+      "location_type": "city",
+      "name": "Istanbul",
+      "provider_count": 1,
+      "region_location_id": "018e0310-06d0-df21-87ab-14fe15cc2184"
+    },
+    {
+      "country_code": "es",
+      "country_location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_type": "country",
+      "name": "Spain",
+      "provider_count": 8
+    },
+    {
+      "country_code": "br",
+      "country_location_id": "018bab1d-6d7a-aa78-e7ef-960cf3d2e5bc",
+      "location_id": "018bab1d-6d7a-aa78-e7ef-960cf3d2e5bc",
+      "location_type": "country",
+      "name": "Brazil",
+      "provider_count": 11
+    },
+    {
+      "country_code": "jp",
+      "country_location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_id": "01908162-e006-ae61-b9e7-80b3177dff80",
+      "location_type": "region",
+      "name": "Osaka",
+      "provider_count": 8,
+      "region_location_id": "01908162-e006-ae61-b9e7-80b3177dff80"
+    },
+    {
+      "city_location_id": "018c965b-fa15-a172-de21-4ac5ee0733d5",
+      "country_code": "se",
+      "country_location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_id": "018c965b-fa15-a172-de21-4ac5ee0733d5",
+      "location_type": "city",
+      "name": "Gävle",
+      "provider_count": 4,
+      "region_location_id": "018c965b-f982-d33a-6b83-24670fbc0fc9"
+    },
+    {
+      "country_code": "no",
+      "country_location_id": "018bab1d-4e8f-2869-3251-3d127cba71f7",
+      "location_id": "018c965b-ded4-c6ca-d274-f30b4da9c00d",
+      "location_type": "region",
+      "name": "Oslo",
+      "provider_count": 4,
+      "region_location_id": "018c965b-ded4-c6ca-d274-f30b4da9c00d"
+    },
+    {
+      "country_code": "de",
+      "country_location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_id": "018c965a-7cce-956c-3e5e-8340cf951182",
+      "location_type": "region",
+      "name": "Hesse",
+      "provider_count": 12,
+      "region_location_id": "018c965a-7cce-956c-3e5e-8340cf951182"
+    },
+    {
+      "city_location_id": "018c965a-b5ea-1c71-d0b4-6e9cc1321cb4",
+      "country_code": "br",
+      "country_location_id": "018bab1d-6d7a-aa78-e7ef-960cf3d2e5bc",
+      "location_id": "018c965a-b5ea-1c71-d0b4-6e9cc1321cb4",
+      "location_type": "city",
+      "name": "São Paulo",
+      "provider_count": 11,
+      "region_location_id": "018c965a-b56b-423d-7e0e-b838ecf46ec8"
+    },
+    {
+      "city_location_id": "018c965a-48b1-456d-ee59-614b2c723fe4",
+      "country_code": "kr",
+      "country_location_id": "018bab1d-7a47-a10d-1f45-a2b4e6459a4a",
+      "location_id": "018c965a-48b1-456d-ee59-614b2c723fe4",
+      "location_type": "city",
+      "name": "Incheon",
+      "provider_count": 4,
+      "region_location_id": "018c965a-4825-fe82-a208-68513023cfb1"
+    },
+    {
+      "country_code": "it",
+      "country_location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_id": "018c965a-9669-ac41-4fbc-25f9c0d8c580",
+      "location_type": "region",
+      "name": "Lombardy",
+      "provider_count": 11,
+      "region_location_id": "018c965a-9669-ac41-4fbc-25f9c0d8c580"
+    },
+    {
+      "city_location_id": "018c965b-61c6-3371-8b40-36ec9068bb7f",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-61c6-3371-8b40-36ec9068bb7f",
+      "location_type": "city",
+      "name": "Council Bluffs",
+      "provider_count": 4,
+      "region_location_id": "018c965b-6132-4723-69b9-2f3c6a5536bd"
+    },
+    {
+      "country_code": "za",
+      "country_location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_id": "018c965c-0590-6399-feda-b3a87b160c06",
+      "location_type": "region",
+      "name": "Gauteng",
+      "provider_count": 4,
+      "region_location_id": "018c965c-0590-6399-feda-b3a87b160c06"
+    },
+    {
+      "country_code": "de",
+      "country_location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_type": "country",
+      "name": "Germany",
+      "provider_count": 16
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c8ff7-67b6-cfe2-e468-43be19ba7489",
+      "location_type": "region",
+      "name": "Arizona",
+      "provider_count": 4,
+      "region_location_id": "018c8ff7-67b6-cfe2-e468-43be19ba7489"
+    },
+    {
+      "city_location_id": "018bab21-4c5f-f446-b033-6bd48bb5fc47",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bab21-4c5f-f446-b033-6bd48bb5fc47",
+      "location_type": "city",
+      "name": "Palo Alto",
+      "provider_count": 11,
+      "region_location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc"
+    },
+    {
+      "country_code": "fr",
+      "country_location_id": "018bab1d-6bf9-39cb-6503-0c129a3a29ba",
+      "location_id": "018c88a9-d300-445f-ba60-0c0b6b38f0db",
+      "location_type": "region",
+      "name": "Île-de-France",
+      "provider_count": 12,
+      "region_location_id": "018c88a9-d300-445f-ba60-0c0b6b38f0db"
+    },
+    {
+      "city_location_id": "018c8d7f-ead5-3b22-0e66-fe3fe3f71ef4",
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018c8d7f-ead5-3b22-0e66-fe3fe3f71ef4",
+      "location_type": "city",
+      "name": "Montréal",
+      "provider_count": 8,
+      "region_location_id": "018c8d7f-ea60-c9b3-c3f9-6514a69dad2f"
+    },
+    {
+      "city_location_id": "018c965a-6c84-c06a-7da9-de1d110fa769",
+      "country_code": "sg",
+      "country_location_id": "018bab1d-72ce-3373-16b8-99bb0c4a4fea",
+      "location_id": "018c965a-6c84-c06a-7da9-de1d110fa769",
+      "location_type": "city",
+      "name": "Singapore",
+      "provider_count": 11,
+      "region_location_id": "018c965a-6bf6-f7e7-8dd0-67560b826f0b"
+    },
+    {
+      "country_code": "au",
+      "country_location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_id": "018c965a-7f39-08d2-812b-ae7eda47328a",
+      "location_type": "region",
+      "name": "Victoria",
+      "provider_count": 8,
+      "region_location_id": "018c965a-7f39-08d2-812b-ae7eda47328a"
+    },
+    {
+      "country_code": "il",
+      "country_location_id": "018bab1d-6f63-9a39-81dc-18ad02ba512f",
+      "location_id": "018c965a-b671-8b62-63d1-6bfef7b5271e",
+      "location_type": "region",
+      "name": "Tel Aviv",
+      "provider_count": 11,
+      "region_location_id": "018c965a-b671-8b62-63d1-6bfef7b5271e"
+    },
+    {
+      "country_code": "gb",
+      "country_location_id": "018bab1d-6148-7905-b87f-0f9a95d31cac",
+      "location_id": "018bab1d-6148-7905-b87f-0f9a95d31cac",
+      "location_type": "country",
+      "name": "United Kingdom",
+      "provider_count": 12
+    },
+    {
+      "country_code": "nl",
+      "country_location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_type": "country",
+      "name": "Netherlands",
+      "provider_count": 7
+    },
+    {
+      "country_code": "it",
+      "country_location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_id": "018c965b-327d-2228-6237-5e91e9f9021b",
+      "location_type": "region",
+      "name": "Piedmont",
+      "provider_count": 3,
+      "region_location_id": "018c965b-327d-2228-6237-5e91e9f9021b"
+    },
+    {
+      "country_code": "nl",
+      "country_location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_id": "018c965c-0e1f-07bd-f745-cd3c30cd3989",
+      "location_type": "region",
+      "name": "North Holland",
+      "provider_count": 4,
+      "region_location_id": "018c965c-0e1f-07bd-f745-cd3c30cd3989"
+    },
+    {
+      "city_location_id": "018c965a-8174-4b89-59e3-2d442c42091d",
+      "country_code": "id",
+      "country_location_id": "018bab1d-63c9-1fe4-a870-30cf6bce95b4",
+      "location_id": "018c965a-8174-4b89-59e3-2d442c42091d",
+      "location_type": "city",
+      "name": "Jakarta",
+      "provider_count": 8,
+      "region_location_id": "018c965a-80ed-1b90-1c4b-89d6151b3e35"
+    },
+    {
+      "city_location_id": "018c965b-d623-7d73-967f-46a9316974f4",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-d623-7d73-967f-46a9316974f4",
+      "location_type": "city",
+      "name": "San Antonio",
+      "provider_count": 4,
+      "region_location_id": "018bdaf3-6a58-44b4-88f4-fc8edea591b3"
+    },
+    {
+      "country_code": "es",
+      "country_location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_id": "018c965b-13b9-f042-12fd-1f1526641192",
+      "location_type": "region",
+      "name": "Madrid",
+      "provider_count": 4,
+      "region_location_id": "018c965b-13b9-f042-12fd-1f1526641192"
+    },
+    {
+      "city_location_id": "018c965b-6a79-3119-c58b-d04918a08a00",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-6a79-3119-c58b-d04918a08a00",
+      "location_type": "city",
+      "name": "North Charleston",
+      "provider_count": 4,
+      "region_location_id": "018c965b-6969-ef25-c0ea-3e5da1ea7d84"
+    },
+    {
+      "city_location_id": "018c965b-982d-b5ba-aaa8-5217bbceb542",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-982d-b5ba-aaa8-5217bbceb542",
+      "location_type": "city",
+      "name": "Boydton",
+      "provider_count": 1,
+      "region_location_id": "018bab1d-8105-4186-bf99-f935e61b05d0"
+    },
+    {
+      "city_location_id": "018c965b-df5d-a8df-655f-20bc74b7ddad",
+      "country_code": "no",
+      "country_location_id": "018bab1d-4e8f-2869-3251-3d127cba71f7",
+      "location_id": "018c965b-df5d-a8df-655f-20bc74b7ddad",
+      "location_type": "city",
+      "name": "Oslo",
+      "provider_count": 4,
+      "region_location_id": "018c965b-ded4-c6ca-d274-f30b4da9c00d"
+    },
+    {
+      "country_code": "hk",
+      "country_location_id": "018bab1d-7f43-4aa4-662e-fc393d0546a6",
+      "location_id": "018d6ff4-83f1-15a8-0e15-59f14c503665",
+      "location_type": "region",
+      "name": "Hong Kong",
+      "provider_count": 12,
+      "region_location_id": "018d6ff4-83f1-15a8-0e15-59f14c503665"
+    },
+    {
+      "city_location_id": "0191e3c3-8b7b-da8e-5508-9ff0b22d88a4",
+      "country_code": "ru",
+      "country_location_id": "018bab1d-4df4-4690-f53b-c2b26dd7dbf8",
+      "location_id": "0191e3c3-8b7b-da8e-5508-9ff0b22d88a4",
+      "location_type": "city",
+      "name": "Vladivostok",
+      "provider_count": 1,
+      "region_location_id": "0191e3c3-8b57-78c0-3284-c94ac8350329"
+    },
+    {
+      "country_code": "ru",
+      "country_location_id": "018bab1d-4df4-4690-f53b-c2b26dd7dbf8",
+      "location_id": "018bab1d-4df4-4690-f53b-c2b26dd7dbf8",
+      "location_type": "country",
+      "name": "Russian Federation",
+      "provider_count": 1
+    },
+    {
+      "city_location_id": "018c8ff7-6838-426f-cef4-9635e4ec5935",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c8ff7-6838-426f-cef4-9635e4ec5935",
+      "location_type": "city",
+      "name": "Phoenix",
+      "provider_count": 4,
+      "region_location_id": "018c8ff7-67b6-cfe2-e468-43be19ba7489"
+    },
+    {
+      "country_code": "fi",
+      "country_location_id": "018bab1d-5338-7ce4-1756-9b0e006d5a3c",
+      "location_id": "018c965b-17b0-a505-c42e-b90cd4254522",
+      "location_type": "region",
+      "name": "South Karelia",
+      "provider_count": 4,
+      "region_location_id": "018c965b-17b0-a505-c42e-b90cd4254522"
+    },
+    {
+      "country_code": "no",
+      "country_location_id": "018bab1d-4e8f-2869-3251-3d127cba71f7",
+      "location_id": "018bab1d-4e8f-2869-3251-3d127cba71f7",
+      "location_type": "country",
+      "name": "Norway",
+      "provider_count": 4
+    },
+    {
+      "city_location_id": "018c965a-7fc8-15e2-27ec-5cda2f0eb225",
+      "country_code": "au",
+      "country_location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_id": "018c965a-7fc8-15e2-27ec-5cda2f0eb225",
+      "location_type": "city",
+      "name": "Melbourne",
+      "provider_count": 8,
+      "region_location_id": "018c965a-7f39-08d2-812b-ae7eda47328a"
+    },
+    {
+      "city_location_id": "018c965b-af89-af15-d7b8-3833896e0642",
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965b-af89-af15-d7b8-3833896e0642",
+      "location_type": "city",
+      "name": "Pune",
+      "provider_count": 4,
+      "region_location_id": "018c965a-6eea-ac67-b1f9-7f5fb9653104"
+    },
+    {
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_type": "country",
+      "name": "Canada",
+      "provider_count": 17
+    },
+    {
+      "country_code": "ie",
+      "country_location_id": "018bab1d-7bbe-afb4-b7a5-828fed714836",
+      "location_id": "018c965a-90d9-8d58-fffd-368f3a399a7a",
+      "location_type": "region",
+      "name": "Leinster",
+      "provider_count": 8,
+      "region_location_id": "018c965a-90d9-8d58-fffd-368f3a399a7a"
+    },
+    {
+      "country_code": "pl",
+      "country_location_id": "018bab1d-510f-72dc-732b-ca31394aec00",
+      "location_id": "018c965b-17d5-42e4-b90b-dd731e21e779",
+      "location_type": "region",
+      "name": "Mazovia",
+      "provider_count": 5,
+      "region_location_id": "018c965b-17d5-42e4-b90b-dd731e21e779"
+    },
+    {
+      "country_code": "nl",
+      "country_location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_id": "018c965b-3679-bb2d-60aa-151e1f3629f6",
+      "location_type": "region",
+      "name": "Groningen",
+      "provider_count": 3,
+      "region_location_id": "018c965b-3679-bb2d-60aa-151e1f3629f6"
+    },
+    {
+      "country_code": "ae",
+      "country_location_id": "018bab1d-6551-2409-247a-0fe165f37f9b",
+      "location_id": "018c965c-173f-d77e-e207-e91015023ef0",
+      "location_type": "region",
+      "name": "Dubai",
+      "provider_count": 8,
+      "region_location_id": "018c965c-173f-d77e-e207-e91015023ef0"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bdaf3-6a58-44b4-88f4-fc8edea591b3",
+      "location_type": "region",
+      "name": "Texas",
+      "provider_count": 7,
+      "region_location_id": "018bdaf3-6a58-44b4-88f4-fc8edea591b3"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c848c-10d6-3353-a1e4-b47fee57910f",
+      "location_type": "region",
+      "name": "Illinois",
+      "provider_count": 4,
+      "region_location_id": "018c848c-10d6-3353-a1e4-b47fee57910f"
+    },
+    {
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965b-0b83-6271-f537-5f2d757446ce",
+      "location_type": "region",
+      "name": "Delhi",
+      "provider_count": 4,
+      "region_location_id": "018c965b-0b83-6271-f537-5f2d757446ce"
+    },
+    {
+      "city_location_id": "01908162-e01f-65d7-2d86-b382ba7f97c4",
+      "country_code": "jp",
+      "country_location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_id": "01908162-e01f-65d7-2d86-b382ba7f97c4",
+      "location_type": "city",
+      "name": "Osaka",
+      "provider_count": 8,
+      "region_location_id": "01908162-e006-ae61-b9e7-80b3177dff80"
+    },
+    {
+      "country_code": "jp",
+      "country_location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_type": "country",
+      "name": "Japan",
+      "provider_count": 20
+    },
+    {
+      "city_location_id": "018c965a-adaf-2c82-7df8-840b24d300d3",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965a-adaf-2c82-7df8-840b24d300d3",
+      "location_type": "city",
+      "name": "Ashburn",
+      "provider_count": 4,
+      "region_location_id": "018bab1d-8105-4186-bf99-f935e61b05d0"
+    },
+    {
+      "country_code": "fi",
+      "country_location_id": "018bab1d-5338-7ce4-1756-9b0e006d5a3c",
+      "location_id": "018bab1d-5338-7ce4-1756-9b0e006d5a3c",
+      "location_type": "country",
+      "name": "Finland",
+      "provider_count": 4
+    },
+    {
+      "city_location_id": "018c9038-6a5d-bdf8-6555-479fbeec14f2",
+      "country_code": "fr",
+      "country_location_id": "018bab1d-6bf9-39cb-6503-0c129a3a29ba",
+      "location_id": "018c9038-6a5d-bdf8-6555-479fbeec14f2",
+      "location_type": "city",
+      "name": "Paris",
+      "provider_count": 12,
+      "region_location_id": "018c88a9-d300-445f-ba60-0c0b6b38f0db"
+    },
+    {
+      "city_location_id": "018d6ff4-841d-719c-dfd7-9bf91d0e87b6",
+      "country_code": "hk",
+      "country_location_id": "018bab1d-7f43-4aa4-662e-fc393d0546a6",
+      "location_id": "018d6ff4-841d-719c-dfd7-9bf91d0e87b6",
+      "location_type": "city",
+      "name": "Hong Kong",
+      "provider_count": 12,
+      "region_location_id": "018d6ff4-83f1-15a8-0e15-59f14c503665"
+    },
+    {
+      "country_code": "ru",
+      "country_location_id": "018bab1d-4df4-4690-f53b-c2b26dd7dbf8",
+      "location_id": "0191e3c3-8b57-78c0-3284-c94ac8350329",
+      "location_type": "region",
+      "name": "Primorye",
+      "provider_count": 1,
+      "region_location_id": "0191e3c3-8b57-78c0-3284-c94ac8350329"
+    },
+    {
+      "country_code": "se",
+      "country_location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_id": "018bab1d-4ea0-4bd2-d15a-683802e0873e",
+      "location_type": "country",
+      "name": "Sweden",
+      "provider_count": 6
+    },
+    {
+      "country_code": "hk",
+      "country_location_id": "018bab1d-7f43-4aa4-662e-fc393d0546a6",
+      "location_id": "018bab1d-7f43-4aa4-662e-fc393d0546a6",
+      "location_type": "country",
+      "name": "Hong Kong",
+      "provider_count": 12
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c902f-f790-0cdd-62ec-6ccd9840b4d5",
+      "location_type": "region",
+      "name": "Oregon",
+      "provider_count": 8,
+      "region_location_id": "018c902f-f790-0cdd-62ec-6ccd9840b4d5"
+    },
+    {
+      "city_location_id": "018c9623-c920-03c6-2c87-d9cdaf49fb51",
+      "country_code": "jp",
+      "country_location_id": "018bab1d-602c-3952-cc71-7573a687fe34",
+      "location_id": "018c9623-c920-03c6-2c87-d9cdaf49fb51",
+      "location_type": "city",
+      "name": "Tokyo",
+      "provider_count": 12,
+      "region_location_id": "018c9623-c89b-0122-5875-190e62605802"
+    },
+    {
+      "country_code": "es",
+      "country_location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_id": "018c965a-962d-1b7e-5e39-afb65d996de1",
+      "location_type": "region",
+      "name": "Aragon",
+      "provider_count": 4,
+      "region_location_id": "018c965a-962d-1b7e-5e39-afb65d996de1"
+    },
+    {
+      "city_location_id": "018c965a-af02-111b-3ce4-04823002370a",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965a-af02-111b-3ce4-04823002370a",
+      "location_type": "city",
+      "name": "San Jose",
+      "provider_count": 8,
+      "region_location_id": "018bab1d-7fa9-59ab-b4cd-279256cfc9bc"
+    },
+    {
+      "city_location_id": "018c965a-d9d3-12c6-fb30-a1c67c572462",
+      "country_code": "tw",
+      "country_location_id": "018bab1d-5794-57ff-bc30-f35d2b9b5df3",
+      "location_id": "018c965a-d9d3-12c6-fb30-a1c67c572462",
+      "location_type": "city",
+      "name": "Taipei",
+      "provider_count": 4,
+      "region_location_id": "018c965a-d957-6ac6-3b2a-d99e8abb3ec1"
+    },
+    {
+      "city_location_id": "018c965b-143d-ee37-f6b9-9a8568aedd78",
+      "country_code": "es",
+      "country_location_id": "018bab1d-4d84-c5fa-b0e8-6930d2f6b75f",
+      "location_id": "018c965b-143d-ee37-f6b9-9a8568aedd78",
+      "location_type": "city",
+      "name": "Madrid",
+      "provider_count": 4,
+      "region_location_id": "018c965b-13b9-f042-12fd-1f1526641192"
+    },
+    {
+      "country_code": "za",
+      "country_location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_type": "country",
+      "name": "South Africa",
+      "provider_count": 8
+    },
+    {
+      "country_code": "de",
+      "country_location_id": "018bab1d-5b38-1698-e335-d5ad3a486f25",
+      "location_id": "018c8e48-8e1e-dc7a-f894-e0824baef39f",
+      "location_type": "region",
+      "name": "Berlin",
+      "provider_count": 4,
+      "region_location_id": "018c8e48-8e1e-dc7a-f894-e0824baef39f"
+    },
+    {
+      "city_location_id": "018c965b-0c04-db6e-5488-40b1102770b9",
+      "country_code": "in",
+      "country_location_id": "018bab1d-67de-3ca9-6546-40930d820382",
+      "location_id": "018c965b-0c04-db6e-5488-40b1102770b9",
+      "location_type": "city",
+      "name": "New Delhi",
+      "provider_count": 4,
+      "region_location_id": "018c965b-0b83-6271-f537-5f2d757446ce"
+    },
+    {
+      "country_code": "id",
+      "country_location_id": "018bab1d-63c9-1fe4-a870-30cf6bce95b4",
+      "location_id": "018c965a-80ed-1b90-1c4b-89d6151b3e35",
+      "location_type": "region",
+      "name": "Jakarta",
+      "provider_count": 8,
+      "region_location_id": "018c965a-80ed-1b90-1c4b-89d6151b3e35"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c965b-6969-ef25-c0ea-3e5da1ea7d84",
+      "location_type": "region",
+      "name": "South Carolina",
+      "provider_count": 4,
+      "region_location_id": "018c965b-6969-ef25-c0ea-3e5da1ea7d84"
+    },
+    {
+      "city_location_id": "018c965c-0ebe-a098-f071-c136431f00ba",
+      "country_code": "nl",
+      "country_location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_id": "018c965c-0ebe-a098-f071-c136431f00ba",
+      "location_type": "city",
+      "name": "Amsterdam",
+      "provider_count": 4,
+      "region_location_id": "018c965c-0e1f-07bd-f745-cd3c30cd3989"
+    },
+    {
+      "city_location_id": "018cdfc5-af05-ec55-54f9-2ec275353c95",
+      "country_code": "bh",
+      "country_location_id": "018bab1d-6bc3-95f8-9374-57ff852ef9ea",
+      "location_id": "018cdfc5-af05-ec55-54f9-2ec275353c95",
+      "location_type": "city",
+      "name": "Dār Kulayb",
+      "provider_count": 3,
+      "region_location_id": "018cdfc5-ae83-1d54-af07-c2cf67684a07"
+    },
+    {
+      "country_code": "tr",
+      "country_location_id": "018bab1d-4dc7-e509-5691-e8462f7182e0",
+      "location_id": "018e0310-06d0-df21-87ab-14fe15cc2184",
+      "location_type": "region",
+      "name": "Istanbul",
+      "provider_count": 1,
+      "region_location_id": "018e0310-06d0-df21-87ab-14fe15cc2184"
+    },
+    {
+      "city_location_id": "018bcc85-b1bc-ea3e-6518-f484faadfefa",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bcc85-b1bc-ea3e-6518-f484faadfefa",
+      "location_type": "city",
+      "name": "Las Vegas",
+      "provider_count": 4,
+      "region_location_id": "018bcc85-b15f-d013-9e48-69dfe7d4700e"
+    },
+    {
+      "city_location_id": "018c5ff3-c9e8-6ed6-d792-1469dbce434b",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018c5ff3-c9e8-6ed6-d792-1469dbce434b",
+      "location_type": "city",
+      "name": "Reno",
+      "provider_count": 1,
+      "region_location_id": "018bcc85-b15f-d013-9e48-69dfe7d4700e"
+    },
+    {
+      "city_location_id": "018c850c-cbec-48d3-0b1f-36f248617280",
+      "country_code": "ch",
+      "country_location_id": "018bab1d-7b34-eb4b-d0b8-9c0f5b5b8d4e",
+      "location_id": "018c850c-cbec-48d3-0b1f-36f248617280",
+      "location_type": "city",
+      "name": "Zürich",
+      "provider_count": 12,
+      "region_location_id": "018c83cc-8b12-7e33-a919-f1d36097b11b"
+    },
+    {
+      "country_code": "za",
+      "country_location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_id": "018c965a-65b6-ce0b-0b06-ca1f3f14f409",
+      "location_type": "region",
+      "name": "Western Cape",
+      "provider_count": 4,
+      "region_location_id": "018c965a-65b6-ce0b-0b06-ca1f3f14f409"
+    },
+    {
+      "country_code": "sg",
+      "country_location_id": "018bab1d-72ce-3373-16b8-99bb0c4a4fea",
+      "location_id": "018c965a-6bf6-f7e7-8dd0-67560b826f0b",
+      "location_type": "region",
+      "name": "Singapore",
+      "provider_count": 11,
+      "region_location_id": "018c965a-6bf6-f7e7-8dd0-67560b826f0b"
+    },
+    {
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018cc0a0-ca99-b670-5faa-42531ea9fc40",
+      "location_type": "region",
+      "name": "British Columbia",
+      "provider_count": 1,
+      "region_location_id": "018cc0a0-ca99-b670-5faa-42531ea9fc40"
+    },
+    {
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bcc85-b15f-d013-9e48-69dfe7d4700e",
+      "location_type": "region",
+      "name": "Nevada",
+      "provider_count": 5,
+      "region_location_id": "018bcc85-b15f-d013-9e48-69dfe7d4700e"
+    },
+    {
+      "city_location_id": "018bfac4-1c51-ce1e-fb38-d750eda0f3e2",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "018bfac4-1c51-ce1e-fb38-d750eda0f3e2",
+      "location_type": "city",
+      "name": "Dallas",
+      "provider_count": 3,
+      "region_location_id": "018bdaf3-6a58-44b4-88f4-fc8edea591b3"
+    },
+    {
+      "country_code": "ch",
+      "country_location_id": "018bab1d-7b34-eb4b-d0b8-9c0f5b5b8d4e",
+      "location_id": "018bab1d-7b34-eb4b-d0b8-9c0f5b5b8d4e",
+      "location_type": "country",
+      "name": "Switzerland",
+      "provider_count": 12
+    },
+    {
+      "country_code": "ca",
+      "country_location_id": "018bab1d-7c56-ce30-3029-b57965555c68",
+      "location_id": "018c8d7f-ea60-c9b3-c3f9-6514a69dad2f",
+      "location_type": "region",
+      "name": "Quebec",
+      "provider_count": 8,
+      "region_location_id": "018c8d7f-ea60-c9b3-c3f9-6514a69dad2f"
+    },
+    {
+      "city_location_id": "018c965b-6a98-2c91-e003-0aa8739a1e59",
+      "country_code": "qa",
+      "country_location_id": "018bab1d-73de-c653-82f8-00cbb158b86f",
+      "location_id": "018c965b-6a98-2c91-e003-0aa8739a1e59",
+      "location_type": "city",
+      "name": "Doha",
+      "provider_count": 4,
+      "region_location_id": "018c965b-697d-9d2c-1ef8-f24ca8928f32"
+    },
+    {
+      "country_code": "it",
+      "country_location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_id": "018bab1d-4c7c-60fa-38dc-0d98b581208a",
+      "location_type": "country",
+      "name": "Italy",
+      "provider_count": 14
+    },
+    {
+      "country_code": "sg",
+      "country_location_id": "018bab1d-72ce-3373-16b8-99bb0c4a4fea",
+      "location_id": "018bab1d-72ce-3373-16b8-99bb0c4a4fea",
+      "location_type": "country",
+      "name": "Singapore",
+      "provider_count": 11
+    },
+    {
+      "country_code": "au",
+      "country_location_id": "018bab1d-55f4-7c77-f942-7ad368a7f17e",
+      "location_id": "018c965a-64c3-b4ae-d1a2-f6b92b39d678",
+      "location_type": "region",
+      "name": "New South Wales",
+      "provider_count": 12,
+      "region_location_id": "018c965a-64c3-b4ae-d1a2-f6b92b39d678"
+    },
+    {
+      "city_location_id": "018c965a-6652-8b93-ff06-da54fd1e81e7",
+      "country_code": "za",
+      "country_location_id": "018bab1d-79bf-4e49-4e17-96bdba773a47",
+      "location_id": "018c965a-6652-8b93-ff06-da54fd1e81e7",
+      "location_type": "city",
+      "name": "Cape Town",
+      "provider_count": 4,
+      "region_location_id": "018c965a-65b6-ce0b-0b06-ca1f3f14f409"
+    },
+    {
+      "city_location_id": "019123f1-1980-6810-02d8-ff988c222d17",
+      "country_code": "us",
+      "country_location_id": "018bab1d-60e8-27a7-3757-6b11fd7e747c",
+      "location_id": "019123f1-1980-6810-02d8-ff988c222d17",
+      "location_type": "city",
+      "name": "Washington",
+      "provider_count": 4,
+      "region_location_id": "019123f1-18f7-c8d6-9b81-b2301c492df5"
+    },
+    {
+      "city_location_id": "018c965b-3703-dddd-8209-9e3a831f8fc3",
+      "country_code": "nl",
+      "country_location_id": "018bab1d-78d0-299a-c4d7-ea9f8610ae7e",
+      "location_id": "018c965b-3703-dddd-8209-9e3a831f8fc3",
+      "location_type": "city",
+      "name": "Groningen",
+      "provider_count": 3,
+      "region_location_id": "018c965b-3679-bb2d-60aa-151e1f3629f6"
+    },
+    {
+      "country_code": "pl",
+      "country_location_id": "018bab1d-510f-72dc-732b-ca31394aec00",
+      "location_id": "018bab1d-510f-72dc-732b-ca31394aec00",
+      "location_type": "country",
+      "name": "Poland",
+      "provider_count": 5
+    },
+    {
+      "country_code": "ch",
+      "country_location_id": "018bab1d-7b34-eb4b-d0b8-9c0f5b5b8d4e",
+      "location_id": "018c83cc-8b12-7e33-a919-f1d36097b11b",
+      "location_type": "region",
+      "name": "Zurich",
+      "provider_count": 12,
+      "region_location_id": "018c83cc-8b12-7e33-a919-f1d36097b11b"
+    },
+    {
+      "country_code": "qa",
+      "country_location_id": "018bab1d-73de-c653-82f8-00cbb158b86f",
+      "location_id": "018bab1d-73de-c653-82f8-00cbb158b86f",
+      "location_type": "country",
+      "name": "Qatar",
+      "provider_count": 4
+    }
+  ]
+}

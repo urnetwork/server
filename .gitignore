@@ -14,6 +14,7 @@ gpt/gpt
 connect/connect
 connect/connect.test
 connect/profile
+proxy/proxy
 main
 
 temp/*
