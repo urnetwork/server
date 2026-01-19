@@ -99,7 +99,12 @@ type ProxyConfig struct {
 
 	HttpsRequireAuth bool `json:"https_require_auth"`
 
-	InitialDeviceState *ProxyDeviceState `json:"initial_device_state,omitempty"`
+	InitialDeviceState *ExtendedProxyDeviceState `json:"initial_device_state,omitempty"`
+}
+
+type ExtendedProxyDeviceState struct {
+	ProxyDeviceState
+	CountryCode string `json:"country_code,omitempty"`
 }
 
 type AuthNetworkClientResult struct {
@@ -247,12 +252,21 @@ func AuthNetworkClient(
 				}
 			}
 
+			proxyDeviceState := authClient.ProxyConfig.InitialDeviceState.ProxyDeviceState
+			if proxyDeviceState.Location == nil {
+				// try the country code
+				proxyDeviceState.Location = GetConnectLocationForCountryCode(
+					session.Ctx,
+					authClient.ProxyConfig.InitialDeviceState.CountryCode,
+				)
+			}
+
 			proxyDeviceConfig := &ProxyDeviceConfig{
 				ProxyDeviceConnection: ProxyDeviceConnection{
 					ClientId: clientId,
 				},
 				LockSubnets:        lockSubnets,
-				InitialDeviceState: authClient.ProxyConfig.InitialDeviceState,
+				InitialDeviceState: &proxyDeviceState,
 			}
 			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 			if err == nil {

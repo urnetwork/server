@@ -365,12 +365,15 @@ var countryCodeConnectCountries = sync.OnceValue(func() map[string]*connectCount
 			LocationTypeCountry,
 		)
 		server.WithPgResult(result, err, func() {
-			var c connectCountry
-			server.Raise(result.Scan(
-				&c.LocationId,
-				&c.Country,
-				&c.CountryCode,
-			))
+			for result.Next() {
+				var c connectCountry
+				server.Raise(result.Scan(
+					&c.LocationId,
+					&c.Country,
+					&c.CountryCode,
+				))
+				m[c.CountryCode] = &c
+			}
 		})
 	})
 
