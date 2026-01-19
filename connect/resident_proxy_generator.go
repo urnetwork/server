@@ -193,6 +193,14 @@ func (self *exchangeGenerator) NewClient(
 	clientOob := newExchangeOutOfBandControl(ctx, server.Id(args.ClientId))
 	client := connect.NewClient(ctx, args.ClientId, clientOob, clientSettings)
 
+	// enable return traffic for this client
+	client.ContractManager().SetProvideModesWithReturnTrafficWithAckCallback(
+		map[protocol.ProvideMode]bool{},
+		nil,
+	)
+
+	routeManager := client.RouteManager()
+
 	transport := NewResidentTransport(
 		client.Ctx(),
 		self.exchange,
@@ -201,6 +209,20 @@ func (self *exchangeGenerator) NewClient(
 	)
 	go server.HandleError(func() {
 		defer client.Cancel()
+
+		// the platform can route any destination,
+		// since every client has a platform transport
+		sendTransport := connect.NewSendGatewayTransport()
+		receiveTransport := connect.NewReceiveGatewayTransport()
+
+		routeManager.UpdateTransport(sendTransport, []connect.Route{transport.send})
+		routeManager.UpdateTransport(receiveTransport, []connect.Route{transport.receive})
+
+		defer func() {
+			routeManager.RemoveTransport(sendTransport)
+			routeManager.RemoveTransport(receiveTransport)
+		}()
+
 		transport.Run()
 		// close is done in the write
 	})
@@ -211,27 +233,6 @@ func (self *exchangeGenerator) NewClient(
 		case <-transport.Done():
 		}
 	})
-
-	// the platform can route any destination,
-	// since every client has a platform transport
-	sendTransport := connect.NewSendGatewayTransport()
-	receiveTransport := connect.NewReceiveGatewayTransport()
-
-	routeManager := client.RouteManager()
-
-	routeManager.UpdateTransport(sendTransport, []connect.Route{transport.send})
-	routeManager.UpdateTransport(receiveTransport, []connect.Route{transport.receive})
-
-	// defer func() {
-	// 	self.routeManager.RemoveTransport(sendTransport)
-	// 	self.routeManager.RemoveTransport(receiveTransport)
-	// }()
-
-	// enable return traffic for this client
-	client.ContractManager().SetProvideModesWithReturnTrafficWithAckCallback(
-		map[protocol.ProvideMode]bool{},
-		nil,
-	)
 
 	return client, nil
 }

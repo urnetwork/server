@@ -528,65 +528,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		}
 	})
 
-	runForward := func(forward chan []byte, closeForward func()) {
-		// messages from the forward are to be forwarded by the resident
-		// the only route a resident has is to its client_id
-		// a forward is a send where the source id does not match the client
-
-		defer closeForward()
-
-		go server.HandleError(func() {
-			defer handleCancel()
-
-			sendBuffer := NewDefaultExchangeBuffer(self.settings)
-			for {
-				select {
-				case <-handleCtx.Done():
-					return
-				case <-time.After(self.settings.ExchangePingTimeout):
-					// send a ping
-					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
-						return
-					}
-				}
-			}
-		})
-
-		go server.HandleError(func() {
-			defer handleCancel()
-
-			for {
-				message, err := receiveBuffer.ReadMessage(conn)
-				if err != nil {
-					return
-				}
-				if len(message) == 0 {
-					// just a ping
-					resident.UpdateActivity()
-					connect.MessagePoolReturn(message)
-					continue
-				}
-
-				select {
-				case <-handleCtx.Done():
-					connect.MessagePoolReturn(message)
-					return
-				case forward <- message:
-					resident.UpdateActivity()
-					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
-				case <-time.After(self.settings.WriteTimeout):
-					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
-					connect.MessagePoolReturn(message)
-				}
-			}
-		})
-
-		select {
-		case <-handleCtx.Done():
-			glog.V(1).Infof("[ecrf]handle done\n")
-		}
-	}
-
 	runTransport := func(send chan []byte, receive chan []byte, closeTransport func()) {
 		// this must close `receive`
 
@@ -663,6 +604,144 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		}
 	}
 
+	runTun := func(send chan []byte, receive chan []byte, closeTransport func()) {
+		// this must close `receive`
+
+		defer closeTransport()
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-send:
+					if !ok {
+						return
+					}
+					resident.UpdateActivity()
+					if err := sendBuffer.WriteMessage(conn, message); err != nil {
+						return
+					}
+
+					glog.V(1).Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
+
+				case <-time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		})
+
+		go server.HandleError(func() {
+			defer func() {
+				handleCancel()
+				close(receive)
+			}()
+
+			// read
+			// messages from the transport are to be received by the resident
+			// messages not destined for the control id are handled by the resident forward
+			for {
+				message, err := receiveBuffer.ReadMessage(conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				glog.V(2).Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+
+				select {
+				case <-handleCtx.Done():
+					connect.MessagePoolReturn(message)
+					return
+				case receive <- message:
+					resident.UpdateActivity()
+					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+					// case <-time.After(self.settings.WriteTimeout):
+					// 	glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
+					// 	connect.MessagePoolReturn(message)
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecr]handle done\n")
+		}
+	}
+
+	runForward := func(forward chan []byte, closeForward func()) {
+		// messages from the forward are to be forwarded by the resident
+		// the only route a resident has is to its client_id
+		// a forward is a send where the source id does not match the client
+
+		defer closeForward()
+
+		go server.HandleError(func() {
+			defer handleCancel()
+
+			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			for {
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-time.After(self.settings.ExchangePingTimeout):
+					// send a ping
+					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
+						return
+					}
+				}
+			}
+		})
+
+		go server.HandleError(func() {
+			defer func() {
+				handleCancel()
+				close(forward)
+			}()
+
+			for {
+				message, err := receiveBuffer.ReadMessage(conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					resident.UpdateActivity()
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				select {
+				case <-handleCtx.Done():
+					connect.MessagePoolReturn(message)
+					return
+				case forward <- message:
+					resident.UpdateActivity()
+					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+				case <-time.After(self.settings.WriteTimeout):
+					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
+					connect.MessagePoolReturn(message)
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			glog.V(1).Infof("[ecrf]handle done\n")
+		}
+	}
+
 	switch header.Op {
 	case ExchangeOpTransport:
 		send, receive, closeTransport, err := resident.AddTransport()
@@ -670,17 +749,16 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			runTransport(send, receive, closeTransport)
 		} else {
 			glog.Infof("[ecr]transport connect err = %s", err)
-			handleCancel()
 		}
 
 	case ExchangeOpTunTransport:
-		send, receive, closeTransport, err := resident.AddTun()
+		send, receive, closeTransport, err := resident.AddTun(*header)
 		if err == nil {
-			runTransport(send, receive, closeTransport)
+			runTun(send, receive, closeTransport)
 		} else {
 			glog.Infof("[ecr]tun connect err = %s", err)
-			handleCancel()
 		}
+		glog.V(1).Info("[tun]close resident connection\n")
 
 	case ExchangeOpForward:
 		forward, closeForward, err := resident.AddForward()
@@ -688,7 +766,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			runForward(forward, closeForward)
 		} else {
 			glog.Infof("[ecr]forward connect err = %s", err)
-			handleCancel()
 		}
 	}
 }
@@ -816,6 +893,8 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	return &header, nil
 }
 
+// FIXME resident transport can have write backpressure timeout
+
 func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err := self.framer.Write(conn, transferFrameBytes)
@@ -848,12 +927,17 @@ type ExchangeHeader struct {
 	ClientId   server.Id
 	ResidentId server.Id
 	Op         ExchangeOp
+	TunDial    *TunDial
+}
+
+type TunDial struct {
+	Network string
+	Address string
 }
 
 type ExchangeConnection struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
-	op            ExchangeOp
 	conn          net.Conn
 	sendBuffer    *ExchangeBuffer
 	receiveBuffer *ExchangeBuffer
@@ -861,19 +945,16 @@ type ExchangeConnection struct {
 	receive       chan []byte
 	settings      *ExchangeSettings
 
-	clientId   server.Id
-	residentId server.Id
-	host       string
-	port       int
+	header ExchangeHeader
+	host   string
+	port   int
 }
 
 func NewExchangeConnection(
 	ctx context.Context,
-	clientId server.Id,
-	residentId server.Id,
+	header ExchangeHeader,
 	host string,
 	port int,
-	op ExchangeOp,
 	routes map[string]string,
 	settings *ExchangeSettings,
 ) (*ExchangeConnection, error) {
@@ -915,11 +996,7 @@ func NewExchangeConnection(
 	sendBuffer := NewDefaultExchangeBuffer(settings)
 
 	// write header
-	err = sendBuffer.WriteHeader(ctx, conn, &ExchangeHeader{
-		Op:         op,
-		ClientId:   clientId,
-		ResidentId: residentId,
-	})
+	err = sendBuffer.WriteHeader(ctx, conn, &header)
 	if err != nil {
 		return nil, err
 	}
@@ -937,15 +1014,13 @@ func NewExchangeConnection(
 	connection := &ExchangeConnection{
 		ctx:           cancelCtx,
 		cancel:        cancel,
-		op:            op,
 		conn:          conn,
 		sendBuffer:    sendBuffer,
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
 		send:          make(chan []byte, settings.ExchangeBufferSize),
 		receive:       make(chan []byte, settings.ExchangeBufferSize),
 		settings:      settings,
-		clientId:      clientId,
-		residentId:    residentId,
+		header:        header,
 		host:          host,
 		port:          port,
 	}
@@ -961,8 +1036,8 @@ func (self *ExchangeConnection) Run() {
 	}()
 
 	// only a transport connection will receive messages
-	switch self.op {
-	case ExchangeOpTransport, ExchangeOpTunTransport:
+	switch self.header.Op {
+	case ExchangeOpTransport:
 		go server.HandleError(func() {
 			defer func() {
 				self.cancel()
@@ -990,10 +1065,45 @@ func (self *ExchangeConnection) Run() {
 					connect.MessagePoolReturn(message)
 					return
 				case self.receive <- message:
-					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 				case <-time.After(self.settings.WriteTimeout):
-					glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+					glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 					connect.MessagePoolReturn(message)
+				}
+			}
+		})
+	case ExchangeOpTunTransport:
+		go server.HandleError(func() {
+			defer func() {
+				self.cancel()
+				close(self.receive)
+			}()
+
+			for {
+				select {
+				case <-self.ctx.Done():
+					return
+				default:
+				}
+				message, err := self.receiveBuffer.ReadMessage(self.conn)
+				if err != nil {
+					return
+				}
+				if len(message) == 0 {
+					// just a ping
+					connect.MessagePoolReturn(message)
+					continue
+				}
+
+				select {
+				case <-self.ctx.Done():
+					connect.MessagePoolReturn(message)
+					return
+				case self.receive <- message:
+					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					// case <-time.After(self.settings.WriteTimeout):
+					// 	glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					// 	connect.MessagePoolReturn(message)
 				}
 			}
 		})
@@ -1040,7 +1150,7 @@ func (self *ExchangeConnection) Run() {
 				if err != nil {
 					return
 				}
-				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.clientId, self.residentId, self.host, self.port)
+				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 			case <-time.After(self.settings.ExchangePingTimeout):
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
@@ -1082,8 +1192,8 @@ type ResidentTransport struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	exchange   *Exchange
-	exchangeOp ExchangeOp
+	exchange *Exchange
+	header   ExchangeHeader
 
 	clientId   server.Id
 	instanceId server.Id
@@ -1100,22 +1210,30 @@ func NewResidentTransport(
 	clientId server.Id,
 	instanceId server.Id,
 ) *ResidentTransport {
-	return newResidentTransport(ctx, exchange, ExchangeOpTransport, clientId, instanceId)
+	header := ExchangeHeader{
+		Op: ExchangeOpTransport,
+	}
+	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
 }
 
 func NewResidentProxyTransport(
 	ctx context.Context,
 	exchange *Exchange,
+	tunDial TunDial,
 	clientId server.Id,
 	instanceId server.Id,
 ) *ResidentTransport {
-	return newResidentTransport(ctx, exchange, ExchangeOpTunTransport, clientId, instanceId)
+	header := ExchangeHeader{
+		Op:      ExchangeOpTunTransport,
+		TunDial: &tunDial,
+	}
+	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
 }
 
 func newResidentTransport(
 	ctx context.Context,
 	exchange *Exchange,
-	exchangeOp ExchangeOp,
+	header ExchangeHeader,
 	clientId server.Id,
 	instanceId server.Id,
 ) *ResidentTransport {
@@ -1124,7 +1242,7 @@ func newResidentTransport(
 		ctx:        cancelCtx,
 		cancel:     cancel,
 		exchange:   exchange,
-		exchangeOp: exchangeOp,
+		header:     header,
 		clientId:   clientId,
 		instanceId: instanceId,
 		send:       make(chan []byte, exchange.settings.ExchangeBufferSize),
@@ -1151,21 +1269,44 @@ func (self *ResidentTransport) Run() {
 			}
 		})
 
-		go server.HandleError(func() {
-			defer func() {
-				handleCancel()
-				connection.Close()
-			}()
+		switch self.header.Op {
+		case ExchangeOpTransport:
+			go server.HandleError(func() {
+				defer func() {
+					handleCancel()
+					connection.Close()
+				}()
+				// write
+				for {
+					select {
+					case <-handleCtx.Done():
+						return
+					case message, ok := <-self.send:
+						if !ok {
+							// transport closed
+							self.cancel()
+							return
+						}
+						select {
+						case <-handleCtx.Done():
+							return
+						case <-connection.Done():
+							return
+						case connection.send <- message:
+						case <-time.After(self.exchange.settings.WriteTimeout):
+						}
+					}
+				}
+			})
 
-			// write
+			// read
 			for {
 				select {
 				case <-handleCtx.Done():
 					return
-				case message, ok := <-self.send:
+				case message, ok := <-connection.receive:
 					if !ok {
-						// transport closed
-						self.cancel()
+						// need a new connection
 						return
 					}
 					select {
@@ -1173,34 +1314,66 @@ func (self *ResidentTransport) Run() {
 						return
 					case <-connection.Done():
 						return
-					case connection.send <- message:
+					case self.receive <- message:
 					case <-time.After(self.exchange.settings.WriteTimeout):
+						glog.V(1).Infof("[rt]drop %s->\n", self.clientId)
 					}
 				}
 			}
-		})
 
-		// read
-		for {
-			select {
-			case <-handleCtx.Done():
-				return
-			case message, ok := <-connection.receive:
-				if !ok {
-					// need a new connection
-					return
+		case ExchangeOpTunTransport:
+			go server.HandleError(func() {
+				defer func() {
+					handleCancel()
+					connection.Close()
+				}()
+
+				// write
+				for {
+					select {
+					case <-handleCtx.Done():
+						return
+					case message, ok := <-self.send:
+						if !ok {
+							// transport closed
+							self.cancel()
+							return
+						}
+						select {
+						case <-handleCtx.Done():
+							return
+						case <-connection.Done():
+							return
+						case connection.send <- message:
+							// case <-time.After(self.exchange.settings.WriteTimeout):
+						}
+					}
 				}
+			})
+
+			// read
+			for {
 				select {
 				case <-handleCtx.Done():
 					return
-				case <-connection.Done():
-					return
-				case self.receive <- message:
-				case <-time.After(self.exchange.settings.WriteTimeout):
-					glog.V(1).Infof("[rt]drop %s->\n", self.clientId)
+				case message, ok := <-connection.receive:
+					if !ok {
+						// need a new connection
+						return
+					}
+					select {
+					case <-handleCtx.Done():
+						return
+					case <-connection.Done():
+						return
+					case self.receive <- message:
+						// case <-time.After(self.exchange.settings.WriteTimeout):
+						// 	glog.V(1).Infof("[rt]drop %s->\n", self.clientId)
+					}
 				}
 			}
 		}
+
 	}
 
 	for {
@@ -1208,13 +1381,14 @@ func (self *ResidentTransport) Run() {
 		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+			headerCopy := self.header
+			headerCopy.ClientId = self.clientId
+			headerCopy.ResidentId = resident.ResidentId
 			exchangeConnection, err := NewExchangeConnection(
 				self.ctx,
-				self.clientId,
-				resident.ResidentId,
+				headerCopy,
 				resident.ResidentHost,
 				port,
-				self.exchangeOp,
 				self.exchange.routes,
 				self.exchange.settings,
 			)
@@ -1364,13 +1538,16 @@ func (self *ResidentForward) Run() {
 		resident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+			header := ExchangeHeader{
+				ClientId:   self.clientId,
+				ResidentId: resident.ResidentId,
+				Op:         ExchangeOpForward,
+			}
 			exchangeConnection, err := NewExchangeConnection(
 				self.ctx,
-				self.clientId,
-				resident.ResidentId,
+				header,
 				resident.ResidentHost,
 				port,
-				ExchangeOpForward,
 				self.exchange.routes,
 				self.exchange.settings,
 			)
@@ -1895,7 +2072,10 @@ func (self *Resident) AddForward() (
 			select {
 			case <-forwardCtx.Done():
 				return
-			case message := <-forward:
+			case message, ok := <-forward:
+				if !ok {
+					return
+				}
 				self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
 			}
 		}
@@ -1903,15 +2083,12 @@ func (self *Resident) AddForward() (
 
 	closeForward = func() {
 		forwardCancel()
-
-		// note `forward` is not closed. This channel is left open.
-		// it used to be closed after a delay, but it is not needed to close it.
 	}
 
 	return
 }
 
-func (self *Resident) AddTun() (
+func (self *Resident) AddTun(header ExchangeHeader) (
 	send chan []byte,
 	receive chan []byte,
 	closeTun func(),
@@ -1922,8 +2099,7 @@ func (self *Resident) AddTun() (
 		returnErr = fmt.Errorf("Tun requires a proxy device")
 		return
 	}
-	send, receive, closeTun = residentProxyDevice.AddTun()
-	return
+	return residentProxyDevice.AddTun(header)
 }
 
 // func (self *Resident) Forward(transferFrameBytes []byte) bool {

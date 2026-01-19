@@ -5,7 +5,8 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	mathrand "math/rand"
+	// mathrand "math/rand"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,13 +16,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/elazarl/goproxy"
+	"github.com/stripe/goproxy"
 	"github.com/things-go/go-socks5"
-	"github.com/things-go/go-socks5/statute"
+	// "github.com/things-go/go-socks5/statute"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
-	"github.com/urnetwork/proxy"
+	// "github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -43,32 +44,31 @@ import (
 // as either a normal resident or a proxy device resident.
 
 func DefaultProxyConnectHandlerSettings() *ProxyConnectHandlerSettings {
-	connectHandlerSettings := DefaultConnectHandlerSettings()
+	// connectHandlerSettings := DefaultConnectHandlerSettings()
 	return &ProxyConnectHandlerSettings{
-		WriteTimeout:               connectHandlerSettings.WriteTimeout,
-		ReadTimeout:                connectHandlerSettings.ReadTimeout,
+		// WriteTimeout:               connectHandlerSettings.WriteTimeout,
+		// ReadTimeout:                connectHandlerSettings.ReadTimeout,
 		ProxyConnectionIdleTimeout: 15 * time.Minute,
 		ListenSocksPort:            1080,
 		ListenHttpsPort:            444,
 		FramerSettings:             connect.DefaultFramerSettings(),
 		EnableProxyProtocol:        true,
-		ProxyConnectTimeout:        15 * time.Second,
-		Mtu:                        1440,
+		// ProxyConnectTimeout:        15 * time.Second,
 
 		TransportTlsSettings: DefaultTransportTlsSettings(),
 	}
 }
 
 type ProxyConnectHandlerSettings struct {
-	WriteTimeout               time.Duration
-	ReadTimeout                time.Duration
+	// WriteTimeout               time.Duration
+	// ReadTimeout                time.Duration
 	ProxyConnectionIdleTimeout time.Duration
 	ListenSocksPort            int
 	ListenHttpsPort            int
 	FramerSettings             *connect.FramerSettings
 	EnableProxyProtocol        bool
-	ProxyConnectTimeout        time.Duration
-	Mtu                        int
+	// ProxyConnectTimeout        time.Duration
+	// Mtu                        int
 
 	TransportTlsSettings *TransportTlsSettings
 }
@@ -81,8 +81,8 @@ type ProxyConnectHandler struct {
 	transportTls *TransportTls
 	settings     *ProxyConnectHandlerSettings
 
-	stateLock        sync.Mutex
-	proxyConnections map[server.Id]*ProxyConnection
+	// stateLock        sync.Mutex
+	// proxyConnections map[server.Id]*ProxyConnection
 }
 
 func NewProxyConnectHandlerWithDefaults(
@@ -112,13 +112,13 @@ func NewProxyConnectHandler(
 	}
 
 	h := &ProxyConnectHandler{
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		handlerId:        handlerId,
-		exchange:         exchange,
-		transportTls:     transportTls,
-		settings:         settings,
-		proxyConnections: map[server.Id]*ProxyConnection{},
+		ctx:          cancelCtx,
+		cancel:       cancel,
+		handlerId:    handlerId,
+		exchange:     exchange,
+		transportTls: transportTls,
+		settings:     settings,
+		// proxyConnections: map[server.Id]*ProxyConnection{},
 	}
 
 	if server.HasPort(settings.ListenHttpsPort) {
@@ -132,7 +132,7 @@ func NewProxyConnectHandler(
 	return h
 }
 
-func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyConnection *ProxyConnection, returnErr error) {
+func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request, tunDial TunDial) (proxyConnection *ProxyConnection, returnErr error) {
 	glog.Infof("[tp]found headers: %v\n", r.Header)
 	host := r.Header.Get("X-Forwarded-Host")
 	if host == "" {
@@ -190,7 +190,7 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 	}
 	glog.Infof("[tp]connect with host=%s proxyId=%s\n", host, proxyId)
 
-	proxyConnection, returnErr = self.connectProxy(proxyId)
+	proxyConnection, returnErr = self.connectProxy(proxyId, tunDial)
 	if returnErr != nil {
 		return
 	}
@@ -210,7 +210,7 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 		return
 	}
 
-	if !proxyConnection.ValidCaller(addrPort.Addr()) {
+	if !self.ValidCaller(proxyId, addrPort.Addr()) {
 		returnErr = fmt.Errorf("Invalid caller")
 		return
 	}
@@ -218,77 +218,60 @@ func (self *ProxyConnectHandler) connectProxyForRequest(r *http.Request) (proxyC
 	return
 }
 
-func (self *ProxyConnectHandler) connectProxy(proxyId server.Id) (*ProxyConnection, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+func (self *ProxyConnectHandler) connectProxy(proxyId server.Id, tunDial TunDial) (*ProxyConnection, error) {
+	// self.stateLock.Lock()
+	// defer self.stateLock.Unlock()
 
-	nextProxyConnection := func() (*ProxyConnection, error) {
-		proxyConnection, err := NewProxyConnection(self.ctx, self.exchange, proxyId, self.settings)
-		if err != nil {
-			return nil, err
-		}
-		go server.HandleError(func() {
-			defer func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				proxyConnection.Close()
-				if currentProxyConnection := self.proxyConnections[proxyId]; proxyConnection == currentProxyConnection {
-					delete(self.proxyConnections, proxyId)
-				}
-			}()
-			proxyConnection.Run()
-
-			glog.V(1).Infof("[rp]close %s\n", proxyId)
-		})
-		go server.HandleError(func() {
-			defer proxyConnection.Cancel()
-			for {
-				if proxyConnection.CancelIfIdle() {
-					glog.V(1).Infof("[rp]idle %s\n", proxyId)
-					return
-				}
-
-				select {
-				case <-proxyConnection.Done():
-					return
-				case <-time.After(self.settings.ProxyConnectionIdleTimeout):
-				}
-			}
-		})
-
-		return proxyConnection, nil
+	proxyConnection, err := NewProxyConnection(self.ctx, self.exchange, tunDial, proxyId, self.settings)
+	if err != nil {
+		return nil, err
 	}
+	// go server.HandleError(func() {
+	// 	defer proxyConnection.Close()
+	// 	proxyConnection.Run()
 
-	var proxyConnection *ProxyConnection
-	// func() {
+	// 	glog.V(1).Infof("[rp]close %s\n", proxyId)
+	// })
+	// go server.HandleError(func() {
+	// 	defer proxyConnection.Cancel()
+	// 	for {
+	// 		if proxyConnection.CancelIfIdle() {
+	// 			glog.V(1).Infof("[rp]idle %s\n", proxyId)
+	// 			return
+	// 		}
 
-	proxyConnection = self.proxyConnections[proxyId]
-	// }()
-
-	if proxyConnection == nil || !proxyConnection.UpdateActivity() {
-		var err error
-		proxyConnection, err = nextProxyConnection()
-		if err != nil {
-			return nil, err
-		}
-
-		var replacedProxyConnection *ProxyConnection
-		// func() {
-		// 	self.stateLock.Lock()
-		// 	defer self.stateLock.Unlock()
-		replacedProxyConnection = self.proxyConnections[proxyId]
-		self.proxyConnections[proxyId] = proxyConnection
-		// }()
-		if replacedProxyConnection != nil {
-			replacedProxyConnection.Cancel()
-		}
-		glog.V(1).Infof("[rp]open %s\n", proxyId)
-	}
+	// 		select {
+	// 		case <-proxyConnection.Done():
+	// 			return
+	// 		case <-time.After(self.settings.ProxyConnectionIdleTimeout):
+	// 		}
+	// 	}
+	// })
 
 	return proxyConnection, nil
 }
 
 func (self *ProxyConnectHandler) runHttps() {
+
+	httpProxy := goproxy.NewProxyHttpServer()
+
+	// tr := &http.Transport{
+	// 	IdleConnTimeout: 300 * time.Second,
+	// 	TLSHandshakeTimeout: 30 * time.Second,
+
+	// }
+	// httpProxy.Tr = tr
+
+	// httpProxy.AllowHTTP2 = false
+	httpProxy.ConnectDialContext = func(proxyCtx *goproxy.ProxyCtx, network string, addr string) (conn net.Conn, err error) {
+		return self.connectProxyForRequest(proxyCtx.Req, TunDial{
+			Network: network,
+			Address: addr,
+		})
+	}
+
+	// proxyConnection.httpProxy = httpProxy
+
 	addr := fmt.Sprintf(":%d", self.settings.ListenHttpsPort)
 
 	tlsConfig := &tls.Config{
@@ -297,7 +280,7 @@ func (self *ProxyConnectHandler) runHttps() {
 
 	httpServer := &http.Server{
 		Addr:      addr,
-		Handler:   self,
+		Handler:   httpProxy,
 		TLSConfig: tlsConfig,
 	}
 
@@ -322,15 +305,15 @@ func (self *ProxyConnectHandler) runHttps() {
 	httpServer.ServeTLS(serverConn, "", "")
 }
 
-func (self *ProxyConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	proxyConnection, err := self.connectProxyForRequest(r)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
+// func (self *ProxyConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// 	proxyConnection, err := self.connectProxyForRequest(r)
+// 	if err != nil {
+// 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+// 		return
+// 	}
 
-	proxyConnection.ServeHTTP(w, r)
-}
+// 	proxyConnection.ServeHTTP(w, r)
+// }
 
 func (self *ProxyConnectHandler) runSocks() {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
@@ -339,17 +322,18 @@ func (self *ProxyConnectHandler) runSocks() {
 	socksServer := socks5.NewServer(
 		socks5.WithLogger(self),
 		socks5.WithCredential(self),
-		socks5.WithRewriter(self),
+		// socks5.WithRewriter(self),
+		socks5.WithResolver(self),
 		socks5.WithRule(socks5.NewPermitConnAndAss()),
 		socks5.WithDialAndRequest(func(ctx context.Context, network string, addr string, request *socks5.Request) (net.Conn, error) {
 			username := request.AuthContext.Payload["username"]
 			// the proxy id was already verified by the credential store
 			proxyId := model.RequireEncodedProxyId(username)
 
-			addrPort, err := netip.ParseAddrPort(addr)
-			if err != nil {
-				return nil, err
-			}
+			// addrPort, err := netip.ParseAddrPort(addr)
+			// if err != nil {
+			// 	return nil, err
+			// }
 
 			// FIXME use standard connect security here
 			// if PRIVATESUBNET {
@@ -358,19 +342,21 @@ func (self *ProxyConnectHandler) runSocks() {
 
 			// FIXME caller IP
 
-			proxyConnection, err := self.connectProxy(proxyId)
-			if err != nil {
-				return nil, err
+			if request.DestAddr.FQDN != "" {
+				addrPort, _ := netip.ParseAddrPort(addr)
+				addr = fmt.Sprintf("%s:%d", request.DestAddr.FQDN, addrPort.Port())
 			}
 
-			switch network {
-			case "tcp", "tcp4", "tcp6":
-				return proxyConnection.tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(addrPort))
-			case "udp", "udp4", "udp6":
-				return proxyConnection.tnet.DialContextUDP(ctx, net.UDPAddrFromAddrPort(addrPort))
-			default:
-				return nil, fmt.Errorf("Unsupported network: %s", network)
+			conn, err := self.connectProxy(proxyId, TunDial{
+				Network: network,
+				Address: addr,
+			})
+			if err != nil {
+				glog.Infof("[socks]connect (%s) %s %s (%s) err=%s\n", proxyId, network, addr, request.DestAddr.FQDN, err)
+				return nil, err
 			}
+			glog.Infof("[socks]connect (%s) %s %s (%s) success\n", proxyId, network, addr, request.DestAddr.FQDN)
+			return conn, err
 		}),
 	)
 
@@ -397,7 +383,7 @@ func (self *ProxyConnectHandler) runSocks() {
 
 // socks.Logger
 func (self *ProxyConnectHandler) Errorf(format string, args ...any) {
-	glog.Errorf("[tp]"+format, args...)
+	glog.Errorf("[socks]"+format, args...)
 }
 
 // socks.CredentialStore
@@ -409,46 +395,29 @@ func (self *ProxyConnectHandler) Valid(username string, password string, userAdd
 
 	addrPort, err := netip.ParseAddrPort(userAddr)
 	if err != nil {
+		glog.Infof("[socks]user address %s err=%s\n", userAddr, err)
 		return false
 	}
 
-	proxyConnection, err := self.connectProxy(proxyId)
-	if err != nil {
-		return false
-	}
+	glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 
-	return proxyConnection.ValidCaller(addrPort.Addr())
+	// proxyConnection, err := self.connectProxy(proxyId)
+	// if err != nil {
+	// 	return false
+	// }
+
+	return self.ValidCaller(proxyId, addrPort.Addr())
 }
 
-// socks.AddressRewriter
-func (self *ProxyConnectHandler) Rewrite(ctx context.Context, request *socks5.Request) (context.Context, *statute.AddrSpec) {
-	dest := request.DestAddr
+// socks.NameResolver
+func (self *ProxyConnectHandler) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// names are not resolved locally
+	return ctx, net.ParseIP("0.0.0.0").To4(), nil
+}
 
-	if dest.FQDN != "" {
-		// resolve via the device
-		username := request.AuthContext.Payload["username"]
-		// the proxy id was already verified by the credential store
-		proxyId := model.RequireEncodedProxyId(username)
-
-		proxyConnection, err := self.connectProxy(proxyId)
-
-		if err == nil {
-			addrs := proxyConnection.tnet.DohCache().Query(ctx, "A", dest.FQDN)
-			if 0 < len(addrs) {
-				// choose one randomly
-				addr := addrs[mathrand.Intn(len(addrs))]
-				ip := net.IP(addr.AsSlice())
-
-				dest = &statute.AddrSpec{
-					IP:   ip,
-					Port: dest.Port,
-				}
-			}
-		}
-		// else let the name resolve locally
-	}
-
-	return ctx, dest
+func (self *ProxyConnectHandler) ValidCaller(proxyId server.Id, addr netip.Addr) bool {
+	// FIXME
+	return true
 }
 
 type ProxyConnection struct {
@@ -456,10 +425,19 @@ type ProxyConnection struct {
 	cancel context.CancelFunc
 
 	exchange          *Exchange
+	tunDial           TunDial
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
-	tnet      *proxy.Net
-	httpProxy *goproxy.ProxyHttpServer
+	residentTransport *ResidentTransport
+
+	// tnet      *proxy.Net
+	// httpProxy *goproxy.ProxyHttpServer
+
+	// modified by the reader only
+	lookaheadBuffer []byte
+
+	readDeadline  time.Time
+	writeDeadline time.Time
 
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
@@ -472,147 +450,238 @@ var localIpCounter atomic.Uint32
 func NewProxyConnection(
 	ctx context.Context,
 	exchange *Exchange,
+	tunDial TunDial,
 	proxyId server.Id,
 	settings *ProxyConnectHandlerSettings,
 ) (*ProxyConnection, error) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	proxyDeviceConfig := model.GetProxyDeviceConfig(ctx, proxyId)
+	proxyDeviceConfig := model.GetProxyDeviceConfig(cancelCtx, proxyId)
 	if proxyDeviceConfig == nil {
 		return nil, fmt.Errorf("Proxy device does not exist.")
 	}
 
-	tnet, err := proxy.CreateNetTUN(
-		cancelCtx,
-		settings.Mtu,
+	glog.Infof(
+		"[tp]connect to client_id=%s instance_id=%s (proxy_id=%s)\n",
+		proxyDeviceConfig.ClientId,
+		proxyDeviceConfig.InstanceId,
+		proxyDeviceConfig.ProxyId,
 	)
-	if err != nil {
-		return nil, err
-	}
+
+	residentTransport := NewResidentProxyTransport(
+		cancelCtx,
+		exchange,
+		tunDial,
+		proxyDeviceConfig.ClientId,
+		proxyDeviceConfig.InstanceId,
+	)
 
 	proxyConnection := &ProxyConnection{
 		ctx:               cancelCtx,
 		cancel:            cancel,
 		exchange:          exchange,
+		tunDial:           tunDial,
 		proxyDeviceConfig: proxyDeviceConfig,
-		tnet:              tnet,
+		residentTransport: residentTransport,
+		// tnet:              tnet,
 		// httpProxy:         httpProxy,
 		lastActivityTime: time.Now(),
 		settings:         settings,
 	}
-
-	connectDialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
-		switch network {
-		case "tcp", "tcp4", "tcp6":
-			network = "tcp4"
-		case "udp", "udp4", "udp6":
-			network = "udp4"
-		default:
-			return nil, fmt.Errorf("Unsupported network: %s", network)
-		}
-
-		// rCtx, _ := context.WithTimeout(cancelCtx, settings.ProxyConnectTimeout)
-		return tnet.DialContext(ctx, network, addr)
-	}
-
-	httpProxy := goproxy.NewProxyHttpServer()
-
-	httpProxy.Tr = &http.Transport{
-		Dial: func(network string, addr string) (net.Conn, error) {
-			return connectDialContext(proxyConnection.ctx, network, addr)
-		},
-		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			return connectDialContext(ctx, network, addr)
-		},
-	}
-
-	// httpProxy.AllowHTTP2 = false
-	httpProxy.ConnectDialWithReq = func(r *http.Request, network string, addr string) (conn net.Conn, err error) {
-		return connectDialContext(r.Context(), network, addr)
-	}
-
-	proxyConnection.httpProxy = httpProxy
+	go server.HandleError(proxyConnection.run)
 
 	return proxyConnection, nil
 }
 
-func (self *ProxyConnection) Run() {
-	defer self.cancel()
-
-	exchangeTransport := NewResidentProxyTransport(
-		self.ctx,
-		self.exchange,
-		self.proxyDeviceConfig.ClientId,
-		self.proxyDeviceConfig.InstanceId,
-	)
+func (self *ProxyConnection) run() {
 	go server.HandleError(func() {
 		defer self.cancel()
-		exchangeTransport.Run()
+		self.residentTransport.Run()
 		// close is done in the write
 	})
-	go server.HandleError(func() {
-		defer self.cancel()
-		select {
-		case <-self.ctx.Done():
-		case <-exchangeTransport.Done():
-		}
-	})
-
-	go server.HandleError(func() {
-		defer func() {
-			self.cancel()
-			exchangeTransport.Close()
-		}()
-		for {
-			// packet := connect.MessagePoolGet(self.settings.Mtu)
-			packet, err := self.tnet.Read()
-			if err != nil {
-				return
-			}
-			self.UpdateActivity()
-			select {
-			case <-self.ctx.Done():
-				connect.MessagePoolReturn(packet)
-				return
-			case exchangeTransport.send <- packet:
-			case <-time.After(self.settings.WriteTimeout):
-				// drop
-				connect.MessagePoolReturn(packet)
-			}
-		}
-	})
 
 	go server.HandleError(func() {
 		defer self.cancel()
 		for {
-			select {
-			case <-self.ctx.Done():
+			if self.CancelIfIdle() {
+				glog.V(1).Infof("[rp]idle %s\n", self.proxyDeviceConfig.ProxyId)
 				return
-			case packet := <-exchangeTransport.receive:
-				self.UpdateActivity()
-				_, err := self.tnet.Write(packet)
-				connect.MessagePoolReturn(packet)
-				if err != nil {
-					return
-				}
+			}
+
+			select {
+			case <-self.Done():
+				return
+			case <-time.After(self.settings.ProxyConnectionIdleTimeout):
 			}
 		}
 	})
 
 	select {
 	case <-self.ctx.Done():
-	case <-exchangeTransport.Done():
 	}
 }
 
-func (self *ProxyConnection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	self.httpProxy.ServeHTTP(w, r)
+func (self *ProxyConnection) Read(b []byte) (n int, err error) {
+	// read from lookahead
+	// if need more, pull from receive
+	self.UpdateActivity()
+
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	if 0 < len(self.lookaheadBuffer) {
+		m := copy(b, self.lookaheadBuffer)
+		self.lookaheadBuffer = self.lookaheadBuffer[m:]
+		n += m
+	}
+
+	// fill blocking if there is no data
+	if n == 0 {
+		if len(self.lookaheadBuffer) != 0 {
+			panic(fmt.Errorf("lookaheader buffer must be empty (%d)", len(self.lookaheadBuffer)))
+		}
+		if self.lookaheadBuffer != nil {
+			connect.MessagePoolReturn(self.lookaheadBuffer)
+			self.lookaheadBuffer = nil
+		}
+
+		if !self.readDeadline.IsZero() {
+			timeout := self.readDeadline.Sub(time.Now())
+			if timeout <= 0 {
+				return n, fmt.Errorf("Timeout")
+			}
+
+			select {
+			case <-self.ctx.Done():
+				return n, io.EOF
+			case self.lookaheadBuffer = <-self.residentTransport.receive:
+				m := copy(b[n:], self.lookaheadBuffer)
+				self.lookaheadBuffer = self.lookaheadBuffer[m:]
+				n += m
+			case <-time.After(timeout):
+				return n, fmt.Errorf("Timeout")
+			}
+		} else {
+			select {
+			case <-self.ctx.Done():
+				return n, io.EOF
+			case self.lookaheadBuffer = <-self.residentTransport.receive:
+				m := copy(b[n:], self.lookaheadBuffer)
+				self.lookaheadBuffer = self.lookaheadBuffer[m:]
+				n += m
+			}
+		}
+	}
+
+	// fill as much as possible non blocking
+	for n < len(b) {
+		if len(self.lookaheadBuffer) != 0 {
+			panic(fmt.Errorf("lookaheader buffer must be empty (%d)", len(self.lookaheadBuffer)))
+		}
+		if self.lookaheadBuffer != nil {
+			connect.MessagePoolReturn(self.lookaheadBuffer)
+			self.lookaheadBuffer = nil
+		}
+		nb := true
+		select {
+		case <-self.ctx.Done():
+			return n, io.EOF
+		case self.lookaheadBuffer = <-self.residentTransport.receive:
+			m := copy(b[n:], self.lookaheadBuffer)
+			self.lookaheadBuffer = self.lookaheadBuffer[m:]
+			n += m
+		default:
+			nb = false
+		}
+		if !nb {
+			break
+		}
+	}
+
+	glog.V(1).Infof("[tun]proxy connect (%s, %s) read %d\n", self.tunDial.Network, self.tunDial.Address, n)
+
+	return
 }
 
-func (self *ProxyConnection) ValidCaller(addr netip.Addr) bool {
-	// FIXME
-	return true
+func (self *ProxyConnection) Write(b []byte) (int, error) {
+	self.UpdateActivity()
+
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	packet := connect.MessagePoolCopy(b)
+
+	if !self.writeDeadline.IsZero() {
+		timeout := self.writeDeadline.Sub(time.Now())
+		if timeout <= 0 {
+			return 0, fmt.Errorf("Timeout")
+		}
+
+		select {
+		case <-self.ctx.Done():
+			connect.MessagePoolReturn(packet)
+			return 0, fmt.Errorf("Done")
+		case self.residentTransport.send <- packet:
+			glog.V(1).Infof("[tun]proxy connect (%s, %s) write %d\n", self.tunDial.Network, self.tunDial.Address, len(packet))
+			return len(packet), nil
+		case <-time.After(timeout):
+			// drop
+			connect.MessagePoolReturn(packet)
+			return 0, fmt.Errorf("Timeout")
+		}
+	} else {
+		select {
+		case <-self.ctx.Done():
+			connect.MessagePoolReturn(packet)
+			return 0, fmt.Errorf("Done")
+		case self.residentTransport.send <- packet:
+			glog.V(1).Infof("[tun]proxy connect (%s, %s) write %d\n", self.tunDial.Network, self.tunDial.Address, len(packet))
+			return len(packet), nil
+		}
+	}
 }
+
+func (self *ProxyConnection) LocalAddr() net.Addr {
+	return SimpleNetAddr(self.tunDial.Network, "0.0.0.0:0")
+}
+
+func (self *ProxyConnection) RemoteAddr() net.Addr {
+	return SimpleNetAddr(self.tunDial.Network, "0.0.0.0:0")
+}
+
+func (self *ProxyConnection) SetDeadline(t time.Time) error {
+	self.readDeadline = t
+	self.writeDeadline = t
+	return nil
+}
+
+func (self *ProxyConnection) SetReadDeadline(t time.Time) error {
+	self.readDeadline = t
+	return nil
+}
+
+func (self *ProxyConnection) SetWriteDeadline(t time.Time) error {
+	self.writeDeadline = t
+	return nil
+}
+
+func (self *ProxyConnection) Close() error {
+	self.cancel()
+	// self.tnet.Close()
+	self.residentTransport.Close()
+	return nil
+}
+
+// func (self *ProxyConnection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// 	self.httpProxy.ServeHTTP(w, r)
+// }
+
+// func (self *ProxyConnection) ValidCaller(addr netip.Addr) bool {
+// 	// FIXME
+// 	return true
+// }
 
 func (self *ProxyConnection) UpdateActivity() bool {
 	self.stateLock.Lock()
@@ -648,7 +717,22 @@ func (self *ProxyConnection) Cancel() {
 	self.cancel()
 }
 
-func (self *ProxyConnection) Close() {
-	self.cancel()
-	self.tnet.Close()
+type simpleNetAddr struct {
+	network string
+	address string
+}
+
+func SimpleNetAddr(network string, address string) net.Addr {
+	return &simpleNetAddr{
+		network: network,
+		address: address,
+	}
+}
+
+func (self *simpleNetAddr) Network() string {
+	return self.network
+}
+
+func (self *simpleNetAddr) String() string {
+	return self.address
 }

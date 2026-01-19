@@ -25,6 +25,50 @@ import (
 
 const PpMaxHeaderSize = 2048
 
+// see https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+// var ppv1Signature = [6]byte{
+// 	0x50,
+// 	0x52,
+// 	0x4F,
+// 	0x58,
+// 	0x59,
+// 	0x20,
+// }
+// var ppv2Signature = [12]byte{
+// 	0x0D,
+// 	0x0A,
+// 	0x0D,
+// 	0x0A,
+// 	0x00,
+// 	0x0D,
+// 	0x0A,
+// 	0x51,
+// 	0x55,
+// 	0x49,
+// 	0x54,
+// 	0x0A,
+// }
+
+var (
+	V1Identifier = []byte("PROXY ")
+	V2Identifier = []byte("\r\n\r\n\x00\r\nQUIT\n")
+)
+
+func parsePpHeaderPacket(b []byte) (h int, header *proxyproto.Header, err error) {
+	if !(6 <= len(b) && ([6]byte)(V1Identifier) == ([6]byte)(b) ||
+		12 <= len(b) && ([12]byte)(V2Identifier) == ([12]byte)(b)) {
+		return 0, nil, nil
+	}
+	r := bytes.NewReader(b)
+	header, err = proxyproto.ReadHeader(r)
+	h = len(b) - r.Len()
+	return
+}
+
+func parsePpHeader(r io.Reader) (header *proxyproto.Header, err error) {
+	return proxyproto.ReadHeader(r)
+}
+
 func DefaultWarpPpSettings() *PpSettings {
 	return &PpSettings{
 		MaxPacketSize: 1500,
@@ -71,7 +115,6 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	buffer := self.readBuffer
 
 	for range self.settings.MaxDiscardPackets + 1 {
-		fmt.Printf("READ ONE\n")
 		n, addr, err = self.conn.ReadFrom(buffer)
 		if err != nil {
 			return
@@ -220,50 +263,6 @@ func (self *PpPacketConn) SetWriteBuffer(bytes int) error {
 		return fmt.Errorf("Set write buffer not supporter on underlying packet conn: %T", self.conn)
 	}
 	return conn.SetWriteBuffer(bytes)
-}
-
-// see https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
-// var ppv1Signature = [6]byte{
-// 	0x50,
-// 	0x52,
-// 	0x4F,
-// 	0x58,
-// 	0x59,
-// 	0x20,
-// }
-// var ppv2Signature = [12]byte{
-// 	0x0D,
-// 	0x0A,
-// 	0x0D,
-// 	0x0A,
-// 	0x00,
-// 	0x0D,
-// 	0x0A,
-// 	0x51,
-// 	0x55,
-// 	0x49,
-// 	0x54,
-// 	0x0A,
-// }
-
-var (
-	V1Identifier = []byte("PROXY ")
-	V2Identifier = []byte("\r\n\r\n\x00\r\nQUIT\n")
-)
-
-func parsePpHeaderPacket(b []byte) (h int, header *proxyproto.Header, err error) {
-	if !(6 <= len(b) && ([6]byte)(V1Identifier) == ([6]byte)(b) ||
-		12 <= len(b) && ([12]byte)(V2Identifier) == ([12]byte)(b)) {
-		return 0, nil, nil
-	}
-	r := bytes.NewReader(b)
-	header, err = proxyproto.ReadHeader(r)
-	h = len(b) - r.Len()
-	return
-}
-
-func parsePpHeader(r io.Reader) (header *proxyproto.Header, err error) {
-	return proxyproto.ReadHeader(r)
 }
 
 type proxyState struct {
@@ -438,7 +437,20 @@ func NewPpConn(conn net.Conn, settings *PpSettings) (*PpConn, error) {
 }
 
 func (self *PpConn) Read(b []byte) (n int, err error) {
+	// if 0 < len(self.lookaheadBuffer) {
+	// 	m := copy(b, self.lookaheadBuffer)
+	// 	if len(self.lookaheadBuffer) <= m {
+	// 		// free the memory
+	// 		self.lookaheadBuffer = nil
+	// 	} else {
+	// 		self.lookaheadBuffer = self.lookaheadBuffer[m:]
+	// 	}
+	// 	n, err = self.conn.Read(b[m:])
+	// 	n += m
+	// 	return
+	// } else {
 	return self.conn.Read(b)
+	// }
 }
 
 func (self *PpConn) Write(b []byte) (n int, err error) {

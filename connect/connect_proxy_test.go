@@ -1,7 +1,7 @@
 //go:build !race
 
 // note race detection on this test progressively slows down the test until it stops working
-//
+// FIXME the root cause might be a timeout/bad recovery in some part of the system
 package main
 
 import (
@@ -35,6 +35,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
+	// goproxy "golang.org/x/net/proxy"
 )
 
 func TestConnectProxy(t *testing.T) {
@@ -179,11 +180,17 @@ func testConnectProxy(t *testing.T) {
 		return fmt.Sprintf("local-connect.bringyour.com:%d", port), port
 	}
 
-	randHttpsPoxyServerHostPort := func() (string, int) {
+	randHttpsProxyServerHostPort := func() (string, int) {
 		ports := maps.Values(hostPorts)
 		port := ports[mathrand.Intn(len(ports))] + 444
 		return fmt.Sprintf("local-connect.bringyour.com:%d", port), port
 	}
+
+	// randSocksProxyServerHostPort := func() (string, int) {
+	// 	ports := maps.Values(hostPorts)
+	// 	port := ports[mathrand.Intn(len(ports))] + 1080
+	// 	return fmt.Sprintf("local-connect.bringyour.com:%d", port), port
+	// }
 
 	// connect a new provider
 	runProvider := func() (providerClientId server.Id) {
@@ -356,10 +363,12 @@ func testConnectProxy(t *testing.T) {
 			DeviceSpec:  "test",
 
 			ProxyConfig: &model.ProxyConfig{
-				InitialDeviceState: &model.ProxyDeviceState{
-					Location: &sdk.ConnectLocation{
-						ConnectLocationId: &sdk.ConnectLocationId{
-							ClientId: server.ToSdkId(providerClientId),
+				InitialDeviceState: &model.ExtendedProxyDeviceState{
+					ProxyDeviceState: model.ProxyDeviceState{
+						Location: &sdk.ConnectLocation{
+							ConnectLocationId: &sdk.ConnectLocationId{
+								ClientId: server.ToSdkId(providerClientId),
+							},
 						},
 					},
 				},
@@ -385,8 +394,8 @@ func testConnectProxy(t *testing.T) {
 		// 	},
 		// }
 
-		proxyConnectHeader := http.Header{}
-		proxyConnectHeader.Add("Proxy-Authorization", fmt.Sprintf("Bearer %s", result.ProxyConfigResult.AuthToken))
+		// proxyConnectHeader := http.Header{}
+		// proxyConnectHeader.Add("Proxy-Authorization", fmt.Sprintf("Bearer %s", result.ProxyConfigResult.AuthToken))
 
 		proxyHttpClient := &http.Client{
 			Timeout: 120 * time.Second,
@@ -397,8 +406,8 @@ func testConnectProxy(t *testing.T) {
 				// TLSHandshakeTimeout: 15 * time.Second,
 				// Proxy: http.ProxyURL(httpsProxyUrl),
 				Proxy: func(r *http.Request) (*url.URL, error) {
-					addr, _ := randHttpsPoxyServerHostPort()
-					httpsProxyUrlStr := fmt.Sprintf("https://%s", addr)
+					addr, _ := randHttpsProxyServerHostPort()
+					httpsProxyUrlStr := fmt.Sprintf("https://%s:@%s", result.ProxyConfigResult.AuthToken, addr)
 					return url.Parse(httpsProxyUrlStr)
 				},
 				// DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -406,18 +415,64 @@ func testConnectProxy(t *testing.T) {
 				// 	fmt.Printf("DIAL %s VIA %s %s\n", httpsProxyUrl, network, addr)
 				//     return proxyDialer.DialContext(ctx, network, addr)
 				// },
-				ProxyConnectHeader: proxyConnectHeader,
+				// ProxyConnectHeader: proxyConnectHeader,
 			},
 		}
+		/*
+			socksHttpClient := func() (*http.Client){
+
+				addr, _ := randSocksProxyServerHostPort()
+				// socksProxyUrlStr := fmt.Sprintf("socks5h://%s", addr)
+				// return url.Parse(httpsProxyUrlStr)
+
+				auth := &goproxy.Auth{
+					User: result.ProxyConfigResult.AuthToken,
+				}
+				socksDialer, err := goproxy.SOCKS5("tcp", addr, auth, goproxy.Direct)
+				assert.Equal(t, err, nil)
+
+				return &http.Client{
+					Timeout: 120 * time.Second,
+					Transport: &http.Transport{
+						// MaxIdleConns:       1,             // Max idle connections in the pool
+						// IdleConnTimeout:    30 * time.Second, // Max time an idle connection stays open
+						// DisableKeepAlives:  true,
+						// TLSHandshakeTimeout: 15 * time.Second,
+						// Proxy: http.ProxyURL(httpsProxyUrl),
+						// Proxy: func(r *http.Request) (*url.URL, error) {
+						// 	addr, _ := randHttpsProxyServerHostPort()
+						// 	httpsProxyUrlStr := fmt.Sprintf("https://%s:@%s", result.ProxyConfigResult.AuthToken, addr)
+						// 	return url.Parse(httpsProxyUrlStr)
+						// },
+						// DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+						// 	addr, _ = randServerHostPort()
+						// 	fmt.Printf("DIAL %s VIA %s %s\n", httpsProxyUrl, network, addr)
+						//     return proxyDialer.DialContext(ctx, network, addr)
+						// },
+						// ProxyConnectHeader: proxyConnectHeader,
+						DialContext: socksDialer.(goproxy.ContextDialer).DialContext,
+					},
+				}
+			}
+		*/
 
 		runOne := func() {
 			// var err error
 			// for range 2 {
+
+			var httpClient *http.Client
+			switch mathrand.Intn(2) {
+			// case 1:
+			// 	httpClient = socksHttpClient()
+			default:
+				httpClient = proxyHttpClient
+			}
+
 			addr, _ := randServerHostPort()
 			targetUrlString := fmt.Sprintf("https://%s/status", addr)
 			// targetUrlString := "https://api.bringyour.com/hello"
 			// var r *http.Response
-			r, err := proxyHttpClient.Get(targetUrlString)
+			r, err := httpClient.Get(targetUrlString)
 			assert.Equal(t, err, nil)
 			if err == nil {
 				b, err := io.ReadAll(r.Body)
@@ -454,6 +509,50 @@ func testConnectProxy(t *testing.T) {
 			}()
 		}
 		wg.Wait()
+
+		/*
+			runPublic := func(targetUrlString string) {
+				r, err := proxyHttpClient.Get(targetUrlString)
+				assert.Equal(t, err, nil)
+				if err == nil {
+					_, err := io.ReadAll(r.Body)
+					assert.Equal(t, err, nil)
+					r.Body.Close()
+					// m := map[string]any{}
+					// err = json.Unmarshal(b, &m)
+					// assert.Equal(t, err, nil)
+					// assert.NotEqual(t, m["client_address"], nil)
+					return
+				}
+			}
+
+			publicHosts := []string{
+				"https://api.bringyour.com/hello",
+				// this will get rate limited
+				// "https://ur.io",
+			}
+
+			for _, publicHost := range publicHosts {
+				// run in serial
+				for j := range 8 {
+					fmt.Printf("[%d][%d][s][public]start\n", i, j)
+					runPublic(publicHost)
+				}
+
+				// run in parallel
+				var wg sync.WaitGroup
+				for j := range 8 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+
+						fmt.Printf("[%d][%d][p][public]start\n", i, j)
+						runPublic(publicHost)
+					}()
+				}
+				wg.Wait()
+			}
+		*/
 
 		proxyHttpClient.CloseIdleConnections()
 
