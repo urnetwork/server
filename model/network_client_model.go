@@ -272,8 +272,11 @@ func AuthNetworkClient(
 			if err == nil {
 				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
-				host := fmt.Sprintf("%s.%s", "connect", server.RequireDomain())
-				httpsProxyPort := 444
+				// FIXME pull the current avaiable far edges and use least recently used with a threshold
+				socksProxyPort := 8080
+				httpsProxyPort := 8082
+
+				host := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
 
 				var httpsProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
@@ -292,7 +295,7 @@ func AuthNetworkClient(
 					)
 				}
 
-				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", host, 1080)
+				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", host, socksProxyPort)
 
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
 					HttpsProxyUrl: httpsProxyUrl,
