@@ -310,6 +310,9 @@ func (self *ByJwt) User() *ByJwt {
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
 		Pro:            self.Pro,
+		RegisteredClaims: gojwt.RegisteredClaims{
+			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
+		},
 	}
 }
 
