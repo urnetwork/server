@@ -55,7 +55,7 @@ func DefaultProxyConnectHandlerSettings() *ProxyConnectHandlerSettings {
 		EnableProxyProtocol:        true,
 		// ProxyConnectTimeout:        15 * time.Second,
 
-		TransportTlsSettings: DefaultTransportTlsSettings(),
+		TransportTlsSettings: server.DefaultTransportTlsSettings(),
 	}
 }
 
@@ -70,7 +70,7 @@ type ProxyConnectHandlerSettings struct {
 	// ProxyConnectTimeout        time.Duration
 	// Mtu                        int
 
-	TransportTlsSettings *TransportTlsSettings
+	TransportTlsSettings *server.TransportTlsSettings
 }
 
 type ProxyConnectHandler struct {
@@ -78,7 +78,7 @@ type ProxyConnectHandler struct {
 	cancel       context.CancelFunc
 	handlerId    server.Id
 	exchange     *Exchange
-	transportTls *TransportTls
+	transportTls *server.TransportTls
 	settings     *ProxyConnectHandlerSettings
 
 	// stateLock        sync.Mutex
@@ -105,10 +105,10 @@ func NewProxyConnectHandler(
 	settings *ProxyConnectHandlerSettings) *ProxyConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	transportTls, err := NewTransportTlsFromConfig(settings.TransportTlsSettings)
+	transportTls, err := server.NewTransportTlsFromConfig(settings.TransportTlsSettings)
 	if err != nil {
 		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
-		transportTls = NewTransportTls(map[string]bool{}, DefaultTransportTlsSettings())
+		transportTls = server.NewTransportTls(map[string]bool{}, server.DefaultTransportTlsSettings())
 	}
 
 	h := &ProxyConnectHandler{

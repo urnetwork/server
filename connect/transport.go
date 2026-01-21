@@ -79,7 +79,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		ListenDnsPort:        53,
 		EnableProxyProtocol:  true,
 		FramerSettings:       connect.DefaultFramerSettings(),
-		TransportTlsSettings: DefaultTransportTlsSettings(),
+		TransportTlsSettings: server.DefaultTransportTlsSettings(),
 
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
@@ -100,7 +100,7 @@ type ConnectHandlerSettings struct {
 	ListenDnsPort             int
 	EnableProxyProtocol       bool
 	FramerSettings            *connect.FramerSettings
-	TransportTlsSettings      *TransportTlsSettings
+	TransportTlsSettings      *server.TransportTlsSettings
 	ConnectionAnnounceTimeout time.Duration
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
@@ -113,7 +113,7 @@ type ConnectHandler struct {
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
 
-	transportTls          *TransportTls
+	transportTls          *server.TransportTls
 	serviceTransitionTime time.Time
 }
 
@@ -124,10 +124,10 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	transportTls, err := NewTransportTlsFromConfig(settings.TransportTlsSettings)
+	transportTls, err := server.NewTransportTlsFromConfig(settings.TransportTlsSettings)
 	if err != nil {
 		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
-		transportTls = NewTransportTls(map[string]bool{}, DefaultTransportTlsSettings())
+		transportTls = server.NewTransportTls(map[string]bool{}, server.DefaultTransportTlsSettings())
 	}
 
 	h := &ConnectHandler{
