@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"fmt"
@@ -24,8 +24,6 @@ import (
 	"encoding/pem"
 
 	"github.com/urnetwork/glog"
-
-	"github.com/urnetwork/server"
 )
 
 // read tls host names from config
@@ -52,8 +50,12 @@ type TransportTls struct {
 	tlsConfigs map[string]*tls.Config
 }
 
+func NewTransportTlsFromConfigWithDefaults() (*TransportTls, error) {
+	return NewTransportTlsFromConfig(DefaultTransportTlsSettings())
+}
+
 func NewTransportTlsFromConfig(settings *TransportTlsSettings) (*TransportTls, error) {
-	r, err := server.Config.SimpleResource("connect.yml")
+	r, err := Config.SimpleResource("tls.yml")
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +147,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	}
 
 	findExplicit := func() (certPath string, keyPath string, ok bool) {
-		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.crt", hostName, hostName))
+		certPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.crt", hostName, hostName))
 		if err != nil {
 			return
 		}
-		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.key", hostName, hostName))
+		keyPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/%s/%s.key", hostName, hostName))
 		if err != nil {
 			return
 		}
@@ -162,11 +164,11 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	findWildcard := func(baseName string) (certPath string, keyPath string, ok bool) {
 		// baseName := strings.SplitN(hostName, ".", 2)[1]
 
-		certPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.crt", baseName, baseName))
+		certPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.crt", baseName, baseName))
 		if err != nil {
 			return
 		}
-		keyPaths, err := server.Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.key", baseName, baseName))
+		keyPaths, err := Vault.ResourcePaths(fmt.Sprintf("tls/star.%s/star.%s.key", baseName, baseName))
 		if err != nil {
 			return
 		}
