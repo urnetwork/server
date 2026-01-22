@@ -37,6 +37,9 @@ const ListenHttpsPort = 8082
 
 func main() {
 
+	// use up to a 4gib message pool per instance
+	connect.ResizeMessagePools(connect.Gib(4))
+
 	quitEvent := server.NewEventWithContext(context.Background())
 	defer quitEvent.Set()
 
