@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/stripe/goproxy"
+	"github.com/elazarl/goproxy"
 	"github.com/things-go/go-socks5"
 
 	"github.com/urnetwork/connect"
@@ -88,6 +88,8 @@ func main() {
 	select {
 	case <-ctx.Done():
 	}
+
+	os.Exit(1)
 }
 
 type socks5Server struct {
@@ -214,8 +216,6 @@ func newHttpServer(
 func (self *httpServer) run() {
 	defer self.cancel()
 
-	httpProxy := goproxy.NewProxyHttpServer()
-
 	// tr := &http.Transport{
 	// 	IdleConnTimeout: 300 * time.Second,
 	// 	TLSHandshakeTimeout: 30 * time.Second,
@@ -260,10 +260,8 @@ func (self *httpServer) run() {
 		return server.Id{}, fmt.Errorf("Not authorized")
 	}
 
-	httpProxy.ConnectDialContext = func(proxyCtx *goproxy.ProxyCtx, network string, addr string) (net.Conn, error) {
+	connectDialContext := func(r *http.Request, network string, addr string) (net.Conn, error) {
 		return server.HandleError2(func() (net.Conn, error) {
-			r := proxyCtx.Req
-
 			proxyId, err := authProxyId(r)
 			if err != nil {
 				return nil, err
@@ -294,6 +292,9 @@ func (self *httpServer) run() {
 	go server.HandleError(func() {
 		defer self.cancel()
 
+		httpProxy := goproxy.NewProxyHttpServer()
+		httpProxy.ConnectDialWithReq = connectDialContext
+
 		addr := fmt.Sprintf(":%d", ListenHttpPort)
 
 		httpServer := &http.Server{
@@ -301,19 +302,7 @@ func (self *httpServer) run() {
 			Handler: httpProxy,
 		}
 
-		listenConfig := net.ListenConfig{}
-
-		serverConn, err := listenConfig.Listen(
-			self.ctx,
-			"tcp",
-			addr,
-		)
-		if err != nil {
-			return
-		}
-		defer serverConn.Close()
-
-		err = httpServer.Serve(serverConn)
+		err := httpServer.ListenAndServe()
 		if err != nil {
 			panic(err)
 		}
@@ -322,6 +311,9 @@ func (self *httpServer) run() {
 	// listen https
 	go server.HandleError(func() {
 		defer self.cancel()
+
+		httpProxy := goproxy.NewProxyHttpServer()
+		httpProxy.ConnectDialWithReq = connectDialContext
 
 		addr := fmt.Sprintf(":%d", ListenHttpsPort)
 
@@ -335,19 +327,7 @@ func (self *httpServer) run() {
 			TLSConfig: tlsConfig,
 		}
 
-		listenConfig := net.ListenConfig{}
-
-		serverConn, err := listenConfig.Listen(
-			self.ctx,
-			"tcp",
-			addr,
-		)
-		if err != nil {
-			return
-		}
-		defer serverConn.Close()
-
-		err = httpServer.ServeTLS(serverConn, "", "")
+		err := httpServer.ListenAndServeTLS("", "")
 		if err != nil {
 			panic(err)
 		}
@@ -356,6 +336,4 @@ func (self *httpServer) run() {
 	select {
 	case <-self.ctx.Done():
 	}
-
-	os.Exit(1)
 }
