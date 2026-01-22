@@ -120,21 +120,25 @@ func (self *socks5Server) run() {
 		socks5.WithResolver(self),
 		socks5.WithRule(socks5.NewPermitConnAndAss()),
 		socks5.WithDialAndRequest(func(ctx context.Context, network string, addr string, request *socks5.Request) (net.Conn, error) {
-			username := request.AuthContext.Payload["username"]
-			// the proxy id was already verified by the credential store
-			proxyId := model.RequireEncodedProxyId(username)
+			return server.HandleError2(func() (net.Conn, error) {
+				username := request.AuthContext.Payload["username"]
+				// the proxy id was already verified by the credential store
+				proxyId := model.RequireEncodedProxyId(username)
 
-			if request.DestAddr.FQDN != "" {
-				addrPort, _ := netip.ParseAddrPort(addr)
-				addr = fmt.Sprintf("%s:%d", request.DestAddr.FQDN, addrPort.Port())
-			}
+				if request.DestAddr.FQDN != "" {
+					addrPort, _ := netip.ParseAddrPort(addr)
+					addr = fmt.Sprintf("%s:%d", request.DestAddr.FQDN, addrPort.Port())
+				}
 
-			pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
-			if err != nil {
-				return nil, err
-			}
+				pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+				if err != nil {
+					return nil, err
+				}
 
-			return pd.Tun().DialContext(ctx, network, addr)
+				return pd.Tun().DialContext(ctx, network, addr)
+			}, func() (net.Conn, error) {
+				return nil, fmt.Errorf("Unexpected error")
+			})
 		}),
 	)
 
@@ -148,20 +152,24 @@ func (self *socks5Server) Errorf(format string, args ...any) {
 
 // socks.CredentialStore
 func (self *socks5Server) Valid(username string, password string, userAddr string) bool {
-	proxyId, err := model.ParseSignedProxyId(username)
-	if err != nil {
+	return server.HandleError1(func() bool {
+		proxyId, err := model.ParseSignedProxyId(username)
+		if err != nil {
+			return false
+		}
+
+		addrPort, err := netip.ParseAddrPort(userAddr)
+		if err != nil {
+			glog.Infof("[socks]user address %s err=%s\n", userAddr, err)
+			return false
+		}
+
+		glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
+
+		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+	}, func() bool {
 		return false
-	}
-
-	addrPort, err := netip.ParseAddrPort(userAddr)
-	if err != nil {
-		glog.Infof("[socks]user address %s err=%s\n", userAddr, err)
-		return false
-	}
-
-	glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
-
-	return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+	})
 }
 
 // socks.NameResolver
@@ -246,29 +254,34 @@ func (self *httpServer) run() {
 		return server.Id{}, fmt.Errorf("Not authorized")
 	}
 
-	httpProxy.ConnectDialContext = func(proxyCtx *goproxy.ProxyCtx, network string, addr string) (conn net.Conn, err error) {
-		r := proxyCtx.Req
+	httpProxy.ConnectDialContext = func(proxyCtx *goproxy.ProxyCtx, network string, addr string) (net.Conn, error) {
+		return server.HandleError2(func() (net.Conn, error) {
+			r := proxyCtx.Req
 
-		proxyId, err := authProxyId(r)
-		if err != nil {
-			return nil, err
-		}
+			proxyId, err := authProxyId(r)
+			if err != nil {
+				return nil, err
+			}
 
-		addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
-		if err != nil {
-			return nil, err
-		}
+			addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+			if err != nil {
+				return nil, err
+			}
 
-		if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
-			return nil, fmt.Errorf("Not authorized")
-		}
+			if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
+				return nil, fmt.Errorf("Not authorized")
+			}
 
-		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
-		if err != nil {
-			return nil, err
-		}
+			pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+			if err != nil {
+				return nil, err
+			}
 
-		return pd.Tun().DialContext(r.Context(), network, addr)
+			return pd.Tun().DialContext(r.Context(), network, addr)
+		}, func() (net.Conn, error) {
+			return nil, fmt.Errorf("Unexpected error")
+		})
+
 	}
 
 	// listen http
