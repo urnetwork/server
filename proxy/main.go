@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"syscall"
 
@@ -146,7 +147,10 @@ func (self *socks5Server) run() {
 		}),
 	)
 
-	socksServer.ListenAndServe("tcp", fmt.Sprintf(":%d", ListenSocksPort))
+	err := socksServer.ListenAndServe("tcp", fmt.Sprintf(":%d", ListenSocksPort))
+	if err != nil {
+		panic(err)
+	}
 }
 
 // socks.Logger
@@ -309,7 +313,10 @@ func (self *httpServer) run() {
 		}
 		defer serverConn.Close()
 
-		httpServer.Serve(serverConn)
+		err = httpServer.Serve(serverConn)
+		if err != nil {
+			panic(err)
+		}
 	})
 
 	// listen https
@@ -340,10 +347,15 @@ func (self *httpServer) run() {
 		}
 		defer serverConn.Close()
 
-		httpServer.ServeTLS(serverConn, "", "")
+		err = httpServer.ServeTLS(serverConn, "", "")
+		if err != nil {
+			panic(err)
+		}
 	})
 
 	select {
 	case <-self.ctx.Done():
 	}
+
+	os.Exit(1)
 }
