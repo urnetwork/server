@@ -189,12 +189,16 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	isPro := false
 
 	for _, transferBalance := range transferBalances {
-		netBalanceByteCount += transferBalance.BalanceByteCount
-		startBalanceByteCount += transferBalance.StartBalanceByteCount
 
-		if !isPro && transferBalance.Paid {
-			// check if any of the transfer balances are from a pro subscription
-			isPro = true
+		if transferBalance.EndTime.After(server.NowUtc()) {
+			netBalanceByteCount += transferBalance.BalanceByteCount
+			startBalanceByteCount += transferBalance.StartBalanceByteCount
+
+			if !isPro && transferBalance.Paid {
+				// check if any of the transfer balances are from a pro subscription
+				isPro = true
+			}
+
 		}
 
 	}
