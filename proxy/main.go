@@ -220,8 +220,6 @@ func (self *httpServer) run() {
 	// httpProxy.Tr = tr
 
 	authProxyId := func(r *http.Request) (server.Id, error) {
-		glog.Infof("AUTH %v\n", r.Header)
-
 		if r.TLS != nil {
 			host := r.TLS.ServerName
 			hostProxyId := strings.SplitN(host, ".", 2)[0]
