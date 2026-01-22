@@ -32,6 +32,8 @@ type ProxyDeviceManager struct {
 	cancel   context.CancelFunc
 	settings *ProxyDeviceManagerSettings
 
+	networkSpace *sdk.NetworkSpace
+
 	stateLock    sync.Mutex
 	proxyDevices map[server.Id]*ProxyDevice
 }
@@ -43,10 +45,19 @@ func NewProxyDeviceManagerWithDefaults(ctx context.Context) *ProxyDeviceManager 
 func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSettings) *ProxyDeviceManager {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	// share one network space across all clients
+	// this reuses the client strategy and keep alive connections
+	networkSpace := sdk.NewPlatformNetworkSpace(
+		cancelCtx,
+		server.RequireEnv(),
+		server.RequireDomain(),
+	)
+
 	return &ProxyDeviceManager{
 		ctx:          cancelCtx,
 		cancel:       cancel,
 		settings:     settings,
+		networkSpace: networkSpace,
 		proxyDevices: map[server.Id]*ProxyDevice{},
 	}
 }
@@ -61,7 +72,7 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			return nil, fmt.Errorf("Proxy device does not exist.")
 		}
 
-		pd, err := NewProxyDeviceWithDefaults(self.ctx, proxyDeviceConfig)
+		pd, err := NewProxyDeviceWithDefaults(self.ctx, proxyDeviceConfig, self.networkSpace)
 		if err != nil {
 			return nil, err
 		}
@@ -161,10 +172,12 @@ type ProxyDevice struct {
 func NewProxyDeviceWithDefaults(
 	ctx context.Context,
 	proxyDeviceConfig *model.ProxyDeviceConfig,
+	networkSpace *sdk.NetworkSpace,
 ) (*ProxyDevice, error) {
 	return NewProxyDevice(
 		ctx,
 		proxyDeviceConfig,
+		networkSpace,
 		DefaultProxyDeviceSettings(),
 	)
 }
@@ -172,6 +185,7 @@ func NewProxyDeviceWithDefaults(
 func NewProxyDevice(
 	ctx context.Context,
 	proxyDeviceConfig *model.ProxyDeviceConfig,
+	networkSpace *sdk.NetworkSpace,
 	settings *ProxyDeviceSettings,
 ) (*ProxyDevice, error) {
 	// this jwt is used to access the services in the network space
@@ -181,12 +195,6 @@ func NewProxyDevice(
 	}
 
 	cancelCtx, cancel := context.WithCancel(ctx)
-
-	networkSpace := sdk.NewPlatformNetworkSpace(
-		cancelCtx,
-		server.RequireEnv(),
-		server.RequireDomain(),
-	)
 
 	deviceLocal, err := sdk.NewPlatformDeviceLocalWithDefaults(
 		nil,
