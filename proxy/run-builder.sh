@@ -2,6 +2,7 @@
 
 env=main
 
+export GOEXPERIMENT=greenteagc; \
 export WARP_DOMAIN="bringyour.com"; \
 export WARP_SERVICE="proxy"; \
 export WARP_VERSION="0.0.0-local"; \
