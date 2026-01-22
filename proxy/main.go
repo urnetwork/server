@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/elazarl/goproxy"
 	"github.com/things-go/go-socks5"
@@ -37,7 +38,21 @@ const ListenSocksPort = 8080
 const ListenHttpPort = 8081
 const ListenHttpsPort = 8082
 
+func DefaultProxySettings() *ProxySettings {
+	return &ProxySettings{
+		TlsHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+}
+
+type ProxySettings struct {
+	TlsHandshakeTimeout   time.Duration
+	ResponseHeaderTimeout time.Duration
+}
+
 func main() {
+
+	settings := DefaultProxySettings()
 
 	// use up to a 4gib message pool per instance
 	connect.ResizeMessagePools(connect.Gib(4))
@@ -76,6 +91,7 @@ func main() {
 		cancel,
 		proxyDeviceManager,
 		transportTls,
+		settings,
 	)
 
 	newHttpServer(
@@ -83,6 +99,7 @@ func main() {
 		cancel,
 		proxyDeviceManager,
 		transportTls,
+		settings,
 	)
 
 	select {
@@ -97,6 +114,7 @@ type socks5Server struct {
 	cancel             context.CancelFunc
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
+	settings           *ProxySettings
 }
 
 func newSocks5Server(
@@ -104,12 +122,14 @@ func newSocks5Server(
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
 	transportTls *server.TransportTls,
+	settings *ProxySettings,
 ) *socks5Server {
 	s := &socks5Server{
 		ctx:                ctx,
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
+		settings:           settings,
 	}
 
 	go server.HandleError(s.run, cancel)
@@ -193,6 +213,7 @@ type httpServer struct {
 	cancel             context.CancelFunc
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
+	settings           *ProxySettings
 }
 
 func newHttpServer(
@@ -200,12 +221,14 @@ func newHttpServer(
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
 	transportTls *server.TransportTls,
+	settings *ProxySettings,
 ) *httpServer {
 	s := &httpServer{
 		ctx:                ctx,
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
+		settings:           settings,
 	}
 
 	go server.HandleError(s.run, cancel)
@@ -288,12 +311,21 @@ func (self *httpServer) run() {
 
 	}
 
+	httpProxy := goproxy.NewProxyHttpServer()
+	httpProxy.ConnectDialWithReq = connectDialContext
+	httpProxy.Tr = &http.Transport{
+		TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
+		ResponseHeaderTimeout: self.settings.ResponseHeaderTimeout,
+		IdleConnTimeout:       300 * time.Second,
+		MaxIdleConns:          0,
+		MaxIdleConnsPerHost:   4,
+		MaxConnsPerHost:       0,
+		ForceAttemptHTTP2:     true,
+	}
+
 	// listen http
 	go server.HandleError(func() {
 		defer self.cancel()
-
-		httpProxy := goproxy.NewProxyHttpServer()
-		httpProxy.ConnectDialWithReq = connectDialContext
 
 		addr := fmt.Sprintf(":%d", ListenHttpPort)
 
@@ -311,9 +343,6 @@ func (self *httpServer) run() {
 	// listen https
 	go server.HandleError(func() {
 		defer self.cancel()
-
-		httpProxy := goproxy.NewProxyHttpServer()
-		httpProxy.ConnectDialWithReq = connectDialContext
 
 		addr := fmt.Sprintf(":%d", ListenHttpsPort)
 
