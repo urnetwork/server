@@ -14,6 +14,7 @@ import (
 	"github.com/stripe/goproxy"
 	"github.com/things-go/go-socks5"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
