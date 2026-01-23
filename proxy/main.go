@@ -13,11 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/elazarl/goproxy"
+	// "github.com/elazarl/goproxy"
 	"github.com/things-go/go-socks5"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -40,14 +41,16 @@ const ListenHttpsPort = 8082
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
-		TlsHandshakeTimeout:   30 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ProxyReadTimeout:         60 * time.Second,
+		ProxyWriteTimeout:        60 * time.Second,
+		ProxyTlsHandshakeTimeout: 60 * time.Second,
 	}
 }
 
 type ProxySettings struct {
-	TlsHandshakeTimeout   time.Duration
-	ResponseHeaderTimeout time.Duration
+	ProxyReadTimeout         time.Duration
+	ProxyWriteTimeout        time.Duration
+	ProxyTlsHandshakeTimeout time.Duration
 }
 
 func main() {
@@ -284,6 +287,8 @@ func (self *httpServer) run() {
 	}
 
 	connectDialContext := func(r *http.Request, network string, addr string) (net.Conn, error) {
+		fmt.Printf("CONNECT DIAL %s %s\n", network, addr)
+
 		return server.HandleError2(func() (net.Conn, error) {
 			proxyId, err := authProxyId(r)
 			if err != nil {
@@ -311,19 +316,22 @@ func (self *httpServer) run() {
 
 	}
 
-	httpProxy := goproxy.NewProxyHttpServer()
-	httpProxy.Logger = self
-	httpProxy.ConnectDialWithReq = connectDialContext
-	httpProxy.AllowHTTP2 = true
-	httpProxy.Tr = &http.Transport{
-		TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
-		ResponseHeaderTimeout: self.settings.ResponseHeaderTimeout,
-		IdleConnTimeout:       300 * time.Second,
-		MaxIdleConns:          0,
-		MaxIdleConnsPerHost:   4,
-		MaxConnsPerHost:       0,
-		ForceAttemptHTTP2:     true,
-	}
+	httpProxy := proxy.NewHttpProxy()
+	// httpProxy.Logger = self
+	httpProxy.ConnectDialWithRequest = connectDialContext
+	httpProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
+	httpProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
+	httpProxy.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
+	// httpProxy.AllowHTTP2 = true
+	// httpProxy.Tr = &http.Transport{
+	// 	TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
+	// 	ResponseHeaderTimeout: self.settings.ResponseHeaderTimeout,
+	// 	IdleConnTimeout:       300 * time.Second,
+	// 	MaxIdleConns:          0,
+	// 	MaxIdleConnsPerHost:   4,
+	// 	MaxConnsPerHost:       0,
+	// 	ForceAttemptHTTP2:     true,
+	// }
 
 	// listen http
 	go server.HandleError(func() {
