@@ -190,11 +190,11 @@ func (self *socks5Server) Valid(username string, password string, userAddr strin
 
 		addrPort, err := netip.ParseAddrPort(userAddr)
 		if err != nil {
-			glog.Infof("[socks]user address %s err=%s\n", userAddr, err)
+			glog.V(1).Infof("[socks]user address %s err=%s\n", userAddr, err)
 			return false
 		}
 
-		glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
+		glog.V(1).Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 
 		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
 	}, func() bool {
@@ -312,7 +312,9 @@ func (self *httpServer) run() {
 	}
 
 	httpProxy := goproxy.NewProxyHttpServer()
+	httpProxy.Logger = self
 	httpProxy.ConnectDialWithReq = connectDialContext
+	httpProxy.AllowHTTP2 = true
 	httpProxy.Tr = &http.Transport{
 		TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
 		ResponseHeaderTimeout: self.settings.ResponseHeaderTimeout,
@@ -365,4 +367,9 @@ func (self *httpServer) run() {
 	select {
 	case <-self.ctx.Done():
 	}
+}
+
+// goproxy.Logger
+func (self *httpServer) Printf(format string, v ...any) {
+	glog.Infof("[http]"+format, v...)
 }
