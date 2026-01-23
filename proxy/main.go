@@ -287,8 +287,6 @@ func (self *httpServer) run() {
 	}
 
 	connectDialContext := func(r *http.Request, network string, addr string) (net.Conn, error) {
-		fmt.Printf("CONNECT DIAL %s %s\n", network, addr)
-
 		return server.HandleError2(func() (net.Conn, error) {
 			proxyId, err := authProxyId(r)
 			if err != nil {
