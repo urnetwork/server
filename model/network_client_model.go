@@ -286,7 +286,7 @@ func AuthNetworkClient(
 
 				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
 
-				httpProxyUrl = fmt.Sprintf(
+				httpProxyUrl := fmt.Sprintf(
 					"http://%s:%d",
 					proxyHost,
 					httpProxyPort,
