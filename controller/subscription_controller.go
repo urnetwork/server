@@ -44,8 +44,8 @@ const RefreshTransferBalanceDuration = 30 * time.Hour
 
 // const RefreshTransferBalanceTimeout = 24 * time.Hour
 
-const RefreshSupporterTransferBalance = 600 * model.Gib
-const RefreshFreeTransferBalance = 60 * model.Gib
+const RefreshSupporterTransferBalance = 1000 * model.Gib
+const RefreshFreeTransferBalance = 70 * model.Gib
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
