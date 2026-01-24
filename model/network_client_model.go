@@ -122,10 +122,15 @@ type AuthNetworkClientError struct {
 
 type ProxyConfigResult struct {
 	KeepaliveSeconds int       `json:"keepalive_seconds"`
-	HttpsProxyUrl    string    `json:"https_proxy_url"`
 	SocksProxyUrl    string    `json:"socks_proxy_url"`
+	HttpProxyUrl     string    `json:"http_proxy_url"`
+	HttpsProxyUrl    string    `json:"https_proxy_url"`
 	AuthToken        string    `json:"auth_token"`
 	InstanceId       server.Id `json:"instance_id"`
+	ProxyHost        string    `json:"proxy_host"`
+	HttpProxyPort    int       `json:"http_proxy_port"`
+	HttpsProxyPort   int       `json:"https_proxy_port"`
+	SocksProxyPort   int       `json:"socks_proxy_port"`
 }
 
 type ProxyAuthResult struct {
@@ -274,34 +279,46 @@ func AuthNetworkClient(
 
 				// FIXME pull the current avaiable far edges and use least recently used with a threshold
 				socksProxyPort := 8080
+				httpProxyPort := 8081
 				httpsProxyPort := 8082
 
-				host := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
+				proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
+
+				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
+
+				httpProxyUrl = fmt.Sprintf(
+					"http://%s:%d",
+					proxyHost,
+					httpProxyPort,
+				)
 
 				var httpsProxyUrl string
 				if authClient.ProxyConfig.HttpsRequireAuth {
 					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
 					httpsProxyUrl = fmt.Sprintf(
 						"https://%s:%d",
-						host,
+						proxyHost,
 						httpsProxyPort,
 					)
 				} else {
 					httpsProxyUrl = fmt.Sprintf(
 						"https://%s.%s:%d",
 						strings.ToLower(signedProxyId),
-						host,
+						proxyHost,
 						httpsProxyPort,
 					)
 				}
 
-				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", host, socksProxyPort)
-
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
-					HttpsProxyUrl: httpsProxyUrl,
-					SocksProxyUrl: socksProxyUrl,
-					AuthToken:     strings.ToLower(signedProxyId),
-					InstanceId:    proxyDeviceConfig.InstanceId,
+					SocksProxyUrl:  socksProxyUrl,
+					HttpProxyUrl:   httpProxyUrl,
+					HttpsProxyUrl:  httpsProxyUrl,
+					AuthToken:      strings.ToLower(signedProxyId),
+					InstanceId:     proxyDeviceConfig.InstanceId,
+					ProxyHost:      proxyHost,
+					SocksProxyPort: socksProxyPort,
+					HttpProxyPort:  httpProxyPort,
+					HttpsProxyPort: httpsProxyPort,
 				}
 			} else {
 				authClientResult.Error = &AuthNetworkClientError{
