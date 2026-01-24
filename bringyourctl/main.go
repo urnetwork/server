@@ -72,6 +72,7 @@ Usage:
     bringyourctl product-updates sync
     bringyourctl query location <query>
     bringyourctl upgrade-plan --network_id=<network_id>
+    bringyourctl proxy parse-id <signed_proxy_id>
 
 Options:
     -h --help     Show this screen.
@@ -228,6 +229,10 @@ Options:
 		searchQuery(opts)
 	} else if upgradePlan_, _ := opts.Bool("upgrade-plan"); upgradePlan_ {
 		upgradePlan(opts)
+	} else if proxy, _ := opts.Bool("proxy"); proxy {
+		if parseId, _ := opts.Bool("parse-id"); parseId {
+			proxyParseId(opts)
+		}
 	} else {
 		fmt.Println(usage)
 	}
@@ -1081,4 +1086,16 @@ func upgradePlan(opts docopt.Opts) {
 	model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
 	controller.AddRefreshTransferBalance(ctx, networkId)
+}
+
+func proxyParseId(opts docopt.Opts) {
+	signedProxyId, _ := opts.String("<signed_proxy_id>")
+
+	proxyId, err := model.ParseSignedProxyId(signedProxyId)
+
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%s\n", proxyId)
 }
