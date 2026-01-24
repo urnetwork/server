@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
+	// "crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -14,7 +14,7 @@ import (
 	"time"
 
 	// "github.com/elazarl/goproxy"
-	"github.com/things-go/go-socks5"
+	// socks5 "github.com/things-go/go-socks5"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
@@ -143,49 +143,25 @@ func newSocks5Server(
 func (self *socks5Server) run() {
 	defer self.cancel()
 
-	socksServer := socks5.NewServer(
-		socks5.WithLogger(self),
-		socks5.WithCredential(self),
-		// socks5.WithRewriter(self),
-		socks5.WithResolver(self),
-		socks5.WithRule(socks5.NewPermitConnAndAss()),
-		socks5.WithDialAndRequest(func(ctx context.Context, network string, addr string, request *socks5.Request) (net.Conn, error) {
-			return server.HandleError2(func() (net.Conn, error) {
-				username := request.AuthContext.Payload["username"]
-				// the proxy id was already verified by the credential store
-				proxyId := model.RequireEncodedProxyId(username)
+	connectDial := func(ctx context.Context, r proxy.SocksRequest, network string, addr string) (net.Conn, error) {
+		username := r.AuthContext.Payload["username"]
+		// the proxy id was already verified by the credential store
+		proxyId := model.RequireEncodedProxyId(username)
 
-				if request.DestAddr.FQDN != "" {
-					addrPort, _ := netip.ParseAddrPort(addr)
-					addr = fmt.Sprintf("%s:%d", request.DestAddr.FQDN, addrPort.Port())
-				}
+		if r.DestAddr.FQDN != "" {
+			addrPort, _ := netip.ParseAddrPort(addr)
+			addr = fmt.Sprintf("%s:%d", r.DestAddr.FQDN, addrPort.Port())
+		}
 
-				pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
-				if err != nil {
-					return nil, err
-				}
+		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+		if err != nil {
+			return nil, err
+		}
 
-				return pd.Tun().DialContext(ctx, network, addr)
-			}, func() (net.Conn, error) {
-				return nil, fmt.Errorf("Unexpected error")
-			})
-		}),
-	)
-
-	err := socksServer.ListenAndServe("tcp", fmt.Sprintf(":%d", ListenSocksPort))
-	if err != nil {
-		panic(err)
+		return pd.Tun().DialContext(ctx, network, addr)
 	}
-}
 
-// socks.Logger
-func (self *socks5Server) Errorf(format string, args ...any) {
-	glog.Errorf("[socks]"+format, args...)
-}
-
-// socks.CredentialStore
-func (self *socks5Server) Valid(username string, password string, userAddr string) bool {
-	return server.HandleError1(func() bool {
+	validUser := func(username string, password string, userAddr string) bool {
 		proxyId, err := model.ParseSignedProxyId(username)
 		if err != nil {
 			return false
@@ -200,15 +176,18 @@ func (self *socks5Server) Valid(username string, password string, userAddr strin
 		glog.V(1).Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 
 		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
-	}, func() bool {
-		return false
-	})
-}
+	}
 
-// socks.NameResolver
-func (self *socks5Server) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	// names are not resolved locally
-	return ctx, net.ParseIP("0.0.0.0").To4(), nil
+	socksProxy := proxy.NewSocksProxy()
+	socksProxy.ConnectDialWithRequest = connectDial
+	socksProxy.ValidUser = validUser
+	socksProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
+	socksProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
+
+	err := socksProxy.ListenAndServe(self.ctx, "tcp", fmt.Sprintf(":%d", ListenSocksPort))
+	if err != nil {
+		panic(err)
+	}
 }
 
 type httpServer struct {
@@ -286,37 +265,33 @@ func (self *httpServer) run() {
 		return server.Id{}, fmt.Errorf("Not authorized")
 	}
 
-	connectDialContext := func(r *http.Request, network string, addr string) (net.Conn, error) {
-		return server.HandleError2(func() (net.Conn, error) {
-			proxyId, err := authProxyId(r)
-			if err != nil {
-				return nil, err
-			}
+	connectDial := func(r *http.Request, network string, addr string) (net.Conn, error) {
+		proxyId, err := authProxyId(r)
+		if err != nil {
+			return nil, err
+		}
 
-			addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
-			if err != nil {
-				return nil, err
-			}
+		addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil {
+			return nil, err
+		}
 
-			if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
-				return nil, fmt.Errorf("Not authorized")
-			}
+		if !self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr()) {
+			return nil, fmt.Errorf("Not authorized")
+		}
 
-			pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
-			if err != nil {
-				return nil, err
-			}
+		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+		if err != nil {
+			return nil, err
+		}
 
-			return pd.Tun().DialContext(r.Context(), network, addr)
-		}, func() (net.Conn, error) {
-			return nil, fmt.Errorf("Unexpected error")
-		})
-
+		return pd.Tun().DialContext(r.Context(), network, addr)
 	}
 
 	httpProxy := proxy.NewHttpProxy()
 	// httpProxy.Logger = self
-	httpProxy.ConnectDialWithRequest = connectDialContext
+	httpProxy.GetTlsConfigForClient = self.transportTls.GetTlsConfigForClient
+	httpProxy.ConnectDialWithRequest = connectDial
 	httpProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
 	httpProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 	httpProxy.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
@@ -334,15 +309,7 @@ func (self *httpServer) run() {
 	// listen http
 	go server.HandleError(func() {
 		defer self.cancel()
-
-		addr := fmt.Sprintf(":%d", ListenHttpPort)
-
-		httpServer := &http.Server{
-			Addr:    addr,
-			Handler: httpProxy,
-		}
-
-		err := httpServer.ListenAndServe()
+		err := httpProxy.ListenAndServe(self.ctx, "tcp", fmt.Sprintf(":%d", ListenHttpPort))
 		if err != nil {
 			panic(err)
 		}
@@ -351,20 +318,7 @@ func (self *httpServer) run() {
 	// listen https
 	go server.HandleError(func() {
 		defer self.cancel()
-
-		addr := fmt.Sprintf(":%d", ListenHttpsPort)
-
-		tlsConfig := &tls.Config{
-			GetConfigForClient: self.transportTls.GetTlsConfigForClient,
-		}
-
-		httpServer := &http.Server{
-			Addr:      addr,
-			Handler:   httpProxy,
-			TLSConfig: tlsConfig,
-		}
-
-		err := httpServer.ListenAndServeTLS("", "")
+		err := httpProxy.ListenAndServeTls(self.ctx, "tcp", fmt.Sprintf(":%d", ListenHttpsPort))
 		if err != nil {
 			panic(err)
 		}
@@ -373,9 +327,4 @@ func (self *httpServer) run() {
 	select {
 	case <-self.ctx.Done():
 	}
-}
-
-// goproxy.Logger
-func (self *httpServer) Printf(format string, v ...any) {
-	glog.Infof("[http]"+format, v...)
 }
