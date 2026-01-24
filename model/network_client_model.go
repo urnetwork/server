@@ -29,7 +29,7 @@ import (
 	// "github.com/urnetwork/server/jwt"
 )
 
-const NetworkClientHandlerHeartbeatTimeout = 5 * time.Second
+const NetworkClientHandlerHeartbeatTimeout = 60 * time.Second
 
 // const LimitClientIdsPer24Hours = 1024
 // const LimitClientIdsPerNetwork = 128

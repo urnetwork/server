@@ -52,7 +52,7 @@ func NewConnectRouter(
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(model.NetworkClientHandlerHeartbeatTimeout):
+			case <-time.After(min(5*time.Second, model.NetworkClientHandlerHeartbeatTimeout/2)):
 			}
 			// try again after unhandled errors. these signal a transient issue such as db load
 			server.HandleError(func() {
