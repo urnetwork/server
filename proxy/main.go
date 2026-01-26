@@ -105,6 +105,8 @@ func main() {
 		settings,
 	)
 
+	newWatchdog(ctx, 5*time.Second)
+
 	select {
 	case <-ctx.Done():
 	}
@@ -143,6 +145,23 @@ func newSocks5Server(
 func (self *socks5Server) run() {
 	defer self.cancel()
 
+	validUser := func(username string, password string, userAddr string) bool {
+		proxyId, err := model.ParseSignedProxyId(username)
+		if err != nil {
+			return false
+		}
+
+		addrPort, err := netip.ParseAddrPort(userAddr)
+		if err != nil {
+			glog.V(1).Infof("[socks]user address %s err=%s\n", userAddr, err)
+			return false
+		}
+
+		glog.V(1).Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
+
+		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
+	}
+
 	connectDial := func(ctx context.Context, r proxy.SocksRequest, network string, addr string) (net.Conn, error) {
 		username := r.AuthContext.Payload["username"]
 		// the proxy id was already verified by the credential store
@@ -159,23 +178,6 @@ func (self *socks5Server) run() {
 		}
 
 		return pd.Tun().DialContext(ctx, network, addr)
-	}
-
-	validUser := func(username string, password string, userAddr string) bool {
-		proxyId, err := model.ParseSignedProxyId(username)
-		if err != nil {
-			return false
-		}
-
-		addrPort, err := netip.ParseAddrPort(userAddr)
-		if err != nil {
-			glog.V(1).Infof("[socks]user address %s err=%s\n", userAddr, err)
-			return false
-		}
-
-		glog.V(1).Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
-
-		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
 	}
 
 	socksProxy := proxy.NewSocksProxy()
