@@ -140,7 +140,7 @@ func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
 		ProxyDeviceDescription: "resident proxy",
 		ProxyDeviceSpec:        "resident proxy",
 		Mtu:                    1440,
-		ProxyDeviceIdleTimeout: 15 * time.Minute,
+		ProxyDeviceIdleTimeout: 90 * time.Minute,
 	}
 }
 
