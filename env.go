@@ -589,6 +589,22 @@ func (self *SimpleResource) UnmarshalYaml(value any) {
 	}
 }
 
+func (self *SimpleResource) RequireBool(path ...string) bool {
+	values := self.Bool(path...)
+	if len(values) != 1 {
+		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
+	}
+	value := values[0]
+	glog.Infof("[env]%s[%s] = %t\n", self.path, strings.Join(path, " "), value)
+	return value
+}
+
+func (self *SimpleResource) Bool(path ...string) []bool {
+	values := []bool{}
+	getAll(self.Parse(), path, &values)
+	return values
+}
+
 func (self *SimpleResource) RequireInt(path ...string) int {
 	values := self.Int(path...)
 	if len(values) != 1 {

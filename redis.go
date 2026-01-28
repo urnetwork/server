@@ -5,21 +5,24 @@ import (
 	"sync"
 	"time"
 	// "strings"
+	"net"
+	// "net/netip"
+	// "fmt"
 
 	"github.com/redis/go-redis/v9"
 )
 
 // type aliases to simplify user code
-type RedisClient = *redis.Client
+type RedisClient = redis.Cmdable
 
 const RedisNil = redis.Nil
 
 type safeRedisClient struct {
 	mutex  sync.Mutex
-	client *redis.Client
+	client redis.Cmdable
 }
 
-func (self *safeRedisClient) open() *redis.Client {
+func (self *safeRedisClient) open() redis.Cmdable {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -69,26 +72,66 @@ func (self *safeRedisClient) open() *redis.Client {
 			panic(err)
 		}
 
-		// see https://github.com/redis/go-redis/blob/master/options.go#L31
-		options := &redis.Options{
-			Addr:     redisKeys.RequireString("authority"),
-			Password: redisKeys.RequireString("password"),
-			DB:       redisKeys.RequireInt("db"),
-			// Addr: "192.168.208.135:6379",
-			// Password: "",
-			// DB: 0,
-			MaxRetries:      maxRetries,
-			MinIdleConns:    minConnections,
-			MaxIdleConns:    maxConnections,
-			ConnMaxLifetime: connectionMaxLifetimeDuration,
-			ConnMaxIdleTime: connectionMaxIdleTimeDuration,
-			// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
-			// see https://uptrace.dev/blog/golang-context-timeout.html
-			ContextTimeoutEnabled: false,
-			ReadTimeout:           30 * time.Second,
-			WriteTimeout:          15 * time.Second,
+		readTimeout := 30 * time.Second
+		writeTimeout := 15 * time.Second
+
+		dialer := &net.Dialer{
+			Timeout: 30 * time.Second,
 		}
-		self.client = redis.NewClient(options)
+		authority := redisKeys.RequireString("authority")
+		host, _, _ := net.SplitHostPort(authority)
+		dialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
+			// always connect to the original host
+			// this is because the cluser is set up with ip endpoints, but the ip is not universally routable
+			// note: this should be the default client behavior when `cluster-preferred-endpoint-type=unknown-endpoint`
+			//       however, go-redis and most other redis clients don't seem to handle the `MOVE :port` commands
+			//       correctly without a host
+			_, portStr, _ := net.SplitHostPort(addr)
+			return dialer.DialContext(ctx, network, net.JoinHostPort(host, portStr))
+		}
+
+		cluster := redisKeys.RequireBool("cluster")
+
+		if cluster {
+			options := &redis.ClusterOptions{
+				Addrs:           []string{authority},
+				Password:        redisKeys.RequireString("password"),
+				MaxRetries:      maxRetries,
+				MinIdleConns:    minConnections,
+				MaxIdleConns:    maxConnections,
+				ConnMaxLifetime: connectionMaxLifetimeDuration,
+				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
+				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
+				// see https://uptrace.dev/blog/golang-context-timeout.html
+				ContextTimeoutEnabled: false,
+				ReadTimeout:           readTimeout,
+				WriteTimeout:          writeTimeout,
+				Dialer:                dialContext,
+			}
+			self.client = redis.NewClusterClient(options)
+		} else {
+			// see https://github.com/redis/go-redis/blob/master/options.go#L31
+			options := &redis.Options{
+				Addr:     redisKeys.RequireString("authority"),
+				Password: redisKeys.RequireString("password"),
+				DB:       redisKeys.RequireInt("db"),
+				// Addr: "192.168.208.135:6379",
+				// Password: "",
+				// DB: 0,
+				MaxRetries:      maxRetries,
+				MinIdleConns:    minConnections,
+				MaxIdleConns:    maxConnections,
+				ConnMaxLifetime: connectionMaxLifetimeDuration,
+				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
+				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
+				// see https://uptrace.dev/blog/golang-context-timeout.html
+				ContextTimeoutEnabled: false,
+				ReadTimeout:           readTimeout,
+				WriteTimeout:          writeTimeout,
+				Dialer:                dialContext,
+			}
+			self.client = redis.NewClient(options)
+		}
 	}
 	return self.client
 }
@@ -100,7 +143,9 @@ func (self *safeRedisClient) reset() {
 	defer self.mutex.Unlock()
 
 	if self.client != nil {
-		self.client.Close()
+		if v, ok := self.client.(interface{ Close() error }); ok {
+			v.Close()
+		}
 		self.client = nil
 	}
 }
@@ -113,7 +158,7 @@ func RedisReset() {
 	safeClient.reset()
 }
 
-func client() *redis.Client {
+func client() redis.Cmdable {
 	return safeClient.open()
 }
 

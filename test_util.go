@@ -146,10 +146,12 @@ db: "%s"`,
 			`
 authority: "%s"
 password: "%s"
-db: %d`,
+db: %d
+cluster: %t`,
 			redis["authority"],
 			redis["password"],
 			testRedisDb,
+			false,
 		)),
 	)
 	RedisReset()
