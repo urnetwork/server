@@ -201,7 +201,7 @@ func NewUnorderedTransferPair(a server.Id, b server.Id) TransferPair {
 //
 // note: net escrow counters do not have a ttl
 func netEscrowKey(balanceId server.Id) string {
-	return fmt.Sprintf("net_escrow_%s", balanceId)
+	return fmt.Sprintf("{escrow}net_%s", balanceId)
 }
 
 type TransferBalance struct {

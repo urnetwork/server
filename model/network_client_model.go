@@ -639,7 +639,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 }
 
 func pendingClientConnectionKey(clientId server.Id) string {
-	return fmt.Sprintf("pending_client_connection_%s", clientId)
+	return fmt.Sprintf("{pending_client_connection}_%s", clientId)
 }
 
 func SetPendingNetworkClientConnection(ctx context.Context, clientId server.Id, expire time.Duration) {
@@ -1445,10 +1445,10 @@ func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, c
 	// scrub the error message
 	errorMessage := server.ScrubIpPort(err.Error())
 
-	networkKey := fmt.Sprintf("client_error_network_%s", networkId)
-	clientKey := fmt.Sprintf("client_error_client_%s", clientId)
-	networkErrorMessageKey := fmt.Sprintf("client_error_network_%s_message_%s", networkId, errorMessage)
-	clientErrorMessageKey := fmt.Sprintf("client_error_client_%s_message_%s", clientId, errorMessage)
+	networkKey := fmt.Sprintf("{client_error}network_%s", networkId)
+	clientKey := fmt.Sprintf("{client_error}client_%s", clientId)
+	networkErrorMessageKey := fmt.Sprintf("{client_error}network_%s_message_%s", networkId, errorMessage)
+	clientErrorMessageKey := fmt.Sprintf("{client_error}client_%s_message_%s", clientId, errorMessage)
 
 	server.Redis(ctx, func(r server.RedisClient) {
 

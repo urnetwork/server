@@ -1421,11 +1421,11 @@ type InitialClientLocations struct {
 }
 
 func clientLocationKey(locationId server.Id) string {
-	return fmt.Sprintf("client_location_l_%s", locationId)
+	return fmt.Sprintf("{client_location}_l_%s", locationId)
 }
 
 func initialClientLocationsKey() string {
-	return fmt.Sprintf("initial_client_locations")
+	return fmt.Sprintf("{client_location}i")
 }
 
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
@@ -2136,7 +2136,7 @@ func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("csc_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
+	return fmt.Sprintf("{cs}c_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
 }
 
 func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
@@ -2145,7 +2145,7 @@ func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("csc_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
+	return fmt.Sprintf("{cs}c_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
 }
 
 func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
@@ -2154,7 +2154,7 @@ func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("csf_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
+	return fmt.Sprintf("{cs}f_%d_%c_l_%s_%s", fm, rm, locationId, callerLocationId)
 }
 
 func clientScoreLocationGroupFilterKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
@@ -2163,7 +2163,7 @@ func clientScoreLocationGroupFilterKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("csf_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
+	return fmt.Sprintf("{cs}f_%d_%c_g_%s_%s", fm, rm, locationGroupId, callerLocationId)
 }
 
 func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id, index int) string {
@@ -2172,7 +2172,7 @@ func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("css_%d_%c_l_%s_%s_%d", fm, rm, locationId, callerLocationId, index)
+	return fmt.Sprintf("{cs}s_%d_%c_l_%s_%s_%d", fm, rm, locationId, callerLocationId, index)
 }
 
 func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id, index int) string {
@@ -2181,7 +2181,7 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("css_%d_%c_g_%s_%s_%d", fm, rm, locationGroupId, callerLocationId, index)
+	return fmt.Sprintf("{cs}s_%d_%c_g_%s_%s_%d", fm, rm, locationGroupId, callerLocationId, index)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {

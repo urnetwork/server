@@ -81,12 +81,12 @@ func NewConnectionRateLimit(
 // *important* disconnect must always be called, even if there is a rate limit error
 func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 	burstKey := fmt.Sprintf(
-		"connect_burst_%s_%d",
+		"{connect}burst_%s_%d",
 		self.clientIpHashHex,
 		server.NowUtc().Unix()/int64(self.settings.BurstDuration/time.Second),
 	)
 	totalKey := fmt.Sprintf(
-		"connect_total_%s_%s",
+		"{connect}total_%s_%s",
 		self.handlerId,
 		self.clientIpHashHex,
 	)
