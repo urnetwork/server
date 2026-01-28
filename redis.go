@@ -76,7 +76,10 @@ func (self *safeRedisClient) open() redis.Cmdable {
 		writeTimeout := 15 * time.Second
 
 		dialer := &net.Dialer{
-			Timeout: 30 * time.Second,
+			Timeout: 90 * time.Second,
+			KeepAliveConfig: net.KeepAliveConfig{
+				Enable: true,
+			},
 		}
 		authority := redisKeys.RequireString("authority")
 		host, _, _ := net.SplitHostPort(authority)
