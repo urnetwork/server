@@ -744,7 +744,7 @@ func CreateTransferEscrow(
 			contractTransferByteCount,
 			nil,
 		)
-	}, server.TxReadCommitted)
+	})
 
 	for _, post := range posts {
 		post()
@@ -849,7 +849,7 @@ func CreateCompanionTransferEscrow(
 			contractTransferByteCount,
 			companionContractId,
 		)
-	}, server.TxReadCommitted)
+	})
 
 	for _, post := range posts {
 		post()
@@ -1028,8 +1028,6 @@ func CloseContract(
 	// settle := false
 	// dispute := false
 
-	var posts []func()
-
 	server.Tx(ctx, func(tx server.PgTx) {
 		found := false
 		var sourceId server.Id
@@ -1131,93 +1129,109 @@ func CloseContract(
 				usedTransferByteCount,
 				server.NowUtc(),
 			))
+		}
+	})
 
-			// party -> used transfer byte count
-			closes := map[ContractParty]ByteCount{}
-			result, err = tx.Query(
+	if returnErr != nil {
+		return
+	}
+
+	returnErr = settleContract(ctx, contractId)
+	return
+}
+
+func settleContract(ctx context.Context, contractId server.Id) (returnErr error) {
+	var posts []func()
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// party -> used transfer byte count
+		closes := map[ContractParty]ByteCount{}
+		result, err := tx.Query(
+			ctx,
+			`
+            SELECT
+                party,
+                used_transfer_byte_count
+            FROM contract_close
+            WHERE
+                contract_id = $1 AND
+                checkpoint = false
+            `,
+			contractId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var closeParty ContractParty
+				var closeUsedTransferByteCount ByteCount
+				server.Raise(result.Scan(
+					&closeParty,
+					&closeUsedTransferByteCount,
+				))
+				closes[closeParty] = closeUsedTransferByteCount
+			}
+		})
+		// for closeParty, closeUsedTransferByteCount := range closes {
+		// 	fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+		// }
+
+		sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
+		destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
+
+		if sourceOk && destinationOk {
+			hasEscrow := false
+
+			result, err := tx.Query(
 				ctx,
 				`
-                SELECT
-                    party,
-                    used_transfer_byte_count
-                FROM contract_close
-                WHERE
-                    contract_id = $1 AND
-                    checkpoint = false
+                    SELECT balance_id FROM transfer_escrow
+                    WHERE contract_id = $1
+                    LIMIT 1
                 `,
 				contractId,
 			)
 			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var closeParty ContractParty
-					var closeUsedTransferByteCount ByteCount
-					server.Raise(result.Scan(
-						&closeParty,
-						&closeUsedTransferByteCount,
-					))
-					closes[closeParty] = closeUsedTransferByteCount
+				if result.Next() {
+					hasEscrow = true
 				}
 			})
-			// for closeParty, closeUsedTransferByteCount := range closes {
-			// 	fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
-			// }
 
-			sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
-			destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
-
-			if sourceOk && destinationOk {
-				hasEscrow := false
-
-				result, err := tx.Query(
+			if hasEscrow {
+				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
+				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
+					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
+					posts, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+				} else {
+					glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+					// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
+					setContractDisputeInTx(ctx, tx, contractId, true)
+				}
+			} else {
+				// nothing to settle, just close the transaction
+				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
-                        SELECT balance_id FROM transfer_escrow
-                        WHERE contract_id = $1
-                        LIMIT 1
+                        UPDATE transfer_contract
+                        SET
+                            outcome = $2,
+                            close_time = $3
+                        WHERE
+                            contract_id = $1
                     `,
 					contractId,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						hasEscrow = true
-					}
-				})
-
-				if hasEscrow {
-					diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
-					if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
-						// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-						posts, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
-					} else {
-						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
-						// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
-						setContractDisputeInTx(ctx, tx, contractId, true)
-					}
-				} else {
-					// nothing to settle, just close the transaction
-					server.RaisePgResult(tx.Exec(
-						ctx,
-						`
-                            UPDATE transfer_contract
-                            SET
-                                outcome = $2,
-                                close_time = $3
-                            WHERE
-                                contract_id = $1
-                        `,
-						contractId,
-						ContractOutcomeSettled,
-						server.NowUtc(),
-					))
-				}
+					ContractOutcomeSettled,
+					server.NowUtc(),
+				))
 			}
 		}
 	}, server.TxReadCommitted)
 
+	if returnErr != nil {
+		return
+	}
+
 	for _, post := range posts {
 		post()
 	}
-
 	return
 }
 
@@ -1226,7 +1240,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		posts, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
-	}, server.TxReadCommitted)
+	})
 
 	for _, post := range posts {
 		post()
@@ -1867,7 +1881,7 @@ func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error 
 			return fmt.Errorf("Done.")
 		default:
 		}
-		c, err := ForceCloseOpenContractIds(ctx, minTime, 1000, 1)
+		c, err := ForceCloseOpenContractIds(ctx, minTime, 1000, 1, 0, 0)
 		if err != nil {
 			return err
 		}
@@ -1882,7 +1896,17 @@ func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error 
 // - no closes
 // - single close
 // - one or more checkpoints
-func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount int, parallel int) (closeCount int64, err error) {
+func ForceCloseOpenContractIds(
+	ctx context.Context,
+	minTime time.Time,
+	maxCount int,
+	parallel int,
+	blockSize int,
+	blockIndex int,
+) (
+	closeCount int64,
+	err error,
+) {
 
 	/*
 		// force close contracts where there is nothing to do
@@ -2028,7 +2052,13 @@ func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount 
 					&openContract.destinationCheckpoint,
 				))
 
-				openContracts = append(openContracts, openContract)
+				if 0 < blockSize {
+					if int(openContract.contractId.Hash()%uint64(blockSize)) == blockIndex%blockSize {
+						openContracts = append(openContracts, openContract)
+					}
+				} else {
+					openContracts = append(openContracts, openContract)
+				}
 			}
 		})
 	})

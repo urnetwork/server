@@ -139,7 +139,9 @@ func initTasks(ctx context.Context) {
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
-		work.ScheduleCloseExpiredContracts(clientSession, tx)
+		for i := range work.DefaultCloseExpiredContractsBlockSize {
+			work.ScheduleCloseExpiredContracts(clientSession, tx, i)
+		}
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)

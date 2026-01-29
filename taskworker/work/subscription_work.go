@@ -1,6 +1,7 @@
 package work
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -10,13 +11,17 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+const DefaultCloseExpiredContractsBlockSize = 32
+
 type CloseExpiredContractsArgs struct {
+	BlockSize  int `json:"block_size"`
+	BlockIndex int `json:"block_index"`
 }
 
 type CloseExpiredContractsResult struct {
 }
 
-func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx server.PgTx) {
+func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx server.PgTx, blockIndex int) {
 	// runAt := func() time.Time {
 	// 	now := server.NowUtc()
 	// 	year, month, day := now.Date()
@@ -24,13 +29,19 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx serv
 	// 	return time.Date(year, month, day, hour, minute + 1, 0, 0, time.UTC)
 	// }()
 
+	blockSize := DefaultCloseExpiredContractsBlockSize
+	blockIndex = blockIndex % blockSize
+
 	task.ScheduleTaskInTx(
 		tx,
 		CloseExpiredContracts,
-		&CloseExpiredContractsArgs{},
+		&CloseExpiredContractsArgs{
+			BlockSize:  blockSize,
+			BlockIndex: blockIndex,
+		},
 		clientSession,
 		// legacy key
-		task.RunOnce("close_expired_contracts"),
+		task.RunOnce(fmt.Sprintf("close_expired_contracts_%d_%d", blockSize, blockIndex)),
 		task.RunAt(server.NowUtc().Add(time.Minute)),
 		task.MaxTime(30*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
@@ -41,15 +52,20 @@ func CloseExpiredContracts(
 	closeExpiredContracts *CloseExpiredContractsArgs,
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
-	minTime := server.NowUtc().Add(-5 * time.Minute)
-	_, err := model.ForceCloseOpenContractIds(
-		clientSession.Ctx,
-		minTime,
-		1000000,
-		48,
-	)
-
-	return &CloseExpiredContractsResult{}, err
+	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
+		minTime := server.NowUtc().Add(-5 * time.Minute)
+		_, err := model.ForceCloseOpenContractIds(
+			clientSession.Ctx,
+			minTime,
+			1000000,
+			48,
+			closeExpiredContracts.BlockSize,
+			closeExpiredContracts.BlockIndex,
+		)
+		return &CloseExpiredContractsResult{}, err
+	}
+	// else ignore lingering tasks with older block size
+	return &CloseExpiredContractsResult{}, nil
 }
 
 func CloseExpiredContractsPost(
@@ -58,7 +74,7 @@ func CloseExpiredContractsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleCloseExpiredContracts(clientSession, tx)
+	ScheduleCloseExpiredContracts(clientSession, tx, closeExpiredContracts.BlockIndex)
 	return nil
 }
 

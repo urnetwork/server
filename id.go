@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 
 	"database/sql/driver"
 
@@ -114,6 +115,12 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 	}
 	*self = buf
 	return nil
+}
+
+func (self *Id) Hash() uint64 {
+	h := fnv.New64()
+	h.Write(self[0:16])
+	return h.Sum64()
 }
 
 // parseUuid converts a string UUID in standard form to a byte array.
