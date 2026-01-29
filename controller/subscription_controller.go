@@ -44,8 +44,8 @@ const RefreshTransferBalanceDuration = 30 * time.Hour
 
 // const RefreshTransferBalanceTimeout = 24 * time.Hour
 
-const RefreshSupporterTransferBalance = 1000 * model.Gib
-const RefreshFreeTransferBalance = 70 * model.Gib
+const RefreshSupporterTransferBalance = 600 * model.Gib
+const RefreshFreeTransferBalance = 34 * model.Gib // ~ 1 TiB / month
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
@@ -1863,32 +1863,18 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		}
 
-		// // note - currently if a TestFlight user subscribes,
-		// // they won't be marked as pro since their price is 0
-		// // in the transaction info
-		// // uncommenting this will mark them as pro, but pollutes net_revenue with false data
-		// // if uncommenting, wrap in check that price is zero
-
-		//
-		// 	// todo - deprecate
-		// 	// we should instead mark transfer balance as PRO
-		// 	// in the case of testflight users, we don't want to pollute net_revenue with false data
-		// 	//
-		// 	// fallback if we can't parse price, hardset price
-		// 	glog.Infof("[apple] price not found in transaction info, using hardset values")
-
-		// 	now := time.Now()
-		// 	twoMonthsFromNow := now.AddDate(0, 2, 0)
-		// 	if expiresDate.After(twoMonthsFromNow) {
-		// 		priceNanoCents = model.UsdToNanoCents(39.99) // year subscription
-		// 	} else {
-		// 		priceNanoCents = model.UsdToNanoCents(4.99) // monthly subscription
-		// 	}
-
 		// fixme: hardcoded fee fraction
 		feeFraction := 0.2
 
 		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
+
+		if netRevenue == 0 {
+			/**
+			 * For users who subscribe via TestFlight or with FREE_TRIAL, the price will be 0
+			 * We still want to mark them upgraded in the DB, which means they need some paid transfer_balance
+			 */
+			netRevenue = model.UsdToNanoCents(0.01)
+		}
 
 		glog.Infof("[apple] Subscription details - App Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s, Net Revenue: %d",
 			appTransactionId,
