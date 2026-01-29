@@ -1223,7 +1223,7 @@ func settleContract(ctx context.Context, contractId server.Id) (returnErr error)
 				))
 			}
 		}
-	}, server.TxReadCommitted)
+	})
 
 	if returnErr != nil {
 		return
