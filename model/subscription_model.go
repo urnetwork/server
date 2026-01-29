@@ -1391,10 +1391,10 @@ func settleEscrowInTx(
 		}
 	})
 
-	if len(sweepPayouts) == 0 {
-		returnErr = fmt.Errorf("Invalid contract.")
-		return
-	}
+	// if len(sweepPayouts) == 0 {
+	// 	returnErr = fmt.Errorf("Invalid contract.")
+	// 	return
+	// }
 
 	if netPayoutByteCount < usedTransferByteCount {
 		returnErr = fmt.Errorf("Escrow does not have enough value to pay out the full amount.")
@@ -1450,13 +1450,6 @@ func settleEscrowInTx(
 		return
 	}
 
-	server.CreateTempJoinTableInTx(
-		ctx,
-		tx,
-		"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
-		sweepPayouts,
-	)
-
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -1472,80 +1465,89 @@ func settleEscrowInTx(
 		server.NowUtc(),
 	))
 
-	result, err = tx.Query(
-		ctx,
-		`
-            UPDATE transfer_escrow
-            SET
-                settled = true,
-                settle_time = $2,
-                payout_byte_count = sweep_payout.payout_byte_count
-            FROM sweep_payout
-            WHERE
-                transfer_escrow.contract_id = $1 AND
-                transfer_escrow.balance_id = sweep_payout.balance_id
-            RETURNING transfer_escrow.balance_id, transfer_escrow.balance_byte_count
-        `,
-		contractId,
-		server.NowUtc(),
-	)
-	balanceEscrowByteCounts := map[server.Id]ByteCount{}
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var balanceId server.Id
-			var escrowByteCount ByteCount
-			server.Raise(result.Scan(&balanceId, &escrowByteCount))
-			balanceEscrowByteCounts[balanceId] = escrowByteCount
-		}
-	})
+	if 0 < len(sweepPayouts) {
+		server.CreateTempJoinTableInTx(
+			ctx,
+			tx,
+			"sweep_payout(balance_id uuid -> payout_byte_count bigint, return_byte_count bigint, payout_net_revenue_nano_cents bigint)",
+			sweepPayouts,
+		)
 
-	posts = append(posts, func() {
-		server.Redis(ctx, func(r server.RedisClient) {
-			r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				for balanceId, escrowByteCount := range balanceEscrowByteCounts {
-					pipe.DecrBy(ctx, netEscrowKey(balanceId), escrowByteCount)
-				}
-				return nil
+		result, err = tx.Query(
+			ctx,
+			`
+	            UPDATE transfer_escrow
+	            SET
+	                settled = true,
+	                settle_time = $2,
+	                payout_byte_count = sweep_payout.payout_byte_count
+	            FROM sweep_payout
+	            WHERE
+	                transfer_escrow.contract_id = $1 AND
+	                transfer_escrow.balance_id = sweep_payout.balance_id
+	            RETURNING transfer_escrow.balance_id, transfer_escrow.balance_byte_count
+	        `,
+			contractId,
+			server.NowUtc(),
+		)
+		balanceEscrowByteCounts := map[server.Id]ByteCount{}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var escrowByteCount ByteCount
+				server.Raise(result.Scan(&balanceId, &escrowByteCount))
+				balanceEscrowByteCounts[balanceId] = escrowByteCount
+			}
+		})
+
+		posts = append(posts, func() {
+			server.Redis(ctx, func(r server.RedisClient) {
+				r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+					for balanceId, escrowByteCount := range balanceEscrowByteCounts {
+						pipe.DecrBy(ctx, netEscrowKey(balanceId), escrowByteCount)
+					}
+					return nil
+				})
 			})
 		})
-	})
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-            INSERT INTO transfer_escrow_sweep (
-                contract_id,
-                balance_id,
-                network_id,
-                payout_byte_count,
-                payout_net_revenue_nano_cents
-            )
-            SELECT
-                $1 AS contract_id,
-                sweep_payout.balance_id,
-                $2 AS network_id,
-                sweep_payout.payout_byte_count,
-                sweep_payout.payout_net_revenue_nano_cents
-            FROM sweep_payout
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+	            INSERT INTO transfer_escrow_sweep (
+	                contract_id,
+	                balance_id,
+	                network_id,
+	                payout_byte_count,
+	                payout_net_revenue_nano_cents
+	            )
+	            SELECT
+	                $1 AS contract_id,
+	                sweep_payout.balance_id,
+	                $2 AS network_id,
+	                sweep_payout.payout_byte_count,
+	                sweep_payout.payout_net_revenue_nano_cents
+	            FROM sweep_payout
 
-            WHERE
-                0 < sweep_payout.payout_byte_count
-        `,
-		contractId,
-		payoutNetworkId,
-	))
+	            WHERE
+	                0 < sweep_payout.payout_byte_count
+	        `,
+			contractId,
+			payoutNetworkId,
+		))
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-            UPDATE transfer_balance
-            SET
-                balance_byte_count = transfer_balance.balance_byte_count - sweep_payout.payout_byte_count
-            FROM sweep_payout
-            WHERE
-                transfer_balance.balance_id = sweep_payout.balance_id
-        `,
-	))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+	            UPDATE transfer_balance
+	            SET
+	                balance_byte_count = transfer_balance.balance_byte_count - sweep_payout.payout_byte_count
+	            FROM sweep_payout
+	            WHERE
+	                transfer_balance.balance_id = sweep_payout.balance_id
+	        `,
+		))
+	}
 
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -2065,8 +2067,8 @@ func ForceCloseOpenContractIds(
 
 	glog.Infof("[sm]found %d contracts to close\n", len(openContracts))
 
-	closeMalformedContract := func(tag string, openContract *OpenContract) {
-		glog.Infof("%sforce close malformed contract\n", tag)
+	closeMalformedContract := func(tag string, openContract *OpenContract, err error) {
+		glog.Infof("%sforce close malformed contract: %s\n", tag, err)
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
@@ -2238,8 +2240,8 @@ func ForceCloseOpenContractIds(
 					tag := fmt.Sprintf("[sm][%s][%d/%d]", openContract.contractId, j+1, len(openContracts))
 					err := closeContract(tag, openContracts[j])
 					if err != nil {
-						glog.Infof("%sforce close contract err = %s\n", tag, err)
-						closeMalformedContract(tag, openContract)
+						// glog.Infof("%sforce close contract err = %s\n", tag, err)
+						closeMalformedContract(tag, openContract, err)
 					}
 				})
 			}
