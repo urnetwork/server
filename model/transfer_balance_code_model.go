@@ -161,7 +161,7 @@ func RedeemBalanceCode(
 			ctx,
 			tx,
 		)
-	}, server.TxReadCommitted)
+	})
 
 	return
 }
@@ -237,7 +237,7 @@ func CheckBalanceCode(
 				BalanceByteCount: balanceCode.BalanceByteCount,
 			},
 		}
-	}, server.TxReadCommitted)
+	})
 
 	return
 }
