@@ -490,14 +490,22 @@ func CompletePayment(
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-                UPDATE account_balance
-                SET
-                    paid_byte_count = paid_byte_count + account_payment.payout_byte_count,
-                    paid_net_revenue_nano_cents = paid_net_revenue_nano_cents + account_payment.payout_nano_cents
+                INSERT INTO account_balance (
+                	network_id,
+                	paid_byte_count,
+                	paid_net_revenue_nano_cents
+                )
+                SELECT
+                	account_payment.network_id,
+                	account_payment.payout_byte_count AS paid_byte_count,
+                	account_payment.payout_nano_cents AS paid_net_revenue_nano_cents
                 FROM account_payment
                 WHERE
-                    account_payment.payment_id = $1 AND
-                    account_balance.network_id = account_payment.network_id
+                    account_payment.payment_id = $1
+		        ON CONFLICT (network_id) DO UPDATE
+                SET
+                    paid_byte_count = account_balance.paid_byte_count + EXCLUDED.paid_byte_count,
+                    paid_net_revenue_nano_cents = account_balance.paid_net_revenue_nano_cents + EXCLUDED.paid_net_revenue_nano_cents
             `,
 			paymentId,
 		))
