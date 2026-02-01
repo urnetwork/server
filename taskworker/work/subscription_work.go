@@ -2,6 +2,7 @@ package work
 
 import (
 	"fmt"
+	mathrand "math/rand"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -11,7 +12,7 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-const DefaultCloseExpiredContractsBlockSize = 24
+const DefaultCloseExpiredContractsBlockSize = 8
 
 type CloseExpiredContractsArgs struct {
 	BlockSize  int `json:"block_size"`
@@ -35,7 +36,8 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx serv
 
 	runAt := server.NowUtc()
 	if delay {
-		runAt = runAt.Add(time.Minute)
+		randomDelay := time.Minute + time.Duration(mathrand.Int63n(int64(4*time.Minute)))
+		runAt = runAt.Add(randomDelay)
 	}
 
 	task.ScheduleTaskInTx(
