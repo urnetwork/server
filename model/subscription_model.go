@@ -2022,6 +2022,8 @@ func ForceCloseOpenContractIds(
                         transfer_contract.open AND
                         transfer_contract.create_time <= $3
 
+                    ORDER BY transfer_contract.create_time
+
                     LIMIT $4
                 ) t
 
