@@ -2259,19 +2259,19 @@ func HeliusWebhook(
 
 		netRevenue := model.UsdToNanoCents(tokenAmountReceived)
 
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          *paymentSearchResult.NetworkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketSolana,
-			TransactionId:      paymentSearchResult.PaymentReference,
-		}
-
 		var insertErr error
 
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+
+			subscriptionRenewal := model.SubscriptionRenewal{
+				NetworkId:          *paymentSearchResult.NetworkId,
+				SubscriptionType:   model.SubscriptionTypeSupporter,
+				StartTime:          startTime,
+				EndTime:            endTime,
+				NetRevenue:         netRevenue,
+				SubscriptionMarket: model.SubscriptionMarketSolana,
+				TransactionId:      paymentSearchResult.PaymentReference,
+			}
 
 			err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
 
