@@ -88,6 +88,25 @@ func SearchPaymentIntents(
 
 }
 
+func MarkPaymentIntentCompletedInTx(
+	tx server.PgTx,
+	reference string,
+	signature string,
+	session *session.ClientSession,
+) error {
+	_, err := tx.Exec(
+		session.Ctx,
+		`
+		UPDATE solana_payment_intent
+		SET tx_signature = $1
+		WHERE payment_reference = $2
+		`,
+		signature,
+		reference,
+	)
+	return err
+}
+
 func MarkPaymentIntentCompleted(
 	reference string,
 	signature string,
@@ -95,19 +114,7 @@ func MarkPaymentIntentCompleted(
 ) (err error) {
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-
-		_, err = tx.Exec(
-			session.Ctx,
-			`
-			UPDATE solana_payment_intent
-			SET tx_signature = $1
-			WHERE payment_reference = $2
-			`,
-			signature,
-			reference,
-		)
-		server.Raise(err)
-
+		err = MarkPaymentIntentCompletedInTx(tx, reference, signature, session)
 	})
 
 	return
