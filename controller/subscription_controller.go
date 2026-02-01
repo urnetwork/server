@@ -2199,12 +2199,14 @@ func HeliusWebhook(
 	for _, transaction := range transactions {
 
 		if transaction.Type != "TRANSFER" {
+			glog.Infof("HeliusWebhook: ignoring non-transfer transaction: %s of type %s", transaction.Signature, transaction.Type)
 			return &HeliusWebhookResult{
 				Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
 			}, nil
 		}
 
 		if len(transaction.TokenTransfers) == 0 {
+			glog.Infof("HeliusWebhook: no token transfers found for transaction: %s", transaction.Signature)
 			return &HeliusWebhookResult{
 				Message: "Ignoring transaction with no token transfers",
 			}, nil
@@ -2225,6 +2227,7 @@ func HeliusWebhook(
 		}
 
 		if !paymentReceived {
+			glog.Infof("HeliusWebhook: no USDC payment found for transaction: %s", transaction.Signature)
 			return &HeliusWebhookResult{
 				Message: "Ignoring transaction with no matching USDC payment",
 			}, nil
@@ -2239,12 +2242,12 @@ func HeliusWebhook(
 		paymentSearchResult, err := model.SearchPaymentIntents(accounts, clientSession)
 
 		if err != nil {
-			return &HeliusWebhookResult{
-				Message: "Server err calling SearchPaymentIntents",
-			}, nil
+			glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
+			return nil, err
 		}
 
 		if paymentSearchResult == nil {
+			glog.Infof("HeliusWebhook: no payment intent found for transaction: %s", transaction.Signature)
 			return &HeliusWebhookResult{
 				Message: "No payment intent found for this network ID",
 			}, nil
@@ -2256,41 +2259,65 @@ func HeliusWebhook(
 
 		netRevenue := model.UsdToNanoCents(tokenAmountReceived)
 
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          *paymentSearchResult.NetworkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketSolana,
-			TransactionId:      paymentSearchResult.PaymentReference,
+		var insertErr error
+
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+
+			subscriptionRenewal := model.SubscriptionRenewal{
+				NetworkId:          *paymentSearchResult.NetworkId,
+				SubscriptionType:   model.SubscriptionTypeSupporter,
+				StartTime:          startTime,
+				EndTime:            endTime,
+				NetRevenue:         netRevenue,
+				SubscriptionMarket: model.SubscriptionMarketSolana,
+				TransactionId:      paymentSearchResult.PaymentReference,
+			}
+
+			err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
+
+			if err != nil {
+				glog.Infof("HeliusWebhook: error adding subscription renewal: %v", err)
+				insertErr = err
+				return
+			}
+
+			transferBalance := &model.TransferBalance{
+				NetworkId:             *paymentSearchResult.NetworkId,
+				StartTime:             startTime,
+				EndTime:               endTime,
+				StartBalanceByteCount: RefreshSupporterTransferBalance,
+				SubsidyNetRevenue:     netRevenue,
+				BalanceByteCount:      RefreshSupporterTransferBalance,
+			}
+			model.AddTransferBalanceInTx(
+				clientSession.Ctx,
+				tx,
+				transferBalance,
+			)
+
+			err = model.MarkPaymentIntentCompletedInTx(
+				tx,
+				paymentSearchResult.PaymentReference,
+				transaction.Signature,
+				clientSession,
+			)
+
+			if err != nil {
+				glog.Infof("HeliusWebhook: error marking payment intent completed: %v", err)
+				insertErr = err
+			}
+		})
+
+		if insertErr != nil {
+			glog.Infof("HeliusWebhook: error inserting payment data: %v", insertErr)
+			return nil, insertErr
 		}
-
-		model.AddSubscriptionRenewal(clientSession.Ctx, &subscriptionRenewal)
-
-		transferBalance := &model.TransferBalance{
-			NetworkId:             *paymentSearchResult.NetworkId,
-			StartTime:             startTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
-		}
-		model.AddTransferBalance(
-			clientSession.Ctx,
-			transferBalance,
-		)
-
-		model.MarkPaymentIntentCompleted(
-			paymentSearchResult.PaymentReference,
-			transaction.Signature,
-			clientSession,
-		)
 
 		matched++
 	}
 
 	if matched == 0 {
+		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
