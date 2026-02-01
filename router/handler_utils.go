@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/glog"
 
@@ -26,6 +27,12 @@ type ImplFunction[R any] func(*session.ClientSession) (R, error)
 type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, error)
 type BodyFormatFunction func(*http.Request) (io.Reader, error)
 type FormatFunction[R any] func(result R) (complete bool)
+
+var DefaultRetryOptions = server.RetryOptions{
+	Count:    0,
+	MinDelay: 100 * time.Millisecond,
+	MaxDelay: 2 * time.Second,
+}
 
 func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
 	formatter := func(result R) bool {
@@ -61,7 +68,9 @@ func wrap[R any](
 	// }
 
 	// server.Logger().Printf("Handling %s\n", impl)
-	result, err := impl(session)
+	result, err := server.HandleError2WithRetry(func() (R, error) {
+		return impl(session)
+	}, DefaultRetryOptions)
 	if err != nil {
 		if !RaiseHttpError(err, w) {
 			glog.Infof("[h]impl error: %s\n", err)
@@ -233,7 +242,9 @@ func wrapWithInput[T any, R any](
 	}
 
 	// server.Logger().Printf("Handling %s\n", impl)
-	result, err := impl(input, session)
+	result, err := server.HandleError2WithRetry(func() (R, error) {
+		return impl(input, session)
+	}, DefaultRetryOptions)
 	if err != nil {
 		custom := map[string]any{
 			"headers": req.Header,

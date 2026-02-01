@@ -13,7 +13,7 @@ import (
 	"runtime/debug"
 	"strings"
 	// "reflect"
-	// mathrand "math/rand"
+	mathrand "math/rand"
 
 	"github.com/urnetwork/glog"
 )
@@ -41,8 +41,18 @@ func IsDoneError(r any) bool {
 	}
 }
 
+type RetryOptions struct {
+	Count    int
+	MinDelay time.Duration
+	MaxDelay time.Duration
+}
+
 // this is meant to handle unexpected errors and do some cleanup
 func HandleError(do func(), handlers ...any) (r any) {
+	return HandleErrorWithRetry(do, RetryOptions{}, handlers...)
+}
+
+func HandleErrorWithRetry(do func(), retryOptions RetryOptions, handlers ...any) (r any) {
 	defer func() {
 		if r = recover(); r != nil {
 			if IsDoneError(r) {
@@ -64,14 +74,38 @@ func HandleError(do func(), handlers ...any) (r any) {
 			}
 		}
 	}()
+	for range retryOptions.Count {
+		success := false
+		func() {
+			defer func() {
+				if r = recover(); r != nil {
+					randomDelay := retryOptions.MinDelay + time.Duration(mathrand.Int63n(int64(retryOptions.MaxDelay)))
+					if 0 < randomDelay {
+						select {
+						case <-time.After(randomDelay):
+						}
+					}
+				}
+			}()
+			do()
+			success = true
+		}()
+		if success {
+			return
+		}
+	}
 	do()
 	return
 }
 
 func HandleError1[R any](do func() R, handlers ...any) (result R) {
+	return HandleError1WithRetry(do, RetryOptions{}, handlers...)
+}
+
+func HandleError1WithRetry[R any](do func() R, retryOptions RetryOptions, handlers ...any) (result R) {
 	HandleError(func() {
 		result = do()
-	}, func(err error) {
+	}, retryOptions, func(err error) {
 		for _, handler := range handlers {
 			switch v := handler.(type) {
 			case func() R:
@@ -85,9 +119,13 @@ func HandleError1[R any](do func() R, handlers ...any) (result R) {
 }
 
 func HandleError2[R1 any, R2 any](do func() (R1, R2), handlers ...any) (result1 R1, result2 R2) {
-	HandleError(func() {
+	return HandleError2WithRetry(do, RetryOptions{}, handlers...)
+}
+
+func HandleError2WithRetry[R1 any, R2 any](do func() (R1, R2), retryOptions RetryOptions, handlers ...any) (result1 R1, result2 R2) {
+	HandleErrorWithRetry(func() {
 		result1, result2 = do()
-	}, func(err error) {
+	}, retryOptions, func(err error) {
 		for _, handler := range handlers {
 			switch v := handler.(type) {
 			case func() (R1, R2):
