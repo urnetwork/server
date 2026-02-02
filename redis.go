@@ -32,7 +32,7 @@ func (self *safeRedisClient) open() redis.Cmdable {
 
 		minConnections := redisConfigKeys.RequireInt("min_connections")
 		maxConnections := redisConfigKeys.RequireInt("max_connections")
-		maxRetries := 32
+		maxRetries := 8
 		connectionMaxLifetime := "1h"
 		connectionMaxIdleTime := "5m"
 		if allMaxRetries := redisConfigKeys.Int("max_retries"); 0 < len(allMaxRetries) {
@@ -74,9 +74,10 @@ func (self *safeRedisClient) open() redis.Cmdable {
 
 		readTimeout := 30 * time.Second
 		writeTimeout := 15 * time.Second
+		dialTimeout := 30 * time.Second
 
 		dialer := &net.Dialer{
-			Timeout: 90 * time.Second,
+			Timeout: dialTimeout,
 			KeepAliveConfig: net.KeepAliveConfig{
 				Enable: true,
 			},
@@ -102,6 +103,8 @@ func (self *safeRedisClient) open() redis.Cmdable {
 				MaxRetries:      maxRetries,
 				MinIdleConns:    minConnections,
 				MaxIdleConns:    maxConnections,
+				PoolSize:        minConnections,
+				MaxActiveConns:  maxConnections,
 				ConnMaxLifetime: connectionMaxLifetimeDuration,
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
@@ -110,6 +113,8 @@ func (self *safeRedisClient) open() redis.Cmdable {
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
 				Dialer:                dialContext,
+				// DialerRetries: maxRetries,
+				DialTimeout: dialTimeout,
 			}
 			self.client = redis.NewClusterClient(options)
 		} else {
@@ -124,6 +129,8 @@ func (self *safeRedisClient) open() redis.Cmdable {
 				MaxRetries:      maxRetries,
 				MinIdleConns:    minConnections,
 				MaxIdleConns:    maxConnections,
+				PoolSize:        minConnections,
+				MaxActiveConns:  maxConnections,
 				ConnMaxLifetime: connectionMaxLifetimeDuration,
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
@@ -132,6 +139,8 @@ func (self *safeRedisClient) open() redis.Cmdable {
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
 				Dialer:                dialContext,
+				// DialerRetries: maxRetries,
+				DialTimeout: dialTimeout,
 			}
 			self.client = redis.NewClient(options)
 		}
