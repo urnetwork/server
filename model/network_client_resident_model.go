@@ -106,7 +106,7 @@ func NominateResident(
 			}
 		}
 		if err != nil {
-			glog.Infof("[ncrm]nominated=%t err=%v\n", nominated, err)
+			glog.V(1).Infof("[ncrm]nominated=%t err=%v\n", nominated, err)
 		}
 	})
 	return
