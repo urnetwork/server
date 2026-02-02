@@ -1870,7 +1870,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 				// if !isAck(transferFrameBytes) {
 				hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
 				if !hasActiveContract {
-					glog.Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
+					glog.V(1).Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
 					// there is no active contract
 					// drop
 					self.abuseLimiter.delay()
