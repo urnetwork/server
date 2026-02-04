@@ -374,7 +374,13 @@ func (self *HttpStatusError) Error() string {
 	return fmt.Sprintf("Bad status: %s %s", self.Status, self.ResponseBody)
 }
 
-func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool) error {
+type HttpServerOptions struct {
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+}
+
+func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions) error {
 	listenConfig := net.ListenConfig{}
 	if reusePort {
 		listenConfig.Control = SoReusePort
@@ -386,8 +392,11 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 	}
 
 	server := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  httpServerOptions.ReadTimeout,
+		WriteTimeout: httpServerOptions.WriteTimeout,
+		IdleTimeout:  httpServerOptions.IdleTimeout,
 	}
 
 	return server.Serve(listener)

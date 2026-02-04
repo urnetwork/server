@@ -41,15 +41,17 @@ const ListenHttpsPort = 8082
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
-		ProxyReadTimeout:         60 * time.Second,
-		ProxyWriteTimeout:        60 * time.Second,
-		ProxyTlsHandshakeTimeout: 60 * time.Second,
+		ProxyReadTimeout:         15 * time.Second,
+		ProxyWriteTimeout:        30 * time.Second,
+		ProxyIdleTimeout:         5 * time.Minute,
+		ProxyTlsHandshakeTimeout: 30 * time.Second,
 	}
 }
 
 type ProxySettings struct {
 	ProxyReadTimeout         time.Duration
 	ProxyWriteTimeout        time.Duration
+	ProxyIdleTimeout.        time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
 }
 
@@ -296,6 +298,7 @@ func (self *httpServer) run() {
 	httpProxy.ConnectDialWithRequest = connectDial
 	httpProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
 	httpProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
+	httpProxy.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
 	httpProxy.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
 	// httpProxy.AllowHTTP2 = true
 	// httpProxy.Tr = &http.Transport{
