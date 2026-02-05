@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	// "strings"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -65,6 +66,19 @@ Options:
 		case <-ctx.Done():
 		case <-quitEvent.Ctx.Done():
 			exchange.Drain()
+		}
+	})
+
+	// Debugging
+	go server.HandleError(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+
+			glog.Infof("[connect]goroutines=%d/%d\n", runtime.NumGoroutine(), runtime.GOMAXPROCS(0))
 		}
 	})
 

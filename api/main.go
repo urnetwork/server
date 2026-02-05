@@ -10,6 +10,7 @@ import (
 	// "net"
 	// "errors"
 	"net"
+	"runtime"
 	"strconv"
 
 	"time"
@@ -66,6 +67,19 @@ Options:
 				return
 			case <-time.After(DrainTimeout):
 			}
+		}
+	})
+
+	// Debugging
+	go server.HandleError(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+
+			glog.Infof("[api]goroutines=%d/%d\n", runtime.NumGoroutine(), runtime.GOMAXPROCS(0))
 		}
 	})
 
