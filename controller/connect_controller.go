@@ -38,7 +38,7 @@ var MaxContractTransferByteCount = func() model.ByteCount {
 }()
 
 // allow the return contract to be created for up to this timeout after the source contract was closed
-var OriginContractTimeout = 15 * time.Second
+var OriginContractLinger = 300 * time.Second
 
 type ConnectControlArgs struct {
 	Pack string `json:"pack"`
@@ -58,10 +58,11 @@ func ConnectControl(
 	connectControl *ConnectControlArgs,
 	clientSession *session.ClientSession,
 ) (*ConnectControlResult, error) {
-	packBytes, err := base64.StdEncoding.DecodeString(connectControl.Pack)
+	packBytes, err := connect.DecodeBase64(base64.StdEncoding, connectControl.Pack)
 	if err != nil {
 		return nil, err
 	}
+	defer connect.MessagePoolReturn(packBytes)
 
 	pack := &protocol.Pack{}
 	err = proto.Unmarshal(packBytes, pack)
@@ -84,7 +85,7 @@ func ConnectControl(
 	}
 
 	result := &ConnectControlResult{
-		Pack: base64.StdEncoding.EncodeToString(resultPackBytes),
+		Pack: connect.EncodeBase64(base64.StdEncoding, resultPackBytes),
 	}
 	if resultErr != nil {
 		result.Error = &ConnectControlError{
@@ -275,7 +276,7 @@ func nextContract(
 ) (server.Id, model.ByteCount, model.Priority, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
-	if createContract.UsedContractIds != nil {
+	if 0 < len(createContract.UsedContractIds) {
 		// look for existing open contracts that the requestor does not have
 		usedContractIds := map[server.Id]bool{}
 		for _, contractIdBytes := range createContract.UsedContractIds {
@@ -356,7 +357,7 @@ func newContract(
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
-			OriginContractTimeout,
+			OriginContractLinger,
 		)
 		if err != nil {
 			returnErr = err
