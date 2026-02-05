@@ -114,11 +114,18 @@ Options:
 
 		reusePort := false
 
+		httpServerOptions := server.HttpServerOptions{
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  5 * time.Minute,
+		}
+
 		err := server.HttpListenAndServeWithReusePort(
 			ctx,
 			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
 			router.NewRouter(ctx, routes),
 			reusePort,
+			httpServerOptions,
 		)
 		if err != nil {
 			panic(err)
