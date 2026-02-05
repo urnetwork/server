@@ -51,7 +51,7 @@ func DefaultProxySettings() *ProxySettings {
 type ProxySettings struct {
 	ProxyReadTimeout         time.Duration
 	ProxyWriteTimeout        time.Duration
-	ProxyIdleTimeout.        time.Duration
+	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
 }
 
