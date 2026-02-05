@@ -2478,11 +2478,20 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// the last filter represents the worst case the network will expose to users
 	minFilter := filter{
 		maxScore: 2 * scorePerTier,
-		minIndependentReliabilityWeights: map[int]float64{
+	}
+	if NormalNetworkConditions() {
+		minFilter.minIndependentReliabilityWeights = map[int]float64{
 			1: float64(0.99),
-			2: float64(0.8),
+			2: float64(0.7),
 			3: float64(0.6),
-		},
+		}
+	} else {
+		// some abormal conditions, loosen the stats as they reset
+		minFilter.minIndependentReliabilityWeights = map[int]float64{
+			1: float64(0.8),
+			2: float64(0.6),
+			3: float64(0.6),
+		}
 	}
 	minReliabilityWeightScale := 0.1
 	maxReliabilityWeightScale := 1.0
