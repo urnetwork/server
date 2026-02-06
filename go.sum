@@ -236,8 +236,8 @@ github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe h1:nbdqkIGOG
 github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe/go.mod h1:jZJtfjgudtNl4en1tzwPIV3KjUnQUvG3/j+w+fVonLw=
 github.com/test-go/testify v1.1.4 h1:Tf9lntrKUMHiXQ07qBScBTSA0dhYQlu83hswqelv1iE=
 github.com/test-go/testify v1.1.4/go.mod h1:rH7cfJo/47vWGdi4GPj16x3/t1xGOj2YxzmNQzk2ghU=
-github.com/things-go/go-socks5 v0.0.6 h1:YjylIYZiND41szH4NzsVbx8aVDsS/Y8ps3QYPwQvqnI=
-github.com/things-go/go-socks5 v0.0.6/go.mod h1:RF6tRutwNWzISbPfiDEChH/o1aDfRv+cXDYn2a2qkK4=
+github.com/things-go/go-socks5 v0.1.0 h1:4f5dz0iMQ6cA4wseFmyLmCHmg3SWJTW92ndrKS6oERg=
+github.com/things-go/go-socks5 v0.1.0/go.mod h1:Riabiyu52kLsla0YmJqunt1c1JEl6iXSr4bRd7swFEA=
 github.com/thrawn01/args v0.3.0/go.mod h1:TnRiOFjyh7Wa6oC8ACFPc7KIvbzCiluphA3mJUiPIEo=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
@@ -370,7 +370,7 @@ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C
 gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-gvisor.dev/gvisor v0.0.0-20260109181451-4be7c433dae2 h1:fr6L00yGG2RP5NMea6njWpdC+bm+cMdFClrSpaicp1c=
-gvisor.dev/gvisor v0.0.0-20260109181451-4be7c433dae2/go.mod h1:QkHjoMIBaYtpVufgwv3keYAbln78mBoCuShZrPrer1Q=
+gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c h1:Mmc+Ss3+yUO4wajlxS4FCptW3ONsPe7YvQI0s6qovd0=
+gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c/go.mod h1:QkHjoMIBaYtpVufgwv3keYAbln78mBoCuShZrPrer1Q=
 src.agwa.name/tlshacks v0.0.2 h1:Dg1tW0UiAJZnJK/SXDF8u+sDRrly38iPa4YzCBJAqPI=
 src.agwa.name/tlshacks v0.0.2/go.mod h1:c+kcKFr6y2/kWl2+Q8z/UuIWDPdlMuY038Id8tujfwA=

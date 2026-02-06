@@ -27,7 +27,7 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/goproxy v0.0.0-20251009123132-ee3e713dae03
 	github.com/stripe/stripe-go/v82 v82.5.1
-	github.com/things-go/go-socks5 v0.0.6
+	github.com/things-go/go-socks5 v0.1.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
@@ -76,7 +76,7 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	gvisor.dev/gvisor v0.0.0-20260109181451-4be7c433dae2 // indirect
+	gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c // indirect
 )
 
 require (
