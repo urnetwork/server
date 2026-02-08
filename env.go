@@ -788,6 +788,7 @@ func limitExcludePrefixes() []netip.Prefix {
 		prefix := netip.MustParsePrefix(subnet)
 		prefixes = append(prefixes, prefix)
 	}
+	glog.Infof("[env]found limit exclude prefixes=%s\n", prefixes)
 	return prefixes
 }
 
