@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -42,6 +43,7 @@ type ConnectionRateLimitSettings struct {
 type ConnectionRateLimit struct {
 	ctx             context.Context
 	clientIpHashHex string
+	excluded        bool
 	handlerId       server.Id
 	settings        *ConnectionRateLimitSettings
 }
@@ -64,15 +66,19 @@ func NewConnectionRateLimit(
 	if err != nil {
 		return nil, err
 	}
-	clientIpHash, err := server.ClientIpHash(clientIp)
+	clientAddr, err := netip.ParseAddr(clientIp)
 	if err != nil {
 		return nil, err
 	}
+	clientIpHash := server.ClientIpHashForAddr(clientAddr)
 	clientIpHashHex := hex.EncodeToString(clientIpHash[:])
+
+	excluded := server.IsLimitExcludeAddr(clientAddr)
 
 	return &ConnectionRateLimit{
 		ctx:             ctx,
 		clientIpHashHex: clientIpHashHex,
+		excluded:        excluded,
 		handlerId:       handlerId,
 		settings:        settings,
 	}, nil
@@ -135,6 +141,10 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 		totalIncremented = true
 	})
 	if err != nil {
+		return
+	}
+
+	if self.excluded {
 		return
 	}
 
