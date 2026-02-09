@@ -27,6 +27,7 @@ import (
 	"github.com/urnetwork/server/session"
 	// "github.com/urnetwork/server/ulid"
 	// "github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/connect"
 )
 
 const NetworkClientHandlerHeartbeatTimeout = 60 * time.Second
@@ -264,6 +265,10 @@ func AuthNetworkClient(
 					session.Ctx,
 					authClient.ProxyConfig.InitialDeviceState.CountryCode,
 				)
+			}
+
+			if proxyDeviceState.Location != nil {
+				proxyDeviceState.DnsResolverSettings = connect.RegionalDnsResolverSettings(proxyDeviceState.Location.CountryCode)
 			}
 
 			proxyDeviceConfig := &ProxyDeviceConfig{
