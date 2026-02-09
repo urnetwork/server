@@ -211,14 +211,17 @@ func NewProxyDevice(
 	deviceLocal.SetIngressSecurityPolicyGenerator(settings.IngressSecurityPolicyGenerator)
 	deviceLocal.SetEgressSecurityPolicyGenerator(settings.EgressSecurityPolicyGenerator)
 
+	var dnsResolverSettings *connect.DnsResolverSettings
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
 		deviceLocal.SetPerformanceProfile(initialDeviceState.PerformanceProfile)
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
+		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
-	tnet, err := proxy.CreateNetTUN(
+	tnet, err := proxy.CreateNetTunWithResolver(
 		cancelCtx,
 		settings.Mtu,
+		dnsResolverSettings,
 	)
 	if err != nil {
 		return nil, err

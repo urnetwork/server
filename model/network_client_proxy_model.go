@@ -14,6 +14,7 @@ import (
 
 	// "github.com/urnetwork/glog"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 )
@@ -157,6 +158,8 @@ type ProxyDeviceState struct {
 	Location *sdk.ConnectLocation `json:"location"`
 
 	PerformanceProfile *sdk.PerformanceProfile `json:"performance_profile"`
+
+	DnsResolverSettings *connect.DnsResolverSettings `json:"dns_resolver_settings"`
 }
 
 func GetProxyDeviceConnection(ctx context.Context, proxyId server.Id) (proxyDeviceConnection *ProxyDeviceConnection) {
