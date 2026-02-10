@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	// "errors"
 	"fmt"
@@ -390,6 +391,7 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
 
 	server := &http.Server{
 		Addr:         addr,
@@ -400,4 +402,28 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 	}
 
 	return server.Serve(listener)
+}
+
+func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
+	listenConfig := net.ListenConfig{}
+	if reusePort {
+		listenConfig.Control = SoReusePort
+	}
+
+	listener, err := listenConfig.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  httpServerOptions.ReadTimeout,
+		WriteTimeout: httpServerOptions.WriteTimeout,
+		IdleTimeout:  httpServerOptions.IdleTimeout,
+	}
+
+	return server.ServeTLS(listener, "", "")
 }

@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
-	// "crypto/tls"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +24,7 @@ import (
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 // FIXME this is meant to be deployed with no lb and no containers
@@ -35,9 +39,11 @@ import (
 // -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
 var Version string
 
+// FIXME warp port blocks
 const ListenSocksPort = 8080
 const ListenHttpPort = 8081
 const ListenHttpsPort = 8082
+const ListenApiPort = 8083
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
@@ -89,7 +95,15 @@ func main() {
 		panic(err)
 	}
 
-	glog.Infof("Listen socks5 (:%d), http (:%d), https (:%d)", ListenSocksPort, ListenHttpPort, ListenHttpsPort)
+	glog.Infof("Listen api (:%d), socks5 (:%d), http (:%d), https (:%d)", ListenApiPort, ListenSocksPort, ListenHttpPort, ListenHttpsPort)
+
+	newApiServer(
+		ctx,
+		cancel,
+		proxyDeviceManager,
+		transportTls,
+		settings,
+	)
 
 	newSocks5Server(
 		ctx,
@@ -242,31 +256,8 @@ func (self *httpServer) run() {
 			}
 		}
 
-		headerAuth := r.Header.Get("Proxy-Authorization")
-
-		bearerPrefix := "bearer "
-		basicPrefix := "basic "
-
-		if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
-			signedProxyId := headerAuth[len(bearerPrefix):]
-			proxyId, err := model.ParseSignedProxyId(signedProxyId)
-			if err == nil {
-				return proxyId, nil
-			}
-		} else if len(basicPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(basicPrefix)]) == basicPrefix {
-			// user:pass
-			combinedSignedProxyId, err := base64.StdEncoding.DecodeString(headerAuth[len(basicPrefix):])
-			if err != nil {
-				return server.Id{}, err
-			}
-			signedProxyId := strings.SplitN(string(combinedSignedProxyId), ":", 2)[0]
-			proxyId, err := model.ParseSignedProxyId(signedProxyId)
-			if err == nil {
-				return proxyId, nil
-			}
-		}
-
-		return server.Id{}, fmt.Errorf("Not authorized")
+		authHeader := r.Header.Get("Proxy-Authorization")
+		return authHeaderProxyId(authHeader)
 	}
 
 	connectDial := func(r *http.Request, network string, addr string) (net.Conn, error) {
@@ -332,4 +323,137 @@ func (self *httpServer) run() {
 	select {
 	case <-self.ctx.Done():
 	}
+}
+
+type apiServer struct {
+	ctx                context.Context
+	cancel             context.CancelFunc
+	proxyDeviceManager *ProxyDeviceManager
+	transportTls       *server.TransportTls
+	settings           *ProxySettings
+}
+
+func newApiServer(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	proxyDeviceManager *ProxyDeviceManager,
+	transportTls *server.TransportTls,
+	settings *ProxySettings,
+) *apiServer {
+	s := &apiServer{
+		ctx:                ctx,
+		cancel:             cancel,
+		proxyDeviceManager: proxyDeviceManager,
+		transportTls:       transportTls,
+		settings:           settings,
+	}
+
+	go server.HandleError(s.run, cancel)
+
+	return s
+}
+
+func (self *apiServer) run() {
+	defer self.cancel()
+
+	routes := []*router.Route{
+		router.NewRoute("POST", "/warmup", self.HandleWarmup),
+	}
+
+	reusePort := false
+
+	httpServerOptions := server.HttpServerOptions{
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  5 * time.Minute,
+	}
+
+	tlsConfig := &tls.Config{
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
+	}
+
+	err := server.HttpListenAndServeTlsWithReusePort(
+		self.ctx,
+		net.JoinHostPort("", strconv.Itoa(ListenApiPort)),
+		router.NewRouter(self.ctx, routes),
+		reusePort,
+		httpServerOptions,
+		tlsConfig,
+	)
+	if err != nil {
+		panic(err)
+	}
+}
+
+type WarmupRequest struct {
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+type WarmupResponse struct {
+	Ready bool `json:"ready"`
+}
+
+func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	proxyId, err := authHeaderProxyId(authHeader)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	defer r.Body.Close()
+	bodyBytes, err := io.ReadAll(r.Body)
+
+	var warmupRequest WarmupRequest
+	err = json.Unmarshal(bodyBytes, &warmupRequest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	timeout := time.Duration(warmupRequest.TimeoutSeconds) * time.Second
+	ready := proxyDevice.WaitForReady(r.Context(), timeout)
+
+	warmupResponse := &WarmupResponse{
+		Ready: ready,
+	}
+
+	out, err := json.Marshal(warmupResponse)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(out)
+}
+
+func authHeaderProxyId(authHeader string) (server.Id, error) {
+	bearerPrefix := "bearer "
+	basicPrefix := "basic "
+
+	if len(bearerPrefix) < len(authHeader) && strings.ToLower(authHeader[:len(bearerPrefix)]) == bearerPrefix {
+		signedProxyId := authHeader[len(bearerPrefix):]
+		proxyId, err := model.ParseSignedProxyId(signedProxyId)
+		if err == nil {
+			return proxyId, nil
+		}
+	} else if len(basicPrefix) < len(authHeader) && strings.ToLower(authHeader[:len(basicPrefix)]) == basicPrefix {
+		// user:pass
+		combinedSignedProxyId, err := base64.StdEncoding.DecodeString(authHeader[len(basicPrefix):])
+		if err != nil {
+			return server.Id{}, err
+		}
+		signedProxyId := strings.SplitN(string(combinedSignedProxyId), ":", 2)[0]
+		proxyId, err := model.ParseSignedProxyId(signedProxyId)
+		if err == nil {
+			return proxyId, nil
+		}
+	}
+
+	return server.Id{}, fmt.Errorf("Not authorized")
 }
