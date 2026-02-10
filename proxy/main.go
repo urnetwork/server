@@ -401,15 +401,19 @@ func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var warmupRequest WarmupRequest
+
 	defer r.Body.Close()
 	bodyBytes, err := io.ReadAll(r.Body)
 
-	var warmupRequest WarmupRequest
-	err = json.Unmarshal(bodyBytes, &warmupRequest)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if 0 < len(bodyBytes) {
+		err = json.Unmarshal(bodyBytes, &warmupRequest)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
+	// else use the default object
 
 	proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 	if err != nil {

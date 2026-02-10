@@ -318,7 +318,7 @@ func AuthNetworkClient(
 				}
 
 				apiBaseUrl := fmt.Sprintf(
-					"http://%s:%d",
+					"https://api.%s:%d",
 					proxyHost,
 					apiPort,
 				)
