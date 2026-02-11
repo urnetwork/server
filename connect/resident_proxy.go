@@ -124,7 +124,7 @@ func NewResidentProxyDevice(
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
 	}
 
-	tnet, err := proxy.CreateNetTUN(
+	tnet, err := proxy.CreateNetTun(
 		cancelCtx,
 		settings.Mtu,
 	)

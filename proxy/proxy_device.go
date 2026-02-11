@@ -276,6 +276,59 @@ func (self *ProxyDevice) Tun() *proxy.Net {
 	return self.tnet
 }
 
+func (self *ProxyDevice) WaitForReady(ctx context.Context, timeout time.Duration) bool {
+	readyCtx, readyCancel := context.WithCancel(self.ctx)
+	defer readyCancel()
+	go server.HandleError(func() {
+		defer readyCancel()
+		select {
+		case <-self.ctx.Done():
+		case <-ctx.Done():
+		}
+	})
+
+	windowStatus := self.deviceLocal.GetWindowStatus()
+	if windowStatus.MinSatisfied {
+		return true
+	}
+
+	if timeout == 0 {
+		return false
+	}
+
+	sub := self.deviceLocal.AddWindowStatusChangeListener(&windowStatusChangeListener{
+		callback: func(windowStatus *sdk.WindowStatus) {
+			if windowStatus.MinSatisfied {
+				readyCancel()
+			}
+		},
+	})
+	defer sub.Close()
+
+	if 0 < timeout {
+		select {
+		case <-readyCtx.Done():
+			return true
+		case <-time.After(timeout):
+			return false
+		}
+	} else {
+		select {
+		case <-readyCtx.Done():
+			return true
+		}
+	}
+}
+
+// conforms to `sdk.WindowStatusChangeListener`
+type windowStatusChangeListener struct {
+	callback func(*sdk.WindowStatus)
+}
+
+func (self *windowStatusChangeListener) WindowStatusChanged(windowStatus *sdk.WindowStatus) {
+	self.callback(windowStatus)
+}
+
 func (self *ProxyDevice) UpdateActivity() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

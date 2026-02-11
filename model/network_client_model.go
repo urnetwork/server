@@ -126,12 +126,14 @@ type ProxyConfigResult struct {
 	SocksProxyUrl    string    `json:"socks_proxy_url"`
 	HttpProxyUrl     string    `json:"http_proxy_url"`
 	HttpsProxyUrl    string    `json:"https_proxy_url"`
+	ApiBaseUrl       string    `json:"api_base_url"`
 	AuthToken        string    `json:"auth_token"`
 	InstanceId       server.Id `json:"instance_id"`
 	ProxyHost        string    `json:"proxy_host"`
 	HttpProxyPort    int       `json:"http_proxy_port"`
 	HttpsProxyPort   int       `json:"https_proxy_port"`
 	SocksProxyPort   int       `json:"socks_proxy_port"`
+	ApiPort          int       `json:"api_port"`
 }
 
 type ProxyAuthResult struct {
@@ -286,6 +288,7 @@ func AuthNetworkClient(
 				socksProxyPort := 8080
 				httpProxyPort := 8081
 				httpsProxyPort := 8082
+				apiPort := 8083
 
 				proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
 
@@ -314,16 +317,24 @@ func AuthNetworkClient(
 					)
 				}
 
+				apiBaseUrl := fmt.Sprintf(
+					"https://api.%s:%d",
+					proxyHost,
+					apiPort,
+				)
+
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
 					SocksProxyUrl:  socksProxyUrl,
 					HttpProxyUrl:   httpProxyUrl,
 					HttpsProxyUrl:  httpsProxyUrl,
+					ApiBaseUrl:     apiBaseUrl,
 					AuthToken:      strings.ToLower(signedProxyId),
 					InstanceId:     proxyDeviceConfig.InstanceId,
 					ProxyHost:      proxyHost,
 					SocksProxyPort: socksProxyPort,
 					HttpProxyPort:  httpProxyPort,
 					HttpsProxyPort: httpsProxyPort,
+					ApiPort:        apiPort,
 				}
 			} else {
 				authClientResult.Error = &AuthNetworkClientError{
