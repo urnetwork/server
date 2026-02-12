@@ -33,6 +33,7 @@ require (
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
+	github.com/urnetwork/userwireguard v0.0.0
 	golang.org/x/crypto v0.47.0
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
 	google.golang.org/protobuf v1.36.11
@@ -76,6 +77,7 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
+	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10 // indirect
 	gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c // indirect
 )
 
@@ -106,3 +108,5 @@ replace github.com/urnetwork/proxy => ../proxy
 replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
+
+replace github.com/urnetwork/userwireguard => ../userwireguard

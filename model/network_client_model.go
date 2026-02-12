@@ -122,18 +122,8 @@ type AuthNetworkClientError struct {
 }
 
 type ProxyConfigResult struct {
-	KeepaliveSeconds int       `json:"keepalive_seconds"`
-	SocksProxyUrl    string    `json:"socks_proxy_url"`
-	HttpProxyUrl     string    `json:"http_proxy_url"`
-	HttpsProxyUrl    string    `json:"https_proxy_url"`
-	ApiBaseUrl       string    `json:"api_base_url"`
-	AuthToken        string    `json:"auth_token"`
-	InstanceId       server.Id `json:"instance_id"`
-	ProxyHost        string    `json:"proxy_host"`
-	HttpProxyPort    int       `json:"http_proxy_port"`
-	HttpsProxyPort   int       `json:"https_proxy_port"`
-	SocksProxyPort   int       `json:"socks_proxy_port"`
-	ApiPort          int       `json:"api_port"`
+	KeepaliveSeconds int `json:"keepalive_seconds"`
+	ProxyClient
 }
 
 type ProxyAuthResult struct {
@@ -323,7 +313,8 @@ func AuthNetworkClient(
 					apiPort,
 				)
 
-				authClientResult.ProxyConfigResult = &ProxyConfigResult{
+				proxyClient := &ProxyClient{
+					ProxyId:        proxyDeviceConfig.ProxyId,
 					SocksProxyUrl:  socksProxyUrl,
 					HttpProxyUrl:   httpProxyUrl,
 					HttpsProxyUrl:  httpsProxyUrl,
@@ -335,6 +326,16 @@ func AuthNetworkClient(
 					HttpProxyPort:  httpProxyPort,
 					HttpsProxyPort: httpsProxyPort,
 					ApiPort:        apiPort,
+				}
+				err = CreateProxyClient(session.Ctx, proxyClient)
+				if err == nil {
+					authClientResult.ProxyConfigResult = &ProxyConfigResult{
+						ProxyClient: *proxyClient,
+					}
+				} else {
+					authClientResult.Error = &AuthNetworkClientError{
+						Message: "Could not create proxy client",
+					}
 				}
 			} else {
 				authClientResult.Error = &AuthNetworkClientError{

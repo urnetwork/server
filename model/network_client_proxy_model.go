@@ -405,3 +405,35 @@ func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *
 		CountryLocationId: server.ToSdkId(c.LocationId),
 	}
 }
+
+// FIXME store this after the proxy clinet is created
+type ProxyClient struct {
+	ChangeId       int       `json:"change_id,omitempty"`
+	ProxyId        server.Id `json:"proxy_id"`
+	SocksProxyUrl  string    `json:"socks_proxy_url"`
+	HttpProxyUrl   string    `json:"http_proxy_url"`
+	HttpsProxyUrl  string    `json:"https_proxy_url"`
+	ApiBaseUrl     string    `json:"api_base_url"`
+	AuthToken      string    `json:"auth_token"`
+	InstanceId     server.Id `json:"instance_id"`
+	ProxyHost      string    `json:"proxy_host"`
+	HttpProxyPort  int       `json:"http_proxy_port"`
+	HttpsProxyPort int       `json:"https_proxy_port"`
+	SocksProxyPort int       `json:"socks_proxy_port"`
+	ApiPort        int       `json:"api_port"`
+
+	WgProxyPort       int
+	WgClientPublicKey string
+	WgServerPublicKey string
+	WgClientIpv4      string
+}
+
+// FIXME allocate the change id
+func CreateProxyClient(ctx context.Context, proxyClient *ProxyClient) (returnErr error) {
+	return nil
+}
+
+// FIXME
+func GetProxyClientsSince(ctx context.Context, changeId int) ([]*ProxyClient, int) {
+	return nil, 0
+}

@@ -162,7 +162,7 @@ type ProxyDevice struct {
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
 	deviceLocal *sdk.DeviceLocal
-	tnet        *proxy.Net
+	tun         *proxy.Tun
 	settings    *ProxyDeviceSettings
 
 	stateLock        sync.Mutex
@@ -218,9 +218,12 @@ func NewProxyDevice(
 		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
-	tnet, err := proxy.CreateNetTunWithResolver(
+	tunSettings := proxy.DefaultTunSettings()
+	tunSettings.Mtu = settings.Mtu
+
+	tun, err := proxy.CreateTunWithResolver(
 		cancelCtx,
-		settings.Mtu,
+		tunSettings,
 		dnsResolverSettings,
 	)
 	if err != nil {
@@ -232,7 +235,7 @@ func NewProxyDevice(
 		cancel:            cancel,
 		proxyDeviceConfig: proxyDeviceConfig,
 		deviceLocal:       deviceLocal,
-		tnet:              tnet,
+		tun:               tun,
 		settings:          settings,
 		lastActivityTime:  time.Now(),
 	}
@@ -242,7 +245,7 @@ func NewProxyDevice(
 	return proxyDevice, nil
 }
 
-// directly copy between tnet and device
+// directly copy between tun and device
 func (self *ProxyDevice) Run() {
 	defer self.cancel()
 
@@ -252,7 +255,7 @@ func (self *ProxyDevice) Run() {
 		if !self.UpdateActivity() {
 			return
 		}
-		self.tnet.Write(packet)
+		self.tun.Write(packet)
 	}
 	sub := self.deviceLocal.AddReceivePacketCallback(receiveCallback)
 	defer sub()
@@ -261,7 +264,7 @@ func (self *ProxyDevice) Run() {
 		if !self.UpdateActivity() {
 			return
 		}
-		packet, err := self.tnet.Read()
+		packet, err := self.tun.Read()
 		if err != nil {
 			return
 		}
@@ -272,8 +275,8 @@ func (self *ProxyDevice) Run() {
 	}
 }
 
-func (self *ProxyDevice) Tun() *proxy.Net {
-	return self.tnet
+func (self *ProxyDevice) Tun() *proxy.Tun {
+	return self.tun
 }
 
 func (self *ProxyDevice) WaitForReady(ctx context.Context, timeout time.Duration) bool {
@@ -368,5 +371,5 @@ func (self *ProxyDevice) Close() {
 	self.cancel()
 
 	self.deviceLocal.Close()
-	self.tnet.Close()
+	self.tun.Close()
 }
