@@ -24,11 +24,11 @@ import (
 
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
 type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, error)
-type BodyFormatFunction func(*http.Request) (io.Reader, error)
-type FormatFunction[R any] func(result R) (complete bool)
+type BodyFormatFunction func(*session.ClientSession, *http.Request) (io.Reader, error)
+type FormatFunction[R any] func(*session.ClientSession, R) (complete bool)
 
 func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
-	formatter := func(result R) bool {
+	formatter := func(clientSession *session.ClientSession, result R) bool {
 		responseJson, err := json.Marshal(result)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -70,12 +70,11 @@ func wrap[R any](
 	}
 
 	for _, formatter := range formatters {
-		if complete := formatter(result); complete {
+		if complete := formatter(session, result); complete {
 			return
 		}
 	}
-
-	JsonFormatter[R](w)(result)
+	JsonFormatter[R](w)(session, result)
 }
 
 func implName[R any](impl ImplFunction[R]) string {
@@ -208,7 +207,7 @@ func wrapWithInput[T any, R any](
 	// 	return
 	// }
 
-	body, err := bodyFormatter(req)
+	body, err := bodyFormatter(session, req)
 	if err != nil {
 		glog.Infof("[h]request body formatter error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -245,12 +244,11 @@ func wrapWithInput[T any, R any](
 	}
 
 	for _, formatter := range formatters {
-		if complete := formatter(result); complete {
+		if complete := formatter(session, result); complete {
 			return
 		}
 	}
-
-	JsonFormatter[R](w)(result)
+	JsonFormatter[R](w)(session, result)
 }
 
 // guarantees NetworkId+UserId
@@ -425,6 +423,6 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	return
 }
 
-func RequestBodyFormatter(req *http.Request) (io.Reader, error) {
+func RequestBodyFormatter(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
 	return req.Body, nil
 }
