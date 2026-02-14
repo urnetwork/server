@@ -7,8 +7,8 @@ ENV WARP_ENV=$warp_env
 
 # see https://docs.docker.com/develop/develop-images/dockerfile_best-practices/
 RUN apt-get update && apt-get install -y \
-	ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
 COPY build/$TARGETPLATFORM/mcp /usr/local/sbin/bringyour-mcp

@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	host = flag.String("host", "localhost", "host to listen on")
+	host = flag.String("host", "0.0.0.0", "host to listen on")
 	port = flag.Int("port", 8000, "port number to listen on")
 )
 
