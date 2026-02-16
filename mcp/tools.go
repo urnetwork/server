@@ -43,6 +43,10 @@ type FindLocationsArgs struct {
 func getProviderLocations(ctx context.Context, req *mcp.CallToolRequest, findLocations FindLocationsArgs) (*mcp.CallToolResult, any, error) {
 
 	clientSession, err := createClientSession(ctx, req)
+	if err != nil {
+		glog.Infof("Error creating client session: %v", err)
+		return nil, nil, err
+	}
 
 	result, err := model.FindProviderLocations(&model.FindLocationsArgs{
 		Query: findLocations.Query,
