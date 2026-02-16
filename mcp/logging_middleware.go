@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/urnetwork/glog"
 )
 
 func createLoggingMiddleware() mcp.Middleware {
@@ -19,7 +19,7 @@ func createLoggingMiddleware() mcp.Middleware {
 			sessionID := req.GetSession().ID()
 
 			// Log request details.
-			log.Printf("[REQUEST] Session: %s | Method: %s",
+			glog.Infof("[REQUEST] Session: %s | Method: %s",
 				sessionID,
 				method)
 
@@ -30,13 +30,13 @@ func createLoggingMiddleware() mcp.Middleware {
 			duration := time.Since(start)
 
 			if err != nil {
-				log.Printf("[RESPONSE] Session: %s | Method: %s | Status: ERROR | Duration: %v | Error: %v",
+				glog.Infof("[RESPONSE] Session: %s | Method: %s | Status: ERROR | Duration: %v | Error: %v",
 					sessionID,
 					method,
 					duration,
 					err)
 			} else {
-				log.Printf("[RESPONSE] Session: %s | Method: %s | Status: OK | Duration: %v",
+				glog.Infof("[RESPONSE] Session: %s | Method: %s | Status: OK | Duration: %v",
 					sessionID,
 					method,
 					duration)
