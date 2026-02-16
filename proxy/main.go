@@ -2,17 +2,18 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
+	// "crypto/tls"
 	"encoding/base64"
-	"encoding/json"
+	// "encoding/json"
 	"fmt"
-	"io"
+	// "io"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
-	"strconv"
+	// "strconv"
 	"strings"
+	// "sync"
 	"syscall"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
+	// "github.com/urnetwork/server/router"
 )
 
 // FIXME this is meant to be deployed with no lb and no containers
@@ -44,6 +45,7 @@ const ListenSocksPort = 8080
 const ListenHttpPort = 8081
 const ListenHttpsPort = 8082
 const ListenApiPort = 8083
+const ListenWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
@@ -59,6 +61,7 @@ type ProxySettings struct {
 	ProxyWriteTimeout        time.Duration
 	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
+	NotificationTimeout      time.Duration
 }
 
 func main() {
@@ -121,7 +124,25 @@ func main() {
 		settings,
 	)
 
+	wg := newWgServer(
+		ctx,
+		cancel,
+		proxyDeviceManager,
+		settings,
+	)
+
 	newWatchdog(ctx, 5*time.Second)
+
+	notif := newProxyClientNotification(ctx, settings)
+	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
+		for _, proxyClient := range proxyClients {
+			// warm up the device
+			proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+		}
+
+		wg.AddProxyClients(proxyClients)
+	})
+	defer sub()
 
 	select {
 	case <-ctx.Done():
@@ -325,27 +346,32 @@ func (self *httpServer) run() {
 	}
 }
 
-type apiServer struct {
+type wgServer struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	proxyDeviceManager *ProxyDeviceManager
-	transportTls       *server.TransportTls
 	settings           *ProxySettings
+	wgProxy            *proxy.WgProxy
 }
 
-func newApiServer(
+func newWgServer(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
-	transportTls *server.TransportTls,
 	settings *ProxySettings,
-) *apiServer {
-	s := &apiServer{
+) *wgServer {
+	serverConfig := model.LoadServerProxyConfig()
+
+	wgProxySettings := proxy.DefaultWgProxySettings()
+	wgProxySettings.PrivateKey = serverConfig.Wg.PrivateKey
+	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
+
+	s := &wgServer{
 		ctx:                ctx,
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
-		transportTls:       transportTls,
 		settings:           settings,
+		wgProxy:            wgProxy,
 	}
 
 	go server.HandleError(s.run, cancel)
@@ -353,87 +379,38 @@ func newApiServer(
 	return s
 }
 
-func (self *apiServer) run() {
+func (self *wgServer) run() {
 	defer self.cancel()
 
-	routes := []*router.Route{
-		router.NewRoute("POST", "/warmup", self.HandleWarmup),
-	}
-
-	reusePort := false
-
-	httpServerOptions := server.HttpServerOptions{
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  5 * time.Minute,
-	}
-
-	tlsConfig := &tls.Config{
-		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
-	}
-
-	err := server.HttpListenAndServeTlsWithReusePort(
-		self.ctx,
-		net.JoinHostPort("", strconv.Itoa(ListenApiPort)),
-		router.NewRouter(self.ctx, routes),
-		reusePort,
-		httpServerOptions,
-		tlsConfig,
-	)
+	err := self.wgProxy.ListenAndServe("udp", fmt.Sprintf(":%d", ListenWgPort))
 	if err != nil {
 		panic(err)
 	}
 }
 
-type WarmupRequest struct {
-	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
-}
+func (self *wgServer) AddProxyClients(proxyClients []*model.ProxyClient) {
+	serverConfig := model.LoadServerProxyConfig()
 
-type WarmupResponse struct {
-	Ready bool `json:"ready"`
-}
-
-func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	proxyId, err := authHeaderProxyId(authHeader)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	var warmupRequest WarmupRequest
-
-	defer r.Body.Close()
-	bodyBytes, err := io.ReadAll(r.Body)
-
-	if 0 < len(bodyBytes) {
-		err = json.Unmarshal(bodyBytes, &warmupRequest)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	var clients map[netip.Addr]*proxy.WgClient
+	for _, proxyClient := range proxyClients {
+		if proxyClient.WgConfig != nil && proxyClient.WgConfig.ProxyPublicKey == serverConfig.Wg.PublicKey {
+			// verify that the access token is still valid
+			proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken)
+			if err == nil && proxyId == proxyClient.ProxyId {
+				proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+				if err == nil {
+					client := &proxy.WgClient{
+						PublicKey:    proxyClient.WgConfig.ClientPublicKey,
+						PresharedKey: proxyClient.AuthToken,
+						ClientIpv4:   proxyClient.WgConfig.ClientIpv4,
+						Tun:          proxyDevice.Tun(),
+					}
+					clients[proxyClient.WgConfig.ClientIpv4] = client
+				}
+			}
 		}
 	}
-	// else use the default object
-
-	proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	timeout := time.Duration(warmupRequest.TimeoutSeconds) * time.Second
-	ready := proxyDevice.WaitForReady(r.Context(), timeout)
-
-	warmupResponse := &WarmupResponse{
-		Ready: ready,
-	}
-
-	out, err := json.Marshal(warmupResponse)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Write(out)
+	self.wgProxy.AddClients(clients)
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {

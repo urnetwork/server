@@ -1,12 +1,14 @@
 package model
 
 import (
+	"context"
 	mathrand "math/rand"
 	"strings"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
@@ -53,21 +55,33 @@ func TestSignProxyIdHosts(t *testing.T) {
 
 }
 
-// FIXME
-/*
-func TestProxyDeviceConfig() {
+func TestCreateProxyClient(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
 
-	// create config
+		ResetProxyClientIpv4(ctx)
 
-	// load config for proxy id
-	// load config for client
+		// create n proxy clients
+		n := 1024
+		for i := range n {
+			proxyDeviceConfig := &ProxyDeviceConfig{}
+			proxyDeviceConfig.ClientId = server.NewId()
+			err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+			assert.Equal(t, err, nil)
 
-	// load connection for proxy id
-	// load conenction for client
+			proxyClient, err := CreateProxyClient(
+				ctx,
+				proxyDeviceConfig.ProxyId,
+				proxyDeviceConfig.ClientId,
+				proxyDeviceConfig.InstanceId,
+				CreateProxyClientOptions{
+					EnableWg: true,
+				},
+			)
+			assert.Equal(t, err, nil)
+			assert.NotEqual(t, proxyClient, nil)
 
-	CreateProxyDeviceConfig(&ProxyDeviceConfig{
-		ClientId: clientId,
+			glog.Infof("[ncpm][%d/%d]ip=%s\n", i+1, n, proxyClient.WgConfig.ClientIpv4)
+		}
 	})
-
 }
-*/

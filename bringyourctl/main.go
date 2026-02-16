@@ -22,6 +22,8 @@ import (
 	"github.com/urnetwork/server/search"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
+
+	"github.com/urnetwork/proxy"
 )
 
 func main() {
@@ -73,6 +75,8 @@ Usage:
     bringyourctl query location <query>
     bringyourctl upgrade-plan --network_id=<network_id>
     bringyourctl proxy parse-id <signed_proxy_id>
+    bringyourctl proxy keygen
+    bringyourctl proxy reset-client-ipv4
 
 Options:
     -h --help     Show this screen.
@@ -232,6 +236,10 @@ Options:
 	} else if proxy, _ := opts.Bool("proxy"); proxy {
 		if parseId, _ := opts.Bool("parse-id"); parseId {
 			proxyParseId(opts)
+		} else if keygen, _ := opts.Bool("keygen"); keygen {
+			proxyKeygen(opts)
+		} else if r, _ := opts.Bool("reset-client-ipv4"); r {
+			proxyResetClientIpv4(opts)
 		}
 	} else {
 		fmt.Println(usage)
@@ -1098,4 +1106,17 @@ func proxyParseId(opts docopt.Opts) {
 	}
 
 	fmt.Printf("%s\n", proxyId)
+}
+
+func proxyKeygen(opts docopt.Opts) {
+	privateKey, publicKey, err := proxy.WgGenKeyPair()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s %s\n", privateKey, publicKey)
+}
+
+func proxyResetClientIpv4(opts docopt.Opts) {
+	ctx := context.Background()
+	model.ResetProxyClientIpv4(ctx)
 }

@@ -46,7 +46,7 @@ type ResidentProxyDevice struct {
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
 	deviceLocal *sdk.DeviceLocal
-	tnet        *proxy.Net
+	tnet        *proxy.Tun
 	settings    *ResidentProxyDeviceSettings
 }
 
@@ -124,9 +124,11 @@ func NewResidentProxyDevice(
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
 	}
 
-	tnet, err := proxy.CreateNetTun(
+	tunSettings := proxy.DefaultTunSettings()
+	tunSettings.Mtu = settings.Mtu
+	tnet, err := proxy.CreateTun(
 		cancelCtx,
-		settings.Mtu,
+		tunSettings,
 	)
 	if err != nil {
 		return nil, err

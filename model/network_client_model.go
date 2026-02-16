@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	// "regexp"
 	"strconv"
-	"strings"
+	// "strings"
 	// "sync"
 
 	// "bytes"
@@ -99,6 +99,7 @@ type ProxyConfig struct {
 	LockIpList   []string `json:"lock_ip_list"`
 
 	HttpsRequireAuth bool `json:"https_require_auth"`
+	EnableWg         bool `json:"enable_wg"`
 
 	InitialDeviceState *ExtendedProxyDeviceState `json:"initial_device_state,omitempty"`
 }
@@ -122,18 +123,8 @@ type AuthNetworkClientError struct {
 }
 
 type ProxyConfigResult struct {
-	KeepaliveSeconds int       `json:"keepalive_seconds"`
-	SocksProxyUrl    string    `json:"socks_proxy_url"`
-	HttpProxyUrl     string    `json:"http_proxy_url"`
-	HttpsProxyUrl    string    `json:"https_proxy_url"`
-	ApiBaseUrl       string    `json:"api_base_url"`
-	AuthToken        string    `json:"auth_token"`
-	InstanceId       server.Id `json:"instance_id"`
-	ProxyHost        string    `json:"proxy_host"`
-	HttpProxyPort    int       `json:"http_proxy_port"`
-	HttpsProxyPort   int       `json:"https_proxy_port"`
-	SocksProxyPort   int       `json:"socks_proxy_port"`
-	ApiPort          int       `json:"api_port"`
+	KeepaliveSeconds int `json:"keepalive_seconds"`
+	ProxyClient
 }
 
 type ProxyAuthResult struct {
@@ -282,59 +273,27 @@ func AuthNetworkClient(
 			}
 			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 			if err == nil {
-				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
-				// FIXME pull the current avaiable far edges and use least recently used with a threshold
-				socksProxyPort := 8080
-				httpProxyPort := 8081
-				httpsProxyPort := 8082
-				apiPort := 8083
-
-				proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
-
-				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
-
-				httpProxyUrl := fmt.Sprintf(
-					"http://%s:%d",
-					proxyHost,
-					httpProxyPort,
-				)
-
-				var httpsProxyUrl string
-				if authClient.ProxyConfig.HttpsRequireAuth {
-					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
-					httpsProxyUrl = fmt.Sprintf(
-						"https://%s:%d",
-						proxyHost,
-						httpsProxyPort,
-					)
-				} else {
-					httpsProxyUrl = fmt.Sprintf(
-						"https://%s.%s:%d",
-						strings.ToLower(signedProxyId),
-						proxyHost,
-						httpsProxyPort,
-					)
+				opts := CreateProxyClientOptions{
+					HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
+					EnableWg:         authClient.ProxyConfig.EnableWg,
 				}
-
-				apiBaseUrl := fmt.Sprintf(
-					"https://api.%s:%d",
-					proxyHost,
-					apiPort,
+				proxyClient, err := CreateProxyClient(
+					session.Ctx,
+					proxyDeviceConfig.ProxyId,
+					proxyDeviceConfig.ClientId,
+					proxyDeviceConfig.InstanceId,
+					opts,
 				)
 
-				authClientResult.ProxyConfigResult = &ProxyConfigResult{
-					SocksProxyUrl:  socksProxyUrl,
-					HttpProxyUrl:   httpProxyUrl,
-					HttpsProxyUrl:  httpsProxyUrl,
-					ApiBaseUrl:     apiBaseUrl,
-					AuthToken:      strings.ToLower(signedProxyId),
-					InstanceId:     proxyDeviceConfig.InstanceId,
-					ProxyHost:      proxyHost,
-					SocksProxyPort: socksProxyPort,
-					HttpProxyPort:  httpProxyPort,
-					HttpsProxyPort: httpsProxyPort,
-					ApiPort:        apiPort,
+				if err == nil {
+					authClientResult.ProxyConfigResult = &ProxyConfigResult{
+						ProxyClient: *proxyClient,
+					}
+				} else {
+					authClientResult.Error = &AuthNetworkClientError{
+						Message: "Could not create proxy client",
+					}
 				}
 			} else {
 				authClientResult.Error = &AuthNetworkClientError{
