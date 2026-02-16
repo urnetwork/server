@@ -9,6 +9,7 @@
 client/build
 bringyourctl/bringyourctl
 api/api
+mcp/mcp
 taskworker/taskworker
 gpt/gpt
 connect/connect
