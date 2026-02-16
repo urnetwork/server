@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"golang.org/x/exp/maps"
+
 	"github.com/urnetwork/connect"
-	// "github.com/urnetwork/glog"
+	"github.com/urnetwork/glog"
 	// "github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -31,12 +33,20 @@ func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *p
 }
 
 func (self *proxyClientNotification) run() {
-	nextChangeId := 0
+	nextChangeId := int64(0)
 	for {
-		var proxyClients []*model.ProxyClient
-		proxyClients, nextChangeId = model.GetProxyClientsSince(self.ctx, nextChangeId)
-		if 0 < len(proxyClients) {
-			self.proxyClients(proxyClients)
+		var proxyClients map[server.Id]*model.ProxyClient
+		var err error
+		proxyClients, nextChangeId, err = model.GetProxyClientsSince(
+			self.ctx,
+			server.RequireHost(),
+			server.RequireBlock(),
+			nextChangeId,
+		)
+		if err != nil {
+			glog.Infof("[pcn]err=%s\n", err)
+		} else if 0 < len(proxyClients) {
+			self.proxyClients(maps.Values(proxyClients))
 		}
 		select {
 		case <-self.ctx.Done():

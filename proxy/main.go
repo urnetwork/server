@@ -13,7 +13,7 @@ import (
 	"os"
 	// "strconv"
 	"strings"
-	"sync"
+	// "sync"
 	"syscall"
 	"time"
 
@@ -346,16 +346,6 @@ func (self *httpServer) run() {
 	}
 }
 
-var wgPrivateKey = sync.OnceValue(func() string {
-	wgKeys := server.Vault.RequireSimpleResource("wg.yml")
-	return wgKeys.RequireString("private_key")
-})
-
-var wgPublicKey = sync.OnceValue(func() string {
-	wgKeys := server.Vault.RequireSimpleResource("wg.yml")
-	return wgKeys.RequireString("public_key")
-})
-
 type wgServer struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -370,9 +360,10 @@ func newWgServer(
 	proxyDeviceManager *ProxyDeviceManager,
 	settings *ProxySettings,
 ) *wgServer {
+	serverConfig := model.LoadServerProxyConfig()
 
 	wgProxySettings := proxy.DefaultWgProxySettings()
-	wgProxySettings.PrivateKey = wgPrivateKey()
+	wgProxySettings.PrivateKey = serverConfig.Wg.PrivateKey
 	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
 
 	s := &wgServer{
@@ -398,24 +389,23 @@ func (self *wgServer) run() {
 }
 
 func (self *wgServer) AddProxyClients(proxyClients []*model.ProxyClient) {
+	serverConfig := model.LoadServerProxyConfig()
+
 	var clients map[netip.Addr]*proxy.WgClient
 	for _, proxyClient := range proxyClients {
-		if 0 < len(proxyClient.WgClientPublicKey) && proxyClient.WgServerPublicKey == wgPublicKey() {
+		if proxyClient.WgConfig != nil && proxyClient.WgConfig.ProxyPublicKey == serverConfig.Wg.PublicKey {
 			// verify that the access token is still valid
 			proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken)
 			if err == nil && proxyId == proxyClient.ProxyId {
 				proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
 				if err == nil {
-					addr, err := netip.ParseAddr(proxyClient.WgClientIpv4)
-					if err == nil {
-						client := &proxy.WgClient{
-							PublicKey:    proxyClient.WgClientPublicKey,
-							PresharedKey: proxyClient.AuthToken,
-							ClientIpv4:   addr,
-							Tun:          proxyDevice.Tun(),
-						}
-						clients[addr] = client
+					client := &proxy.WgClient{
+						PublicKey:    proxyClient.WgConfig.ClientPublicKey,
+						PresharedKey: proxyClient.AuthToken,
+						ClientIpv4:   proxyClient.WgConfig.ClientIpv4,
+						Tun:          proxyDevice.Tun(),
 					}
+					clients[proxyClient.WgConfig.ClientIpv4] = client
 				}
 			}
 		}
