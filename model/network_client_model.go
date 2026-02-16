@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	// "regexp"
 	"strconv"
-	"strings"
+	// "strings"
 	// "sync"
 
 	// "bytes"
@@ -99,6 +99,7 @@ type ProxyConfig struct {
 	LockIpList   []string `json:"lock_ip_list"`
 
 	HttpsRequireAuth bool `json:"https_require_auth"`
+	EnableWg         bool `json:"enable_wg"`
 
 	InitialDeviceState *ExtendedProxyDeviceState `json:"initial_device_state,omitempty"`
 }
@@ -272,62 +273,19 @@ func AuthNetworkClient(
 			}
 			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 			if err == nil {
-				signedProxyId := SignProxyId(proxyDeviceConfig.ProxyId)
 
-				// FIXME pull the current avaiable far edges and use least recently used with a threshold
-				socksProxyPort := 8080
-				httpProxyPort := 8081
-				httpsProxyPort := 8082
-				apiPort := 8083
-
-				proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
-
-				socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
-
-				httpProxyUrl := fmt.Sprintf(
-					"http://%s:%d",
-					proxyHost,
-					httpProxyPort,
+				opts := CreateProxyClientOptions{
+					HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
+					EnableWg:         authClient.ProxyConfig.EnableWg,
+				}
+				proxyClient, err := CreateProxyClient(
+					session.Ctx,
+					proxyDeviceConfig.ProxyId,
+					proxyDeviceConfig.ClientId,
+					proxyDeviceConfig.InstanceId,
+					opts,
 				)
 
-				var httpsProxyUrl string
-				if authClient.ProxyConfig.HttpsRequireAuth {
-					// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
-					httpsProxyUrl = fmt.Sprintf(
-						"https://%s:%d",
-						proxyHost,
-						httpsProxyPort,
-					)
-				} else {
-					httpsProxyUrl = fmt.Sprintf(
-						"https://%s.%s:%d",
-						strings.ToLower(signedProxyId),
-						proxyHost,
-						httpsProxyPort,
-					)
-				}
-
-				apiBaseUrl := fmt.Sprintf(
-					"https://api.%s:%d",
-					proxyHost,
-					apiPort,
-				)
-
-				proxyClient := &ProxyClient{
-					ProxyId:        proxyDeviceConfig.ProxyId,
-					SocksProxyUrl:  socksProxyUrl,
-					HttpProxyUrl:   httpProxyUrl,
-					HttpsProxyUrl:  httpsProxyUrl,
-					ApiBaseUrl:     apiBaseUrl,
-					AuthToken:      strings.ToLower(signedProxyId),
-					InstanceId:     proxyDeviceConfig.InstanceId,
-					ProxyHost:      proxyHost,
-					SocksProxyPort: socksProxyPort,
-					HttpProxyPort:  httpProxyPort,
-					HttpsProxyPort: httpsProxyPort,
-					ApiPort:        apiPort,
-				}
-				err = CreateProxyClient(session.Ctx, proxyClient)
 				if err == nil {
 					authClientResult.ProxyConfigResult = &ProxyConfigResult{
 						ProxyClient: *proxyClient,
