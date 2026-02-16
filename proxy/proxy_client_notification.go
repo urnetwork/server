@@ -33,14 +33,18 @@ func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *p
 }
 
 func (self *proxyClientNotification) run() {
+	proxyHost := server.RequireHost()
+	// FIXME allow an optional block until migration is complete
+	block, _ := server.Block()
+
 	nextChangeId := int64(0)
 	for {
 		var proxyClients map[server.Id]*model.ProxyClient
 		var err error
 		proxyClients, nextChangeId, err = model.GetProxyClientsSince(
 			self.ctx,
-			server.RequireHost(),
-			server.RequireBlock(),
+			proxyHost,
+			block,
 			nextChangeId,
 		)
 		if err != nil {
