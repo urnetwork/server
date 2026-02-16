@@ -2688,4 +2688,54 @@ var migrations = []any{
 		CREATE INDEX transfer_balance_code_network_id_end_time
 		ON transfer_balance_code(network_id, end_time);
     `),
+
+	newSqlMigration(`
+        CREATE TABLE proxy_client (
+            proxy_id uuid NOT NULL,
+            client_id uuid NOT NULL,
+            instance_id uuid NOT NULL,
+            proxy_host varchar(128) NOT NULL,
+            block varchar(128) NOT NULL,
+            client_ipv4 bigint NULL,
+            client_public_key varchar(128) NULL,
+            proxy_client_json text NOT NULL,
+
+            PRIMARY KEY (proxy_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX proxy_client_proxy_host_block_client_ipv4 ON proxy_client (proxy_host, block, client_ipv4)
+    `),
+
+	newSqlMigration(`
+        CREATE UNIQUE INDEX proxy_client_proxy_host_block_client_public_key ON proxy_client (proxy_host, block, client_public_key)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX proxy_client_client_id_instance_id_proxy_id ON proxy_client (client_id, instance_id, proxy_id)
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE proxy_client_change (
+            proxy_host varchar(128) NOT NULL,
+            block varchar(128) NOT NULL,
+            change_id bigint GENERATED ALWAYS AS IDENTITY,
+            proxy_id uuid NOT NULL,
+            
+            PRIMARY KEY (proxy_host, block, change_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE proxy_client_ipv4 (
+            sequence_id bigint NOT NULL,
+            client_ipv4 bigint NOT NULL,
+            
+            PRIMARY KEY (sequence_id, client_ipv4)
+        )
+    `),
+
+	// newCodeMigration(migration_20260214_ResetProxyClientIpv4),
+
 }
