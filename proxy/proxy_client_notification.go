@@ -34,8 +34,7 @@ func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *p
 
 func (self *proxyClientNotification) run() {
 	proxyHost := server.RequireHost()
-	// FIXME allow an optional block until migration is complete
-	block, _ := server.Block()
+	block := server.RequireBlock()
 
 	nextChangeId := int64(0)
 	for {
@@ -50,6 +49,8 @@ func (self *proxyClientNotification) run() {
 		if err != nil {
 			glog.Infof("[pcn]err=%s\n", err)
 		} else if 0 < len(proxyClients) {
+
+			glog.Infof("[pcn]found %d new proxy clients (...%d)\n", len(proxyClients), nextChangeId)
 			self.proxyClients(maps.Values(proxyClients))
 		}
 		select {

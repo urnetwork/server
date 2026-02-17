@@ -496,7 +496,7 @@ func CreateProxyClient(
 		wgPort := 8084
 
 		proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
-		block := ""
+		block := "g1"
 
 		socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
 

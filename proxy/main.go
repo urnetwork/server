@@ -131,7 +131,9 @@ func main() {
 		settings,
 	)
 
-	newWatchdog(ctx, 5*time.Second)
+	if server.RequireEnv() != "local" {
+		newWatchdog(ctx, 5*time.Second)
+	}
 
 	notif := newProxyClientNotification(ctx, settings)
 	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
