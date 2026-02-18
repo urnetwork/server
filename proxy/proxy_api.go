@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	// "github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 )
 
@@ -21,6 +21,7 @@ type apiServer struct {
 	cancel             context.CancelFunc
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
+	warmupCallback     func(*model.ProxyClient) error
 	settings           *ProxySettings
 }
 
@@ -29,6 +30,7 @@ func newApiServer(
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
 	transportTls *server.TransportTls,
+	warmupCallback func(*model.ProxyClient) error,
 	settings *ProxySettings,
 ) *apiServer {
 	s := &apiServer{
@@ -36,6 +38,7 @@ func newApiServer(
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
+		warmupCallback:     warmupCallback,
 		settings:           settings,
 	}
 
@@ -110,6 +113,21 @@ func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if self.warmupCallback != nil {
+		proxyClient, err := model.GetProxyClient(self.ctx, proxyId)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if proxyClient != nil {
+			err = self.warmupCallback(proxyClient)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	timeout := time.Duration(warmupRequest.TimeoutSeconds) * time.Second

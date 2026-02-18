@@ -102,14 +102,6 @@ func main() {
 
 	glog.Infof("Listen api (:%d), socks5 (:%d), http (:%d), https (:%d)", ListenApiPort, ListenSocksPort, ListenHttpPort, ListenHttpsPort)
 
-	newApiServer(
-		ctx,
-		cancel,
-		proxyDeviceManager,
-		transportTls,
-		settings,
-	)
-
 	newSocks5Server(
 		ctx,
 		cancel,
@@ -133,6 +125,20 @@ func main() {
 		settings,
 	)
 
+	warmup := func(proxyClient *model.ProxyClient) error {
+		wg.AddProxyClients(proxyClient)
+		return nil
+	}
+
+	newApiServer(
+		ctx,
+		cancel,
+		proxyDeviceManager,
+		transportTls,
+		warmup,
+		settings,
+	)
+
 	if server.RequireEnv() != "local" {
 		newWatchdog(ctx, 5*time.Second)
 	}
@@ -150,7 +156,7 @@ func main() {
 			}
 		}
 
-		wg.AddProxyClients(proxyClients)
+		wg.AddProxyClients(proxyClients...)
 	})
 	defer sub()
 
@@ -398,7 +404,7 @@ func (self *wgServer) run() {
 	}
 }
 
-func (self *wgServer) AddProxyClients(proxyClients []*model.ProxyClient) {
+func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) {
 	serverConfig := model.LoadServerProxyConfig()
 
 	clients := map[netip.Addr]*proxy.WgClient{}

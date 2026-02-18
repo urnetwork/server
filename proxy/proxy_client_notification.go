@@ -17,7 +17,8 @@ import (
 type ProxyClientsFunction = func(proxyClients []*model.ProxyClient)
 
 type proxyClientNotification struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	settings *ProxySettings
 
@@ -25,21 +26,44 @@ type proxyClientNotification struct {
 }
 
 func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
+	cancelCtx, cancel := context.WithCancel(ctx)
 	p := &proxyClientNotification{
-		ctx:                   ctx,
+		ctx:                   cancelCtx,
+		cancel:                cancel,
 		settings:              settings,
 		proxyClientsCallbacks: connect.NewCallbackList[ProxyClientsFunction](),
 	}
-	go server.HandleError(p.run)
+	go server.HandleError(p.run, cancel)
 	return p
 }
 
 func (self *proxyClientNotification) run() {
+	defer self.cancel()
+
 	proxyHost := server.RequireHost()
 	block := server.RequireBlock()
 
+	monitor := connect.NewMonitor()
+
+	go server.HandleError(func() {
+		defer self.cancel()
+
+		event, sub := server.Subscribe(self.ctx, model.ProxyClientChannel(proxyHost, block))
+		defer sub()
+
+		for {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-event:
+				monitor.NotifyAll()
+			}
+		}
+	})
+
 	nextChangeId := int64(0)
 	for {
+		notify := monitor.NotifyChannel()
 		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
 			self.ctx,
 			proxyHost,
@@ -57,6 +81,7 @@ func (self *proxyClientNotification) run() {
 		select {
 		case <-self.ctx.Done():
 			return
+		case <-notify:
 		case <-time.After(self.settings.NotificationTimeout):
 		}
 	}
