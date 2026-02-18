@@ -2736,6 +2736,11 @@ var migrations = []any{
         )
     `),
 
-	// newCodeMigration(migration_20260214_ResetProxyClientIpv4),
+	newSqlMigration(`
+        CREATE UNIQUE INDEX IF NOT EXISTS proxy_client_client_id ON proxy_client (client_id)
+    `),
 
+	newSqlMigration(`
+        DROP INDEX IF EXISTS proxy_client_client_id_instance_id_proxy_id
+    `),
 }
