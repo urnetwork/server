@@ -4,6 +4,7 @@ import (
 	// "time"
 	"fmt"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -192,7 +193,13 @@ func UpgradeFromGuestExisting(
 
 }
 
-type NetworkRemoveResult struct{}
+type NetworkRemoveResultError struct {
+	Message string `json:"message"`
+}
+
+type NetworkRemoveResult struct {
+	Error *NetworkRemoveResultError `json:"error,omitempty"`
+}
 
 func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error) {
 	success, userAuths := model.RemoveNetwork(
@@ -200,12 +207,24 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 		session.ByJwt.NetworkId,
 		&session.ByJwt.UserId,
 	)
+
 	if success {
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			for userAuth, _ := range userAuths {
 				ScheduleRemoveProductUpdates(session, userAuth, tx)
 			}
 		})
+
+		// ensure we wrap up any Stripe subscriptions for the network
+		err := UnsubscribeStripe(session)
+		if err != nil {
+			glog.Errorf("Failed to unsubscribe Stripe: %v", err)
+			return &NetworkRemoveResult{
+				Error: &NetworkRemoveResultError{
+					Message: "Failed to unsubscribe Stripe",
+				},
+			}, nil
+		}
 
 		return &NetworkRemoveResult{}, nil
 	}
