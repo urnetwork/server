@@ -27,6 +27,8 @@ require (
 	github.com/samber/lo v1.51.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/goproxy v0.0.0-20251009123132-ee3e713dae03
+	github.com/stripe/stripe-go v70.15.0+incompatible
+	github.com/stripe/stripe-go/v76 v76.25.0
 	github.com/stripe/stripe-go/v82 v82.5.1
 	github.com/things-go/go-socks5 v0.1.0
 	github.com/tyler-smith/go-bip39 v1.1.0
