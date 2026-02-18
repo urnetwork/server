@@ -680,6 +680,16 @@ AllowedIPs = 0.0.0.0/0
 
 	})
 
+	if returnErr == nil {
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Publish(
+				ctx,
+				ProxyClientChannel(proxyClient.ProxyHost, proxyClient.Block),
+				proxyId.String(),
+			)
+		})
+	}
+
 	return
 }
 
@@ -761,6 +771,34 @@ func GetProxyIdsSince(ctx context.Context, proxyHost string, block string, chang
 				server.Raise(result.Scan(&changeId, &proxyId))
 				proxyIds = append(proxyIds, proxyId)
 				maxChangeId = max(maxChangeId, changeId)
+			}
+		})
+	})
+	return
+}
+
+func GetProxyClient(ctx context.Context, proxyId server.Id) (proxyClient *ProxyClient, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				proxy_client.proxy_client_json
+			FROM proxy_client
+			WHERE proxy_client.proxy_id = $1
+			`,
+			proxyId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var proxyClientJson string
+				server.Raise(result.Scan(&proxyClientJson))
+
+				var proxyClient_ ProxyClient
+				returnErr = json.Unmarshal([]byte(proxyClientJson), &proxyClient_)
+				if returnErr == nil {
+					proxyClient = &proxyClient_
+				}
 			}
 		})
 	})
@@ -925,4 +963,8 @@ func ResetProxyClientIpv4(ctx context.Context) {
 	})
 
 	glog.Infof("[reset][%d/%d]done\n", len(addrs), len(addrs))
+}
+
+func ProxyClientChannel(proxyHost string, block string) string {
+	return fmt.Sprintf("proxy_client_%s_%s", proxyHost, block)
 }

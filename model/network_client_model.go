@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 
+	"encoding/json"
 	// "crypto/sha256"
 	"errors"
 	// "net"
@@ -462,8 +463,7 @@ type NetworkClientInfo struct {
 
 	Resident *NetworkClientResident `json:"resident,omitempty"`
 
-	ProvideMode *ProvideMode               `json:"provide_mode"`
-	Connections []*NetworkClientConnection `json:"connections"`
+	Connections []*NetworkClientConnection `json:"connections,omitempty"`
 }
 
 type NetworkClientConnection struct {
@@ -493,13 +493,16 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					device.device_spec,
 					network_client.create_time,
 					network_client.auth_time,
-					provide_key.provide_mode
+					provide_key.provide_mode,
+					proxy_client.proxy_client_json
 				FROM network_client
 				LEFT JOIN provide_key ON
 					provide_key.client_id = network_client.client_id AND
 					provide_key.provide_mode = $2
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
+				LEFT JOIN proxy_client ON
+					proxy_client.client_id = network_client.client_id
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true
@@ -514,6 +517,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 				clientInfo := &NetworkClientInfo{}
 				var deviceName_ *string
 				var deviceSpec_ *string
+				var proxyClientJson *string
 				server.Raise(result.Scan(
 					&clientInfo.ClientId,
 					&clientInfo.SourceClientId,
@@ -524,12 +528,20 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
 					&clientInfo.ProvideMode,
+					&proxyClientJson,
 				))
 				if deviceName_ != nil {
 					clientInfo.DeviceName = *deviceName_
 				}
 				if deviceSpec_ != nil {
 					clientInfo.DeviceSpec = *deviceSpec_
+				}
+				if proxyClientJson != nil {
+					var proxyClient ProxyClient
+					err := json.Unmarshal([]byte(*proxyClientJson), &proxyClient)
+					if err == nil {
+						clientInfo.ProxyClient = &proxyClient
+					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
 			}
@@ -640,6 +652,9 @@ type NetworkClient struct {
 
 	CreateTime time.Time `json:"create_time"`
 	AuthTime   time.Time `json:"auth_time"`
+
+	ProvideMode *ProvideMode `json:"provide_mode,omitempty"`
+	ProxyClient *ProxyClient `json:"proxy_client,omitempty"`
 }
 
 func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
@@ -657,12 +672,19 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 					network_client.create_time,
 					network_client.auth_time
 				FROM network_client
-				LEFT JOIN device ON device.device_id = network_client.device_id
+				LEFT JOIN provide_key ON
+					provide_key.client_id = network_client.client_id AND
+					provide_key.provide_mode = $2
+				LEFT JOIN device ON
+					device.device_id = network_client.device_id
+				LEFT JOIN proxy_client ON
+					proxy_client.client_id = network_client.client_id
 				WHERE
 					client_id = $1 AND
 					active = true
 			`,
 			clientId,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -671,6 +693,7 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 				}
 				var deviceName_ *string
 				var deviceSpec_ *string
+				var proxyClientJson *string
 				server.Raise(result.Scan(
 					&networkClient.NetworkId,
 					&networkClient.Description,
@@ -678,12 +701,21 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 					&deviceSpec_,
 					&networkClient.CreateTime,
 					&networkClient.AuthTime,
+					&networkClient.ProvideMode,
+					&proxyClientJson,
 				))
 				if deviceName_ != nil {
 					networkClient.DeviceName = *deviceName_
 				}
 				if deviceSpec_ != nil {
 					networkClient.DeviceSpec = *deviceSpec_
+				}
+				if proxyClientJson != nil {
+					var proxyClient ProxyClient
+					err := json.Unmarshal([]byte(*proxyClientJson), &proxyClient)
+					if err == nil {
+						networkClient.ProxyClient = &proxyClient
+					}
 				}
 			}
 		})
