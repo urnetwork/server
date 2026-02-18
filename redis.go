@@ -13,16 +13,19 @@ import (
 )
 
 // type aliases to simplify user code
-type RedisClient = redis.Cmdable
+type RedisClient = redis.UniversalClient
+type RedisPubSub = *redis.PubSub
+type RedisMessage = *redis.Message
+type RedisSubscription = *redis.Subscription
 
 const RedisNil = redis.Nil
 
 type safeRedisClient struct {
 	mutex  sync.Mutex
-	client redis.Cmdable
+	client redis.UniversalClient
 }
 
-func (self *safeRedisClient) open() redis.Cmdable {
+func (self *safeRedisClient) open() redis.UniversalClient {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -170,7 +173,7 @@ func RedisReset() {
 	safeClient.reset()
 }
 
-func client() redis.Cmdable {
+func client() redis.UniversalClient {
 	return safeClient.open()
 }
 
@@ -181,6 +184,15 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 	// context := context.Background()
 	client := client()
 	callback(client)
+}
+
+// channel messages can be: RedisMessage, RedisSubscription
+func Subscribe(ctx context.Context, channels ...string) (<-chan any, func()) {
+	client := client()
+	pubsub := client.Subscribe(ctx, channels...)
+	return pubsub.ChannelWithSubscriptions(), func() {
+		pubsub.Close()
+	}
 }
 
 func RedisSetIfEqual(r RedisClient, ctx context.Context, key string, test []byte, value []byte, ttl time.Duration) *redis.Cmd {
