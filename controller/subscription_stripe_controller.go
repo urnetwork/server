@@ -756,6 +756,8 @@ func StripeCreateCustomerPortal(
 
 func UnsubscribeStripe(session *session.ClientSession) error {
 
+	glog.Infof("[unsubscribe] Unsubscribing from Stripe for network %s", session.ByJwt.NetworkId)
+
 	var subscriptionRenewals []struct {
 		TransactionId string
 		EndTime       time.Time
@@ -782,7 +784,7 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 		)
 
 		if err != nil {
-			glog.Errorf("Failed to query subscription_renewal: %v", err)
+			glog.Errorf("[unsubscribe] Failed to query subscription_renewal: %v", err)
 			queryErr = err
 			return
 		}
@@ -795,7 +797,7 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 
 				err := result.Scan(&txId, &endTime)
 				if err != nil {
-					glog.Errorf("Failed to scan subscription renewal: %v", err)
+					glog.Errorf("[unsubscribe] Failed to scan subscription renewal: %v", err)
 					queryErr = err
 					continue
 				}
@@ -808,7 +810,7 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 					EndTime:       endTime,
 				})
 
-				glog.Infof("Found active subscription renewal with transaction id: %s and end time: %s", txId, endTime.String())
+				glog.Infof("[unsubscribe] Found active subscription renewal with transaction id: %s and end time: %s", txId, endTime.String())
 
 			}
 		})
@@ -816,11 +818,11 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 	})
 
 	if queryErr != nil {
-		return fmt.Errorf("failed to query subscription renewals: %w", queryErr)
+		return fmt.Errorf("[unsubscribe] failed to query subscription renewals: %w", queryErr)
 	}
 
 	if len(subscriptionRenewals) == 0 {
-		glog.Infof("No active Stripe subscriptions found for network %s", session.ByJwt.NetworkId)
+		glog.Infof("[unsubscribe] No active Stripe subscriptions found for network %s", session.ByJwt.NetworkId)
 		return nil
 	}
 
@@ -830,12 +832,12 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 
 		invoiceId := renewal.TransactionId
 		if invoiceId == "" {
-			glog.Infof("Subscription renewal with empty transaction id, skipping")
+			glog.Infof("[unsubscribe] Subscription renewal with empty transaction id, skipping")
 			continue
 		}
 
 		// Get invoice details with expanded subscription info
-		url := fmt.Sprintf("https://api.stripe.com/v1/invoices/%s?expand[]=subscription", invoiceId)
+		url := fmt.Sprintf("https://api.stripe.com/v1/invoices/%s?expand[]=subscription&expand[]=customer", invoiceId)
 		fullInvoice, err := server.HttpGetRequireStatusOk[*StripeInvoiceExpanded](
 			session.Ctx,
 			url,
@@ -846,7 +848,7 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 		)
 
 		if err != nil {
-			glog.Errorf("Failed to fetch invoice %s: %v", invoiceId, err)
+			glog.Errorf("[unsubscribe] Failed to fetch invoice %s: %v", invoiceId, err)
 			continue
 		}
 
@@ -857,23 +859,23 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 		}
 
 		if subscriptionId == "" {
-			glog.Errorf("No subscription ID found for invoice %s", invoiceId)
+			glog.Errorf("[unsubscribe] No subscription ID found for invoice %s", invoiceId)
 			continue
 		}
 
 		// Cancel the subscription
-		glog.Infof("Canceling Stripe subscription %s for network %s", subscriptionId, session.ByJwt.NetworkId)
+		glog.Infof("[unsubscribe] Canceling Stripe subscription %s for network %s", subscriptionId, session.ByJwt.NetworkId)
 
 		params := &stripe.SubscriptionCancelParams{}
 		_, err = subscription.Cancel(subscriptionId, params)
 
 		if err != nil {
-			glog.Errorf("Failed to cancel Stripe subscription %s: %v", subscriptionId, err)
+			glog.Errorf("[unsubscribe] Failed to cancel Stripe subscription %s: %v", subscriptionId, err)
 			// Continue to try other subscriptions even if one fails
 			continue
 		}
 
-		glog.Infof("Successfully canceled Stripe subscription %s", subscriptionId)
+		glog.Infof("[unsubscribe] Successfully canceled Stripe subscription %s", subscriptionId)
 
 	}
 
