@@ -208,8 +208,6 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 		&session.ByJwt.UserId,
 	)
 
-	glog.Infof("NetworkRemove success: %v, userAuths: %v", success, userAuths)
-
 	if success {
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			for userAuth, _ := range userAuths {

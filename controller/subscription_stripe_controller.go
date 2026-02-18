@@ -756,8 +756,6 @@ func StripeCreateCustomerPortal(
 
 func UnsubscribeStripe(session *session.ClientSession) error {
 
-	glog.Infof("[unsubscribe] Unsubscribing from Stripe for network %s", session.ByJwt.NetworkId)
-
 	var subscriptionRenewals []struct {
 		TransactionId string
 		EndTime       time.Time
@@ -810,8 +808,6 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 					EndTime:       endTime,
 				})
 
-				glog.Infof("[unsubscribe] Found active subscription renewal with transaction id: %s and end time: %s", txId, endTime.String())
-
 			}
 		})
 
@@ -822,7 +818,6 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 	}
 
 	if len(subscriptionRenewals) == 0 {
-		glog.Infof("[unsubscribe] No active Stripe subscriptions found for network %s", session.ByJwt.NetworkId)
 		return nil
 	}
 
@@ -866,18 +861,58 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 		// Cancel the subscription
 		glog.Infof("[unsubscribe] Canceling Stripe subscription %s for network %s", subscriptionId, session.ByJwt.NetworkId)
 
-		params := &stripe.SubscriptionCancelParams{}
-		_, err = subscription.Cancel(subscriptionId, params)
+		cancelUrl := fmt.Sprintf("https://api.stripe.com/v1/subscriptions/%s", subscriptionId)
 
+		req, err := http.NewRequestWithContext(session.Ctx, "DELETE", cancelUrl, nil)
+		if err != nil {
+			glog.Errorf("[unsubscribe] Failed to create cancel request for subscription %s: %v", subscriptionId, err)
+			continue
+		}
+
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiToken()))
+
+		httpClient := server.DefaultHttpClient()
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			glog.Errorf("[unsubscribe] Failed to cancel Stripe subscription %s: %v", subscriptionId, err)
-			// Continue to try other subscriptions even if one fails
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			glog.Errorf("[unsubscribe] Stripe API returned error status %d for subscription %s", resp.StatusCode, subscriptionId)
 			continue
 		}
 
 		glog.Infof("[unsubscribe] Successfully canceled Stripe subscription %s", subscriptionId)
 
 	}
+
+	// set subscription_renewal end time as now for all active subscriptions
+	// to prevent transfer balance from being unnecessarily added
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+
+		_, err := tx.Exec(
+			session.Ctx,
+			`
+			UPDATE subscription_renewal
+			SET end_time = $1
+			WHERE
+				network_id = $2
+				AND market = $3
+				AND end_time > $4
+			`,
+			server.NowUtc(),
+			session.ByJwt.NetworkId,
+			model.SubscriptionMarketStripe,
+			server.NowUtc(),
+		)
+
+		if err != nil {
+			glog.Errorf("[unsubscribe] Failed to update subscription_renewal end times: %v", err)
+		}
+
+	})
 
 	return nil
 }
