@@ -670,7 +670,9 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 					device.device_name,
 					device.device_spec,
 					network_client.create_time,
-					network_client.auth_time
+					network_client.auth_time,
+					provide_key.provide_mode,
+					proxy_client.proxy_client_json
 				FROM network_client
 				LEFT JOIN provide_key ON
 					provide_key.client_id = network_client.client_id AND
@@ -680,8 +682,8 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 				LEFT JOIN proxy_client ON
 					proxy_client.client_id = network_client.client_id
 				WHERE
-					client_id = $1 AND
-					active = true
+					network_client.client_id = $1 AND
+					network_client.active = true
 			`,
 			clientId,
 			ProvideModePublic,
