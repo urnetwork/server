@@ -25,11 +25,13 @@ type proxyClientNotification struct {
 }
 
 func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
-	return &proxyClientNotification{
+	p := &proxyClientNotification{
 		ctx:                   ctx,
 		settings:              settings,
 		proxyClientsCallbacks: connect.NewCallbackList[ProxyClientsFunction](),
 	}
+	go server.HandleError(p.run)
+	return p
 }
 
 func (self *proxyClientNotification) run() {
@@ -38,9 +40,7 @@ func (self *proxyClientNotification) run() {
 
 	nextChangeId := int64(0)
 	for {
-		var proxyClients map[server.Id]*model.ProxyClient
-		var err error
-		proxyClients, nextChangeId, err = model.GetProxyClientsSince(
+		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
 			self.ctx,
 			proxyHost,
 			block,
@@ -50,9 +50,10 @@ func (self *proxyClientNotification) run() {
 			glog.Infof("[pcn]err=%s\n", err)
 		} else if 0 < len(proxyClients) {
 
-			glog.Infof("[pcn]found %d new proxy clients (...%d)\n", len(proxyClients), nextChangeId)
+			glog.Infof("[pcn]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
 			self.proxyClients(maps.Values(proxyClients))
 		}
+		nextChangeId = maxChangeId + 1
 		select {
 		case <-self.ctx.Done():
 			return

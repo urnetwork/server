@@ -167,6 +167,7 @@ type ProxyDevice struct {
 
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
+	receive          chan []byte
 }
 
 func NewProxyDeviceWithDefaults(
@@ -255,7 +256,21 @@ func (self *ProxyDevice) Run() {
 		if !self.UpdateActivity() {
 			return
 		}
-		self.tun.Write(packet)
+		var receive chan []byte
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			receive = self.receive
+		}()
+		if receive != nil {
+			select {
+			case <-self.ctx.Done():
+				return
+			case receive <- packet:
+			}
+		} else {
+			self.tun.Write(packet)
+		}
 	}
 	sub := self.deviceLocal.AddReceivePacketCallback(receiveCallback)
 	defer sub()
@@ -273,6 +288,16 @@ func (self *ProxyDevice) Run() {
 			connect.MessagePoolReturn(packet)
 		}
 	}
+}
+
+func (self *ProxyDevice) Send(packet []byte) bool {
+	return self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
+}
+
+func (self *ProxyDevice) SetReceive(receive chan []byte) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.receive = receive
 }
 
 func (self *ProxyDevice) Tun() *proxy.Tun {
@@ -346,6 +371,12 @@ func (self *ProxyDevice) UpdateActivity() bool {
 }
 
 func (self *ProxyDevice) CancelIfIdle() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+	}
+
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 

@@ -1590,6 +1590,12 @@ func (self *ResidentForward) UpdateActivity() bool {
 }
 
 func (self *ResidentForward) CancelIfIdle() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+	}
+
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -2122,6 +2128,12 @@ func (self *Resident) UpdateActivity() bool {
 
 // idle if no activity in `ResidentIdleTimeout`
 func (self *Resident) CancelIfIdle() bool {
+	select {
+	case <-self.ctx.Done():
+		return true
+	default:
+	}
+
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
