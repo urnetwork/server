@@ -53,6 +53,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyWriteTimeout:        30 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
+		WarmupTimeout:            30 * time.Minute,
 	}
 }
 
@@ -62,6 +63,7 @@ type ProxySettings struct {
 	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
 	NotificationTimeout      time.Duration
+	WarmupTimeout            time.Duration
 }
 
 func main() {
@@ -137,9 +139,15 @@ func main() {
 
 	notif := newProxyClientNotification(ctx, settings)
 	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
-		for _, proxyClient := range proxyClients {
-			// warm up the device
-			proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+		if 0 < settings.WarmupTimeout {
+			warmupStartTime := server.NowUtc().Add(-settings.WarmupTimeout)
+			for _, proxyClient := range proxyClients {
+				if warmupStartTime.Before(proxyClient.CreateTime) {
+					glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
+					// warmup the device
+					proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+				}
+			}
 		}
 
 		wg.AddProxyClients(proxyClients)
@@ -393,26 +401,39 @@ func (self *wgServer) run() {
 func (self *wgServer) AddProxyClients(proxyClients []*model.ProxyClient) {
 	serverConfig := model.LoadServerProxyConfig()
 
-	var clients map[netip.Addr]*proxy.WgClient
+	clients := map[netip.Addr]*proxy.WgClient{}
 	for _, proxyClient := range proxyClients {
-		if proxyClient.WgConfig != nil && proxyClient.WgConfig.ProxyPublicKey == serverConfig.Wg.PublicKey {
+		if proxyClient.WgConfig != nil {
+			valid := true
+			if proxyClient.WgConfig.ProxyPublicKey != serverConfig.Wg.PublicKey {
+				glog.Infof("[wg][%s]public key mismatch %s<>%s\n", proxyClient.ProxyId, proxyClient.WgConfig.ProxyPublicKey, serverConfig.Wg.PublicKey)
+				valid = false
+			}
 			// verify that the access token is still valid
-			proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken)
-			if err == nil && proxyId == proxyClient.ProxyId {
-				proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
-				if err == nil {
-					client := &proxy.WgClient{
-						PublicKey:    proxyClient.WgConfig.ClientPublicKey,
-						PresharedKey: proxyClient.AuthToken,
-						ClientIpv4:   proxyClient.WgConfig.ClientIpv4,
-						Tun:          proxyDevice.Tun(),
-					}
-					clients[proxyClient.WgConfig.ClientIpv4] = client
+			if proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken); err != nil {
+				glog.Infof("[wg][%s]signed proxy id err=%s\n", proxyClient.ProxyId, err)
+				valid = false
+			} else if proxyId != proxyClient.ProxyId {
+				glog.Infof("[wg][%s]signed proxy id mismatch %s\n", proxyClient.ProxyId, proxyId)
+				valid = false
+			}
+			if valid {
+				glog.Infof("[wg][%s]add client %s %s\n", proxyClient.ProxyId, proxyClient.WgConfig.ClientPublicKey, proxyClient.WgConfig.ClientIpv4)
+				tun := func() (proxy.WgTun, error) {
+					return self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
 				}
+				client := &proxy.WgClient{
+					PublicKey:  proxyClient.WgConfig.ClientPublicKey,
+					ClientIpv4: proxyClient.WgConfig.ClientIpv4,
+					Tun:        tun,
+				}
+				clients[proxyClient.WgConfig.ClientIpv4] = client
 			}
 		}
 	}
-	self.wgProxy.AddClients(clients)
+	if 0 < len(clients) {
+		self.wgProxy.AddClients(clients)
+	}
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {

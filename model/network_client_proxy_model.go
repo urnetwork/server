@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -438,6 +439,7 @@ func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *
 
 type ProxyClient struct {
 	ChangeId       int64     `json:"change_id,omitempty"`
+	CreateTime     time.Time `json:"create_time"`
 	ProxyId        server.Id `json:"proxy_id"`
 	ClientId       server.Id `json:"client_id"`
 	InstanceId     server.Id `json:"instance_id"`
@@ -530,6 +532,7 @@ func CreateProxyClient(
 		)
 
 		proxyClient = &ProxyClient{
+			CreateTime:     server.NowUtc(),
 			ProxyId:        proxyId,
 			ClientId:       clientId,
 			InstanceId:     instanceId,
@@ -589,22 +592,20 @@ func CreateProxyClient(
 			clientAddr := IntToIpv4(clientIpv4)
 
 			config := fmt.Sprintf(`
-	[Interface]
-	PrivateKey = %s
-	Address = %s/32
-	DNS = 1.1.1.1
+[Interface]
+PrivateKey = %s
+Address = %s/32
+DNS = 1.1.1.1
 
-	[Peer]
-	PublicKey = %s
-	Endpoint = %s
-	AllowedIPs = 0.0.0.0/0
-	PresharedKey = %s
+[Peer]
+PublicKey = %s
+Endpoint = %s
+AllowedIPs = 0.0.0.0/0
 			`,
 				clientPrivateKey,
 				clientAddr,
 				proxyPublicKey,
 				fmt.Sprintf("%s:%d", proxyHost, wgPort),
-				signedProxyId,
 			)
 
 			proxyClient.WgConfig = &WgConfig{
