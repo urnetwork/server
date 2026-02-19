@@ -74,11 +74,10 @@ func (self *proxyClientNotification) run() {
 		if err != nil {
 			glog.Infof("[proxy]err=%s\n", err)
 		} else if 0 < len(proxyClients) {
-
 			glog.Infof("[proxy]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
 			self.proxyClients(maps.Values(proxyClients))
+			nextChangeId = maxChangeId + 1
 		}
-		nextChangeId = maxChangeId + 1
 		select {
 		case <-self.ctx.Done():
 			return
