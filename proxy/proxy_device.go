@@ -19,7 +19,7 @@ import (
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
-		CheckProxyDeviceIdleTimeout: 5 * time.Minute,
+		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
 	}
 }
 
@@ -167,7 +167,10 @@ type ProxyDevice struct {
 
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
-	receive          chan []byte
+
+	receiveMonitor *connect.Monitor
+	receiveNotify  chan struct{}
+	receive        chan []byte
 }
 
 func NewProxyDeviceWithDefaults(
@@ -239,6 +242,7 @@ func NewProxyDevice(
 		tun:               tun,
 		settings:          settings,
 		lastActivityTime:  time.Now(),
+		receiveMonitor:    connect.NewMonitor(),
 	}
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
@@ -256,20 +260,20 @@ func (self *ProxyDevice) Run() {
 		if !self.UpdateActivity() {
 			return
 		}
-		var receive chan []byte
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			receive = self.receive
-		}()
-		if receive != nil {
-			select {
-			case <-self.ctx.Done():
+		for {
+			receive, notify := self.receiveWithNotify()
+			if receive != nil {
+				select {
+				case <-self.ctx.Done():
+					return
+				case receive <- packet:
+					return
+				case <-notify:
+				}
+			} else {
+				self.tun.Write(packet)
 				return
-			case receive <- packet:
 			}
-		} else {
-			self.tun.Write(packet)
 		}
 	}
 	sub := self.deviceLocal.AddReceivePacketCallback(receiveCallback)
@@ -297,7 +301,15 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 func (self *ProxyDevice) SetReceive(receive chan []byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	self.receiveMonitor.NotifyAll()
 	self.receive = receive
+	self.receiveNotify = self.receiveMonitor.NotifyChannel()
+}
+
+func (self *ProxyDevice) receiveWithNotify() (chan []byte, chan struct{}) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.receive, self.receiveNotify
 }
 
 func (self *ProxyDevice) Tun() *proxy.Tun {
