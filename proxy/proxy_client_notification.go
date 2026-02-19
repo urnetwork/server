@@ -48,14 +48,15 @@ func (self *proxyClientNotification) run() {
 	go server.HandleError(func() {
 		defer self.cancel()
 
-		event, sub := server.Subscribe(self.ctx, model.ProxyClientChannel(proxyHost, block))
-		defer sub()
+		event, unsub := server.Subscribe(self.ctx, model.ProxyClientChannel(proxyHost, block))
+		defer unsub()
 
 		for {
 			select {
 			case <-self.ctx.Done():
 				return
 			case <-event:
+				glog.Infof("[proxy]notify\n")
 				monitor.NotifyAll()
 			}
 		}
@@ -71,10 +72,10 @@ func (self *proxyClientNotification) run() {
 			nextChangeId,
 		)
 		if err != nil {
-			glog.Infof("[pcn]err=%s\n", err)
+			glog.Infof("[proxy]err=%s\n", err)
 		} else if 0 < len(proxyClients) {
 
-			glog.Infof("[pcn]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
+			glog.Infof("[proxy]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
 			self.proxyClients(maps.Values(proxyClients))
 		}
 		nextChangeId = maxChangeId + 1

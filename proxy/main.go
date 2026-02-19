@@ -53,6 +53,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyWriteTimeout:        30 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
+		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 	}
 }
