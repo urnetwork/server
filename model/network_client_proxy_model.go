@@ -682,7 +682,7 @@ AllowedIPs = 0.0.0.0/0
 
 	if returnErr == nil {
 		server.Redis(ctx, func(r server.RedisClient) {
-			r.Publish(
+			r.SPublish(
 				ctx,
 				ProxyClientChannel(proxyClient.ProxyHost, proxyClient.Block),
 				proxyId.String(),

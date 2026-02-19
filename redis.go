@@ -189,7 +189,7 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 // channel messages can be: RedisMessage, RedisSubscription
 func Subscribe(ctx context.Context, channels ...string) (<-chan any, func()) {
 	client := client()
-	pubsub := client.Subscribe(ctx, channels...)
+	pubsub := client.SSubscribe(ctx, channels...)
 	return pubsub.ChannelWithSubscriptions(), func() {
 		pubsub.Close()
 	}
