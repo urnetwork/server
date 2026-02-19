@@ -126,8 +126,7 @@ func main() {
 	)
 
 	warmup := func(proxyClient *model.ProxyClient) error {
-		wg.AddProxyClients(proxyClient)
-		return nil
+		return wg.AddProxyClients(proxyClient)
 	}
 
 	newApiServer(
@@ -149,14 +148,21 @@ func main() {
 			warmupStartTime := server.NowUtc().Add(-settings.WarmupTimeout)
 			for _, proxyClient := range proxyClients {
 				if warmupStartTime.Before(proxyClient.CreateTime) {
-					glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
 					// warmup the device
-					proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+					_, err := proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+					if err != nil {
+						glog.Infof("[proxy][%s]warmup err=%s\n", proxyClient.ProxyId, err)
+					} else {
+						glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
+					}
 				}
 			}
 		}
 
-		wg.AddProxyClients(proxyClients...)
+		err := wg.AddProxyClients(proxyClients...)
+		if err != nil {
+			glog.Infof("[proxy]wg add proxy clients err=%s\n", err)
+		}
 	})
 	defer sub()
 
@@ -404,7 +410,7 @@ func (self *wgServer) run() {
 	}
 }
 
-func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) {
+func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
 	serverConfig := model.LoadServerProxyConfig()
 
 	clients := map[netip.Addr]*proxy.WgClient{}
@@ -438,8 +444,9 @@ func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) {
 		}
 	}
 	if 0 < len(clients) {
-		self.wgProxy.AddClients(clients)
+		return self.wgProxy.AddClients(clients)
 	}
+	return nil
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {
