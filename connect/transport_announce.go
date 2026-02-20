@@ -20,8 +20,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		SyncConnectionTimeout:    model.ReliabilityBlockDuration / 2,
 		LocationRetryTimeout:     5 * time.Minute,
 		MaxLatencyCount:          16,
-		MinTestTimeout:           60 * time.Minute,
-		MaxTestTimeout:           600 * time.Minute,
+		MinTestTimeout:           12 * time.Hour,
+		MaxTestTimeout:           24 * time.Hour,
 		LatencySampleWindowCount: 4,
 		SpeedSampleWindowCount:   4,
 	}
@@ -49,7 +49,7 @@ type SpeedTest struct {
 
 func DefaultTestConfig() *TestConfig {
 	return &TestConfig{
-		MaxLatencyCount: 10,
+		MaxLatencyCount: 2,
 		// warm up then test
 		MaxSpeedCount:       2,
 		SpeedTotalByteCount: 512 * model.Kib,
