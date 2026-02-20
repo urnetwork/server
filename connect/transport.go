@@ -320,8 +320,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// verify the client is still part of the network
 	// this will fail for example if the client has been removed
-	client := model.GetNetworkClient(handleCtx, clientId)
-	if client == nil || client.NetworkId != byJwt.NetworkId {
+	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+	if networkId == nil || *networkId != byJwt.NetworkId {
 		// server.Logger("ERROR HB\n")
 		return
 	}
@@ -385,7 +385,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
-						model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "read", err)
+						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
 					}
 					return
 				}
@@ -396,7 +396,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					message, err := connect.MessagePoolReadAll(r)
 					if err != nil {
 						if connectionId := announce.ConnectionId(); connectionId != nil {
-							model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "read", err)
+							model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
 						}
 						return
 					}
@@ -463,7 +463,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					// note that for websocket a deadline timeout cannot be recovered
 					if connectionId := announce.ConnectionId(); connectionId != nil {
-						model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
+						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
 					}
 					return err
 				}
@@ -496,7 +496,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					if err != nil {
 						// note that for websocket a dealine timeout cannot be recovered
 						if connectionId := announce.ConnectionId(); connectionId != nil {
-							model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
+							model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
 						}
 						return
 					}
@@ -510,7 +510,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						if err != nil {
 							// note that for websocket a dealine timeout cannot be recovered
 							if connectionId := announce.ConnectionId(); connectionId != nil {
-								model.ClientError(handleCtx, client.NetworkId, client.ClientId, *connectionId, "write", err)
+								model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
 							}
 							return
 						}
@@ -769,8 +769,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	// verify the client is still part of the network
 	// this will fail for example if the client has been removed
-	client := model.GetNetworkClient(handleCtx, clientId)
-	if client == nil || client.NetworkId != byJwt.NetworkId {
+	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+	if networkId == nil || *networkId != byJwt.NetworkId {
 		// server.Logger("ERROR HB\n")
 		return fmt.Errorf("Client id is not part of network.")
 	}

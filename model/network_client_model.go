@@ -726,6 +726,72 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 	return networkClient
 }
 
+func GetNetworkClientNetwork(ctx context.Context, clientId server.Id) (networkId *server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_id
+			FROM network_client
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkId_ server.Id
+				server.Raise(result.Scan(&networkId_))
+				networkId = &networkId_
+			}
+		})
+	})
+	return
+}
+
+func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideMode {
+	if clientIdA == clientIdB {
+		return ProvideModeNetwork
+	}
+
+	sameNetwork := false
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				a.network_id,
+				b.network_id
+			FROM network_client a
+			INNER JOIN network_client b ON b.client_id = $2
+			WHERE a.client_id = $1
+			`,
+			clientIdA,
+			clientIdB,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkIdA server.Id
+				var networkIdB server.Id
+				server.Raise(result.Scan(&networkIdA, &networkIdB))
+				if networkIdA == networkIdB {
+					sameNetwork = true
+				}
+			}
+		})
+	})
+
+	if sameNetwork {
+		return ProvideModeNetwork
+	}
+
+	// TODO network and friends-and-family not implemented yet
+	// FIXME these exist in the association model now, can be added
+
+	return ProvideModePublic
+}
+
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
 	provideModes = map[ProvideMode]bool{}
 	server.Db(ctx, func(conn server.PgConn) {

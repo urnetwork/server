@@ -155,22 +155,7 @@ func GetProvideRelationship(ctx context.Context, sourceId server.Id, destination
 		return model.ProvideModeNetwork
 	}
 
-	if sourceId == destinationId {
-		return model.ProvideModeNetwork
-	}
-
-	if sourceClient := model.GetNetworkClient(ctx, sourceId); sourceClient != nil {
-		if destinationClient := model.GetNetworkClient(ctx, destinationId); destinationClient != nil {
-			if sourceClient.NetworkId == destinationClient.NetworkId {
-				return model.ProvideModeNetwork
-			}
-		}
-	}
-
-	// TODO network and friends-and-family not implemented yet
-	// FIXME these exist in the association model now, can be added
-
-	return model.ProvideModePublic
+	return model.GetProvideRelationship(ctx, sourceId, destinationId)
 }
 
 func CreateContract(
