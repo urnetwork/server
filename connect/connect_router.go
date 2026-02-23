@@ -13,13 +13,12 @@ import (
 )
 
 type ConnectRouter struct {
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	exchange            *Exchange
-	service             string
-	envService          string
-	connectHandler      *ConnectHandler
-	proxyConnectHandler *ProxyConnectHandler
+	ctx            context.Context
+	cancel         context.CancelFunc
+	exchange       *Exchange
+	service        string
+	envService     string
+	connectHandler *ConnectHandler
 }
 
 func NewConnectRouterWithDefaults(
@@ -32,7 +31,6 @@ func NewConnectRouterWithDefaults(
 		cancel,
 		exchange,
 		DefaultConnectHandlerSettings(),
-		DefaultProxyConnectHandlerSettings(),
 	)
 }
 
@@ -41,7 +39,6 @@ func NewConnectRouter(
 	cancel context.CancelFunc,
 	exchange *Exchange,
 	connectHandlerSettings *ConnectHandlerSettings,
-	proxyConnectHandlerSettings *ProxyConnectHandlerSettings,
 ) *ConnectRouter {
 	handlerId := model.CreateNetworkClientHandler(ctx)
 
@@ -69,16 +66,14 @@ func NewConnectRouter(
 	envService := strings.ToLower(fmt.Sprintf("%s-%s", server.RequireEnv(), server.RequireService()))
 
 	connectHandler := NewConnectHandler(ctx, handlerId, exchange, connectHandlerSettings)
-	proxyConnectHandler := NewProxyConnectHandler(ctx, handlerId, exchange, proxyConnectHandlerSettings)
 
 	return &ConnectRouter{
-		ctx:                 ctx,
-		cancel:              cancel,
-		exchange:            exchange,
-		service:             service,
-		envService:          envService,
-		connectHandler:      connectHandler,
-		proxyConnectHandler: proxyConnectHandler,
+		ctx:            ctx,
+		cancel:         cancel,
+		exchange:       exchange,
+		service:        service,
+		envService:     envService,
+		connectHandler: connectHandler,
 	}
 }
 
