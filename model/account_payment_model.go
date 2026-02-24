@@ -693,7 +693,7 @@ func GetTransferStats(
 
 				WHERE
 					account_payment.network_id = $1 AND
-					account_payment.canceled
+					account_payment.completed = false
 
 				UNION ALL
 
@@ -702,7 +702,8 @@ func GetTransferStats(
 					0 AS unpaid_bytes_provided
 				FROM account_payment
 				WHERE
-					account_payment.network_id = $1
+					account_payment.network_id = $1 AND
+					account_payment.completed = true
 			`,
 			networkId,
 		)

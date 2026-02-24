@@ -35,7 +35,7 @@ func TestCancelAccountPayment(t *testing.T) {
 			NetworkId: destinationNetworkId,
 			ClientId:  &destinationId,
 		})
-	
+
 		subscriptionYearDuration := 365 * 24 * time.Hour
 
 		balanceCode, err := CreateBalanceCode(
@@ -216,10 +216,11 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		plan, err := PlanPayments(ctx)
 		assert.Equal(t, err, nil)
 
-		// Since the plan is in progress, should be marked as paid
+		// Since the plan is in progress
+		// and the payments are not marked as completed, should be still marked as unpaid
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		assert.Equal(t, transferStats.UnpaidBytesProvided, ByteCount(0))
-		assert.Equal(t, transferStats.PaidBytesProvided, paidByteCount)
+		assert.Equal(t, transferStats.UnpaidBytesProvided, paidByteCount)
+		assert.Equal(t, transferStats.PaidBytesProvided, ByteCount(0))
 
 		// mark plan items as complete
 		for _, payment := range plan.NetworkPayments {
@@ -233,6 +234,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
 		}
 
+		// items are completed, should be marked as paid bytes
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
 		assert.Equal(t, transferStats.PaidBytesProvided, paidByteCount)
 		assert.Equal(t, transferStats.UnpaidBytesProvided, ByteCount(0))
