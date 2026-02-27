@@ -26,18 +26,14 @@ require (
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/samber/lo v1.51.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	github.com/stripe/goproxy v0.0.0-20251009123132-ee3e713dae03
-	github.com/stripe/stripe-go v70.15.0+incompatible
-	github.com/stripe/stripe-go/v76 v76.25.0
 	github.com/stripe/stripe-go/v82 v82.5.1
-	github.com/things-go/go-socks5 v0.1.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
-	golang.org/x/crypto v0.47.0
-	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
+	golang.org/x/crypto v0.48.0
+	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -74,17 +70,18 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20251216203033-fdad0a00f1ca // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
+	github.com/things-go/go-socks5 v0.1.0 // indirect
 	github.com/urnetwork/userwireguard v0.0.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.mongodb.org/mongo-driver v1.17.6 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
-	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/term v0.39.0 // indirect
+	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10 // indirect
-	gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c // indirect
+	gvisor.dev/gvisor v0.0.0-20260227210555-d9691a1d6002 // indirect
 )
 
 require (
@@ -102,8 +99,8 @@ require (
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/sys v0.41.0
+	golang.org/x/text v0.34.0 // indirect
 	src.agwa.name/tlshacks v0.0.2 // indirect
 )
 
