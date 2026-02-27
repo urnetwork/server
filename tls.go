@@ -133,11 +133,19 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 	}
 
 	if !self.allowedHosts[hostName] {
-		baseName, ok := baseName(hostName)
-		if ok {
-			ok = self.allowedHosts[fmt.Sprintf("*.%s", baseName)]
+		allowed := false
+		if baseName, ok := baseName(hostName); ok {
+			allowed = self.allowedHosts[fmt.Sprintf("*.%s", baseName)]
+			if !allowed {
+				parts := strings.Split(baseName, ".")
+				for !allowed && 0 < len(parts) {
+					glog.Infof("[tls]check %s...", fmt.Sprintf("**.%s", strings.Join(parts, ".")))
+					allowed = self.allowedHosts[fmt.Sprintf("**.%s", strings.Join(parts, "."))]
+					parts = parts[1:]
+				}
+			}
 		}
-		if !ok {
+		if !allowed {
 			if self.settings.EnableSelfSign {
 				return selfSigned()
 			} else {
