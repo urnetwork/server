@@ -47,10 +47,14 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 
 	// share one network space across all clients
 	// this reuses the client strategy and keep alive connections
+	connectSettings := connect.DefaultConnectSettings()
+	// FIXME use only ipv4 when communicating back to the platform
+	connectSettings.DisableIpv6 = true
 	networkSpace := sdk.NewPlatformNetworkSpace(
 		cancelCtx,
 		server.RequireEnv(),
 		server.RequireDomain(),
+		connectSettings,
 	)
 
 	return &ProxyDeviceManager{

@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	// "strconv"
+	"strconv"
 	"strings"
 	// "sync"
 	"syscall"
@@ -19,33 +19,25 @@ import (
 
 	// "github.com/elazarl/goproxy"
 	// socks5 "github.com/things-go/go-socks5"
+	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	// "github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/router"
 )
-
-// FIXME this is meant to be deployed with no lb and no containers
-// FIXME is launches a block of ports per version,
-// FIXME and registers the host, ports, version when online
-// FIXME the ncm will use the latest versions when distributing new proxies
-// FIXME a client can run a proxy on any host:port
-// FIXME the proxy server spins up a new resident unique to the service
-// FIXME each proxy instance has an idle timeout where it will shut down if not used in M minutes
 
 // this value is set via the linker, e.g.
 // -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
 var Version string
 
-// FIXME warp port blocks
-const ListenSocksPort = 8080
-const ListenHttpPort = 8081
-const ListenHttpsPort = 8082
-const ListenApiPort = 8083
-const ListenWgPort = 8084
+const InternalSocksPort = 8080
+const InternalHttpPort = 8081
+const InternalHttpsPort = 8082
+const InternalApiPort = 8083
+const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
@@ -68,6 +60,22 @@ type ProxySettings struct {
 }
 
 func main() {
+	usage := `BringYour proxy server.
+
+Usage:
+  proxy [--port=<port>]
+  proxy -h | --help
+  proxy --version
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+  -p --port=<port>  Listen port [default: 80].`
+
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
+	if err != nil {
+		panic(err)
+	}
 
 	settings := DefaultProxySettings()
 
@@ -101,7 +109,9 @@ func main() {
 		panic(err)
 	}
 
-	glog.Infof("Listen api (:%d), socks5 (:%d), http (:%d), https (:%d)", ListenApiPort, ListenSocksPort, ListenHttpPort, ListenHttpsPort)
+	port, _ := opts.Int("--port")
+
+	server.Warmup()
 
 	newSocks5Server(
 		ctx,
@@ -136,11 +146,16 @@ func main() {
 		proxyDeviceManager,
 		transportTls,
 		warmup,
+		InternalApiPort,
 		settings,
 	)
 
 	if server.RequireEnv() != "local" {
-		newWatchdog(ctx, 5*time.Second)
+		newWatchdog(
+			ctx,
+			5*time.Second,
+			InternalHttpPort,
+		)
 	}
 
 	notif := newProxyClientNotification(ctx, settings)
@@ -166,6 +181,41 @@ func main() {
 		}
 	})
 	defer sub()
+
+	routes := []*router.Route{
+		router.NewRoute("GET", "/status", router.WarpStatus),
+	}
+
+	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+
+	glog.Infof(
+		"Listen %s:%d, api (:%d), socks5 (:%d), http (:%d), https (:%d)",
+		listenIpv4,
+		listenPort,
+		InternalApiPort,
+		InternalSocksPort,
+		InternalHttpPort,
+		InternalHttpsPort,
+	)
+
+	reusePort := false
+
+	httpServerOptions := server.HttpServerOptions{
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  5 * time.Minute,
+	}
+
+	err = server.HttpListenAndServeWithReusePort(
+		ctx,
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		router.NewRouter(ctx, routes),
+		reusePort,
+		httpServerOptions,
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -246,7 +296,13 @@ func (self *socks5Server) run() {
 	socksProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
 	socksProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 
-	err := socksProxy.ListenAndServe(self.ctx, "tcp", fmt.Sprintf(":%d", ListenSocksPort))
+	listenIpv4, _, listenPort := server.RequireListenIpPort(InternalSocksPort)
+
+	err := socksProxy.ListenAndServe(
+		self.ctx,
+		"tcp",
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -349,7 +405,14 @@ func (self *httpServer) run() {
 	// listen http
 	go server.HandleError(func() {
 		defer self.cancel()
-		err := httpProxy.ListenAndServe(self.ctx, "tcp", fmt.Sprintf(":%d", ListenHttpPort))
+
+		listenIpv4, _, listenPort := server.RequireListenIpPort(InternalHttpPort)
+
+		err := httpProxy.ListenAndServe(
+			self.ctx,
+			"tcp",
+			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		)
 		if err != nil {
 			panic(err)
 		}
@@ -358,7 +421,14 @@ func (self *httpServer) run() {
 	// listen https
 	go server.HandleError(func() {
 		defer self.cancel()
-		err := httpProxy.ListenAndServeTls(self.ctx, "tcp", fmt.Sprintf(":%d", ListenHttpsPort))
+
+		listenIpv4, _, listenPort := server.RequireListenIpPort(InternalHttpsPort)
+
+		err := httpProxy.ListenAndServeTls(
+			self.ctx,
+			"tcp",
+			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		)
 		if err != nil {
 			panic(err)
 		}
@@ -405,7 +475,12 @@ func newWgServer(
 func (self *wgServer) run() {
 	defer self.cancel()
 
-	err := self.wgProxy.ListenAndServe("udp", fmt.Sprintf(":%d", ListenWgPort))
+	listenIpv4, _, listenPort := server.RequireListenIpPort(InternalWgPort)
+
+	err := self.wgProxy.ListenAndServe(
+		"udp",
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+	)
 	if err != nil {
 		panic(err)
 	}

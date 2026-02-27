@@ -22,6 +22,7 @@ type apiServer struct {
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
 	warmupCallback     func(*model.ProxyClient) error
+	port               int
 	settings           *ProxySettings
 }
 
@@ -31,6 +32,7 @@ func newApiServer(
 	proxyDeviceManager *ProxyDeviceManager,
 	transportTls *server.TransportTls,
 	warmupCallback func(*model.ProxyClient) error,
+	port int,
 	settings *ProxySettings,
 ) *apiServer {
 	s := &apiServer{
@@ -39,6 +41,7 @@ func newApiServer(
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
 		warmupCallback:     warmupCallback,
+		port:               port,
 		settings:           settings,
 	}
 
@@ -66,9 +69,11 @@ func (self *apiServer) run() {
 		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
+	listenIpv4, _, listenPort := server.RequireListenIpPort(self.port)
+
 	err := server.HttpListenAndServeTlsWithReusePort(
 		self.ctx,
-		net.JoinHostPort("", strconv.Itoa(ListenApiPort)),
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
 		router.NewRouter(self.ctx, routes),
 		reusePort,
 		httpServerOptions,

@@ -18,12 +18,14 @@ import (
 type watchdog struct {
 	ctx         context.Context
 	pollTimeout time.Duration
+	port        int
 }
 
-func newWatchdog(ctx context.Context, pollTimeout time.Duration) *watchdog {
+func newWatchdog(ctx context.Context, pollTimeout time.Duration, port int) *watchdog {
 	w := &watchdog{
 		ctx:         ctx,
 		pollTimeout: pollTimeout,
+		port:        port,
 	}
 	go server.HandleError(w.run, func() {
 		os.Exit(1)
@@ -85,7 +87,9 @@ func (self *watchdog) run() {
 			defer model.RemoveProxyDeviceConfig(testCtx, proxyDeviceConfig.ProxyId)
 			signedProxyId := model.SignProxyId(proxyDeviceConfig.ProxyId)
 
-			httpProxyUrl, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", ListenHttpPort))
+			listenIpv4, _, listenPort := server.RequireListenIpPort(self.port)
+
+			httpProxyUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", listenIpv4, listenPort))
 			if err != nil {
 				panic(err)
 			}
