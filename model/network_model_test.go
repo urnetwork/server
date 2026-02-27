@@ -349,3 +349,45 @@ func TestNetworkUpdate(t *testing.T) {
 
 	})
 }
+
+func TestNetworkNameValidation(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+
+		// too short
+		networkName := ""
+		_, err := validateNetworkName(networkName)
+		assert.NotEqual(t, err, nil)
+
+		// too long
+		networkName = "a123456789012345678901234567890123456789012345678901"
+		_, err = validateNetworkName(networkName)
+		assert.NotEqual(t, err, nil)
+
+		/**
+		 * testing special characters
+		 */
+		networkName = "abcde$"
+		_, err = validateNetworkName(networkName)
+		assert.NotEqual(t, err, nil)
+
+		networkName = "abcdeé"
+		_, err = validateNetworkName(networkName)
+		assert.NotEqual(t, err, nil)
+
+		networkName = "東京タワー"
+		_, err = validateNetworkName(networkName)
+		assert.NotEqual(t, err, nil)
+
+		// test spaces
+		networkName = "abc def"
+		expected := "abc-def"
+		validated, err := validateNetworkName(networkName)
+		assert.Equal(t, validated, expected)
+
+		// valid name should pass
+		networkName = "abcdef"
+		_, err = validateNetworkName(networkName)
+		assert.Equal(t, err, nil)
+
+	})
+}

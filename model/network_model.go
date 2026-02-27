@@ -112,6 +112,36 @@ type NetworkCreateResultError struct {
 	Message string `json:"message"`
 }
 
+func validateNetworkName(networkName string) (string, error) {
+	trimmed := strings.TrimSpace(networkName)
+
+	// to lowercase
+	normalized := strings.ToLower(trimmed)
+
+	// replace spaces with underscores
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+
+	// ensure length is at least 5 characters
+	if len(normalized) < 5 {
+		return "", errors.New("Network name must have at least 5 characters")
+	}
+
+	// ensure length is less than 50 characters
+	if len(normalized) > 50 {
+		return "", errors.New("Network name must be less than 50 characters")
+	}
+
+	// ensure ASCII characters only
+	for _, char := range normalized {
+		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
+			return "", errors.New("Network name must contain only lowercase letters, numbers, and dashes")
+		}
+	}
+
+	return normalized, nil
+
+}
+
 func NetworkCreate(
 	networkCreate NetworkCreateArgs,
 	session *session.ClientSession,
@@ -173,10 +203,19 @@ func NetworkCreate(
 		}
 	}
 
-	// user is create an authenticated network
+	validatedNetworkName, error := validateNetworkName(networkCreate.NetworkName)
+
+	if error != nil {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: error.Error(),
+			},
+		}
+		return result, nil
+	}
 
 	// check if the network name is already taken
-	err := checkNetworkNameAvailability(networkCreate.NetworkName, session)
+	err := checkNetworkNameAvailability(validatedNetworkName, session)
 	if err != nil {
 		result := &NetworkCreateResult{
 			Error: &NetworkCreateResultError{
@@ -186,7 +225,7 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	containsProfanity := goaway.IsProfane(networkCreate.NetworkName)
+	containsProfanity := goaway.IsProfane(validatedNetworkName)
 
 	if networkCreate.UserAuth != nil {
 		// user is creating a network via email/phone + pass
@@ -205,6 +244,7 @@ func NetworkCreate(
 			session.Ctx,
 			&networkCreate,
 			userAuth,
+			validatedNetworkName,
 			containsProfanity,
 		)
 
@@ -246,6 +286,7 @@ func NetworkCreate(
 				&networkCreate,
 				containsProfanity,
 				*authJwt,
+				validatedNetworkName,
 				normalJwtUserAuth,
 			)
 
@@ -335,6 +376,7 @@ func NetworkCreate(
 		networkCreateResult := networkCreateWalletAuth(
 			session.Ctx,
 			&networkCreate,
+			validatedNetworkName,
 			containsProfanity,
 		)
 
@@ -424,6 +466,7 @@ type networkCreateResult struct {
 func networkCreateWalletAuth(
 	ctx context.Context,
 	networkCreate *NetworkCreateArgs,
+	validatedNetworkName string,
 	containsProfanity bool,
 ) networkCreateResult {
 
@@ -495,7 +538,7 @@ func networkCreateWalletAuth(
 				VALUES ($1, $2, $3, $4)
 			`,
 			createdNetworkId,
-			networkCreate.NetworkName,
+			validatedNetworkName,
 			createdUserId,
 			containsProfanity,
 		)
@@ -534,6 +577,7 @@ func networkCreateAuthJwt(
 	networkCreate *NetworkCreateArgs,
 	containsProfanity bool,
 	parsedAuthJwt AuthJwt,
+	validatedNetworkName string,
 	normalizedUserAuth string,
 ) networkCreateResult {
 
@@ -609,7 +653,7 @@ func networkCreateAuthJwt(
 				VALUES ($1, $2, $3, $4)
 			`,
 			createdNetworkId,
-			networkCreate.NetworkName,
+			validatedNetworkName,
 			createdUserId,
 			containsProfanity,
 		)
@@ -648,6 +692,7 @@ func networkCreateUserAuth(
 	ctx context.Context,
 	networkCreate *NetworkCreateArgs,
 	userAuth *string,
+	validatedNetworkName string,
 	containsProfanity bool,
 ) networkCreateResult {
 
@@ -741,7 +786,7 @@ func networkCreateUserAuth(
 				VALUES ($1, $2, $3, $4)
 			`,
 			createdNetworkId,
-			networkCreate.NetworkName,
+			validatedNetworkName,
 			createdUserId,
 			containsProfanity,
 		)
@@ -907,12 +952,13 @@ func checkNetworkNameAvailability(
 
 	var existingNetworkId *server.Id
 
-	if len(networkName) < 5 {
-		err = errors.New("Network name must have at least 5 characters")
+	validatedNetworkName, validationErr := validateNetworkName(networkName)
+	if validationErr != nil {
+		err = validationErr
 		return
 	}
 
-	taken := networkNameSearch().AnyAround(session.Ctx, networkName, 1)
+	taken := networkNameSearch().AnyAround(session.Ctx, validatedNetworkName, 1)
 
 	if taken {
 		err = errors.New("Network name not available")
@@ -926,7 +972,7 @@ func checkNetworkNameAvailability(
 			`
 				SELECT network_id FROM network WHERE network_name = $1
 			`,
-			networkName,
+			validatedNetworkName,
 		)
 		server.WithPgResult(result, queryErr, func() {
 			if result.Next() {
