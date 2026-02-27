@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/exp/maps"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
@@ -46,12 +48,10 @@ var proxySigningSecret = sync.OnceValue(func() []byte {
 })
 
 type ServerProxyConfig struct {
-	Hosts  []string `yaml:"hosts"`
-	Blocks []string `yaml:"blocks"`
-	// block -> service -> port
-	Ports   map[string]map[string]int `yaml:"ports"`
-	Secrets []string                  `yaml:"secrets"`
-	Wg      ServerProxyConfigWg       `yaml:"wg"`
+	// host -> block -> service -> port
+	Hosts   map[string]map[string]map[string]int `yaml:"hosts"`
+	Secrets []string                             `yaml:"secrets"`
+	Wg      ServerProxyConfigWg                  `yaml:"wg"`
 }
 
 type ServerProxyConfigWg struct {
@@ -486,19 +486,21 @@ func CreateProxyClient(
 	signedProxyId := SignProxyId(proxyId)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		hosts := maps.Keys(proxyConfig.Hosts)
+		proxyHost := hosts[mathrand.Intn(len(hosts))]
 
-		// FIXME
-		// randomly choose host
-		// randomly choose block
-		// FIXME pull the current avaiable far edges and use least recently used with a threshold
-		socksProxyPort := 8080
-		httpProxyPort := 8081
-		httpsProxyPort := 8082
-		apiPort := 8083
-		wgPort := 8084
+		blockServicePorts := proxyConfig.Hosts[proxyHost]
 
-		proxyHost := fmt.Sprintf("%s.%s", "cosmic", server.RequireDomain())
-		block := "g1"
+		blocks := maps.Keys(blockServicePorts)
+		block := blocks[mathrand.Intn(len(blocks))]
+
+		servicePorts := blockServicePorts[block]
+
+		socksProxyPort := servicePorts["socks"]
+		httpProxyPort := servicePorts["http"]
+		httpsProxyPort := servicePorts["https"]
+		apiPort := servicePorts["api"]
+		wgPort := servicePorts["wg"]
 
 		socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
 
@@ -591,8 +593,8 @@ func CreateProxyClient(
 
 			clientAddr := IntToIpv4(clientIpv4)
 
-			config := fmt.Sprintf(`
-[Interface]
+			config := fmt.Sprintf(
+				`[Interface]
 PrivateKey = %s
 Address = %s/32
 DNS = 1.1.1.1
@@ -600,8 +602,7 @@ DNS = 1.1.1.1
 [Peer]
 PublicKey = %s
 Endpoint = %s
-AllowedIPs = 0.0.0.0/0
-			`,
+AllowedIPs = 0.0.0.0/0`,
 				clientPrivateKey,
 				clientAddr,
 				proxyPublicKey,
