@@ -57,6 +57,14 @@ const (
 )
 
 func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
+
+	_, err := validateNetworkName(check.NetworkName)
+	if err != nil {
+		return &NetworkCheckResult{
+			Available: false,
+		}, nil
+	}
+
 	taken := networkNameSearch().AnyAround(session.Ctx, check.NetworkName, 1)
 
 	result := &NetworkCheckResult{
