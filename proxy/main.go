@@ -296,15 +296,36 @@ func (self *socks5Server) run() {
 	socksProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
 	socksProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 
-	listenIpv4, _, listenPort := server.RequireListenIpPort(InternalSocksPort)
+	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalSocksPort)
 
-	err := socksProxy.ListenAndServe(
-		self.ctx,
-		"tcp",
-		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-	)
-	if err != nil {
-		panic(err)
+	go server.HandleError(func() {
+		defer self.cancel()
+		err := socksProxy.ListenAndServe(
+			self.ctx,
+			"tcp4",
+			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		)
+		if err != nil {
+			panic(err)
+		}
+	})
+
+	if listenIpv6 != "" {
+		go server.HandleError(func() {
+			defer self.cancel()
+			err := socksProxy.ListenAndServe(
+				self.ctx,
+				"tcp6",
+				net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+	}
+
+	select {
+	case <-self.ctx.Done():
 	}
 }
 
@@ -403,36 +424,64 @@ func (self *httpServer) run() {
 	// }
 
 	// listen http
-	go server.HandleError(func() {
-		defer self.cancel()
+	func() {
+		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalHttpPort)
 
-		listenIpv4, _, listenPort := server.RequireListenIpPort(InternalHttpPort)
-
-		err := httpProxy.ListenAndServe(
-			self.ctx,
-			"tcp",
-			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-		)
-		if err != nil {
-			panic(err)
+		go server.HandleError(func() {
+			defer self.cancel()
+			err := httpProxy.ListenAndServe(
+				self.ctx,
+				"tcp4",
+				net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+		if listenIpv6 != "" {
+			go server.HandleError(func() {
+				defer self.cancel()
+				err := httpProxy.ListenAndServe(
+					self.ctx,
+					"tcp6",
+					net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
+				)
+				if err != nil {
+					panic(err)
+				}
+			})
 		}
-	})
+	}()
 
 	// listen https
-	go server.HandleError(func() {
-		defer self.cancel()
+	func() {
+		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalHttpsPort)
 
-		listenIpv4, _, listenPort := server.RequireListenIpPort(InternalHttpsPort)
-
-		err := httpProxy.ListenAndServeTls(
-			self.ctx,
-			"tcp",
-			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-		)
-		if err != nil {
-			panic(err)
+		go server.HandleError(func() {
+			defer self.cancel()
+			err := httpProxy.ListenAndServeTls(
+				self.ctx,
+				"tcp4",
+				net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+		if listenIpv6 != "" {
+			go server.HandleError(func() {
+				defer self.cancel()
+				err := httpProxy.ListenAndServeTls(
+					self.ctx,
+					"tcp6",
+					net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
+				)
+				if err != nil {
+					panic(err)
+				}
+			})
 		}
-	})
+	}()
 
 	select {
 	case <-self.ctx.Done():
@@ -457,6 +506,7 @@ func newWgServer(
 
 	wgProxySettings := proxy.DefaultWgProxySettings()
 	wgProxySettings.PrivateKey = serverConfig.Wg.PrivateKey
+	wgProxySettings.FirewallMark = server.RequireFwMark()
 	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
 
 	s := &wgServer{
@@ -475,12 +525,9 @@ func newWgServer(
 func (self *wgServer) run() {
 	defer self.cancel()
 
-	listenIpv4, _, listenPort := server.RequireListenIpPort(InternalWgPort)
+	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalWgPort)
 
-	err := self.wgProxy.ListenAndServe(
-		"udp",
-		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-	)
+	err := self.wgProxy.ListenAndServe(listenIpv4, listenIpv6, listenPort)
 	if err != nil {
 		panic(err)
 	}

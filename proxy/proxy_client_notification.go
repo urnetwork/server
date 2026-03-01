@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/exp/maps"
@@ -13,6 +15,9 @@ import (
 	"github.com/urnetwork/server/model"
 	// "github.com/urnetwork/server/router"
 )
+
+// this is used to migrate from older configurations that mistakenly used the fully qualified host
+const DebugWatchFqHost = true
 
 type ProxyClientsFunction = func(proxyClients []*model.ProxyClient)
 
@@ -43,12 +48,29 @@ func (self *proxyClientNotification) run() {
 	proxyHost := server.RequireHost()
 	block := server.RequireBlock()
 
+	if DebugWatchFqHost && !strings.Contains(proxyHost, ".") {
+		fqProxyHost := fmt.Sprintf("%s.%s", proxyHost, server.RequireDomain())
+		go server.HandleError(func() {
+			self.watch(fqProxyHost, block)
+		})
+	}
+
+	go server.HandleError(func() {
+		self.watch(proxyHost, block)
+	})
+
+	select {
+	case <-self.ctx.Done():
+	}
+}
+
+func (self *proxyClientNotification) watch(host string, block string) {
 	monitor := connect.NewMonitor()
 
 	go server.HandleError(func() {
 		defer self.cancel()
 
-		event, unsub := server.Subscribe(self.ctx, model.ProxyClientChannel(proxyHost, block))
+		event, unsub := server.Subscribe(self.ctx, model.ProxyClientChannel(host, block))
 		defer unsub()
 
 		for {
@@ -67,7 +89,7 @@ func (self *proxyClientNotification) run() {
 		notify := monitor.NotifyChannel()
 		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
 			self.ctx,
-			proxyHost,
+			host,
 			block,
 			nextChangeId,
 		)

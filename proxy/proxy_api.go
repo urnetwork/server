@@ -57,6 +57,8 @@ func (self *apiServer) run() {
 		router.NewRoute("POST", "/warmup", self.HandleWarmup),
 	}
 
+	router := router.NewRouter(self.ctx, routes)
+
 	reusePort := false
 
 	httpServerOptions := server.HttpServerOptions{
@@ -69,18 +71,41 @@ func (self *apiServer) run() {
 		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
-	listenIpv4, _, listenPort := server.RequireListenIpPort(self.port)
+	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.port)
 
-	err := server.HttpListenAndServeTlsWithReusePort(
-		self.ctx,
-		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-		router.NewRouter(self.ctx, routes),
-		reusePort,
-		httpServerOptions,
-		tlsConfig,
-	)
-	if err != nil {
-		panic(err)
+	server.HandleError(func() {
+		defer self.cancel()
+		err := server.HttpListenAndServeTlsWithReusePort(
+			self.ctx,
+			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+			router,
+			reusePort,
+			httpServerOptions,
+			tlsConfig,
+		)
+		if err != nil {
+			panic(err)
+		}
+	})
+	if listenIpv6 != "" {
+		server.HandleError(func() {
+			defer self.cancel()
+			err := server.HttpListenAndServeTlsWithReusePort(
+				self.ctx,
+				net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
+				router,
+				reusePort,
+				httpServerOptions,
+				tlsConfig,
+			)
+			if err != nil {
+				panic(err)
+			}
+		})
+	}
+
+	select {
+	case <-self.ctx.Done():
 	}
 }
 
