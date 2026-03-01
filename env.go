@@ -309,6 +309,25 @@ func RequireHostIp() (ipv4 string, ipv6 string) {
 	return
 }
 
+func FwMark() (fwMark int, err error) {
+	fwMarkStr := os.Getenv("WARP_FWMARK")
+
+	if fwMarkStr == "" {
+		return 0, nil
+	}
+
+	return strconv.Atoi(fwMarkStr)
+}
+
+func RequireFwMark() (fwMark int) {
+	var err error
+	fwMark, err = FwMark()
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
 func RequireListenIpPort(servicePort int) (ipv4 string, ipv6 string, hostPort int) {
 	var err error
 	ipv4, ipv6, err = HostIp()
