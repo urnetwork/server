@@ -334,8 +334,9 @@ func RequireListenIpPort(servicePort int) (ipv4 string, ipv6 string, hostPort in
 	if err == nil {
 		hostPort = RequireServicePortToHostPort(servicePort)
 	} else {
+		// disable ipv6
 		ipv4 = "0.0.0.0"
-		ipv6 = "[::]"
+		ipv6 = ""
 		hostPort = servicePort
 	}
 	return
