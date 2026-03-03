@@ -2743,4 +2743,20 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS proxy_client_client_id_instance_id_proxy_id
     `),
+
+	newSqlMigration(`
+        DROP INDEX transfer_contract_open_payer_network_id_transfer_byte_count
+    `),
+
+	newSqlMigration(`
+        DROP INDEX transfer_contract_open_create_time
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_create_time ON transfer_contract (create_time, open, contract_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_payer_network_id ON transfer_contract (payer_network_id, open, contract_id)
+    `),
 }
