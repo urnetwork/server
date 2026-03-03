@@ -2745,11 +2745,11 @@ var migrations = []any{
     `),
 
 	newSqlMigration(`
-        DROP INDEX transfer_contract_open_payer_network_id_transfer_byte_count
+        DROP INDEX IF EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
     `),
 
 	newSqlMigration(`
-        DROP INDEX transfer_contract_open_create_time
+        DROP INDEX  IF EXISTS transfer_contract_open_create_time
     `),
 
 	newSqlMigration(`
