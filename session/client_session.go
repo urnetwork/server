@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"net/http"
+
 	// "strconv"
 	// "crypto/sha256"
 	// "net"
@@ -26,6 +27,12 @@ import (
 
 // https://www.rfc-editor.org/rfc/rfc6750
 const authBearerPrefix = "Bearer "
+
+// Set by model package during init() to avoid circular import.
+// Returns (networkId, userId, networkName, ok).
+type ApiKeyLookupFunc func(ctx context.Context, apiKey string) (server.Id, server.Id, string, bool)
+
+var ApiKeyLookup ApiKeyLookupFunc
 
 type ClientSession struct {
 	Ctx    context.Context
@@ -73,24 +80,49 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
-			jwtStr := auth[len(authBearerPrefix):]
+			authStr := auth[len(authBearerPrefix):]
 
-			// to validate the jwt:
-			// 1. parse it which tests the signing key.
-			//    this will fail if the signature is invalid.
-			// 2. test the create time and sessions against
-			//    inactive sessions. For various security reasons sessions may be expired.
+			if strings.HasPrefix(authStr, "urn_") {
+				// handle API KEY authentication
 
-			byJwt, err := jwt.ParseByJwt(self.Ctx, jwtStr)
-			if err != nil {
-				return err
+				if ApiKeyLookup == nil {
+					return errors.New("API key auth not available.")
+				}
+
+				networkId, userId, networkName, ok := ApiKeyLookup(self.Ctx, authStr)
+				if !ok {
+					return errors.New("Invalid API key.")
+				}
+				self.ByJwt = jwt.NewByJwt(
+					networkId,
+					userId,
+					networkName,
+					false, // API keys not available for guest mode
+					false, // atm we don't need to populate "pro" for API key requests
+				)
+				glog.V(2).Infof("[session]authed via api key as (%s %s)\n", networkName, networkId)
+				return nil
+
+			} else {
+				// handle JWT authentication
+				// to validate the jwt:
+				// 1. parse it which tests the signing key.
+				//    this will fail if the signature is invalid.
+				// 2. test the create time and sessions against
+				//    inactive sessions. For various security reasons sessions may be expired.
+
+				byJwt, err := jwt.ParseByJwt(self.Ctx, authStr)
+				if err != nil {
+					return err
+				}
+				if !jwt.IsByJwtActive(self.Ctx, byJwt) {
+					return errors.New("JWT expired.")
+				}
+				glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+				self.ByJwt = byJwt
+				return nil
 			}
-			if !jwt.IsByJwtActive(self.Ctx, byJwt) {
-				return errors.New("JWT expired.")
-			}
-			glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-			self.ByJwt = byJwt
-			return nil
+
 		}
 	}
 	return errors.New("Invalid auth.")

@@ -2722,7 +2722,7 @@ var migrations = []any{
             block varchar(128) NOT NULL,
             change_id bigint GENERATED ALWAYS AS IDENTITY,
             proxy_id uuid NOT NULL,
-            
+
             PRIMARY KEY (proxy_host, block, change_id)
         )
     `),
@@ -2731,7 +2731,7 @@ var migrations = []any{
         CREATE TABLE proxy_client_ipv4 (
             sequence_id bigint NOT NULL,
             client_ipv4 bigint NOT NULL,
-            
+
             PRIMARY KEY (sequence_id, client_ipv4)
         )
     `),
@@ -2758,5 +2758,21 @@ var migrations = []any{
 
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS transfer_contract_payer_network_id ON transfer_contract (payer_network_id, open, contract_id)
+    `),
+
+	newSqlMigration(`
+        CREATE TABLE account_api_key (
+            api_key_id uuid NOT NULL DEFAULT gen_random_uuid(),
+            network_id uuid NOT NULL,
+            api_key varchar(128) NOT NULL,
+            name varchar(128) NOT NULL DEFAULT '',
+            create_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (api_key_id),
+            UNIQUE (api_key)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX account_api_key_network_id ON account_api_key (network_id, api_key_id)
     `),
 }

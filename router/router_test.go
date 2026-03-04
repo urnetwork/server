@@ -347,5 +347,60 @@ func TestRouterBasic(t *testing.T) {
 		)
 		assert.NotEqual(t, err, nil)
 
+		// for API key auth testing
+		// wire a fake API key lookup for the test
+		networkId = server.NewId()
+		userId = server.NewId()
+		const testApiKey = "urn_testapikey123"
+
+		session.ApiKeyLookup = func(ctx context.Context, apiKey string) (server.Id, server.Id, string, bool) {
+			if apiKey == testApiKey {
+				return networkId, userId, "test", true
+			}
+			return server.Id{}, server.Id{}, "", false
+		}
+
+		authApiKey := func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", testApiKey))
+		}
+
+		// valid API key should succeed on auth-required routes
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.Equal(t, err, nil)
+
+		// API keys are non-guest, so /noguest should also succeed
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.Equal(t, err, nil)
+
+		// API keys have no ClientId, so /client should fail
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/client", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.NotEqual(t, err, nil)
+
+		// invalid API key should fail
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			func(header http.Header) {
+				header.Add("Authorization", "Bearer urn_invalid")
+			},
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.NotEqual(t, err, nil)
+
 	})
 }
