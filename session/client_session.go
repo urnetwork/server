@@ -80,6 +80,9 @@ func (self *ClientSession) Auth(req *http.Request) error {
 			if strings.HasPrefix(authStr, "urn_") {
 				// handle API KEY authentication
 
+				// The network_client_proxy_model uses a sha1 hash with a local secret to avoid a db lookup on fake api keys.
+				// Could use a cryptographic hash like jwt/ncpm could be a done here to mitigate possible abuse.
+
 				if len(authStr) != 56 {
 					return errors.New("Invalid API key.")
 				}
