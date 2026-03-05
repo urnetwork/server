@@ -22,6 +22,7 @@ type CreateApiKeyError struct {
 type CreateApiKeyResult struct {
 	Id     server.Id          `json:"id,omitempty"`
 	ApiKey string             `json:"api_key,omitempty"`
+	Name   string             `json:"name,omitempty"`
 	Error  *CreateApiKeyError `json:"error,omitempty"`
 }
 
@@ -65,6 +66,7 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 	return &CreateApiKeyResult{
 		Id:     apiKeyId,
 		ApiKey: apiKey,
+		Name:   createApiKey.Name,
 	}, nil
 }
 
