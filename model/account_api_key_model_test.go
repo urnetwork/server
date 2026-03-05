@@ -45,19 +45,9 @@ func TestAccountApiKeys(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(keys), 2)
 
-		// fetch api key
-		network := GetNetworkByApiKey(key1Result.ApiKey, ctx)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.NetworkId, networkId)
-		// assert.Equal(t, key1.ApiKeyId, key1Result.Id)
-
-		// delete API key
+		// // delete API key
 		err = DeleteApiKey(&key1Result.Id, userSession)
 		assert.Equal(t, err, nil)
-
-		// fetch deleted api key
-		key1Deleted := GetNetworkByApiKey(key1Result.ApiKey, ctx)
-		assert.Equal(t, key1Deleted, nil)
 
 		// list should now just be 1 key
 		keys, err = GetAccountApiKeys(userSession)

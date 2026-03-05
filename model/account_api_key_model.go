@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base32"
 	"fmt"
 	"time"
 
@@ -134,7 +134,7 @@ type NetworkByApiKey struct {
 	NetworkName string
 }
 
-func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
+func Test_GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 	var result *NetworkByApiKey
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -173,15 +173,6 @@ func generateApiKey() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("urn_%s", hex.EncodeToString(b)), nil
-}
-
-func init() {
-	session.ApiKeyLookup = func(ctx context.Context, apiKey string) (server.Id, server.Id, string, bool) {
-		n := GetNetworkByApiKey(apiKey, ctx)
-		if n == nil {
-			return server.Id{}, server.Id{}, "", false
-		}
-		return n.NetworkId, n.UserId, n.NetworkName, true
-	}
+	e := base32.HexEncoding.WithPadding(base32.NoPadding)
+	return fmt.Sprintf("urn_%s", e.EncodeToString(b)), nil
 }

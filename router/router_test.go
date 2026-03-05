@@ -12,6 +12,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -348,20 +349,21 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		// for API key auth testing
-		// wire a fake API key lookup for the test
-		networkId = server.NewId()
-		userId = server.NewId()
-		const testApiKey = "urn_testapikey123"
+		apiNetworkId := server.NewId()
+		apiUserId := server.NewId()
+		model.Testing_CreateNetwork(ctx, apiNetworkId, "apitestnetwork", apiUserId)
 
-		session.ApiKeyLookup = func(ctx context.Context, apiKey string) (server.Id, server.Id, string, bool) {
-			if apiKey == testApiKey {
-				return networkId, userId, "test", true
-			}
-			return server.Id{}, server.Id{}, "", false
-		}
+		apiClientId := server.NewId()
+		apiSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: apiNetworkId,
+			ClientId:  &apiClientId,
+		})
+
+		key, err := model.CreateApiKey(&model.CreateApiKeyArgs{Name: "testkey"}, apiSession)
+		assert.Equal(t, err, nil)
 
 		authApiKey := func(header http.Header) {
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", testApiKey))
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", key.ApiKey))
 		}
 
 		// valid API key should succeed on auth-required routes
@@ -392,11 +394,12 @@ func TestRouterBasic(t *testing.T) {
 		assert.NotEqual(t, err, nil)
 
 		// invalid API key should fail
+		invalidKey := "invalidKey"
 		_, err = server.HttpGet(
 			ctx,
 			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
 			func(header http.Header) {
-				header.Add("Authorization", "Bearer urn_invalid")
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", invalidKey))
 			},
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
