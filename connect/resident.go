@@ -1523,6 +1523,18 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
+	streamHopListener := NewStreamHopListener(cancelCtx, func(event *StreamHopEvent) {
+		switch event.StreamHopEventType {
+		case Added:
+			client.SEND(OPEN)
+		case Removed:
+			client.SEND(REMOVE)
+		case Reset:
+			client.SEND(RESET)
+		}
+	})
+	resident.streamHopListener = streamHopListener
+
 	// go server.HandleError(resident.clientForward, cancel)
 	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
 		go server.HandleError(resident.chaos, cancel)
@@ -1912,6 +1924,7 @@ func (self *Resident) Close() {
 
 	self.clientReceiveUnsub()
 	self.clientForwardUnsub()
+	self.streamHopListener.Close()
 
 	forwards := []*ResidentForward{}
 	func() {

@@ -208,7 +208,7 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
-	contractId, transferByteCount, priority, err := nextContract(ctx, clientId, createContract, provideMode)
+	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -230,6 +230,7 @@ func CreateContract(
 		TransferByteCount: uint64(transferByteCount),
 		SourceId:          clientId.Bytes(),
 		DestinationId:     destinationId.Bytes(),
+		StreamId:          streamId,
 		Priority:          &priority,
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
@@ -258,7 +259,7 @@ func nextContract(
 	clientId server.Id,
 	createContract *protocol.CreateContract,
 	provideMode model.ProvideMode,
-) (server.Id, model.ByteCount, model.Priority, error) {
+) (server.Id, model.ByteCount, model.Priority, *server.Id, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
 	if 0 < len(createContract.UsedContractIds) {
@@ -282,15 +283,23 @@ func nextContract(
 		}
 	}
 
+	var intermediaryIds []server.Id
+	for _, intermediaryIdBytes := createContract.IntermediaryIds {
+		intermediaryId := server.Id(intermediaryIdBytes)
+		intermediaryIds = append(intermediaryIds, intermediaryId)
+	}
+
 	// new contract
 	return newContract(
 		ctx,
 		clientId,
 		destinationId,
+		intermediaryIds,
 		// companion contracts reply to an existing open contract
 		createContract.Companion,
 		model.ByteCount(createContract.TransferByteCount),
 		provideMode,
+		createContract.ForceStream,
 	)
 }
 
@@ -298,10 +307,12 @@ func newContract(
 	ctx context.Context,
 	sourceId server.Id,
 	destinationId server.Id,
+	intermediaryIds []server.Id,
 	companionContract bool,
 	transferByteCount model.ByteCount,
 	provideMode model.ProvideMode,
-) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, returnErr error) {
+	forceStream bool,
+) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
 	if err != nil {
 		// the source is not a real client
@@ -318,9 +329,9 @@ func newContract(
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
 		MaxContractTransferByteCount,
-	)
+	) * (len(intermediaryIds) + 1)
 
-	if provideMode < model.ProvideModePublic {
+	if provideMode < model.ProvideModePublic && len(intermediaryIds) == 0 {
 		contractId, err = model.CreateContractNoEscrow(
 			ctx,
 			sourceNetworkId,
@@ -350,7 +361,13 @@ func newContract(
 		}
 		contractId = escrow.ContractId
 		priority = escrow.Priority
+
+		companionContractId := *escrow.CompanionContract
+		streamId = model.GetStreamIdForContract(companionContractId)
 	} else {
+		// TODO store the intermediary ids on the contract so they can be rewarded in the payout
+		// TODO the transfer should be equally divided amongst all the hops
+
 		escrow, err := model.CreateTransferEscrow(
 			ctx,
 			sourceNetworkId,
@@ -365,7 +382,14 @@ func newContract(
 		}
 		contractId = escrow.ContractId
 		priority = escrow.Priority
+
+		if forceStream || 0 < len(intermediaryIds) {
+			streamId_ := model.AddToStream(contractId, sourceId, destinationId, intermediaryIds)
+			streamId = &streamId_
+		}
 	}
+
+	
 
 	return
 }
