@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"net/http"
+
 	// "strconv"
 	// "crypto/sha256"
 	// "net"
@@ -21,6 +22,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/apikey"
 	"github.com/urnetwork/server/jwt"
 )
 
@@ -73,24 +75,52 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
-			jwtStr := auth[len(authBearerPrefix):]
+			authStr := auth[len(authBearerPrefix):]
 
-			// to validate the jwt:
-			// 1. parse it which tests the signing key.
-			//    this will fail if the signature is invalid.
-			// 2. test the create time and sessions against
-			//    inactive sessions. For various security reasons sessions may be expired.
+			if strings.HasPrefix(authStr, "urn_") {
+				// handle API KEY authentication
 
-			byJwt, err := jwt.ParseByJwt(self.Ctx, jwtStr)
-			if err != nil {
-				return err
+				// The network_client_proxy_model uses a sha1 hash with a local secret to avoid a db lookup on fake api keys.
+				// Could use a cryptographic hash like jwt/ncpm could be a done here to mitigate possible abuse.
+
+				if len(authStr) != 56 {
+					return errors.New("Invalid API key.")
+				}
+
+				network := apikey.GetNetworkByApiKey(authStr, self.Ctx)
+				if network == nil {
+					return errors.New("Invalid API key.")
+				}
+				self.ByJwt = jwt.NewByJwt(
+					network.NetworkId,
+					network.UserId,
+					network.NetworkName,
+					false, // guest mode
+					false, // pro mode - for api keys we don't need to thread this for now
+				)
+				glog.V(2).Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
+				return nil
+
+			} else {
+				// handle JWT authentication
+				// to validate the jwt:
+				// 1. parse it which tests the signing key.
+				//    this will fail if the signature is invalid.
+				// 2. test the create time and sessions against
+				//    inactive sessions. For various security reasons sessions may be expired.
+
+				byJwt, err := jwt.ParseByJwt(self.Ctx, authStr)
+				if err != nil {
+					return err
+				}
+				if !jwt.IsByJwtActive(self.Ctx, byJwt) {
+					return errors.New("JWT expired.")
+				}
+				glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+				self.ByJwt = byJwt
+				return nil
 			}
-			if !jwt.IsByJwtActive(self.Ctx, byJwt) {
-				return errors.New("JWT expired.")
-			}
-			glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
-			self.ByJwt = byJwt
-			return nil
+
 		}
 	}
 	return errors.New("Invalid auth.")

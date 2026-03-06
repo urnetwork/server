@@ -12,6 +12,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -343,6 +344,63 @@ func TestRouterBasic(t *testing.T) {
 			fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
 			map[string]any{},
 			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.NotEqual(t, err, nil)
+
+		// for API key auth testing
+		apiNetworkId := server.NewId()
+		apiUserId := server.NewId()
+		model.Testing_CreateNetwork(ctx, apiNetworkId, "apitestnetwork", apiUserId)
+
+		apiClientId := server.NewId()
+		apiSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: apiNetworkId,
+			ClientId:  &apiClientId,
+		})
+
+		key, err := model.CreateApiKey(&model.CreateApiKeyArgs{Name: "testkey"}, apiSession)
+		assert.Equal(t, err, nil)
+
+		authApiKey := func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", key.ApiKey))
+		}
+
+		// valid API key should succeed on auth-required routes
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.Equal(t, err, nil)
+
+		// API keys are non-guest, so /noguest should also succeed
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/noguest", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.Equal(t, err, nil)
+
+		// API keys have no ClientId, so /client should fail
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/client", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		assert.NotEqual(t, err, nil)
+
+		// invalid API key should fail
+		invalidKey := "invalidKey"
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			func(header http.Header) {
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", invalidKey))
+			},
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
 		assert.NotEqual(t, err, nil)
