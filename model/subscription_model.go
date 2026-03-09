@@ -471,7 +471,7 @@ const (
 
 type TransferEscrow struct {
 	ContractId          server.Id
-	companionContractId *server.Id
+	CompanionContractId *server.Id
 	Priority            Priority
 	TransferByteCount   ByteCount
 	Balances            []*TransferEscrowBalance
@@ -1135,10 +1135,8 @@ func CloseContract(
 		return
 	}
 
-	success, returnErr = settleContract(ctx, contractId)
-	if success {
-		RemoveFromStream(contractId)
-	}
+	returnErr = settleContract(ctx, contractId)
+	RemoveFromStream(ctx, contractId)
 	return
 }
 

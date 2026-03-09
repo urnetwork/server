@@ -109,6 +109,8 @@ type ExchangeSettings struct {
 	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 
+	StreamPollTimeout time.Duration
+
 	ExchangeChaosSettings
 }
 
@@ -151,13 +153,16 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ForwardEnforceActiveContracts: true,
 
-		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 		// default drain 300/minute
 		DrainOneTimeout: 200 * time.Millisecond,
 		// this is set by warp
 		DrainAllTimeout: 60 * time.Minute,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
+
+		StreamPollTimeout: 60 * time.Second,
+
+		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}
 }
 
@@ -1463,6 +1468,8 @@ type Resident struct {
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
+
+	streamHopListener *model.StreamHopListener
 }
 
 func NewResident(
@@ -1523,16 +1530,59 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
-	streamHopListener := NewStreamHopListener(cancelCtx, func(event *StreamHopEvent) {
-		switch event.StreamHopEventType {
-		case Added:
-			client.SEND(OPEN)
-		case Removed:
-			client.SEND(REMOVE)
-		case Reset:
-			client.SEND(RESET)
-		}
-	})
+	/*
+		// each hop on the stream receives this to configure its state,
+	// including the first and last hops
+	// this is sent each time a stream contract is created
+	message StreamOpen {
+	    // ulid
+	    optional bytes source_id = 2;
+	    // ulid
+	    optional bytes destination_id = 1;
+	    // ulid
+	    bytes stream_id = 3;
+	}
+
+	// each hop on the stream receives this to configure its state
+	// this is sent when all open contracts for the stream are closed
+	message StreamClose {
+	    // ulid
+	    bytes stream_id = 3;
+	}
+
+	message StreamReset {
+	    repeated StreamOpen streams = 1;
+	}
+	*/
+
+	client.Send(
+		connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamReset{}),
+		connect.DestinationId(connect.Id(clientId)),
+		nil,
+	)
+	streamHopListener := model.NewStreamHopListener(
+		cancelCtx,
+		clientId,
+		model.NewStreamHopAccumulator(
+			func(hop model.StreamHop) {
+				// added
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamOpen{
+					SourceId:      hop.SourceId().Bytes(),
+					DestinationId: hop.DestinationId().Bytes(),
+					StreamId:      hop.StreamId().Bytes(),
+				})
+				client.Send(frame, connect.DestinationId(connect.Id(clientId)), nil)
+			},
+			func(hop model.StreamHop) {
+				// removed
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamClose{
+					StreamId: hop.StreamId().Bytes(),
+				})
+				client.Send(frame, connect.DestinationId(connect.Id(clientId)), nil)
+			},
+		).Event,
+		exchange.settings.StreamPollTimeout,
+	)
 	resident.streamHopListener = streamHopListener
 
 	// go server.HandleError(resident.clientForward, cancel)
