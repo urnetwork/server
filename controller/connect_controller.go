@@ -230,8 +230,10 @@ func CreateContract(
 		TransferByteCount: uint64(transferByteCount),
 		SourceId:          clientId.Bytes(),
 		DestinationId:     destinationId.Bytes(),
-		StreamId:          streamId.Bytes(),
 		Priority:          &priority,
+	}
+	if streamId != nil {
+		storedContract.StreamId = streamId.Bytes()
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
 
@@ -244,6 +246,7 @@ func CreateContract(
 			StoredContractHmac:  storedContractHmac,
 			ProvideMode:         protocol.ProvideMode(provideMode),
 		},
+		CreateContract: createContract,
 	}
 	frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
 	if err != nil {
