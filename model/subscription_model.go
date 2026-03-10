@@ -1136,7 +1136,9 @@ func CloseContract(
 	}
 
 	returnErr = settleContract(ctx, contractId)
-	RemoveFromStream(ctx, contractId)
+	if returnErr == nil {
+		RemoveFromStream(ctx, contractId)
+	}
 	return
 }
 
@@ -1508,6 +1510,10 @@ func settleEscrowInTx(
 						                payout_net_revenue_nano_cents
 						            )
 						            VALUES ($1, $2, $3, $4, $5)
+						            ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
+						            SET
+						            	payout_byte_count = $4,
+						            	payout_net_revenue_nano_cents = $5
 						        `,
 								contractId,
 								balanceId,
