@@ -208,7 +208,7 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
-	contractId, transferByteCount, priority, err := nextContract(ctx, clientId, createContract, provideMode)
+	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -232,6 +232,9 @@ func CreateContract(
 		DestinationId:     destinationId.Bytes(),
 		Priority:          &priority,
 	}
+	if streamId != nil {
+		storedContract.StreamId = streamId.Bytes()
+	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
 
 	mac := hmac.New(sha256.New, provideSecretKey)
@@ -243,6 +246,7 @@ func CreateContract(
 			StoredContractHmac:  storedContractHmac,
 			ProvideMode:         protocol.ProvideMode(provideMode),
 		},
+		CreateContract: createContract,
 	}
 	frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
 	if err != nil {
@@ -258,39 +262,53 @@ func nextContract(
 	clientId server.Id,
 	createContract *protocol.CreateContract,
 	provideMode model.ProvideMode,
-) (server.Id, model.ByteCount, model.Priority, error) {
+) (server.Id, model.ByteCount, model.Priority, *server.Id, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
-	if 0 < len(createContract.UsedContractIds) {
-		// look for existing open contracts that the requestor does not have
-		usedContractIds := map[server.Id]bool{}
-		for _, contractIdBytes := range createContract.UsedContractIds {
-			if contractId, err := server.IdFromBytes(contractIdBytes); err == nil {
-				usedContractIds[contractId] = true
+	/*
+		if 0 < len(createContract.UsedContractIds) {
+			// look for existing open contracts that the requestor does not have
+			usedContractIds := map[server.Id]bool{}
+			for _, contractIdBytes := range createContract.UsedContractIds {
+				if contractId, err := server.IdFromBytes(contractIdBytes); err == nil {
+					usedContractIds[contractId] = true
+				}
+			}
+			escrows := model.GetOpenTransferEscrowsOrderedByPriorityCreateTime(
+				ctx,
+				clientId,
+				destinationId,
+				model.ByteCount(createContract.TransferByteCount),
+			)
+			for _, escrow := range escrows {
+				if !usedContractIds[escrow.ContractId] {
+					return escrow.ContractId, escrow.TransferByteCount, escrow.Priority, nil
+				}
 			}
 		}
-		escrows := model.GetOpenTransferEscrowsOrderedByPriorityCreateTime(
-			ctx,
-			clientId,
-			destinationId,
-			model.ByteCount(createContract.TransferByteCount),
-		)
-		for _, escrow := range escrows {
-			if !usedContractIds[escrow.ContractId] {
-				return escrow.ContractId, escrow.TransferByteCount, escrow.Priority, nil
-			}
-		}
+	*/
+
+	var intermediaryIds []server.Id
+	for _, intermediaryIdBytes := range createContract.IntermediaryIds {
+		intermediaryId := server.Id(intermediaryIdBytes)
+		intermediaryIds = append(intermediaryIds, intermediaryId)
 	}
 
+	forceStream := false
+	if createContract.ForceStream != nil {
+		forceStream = *createContract.ForceStream
+	}
 	// new contract
 	return newContract(
 		ctx,
 		clientId,
 		destinationId,
+		intermediaryIds,
 		// companion contracts reply to an existing open contract
 		createContract.Companion,
 		model.ByteCount(createContract.TransferByteCount),
 		provideMode,
+		forceStream,
 	)
 }
 
@@ -298,10 +316,12 @@ func newContract(
 	ctx context.Context,
 	sourceId server.Id,
 	destinationId server.Id,
+	intermediaryIds []server.Id,
 	companionContract bool,
 	transferByteCount model.ByteCount,
 	provideMode model.ProvideMode,
-) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, returnErr error) {
+	forceStream bool,
+) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
 	if err != nil {
 		// the source is not a real client
@@ -318,9 +338,9 @@ func newContract(
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
 		MaxContractTransferByteCount,
-	)
+	) * model.ByteCount(len(intermediaryIds)+1)
 
-	if provideMode < model.ProvideModePublic {
+	if provideMode < model.ProvideModePublic && len(intermediaryIds) == 0 {
 		contractId, err = model.CreateContractNoEscrow(
 			ctx,
 			sourceNetworkId,
@@ -350,7 +370,16 @@ func newContract(
 		}
 		contractId = escrow.ContractId
 		priority = escrow.Priority
+
+		companionContractId := *escrow.CompanionContractId
+		streamId_, _, ok := model.GetStream(ctx, companionContractId)
+		if ok {
+			streamId = &streamId_
+		}
 	} else {
+		// TODO store the intermediary ids on the contract so they can be rewarded in the payout
+		// TODO the transfer should be equally divided amongst all the hops
+
 		escrow, err := model.CreateTransferEscrow(
 			ctx,
 			sourceNetworkId,
@@ -365,6 +394,11 @@ func newContract(
 		}
 		contractId = escrow.ContractId
 		priority = escrow.Priority
+
+		if forceStream || 0 < len(intermediaryIds) {
+			streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+			streamId = &streamId_
+		}
 	}
 
 	return

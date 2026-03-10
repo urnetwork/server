@@ -109,6 +109,8 @@ type ExchangeSettings struct {
 	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 
+	StreamPollTimeout time.Duration
+
 	ExchangeChaosSettings
 }
 
@@ -151,13 +153,16 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		ForwardEnforceActiveContracts: true,
 
-		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 		// default drain 300/minute
 		DrainOneTimeout: 200 * time.Millisecond,
 		// this is set by warp
 		DrainAllTimeout: 60 * time.Minute,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
+
+		StreamPollTimeout: 60 * time.Second,
+
+		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}
 }
 
@@ -1463,6 +1468,8 @@ type Resident struct {
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
+
+	// streamHopListener *model.StreamHopListener
 }
 
 func NewResident(
@@ -1523,6 +1530,31 @@ func NewResident(
 	clientForwardUnsub := client.AddForwardCallback(resident.handleClientForward)
 	resident.clientForwardUnsub = clientForwardUnsub
 
+	/*
+			// each hop on the stream receives this to configure its state,
+		// including the first and last hops
+		// this is sent each time a stream contract is created
+		message StreamOpen {
+		    // ulid
+		    optional bytes source_id = 2;
+		    // ulid
+		    optional bytes destination_id = 1;
+		    // ulid
+		    bytes stream_id = 3;
+		}
+
+		// each hop on the stream receives this to configure its state
+		// this is sent when all open contracts for the stream are closed
+		message StreamClose {
+		    // ulid
+		    bytes stream_id = 3;
+		}
+
+		message StreamReset {
+		    repeated StreamOpen streams = 1;
+		}
+	*/
+
 	// go server.HandleError(resident.clientForward, cancel)
 	if 0 < exchange.settings.ExchangeChaosSettings.ResidentShutdownPerSecond {
 		go server.HandleError(resident.chaos, cancel)
@@ -1554,6 +1586,41 @@ func (self *Resident) chaos() {
 
 func (self *Resident) Run() {
 	defer self.cancel()
+
+	self.client.Send(
+		connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamReset{}),
+		connect.DestinationId(connect.Id(self.clientId)),
+		nil,
+	)
+	streamHopListener := model.NewStreamHopListener(
+		self.ctx,
+		self.clientId,
+		model.NewStreamHopAccumulator(
+			func(hop model.StreamHop) {
+				// added
+				streamOpen := &protocol.StreamOpen{
+					StreamId: hop.StreamId().Bytes(),
+				}
+				if sourceId := hop.SourceId(); sourceId != nil {
+					streamOpen.SourceId = sourceId.Bytes()
+				}
+				if destinationId := hop.DestinationId(); destinationId != nil {
+					streamOpen.DestinationId = destinationId.Bytes()
+				}
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
+				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+			},
+			func(hop model.StreamHop) {
+				// removed
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamClose{
+					StreamId: hop.StreamId().Bytes(),
+				})
+				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+			},
+		).Event,
+		self.exchange.settings.StreamPollTimeout,
+	)
+	defer streamHopListener.Close()
 
 	select {
 	case <-self.ctx.Done():
@@ -1912,6 +1979,7 @@ func (self *Resident) Close() {
 
 	self.clientReceiveUnsub()
 	self.clientForwardUnsub()
+	// self.streamHopListener.Close()
 
 	forwards := []*ResidentForward{}
 	func() {
