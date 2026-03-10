@@ -73,7 +73,7 @@ func TestStreamHop(t *testing.T) {
 	destinationId := server.NewId()
 	streamId := server.NewId()
 
-	hop := NewStreamHop(sourceId, destinationId, streamId)
+	hop := NewStreamHop(&sourceId, &destinationId, streamId)
 
 	path := connect.TransferPath{
 		SourceId:      connect.Id(sourceId),

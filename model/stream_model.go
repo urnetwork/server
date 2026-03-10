@@ -102,12 +102,17 @@ func (self streamKey) Edges() iter.Seq2[server.Id, [2]*server.Id] {
 	}
 }
 
+// represents a hop through a client from source to destination
 type StreamHop [48]byte
 
-func NewStreamHop(sourceId server.Id, destinationId server.Id, streamId server.Id) StreamHop {
+func NewStreamHop(sourceId *server.Id, destinationId *server.Id, streamId server.Id) StreamHop {
 	var sh [48]byte
-	copy(sh[:], sourceId[:])
-	copy(sh[16:], destinationId[:])
+	if sourceId != nil {
+		copy(sh[:], sourceId[:])
+	}
+	if destinationId != nil {
+		copy(sh[16:], destinationId[:])
+	}
 	copy(sh[32:], streamId[:])
 	return sh
 }
@@ -116,12 +121,20 @@ func (self StreamHop) Bytes() []byte {
 	return []byte(self[:])
 }
 
-func (self StreamHop) SourceId() server.Id {
-	return server.Id(self[0:16])
+func (self StreamHop) SourceId() *server.Id {
+	sourceId := server.Id(self[0:16])
+	if (sourceId == server.Id{}) {
+		return nil
+	}
+	return &sourceId
 }
 
-func (self StreamHop) DestinationId() server.Id {
-	return server.Id(self[16:32])
+func (self StreamHop) DestinationId() *server.Id {
+	destinationId := server.Id(self[16:32])
+	if (destinationId == server.Id{}) {
+		return nil
+	}
+	return &destinationId
 }
 
 func (self StreamHop) StreamId() server.Id {
@@ -261,16 +274,9 @@ func AddToStream(
 						EventId:            eventId,
 					}
 
-					if edges[0] != nil {
-						streamHop := NewStreamHop(*edges[0], clientId, streamId)
-						pipe.SAdd(ctx, streamHopsKey, streamHop.Bytes())
-						event.StreamHops = append(event.StreamHops, streamHop)
-					}
-					if edges[1] != nil {
-						streamHop := NewStreamHop(clientId, *edges[1], streamId)
-						pipe.SAdd(ctx, streamHopsKey, streamHop.Bytes())
-						event.StreamHops = append(event.StreamHops, streamHop)
-					}
+					streamHop := NewStreamHop(edges[0], edges[1], streamId)
+					pipe.SAdd(ctx, streamHopsKey, streamHop.Bytes())
+					event.StreamHops = append(event.StreamHops, streamHop)
 
 					buf := bytes.NewBuffer(nil)
 					encoder := gob.NewEncoder(buf)
@@ -298,7 +304,7 @@ func AddToStream(
 	return
 }
 
-func RemoveFromStream(ctx context.Context, contractId server.Id) {
+func RemoveFromStream(ctx context.Context, contractId server.Id) (streamId server.Id, ok bool) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
 		streamKeyCmd := pipe.Get(ctx, contractStreamKey(contractId))
@@ -327,7 +333,7 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) {
 		if err != nil {
 			panic(err)
 		}
-		streamId := server.Id(streamIdBytes)
+		streamId = server.Id(streamIdBytes)
 
 		// note the keys in eval have to be in the same hash slot
 		result := r.Eval(
@@ -386,16 +392,9 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) {
 						EventId:            eventId,
 					}
 
-					if edges[0] != nil {
-						streamHop := NewStreamHop(*edges[0], clientId, streamId)
-						pipe.SRem(ctx, streamHopsKey, streamHop.Bytes())
-						event.StreamHops = append(event.StreamHops, streamHop)
-					}
-					if edges[1] != nil {
-						streamHop := NewStreamHop(clientId, *edges[1], streamId)
-						pipe.SRem(ctx, streamHopsKey, streamHop.Bytes())
-						event.StreamHops = append(event.StreamHops, streamHop)
-					}
+					streamHop := NewStreamHop(edges[0], edges[1], streamId)
+					pipe.SRem(ctx, streamHopsKey, streamHop.Bytes())
+					event.StreamHops = append(event.StreamHops, streamHop)
 
 					buf := bytes.NewBuffer(nil)
 					encoder := gob.NewEncoder(buf)
@@ -413,6 +412,8 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) {
 				}
 			}
 		}
+
+		ok = true
 	})
 	return
 }
