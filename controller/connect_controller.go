@@ -298,6 +298,10 @@ func nextContract(
 	if createContract.ForceStream != nil {
 		forceStream = *createContract.ForceStream
 	}
+	streamVersion := 0
+	if createContract.StreamVersion != nil {
+		streamVersion = int(*createContract.StreamVersion)
+	}
 	// new contract
 	return newContract(
 		ctx,
@@ -309,6 +313,7 @@ func nextContract(
 		model.ByteCount(createContract.TransferByteCount),
 		provideMode,
 		forceStream,
+		streamVersion,
 	)
 }
 
@@ -321,6 +326,7 @@ func newContract(
 	transferByteCount model.ByteCount,
 	provideMode model.ProvideMode,
 	forceStream bool,
+	streamVersion int,
 ) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
 	if err != nil {
@@ -371,10 +377,15 @@ func newContract(
 		contractId = escrow.ContractId
 		priority = escrow.Priority
 
-		companionContractId := *escrow.CompanionContractId
-		streamId_, _, ok := model.GetStream(ctx, companionContractId)
-		if ok {
-			streamId = &streamId_
+		switch streamVersion {
+		case 0:
+			// companion stream is not supported
+		default:
+			companionContractId := *escrow.CompanionContractId
+			streamId_, _, ok := model.GetStream(ctx, companionContractId)
+			if ok {
+				streamId = &streamId_
+			}
 		}
 	} else {
 		// TODO store the intermediary ids on the contract so they can be rewarded in the payout

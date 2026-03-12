@@ -487,6 +487,10 @@ func CreateProxyClient(
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		hosts := maps.Keys(proxyConfig.Hosts)
+		if len(hosts) == 0 {
+			returnErr = fmt.Errorf("No proxy hosts available")
+			return
+		}
 		proxyHost := hosts[mathrand.Intn(len(hosts))]
 
 		blockServicePorts := proxyConfig.Hosts[proxyHost]
