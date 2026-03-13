@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -193,4 +194,49 @@ func ToSdkId(id Id) *sdk.Id {
 		panic(err)
 	}
 	return sdkId
+}
+
+type PostFunction = func() any
+
+func RunPosts(ctx context.Context, posts ...PostFunction) {
+	for 0 < len(posts) {
+		// run all posts in parallel
+		next := make(chan any)
+		for _, post := range posts {
+			go HandleError(func() {
+				success := false
+				defer func() {
+					if !success {
+						select {
+						case <-ctx.Done():
+						case next <- nil:
+						}
+					}
+				}()
+				select {
+				case <-ctx.Done():
+				case next <- post():
+					success = true
+				}
+			})
+		}
+
+		var nextPosts []PostFunction
+		for range len(posts) {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-next:
+				if r != nil {
+					switch v := r.(type) {
+					case []PostFunction:
+						nextPosts = append(nextPosts, v...)
+					case PostFunction:
+						nextPosts = append(nextPosts, v)
+					}
+				}
+			}
+		}
+		posts = nextPosts
+	}
 }

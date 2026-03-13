@@ -274,6 +274,7 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 		for _, transferBalance := range transferBalances {
 			netEscrowCmd := netEscrowCmds[transferBalance.BalanceId]
 			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
+			netEscrowBalanceByteCount = max(0, netEscrowBalanceByteCount)
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
@@ -563,6 +564,7 @@ func createTransferEscrowInTx(
 		for _, transferBalance := range orderedTransferBalances {
 			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
 			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
+			netEscrowBalanceByteCount = max(0, netEscrowBalanceByteCount)
 			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
@@ -749,8 +751,10 @@ func CreateTransferEscrow(
 		)
 	})
 
-	runPosts(posts)
-
+	if returnErr != nil {
+		return
+	}
+	server.RunPosts(ctx, posts...)
 	return
 }
 
@@ -852,8 +856,10 @@ func CreateCompanionTransferEscrow(
 		)
 	})
 
-	runPosts(posts)
-
+	if returnErr != nil {
+		return
+	}
+	server.RunPosts(ctx, posts...)
 	return
 }
 
@@ -1230,8 +1236,7 @@ func settleContract(ctx context.Context, contractId server.Id) (returnErr error)
 	if returnErr != nil {
 		return
 	}
-
-	runPosts(posts)
+	server.RunPosts(ctx, posts...)
 	return
 }
 
@@ -1242,8 +1247,10 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 		posts, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
 	})
 
-	runPosts(posts)
-
+	if returnErr != nil {
+		return
+	}
+	server.RunPosts(ctx, posts...)
 	return
 }
 
@@ -2111,10 +2118,10 @@ func ForceCloseOpenContractIds(
 				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
 				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
-			runPosts(posts)
 			if err != nil {
 				return err
 			}
+			server.RunPosts(ctx, posts...)
 
 		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
@@ -2211,10 +2218,10 @@ func ForceCloseOpenContractIds(
 			server.Tx(ctx, func(tx server.PgTx) {
 				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
-			runPosts(posts)
 			if err != nil {
 				return err
 			}
+			server.RunPosts(ctx, posts...)
 		}
 
 		return nil
@@ -2925,33 +2932,4 @@ func GetOpenTransferByteCount(
 	})
 
 	return openTransferByteCount
-
-}
-
-func runPosts(posts []func() any) {
-	for 0 < len(posts) {
-		// run all posts in parallel
-		next := make(chan any)
-		for _, post := range posts {
-			go server.HandleError(func() {
-				next <- post()
-			}, func() {
-				next <- nil
-			})
-		}
-
-		var nextPosts []func() any
-		for range len(posts) {
-			r := <-next
-			if r != nil {
-				switch v := r.(type) {
-				case []func() any:
-					nextPosts = append(nextPosts, v...)
-				case func() any:
-					nextPosts = append(nextPosts, v)
-				}
-			}
-		}
-		posts = nextPosts
-	}
 }
