@@ -355,7 +355,7 @@ func newContract(
 		MaxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
-	if provideMode < model.ProvideModePublic && len(intermediaryIds) == 0 {
+	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
 		contractId, err = model.CreateContractNoEscrow(
 			ctx,
 			sourceNetworkId,
@@ -369,6 +369,16 @@ func newContract(
 			return
 		}
 		priority = model.TrustedPriority
+
+		switch streamVersion {
+		case 0:
+			// force stream is not supported
+		default:
+			if forceStream || 0 < len(intermediaryIds) {
+				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+				streamId = &streamId_
+			}
+		}
 	} else if companionContract {
 		escrow, err := model.CreateCompanionTransferEscrow(
 			ctx,
