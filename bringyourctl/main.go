@@ -77,6 +77,7 @@ Usage:
     bringyourctl proxy parse-id <signed_proxy_id>
     bringyourctl proxy keygen
     bringyourctl proxy reset-client-ipv4
+    bringyourctl refresh-transfer-balances
 
 Options:
     -h --help     Show this screen.
@@ -241,6 +242,8 @@ Options:
 		} else if r, _ := opts.Bool("reset-client-ipv4"); r {
 			proxyResetClientIpv4(opts)
 		}
+	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
+		refreshTransferBalances(opts)
 	} else {
 		fmt.Println(usage)
 	}
@@ -1119,4 +1122,14 @@ func proxyKeygen(opts docopt.Opts) {
 func proxyResetClientIpv4(opts docopt.Opts) {
 	ctx := context.Background()
 	model.ResetProxyClientIpv4(ctx)
+}
+
+func refreshTransferBalances(opts docopt.Opts) {
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+
+	controller.RefreshTransferBalances(
+		&controller.RefreshTransferBalancesArgs{},
+		clientSession,
+	)
 }
