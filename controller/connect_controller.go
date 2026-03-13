@@ -246,7 +246,16 @@ func CreateContract(
 			StoredContractHmac:  storedContractHmac,
 			ProvideMode:         protocol.ProvideMode(provideMode),
 		},
-		CreateContract: createContract,
+	}
+	streamVersion := 0
+	if createContract.StreamVersion != nil {
+		streamVersion = int(*createContract.StreamVersion)
+	}
+	switch streamVersion {
+	case 0:
+		// result CreateContract is unset
+	default:
+		result.CreateContract = createContract
 	}
 	frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
 	if err != nil {
@@ -406,9 +415,14 @@ func newContract(
 		contractId = escrow.ContractId
 		priority = escrow.Priority
 
-		if forceStream || 0 < len(intermediaryIds) {
-			streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
-			streamId = &streamId_
+		switch streamVersion {
+		case 0:
+			// force stream is not supported
+		default:
+			if forceStream || 0 < len(intermediaryIds) {
+				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+				streamId = &streamId_
+			}
 		}
 	}
 
