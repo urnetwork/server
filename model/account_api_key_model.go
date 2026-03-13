@@ -3,7 +3,9 @@ package model
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -40,23 +42,25 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 			return
 		}
 
+		apiKeyHash := sha256.Sum256([]byte(apiKey))
 		_, err = tx.Exec(
 			session.Ctx,
 			`
-				INSERT INTO account_api_key
-				(
-					api_key_id,
-					network_id,
-					api_key,
-					name
-				)
-				VALUES ($1, $2, $3, $4)
-			`,
+        INSERT INTO account_api_key
+        (
+            api_key_id,
+            network_id,
+            api_key,
+            name
+        )
+        VALUES ($1, $2, $3, $4)
+    `,
 			apiKeyId,
 			session.ByJwt.NetworkId,
-			apiKey,
+			hex.EncodeToString(apiKeyHash[:]),
 			createApiKey.Name,
 		)
+
 	})
 
 	if err != nil {
@@ -140,6 +144,8 @@ func Test_GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKe
 	var result *NetworkByApiKey
 
 	server.Db(ctx, func(conn server.PgConn) {
+
+		apiKeyHash := sha256.Sum256([]byte(apiKey))
 		rows, err := conn.Query(
 			ctx,
 			`
@@ -151,7 +157,7 @@ func Test_GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKe
 				JOIN network ON network.network_id = account_api_key.network_id
 				WHERE account_api_key.api_key = $1
 			`,
-			apiKey,
+			hex.EncodeToString(apiKeyHash[:]),
 		)
 
 		server.WithPgResult(rows, err, func() {

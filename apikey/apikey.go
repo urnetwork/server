@@ -3,7 +3,9 @@ package apikey
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/urnetwork/server"
@@ -19,6 +21,8 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 	var result *NetworkByApiKey
 
 	server.Db(ctx, func(conn server.PgConn) {
+
+		apiKeyHash := sha256.Sum256([]byte(apiKey))
 		rows, err := conn.Query(
 			ctx,
 			`
@@ -30,7 +34,7 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 				JOIN network ON network.network_id = account_api_key.network_id
 				WHERE account_api_key.api_key = $1
 			`,
-			apiKey,
+			hex.EncodeToString(apiKeyHash[:]),
 		)
 
 		server.WithPgResult(rows, err, func() {
@@ -68,6 +72,7 @@ func Testing_CreateApiKey(networkId server.Id, ctx context.Context) (result *Cre
 			return
 		}
 
+		apiKeyHash := sha256.Sum256([]byte(apiKey))
 		_, err = tx.Exec(
 			ctx,
 			`
@@ -82,7 +87,7 @@ func Testing_CreateApiKey(networkId server.Id, ctx context.Context) (result *Cre
 			`,
 			apiKeyId,
 			networkId,
-			apiKey,
+			hex.EncodeToString(apiKeyHash[:]),
 			"testkey",
 		)
 	})
