@@ -1371,6 +1371,10 @@ func testConnect(
 	// close(receiveA)
 	// close(receiveB)
 
+	select {
+	case <-time.After(5 * time.Second):
+	}
+
 	clientA.Flush()
 	clientB.Flush()
 
@@ -1380,10 +1384,6 @@ func testConnect(
 
 	clientA.Close()
 	clientB.Close()
-
-	select {
-	case <-time.After(5 * time.Second):
-	}
 
 	select {
 	case <-time.After(1 * time.Second):
@@ -1462,10 +1462,9 @@ func testConnect(
 	}
 
 	// SendSequence now flushes pending contracts when closed
-	// FIXME
-	// assert.Equal(t, len(flushedContractIdsA), 0)
-	// FIXME
-	// assert.Equal(t, len(flushedContractIdsB), 0)
+	// it's normal to have one pending contract per sequence due the predictive queueing of contracts
+	assert.Equal(t, len(flushedContractIdsA), 0)
+	assert.Equal(t, len(flushedContractIdsB), 0)
 
 	// if e := len(contractIdPartialClosePartiesAToB) - len(flushedContractIdsA); 1 < e {
 	// 	assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
