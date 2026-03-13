@@ -156,37 +156,38 @@ func (self StreamHop) Path() connect.TransferPath {
 // meaning if there is no new activity, they will be cleared
 // stream key -> stream id
 // stream key -> set of contract id
-// client id -> set of active stream pairs (from, to, streamid)
-// client id counter
-// event(client id) active streams changed
+// client id -> set of active stream hops
+// client id -> event id counter
+// event(client id) active streams changed event
 // contract id -> stream key
+// contract id -> stream id
 
 func streamIdKey(streamKey []byte) string {
-	return fmt.Sprintf("{%s}s_sk_sid", streamKey)
+	return fmt.Sprintf("{%s}s2_sk_sid", streamKey)
 }
 
 func streamContractsKey(streamKey []byte) string {
-	return fmt.Sprintf("{%s}s_sk_cs", streamKey)
+	return fmt.Sprintf("{%s}s2_sk_cs", streamKey)
 }
 
 func clientStreamHopsKey(clientId server.Id) string {
-	return fmt.Sprintf("{%s}s_c_hops", clientId)
+	return fmt.Sprintf("{%s}s2_c_hops", clientId)
 }
 
 func clientEventIdKey(clientId server.Id) string {
-	return fmt.Sprintf("{%s}s_c_eid", clientId)
+	return fmt.Sprintf("{%s}s2_c_eid", clientId)
 }
 
 func clientStreamHopEvents(clientId server.Id) string {
-	return fmt.Sprintf("{%s}s_c_events", clientId)
+	return fmt.Sprintf("{%s}s2_c_events", clientId)
 }
 
 func contractStreamKey(contractId server.Id) string {
-	return fmt.Sprintf("{%s}s_ct_sk", contractId)
+	return fmt.Sprintf("{%s}s2_ct_sk", contractId)
 }
 
 func contractStreamId(contractId server.Id) string {
-	return fmt.Sprintf("{%s}s_ct_sid", contractId)
+	return fmt.Sprintf("{%s}s2_ct_sid", contractId)
 }
 
 // returns a stream id to use for the contract
