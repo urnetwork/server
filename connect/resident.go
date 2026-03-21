@@ -1612,9 +1612,10 @@ func (self *Resident) Run() {
 			},
 			func(hop model.StreamHop) {
 				// removed
-				frame := connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamClose{
+				streamClose := &protocol.StreamClose{
 					StreamId: hop.StreamId().Bytes(),
-				})
+				}
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
 				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
 			},
 		).Event,
