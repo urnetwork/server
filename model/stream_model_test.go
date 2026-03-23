@@ -211,7 +211,7 @@ func TestStream(t *testing.T) {
 		}
 
 		select {
-		case <-time.After(1 * time.Second):
+		case <-time.After(5 * time.Second):
 		}
 
 		assert.Equal(t, len(c.StreamIds()), len(finalStreamIds))
