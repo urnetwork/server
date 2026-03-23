@@ -546,7 +546,7 @@ func testConnect(
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
-		settings.ResidentIdleTimeout = sequenceIdleTimeout
+		settings.ExchangeResidentTtl = sequenceIdleTimeout
 		settings.ForwardIdleTimeout = sequenceIdleTimeout
 		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
 		if config.enableChaos {

@@ -83,10 +83,10 @@ type ExchangeSettings struct {
 	StartInternalPort                int
 	MaxConcurrentForwardsPerResident int
 
-	ResidentIdleTimeout time.Duration
-	ForwardIdleTimeout  time.Duration
-	AbuseMinTimeout     time.Duration
-	ControlMinTimeout   time.Duration
+	// ResidentIdleTimeout time.Duration
+	ForwardIdleTimeout time.Duration
+	AbuseMinTimeout    time.Duration
+	ControlMinTimeout  time.Duration
 
 	ExchangeConnectTimeout             time.Duration
 	ExchangePingTimeout                time.Duration
@@ -135,18 +135,18 @@ func DefaultExchangeSettings() *ExchangeSettings {
 
 		MaxConcurrentForwardsPerResident: 8 * 1024,
 
-		ResidentIdleTimeout: 15 * time.Minute,
-		ForwardIdleTimeout:  15 * time.Minute,
-		AbuseMinTimeout:     5 * time.Second,
-		ControlMinTimeout:   5 * time.Millisecond,
+		// ResidentIdleTimeout: 300 * time.Minute,
+		ForwardIdleTimeout: 15 * time.Minute,
+		AbuseMinTimeout:    5 * time.Second,
+		ControlMinTimeout:  5 * time.Millisecond,
 
-		ExchangeConnectTimeout:             5 * time.Second,
+		ExchangeConnectTimeout:             15 * time.Second,
 		ExchangePingTimeout:                connectionHandlerSettings.MinPingTimeout,
 		ExchangeReadTimeout:                connectionHandlerSettings.ReadTimeout,
 		ExchangeReadHeaderTimeout:          exchangeResidentWaitTimeout,
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
-		ExchangeResidentTtl:                120 * time.Second,
+		ExchangeResidentTtl:                300 * time.Second,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -342,7 +342,7 @@ func (self *Exchange) NominateLocalResident(
 			select {
 			case <-resident.Done():
 				return
-			case <-time.After(self.settings.ResidentIdleTimeout):
+			case <-time.After(self.settings.ExchangeResidentTtl):
 			}
 		}
 	})
@@ -353,7 +353,7 @@ func (self *Exchange) NominateLocalResident(
 			select {
 			case <-resident.Done():
 				return
-			case <-time.After(self.settings.ExchangeResidentTtl / 2):
+			case <-time.After(self.settings.ExchangeResidentTtl / 4):
 			}
 
 			pollResident := func() bool {
@@ -1935,7 +1935,7 @@ func (self *Resident) UpdateActivity() bool {
 	}
 }
 
-// idle if no activity in `ResidentIdleTimeout`
+// idle if no activity in `ExchangeResidentTtl`
 func (self *Resident) CancelIfIdle() bool {
 	select {
 	case <-self.ctx.Done():
@@ -1947,7 +1947,7 @@ func (self *Resident) CancelIfIdle() bool {
 	defer self.stateLock.Unlock()
 
 	idleTimeout := time.Now().Sub(self.lastActivityTime)
-	if self.exchange.settings.ResidentIdleTimeout <= idleTimeout {
+	if self.exchange.settings.ExchangeResidentTtl <= idleTimeout {
 		self.cancel()
 		return true
 	}
