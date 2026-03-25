@@ -144,6 +144,10 @@ func UpgradeFromGuest(
 		session,
 	)
 
+	if err != nil {
+		return nil, err
+	}
+
 	// if verification required, send it
 	if result.VerificationRequired != nil {
 		verifySend := AuthVerifySendArgs{
@@ -163,7 +167,7 @@ func UpgradeFromGuest(
 
 	}
 
-	return result, err
+	return result, nil
 
 }
 
