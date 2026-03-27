@@ -261,44 +261,50 @@ func AuthNetworkClient(
 				)
 			}
 
-			if proxyDeviceState.Location != nil {
-				proxyDeviceState.DnsResolverSettings = connect.RegionalDnsResolverSettings(proxyDeviceState.Location.CountryCode)
-			}
-
-			proxyDeviceConfig := &ProxyDeviceConfig{
-				ProxyDeviceConnection: ProxyDeviceConnection{
-					ClientId: clientId,
-				},
-				LockSubnets:        lockSubnets,
-				InitialDeviceState: &proxyDeviceState,
-			}
-			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
-			if err == nil {
-
-				opts := CreateProxyClientOptions{
-					HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
-					EnableWg:         authClient.ProxyConfig.EnableWg,
+			if proxyDeviceState.Location == nil {
+				authClientResult.Error = &AuthNetworkClientError{
+					Message: "Invalid location",
 				}
-				proxyClient, err := CreateProxyClient(
-					session.Ctx,
-					proxyDeviceConfig.ProxyId,
-					proxyDeviceConfig.ClientId,
-					proxyDeviceConfig.InstanceId,
-					opts,
-				)
+			} else {
+				if proxyDeviceState.Location.CountryCode != "" {
+					proxyDeviceState.DnsResolverSettings = connect.RegionalDnsResolverSettings(proxyDeviceState.Location.CountryCode)
+				}
 
+				proxyDeviceConfig := &ProxyDeviceConfig{
+					ProxyDeviceConnection: ProxyDeviceConnection{
+						ClientId: clientId,
+					},
+					LockSubnets:        lockSubnets,
+					InitialDeviceState: &proxyDeviceState,
+				}
+				err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 				if err == nil {
-					authClientResult.ProxyConfigResult = &ProxyConfigResult{
-						ProxyClient: *proxyClient,
+
+					opts := CreateProxyClientOptions{
+						HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
+						EnableWg:         authClient.ProxyConfig.EnableWg,
+					}
+					proxyClient, err := CreateProxyClient(
+						session.Ctx,
+						proxyDeviceConfig.ProxyId,
+						proxyDeviceConfig.ClientId,
+						proxyDeviceConfig.InstanceId,
+						opts,
+					)
+
+					if err == nil {
+						authClientResult.ProxyConfigResult = &ProxyConfigResult{
+							ProxyClient: *proxyClient,
+						}
+					} else {
+						authClientResult.Error = &AuthNetworkClientError{
+							Message: "Could not create proxy client",
+						}
 					}
 				} else {
 					authClientResult.Error = &AuthNetworkClientError{
-						Message: "Could not create proxy client",
+						Message: "Could not create proxy device",
 					}
-				}
-			} else {
-				authClientResult.Error = &AuthNetworkClientError{
-					Message: "Could not create proxy device",
 				}
 			}
 		}
