@@ -77,6 +77,7 @@ Usage:
     bringyourctl proxy parse-id <signed_proxy_id>
     bringyourctl proxy keygen
     bringyourctl proxy reset-client-ipv4
+    bringyourctl proxy inspect <proxy_id>
     bringyourctl refresh-transfer-balances
 
 Options:
@@ -241,6 +242,8 @@ Options:
 			proxyKeygen(opts)
 		} else if r, _ := opts.Bool("reset-client-ipv4"); r {
 			proxyResetClientIpv4(opts)
+		} else if inspect, _ := opts.Bool("inspect"); inspect {
+			proxyInspect(opts)
 		}
 	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
 		refreshTransferBalances(opts)
@@ -1122,6 +1125,23 @@ func proxyKeygen(opts docopt.Opts) {
 func proxyResetClientIpv4(opts docopt.Opts) {
 	ctx := context.Background()
 	model.ResetProxyClientIpv4(ctx)
+}
+
+func proxyInspect(opts docopt.Opts) {
+	ctx := context.Background()
+
+	proxyIdStr, _ := opts.String("<proxy_id>")
+	proxyId := server.RequireParseId(proxyIdStr)
+
+	proxyDeviceConfig := model.GetProxyDeviceConfig(ctx, proxyId)
+	if proxyDeviceConfig == nil {
+		fmt.Printf("Proxy does not exist.")
+		return
+	}
+
+	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.Location)
+	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.PerformanceProfile)
+	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.DnsResolverSettings)
 }
 
 func refreshTransferBalances(opts docopt.Opts) {
