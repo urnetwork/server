@@ -40,6 +40,7 @@ func (self *watchdog) run() {
 		case <-time.After(self.pollTimeout):
 		}
 
+		// FIXME read from config
 		testNetworkId := server.RequireParseId("018c224b-909e-d3f3-b0bf-f40b7e11c5d7")
 		testUserId := server.RequireParseId("018c224b-909e-d3f3-b0bf-f40b2f8f8cfd")
 
