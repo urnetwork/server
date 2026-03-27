@@ -1820,7 +1820,8 @@ func FindProviderLocations(
 	findLocations *FindLocationsArgs,
 	session *session.ClientSession,
 ) (*FindLocationsResult, error) {
-	if clientId, err := server.ParseId(findLocations.Query); err == nil {
+	query := strings.TrimSpace(findLocations.Query)
+	if clientId, err := server.ParseId(query); err == nil {
 		device := &LocationDeviceResult{
 			ClientId:   clientId,
 			DeviceName: fmt.Sprintf("%s", clientId),
@@ -1855,8 +1856,6 @@ func FindProviderLocations(
 		}
 
 		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
-
-		query := strings.TrimSpace(findLocations.Query)
 
 		var matchDistances map[server.Id]int
 		var clientLocations map[server.Id]*ClientLocation
