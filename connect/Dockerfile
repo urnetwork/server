@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 # https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
 
 ARG TARGETPLATFORM
@@ -7,8 +7,8 @@ ENV WARP_ENV=$warp_env
 
 # see https://docs.docker.com/develop/develop-images/dockerfile_best-practices/
 RUN apt-get update && apt-get install -y \
-	ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
 COPY build/$TARGETPLATFORM/connect /usr/local/sbin/bringyour-connect
