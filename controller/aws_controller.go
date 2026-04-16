@@ -8,6 +8,7 @@ import (
 	// "net/url"
 	"embed"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -15,8 +16,8 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/pinpointsmsvoicev2"
 	"github.com/aws/aws-sdk-go/service/ses"
-	"github.com/aws/aws-sdk-go/service/sns"
 
 	// "github.com/aws/aws-sdk-go/aws/awserr"
 
@@ -427,14 +428,19 @@ func sendAccountSms(phoneNumber string, bodyText string) error {
 		return err
 	}
 
-	snsService := sns.New(awsSession)
+	// pinpoint requires +CCXXXXXXX format with no spaces and no dashes
+	smsStrip := regexp.MustCompile("[\\-\\s]+")
+	strippedPhoneNumber := smsStrip.ReplaceAllString(phoneNumber, "")
 
-	input := &sns.PublishInput{
-		Message:     &bodyText,
-		PhoneNumber: &phoneNumber,
+	smsService := pinpointsmsvoicev2.New(awsSession)
+
+	input := &pinpointsmsvoicev2.SendTextMessageInput{
+		DestinationPhoneNumber: aws.String(strippedPhoneNumber),
+		MessageBody:            aws.String(bodyText),
+		MessageType:            aws.String(pinpointsmsvoicev2.MessageTypeTransactional),
 	}
 
-	_, err = snsService.Publish(input)
+	_, err = smsService.SendTextMessage(input)
 	if err != nil {
 		return err
 	}
