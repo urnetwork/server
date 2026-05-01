@@ -101,6 +101,7 @@ func (self *JwkValidator) refresh() {
 			returnErr = err
 			return
 		}
+		defer res.Body.Close()
 
 		responseBodyBytes, err := io.ReadAll(res.Body)
 		if err != nil {

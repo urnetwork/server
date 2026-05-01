@@ -401,7 +401,23 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 		IdleTimeout:  httpServerOptions.IdleTimeout,
 	}
 
-	return server.Serve(listener)
+	errs := make(chan error)
+
+	go func() {
+		defer cancel()
+		err := HandleError(server.Serve(listener))
+		select {
+		case errs <- err:
+		case <- cancelCtx.Done():
+		}
+	}
+
+	select {
+	case <- cancelCtx.Done():
+		return errors.New("Done.")
+	case err := <- errs:
+		return err
+	}
 }
 
 func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
