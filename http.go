@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	// "errors"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -382,6 +383,9 @@ type HttpServerOptions struct {
 }
 
 func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions) error {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	listenConfig := net.ListenConfig{}
 	if reusePort {
 		listenConfig.Control = SoReusePort
@@ -405,17 +409,17 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 
 	go func() {
 		defer cancel()
-		err := HandleError(server.Serve(listener))
+		err := server.Serve(listener)
 		select {
 		case errs <- err:
-		case <- cancelCtx.Done():
+		case <-cancelCtx.Done():
 		}
-	}
+	}()
 
 	select {
-	case <- cancelCtx.Done():
+	case <-cancelCtx.Done():
 		return errors.New("Done.")
-	case err := <- errs:
+	case err := <-errs:
 		return err
 	}
 }
