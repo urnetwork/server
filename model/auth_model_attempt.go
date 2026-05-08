@@ -121,7 +121,7 @@ func UserAuthAttempt(
 			}
 
 			var attempts2 []UserAuthAttemptResult
-			result, err := tx.Query(
+			result, err = tx.Query(
 				session.Ctx,
 				`
 					SELECT 
@@ -140,9 +140,9 @@ func UserAuthAttempt(
 				AttemptFailedCountThreshold2,
 			)
 			server.WithPgResult(result, err, func() {
-				attempts = parseAttempts(result)
+				attempts2 = parseAttempts(result)
 			})
-			if !passesThreshold2(attempts) {
+			if !passesThreshold2(attempts2) {
 				return
 			}
 		} else {
