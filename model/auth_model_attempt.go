@@ -15,8 +15,10 @@ func maxUserAuthAttemptsError() error {
 	return errors.New("503 User auth attempts exceeded limits.")
 }
 
-const AttemptLookback = 1 * time.Minute
-const AttemptFailedCountThreshold = 10
+const AttemptLookback = 5 * time.Minute
+const AttemptFailedCountThreshold = 5
+const AttemptLookback2 = 30 * time.Minute
+const AttemptFailedCountThreshold2 = 300
 
 func UserAuthAttempt(
 	userAuth *string,
@@ -76,9 +78,20 @@ func UserAuthAttempt(
 			}
 			return failedCount < AttemptFailedCountThreshold
 		}
+		passesThreshold2 := func(attempts []UserAuthAttemptResult) bool {
+			failedCount := 0
+			for i := 0; i < len(attempts); i += 1 {
+				if !attempts[i].success {
+					failedCount += 1
+				}
+			}
+			return failedCount < AttemptFailedCountThreshold2
+		}
 
 		if userAuth != nil {
 			// lookback by user auth and client ip hash
+			// then if that passes, lookback by user auth
+
 			var attempts []UserAuthAttemptResult
 			result, err := tx.Query(
 				session.Ctx,
@@ -104,6 +117,32 @@ func UserAuthAttempt(
 				attempts = parseAttempts(result)
 			})
 			if !passesThreshold(attempts) {
+				return
+			}
+
+			var attempts2 []UserAuthAttemptResult
+			result, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT 
+						attempt_time,
+						success
+					FROM user_auth_attempt
+					WHERE 
+						user_auth = $1 AND
+						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
+						success = false
+					ORDER BY attempt_time DESC
+					LIMIT $3
+				`,
+				userAuth,
+				AttemptLookback2/time.Second,
+				AttemptFailedCountThreshold2,
+			)
+			server.WithPgResult(result, err, func() {
+				attempts = parseAttempts(result)
+			})
+			if !passesThreshold2(attempts) {
 				return
 			}
 		} else {
