@@ -87,7 +87,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/streamingfast/logging v0.0.0-20251216203033-fdad0a00f1ca // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
-	github.com/things-go/go-socks5 v0.1.0 // indirect
+	github.com/things-go/go-socks5 v0.1.1 // indirect
 	github.com/urnetwork/userwireguard v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
@@ -99,7 +99,7 @@ require (
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10 // indirect
-	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
+	gvisor.dev/gvisor v0.0.0-20260501174236-38fac1bddd3c // indirect
 )
 
 require (
