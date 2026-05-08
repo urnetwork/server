@@ -15,7 +15,7 @@ func maxUserAuthAttemptsError() error {
 	return errors.New("503 User auth attempts exceeded limits.")
 }
 
-const AttemptLookback = 5 * time.Minute
+const AttemptLookback = 1 * time.Minute
 const AttemptFailedCountThreshold = 10
 
 func UserAuthAttempt(
@@ -78,7 +78,7 @@ func UserAuthAttempt(
 		}
 
 		if userAuth != nil {
-			// lookback by user auth
+			// lookback by user auth and client ip hash
 			var attempts []UserAuthAttemptResult
 			result, err := tx.Query(
 				session.Ctx,
@@ -89,12 +89,14 @@ func UserAuthAttempt(
 					FROM user_auth_attempt
 					WHERE 
 						user_auth = $1 AND
-						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
+						client_address_hash = $2 AND
+						now() - INTERVAL '1 seconds' * $3 <= attempt_time AND
 						success = false
 					ORDER BY attempt_time DESC
 					LIMIT $3
 				`,
 				userAuth,
+				clientAddressHash[:],
 				AttemptLookback/time.Second,
 				AttemptFailedCountThreshold,
 			)
@@ -104,32 +106,32 @@ func UserAuthAttempt(
 			if !passesThreshold(attempts) {
 				return
 			}
-		}
-
-		var attempts []UserAuthAttemptResult
-		result, err := tx.Query(
-			session.Ctx,
-			`
-				SELECT 
-					attempt_time,
-					success
-				FROM user_auth_attempt
-				WHERE 
-					client_address_hash = $1 AND
-					now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
-					success = false
-				ORDER BY attempt_time DESC
-				LIMIT $3
-			`,
-			clientAddressHash[:],
-			AttemptLookback/time.Second,
-			AttemptFailedCountThreshold,
-		)
-		server.WithPgResult(result, err, func() {
-			attempts = parseAttempts(result)
-		})
-		if !passesThreshold(attempts) {
-			return
+		} else {
+			var attempts []UserAuthAttemptResult
+			result, err := tx.Query(
+				session.Ctx,
+				`
+					SELECT 
+						attempt_time,
+						success
+					FROM user_auth_attempt
+					WHERE 
+						client_address_hash = $1 AND
+						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
+						success = false
+					ORDER BY attempt_time DESC
+					LIMIT $3
+				`,
+				clientAddressHash[:],
+				AttemptLookback/time.Second,
+				AttemptFailedCountThreshold,
+			)
+			server.WithPgResult(result, err, func() {
+				attempts = parseAttempts(result)
+			})
+			if !passesThreshold(attempts) {
+				return
+			}
 		}
 
 		allow = true
