@@ -106,7 +106,7 @@ func UserAuthAttempt(
 						now() - INTERVAL '1 seconds' * $3 <= attempt_time AND
 						success = false
 					ORDER BY attempt_time DESC
-					LIMIT $3
+					LIMIT $4
 				`,
 				userAuth,
 				clientAddressHash[:],
