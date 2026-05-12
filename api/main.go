@@ -55,18 +55,13 @@ Options:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// drain on sigterm
+	// drain on sigterm: cancel ctx, which triggers graceful http shutdown
+	// (stops accepting new conns and waits up to DrainTimeout for in-flight)
 	go server.HandleError(func() {
 		defer cancel()
 		select {
 		case <-ctx.Done():
-			return
 		case <-quitEvent.Ctx.Done():
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(DrainTimeout):
-			}
 		}
 	})
 
@@ -234,9 +229,10 @@ Options:
 	reusePort := false
 
 	httpServerOptions := server.HttpServerOptions{
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  5 * time.Minute,
+		ReadTimeout:     15 * time.Second,
+		WriteTimeout:    30 * time.Second,
+		IdleTimeout:     5 * time.Minute,
+		ShutdownTimeout: DrainTimeout,
 	}
 
 	err = server.HttpListenAndServeWithReusePort(

@@ -221,6 +221,7 @@ func wrapWithInput[T any, R any](
 	if err != nil {
 		glog.Infof("[h]request read error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	glog.V(2).Infof("[h]request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))

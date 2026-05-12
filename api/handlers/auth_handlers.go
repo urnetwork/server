@@ -69,8 +69,8 @@ func AuthConnect(w http.ResponseWriter, r *http.Request) {
 
 func AppleNotification(w http.ResponseWriter, r *http.Request) {
 
-	bodyBytes, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		glog.Errorf("[apple] Failed to read request body: %v", err)
 		http.Error(w, "Could not read notification", http.StatusInternalServerError)

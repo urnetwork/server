@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	// "errors"
-	"errors"
+	// "errors"
 	"fmt"
 	"io"
 	"net"
@@ -377,9 +377,10 @@ func (self *HttpStatusError) Error() string {
 }
 
 type HttpServerOptions struct {
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	IdleTimeout  time.Duration
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	IdleTimeout     time.Duration
+	ShutdownTimeout time.Duration
 }
 
 func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions) error {
@@ -418,13 +419,18 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 
 	select {
 	case <-cancelCtx.Done():
-		return errors.New("Done.")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpServerOptions.ShutdownTimeout)
+		defer shutdownCancel()
+		return server.Shutdown(shutdownCtx)
 	case err := <-errs:
 		return err
 	}
 }
 
 func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	listenConfig := net.ListenConfig{}
 	if reusePort {
 		listenConfig.Control = SoReusePort
@@ -445,5 +451,23 @@ func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handle
 		IdleTimeout:  httpServerOptions.IdleTimeout,
 	}
 
-	return server.ServeTLS(listener, "", "")
+	errs := make(chan error)
+
+	go func() {
+		defer cancel()
+		err := server.ServeTLS(listener, "", "")
+		select {
+		case errs <- err:
+		case <-cancelCtx.Done():
+		}
+	}()
+
+	select {
+	case <-cancelCtx.Done():
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpServerOptions.ShutdownTimeout)
+		defer shutdownCancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-errs:
+		return err
+	}
 }
