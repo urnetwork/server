@@ -48,6 +48,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyConnectTimeout:      30 * time.Minute,
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
+		MaxRequestBytes:          32 * model.Kib,
 	}
 }
 
@@ -59,6 +60,7 @@ type ProxySettings struct {
 	ProxyConnectTimeout      time.Duration
 	NotificationTimeout      time.Duration
 	WarmupTimeout            time.Duration
+	MaxRequestBytes          model.ByteCount
 }
 
 func main() {

@@ -128,7 +128,12 @@ func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 	var warmupRequest WarmupRequest
 
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, self.settings.MaxRequestBytes)
 	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	if 0 < len(bodyBytes) {
 		err = json.Unmarshal(bodyBytes, &warmupRequest)

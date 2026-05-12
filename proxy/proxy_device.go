@@ -83,9 +83,7 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
 
-				glog.Infof("[pd]cancel")
-				// note we don't call close here because only the sender should call close
-				pd.Cancel()
+				pd.Close()
 				if pdState, ok := self.proxyDevices[proxyId]; ok {
 					func() {
 						pdState.StateLock.Lock()
@@ -348,10 +346,10 @@ func (self *ProxyDevice) WaitForReady(ctx context.Context, timeout time.Duration
 	readyCtx, readyCancel := context.WithCancel(self.ctx)
 	defer readyCancel()
 	go server.HandleError(func() {
-		defer readyCancel()
 		select {
-		case <-self.ctx.Done():
+		case <-readyCtx.Done():
 		case <-ctx.Done():
+			readyCancel()
 		}
 	})
 
