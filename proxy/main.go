@@ -45,6 +45,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyWriteTimeout:        30 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
+		ProxyConnectTimeout:      30 * time.Minute,
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 	}
@@ -55,6 +56,7 @@ type ProxySettings struct {
 	ProxyWriteTimeout        time.Duration
 	ProxyIdleTimeout         time.Duration
 	ProxyTlsHandshakeTimeout time.Duration
+	ProxyConnectTimeout      time.Duration
 	NotificationTimeout      time.Duration
 	WarmupTimeout            time.Duration
 }
@@ -411,6 +413,7 @@ func (self *httpServer) run() {
 	httpProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
 	httpProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 	httpProxy.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
+	httpProxy.ProxyConnectTimeout = self.settings.ProxyConnectTimeout
 	httpProxy.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
 	// httpProxy.AllowHTTP2 = true
 	// httpProxy.Tr = &http.Transport{

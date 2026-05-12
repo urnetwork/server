@@ -35,7 +35,7 @@ type ProxyDeviceManager struct {
 	networkSpace *sdk.NetworkSpace
 
 	stateLock    sync.Mutex
-	proxyDevices map[server.Id]*ProxyDevice
+	proxyDevices map[server.Id]*proxyDeviceState
 }
 
 func NewProxyDeviceManagerWithDefaults(ctx context.Context) *ProxyDeviceManager {
@@ -62,14 +62,11 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		cancel:       cancel,
 		settings:     settings,
 		networkSpace: networkSpace,
-		proxyDevices: map[server.Id]*ProxyDevice{},
+		proxyDevices: map[server.Id]*proxyDeviceState{},
 	}
 }
 
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	nextProxyDevice := func() (*ProxyDevice, error) {
 		proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
 		if proxyDeviceConfig == nil {
@@ -85,18 +82,25 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			defer func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
+
 				glog.Infof("[pd]cancel")
 				// note we don't call close here because only the sender should call close
 				pd.Cancel()
-				if currentPd := self.proxyDevices[proxyId]; pd == currentPd {
-					delete(self.proxyDevices, proxyId)
+				if pdState, ok := self.proxyDevices[proxyId]; ok {
+					func() {
+						pdState.StateLock.Lock()
+						defer pdState.StateLock.Unlock()
+
+						if pd == pdState.ProxyDevice {
+							delete(self.proxyDevices, proxyId)
+						}
+					}()
 				}
 			}()
 			pd.Run()
 		})
 
 		go server.HandleError(func() {
-			defer self.cancel()
 			for {
 				if pd.CancelIfIdle() {
 					return
@@ -113,8 +117,27 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		return pd, nil
 	}
 
-	if pd, ok := self.proxyDevices[proxyId]; ok && pd.UpdateActivity() {
-		return pd, nil
+	pdState := func() *proxyDeviceState {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		pdState, ok := self.proxyDevices[proxyId]
+		if !ok {
+			pdState = &proxyDeviceState{}
+			self.proxyDevices[proxyId] = pdState
+		}
+		return pdState
+	}()
+
+	pdState.StateLock.Lock()
+	defer pdState.StateLock.Unlock()
+
+	if pd := pdState.ProxyDevice; pd != nil {
+		if pd.UpdateActivity() {
+			return pd, nil
+		} else {
+			pd.Cancel()
+			pdState.ProxyDevice = nil
+		}
 	}
 
 	pd, err := nextProxyDevice()
@@ -122,11 +145,7 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		return nil, err
 	}
 
-	if replacedPd, ok := self.proxyDevices[proxyId]; ok {
-		replacedPd.Cancel()
-	}
-	self.proxyDevices[proxyId] = pd
-
+	pdState.ProxyDevice = pd
 	return pd, nil
 }
 
@@ -137,6 +156,11 @@ func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) 
 
 func (self *ProxyDeviceManager) Close() {
 	self.cancel()
+}
+
+type proxyDeviceState struct {
+	StateLock   sync.Mutex
+	ProxyDevice *ProxyDevice
 }
 
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
