@@ -446,7 +446,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					case residentTransport.send <- message:
 						glog.V(2).Infof("[rtr] <-%s\n", clientId)
-						// case <-time.After(self.settings.ReadTimeout):
+					case <-time.After(self.settings.ReadTimeout):
+						connect.MessagePoolReturn(message)
 					}
 					// else ignore
 				}

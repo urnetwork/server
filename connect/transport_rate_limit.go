@@ -156,9 +156,9 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")
+			return
 		case <-time.After(delay):
 		}
-		return
 		err = fmt.Errorf("Total connection count exceeded.")
 		return
 	}
@@ -170,8 +170,10 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")
+			return
 		case <-time.After(delay):
 		}
+		err = fmt.Errorf("Burst connection count exceeded.")
 		return
 	}
 

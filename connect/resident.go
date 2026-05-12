@@ -1701,94 +1701,96 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
 
 	initForward := func() *ResidentForward {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-
-		nextForward := func() *ResidentForward {
-			if self.exchange.settings.ForwardEnforceActiveContracts {
-				// if !isAck(transferFrameBytes) {
-				hasActiveContract := self.residentContractManager.HasActiveContract(sourceId, destinationId)
-				if !hasActiveContract {
-					glog.V(1).Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
-					// there is no active contract
-					// drop
-					self.abuseLimiter.delay()
-					return nil
-				}
-				// }
+		// Fast path: reuse a live existing forward without doing any slow work.
+		if existing := func() *ResidentForward {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if f := self.forwards[destinationId]; f != nil && f.UpdateActivity() {
+				return f
 			}
-
-			forward := NewResidentForward(self.ctx, self.exchange, destinationId)
-			go server.HandleError(func() {
-				defer func() {
-					self.stateLock.Lock()
-					defer self.stateLock.Unlock()
-					// note we don't call close here because only the sender should call close
-					forward.Cancel()
-					if currentForward := self.forwards[destinationId]; forward == currentForward {
-						delete(self.forwards, destinationId)
-					}
-				}()
-				forward.Run()
-
-				glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
-			})
-			go server.HandleError(func() {
-				defer forward.Cancel()
-				for {
-					if forward.CancelIfIdle() {
-						glog.V(1).Infof("[rf]idle %s->%s\n", sourceId, destinationId)
-						return
-					}
-
-					select {
-					case <-forward.Done():
-						return
-					case <-time.After(self.exchange.settings.ForwardIdleTimeout):
-					}
-				}
-			})
-
-			return forward
+			return nil
+		}(); existing != nil {
+			return existing
 		}
 
-		limit := false
-		var forward *ResidentForward
-		// func() {
-		// 	self.stateLock.Lock()
-		// 	defer self.stateLock.Unlock()
-		var ok bool
-		forward, ok = self.forwards[destinationId]
-		if !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards) {
-			limit = true
-		}
-		// }()
-
-		if forward == nil && limit {
+		// Check the per-resident forward limit (snapshot; the limit can be
+		// momentarily exceeded by one if multiple goroutines race past this
+		// point, which is acceptable).
+		limit := func() bool {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			_, ok := self.forwards[destinationId]
+			return !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards)
+		}()
+		if limit {
 			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
 			self.abuseLimiter.delay()
 			return nil
 		}
 
-		if forward == nil || !forward.UpdateActivity() {
-			forward = nextForward()
-
-			if forward != nil {
-				var replacedForward *ResidentForward
-				// func() {
-				// 	self.stateLock.Lock()
-				// 	defer self.stateLock.Unlock()
-				replacedForward = self.forwards[destinationId]
-				self.forwards[destinationId] = forward
-				// }()
-				if replacedForward != nil {
-					replacedForward.Cancel()
-				}
-				glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
-
+		// Slow path: contract check may hit the DB. Do it without holding
+		// Resident.stateLock so concurrent forwards do not serialize on it.
+		if self.exchange.settings.ForwardEnforceActiveContracts {
+			if !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
+				glog.V(1).Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
+				self.abuseLimiter.delay()
+				return nil
 			}
 		}
 
+		// Build a new forward. No lock needed.
+		forward := NewResidentForward(self.ctx, self.exchange, destinationId)
+		go server.HandleError(func() {
+			defer func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				// note we don't call close here because only the sender should call close
+				forward.Cancel()
+				if currentForward := self.forwards[destinationId]; forward == currentForward {
+					delete(self.forwards, destinationId)
+				}
+			}()
+			forward.Run()
+
+			glog.V(1).Infof("[rf]close %s->%s\n", sourceId, destinationId)
+		})
+		go server.HandleError(func() {
+			for {
+				if forward.CancelIfIdle() {
+					glog.V(1).Infof("[rf]idle %s->%s\n", sourceId, destinationId)
+					return
+				}
+
+				select {
+				case <-forward.Done():
+					return
+				case <-time.After(self.exchange.settings.ForwardIdleTimeout):
+				}
+			}
+		})
+
+		// Install. Another goroutine may have raced ahead with a live forward
+		// while we were doing the contract check; if so, yield to it.
+		var replacedForward *ResidentForward
+		var raceWinner *ResidentForward
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if existing := self.forwards[destinationId]; existing != nil && existing.UpdateActivity() {
+				raceWinner = existing
+				return
+			}
+			replacedForward = self.forwards[destinationId]
+			self.forwards[destinationId] = forward
+		}()
+		if raceWinner != nil {
+			forward.Cancel()
+			return raceWinner
+		}
+		if replacedForward != nil {
+			replacedForward.Cancel()
+		}
+		glog.V(1).Infof("[rf]open %s->%s\n", sourceId, destinationId)
 		return forward
 	}
 

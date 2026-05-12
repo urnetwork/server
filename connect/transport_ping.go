@@ -29,6 +29,9 @@ func NewPingTracker(n int) *PingTracker {
 }
 
 func (self *PingTracker) Receive() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
 	self.latestReceiveTime = time.Now()
 }
 
