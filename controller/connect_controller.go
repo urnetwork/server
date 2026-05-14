@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"time"
@@ -74,6 +72,7 @@ func ConnectControl(
 		clientSession.Ctx,
 		*clientSession.ByJwt.ClientId,
 		pack.Frames,
+		connect.DefaultContractManagerSettings(),
 	)
 
 	resultPack := &protocol.Pack{
@@ -99,6 +98,7 @@ func ConnectControlFrames(
 	ctx context.Context,
 	clientId server.Id,
 	frames []*protocol.Frame,
+	contractManagerSettings *connect.ContractManagerSettings,
 ) ([]*protocol.Frame, error) {
 	netOutFrames := []*protocol.Frame{}
 
@@ -113,7 +113,7 @@ func ConnectControlFrames(
 
 		switch v := message.(type) {
 		case *protocol.CreateContract:
-			outFrames, err = CreateContract(ctx, clientId, v)
+			outFrames, err = CreateContract(ctx, clientId, v, contractManagerSettings)
 		case *protocol.CloseContract:
 			err = CloseContract(ctx, clientId, v)
 		case *protocol.Provide:
@@ -162,6 +162,7 @@ func CreateContract(
 	ctx context.Context,
 	clientId server.Id,
 	createContract *protocol.CreateContract,
+	contractManagerSettings *connect.ContractManagerSettings,
 ) ([]*protocol.Frame, error) {
 	// server.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
 
@@ -237,8 +238,7 @@ func CreateContract(
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
 
-	mac := hmac.New(sha256.New, provideSecretKey)
-	storedContractHmac := mac.Sum(storedContractBytes)
+	storedContractHmac := connect.SignStoredContract(contractManagerSettings, provideSecretKey, storedContractBytes)
 
 	result := &protocol.CreateContractResult{
 		Contract: &protocol.Contract{

@@ -205,9 +205,10 @@ Options:
 	reusePort := false
 
 	httpServerOptions := server.HttpServerOptions{
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  5 * time.Minute,
+		ReadTimeout:     15 * time.Second,
+		WriteTimeout:    30 * time.Second,
+		IdleTimeout:     5 * time.Minute,
+		ShutdownTimeout: 30 * time.Second,
 	}
 
 	err = server.HttpListenAndServeWithReusePort(

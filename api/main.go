@@ -26,8 +26,6 @@ import (
 	"github.com/urnetwork/server/router"
 )
 
-const DrainTimeout = 60 * time.Second
-
 func main() {
 	usage := `BringYour API server.
 
@@ -232,7 +230,7 @@ Options:
 		ReadTimeout:     15 * time.Second,
 		WriteTimeout:    30 * time.Second,
 		IdleTimeout:     5 * time.Minute,
-		ShutdownTimeout: DrainTimeout,
+		ShutdownTimeout: 30 * time.Second,
 	}
 
 	err = server.HttpListenAndServeWithReusePort(
