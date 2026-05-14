@@ -20,11 +20,13 @@ import (
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 	return &ProxyDeviceManagerSettings{
 		CheckProxyDeviceIdleTimeout: 1 * time.Minute,
+		SequenceBufferSize:          2048,
 	}
 }
 
 type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
+	SequenceBufferSize          int
 }
 
 type ProxyDeviceManager struct {
@@ -73,7 +75,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			return nil, fmt.Errorf("Proxy device does not exist.")
 		}
 
-		pd, err := NewProxyDeviceWithDefaults(self.ctx, proxyDeviceConfig, self.networkSpace)
+		settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
+		pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, self.networkSpace, settings)
 		if err != nil {
 			return nil, err
 		}
@@ -162,11 +165,16 @@ type proxyDeviceState struct {
 }
 
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
+	return DefaultProxyDeviceSettingsWithBufferSize(32)
+}
+
+func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettings {
 	return &ProxyDeviceSettings{
 		ProxyDeviceDescription: "resident proxy",
 		ProxyDeviceSpec:        "resident proxy",
 		Mtu:                    1440,
 		ProxyDeviceIdleTimeout: 90 * time.Minute,
+		SequenceBufferSize:     bufferSize,
 	}
 }
 
@@ -177,6 +185,7 @@ type ProxyDeviceSettings struct {
 	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	Mtu                            int
 	ProxyDeviceIdleTimeout         time.Duration
+	SequenceBufferSize             int
 }
 
 type ProxyDevice struct {
@@ -248,7 +257,7 @@ func NewProxyDevice(
 		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
-	tunSettings := proxy.DefaultTunSettings()
+	tunSettings := proxy.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
 
 	tun, err := proxy.CreateTunWithResolver(
@@ -436,9 +445,9 @@ func (self *ProxyDevice) Cancel() {
 	self.cancel()
 }
 
-func (self *ProxyDevice) Close() {
+func (self *ProxyDevice) Close() error {
 	self.cancel()
 
 	self.deviceLocal.Close()
-	self.tun.Close()
+	return self.tun.Close()
 }

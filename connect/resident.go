@@ -68,7 +68,7 @@ var ControlId = server.Id(connect.ControlId)
 // the client can suffer from head of queue blocking when the forwards/clients are changing rates
 // (flow control in the application protocol level should establish a steady rate)
 // a larger exchange buffer size helps mitigate this
-const DefaultExchangeBufferSize = 1024
+const defaultExchangeBufferSize = 2048
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
@@ -123,12 +123,16 @@ type ExchangeChaosSettings struct {
 }
 
 func DefaultExchangeSettings() *ExchangeSettings {
+	return DefaultExchangeSettingsWithBufferSize(defaultExchangeBufferSize)
+}
+
+func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 	connectionHandlerSettings := DefaultConnectHandlerSettings()
 	exchangeResidentWaitTimeout := 30 * time.Second
 	return &ExchangeSettings{
 		ConnectHandlerSettings: *connectionHandlerSettings,
 
-		ExchangeBufferSize: DefaultExchangeBufferSize,
+		ExchangeBufferSize: bufferSize,
 
 		// 64kib minimum contract
 		// this is set high enough to limit the number of parallel contracts and avoid contract spam
@@ -1491,7 +1495,7 @@ func NewResident(
 
 	// use a tag with the client so that the logging does not show up as the control id
 	clientTag := fmt.Sprintf("c(%s)", clientId.String())
-	clientSettings := connect.DefaultClientSettings()
+	clientSettings := connect.DefaultClientSettingsWithBufferSize(exchange.settings.ExchangeBufferSize)
 	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, connect.NewNoContractClientOob(), clientSettings)
 
 	// no contract is required between the platform and client
