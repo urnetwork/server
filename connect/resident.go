@@ -111,6 +111,10 @@ type ExchangeSettings struct {
 
 	StreamPollTimeout time.Duration
 
+	// passed to controller.ConnectControlFrames so SignStoredContract uses
+	// the right HMAC-cutover network event time for this exchange.
+	ContractManagerSettings *connect.ContractManagerSettings
+
 	ExchangeChaosSettings
 }
 
@@ -161,6 +165,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		ContractManagerCheckTimeout: 5 * time.Second,
 
 		StreamPollTimeout: 60 * time.Second,
+
+		ContractManagerSettings: connect.DefaultContractManagerSettings(),
 
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}

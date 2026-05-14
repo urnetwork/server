@@ -54,6 +54,7 @@ func (self *residentController) HandleControlFrames(frames []*protocol.Frame) er
 		self.ctx,
 		self.clientId,
 		frames,
+		self.settings.ContractManagerSettings,
 	)
 	if err != nil {
 		return err

@@ -585,7 +585,7 @@ func testConnect(
 	standardContractTransferByteCount := 4 * maxMessageContentSize
 	if config.forceStream {
 		// signal exchanges need at least 16k, and the contract is half filled
-		standardContractTransferByteCount = max(standardContractTransferByteCount, 32*1024)
+		standardContractTransferByteCount = max(standardContractTransferByteCount, 64*1024)
 	}
 	standardContractFillFraction := float32(0.5)
 
@@ -611,7 +611,7 @@ func testConnect(
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
-	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA), clientSettingsA)
+	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA, clientSettingsA.ContractManagerSettings), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
@@ -636,7 +636,7 @@ func testConnect(
 	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
-	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB), clientSettingsB)
+	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB, clientSettingsB.ContractManagerSettings), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
@@ -858,6 +858,12 @@ func testConnect(
 		provideModes := map[protocol.ProvideMode]bool{
 			protocol.ProvideMode_Network: true,
 			protocol.ProvideMode_Public:  true,
+		}
+		if config.forceStream {
+			// passive peers in the WebRTC handshake send signals via
+			// companion contracts (verified as ProvideMode_Stream), so
+			// both sides need Stream provide enabled.
+			provideModes[protocol.ProvideMode_Stream] = true
 		}
 
 		func() {
@@ -1552,20 +1558,26 @@ func printAllStacks() {
 }
 
 type controllerOutOfBandControl struct {
-	ctx      context.Context
-	clientId server.Id
+	ctx                     context.Context
+	clientId                server.Id
+	contractManagerSettings *connect.ContractManagerSettings
 }
 
-func Testing_NewControllerOutOfBandControl(ctx context.Context, clientId server.Id) connect.OutOfBandControl {
+func Testing_NewControllerOutOfBandControl(
+	ctx context.Context,
+	clientId server.Id,
+	contractManagerSettings *connect.ContractManagerSettings,
+) connect.OutOfBandControl {
 	return &controllerOutOfBandControl{
-		ctx:      ctx,
-		clientId: clientId,
+		ctx:                     ctx,
+		clientId:                clientId,
+		contractManagerSettings: contractManagerSettings,
 	}
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
 	go server.HandleError(func() {
-		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames)
+		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
 		callback(resultFrames, err)
 	})
 }

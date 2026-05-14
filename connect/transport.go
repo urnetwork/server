@@ -429,10 +429,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.MessagePoolReturn(message)
 						continue
 					}
+					// during a speed test, count all incoming bytes (both
+					// the client's echoed chunks and any user traffic the
+					// client is concurrently sending) toward the throughput
+					// total. user traffic continues to flow rather than being
+					// dropped — speed test runs in parallel.
 					if speedTest != nil {
 						speedTest.TotalByteCount += model.ByteCount(len(message))
-						connect.MessagePoolReturn(message)
-						continue
 					}
 
 					pingTracker.Receive()
@@ -474,7 +477,67 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 
+			// speed test state: when non-zero, the writer is driving a speed
+			// test and should interleave chunk writes with user traffic so
+			// user packets aren't blocked. mirrors the client-side behavior.
+			var speedTestId uint32
+			speedTestChunksRemaining := 0
+			chunk := make([]byte, 1024)
+
 			for {
+				if 0 < speedTestChunksRemaining {
+					// drive the speed test in parallel with user traffic.
+					// each iteration writes exactly one chunk (guaranteed
+					// forward progress on the test even under heavy user
+					// traffic), then opportunistically drains any pending
+					// user messages before returning to the top.
+					select {
+					case <-handleCtx.Done():
+						return
+					case <-residentTransport.Done():
+						return
+					default:
+					}
+					mathrand.Read(chunk)
+					chunkCopy := connect.MessagePoolCopy(chunk)
+					if write(chunkCopy) != nil {
+						return
+					}
+					speedTestChunksRemaining -= 1
+					if speedTestChunksRemaining == 0 {
+						stopMessage := connect.MessagePoolGet(5)
+						stopMessage[0] = connect.TransportControlSpeedStop
+						binary.BigEndian.PutUint32(stopMessage[1:5], speedTestId)
+						if write(stopMessage) != nil {
+							return
+						}
+					}
+					// non-blocking drain of user traffic so it flows alongside
+					// the chunks without starving chunk progress
+				drainUser:
+					for {
+						select {
+						case <-handleCtx.Done():
+							return
+						case <-residentTransport.Done():
+							return
+						case message, ok := <-residentTransport.receive:
+							if !ok {
+								return
+							}
+							if len(message) <= 16 {
+								glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+								connect.MessagePoolReturn(message)
+							} else if write(message) != nil {
+								return
+							}
+						default:
+							break drainUser
+						}
+					}
+					continue
+				}
+
 				select {
 				case <-handleCtx.Done():
 					return
@@ -487,6 +550,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					if len(message) <= 16 {
 						glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+						connect.MessagePoolReturn(message)
 					} else if write(message) != nil {
 						return
 					}
@@ -519,29 +583,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						announce.SendMessage(model.ByteCount(len(message)))
 					}
 				case speedTest := <-announce.PendingSpeedTest:
-					// client should echo control values and packets in speed test mode
+					// client should echo control values and packets in speed test mode.
+					// after starting, the writer interleaves chunk writes with
+					// user traffic above so user packets aren't blocked. on the
+					// reader side, all bytes received during the test (chunks +
+					// user) count toward the throughput total.
 
 					if announce.SendSpeed(speedTest) {
-						controlMessage := make([]byte, 5)
-						binary.BigEndian.PutUint32(controlMessage[1:5], speedTest.TestId)
-						controlMessage[0] = connect.TransportControlSpeedStart
-						if write(controlMessage) != nil {
+						startMessage := connect.MessagePoolGet(5)
+						startMessage[0] = connect.TransportControlSpeedStart
+						binary.BigEndian.PutUint32(startMessage[1:5], speedTest.TestId)
+						if write(startMessage) != nil {
 							return
 						}
-						// read data size amount of speed test and time limit of speed test
-						chunk := make([]byte, 1024)
-						for range (speedTest.TotalByteCount + model.ByteCount(len(chunk)-1)) / model.ByteCount(len(chunk)) {
-							mathrand.Read(chunk)
-							if write(chunk) != nil {
-								return
-							}
-						}
-						controlMessage[0] = connect.TransportControlSpeedStop
-						if write(controlMessage) != nil {
-							return
-						}
+						speedTestId = speedTest.TestId
+						speedTestChunksRemaining = int((speedTest.TotalByteCount + model.ByteCount(len(chunk)-1)) / model.ByteCount(len(chunk)))
 					}
-
 				}
 			}
 		})
