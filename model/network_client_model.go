@@ -1190,23 +1190,28 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 
 	}, server.TxReadCommitted)
 
-	// FIXME perf only do this when the client can recover correctly
-	// remove network clients without a connection
-	// important: the app will need to create a new client id for these clients when it notices the existing jwt fails
-	// server.RaisePgResult(tx.Exec(
-	// 	ctx,
-	// 	`
-	// 	DELETE FROM network_client
-	// 	USING (
-	// 		SELECT network_client.client_id
-	// 		FROM network_client
-	// 	    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
-	// 		WHERE network_client.create_time < $1 AND network_client_connection.client_id IS NULL
-	// 	) t
-	// 	WHERE network_client.client_id = t.client_id
-	// 	`,
-	// 	minTime.UTC(),
-	// ))
+	// remove network clients with a parent and without a connection
+	// important: to delete clients without a source id (top level clients),
+	//            the app will need to create a new client id for these clients when it notices the existing jwt fails
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM network_client
+			USING (
+				SELECT network_client.client_id
+				FROM network_client
+			    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
+				WHERE
+					network_client.create_time < $1
+					AND network_client.source_client_id IS NOT NULL
+					AND network_client_connection.client_id IS NULL
+			) t
+			WHERE network_client.client_id = t.client_id
+			`,
+			minTime.UTC(),
+		))
+	})
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 

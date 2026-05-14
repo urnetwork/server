@@ -1336,7 +1336,7 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 					NOT active OR
 					end_time < $1
 			`,
-			minTime,
+			minTime.UTC(),
 		)
 		authCodeIds := []server.Id{}
 		server.WithPgResult(result, err, func() {
@@ -1370,6 +1370,25 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 			USING temp_auth_code_id
 			WHERE auth_code_session.auth_code_id = temp_auth_code_id.auth_code_id
 			`,
+		)
+	})
+
+	return
+}
+
+func RemoveExpiredVerifyCodes(ctx context.Context, minTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		verifyMinTime := server.NowUtc().Add(-VerifyCodeTimeout)
+		tx.Exec(
+			ctx,
+			`
+			DELETE FROM user_auth_verify
+			WHERE
+				used = true AND verify_time < $1
+				OR verify_time < $2
+			`,
+			minTime.UTC(),
+			verifyMinTime.UTC(),
 		)
 	})
 

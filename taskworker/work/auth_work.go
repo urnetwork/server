@@ -34,8 +34,10 @@ func RemoveExpiredAuthCodes(
 	removeExpiredAuthCodes *RemoveExpiredAuthCodesArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredAuthCodesResult, error) {
-	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, server.NowUtc())
+	minTime := server.NowUtc().Add(-24 * time.Hour)
+	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, minTime)
 	glog.Infof("[authw]removed %d auth codes.\n", authCodeCount)
+	model.RemoverExpiredVerifyCodes(clientSession.Ctx, minTime)
 	return &RemoveExpiredAuthCodesResult{}, nil
 }
 

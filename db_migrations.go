@@ -2775,4 +2775,9 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX account_api_key_network_id ON account_api_key (network_id, api_key_id)
     `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
+        ON transfer_contract (open, payer_network_id, transfer_byte_count)
+    `),
 }
