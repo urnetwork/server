@@ -37,7 +37,7 @@ func RemoveExpiredAuthCodes(
 	minTime := server.NowUtc().Add(-24 * time.Hour)
 	authCodeCount := model.RemoveExpiredAuthCodes(clientSession.Ctx, minTime)
 	glog.Infof("[authw]removed %d auth codes.\n", authCodeCount)
-	model.RemoverExpiredVerifyCodes(clientSession.Ctx, minTime)
+	model.RemoveExpiredVerifyCodes(clientSession.Ctx, minTime)
 	return &RemoveExpiredAuthCodesResult{}, nil
 }
 
