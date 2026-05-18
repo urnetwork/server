@@ -68,7 +68,7 @@ var ControlId = server.Id(connect.ControlId)
 // the client can suffer from head of queue blocking when the forwards/clients are changing rates
 // (flow control in the application protocol level should establish a steady rate)
 // a larger exchange buffer size helps mitigate this
-const defaultExchangeBufferSize = 2048
+const defaultExchangeBufferSize = 4096
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
@@ -1816,8 +1816,13 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			return false
 		case forward.send <- transferFrameBytes:
 			return true
-		case <-time.After(self.exchange.settings.WriteTimeout):
-			glog.V(1).Infof("[rf]drop %s->%s", sourceId, destinationId)
+		// case <-time.After(self.exchange.settings.WriteTimeout):
+		// 	glog.V(1).Infof("[rf]drop %s->%s", sourceId, destinationId)
+		// 	return false
+		default:
+			// forwards are non blocking to avoid slower clients blocking the transfer loop
+			// the traffic on the client to client connect should manage its own transfer buffer,
+			// to avoid saturating the connection to the point where it needs buffering
 			return false
 		}
 	}
