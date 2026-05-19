@@ -154,13 +154,13 @@ Options:
 		settings,
 	)
 
-	if server.RequireEnv() != "local" {
-		newWatchdog(
-			ctx,
-			5*time.Second,
-			InternalHttpPort,
-		)
-	}
+	// if server.RequireEnv() != "local" {
+	// 	newWatchdog(
+	// 		ctx,
+	// 		5*time.Second,
+	// 		InternalHttpPort,
+	// 	)
+	// }
 
 	notif := newProxyClientNotification(ctx, settings)
 	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
