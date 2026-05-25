@@ -2780,4 +2780,41 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
         ON transfer_contract (open, payer_network_id, transfer_byte_count)
     `),
+
+	// PEM-encoded X.509 certificate chain the provider commits to as the TLS
+	// server identity for sequence-level TLS sessions. Multiple chain entries
+	// (leaf first, then issuers) are concatenated as standard PEM blocks
+	// inside a single bytea -- they can be re-split with `pem.Decode` in a
+	// loop on read. Null means the provider did not publish a certificate.
+	newSqlMigration(`
+        ALTER TABLE provide_key ADD COLUMN tls_certificate_pem bytea NULL
+    `),
+
+	// The TLS certificate published by a client via `EncryptedKey` is keyed
+	// on `client_id` only — every encryption-enabled client owns exactly one
+	// cert (managed by the local `EncryptionSessionManager`) and it is the
+	// receiver-role TLS identity for every contract whose destination is
+	// this client, regardless of provide mode.
+	//
+	// `tls_certificate_pem` is one or more concatenated PEM blocks (leaf
+	// first, then issuers) — re-split with `pem.Decode` in a loop on read.
+	// Null is impossible by construction (the row is deleted instead when a
+	// client clears its cert).
+	newSqlMigration(`
+        CREATE TABLE client_tls_certificate (
+            client_id uuid NOT NULL,
+            tls_certificate_pem bytea NOT NULL,
+            set_time timestamp NOT NULL,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	// The per-provide-mode tls cert column is superseded by the per-client
+	// `client_tls_certificate` table — clients no longer publish certs in
+	// `Provide` (the cert moved to `EncryptedKey`). Drop the orphaned
+	// column to avoid confusion.
+	newSqlMigration(`
+        ALTER TABLE provide_key DROP COLUMN IF EXISTS tls_certificate_pem
+    `),
 }

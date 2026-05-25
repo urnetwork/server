@@ -850,6 +850,78 @@ func GetProvideSecretKey(
 	return
 }
 
+// GetClientTlsCertificate returns the PEM-encoded X.509 certificate chain
+// the client published via `EncryptedKey`. The returned bytes are one or
+// more concatenated PEM blocks (`-----BEGIN CERTIFICATE-----` ...
+// `-----END CERTIFICATE-----`), leaf first. Returns nil (and no error)
+// when the client has not published a certificate. The cert is keyed on
+// `client_id` only — independent of provide mode.
+func GetClientTlsCertificate(
+	ctx context.Context,
+	clientId server.Id,
+) (tlsCertificatePem []byte, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					tls_certificate_pem
+				FROM client_tls_certificate
+				WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&tlsCertificatePem))
+			}
+		})
+	})
+	return
+}
+
+// SetClientTlsCertificate stores the PEM-encoded X.509 certificate chain
+// (concatenated PEM blocks, leaf first) the client published via
+// `EncryptedKey`. Passing an empty / nil chain clears the stored cert.
+// The platform attaches this chain to every contract whose destination is
+// this client (`CreateContract`) so the sender can verify the cert
+// observed during the per-peer TLS handshake.
+func SetClientTlsCertificate(
+	ctx context.Context,
+	clientId server.Id,
+	tlsCertificatePem []byte,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		if 0 < len(tlsCertificatePem) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_tls_certificate (
+					client_id,
+					tls_certificate_pem,
+					set_time
+				) VALUES ($1, $2, $3)
+				ON CONFLICT (client_id) DO UPDATE
+				SET tls_certificate_pem = EXCLUDED.tls_certificate_pem,
+				    set_time = EXCLUDED.set_time
+				`,
+				clientId,
+				tlsCertificatePem,
+				server.NowUtc(),
+			))
+		} else {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM client_tls_certificate
+				WHERE client_id = $1
+				`,
+				clientId,
+			))
+		}
+	})
+}
+
 func SetProvide(
 	ctx context.Context,
 	clientId server.Id,

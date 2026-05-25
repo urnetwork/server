@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -118,6 +119,8 @@ func ConnectControlFrames(
 			err = CloseContract(ctx, clientId, v)
 		case *protocol.Provide:
 			err = Provide(ctx, clientId, v)
+		case *protocol.EncryptedKey:
+			err = SetEncryptedKey(ctx, clientId, v)
 
 		default:
 			err = fmt.Errorf("Cannot handle oob control message: %T", message)
@@ -209,6 +212,20 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
+	// look up the destination's published TLS certificate chain (if any)
+	// so the sender can verify it during the per-peer TLS handshake. The
+	// certificate is keyed on `client_id` only (independent of provide
+	// mode) — every encryption-enabled client publishes exactly one cert
+	// via `EncryptedKey`, and that cert is the receiver-role identity for
+	// every contract whose destination is this client. A nil chain means
+	// the destination did not publish a cert; senders accept any cert
+	// (skip verification) in that case — see Contract proto.
+	provideTlsCertificatePem, err := model.GetClientTlsCertificate(ctx, destinationId)
+	if err != nil {
+		provideTlsCertificatePem = nil
+	}
+	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
+
 	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
@@ -227,11 +244,12 @@ func CreateContract(
 	}
 
 	storedContract := &protocol.StoredContract{
-		ContractId:        contractId.Bytes(),
-		TransferByteCount: uint64(transferByteCount),
-		SourceId:          clientId.Bytes(),
-		DestinationId:     destinationId.Bytes(),
-		Priority:          &priority,
+		ContractId:            contractId.Bytes(),
+		TransferByteCount:     uint64(transferByteCount),
+		SourceId:              clientId.Bytes(),
+		DestinationId:         destinationId.Bytes(),
+		Priority:              &priority,
+		ProvideTlsCertificate: provideTlsCertificate,
 	}
 	if streamId != nil {
 		storedContract.StreamId = streamId.Bytes()
@@ -242,9 +260,10 @@ func CreateContract(
 
 	result := &protocol.CreateContractResult{
 		Contract: &protocol.Contract{
-			StoredContractBytes: storedContractBytes,
-			StoredContractHmac:  storedContractHmac,
-			ProvideMode:         protocol.ProvideMode(provideMode),
+			StoredContractBytes:   storedContractBytes,
+			StoredContractHmac:    storedContractHmac,
+			ProvideMode:           protocol.ProvideMode(provideMode),
+			ProvideTlsCertificate: provideTlsCertificate,
 		},
 	}
 	streamVersion := 0
@@ -448,11 +467,63 @@ func Provide(
 	for _, provideKey := range provide.Keys {
 		secretKeys[model.ProvideMode(provideKey.Mode)] = provideKey.ProvideSecretKey
 	}
-	// server.Logger().Printf("SET PROVIDE %s %v\n", sourceId.String(), secretKeys)
 	model.SetProvide(ctx, clientId, secretKeys)
-	// server.Logger().Printf("SET PROVIDE COMPLETE %s %v\n", sourceId.String(), secretKeys)
-
 	return nil
+}
+
+// SetEncryptedKey stores the client's published TLS certificate chain so
+// the platform can attach it to every contract whose destination is this
+// client. Certificates are keyed on `client_id` only — a single cert per
+// client regardless of provide mode. An empty chain clears the stored
+// cert (e.g., when a client opts out of publishing).
+func SetEncryptedKey(
+	ctx context.Context,
+	clientId server.Id,
+	encryptedKey *protocol.EncryptedKey,
+) error {
+	tlsCertificatePem := concatenatePemBlocks(encryptedKey.ProvideTlsCertificate)
+	model.SetClientTlsCertificate(ctx, clientId, tlsCertificatePem)
+	return nil
+}
+
+// concatenatePemBlocks joins each PEM block in the wire-level chain into one
+// byte slice. PEM is designed to be concatenable: tools like x509.ParseCertificate
+// loop on `pem.Decode` and re-extract each block in order. Returns nil when
+// no chain is provided.
+func concatenatePemBlocks(chain [][]byte) []byte {
+	if len(chain) == 0 {
+		return nil
+	}
+	total := 0
+	for _, block := range chain {
+		total += len(block)
+	}
+	out := make([]byte, 0, total)
+	for _, block := range chain {
+		out = append(out, block...)
+	}
+	return out
+}
+
+// splitPemBlocks is the inverse of concatenatePemBlocks. Given a concatenated
+// PEM bytes blob, returns the individual blocks (one entry per
+// `-----BEGIN CERTIFICATE-----` ... `-----END CERTIFICATE-----`). Returns nil
+// when the blob is empty or contains no PEM blocks.
+func splitPemBlocks(blob []byte) [][]byte {
+	if len(blob) == 0 {
+		return nil
+	}
+	var out [][]byte
+	rest := blob
+	for len(rest) > 0 {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		out = append(out, pem.EncodeToMemory(block))
+		rest = next
+	}
+	return out
 }
 
 func CloseContract(

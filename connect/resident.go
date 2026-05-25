@@ -21,8 +21,6 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
@@ -2047,17 +2045,17 @@ func (self *limiter) delay() {
 	}
 }
 
-func isAck(transferFrameBytes []byte) bool {
-	var filteredTransferFrameWithFrame protocol.FilteredTransferFrameWithFrame
-	if err := proto.Unmarshal(transferFrameBytes, &filteredTransferFrameWithFrame); err != nil {
-		// bad protobuf
-		return false
-	}
-	if filteredTransferFrameWithFrame.Frame != nil {
-		return filteredTransferFrameWithFrame.Frame.MessageType == protocol.MessageType_TransferAck
-	}
-	if filteredTransferFrameWithFrame.MessageType != nil {
-		return *filteredTransferFrameWithFrame.MessageType == protocol.MessageType_TransferAck
-	}
-	return false
-}
+// func isAck(transferFrameBytes []byte) bool {
+// 	var filteredTransferFrameWithFrame protocol.FilteredTransferFrameWithFrame
+// 	if err := proto.Unmarshal(transferFrameBytes, &filteredTransferFrameWithFrame); err != nil {
+// 		// bad protobuf
+// 		return false
+// 	}
+// 	if filteredTransferFrameWithFrame.Frame != nil {
+// 		return filteredTransferFrameWithFrame.Frame.MessageType == protocol.MessageType_TransferAck
+// 	}
+// 	if filteredTransferFrameWithFrame.MessageType != nil {
+// 		return *filteredTransferFrameWithFrame.MessageType == protocol.MessageType_TransferAck
+// 	}
+// 	return false
+// }

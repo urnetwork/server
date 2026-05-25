@@ -390,6 +390,799 @@ func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
 	})
 }
 
+// -----------------------------------------------------------------------
+// Encrypted-sequence variants.
+//
+// Each of the tests above is mirrored here with `enableEncryption: true`
+// so the SendSequence <-> ReceiveSequence TLS session is exercised
+// end-to-end through the connect server.
+// -----------------------------------------------------------------------
+
+func TestConnectNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoNackEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNackEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:      true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectH1Encrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectH1Encrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectAutoEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectAutoEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeAuto,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectH3Encrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectH3Encrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectDnsEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectDnsEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3Dns,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectDnsPumpEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3DnsPump,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithForceStreamEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				forceStream:           true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithForceStreamEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				forceStream:           true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosH1Encrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosH1Encrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosH3Encrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosH3Encrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack:       true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:      true,
+				enableNack:       true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack:        true,
+				enableNewInstance: true,
+				enableEncryption:  true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:       true,
+				enableNack:        true,
+				enableNewInstance: true,
+				enableEncryption:  true,
+			})
+	})
+}
+
+// -----------------------------------------------------------------------
+// Encrypted-sequence variants with EncryptAllowUnwrappedFallback=true.
+//
+// Same matrix as the Encrypted tests above, but with the sender configured
+// to fall back gracefully if the TLS handshake fails. Under normal test
+// conditions the handshake still completes, so these mirror the strict
+// variants -- they also verify the parallel-handshake codepath in the
+// SendSequence (app packs flow during the handshake instead of being
+// gated on session readiness).
+// -----------------------------------------------------------------------
+
+func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:      true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectH1EncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectH1EncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectAutoEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeAuto,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectH3EncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectH3EncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectDnsEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3Dns,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3DnsPump,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				forceStream:           true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				forceStream:           true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH1,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				transportMode:         connect.TransportModeH3,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack:       true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:      true,
+				enableNack:       true,
+				enableEncryption: true,
+			})
+	})
+}
+
+func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestSymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestAsymmetric,
+			&testConnectConfig{
+				enableChaos:           true,
+				enableTransportReform: true,
+				enableNack:            true,
+				enableNewInstance:     true,
+				enableEncryption:      true,
+			})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableNack:        true,
+				enableNewInstance: true,
+				enableEncryption:  true,
+			})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
+		testConnect(t, contractTestNone,
+			&testConnectConfig{
+				enableChaos:       true,
+				enableNack:        true,
+				enableNewInstance: true,
+				enableEncryption:  true,
+			})
+	})
+}
+
 const (
 	contractTestNone      int = 0
 	contractTestSymmetric     = 1
@@ -404,6 +1197,12 @@ type testConnectConfig struct {
 	enableNewInstance     bool
 	transportMode         connect.TransportMode
 	forceStream           bool
+	// enableEncryption turns on the per-peer encryption session for both
+	// clients. Both sides must have Encrypt=true for the handshake to
+	// complete, so this is set symmetrically. While the handshake is in
+	// progress (cipher nil) traffic flows in plaintext; once the cipher
+	// is established, all traffic is outer-wrapped.
+	enableEncryption bool
 }
 
 // this test that two clients can communicate via the connect server
@@ -611,6 +1410,10 @@ func testConnect(
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
+	if config.enableEncryption {
+		clientSettingsA.EncryptionSettings.Encrypt = true
+		clientSettingsA.EncryptionSettings.HandshakeTimeout = 60 * time.Second
+	}
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA, clientSettingsA.ContractManagerSettings), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
@@ -636,6 +1439,10 @@ func testConnect(
 	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
+	if config.enableEncryption {
+		clientSettingsB.EncryptionSettings.Encrypt = true
+		clientSettingsB.EncryptionSettings.HandshakeTimeout = 60 * time.Second
+	}
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB, clientSettingsB.ContractManagerSettings), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
@@ -682,8 +1489,8 @@ func testConnect(
 		"b",
 	)
 
-	receiveA := make(chan *Message, 1024)
-	receiveB := make(chan *Message, 1024)
+	receiveA := make(chan *Message, 16384)
+	receiveB := make(chan *Message, 16384)
 
 	// printReceive := func(clientName string, frames []*protocol.Frame) {
 	// 	for _, frame := range frames {
