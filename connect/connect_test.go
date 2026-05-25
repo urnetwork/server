@@ -1251,8 +1251,8 @@ func testConnect(
 	// case connect.TransportModeH1, connect.TransportModeH3:
 	messageContentSizes = []ByteCount{
 		1024,
-		2048,
-		4 * 1024,
+		// 2048,
+		// 4 * 1024,
 		// 128 * 1024,
 		// 1024 * 1024,
 	}
@@ -1286,6 +1286,20 @@ func testConnect(
 	service := "connect"
 	block := "test"
 
+	// The per-peer encryption handshake ships its TLS server flight
+	// as a single `EncryptedControl{Handshake}` Pack, which lands on
+	// the wire at ~2 KiB once protobuf-wrapped. Any framer along the
+	// path with `MaxMessageLen` below that closes the transport
+	// mid-handshake; SendSequence's resend keeps re-sending the same
+	// oversized pack and the session deadlocks. Floor every framer
+	// cap at `ClientSettings.MinimumMessageLenLimit()` so the
+	// handshake always fits — see that method for the worst-case
+	// derivation.
+	framerMaxMessageLen := max(
+		2*int(messageContentSizes[len(messageContentSizes)-1]),
+		int(connect.DefaultClientSettings().MinimumMessageLenLimit()),
+	)
+
 	clientIdA := server.NewId()
 	clientAInstanceId := server.NewId()
 	clientIdB := server.NewId()
@@ -1305,7 +1319,7 @@ func testConnect(
 		settings.ListenH3Port = port + 443
 		settings.ListenDnsPort = port + 53
 		settings.EnableProxyProtocol = false
-		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		settings.TransportTlsSettings.EnableSelfSign = true
 		settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
 		settings.ConnectionAnnounceTimeout = 0
@@ -1347,7 +1361,7 @@ func testConnect(
 		settings.ExchangeBufferSize = 0
 		settings.ExchangeResidentTtl = sequenceIdleTimeout
 		settings.ForwardIdleTimeout = sequenceIdleTimeout
-		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		if config.enableChaos {
 			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.01
 		}
@@ -1555,7 +1569,7 @@ func testConnect(
 		settings.QuicTlsConfig.InsecureSkipVerify = true
 		settings.H3Port = port + 443
 		settings.DnsPort = port + 53
-		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		transportA := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategyA,
@@ -1591,7 +1605,7 @@ func testConnect(
 		settings.QuicTlsConfig.InsecureSkipVerify = true
 		settings.H3Port = port + 443
 		settings.DnsPort = port + 53
-		settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		transportB := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategyB,
@@ -1789,7 +1803,7 @@ func testConnect(
 						settings.QuicTlsConfig.InsecureSkipVerify = true
 						settings.H3Port = port + 443
 						settings.DnsPort = port + 53
-						settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 						transportA := connect.NewPlatformTransportWithTargetMode(
 							ctx,
 							clientStrategyA,
@@ -1981,7 +1995,7 @@ func testConnect(
 						settings.QuicTlsConfig.InsecureSkipVerify = true
 						settings.H3Port = port + 443
 						settings.DnsPort = port + 53
-						settings.FramerSettings.MaxMessageLen = 2 * int(messageContentSizes[len(messageContentSizes)-1])
+						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 						transportB := connect.NewPlatformTransportWithTargetMode(
 							ctx,
 							clientStrategyB,

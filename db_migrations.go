@@ -2817,4 +2817,47 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE provide_key DROP COLUMN IF EXISTS tls_certificate_pem
     `),
+
+	// The long-lived public client identity key (Ed25519, 32 bytes)
+	// published by a client via `ClientKey` is keyed on `client_id`. A
+	// single key per client; rotation overwrites the row. The
+	// `/key/<client_id>` API returns this value to anyone (no auth)
+	// so a remote peer can fetch the canonical (ClientId, public key)
+	// binding independently of the contract pipeline that the
+	// platform itself authors. Used by senders to verify both the
+	// destination's published TLS cert chain (signature in
+	// `client_key_signed_tls_certificate` on the cert publish) and
+	// the destination's post-handshake identity proof.
+	newSqlMigration(`
+        CREATE TABLE client_key (
+            client_id uuid NOT NULL,
+            public_key bytea NOT NULL,
+            set_time timestamp NOT NULL,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	// The signature over the published TLS cert chain by the client's
+	// long-lived identity key is stored alongside the cert in
+	// `client_tls_certificate`. It travels back to every contract
+	// destined for this client in
+	// `Contract.destination_client_key_signed_tls_certificate` so the
+	// sender can verify the platform-attached cert chain is the same
+	// chain the destination committed to. Null until the destination
+	// (re)publishes its cert via a client capable of signing.
+	newSqlMigration(`
+        ALTER TABLE client_tls_certificate
+            ADD COLUMN client_key_signed_tls_certificate bytea NULL
+    `),
+
+	// Drop the `client_key` table — long-lived client identity public
+	// keys now live in redis (key `ckey_<clientId>`) as the source of
+	// truth. Cleanup happens by side effect of the
+	// `RemoveDisconnectedNetworkClients` pass: when a network_client
+	// row is deleted, `RemoveClientPublicKey` deletes the matching
+	// redis entry.
+	newSqlMigration(`
+        DROP TABLE IF EXISTS client_key
+    `),
 }

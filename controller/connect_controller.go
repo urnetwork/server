@@ -121,6 +121,8 @@ func ConnectControlFrames(
 			err = Provide(ctx, clientId, v)
 		case *protocol.EncryptedKey:
 			err = SetEncryptedKey(ctx, clientId, v)
+		case *protocol.ClientKey:
+			err = SetClientKey(ctx, clientId, v)
 
 		default:
 			err = fmt.Errorf("Cannot handle oob control message: %T", message)
@@ -220,11 +222,28 @@ func CreateContract(
 	// every contract whose destination is this client. A nil chain means
 	// the destination did not publish a cert; senders accept any cert
 	// (skip verification) in that case — see Contract proto.
-	provideTlsCertificatePem, err := model.GetClientTlsCertificate(ctx, destinationId)
+	//
+	// Alongside the cert chain, return the destination's signature over
+	// the chain by its long-lived client identity key
+	// (`Contract.destination_client_key_signed_tls_certificate`) and the
+	// destination's public client identity key
+	// (`Contract.destination_client_public_key`). The sender uses these
+	// for the long-lived-identity verification path (Option 1 + Option
+	// 4): the public key value attached here is the platform's claim
+	// about the destination's identity; the sender SHOULD cross-check
+	// it against the unauthenticated `/key/<client_id>` lookup before
+	// trusting it (defeats a MITM platform that substitutes both the
+	// cert and the verifying key in lockstep).
+	provideTlsCertificatePem, clientKeySignedTlsCertificate, err := model.GetClientTlsCertificateAndSignature(ctx, destinationId)
 	if err != nil {
 		provideTlsCertificatePem = nil
+		clientKeySignedTlsCertificate = nil
 	}
 	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
+	destinationClientPublicKey, err := model.GetClientPublicKey(ctx, destinationId)
+	if err != nil {
+		destinationClientPublicKey = nil
+	}
 
 	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
@@ -244,12 +263,14 @@ func CreateContract(
 	}
 
 	storedContract := &protocol.StoredContract{
-		ContractId:            contractId.Bytes(),
-		TransferByteCount:     uint64(transferByteCount),
-		SourceId:              clientId.Bytes(),
-		DestinationId:         destinationId.Bytes(),
-		Priority:              &priority,
-		ProvideTlsCertificate: provideTlsCertificate,
+		ContractId:                               contractId.Bytes(),
+		TransferByteCount:                        uint64(transferByteCount),
+		SourceId:                                 clientId.Bytes(),
+		DestinationId:                            destinationId.Bytes(),
+		Priority:                                 &priority,
+		ProvideTlsCertificate:                    provideTlsCertificate,
+		DestinationClientPublicKey:               destinationClientPublicKey,
+		DestinationClientKeySignedTlsCertificate: clientKeySignedTlsCertificate,
 	}
 	if streamId != nil {
 		storedContract.StreamId = streamId.Bytes()
@@ -260,10 +281,12 @@ func CreateContract(
 
 	result := &protocol.CreateContractResult{
 		Contract: &protocol.Contract{
-			StoredContractBytes:   storedContractBytes,
-			StoredContractHmac:    storedContractHmac,
-			ProvideMode:           protocol.ProvideMode(provideMode),
-			ProvideTlsCertificate: provideTlsCertificate,
+			StoredContractBytes:                      storedContractBytes,
+			StoredContractHmac:                       storedContractHmac,
+			ProvideMode:                              protocol.ProvideMode(provideMode),
+			ProvideTlsCertificate:                    provideTlsCertificate,
+			DestinationClientPublicKey:               destinationClientPublicKey,
+			DestinationClientKeySignedTlsCertificate: clientKeySignedTlsCertificate,
 		},
 	}
 	streamVersion := 0
@@ -471,19 +494,75 @@ func Provide(
 	return nil
 }
 
-// SetEncryptedKey stores the client's published TLS certificate chain so
-// the platform can attach it to every contract whose destination is this
-// client. Certificates are keyed on `client_id` only — a single cert per
-// client regardless of provide mode. An empty chain clears the stored
-// cert (e.g., when a client opts out of publishing).
+// SetEncryptedKey stores the client's published TLS certificate chain
+// — and the client's signature over that chain by its long-lived
+// identity key — so the platform can attach both to every contract
+// whose destination is this client. Certificates are keyed on
+// `client_id` only — a single cert per client regardless of provide
+// mode. An empty chain clears the stored cert (e.g., when a client
+// opts out of publishing).
+//
+// The signature is the value the receiving sender will verify against
+// the destination's public client key (fetched out-of-band) before
+// admitting the cert chain to the per-peer session's trusted set. If
+// the publishing client doesn't include a signature, the chain is
+// still stored but the signature column is left null.
 func SetEncryptedKey(
 	ctx context.Context,
 	clientId server.Id,
 	encryptedKey *protocol.EncryptedKey,
 ) error {
 	tlsCertificatePem := concatenatePemBlocks(encryptedKey.ProvideTlsCertificate)
-	model.SetClientTlsCertificate(ctx, clientId, tlsCertificatePem)
+	model.SetClientTlsCertificateWithSignature(
+		ctx,
+		clientId,
+		tlsCertificatePem,
+		encryptedKey.ClientKeySignedTlsCertificate,
+	)
 	return nil
+}
+
+// SetClientKey stores the client's published long-lived public client
+// identity key (Ed25519, 32 bytes). Keyed on `client_id`; rotation
+// overwrites. The value is served by the unauthenticated
+// `/key/<client_id>` API and is also attached to every contract whose
+// destination is this client. An empty / nil key clears the stored
+// value.
+func SetClientKey(
+	ctx context.Context,
+	clientId server.Id,
+	clientKey *protocol.ClientKey,
+) error {
+	model.SetClientPublicKey(ctx, clientId, clientKey.PublicKey)
+	return nil
+}
+
+// GetClientKeyArgs / GetClientKeyResult / GetClientKey back the
+// unauthenticated `GET /key/<client_id>` route. The handler URL-routes
+// the client id into `ClientId`; the controller looks it up in the
+// `client_key` table. A client that has never published a key returns
+// `{"public_key": null}` with HTTP 200, so callers can distinguish
+// "not yet published" from a network error without parsing status
+// codes.
+type GetClientKeyArgs struct {
+	ClientId server.Id `json:"client_id"`
+}
+
+type GetClientKeyResult struct {
+	PublicKey []byte `json:"public_key"`
+}
+
+func GetClientKey(
+	args *GetClientKeyArgs,
+	clientSession *session.ClientSession,
+) (*GetClientKeyResult, error) {
+	pub, err := model.GetClientPublicKey(clientSession.Ctx, args.ClientId)
+	if err != nil {
+		return nil, err
+	}
+	return &GetClientKeyResult{
+		PublicKey: pub,
+	}, nil
 }
 
 // concatenatePemBlocks joins each PEM block in the wire-level chain into one
