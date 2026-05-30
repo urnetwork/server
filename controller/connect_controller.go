@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -234,15 +237,33 @@ func CreateContract(
 	// it against the unauthenticated `/key/<client_id>` lookup before
 	// trusting it (defeats a MITM platform that substitutes both the
 	// cert and the verifying key in lockstep).
-	provideTlsCertificatePem, clientKeySignedTlsCertificate, err := model.GetClientTlsCertificateAndSignature(ctx, destinationId)
-	if err != nil {
-		provideTlsCertificatePem = nil
-		clientKeySignedTlsCertificate = nil
-	}
+	var provideTlsCertificatePem []byte
+	var clientKeySignedTlsCertificate []byte
+	var destinationClientPublicKey []byte
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go server.HandleError(func() {
+		defer wg.Done()
+		certPem, sig, err := model.GetClientTlsCertificateAndSignature(ctx, destinationId)
+		if err == nil {
+			provideTlsCertificatePem = certPem
+			clientKeySignedTlsCertificate = sig
+		}
+	})
+	go server.HandleError(func() {
+		defer wg.Done()
+		pub, err := model.GetClientPublicKey(ctx, destinationId)
+		if err == nil {
+			destinationClientPublicKey = pub
+		}
+	})
+	wg.Wait()
+
 	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
-	destinationClientPublicKey, err := model.GetClientPublicKey(ctx, destinationId)
-	if err != nil {
-		destinationClientPublicKey = nil
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
@@ -512,6 +533,15 @@ func SetEncryptedKey(
 	clientId server.Id,
 	encryptedKey *protocol.EncryptedKey,
 ) error {
+	for i, block := range encryptedKey.ProvideTlsCertificate {
+		p, _ := pem.Decode(block)
+		if p == nil {
+			return fmt.Errorf("Invalid PEM in certificate chain at index %d", i)
+		}
+		if _, err := x509.ParseCertificate(p.Bytes); err != nil {
+			return fmt.Errorf("Invalid X.509 certificate in chain at index %d: %w", i, err)
+		}
+	}
 	tlsCertificatePem := concatenatePemBlocks(encryptedKey.ProvideTlsCertificate)
 	model.SetClientTlsCertificateWithSignature(
 		ctx,
@@ -533,6 +563,9 @@ func SetClientKey(
 	clientId server.Id,
 	clientKey *protocol.ClientKey,
 ) error {
+	if len(clientKey.PublicKey) != 0 && len(clientKey.PublicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("Invalid client public key length: %d (expected %d)", len(clientKey.PublicKey), ed25519.PublicKeySize)
+	}
 	model.SetClientPublicKey(ctx, clientId, clientKey.PublicKey)
 	return nil
 }
@@ -611,6 +644,10 @@ func CloseContract(
 	closeContract *protocol.CloseContract,
 ) error {
 	contractId := server.RequireIdFromBytes(closeContract.ContractId)
+	const maxByteCount = uint64(1<<63 - 1)
+	if maxByteCount < closeContract.AckedByteCount {
+		return fmt.Errorf("Invalid acked byte count %d (max %d)", closeContract.AckedByteCount, maxByteCount)
+	}
 	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
 	checkpoint := closeContract.Checkpoint
 

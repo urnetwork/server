@@ -173,7 +173,6 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}
 }
-
 func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
 	return &ExchangeChaosSettings{
 		ResidentShutdownPerSecond: 0.0,
@@ -2044,18 +2043,3 @@ func (self *limiter) delay() {
 		}
 	}
 }
-
-// func isAck(transferFrameBytes []byte) bool {
-// 	var filteredTransferFrameWithFrame protocol.FilteredTransferFrameWithFrame
-// 	if err := proto.Unmarshal(transferFrameBytes, &filteredTransferFrameWithFrame); err != nil {
-// 		// bad protobuf
-// 		return false
-// 	}
-// 	if filteredTransferFrameWithFrame.Frame != nil {
-// 		return filteredTransferFrameWithFrame.Frame.MessageType == protocol.MessageType_TransferAck
-// 	}
-// 	if filteredTransferFrameWithFrame.MessageType != nil {
-// 		return *filteredTransferFrameWithFrame.MessageType == protocol.MessageType_TransferAck
-// 	}
-// 	return false
-// }

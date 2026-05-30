@@ -1373,6 +1373,25 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
+		// (cascade) remove TLS certificates without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM client_tls_certificate
+			USING (
+				SELECT client_tls_certificate.client_id
+				FROM client_tls_certificate
+					LEFT JOIN network_client ON network_client.client_id = client_tls_certificate.client_id
+				WHERE network_client.client_id IS NULL
+			) t
+			WHERE client_tls_certificate.client_id = t.client_id
+			`,
+		))
+
+	}, server.TxReadCommitted)
+
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+
 		// (cascade) remove devices without a network client
 		server.RaisePgResult(tx.Exec(
 			ctx,

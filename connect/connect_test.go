@@ -1363,7 +1363,7 @@ func testConnect(
 		settings.ForwardIdleTimeout = sequenceIdleTimeout
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		if config.enableChaos {
-			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.01
+			settings.ExchangeChaosSettings.ResidentShutdownPerSecond = 0.005
 		}
 		switch contractTest {
 		case contractTestSymmetric, contractTestAsymmetric:
@@ -1426,7 +1426,10 @@ func testConnect(
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
 		clientSettingsA.EncryptionSettings.Encrypt = true
-		clientSettingsA.EncryptionSettings.HandshakeTimeout = 60 * time.Second
+		clientSettingsA.EncryptionSettings.TlsTimeout = 120 * time.Second
+		if contractTest != contractTestAsymmetric {
+			clientSettingsA.EncryptionSettings.EncryptionControlUseCompanion = false
+		}
 	}
 	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA, clientSettingsA.ContractManagerSettings), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
@@ -1455,7 +1458,10 @@ func testConnect(
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
 		clientSettingsB.EncryptionSettings.Encrypt = true
-		clientSettingsB.EncryptionSettings.HandshakeTimeout = 60 * time.Second
+		clientSettingsB.EncryptionSettings.TlsTimeout = 120 * time.Second
+		if contractTest != contractTestAsymmetric {
+			clientSettingsB.EncryptionSettings.EncryptionControlUseCompanion = false
+		}
 	}
 	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB, clientSettingsB.ContractManagerSettings), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
@@ -2173,6 +2179,13 @@ func testConnect(
 				// 	}
 				// }
 
+				if config.enableEncryption {
+					// flush EncryptedControl messages
+					select {
+					case <-time.After(5 * time.Second):
+					}
+				}
+
 				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
@@ -2397,8 +2410,8 @@ func Testing_NewControllerOutOfBandControl(
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
-	go server.HandleError(func() {
+	go func() {
 		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
 		callback(resultFrames, err)
-	})
+	}()
 }

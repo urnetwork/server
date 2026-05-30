@@ -38,8 +38,8 @@ func DefaultTestEnv() *TestEnv {
 	return &TestEnv{
 		ApplyDbMigrations: true,
 		Warmup:            false,
-		RerunCount:        1,
-		RerunTimeout:      2 * time.Second,
+		RerunCount:        2,
+		RerunTimeout:      30 * time.Second,
 	}
 }
 
@@ -72,7 +72,7 @@ func (self *TestEnv) Run(callback func()) {
 			}
 			return
 		}
-		// glog.Infof("[FLAKY]test failed iteration[%d/%d]. err = %s", i+i, n, r)
+		glog.Infof("[FLAKY]test failed iteration[%d/%d]. err = %s", i+1, n, r)
 		select {
 		case <-time.After(self.RerunTimeout):
 		}

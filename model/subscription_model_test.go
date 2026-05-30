@@ -1012,8 +1012,14 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 				)
 				assert.Equal(t, err, nil)
 
+				// non-checkpoint + checkpoint now settles
+				// (`settleContract`): the non-checkpoint side is
+				// definitively done, so the checkpoint's byte count
+				// is folded in as that party's final contribution.
+				// Pre-fix this assertion was `false` — the contract
+				// stayed open forever in limbo until force-close.
 				_, closed = GetContractClose(ctx, contractId)
-				assert.Equal(t, closed, false)
+				assert.Equal(t, closed, true)
 			}
 		}
 
@@ -1329,3 +1335,210 @@ func TestAccountIsPro(t *testing.T) {
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
+
+// TestSettleContractCheckpointPlusClose verifies the asymmetric
+// settlement path: one party closed non-checkpoint, the other only
+// checkpointed. The contract MUST settle (using the checkpoint's
+// byte count as that party's final contribution) rather than sit in
+// limbo. Pre-fix this state held the contract `open=true` forever
+// and the escrow stayed deducted from the source network's balance.
+func TestSettleContractCheckpointPlusClose(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		// Case 1: source closes non-checkpoint, destination
+		// checkpoints. Must settle.
+		contractId, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId, clientIdA, 512*1024, false) // source, non-checkpoint
+		assert.Equal(t, nil, err)
+		_, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, false, closed) // not yet — destination hasn't reported
+
+		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId)
+		assert.Equal(t, true, closed) // SETTLED — was the bug before the fix
+
+		// Case 2: destination closes non-checkpoint, source
+		// checkpoints. Must also settle.
+		contractId2, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId2, clientIdA, 512*1024, true) // source, checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, false, closed)
+
+		err = CloseContract(ctx, contractId2, clientIdB, 512*1024, false) // destination, non-checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, true, closed)
+	})
+}
+
+// TestSettleContractBothCheckpointStaysOpen verifies the only
+// state we still hold off on: both parties only checkpointed. Both
+// said "I might come back," so we should NOT settle yet.
+func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		contractId, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId, clientIdA, 512*1024, true) // source, checkpoint
+		assert.Equal(t, nil, err)
+		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
+		assert.Equal(t, nil, err)
+
+		_, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, false, closed) // both checkpointed → still active
+	})
+}
+
+// TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose
+// verifies that the listing surfaces 2-party contracts where
+// exactly one party is `ContractPartyCheckpoint`, mapped to the
+// non-checkpoint party. With the new `settleContract` rule, these
+// contracts no longer reach this state in normal operation — but
+// the listing must still handle the case for older rows that
+// existed pre-fix, and for any future case where the listing is
+// consulted before settlement runs.
+func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
+	server.DefaultTestEnv().Run(func() {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		// Two-party-both-checkpoint contract: stays open, must
+		// NOT appear in the partial-close list (the rule there is
+		// "exactly one checkpoint" → safe to finalize; both
+		// checkpointed → still active).
+		contractIdBoth, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdBoth, clientIdA, 0, true))
+		assert.Equal(t, nil, CloseContract(ctx, contractIdBoth, clientIdB, 0, true))
+
+		// One-party-source-only: classic partial close.
+		contractIdSourceOnly, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdSourceOnly, clientIdA, 0, false))
+
+		// One-party-destination-only: classic partial close.
+		contractIdDestOnly, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdDestOnly, clientIdB, 0, false))
+
+		// Zero-close contract: contract opened but neither side
+		// reported close. MUST NOT appear in the partial-close list.
+		contractIdZero, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		partial := GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
+
+		// `contractIdSourceOnly` listed under Source.
+		party, ok := partial[contractIdSourceOnly]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, ContractPartySource, party)
+
+		// `contractIdDestOnly` listed under Destination.
+		party, ok = partial[contractIdDestOnly]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, ContractPartyDestination, party)
+
+		// `contractIdBoth` (both checkpointed) NOT listed.
+		_, ok = partial[contractIdBoth]
+		assert.Equal(t, false, ok)
+
+		// `contractIdZero` (no closes) NOT listed.
+		_, ok = partial[contractIdZero]
+		assert.Equal(t, false, ok)
+	})
+}

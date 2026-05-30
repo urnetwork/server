@@ -2781,83 +2781,21 @@ var migrations = []any{
         ON transfer_contract (open, payer_network_id, transfer_byte_count)
     `),
 
-	// PEM-encoded X.509 certificate chain the provider commits to as the TLS
-	// server identity for sequence-level TLS sessions. Multiple chain entries
-	// (leaf first, then issuers) are concatenated as standard PEM blocks
-	// inside a single bytea -- they can be re-split with `pem.Decode` in a
-	// loop on read. Null means the provider did not publish a certificate.
-	newSqlMigration(`
-        ALTER TABLE provide_key ADD COLUMN tls_certificate_pem bytea NULL
-    `),
-
-	// The TLS certificate published by a client via `EncryptedKey` is keyed
-	// on `client_id` only — every encryption-enabled client owns exactly one
-	// cert (managed by the local `EncryptionSessionManager`) and it is the
-	// receiver-role TLS identity for every contract whose destination is
-	// this client, regardless of provide mode.
-	//
-	// `tls_certificate_pem` is one or more concatenated PEM blocks (leaf
-	// first, then issuers) — re-split with `pem.Decode` in a loop on read.
-	// Null is impossible by construction (the row is deleted instead when a
-	// client clears its cert).
+	// Per-client TLS certificate for the encryption handshake, keyed on
+	// `client_id` only (independent of provide mode). Published via
+	// `EncryptedKey`. `tls_certificate_pem` is one or more concatenated
+	// PEM blocks (leaf first, then issuers). `client_key_signed_tls_certificate`
+	// is the client's Ed25519 signature over the chain under its long-lived
+	// identity key (nullable for older clients that don't sign cert publishes).
+	// Long-lived client identity public keys live in redis (`ckey_<clientId>`).
 	newSqlMigration(`
         CREATE TABLE client_tls_certificate (
             client_id uuid NOT NULL,
             tls_certificate_pem bytea NOT NULL,
+            client_key_signed_tls_certificate bytea NULL,
             set_time timestamp NOT NULL,
 
             PRIMARY KEY (client_id)
         )
-    `),
-
-	// The per-provide-mode tls cert column is superseded by the per-client
-	// `client_tls_certificate` table — clients no longer publish certs in
-	// `Provide` (the cert moved to `EncryptedKey`). Drop the orphaned
-	// column to avoid confusion.
-	newSqlMigration(`
-        ALTER TABLE provide_key DROP COLUMN IF EXISTS tls_certificate_pem
-    `),
-
-	// The long-lived public client identity key (Ed25519, 32 bytes)
-	// published by a client via `ClientKey` is keyed on `client_id`. A
-	// single key per client; rotation overwrites the row. The
-	// `/key/<client_id>` API returns this value to anyone (no auth)
-	// so a remote peer can fetch the canonical (ClientId, public key)
-	// binding independently of the contract pipeline that the
-	// platform itself authors. Used by senders to verify both the
-	// destination's published TLS cert chain (signature in
-	// `client_key_signed_tls_certificate` on the cert publish) and
-	// the destination's post-handshake identity proof.
-	newSqlMigration(`
-        CREATE TABLE client_key (
-            client_id uuid NOT NULL,
-            public_key bytea NOT NULL,
-            set_time timestamp NOT NULL,
-
-            PRIMARY KEY (client_id)
-        )
-    `),
-
-	// The signature over the published TLS cert chain by the client's
-	// long-lived identity key is stored alongside the cert in
-	// `client_tls_certificate`. It travels back to every contract
-	// destined for this client in
-	// `Contract.destination_client_key_signed_tls_certificate` so the
-	// sender can verify the platform-attached cert chain is the same
-	// chain the destination committed to. Null until the destination
-	// (re)publishes its cert via a client capable of signing.
-	newSqlMigration(`
-        ALTER TABLE client_tls_certificate
-            ADD COLUMN client_key_signed_tls_certificate bytea NULL
-    `),
-
-	// Drop the `client_key` table — long-lived client identity public
-	// keys now live in redis (key `ckey_<clientId>`) as the source of
-	// truth. Cleanup happens by side effect of the
-	// `RemoveDisconnectedNetworkClients` pass: when a network_client
-	// row is deleted, `RemoveClientPublicKey` deletes the matching
-	// redis entry.
-	newSqlMigration(`
-        DROP TABLE IF EXISTS client_key
     `),
 }

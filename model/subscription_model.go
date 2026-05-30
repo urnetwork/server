@@ -1032,6 +1032,9 @@ func CloseContract(
 ) (returnErr error) {
 	// settle := false
 	// dispute := false
+	if usedTransferByteCount < 0 {
+		return fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		found := false
@@ -1141,29 +1144,57 @@ func CloseContract(
 		return
 	}
 
-	returnErr = settleContract(ctx, contractId)
-	if returnErr == nil {
+	closed, err := settleContract(ctx, contractId)
+	if err != nil {
+		returnErr = err
+		return
+	}
+	if closed {
 		RemoveFromStream(ctx, contractId)
 	}
 	return
 }
 
-func settleContract(ctx context.Context, contractId server.Id) (returnErr error) {
+func settleContract(ctx context.Context, contractId server.Id) (closed bool, returnErr error) {
 	var posts []func() any
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		// party -> used transfer byte count
-		closes := map[ContractParty]ByteCount{}
+		// party -> (used transfer byte count, is-checkpoint).
+		// Pull ALL close records (checkpoint or non-checkpoint). A
+		// checkpoint says "I'm pausing — might come back"; a non-
+		// checkpoint says "I'm done." For settlement we accept any
+		// combination as terminal *except* when both sides only
+		// checkpointed — in that case both sides intend to come
+		// back and the contract should stay open. If either side
+		// has said "done" non-checkpoint and the other has at
+		// least said "I'm pausing here at byte N," there's no more
+		// legitimate activity coming and the contract is ready to
+		// settle (using the checkpoint's reported byte count as
+		// that side's final contribution).
+		//
+		// Without this rule, the receiver's `CheckpointContract`
+		// from `ReceiveSequence.Run`'s defer combined with the
+		// sender's `CloseContract` from `SendSequence.Run`'s defer
+		// would leave the contract in an unsettleable limbo: source
+		// row is checkpoint=false, destination row is
+		// checkpoint=true, and the contract sits open forever with
+		// its escrow still deducted from the source network's
+		// balance.
+		type closeRecord struct {
+			usedTransferByteCount ByteCount
+			checkpoint            bool
+		}
+		closes := map[ContractParty]closeRecord{}
 		result, err := tx.Query(
 			ctx,
 			`
             SELECT
                 party,
-                used_transfer_byte_count
+                used_transfer_byte_count,
+                checkpoint
             FROM contract_close
             WHERE
-                contract_id = $1 AND
-                checkpoint = false
+                contract_id = $1
             `,
 			contractId,
 		)
@@ -1171,21 +1202,28 @@ func settleContract(ctx context.Context, contractId server.Id) (returnErr error)
 			for result.Next() {
 				var closeParty ContractParty
 				var closeUsedTransferByteCount ByteCount
+				var closeCheckpoint bool
 				server.Raise(result.Scan(
 					&closeParty,
 					&closeUsedTransferByteCount,
+					&closeCheckpoint,
 				))
-				closes[closeParty] = closeUsedTransferByteCount
+				closes[closeParty] = closeRecord{
+					usedTransferByteCount: closeUsedTransferByteCount,
+					checkpoint:            closeCheckpoint,
+				}
 			}
 		})
-		// for closeParty, closeUsedTransferByteCount := range closes {
-		// 	fmt.Printf("CLOSE CONTRACT PARTY %s=%d: %s %s %s->%s\n", closeParty, closeUsedTransferByteCount, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
-		// }
 
-		sourceUsedTransferByteCount, sourceOk := closes[ContractPartySource]
-		destinationUsedTransferByteCount, destinationOk := closes[ContractPartyDestination]
+		sourceClose, sourceOk := closes[ContractPartySource]
+		destinationClose, destinationOk := closes[ContractPartyDestination]
+		sourceUsedTransferByteCount := sourceClose.usedTransferByteCount
+		destinationUsedTransferByteCount := destinationClose.usedTransferByteCount
 
-		if sourceOk && destinationOk {
+		// Settle when both parties have a close row AND at least one
+		// is non-checkpoint. Both-sides-checkpointed means both sides
+		// said "I might come back" — leave the contract open.
+		if sourceOk && destinationOk && !(sourceClose.checkpoint && destinationClose.checkpoint) {
 			hasEscrow := false
 
 			result, err := tx.Query(
@@ -1207,28 +1245,15 @@ func settleContract(ctx context.Context, contractId server.Id) (returnErr error)
 				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
 				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-					posts, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+					posts, closed, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
 				} else {
 					glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
 					// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
-					setContractDisputeInTx(ctx, tx, contractId, true)
+					closed = setContractDisputeInTx(ctx, tx, contractId, true)
 				}
 			} else {
 				// nothing to settle, just close the transaction
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`
-                        UPDATE transfer_contract
-                        SET
-                            outcome = $2,
-                            close_time = $3
-                        WHERE
-                            contract_id = $1
-                    `,
-					contractId,
-					ContractOutcomeSettled,
-					server.NowUtc(),
-				))
+				closed = claimContractOutcomeInTx(ctx, tx, contractId, ContractOutcomeSettled)
 			}
 		}
 	}, server.TxReadCommitted)
@@ -1244,7 +1269,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 	var posts []func() any
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		posts, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
+		posts, _, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
 	})
 
 	if returnErr != nil {
@@ -1254,12 +1279,36 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 	return
 }
 
+func claimContractOutcomeInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	contractId server.Id,
+	outcome ContractOutcome,
+) bool {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+            UPDATE transfer_contract
+            SET
+                outcome = $2,
+                close_time = $3
+            WHERE
+                contract_id = $1 AND
+                outcome IS NULL
+        `,
+		contractId,
+		outcome,
+		server.NowUtc(),
+	))
+	return tag.RowsAffected() == 1
+}
+
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
-) (posts []func() any, returnErr error) {
+) (posts []func() any, closed bool, returnErr error) {
 	var usedTransferByteCount ByteCount
 
 	switch outcome {
@@ -1279,6 +1328,7 @@ func settleEscrowInTx(
 		)
 		netUsedTransferByteCount := ByteCount(0)
 		partyCount := 0
+		checkpointCount := 0
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var usedTransferByteCountForParty ByteCount
@@ -1289,17 +1339,30 @@ func settleEscrowInTx(
 					&party,
 					&checkpoint,
 				))
+				// Count the checkpoint row's reported byte count
+				// like any other close. `settleContract`'s decision
+				// to settle already established that at least one
+				// party is non-checkpoint, which means no more
+				// activity is coming — the checkpoint's
+				// `used_transfer_byte_count` is that party's final
+				// contribution.
 				if checkpoint {
-					returnErr = fmt.Errorf("Cannot settle party %s with a checkpoint.", party)
-					return
+					checkpointCount += 1
 				}
 				netUsedTransferByteCount += usedTransferByteCountForParty
 				partyCount += 1
-				// fmt.Printf("SETTLE %s: found party %s used %d\n", contractId.String(), party, usedTransferByteCountForParty)
 			}
 		})
 		if partyCount != 2 {
 			returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
+			return
+		}
+		// Defensive: refuse to settle if BOTH parties are
+		// checkpoint. `settleContract` shouldn't have routed us
+		// here in that case, but if it ever does, that's a logic
+		// bug we'd rather flag than silently settle.
+		if checkpointCount == 2 {
+			returnErr = fmt.Errorf("Cannot settle contract with both parties checkpoint.")
 			return
 		}
 		usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
@@ -1344,17 +1407,13 @@ func settleEscrowInTx(
                 transfer_escrow.balance_byte_count,
                 transfer_balance.start_balance_byte_count,
                 transfer_balance.net_revenue_nano_cents
-            FROM transfer_contract
-
-            INNER JOIN transfer_escrow ON
-                transfer_escrow.contract_id = transfer_contract.contract_id
+            FROM transfer_escrow
 
             INNER JOIN transfer_balance ON
                 transfer_balance.balance_id = transfer_escrow.balance_id
 
             WHERE
-                transfer_contract.contract_id = $1 AND
-                transfer_contract.outcome IS NULL
+                transfer_escrow.contract_id = $1
 
             ORDER BY transfer_balance.end_time ASC
         `,
@@ -1456,20 +1515,10 @@ func settleEscrowInTx(
 		return
 	}
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-            UPDATE transfer_contract
-            SET
-                outcome = $2,
-                close_time = $3
-            WHERE
-                contract_id = $1
-        `,
-		contractId,
-		ContractOutcomeSettled,
-		server.NowUtc(),
-	))
+	if !claimContractOutcomeInTx(ctx, tx, contractId, outcome) {
+		return
+	}
+	closed = true
 
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
 
@@ -1615,8 +1664,8 @@ func setContractDisputeInTx(
 	tx server.PgTx,
 	contractId server.Id,
 	dispute bool,
-) {
-	server.RaisePgResult(tx.Exec(
+) bool {
+	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
             UPDATE transfer_contract
@@ -1631,6 +1680,7 @@ func setContractDisputeInTx(
 		dispute,
 		server.NowUtc(),
 	))
+	return tag.RowsAffected() == 1
 }
 
 func GetOpenContractIdsWithNoPartialClose(
@@ -1654,8 +1704,32 @@ func GetOpenContractIdsWithPartialClose(
 ) map[server.Id]ContractParty {
 	contractIdPartialCloseParties := map[server.Id]ContractParty{}
 	for contractId, parties := range GetOpenContractIds(ctx, sourceId, destinationId) {
-		if len(parties) == 1 {
+		switch len(parties) {
+		case 1:
 			contractIdPartialCloseParties[contractId] = parties[0]
+		case 2:
+			// Both sides have a close row. If exactly one is
+			// `ContractPartyCheckpoint`, the contract is stuck in
+			// the limbo state where one side is definitively done
+			// and the other only paused via `CheckpointContract`.
+			// Surface it under the non-checkpoint party so callers
+			// (e.g., test cleanup) can finalize it the same way
+			// they finalize a true 1-party partial close. Without
+			// this, the test's cleanup loop misses these contracts
+			// entirely and they keep their escrow deducted from
+			// the network balance.
+			var nonCheckpoint ContractParty
+			checkpointCount := 0
+			for _, p := range parties {
+				if p == ContractPartyCheckpoint {
+					checkpointCount += 1
+				} else {
+					nonCheckpoint = p
+				}
+			}
+			if checkpointCount == 1 {
+				contractIdPartialCloseParties[contractId] = nonCheckpoint
+			}
 		}
 	}
 	return contractIdPartialCloseParties
@@ -1727,7 +1801,7 @@ func GetOpenContractIds(
 }
 
 // expired contracts are open:
-// - 2 closes - one source and one checkpoint
+// - 2 closes - one non-checkpoint party and one checkpoint
 // TODO - 0 closes can be used if the contract has a max lived time
 // TODO   add this to the protocol
 // TODO there may be some overlap with https://github.com/bringyour/bringyour/commit/4a8150083083161be04737f0cc4b087906d9b449
@@ -1770,8 +1844,6 @@ func GetExpiredOpenContractIds(
 				if checkpoint_ != nil {
 					checkpoint = *checkpoint_
 				}
-				// there can be up to two rows per contractId (one checkpoint)
-				// checkpoint takes precedence
 				if checkpoint {
 					party = ContractPartyCheckpoint
 				}
@@ -1788,8 +1860,9 @@ func GetExpiredOpenContractIds(
 	contractIdCloses := map[server.Id]bool{}
 	for contractId, partialCloseParties := range contractIdPartialCloseParties {
 		hasSource := partialCloseParties[ContractPartySource]
+		hasDestination := partialCloseParties[ContractPartyDestination]
 		hasCheckpoint := partialCloseParties[ContractPartyCheckpoint]
-		if hasSource && hasCheckpoint {
+		if (hasSource || hasDestination) && hasCheckpoint {
 			contractIdCloses[contractId] = true
 		}
 	}
@@ -1878,14 +1951,15 @@ func GetOpenContractIdsForSourceOrDestination(
 				if checkpoint_ != nil {
 					checkpoint = *checkpoint_
 				}
-				// there can be up to two rows per contractId (one checkpoint)
-				// non-checkpoint takes precedence
+				// non-checkpoint takes precedence over checkpoint
 				if checkpoint {
 					if contractIdPartialCloseParties[contractId] == "" {
 						contractIdPartialCloseParties[contractId] = ContractPartyCheckpoint
 					}
-				} else {
+				} else if party != "" {
 					contractIdPartialCloseParties[contractId] = party
+				} else if _, ok2 := contractIdPartialCloseParties[contractId]; !ok2 {
+					contractIdPartialCloseParties[contractId] = ""
 				}
 			}
 		})
@@ -2116,7 +2190,7 @@ func ForceCloseOpenContractIds(
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
 				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
-				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
 			if err != nil {
 				return err
@@ -2216,7 +2290,7 @@ func ForceCloseOpenContractIds(
 			var posts []func() any
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
-				posts, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			})
 			if err != nil {
 				return err
