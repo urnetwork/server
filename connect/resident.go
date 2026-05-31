@@ -21,7 +21,7 @@ import (
 
 	"golang.org/x/exp/maps"
 
-	"google.golang.org/protobuf/proto"
+	// "google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/glog"
 
@@ -2047,6 +2047,7 @@ func (self *limiter) delay() {
 	}
 }
 
+/*
 func isAck(transferFrameBytes []byte) bool {
 	var filteredTransferFrameWithFrame protocol.FilteredTransferFrameWithFrame
 	if err := proto.Unmarshal(transferFrameBytes, &filteredTransferFrameWithFrame); err != nil {
@@ -2061,3 +2062,4 @@ func isAck(transferFrameBytes []byte) bool {
 	}
 	return false
 }
+*/
