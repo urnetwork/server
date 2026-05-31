@@ -41,10 +41,11 @@ func Payout(
 	schedulePayout *SchedulePayoutArgs,
 	clientSession *session.ClientSession,
 ) (*SchedulePayoutResult, error) {
-	err := controller.SendPayments(clientSession)
-	if err != nil {
-		return nil, err
-	}
+	// FIXME disable payments until we figure out the account bug
+	// err := controller.SendPayments(clientSession)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	return &SchedulePayoutResult{
 		Success: true,
