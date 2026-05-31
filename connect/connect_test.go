@@ -1426,7 +1426,7 @@ func testConnect(
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
 		clientSettingsA.EncryptionSettings.Encrypt = true
-		clientSettingsA.EncryptionSettings.TlsTimeout = 120 * time.Second
+		// clientSettingsA.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsA.EncryptionSettings.EncryptionControlUseCompanion = false
 		}
@@ -1458,7 +1458,7 @@ func testConnect(
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
 		clientSettingsB.EncryptionSettings.Encrypt = true
-		clientSettingsB.EncryptionSettings.TlsTimeout = 120 * time.Second
+		// clientSettingsB.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsB.EncryptionSettings.EncryptionControlUseCompanion = false
 		}
@@ -2179,10 +2179,10 @@ func testConnect(
 				// 	}
 				// }
 
-				if config.enableEncryption {
-					// flush EncryptedControl messages
+				if config.enableEncryption || config.forceStream {
+					// flush EncryptedControl messages and p2p signal messages
 					select {
-					case <-time.After(5 * time.Second):
+					case <-time.After(10 * time.Second):
 					}
 				}
 

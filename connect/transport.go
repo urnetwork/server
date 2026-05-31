@@ -76,9 +76,15 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 
 		ListenH3Port: 443,
 		// FIXME use a different port and DNAT 53->(different port) from the routers
-		ListenDnsPort:        53,
-		EnableProxyProtocol:  true,
-		FramerSettings:       connect.DefaultFramerSettings(),
+		ListenDnsPort:       53,
+		EnableProxyProtocol: true,
+		// The per-peer encryption handshake ships its TLS server flight as a
+		// single ~2.2 KiB pack, so every framer on the resident exchange flow
+		// must admit at least the connect runtime minimum message length. This
+		// one settings object backs the websocket read limit, the connect-
+		// handler framer, and -- because `ExchangeSettings` embeds
+		// `ConnectHandlerSettings` -- the resident `ExchangeBuffer` framer.
+		FramerSettings:       connect.DefaultFramerSettings(int(connect.DefaultClientSettings().MinimumMessageLenLimit())),
 		TransportTlsSettings: server.DefaultTransportTlsSettings(),
 
 		ConnectionAnnounceTimeout:   5 * time.Second,
@@ -269,7 +275,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	// enforce the message size limit on messages in
-	ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen))
+	// +4 for the framer's length header: the websocket carries the framed
+	// message, which is the max message length plus the header.
+	ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
 
 	if auth == nil {
 		ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))

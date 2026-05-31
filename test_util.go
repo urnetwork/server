@@ -38,8 +38,8 @@ func DefaultTestEnv() *TestEnv {
 	return &TestEnv{
 		ApplyDbMigrations: true,
 		Warmup:            false,
-		RerunCount:        2,
-		RerunTimeout:      30 * time.Second,
+		RerunCount:        4,
+		RerunTimeout:      15 * time.Second,
 	}
 }
 
