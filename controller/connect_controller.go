@@ -12,7 +12,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	// "github.com/urnetwork/glog"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -177,6 +177,11 @@ func CreateContract(
 	destinationId := server.RequireIdFromBytes(createContract.DestinationId)
 	var provideMode model.ProvideMode
 
+	// V(2) diagnostic: log every contract request up front, including companion
+	// requests that get rejected below (those never reach the success-path
+	// [contract][cert] log). In symmetric mode we expect companion=false here.
+	glog.V(2).Infof("[contract][req]%s->%s companion=%t\n", clientId, destinationId, createContract.Companion)
+
 	if createContract.Companion {
 
 		// companion contracts use `ProvideModeStream`
@@ -186,7 +191,7 @@ func CreateContract(
 		provideRelationship := GetProvideRelationship(ctx, clientId, destinationId)
 
 		if provideModes := GetProvideModes(ctx, destinationId); !provideModes[provideRelationship] {
-			// server.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO PERMISSION (%s->%s)\n", clientId.String(), destinationId.String())
+			glog.V(2).Infof("[contract][reject]%s->%s no-permission (companion=%t relationship=%d)\n", clientId, destinationId, createContract.Companion, provideRelationship)
 			contractError := protocol.ContractError_NoPermission
 			result := &protocol.CreateContractResult{
 				Error: &contractError,
@@ -204,7 +209,9 @@ func CreateContract(
 
 	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
 	if err != nil {
-		// server.Logger().Printf("CONTROL CREATE CONTRACT ERROR NO SECRET KEY\n")
+		// A companion request in symmetric mode lands here: provideMode=Stream(4)
+		// has no secret key because the destination never provided Stream.
+		glog.V(2).Infof("[contract][reject]%s->%s no-secret-key (companion=%t provideMode=%d err=%v)\n", clientId, destinationId, createContract.Companion, provideMode, err)
 		contractError := protocol.ContractError_NoPermission
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -261,6 +268,16 @@ func CreateContract(
 	wg.Wait()
 
 	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
+
+	// V(2) diagnostic: verify (a) no companion contracts are created in
+	// symmetric mode, and (b) whether a destination TLS cert is attached to the
+	// contract — the attached cert is what arms sender-side cert verification.
+	glog.V(2).Infof(
+		"[contract][cert]%s->%s companion=%t provideMode=%s certBlocks=%d certPemLen=%d clientKeySig=%d pubKey=%d\n",
+		clientId, destinationId, createContract.Companion, provideMode,
+		len(provideTlsCertificate), len(provideTlsCertificatePem),
+		len(clientKeySignedTlsCertificate), len(destinationClientPublicKey),
+	)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -1424,8 +1424,17 @@ func testConnect(
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
+	// Reap the encryption session immediately at refs==0 (no idle keep-alive).
+	// This is deliberate, not a temporary toggle: like setting the channel
+	// buffer sizes to 0 to expose deadlocks, IdleTimeout=0 forces a fresh
+	// session + handshake on every burst so any logical error in the
+	// restart -> plaintext -> upgrade path is exposed rather than papered over
+	// by session reuse. (Production derives IdleTimeout = max(send,receive)
+	// idle for performance; the correctness must hold at 0.)
+	encryptionSessionIdleTimeout := 0 * time.Second
 	if config.enableEncryption {
 		clientSettingsA.EncryptionSettings.Encrypt = true
+		clientSettingsA.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
 		// clientSettingsA.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsA.EncryptionSettings.EncryptionControlUseCompanion = false
@@ -1458,6 +1467,7 @@ func testConnect(
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
 		clientSettingsB.EncryptionSettings.Encrypt = true
+		clientSettingsB.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
 		// clientSettingsB.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsB.EncryptionSettings.EncryptionControlUseCompanion = false
@@ -2181,24 +2191,53 @@ func testConnect(
 
 				if config.enableEncryption || config.forceStream {
 					// flush EncryptedControl messages and p2p signal messages
-					select {
-					case <-time.After(10 * time.Second):
+					controlMessageCount := func(messageTypes []protocol.MessageType) int {
+						count := 0
+						for _, messageType := range messageTypes {
+							switch messageType {
+							case protocol.MessageType_TransferEncryptedControl:
+								count += 1
+							}
+						}
+						return count
+					}
+					for {
+						_, _, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
+						_, _, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
+						_, _, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
+						_, _, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
+						count := 0
+						count += controlMessageCount(resendMessageTypesA)
+						count += controlMessageCount(resendMessageTypesB)
+						count += controlMessageCount(receiveMessageTypesA)
+						count += controlMessageCount(receiveMessageTypesB)
+						if count == 0 {
+							break
+						}
+						fmt.Printf("Waiting for %d control messages to settle\n", count)
+						select {
+						case <-time.After(10 * time.Second):
+						}
 					}
 				}
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA := clientA.ResendQueueSize(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
+				resendItemCountA, resendItemByteCountA, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
+				assert.Equal(t, resendMessageTypesA, nil)
 				assert.Equal(t, resendItemCountA, 0)
 				assert.Equal(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB := clientB.ResendQueueSize(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
+				resendItemCountB, resentItemByteCountB, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
+				assert.Equal(t, resendMessageTypesB, nil)
 				assert.Equal(t, resendItemCountB, 0)
 				assert.Equal(t, resentItemByteCountB, ByteCount(0))
 
-				receiveItemCountA, receiveItemByteCountA := clientA.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
+				receiveItemCountA, receiveItemByteCountA, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
+				assert.Equal(t, receiveMessageTypesA, nil)
 				assert.Equal(t, receiveItemCountA, 0)
 				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
 
-				receiveItemCountB, receiveItemByteCountB := clientB.ReceiveQueueSize(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
+				receiveItemCountB, receiveItemByteCountB, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
+				assert.Equal(t, receiveMessageTypesB, nil)
 				assert.Equal(t, receiveItemCountB, 0)
 				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
 			}
