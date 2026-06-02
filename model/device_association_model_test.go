@@ -14,7 +14,7 @@ import (
 )
 
 func TestDeviceAdopt(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -122,7 +122,7 @@ func TestDeviceAdopt(t *testing.T) {
 }
 
 func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// add adopt new code
 		// remove association from the added account should remove the adopt code
 
@@ -211,7 +211,7 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 }
 
 func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// remove the adopt code before confirm
 		// TODO test remove adopt code after confirm should have no impact
 
@@ -299,7 +299,7 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 }
 
 func TestDeviceShare(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()

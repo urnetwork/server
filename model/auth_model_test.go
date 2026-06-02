@@ -19,7 +19,7 @@ import (
 )
 
 func TestGetUserAuth(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -35,7 +35,7 @@ func TestGetUserAuth(t *testing.T) {
 }
 
 func TestResetPassword(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -109,7 +109,7 @@ func TestResetPassword(t *testing.T) {
 }
 
 func TestAuthCode(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -164,7 +164,7 @@ func TestAuthCode(t *testing.T) {
 }
 
 func TestVerifySolanaSignature(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
 		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
@@ -185,7 +185,7 @@ func TestVerifySolanaSignature(t *testing.T) {
 }
 
 func TestVerifyEthereumSignature(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		// Create a test wallet
 		privateKey, err := crypto.GenerateKey()
@@ -228,7 +228,7 @@ func TestVerifyEthereumSignature(t *testing.T) {
 }
 
 func TestUserAuthLogin(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -294,7 +294,7 @@ func TestUserAuthLogin(t *testing.T) {
 }
 
 func TestLoginWithWallet(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -331,7 +331,7 @@ func TestLoginWithWallet(t *testing.T) {
 
 // test social logins
 func TestSocialLogin(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -407,7 +407,7 @@ func TestSocialLogin(t *testing.T) {
 }
 
 func TestAddingSsoToDifferentNetworksShouldFail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -476,7 +476,7 @@ func TestAddingSsoToDifferentNetworksShouldFail(t *testing.T) {
 }
 
 func TestAddingSameSsoToNetworkShouldFail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -522,7 +522,7 @@ func TestAddingSameSsoToNetworkShouldFail(t *testing.T) {
 }
 
 func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 

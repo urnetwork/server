@@ -19,7 +19,7 @@ import (
 )
 
 func TestEditDistance(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 
 		assert.Equal(t, EditDistance("hi", "hi"), 0)
 		assert.Equal(t, EditDistance("hi", "ho"), 1)

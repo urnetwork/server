@@ -16,7 +16,7 @@ import (
 )
 
 func TestNetworkCreate(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		session := session.Testing_CreateClientSession(ctx, nil)
@@ -82,7 +82,7 @@ func TestNetworkCreate(t *testing.T) {
 }
 
 func TestNetworkCreateWithProfanity(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		session := session.Testing_CreateClientSession(ctx, nil)
@@ -120,7 +120,7 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 }
 
 func TestNetworkNameUpdate(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -182,7 +182,7 @@ func TestNetworkNameUpdate(t *testing.T) {
 }
 
 func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 		session := session.Testing_CreateClientSession(ctx, nil)

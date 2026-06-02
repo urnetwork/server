@@ -12,7 +12,7 @@ import (
 // TestRedisGetSetPipeline exercises the basic command path through the `Redis`
 // wrapper: SET, GET (hit and miss), and a pipeline.
 func TestRedisGetSetPipeline(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		key := fmt.Sprintf("test:redis:get-set:%s", NewId())
@@ -57,7 +57,7 @@ func TestRedisGetSetPipeline(t *testing.T) {
 // confirmation before publishing -- pub/sub does not buffer for a subscriber
 // that is not yet active.
 func TestRedisPublishSubscribe(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

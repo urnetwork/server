@@ -18,7 +18,7 @@ import (
 )
 
 func TestAddDefaultLocations(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		AddDefaultLocations(ctx, 10)
@@ -26,7 +26,7 @@ func TestAddDefaultLocations(t *testing.T) {
 }
 
 func TestCanonicalLocations(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		us1 := &Location{
@@ -99,7 +99,7 @@ func TestCanonicalLocations(t *testing.T) {
 }
 
 func TestCanonicalLocationsParallel(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		n := 1000
@@ -130,7 +130,7 @@ func TestCanonicalLocationsParallel(t *testing.T) {
 }
 
 func TestBestAvailableProviders(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -251,7 +251,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 	// search for providers with client exclude
 	// search for providers with destination exclude
 
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -486,7 +486,7 @@ func TestRankMode(t *testing.T) {
 }
 
 // func TestFindLocationGroupByName(t *testing.T) {
-// 	server.DefaultTestEnv().Run(func() {
+// 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 // 		ctx := context.Background()
 

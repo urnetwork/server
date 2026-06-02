@@ -21,7 +21,7 @@ import (
 )
 
 func TestByteCount(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0b")
 		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5tib")
 
@@ -59,7 +59,7 @@ func TestByteCount(t *testing.T) {
 }
 
 func TestNanoCents(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		usd := float64(1.55)
 		a := UsdToNanoCents(usd)
 		usd2 := NanoCentsToUsd(a)
@@ -71,7 +71,7 @@ func TestNanoCents(t *testing.T) {
 }
 
 func TestEscrow(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
@@ -318,7 +318,7 @@ func TestEscrow(t *testing.T) {
 }
 
 func TestCompanionEscrowAndCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// tests companion and checkpoint
 		// this is a more realistic use case
 		ctx := context.Background()
@@ -601,7 +601,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 // TODO escrow benchmark to see how many contracts can be opened and closed in some time period (e.g. 15s)
 
 func TestSubscriptionPaymentId(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -628,7 +628,7 @@ func TestSubscriptionPaymentId(t *testing.T) {
 }
 
 func TestInitialBalance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -670,7 +670,7 @@ func TestInitialBalance(t *testing.T) {
 }
 
 func TestClosePartialContract(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -794,7 +794,7 @@ func TestClosePartialContract(t *testing.T) {
 }
 
 func TestClosePartialContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -899,7 +899,7 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 }
 
 func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1033,7 +1033,7 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 }
 
 func TestClosePartialContractNoEscrow(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1158,7 +1158,7 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 }
 
 func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		userIdA := server.NewId()
@@ -1221,7 +1221,7 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 }
 
 func TestGetOpenTransferByteCount(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1293,7 +1293,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 }
 
 func TestAccountIsPro(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1343,7 +1343,7 @@ func TestAccountIsPro(t *testing.T) {
 // limbo. Pre-fix this state held the contract `open=true` forever
 // and the escrow stayed deducted from the source network's balance.
 func TestSettleContractCheckpointPlusClose(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1410,7 +1410,7 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 // state we still hold off on: both parties only checkpointed. Both
 // said "I might come back," so we should NOT settle yet.
 func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1460,7 +1460,7 @@ func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
 // existed pre-fix, and for any future case where the listing is
 // consulted before settlement runs.
 func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()

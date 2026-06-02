@@ -10,7 +10,7 @@ import (
 )
 
 func TestRemoveNetwork(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 

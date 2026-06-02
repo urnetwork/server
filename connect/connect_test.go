@@ -28,7 +28,7 @@ import (
 )
 
 func TestConnectNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -38,7 +38,7 @@ func TestConnectNoNack(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -48,7 +48,7 @@ func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{})
@@ -56,7 +56,7 @@ func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
 }
 
 func TestConnectWithChaosNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -67,7 +67,7 @@ func TestConnectWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -78,7 +78,7 @@ func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -89,7 +89,7 @@ func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
 }
 
 func TestConnectNoTransportReformNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{})
@@ -97,7 +97,7 @@ func TestConnectNoTransportReformNoNack(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -112,7 +112,7 @@ func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
 // see the notes on how contracts work for acks in connect/transfer
 
 func TestConnectH1(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect[h1]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -124,7 +124,7 @@ func TestConnectH1(t *testing.T) {
 }
 
 func TestConnectAuto(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect[auto]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -136,7 +136,7 @@ func TestConnectAuto(t *testing.T) {
 }
 
 func TestConnectH3(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect[h3]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -148,7 +148,7 @@ func TestConnectH3(t *testing.T) {
 }
 
 func TestConnectDns(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect[dns]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -160,7 +160,7 @@ func TestConnectDns(t *testing.T) {
 }
 
 func TestConnectDnsPump(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect[dnspump]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -172,7 +172,7 @@ func TestConnectDnsPump(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContracts(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -183,7 +183,7 @@ func TestConnectWithSymmetricContracts(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithForceStream(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStream\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -195,7 +195,7 @@ func TestConnectWithSymmetricContractsWithForceStream(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContracts(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -206,7 +206,7 @@ func TestConnectWithAsymmetricContracts(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithForceStream(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStream\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -218,7 +218,7 @@ func TestConnectWithAsymmetricContractsWithForceStream(t *testing.T) {
 }
 
 func TestConnectWithChaosH1(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaos[h1]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -231,7 +231,7 @@ func TestConnectWithChaosH1(t *testing.T) {
 }
 
 func TestConnectWithChaosH3(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaos[h3]\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -244,7 +244,7 @@ func TestConnectWithChaosH3(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -256,7 +256,7 @@ func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -268,7 +268,7 @@ func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 }
 
 func TestConnectNoTransportReform(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -278,7 +278,7 @@ func TestConnectNoTransportReform(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReform(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -293,7 +293,7 @@ func TestConnectWithChaosNoTransportReform(t *testing.T) {
 // e.g. logout and login
 
 func TestConnectWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnect\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -305,7 +305,7 @@ func TestConnectWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -317,7 +317,7 @@ func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -329,7 +329,7 @@ func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithChaosWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaos\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -342,7 +342,7 @@ func TestConnectWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -355,7 +355,7 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -368,7 +368,7 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 }
 
 func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -379,7 +379,7 @@ func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -399,7 +399,7 @@ func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestConnectNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoNackEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -410,7 +410,7 @@ func TestConnectNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -421,7 +421,7 @@ func TestConnectWithSymmetricContractsNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -431,7 +431,7 @@ func TestConnectWithAsymmetricContractsNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -443,7 +443,7 @@ func TestConnectWithChaosNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -455,7 +455,7 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -467,7 +467,7 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectNoTransportReformNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -477,7 +477,7 @@ func TestConnectNoTransportReformNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformNoNackEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -488,7 +488,7 @@ func TestConnectWithChaosNoTransportReformNoNackEncrypted(t *testing.T) {
 }
 
 func TestConnectH1Encrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH1Encrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -501,7 +501,7 @@ func TestConnectH1Encrypted(t *testing.T) {
 }
 
 func TestConnectAutoEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectAutoEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -514,7 +514,7 @@ func TestConnectAutoEncrypted(t *testing.T) {
 }
 
 func TestConnectH3Encrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH3Encrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -527,7 +527,7 @@ func TestConnectH3Encrypted(t *testing.T) {
 }
 
 func TestConnectDnsEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -540,7 +540,7 @@ func TestConnectDnsEncrypted(t *testing.T) {
 }
 
 func TestConnectDnsPumpEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsPumpEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -553,7 +553,7 @@ func TestConnectDnsPumpEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -565,7 +565,7 @@ func TestConnectWithSymmetricContractsEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithForceStreamEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -578,7 +578,7 @@ func TestConnectWithSymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -590,7 +590,7 @@ func TestConnectWithAsymmetricContractsEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithForceStreamEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -603,7 +603,7 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosH1Encrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH1Encrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -617,7 +617,7 @@ func TestConnectWithChaosH1Encrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosH3Encrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH3Encrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -631,7 +631,7 @@ func TestConnectWithChaosH3Encrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -644,7 +644,7 @@ func TestConnectWithSymmetricContractsWithChaosEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithChaosEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -657,7 +657,7 @@ func TestConnectWithAsymmetricContractsWithChaosEncrypted(t *testing.T) {
 }
 
 func TestConnectNoTransportReformEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -668,7 +668,7 @@ func TestConnectNoTransportReformEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -680,7 +680,7 @@ func TestConnectWithChaosNoTransportReformEncrypted(t *testing.T) {
 }
 
 func TestConnectWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -693,7 +693,7 @@ func TestConnectWithNewInstanceEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -706,7 +706,7 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -719,7 +719,7 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -733,7 +733,7 @@ func TestConnectWithChaosWithNewInstanceEncrypted(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -747,7 +747,7 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted(t *testi
 }
 
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -761,7 +761,7 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted(t *test
 }
 
 func TestConnectNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -773,7 +773,7 @@ func TestConnectNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -797,7 +797,7 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T)
 // -----------------------------------------------------------------------
 
 func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -808,7 +808,7 @@ func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -819,7 +819,7 @@ func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T)
 }
 
 func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -829,7 +829,7 @@ func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback(t *testing.T
 }
 
 func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -841,7 +841,7 @@ func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -853,7 +853,7 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *t
 }
 
 func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -865,7 +865,7 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *
 }
 
 func TestConnectNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -875,7 +875,7 @@ func TestConnectNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -886,7 +886,7 @@ func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testin
 }
 
 func TestConnectH1EncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH1EncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -899,7 +899,7 @@ func TestConnectH1EncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectAutoEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -912,7 +912,7 @@ func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectH3EncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH3EncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -925,7 +925,7 @@ func TestConnectH3EncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -938,7 +938,7 @@ func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -951,7 +951,7 @@ func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -963,7 +963,7 @@ func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -976,7 +976,7 @@ func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *t
 }
 
 func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -988,7 +988,7 @@ func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -1001,7 +1001,7 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *
 }
 
 func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1015,7 +1015,7 @@ func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1029,7 +1029,7 @@ func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -1042,7 +1042,7 @@ func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing
 }
 
 func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -1055,7 +1055,7 @@ func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testin
 }
 
 func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1066,7 +1066,7 @@ func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1078,7 +1078,7 @@ func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1091,7 +1091,7 @@ func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -1104,7 +1104,7 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *t
 }
 
 func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -1117,7 +1117,7 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *
 }
 
 func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1131,7 +1131,7 @@ func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 }
 
 func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestSymmetric,
 			&testConnectConfig{
@@ -1145,7 +1145,7 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFall
 }
 
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
@@ -1159,7 +1159,7 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFal
 }
 
 func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1171,7 +1171,7 @@ func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testin
 }
 
 func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
@@ -1211,7 +1211,7 @@ type testConnectConfig struct {
 // contract logic is optional so that the effects of contracts can be isolated
 // sets all sequence buffer sizes to 0 to test deadlock
 func testConnect(
-	t *testing.T,
+	t testing.TB,
 	contractTest int,
 	config *testConnectConfig,
 ) {

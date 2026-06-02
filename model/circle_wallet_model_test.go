@@ -11,7 +11,7 @@ import (
 )
 
 func TestCircleUC(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		var circleUserIdWithWallet = server.RequireParseId("018c4b12-1a76-aaca-acce-72ddae03f60d")
 		ctx := context.Background()
 
