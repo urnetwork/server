@@ -850,16 +850,10 @@ func GetProvideSecretKey(
 	return
 }
 
-// GetClientTlsCertificateAndSignature returns both the published TLS
-// cert chain (concatenated PEM blocks, leaf first) and the client's
-// Ed25519 signature over it under the client's long-lived identity
-// key. Either or both may be nil: a client that has not published
-// yields both nil; a client that pre-dates client-key signing yields
-// a non-nil cert and a nil signature. Used by `CreateContract` to
-// populate `Contract.provide_tls_certificate` and
-// `Contract.destination_client_key_signed_tls_certificate` in one
-// query. The cert and signature are keyed on `client_id` only —
-// independent of provide mode.
+// GetClientTlsCertificateAndSignature returns the published TLS cert chain
+// (concatenated PEM, leaf first) and the client's Ed25519 signature over it.
+// Either may be nil: not-published yields both nil; a client pre-dating
+// client-key signing yields a cert and nil signature.
 func GetClientTlsCertificateAndSignature(
 	ctx context.Context,
 	clientId server.Id,
@@ -885,23 +879,10 @@ func GetClientTlsCertificateAndSignature(
 	return
 }
 
-// SetClientTlsCertificateWithSignature stores the PEM-encoded X.509
-// certificate chain — and the client's signature over that chain by
-// its long-lived identity key — that the client published via
-// `EncryptedKey`. Passing an empty / nil chain clears both the
-// stored cert and signature. The platform attaches both to every
-// contract whose destination is this client (`CreateContract`) so
-// the sender can (a) verify the cert observed during the per-peer
-// TLS handshake matches the committed chain, and (b) verify the
-// chain itself was authentically committed by the destination's
-// long-lived identity key.
-//
-// A non-empty chain with a nil signature is allowed (records the
-// cert without binding it to the client's identity key) so older
-// clients that don't yet sign cert publishes don't regress; senders
-// will refuse to admit such a chain into their trusted set once they
-// have a peer key on hand, but this layer just records what was
-// published.
+// SetClientTlsCertificateWithSignature stores the PEM cert chain and the
+// client's signature over it (by its long-lived identity key), published via
+// `EncryptedKey`. An empty/nil chain clears both. A non-empty chain with a nil
+// signature is allowed (older clients that don't sign yet).
 func SetClientTlsCertificateWithSignature(
 	ctx context.Context,
 	clientId server.Id,
@@ -1270,11 +1251,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
-	// Capture the client_ids deleted by the two passes below so we
-	// can sweep their long-lived identity public keys out of redis
-	// (`RemoveClientPublicKey`). Client keys live in redis only —
-	// they have no DB cascade — so if we don't remove them here, a
-	// recycled client_id would inherit the previous owner's key.
+	// Capture the deleted client_ids so we can sweep their identity keys from
+	// redis below. Keys live only in redis (no DB cascade), so a recycled
+	// client_id would otherwise inherit the previous owner's key.
 	var reapedClientIds []server.Id
 	collectReaped := func(rows server.PgResult, err error) {
 		server.WithPgResult(rows, err, func() {
@@ -1325,10 +1304,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		collectReaped(rows, err)
 	})
 
-	// Sweep the per-client redis state for every client_id reaped
-	// above. Done outside the DB tx because redis isn't transactional
-	// with Postgres; a redis failure here just leaves the keys in
-	// place until the next sweep or an overwrite.
+	// Sweep per-client redis state for each reaped client_id. Outside the DB tx
+	// since redis isn't transactional with Postgres; a failure just leaves keys
+	// until the next sweep or overwrite.
 	for _, clientId := range reapedClientIds {
 		RemoveClientPublicKey(ctx, clientId)
 	}

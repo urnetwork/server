@@ -2782,12 +2782,9 @@ var migrations = []any{
     `),
 
 	// Per-client TLS certificate for the encryption handshake, keyed on
-	// `client_id` only (independent of provide mode). Published via
-	// `EncryptedKey`. `tls_certificate_pem` is one or more concatenated
-	// PEM blocks (leaf first, then issuers). `client_key_signed_tls_certificate`
-	// is the client's Ed25519 signature over the chain under its long-lived
-	// identity key (nullable for older clients that don't sign cert publishes).
-	// Long-lived client identity public keys live in redis (`ckey_<clientId>`).
+	// `client_id`, published via `EncryptedKey`. `tls_certificate_pem` is
+	// concatenated PEM (leaf first); `client_key_signed_tls_certificate` is the
+	// client's Ed25519 signature over the chain (nullable for older clients).
 	newSqlMigration(`
         CREATE TABLE client_tls_certificate (
             client_id uuid NOT NULL,

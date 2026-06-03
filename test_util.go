@@ -61,15 +61,11 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 		tb := &retryTB{TB: t}
 		var panicValue any
 
-		// The attempt runs in its own goroutine rather than inline. tb.Fatal /
-		// FailNow (and assert.Equal, which calls FailNow) end a failed attempt
-		// with runtime.Goexit, exactly like a real *testing.T. Goexit terminates
-		// the *current* goroutine and cannot be caught by recover, so if the
-		// attempt ran inline the first failure would unwind and kill this rerun
-		// loop (and the whole test) instead of advancing to the next attempt.
-		// The child goroutine confines that Goexit to the single attempt; the
-		// loop blocks on done and then inspects the wrapper's failed/skipped
-		// state to decide whether to rerun.
+		// Run each attempt in its own goroutine: tb.Fatal/FailNow (and assert.*,
+		// which call FailNow) end a failed attempt with runtime.Goexit, which
+		// can't be recovered. Inline, that Goexit would unwind and kill the whole
+		// rerun loop; the child goroutine confines it to one attempt. The loop
+		// blocks on done, then inspects the wrapper's failed/skipped state.
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -115,23 +111,21 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 	}
 }
 
-// retryTB wraps a *testing.T (through the testing.TB interface) so that a failed
-// assertion in a rerun iteration is recorded locally instead of failing the
-// parent test. Embedding testing.TB promotes its unexported private() method,
-// which is what lets this type satisfy the interface at all; the methods below
-// override the embedded ones so failure and skip state never propagate to the
-// real test. Non-failure methods (Log, Helper, Name, TempDir, ...) fall through
-// to the embedded *testing.T.
+// retryTB wraps a *testing.T (via testing.TB) so a failed assertion in a rerun
+// iteration is recorded locally instead of failing the parent test. Embedding
+// testing.TB promotes its unexported private() method, satisfying the interface;
+// the methods below override the embedded ones so failure/skip state never
+// propagates. Other methods (Log, Helper, Name, ...) fall through to *testing.T.
 type retryTB struct {
 	testing.TB
-	mu      sync.Mutex
-	failed  bool
-	skipped bool
+	stateLock sync.Mutex
+	failed    bool
+	skipped   bool
 }
 
 func (self *retryTB) Fail() {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.failed = true
 }
 
@@ -141,8 +135,8 @@ func (self *retryTB) FailNow() {
 }
 
 func (self *retryTB) Failed() bool {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	return self.failed
 }
 
@@ -177,15 +171,15 @@ func (self *retryTB) Skipf(format string, args ...any) {
 }
 
 func (self *retryTB) SkipNow() {
-	self.mu.Lock()
+	self.stateLock.Lock()
 	self.skipped = true
-	self.mu.Unlock()
+	self.stateLock.Unlock()
 	runtime.Goexit()
 }
 
 func (self *retryTB) Skipped() bool {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	return self.skipped
 }
 

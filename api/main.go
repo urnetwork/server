@@ -156,12 +156,7 @@ Options:
 		router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
 		router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
 		router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
-		// Unauthenticated lookup of a client's long-lived public client
-		// identity key. Returned in JSON: `{"public_key": "<base64>"}`.
-		// Senders fetch the peer's key here as an out-of-band cross-
-		// check against the value the platform attaches to a contract,
-		// so a malicious platform that substitutes the key in a
-		// contract can be detected.
+		// Unauthenticated public-key lookup; see handlers.GetClientKey.
 		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
 		router.NewRoute("GET", "/hello", handlers.Hello),
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),

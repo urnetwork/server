@@ -31,9 +31,8 @@ func TestRedisGetSetPipeline(t *testing.T) {
 			_, err = r.Get(ctx, missingKey).Result()
 			assert.Equal(t, err, RedisNil)
 
-			// pipeline: queue SET + GET on the same key and exec in one round
-			// trip. The same key keeps both commands on one slot, so this is
-			// also valid against a cluster client.
+			// Pipeline SET + GET on the same key in one round trip. Same key
+			// keeps both on one slot, so this also works against a cluster.
 			pipe := r.Pipeline()
 			setCmd := pipe.Set(ctx, pipelineKey, "value2", 30*time.Second)
 			getCmd := pipe.Get(ctx, pipelineKey)
@@ -50,12 +49,11 @@ func TestRedisGetSetPipeline(t *testing.T) {
 	})
 }
 
-// TestRedisPublishSubscribe exercises sharded pub/sub: a message published with
-// `SPublish` is delivered to a subscriber created with the `Subscribe` wrapper
-// (which uses `SSubscribe`). `Subscribe` returns a channel carrying both the
-// subscription confirmation and subsequent messages, so the test waits for the
-// confirmation before publishing -- pub/sub does not buffer for a subscriber
-// that is not yet active.
+// TestRedisPublishSubscribe exercises sharded pub/sub: `SPublish` delivers to a
+// subscriber from the `Subscribe` wrapper (which uses `SSubscribe`). `Subscribe`'s
+// channel carries the subscription confirmation and messages, so the test waits
+// for the confirmation before publishing -- pub/sub doesn't buffer for an
+// inactive subscriber.
 func TestRedisPublishSubscribe(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -67,9 +65,9 @@ func TestRedisPublishSubscribe(t *testing.T) {
 		ch, closeSubscribe := Subscribe(ctx, channel)
 		defer closeSubscribe()
 
-		// Wait until the subscription is active before publishing. The channel
-		// may also carry other control events (e.g. a health-check pong), so
-		// read until the subscription confirmation arrives.
+		// Wait for the subscription to go active before publishing. The channel
+		// may carry other control events (e.g. a health-check pong), so read
+		// until the subscription confirmation arrives.
 	waitSubscribed:
 		for {
 			select {

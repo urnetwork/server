@@ -1012,12 +1012,10 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 				)
 				assert.Equal(t, err, nil)
 
-				// non-checkpoint + checkpoint now settles
-				// (`settleContract`): the non-checkpoint side is
-				// definitively done, so the checkpoint's byte count
-				// is folded in as that party's final contribution.
-				// Pre-fix this assertion was `false` — the contract
-				// stayed open forever in limbo until force-close.
+				// non-checkpoint + checkpoint now settles (`settleContract`):
+				// the non-checkpoint side is done, so the checkpoint's byte
+				// count is its final contribution. Pre-fix: was `false`,
+				// contract stayed open until force-close.
 				_, closed = GetContractClose(ctx, contractId)
 				assert.Equal(t, closed, true)
 			}
@@ -1336,12 +1334,10 @@ func TestAccountIsPro(t *testing.T) {
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
 
-// TestSettleContractCheckpointPlusClose verifies the asymmetric
-// settlement path: one party closed non-checkpoint, the other only
-// checkpointed. The contract MUST settle (using the checkpoint's
-// byte count as that party's final contribution) rather than sit in
-// limbo. Pre-fix this state held the contract `open=true` forever
-// and the escrow stayed deducted from the source network's balance.
+// TestSettleContractCheckpointPlusClose verifies the asymmetric path: one
+// party non-checkpoint, the other checkpoint only. The contract must settle (the
+// checkpoint's byte count is that party's final contribution). Pre-fix it held
+// `open=true` forever with the escrow stranded on the source network's balance.
 func TestSettleContractCheckpointPlusClose(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1368,8 +1364,7 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 			)
 		}
 
-		// Case 1: source closes non-checkpoint, destination
-		// checkpoints. Must settle.
+		// Case 1: source non-checkpoint, destination checkpoint. Must settle.
 		contractId, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1384,10 +1379,9 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
 		assert.Equal(t, nil, err)
 		_, closed = GetContractClose(ctx, contractId)
-		assert.Equal(t, true, closed) // SETTLED — was the bug before the fix
+		assert.Equal(t, true, closed) // settled — was the bug before the fix
 
-		// Case 2: destination closes non-checkpoint, source
-		// checkpoints. Must also settle.
+		// Case 2: destination non-checkpoint, source checkpoint. Must also settle.
 		contractId2, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1406,9 +1400,9 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 	})
 }
 
-// TestSettleContractBothCheckpointStaysOpen verifies the only
-// state we still hold off on: both parties only checkpointed. Both
-// said "I might come back," so we should NOT settle yet.
+// TestSettleContractBothCheckpointStaysOpen verifies the one state we still
+// hold off on: both parties checkpointed only (both might resume), so do not
+// settle yet.
 func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1451,14 +1445,11 @@ func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
 	})
 }
 
-// TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose
-// verifies that the listing surfaces 2-party contracts where
-// exactly one party is `ContractPartyCheckpoint`, mapped to the
-// non-checkpoint party. With the new `settleContract` rule, these
-// contracts no longer reach this state in normal operation — but
-// the listing must still handle the case for older rows that
-// existed pre-fix, and for any future case where the listing is
-// consulted before settlement runs.
+// TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose verifies the
+// listing surfaces 2-party contracts where exactly one party is
+// `ContractPartyCheckpoint`, mapped to the non-checkpoint party. The new
+// `settleContract` rule means this state no longer arises normally, but the
+// listing must still handle pre-fix rows and reads before settlement runs.
 func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1485,10 +1476,8 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 			)
 		}
 
-		// Two-party-both-checkpoint contract: stays open, must
-		// NOT appear in the partial-close list (the rule there is
-		// "exactly one checkpoint" → safe to finalize; both
-		// checkpointed → still active).
+		// Both-checkpoint: stays open, must not appear (list rule is
+		// "exactly one checkpoint" → finalize; both → still active).
 		contractIdBoth, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1513,8 +1502,7 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 		assert.Equal(t, nil, err)
 		assert.Equal(t, nil, CloseContract(ctx, contractIdDestOnly, clientIdB, 0, false))
 
-		// Zero-close contract: contract opened but neither side
-		// reported close. MUST NOT appear in the partial-close list.
+		// Zero-close: opened but neither side closed. Must not appear.
 		contractIdZero, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1533,11 +1521,11 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 		assert.Equal(t, true, ok)
 		assert.Equal(t, ContractPartyDestination, party)
 
-		// `contractIdBoth` (both checkpointed) NOT listed.
+		// `contractIdBoth` (both checkpointed) not listed.
 		_, ok = partial[contractIdBoth]
 		assert.Equal(t, false, ok)
 
-		// `contractIdZero` (no closes) NOT listed.
+		// `contractIdZero` (no closes) not listed.
 		_, ok = partial[contractIdZero]
 		assert.Equal(t, false, ok)
 	})

@@ -393,9 +393,8 @@ func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
 // -----------------------------------------------------------------------
 // Encrypted-sequence variants.
 //
-// Each of the tests above is mirrored here with `enableEncryption: true`
-// so the SendSequence <-> ReceiveSequence TLS session is exercised
-// end-to-end through the connect server.
+// The matrix above mirrored with `enableEncryption: true`, exercising the
+// SendSequence <-> ReceiveSequence TLS session end-to-end through the server.
 // -----------------------------------------------------------------------
 
 func TestConnectNoNackEncrypted(t *testing.T) {
@@ -788,12 +787,11 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T)
 // -----------------------------------------------------------------------
 // Encrypted-sequence variants with EncryptAllowUnwrappedFallback=true.
 //
-// Same matrix as the Encrypted tests above, but with the sender configured
-// to fall back gracefully if the TLS handshake fails. Under normal test
-// conditions the handshake still completes, so these mirror the strict
-// variants -- they also verify the parallel-handshake codepath in the
-// SendSequence (app packs flow during the handshake instead of being
-// gated on session readiness).
+// Same matrix as the Encrypted tests, but the sender falls back to plaintext
+// if the TLS handshake fails. The handshake still completes under test, so
+// these mirror the strict variants; they also exercise SendSequence's
+// parallel-handshake path (app packs flow during the handshake rather than
+// gating on session readiness).
 // -----------------------------------------------------------------------
 
 func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
@@ -1198,10 +1196,8 @@ type testConnectConfig struct {
 	transportMode         connect.TransportMode
 	forceStream           bool
 	// enableEncryption turns on the per-peer encryption session for both
-	// clients. Both sides must have Encrypt=true for the handshake to
-	// complete, so this is set symmetrically. While the handshake is in
-	// progress (cipher nil) traffic flows in plaintext; once the cipher
-	// is established, all traffic is outer-wrapped.
+	// clients (set symmetrically: both sides need Encrypt=true to handshake).
+	// During the handshake (cipher nil) traffic is plaintext, then outer-wrapped.
 	enableEncryption bool
 }
 
@@ -1286,15 +1282,11 @@ func testConnect(
 	service := "connect"
 	block := "test"
 
-	// The per-peer encryption handshake ships its TLS server flight
-	// as a single `EncryptedControl{Handshake}` Pack, which lands on
-	// the wire at ~2 KiB once protobuf-wrapped. Any framer along the
-	// path with `MaxMessageLen` below that closes the transport
-	// mid-handshake; SendSequence's resend keeps re-sending the same
-	// oversized pack and the session deadlocks. Floor every framer
-	// cap at `ClientSettings.MinimumMessageLenLimit()` so the
-	// handshake always fits — see that method for the worst-case
-	// derivation.
+	// The handshake's TLS server flight is one `EncryptedControl{Handshake}`
+	// Pack, ~2 KiB protobuf-wrapped. A framer with `MaxMessageLen` below that
+	// closes the transport mid-handshake, and SendSequence's resend of the
+	// oversized pack deadlocks. Floor every framer cap at
+	// `ClientSettings.MinimumMessageLenLimit()` (worst-case derivation there).
 	framerMaxMessageLen := max(
 		2*int(messageContentSizes[len(messageContentSizes)-1]),
 		int(connect.DefaultClientSettings().MinimumMessageLenLimit()),
@@ -1424,18 +1416,15 @@ func testConnect(
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
-	// Reap the encryption session immediately at refs==0 (no idle keep-alive).
-	// This is deliberate, not a temporary toggle: like setting the channel
-	// buffer sizes to 0 to expose deadlocks, IdleTimeout=0 forces a fresh
-	// session + handshake on every burst so any logical error in the
-	// restart -> plaintext -> upgrade path is exposed rather than papered over
-	// by session reuse. (Production derives IdleTimeout = max(send,receive)
-	// idle for performance; the correctness must hold at 0.)
+	// IdleTimeout=0 reaps the encryption session at refs==0 (no keep-alive),
+	// deliberately — like 0-size buffers exposing deadlocks, it forces a fresh
+	// session + handshake per burst so bugs in the restart -> plaintext ->
+	// upgrade path surface instead of being hidden by session reuse.
+	// (Production uses max(send,receive) idle; correctness must hold at 0.)
 	encryptionSessionIdleTimeout := 0 * time.Second
 	if config.enableEncryption {
 		clientSettingsA.EncryptionSettings.Encrypt = true
 		clientSettingsA.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
-		// clientSettingsA.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsA.EncryptionSettings.EncryptionControlUseCompanion = false
 		}
@@ -1468,7 +1457,6 @@ func testConnect(
 	if config.enableEncryption {
 		clientSettingsB.EncryptionSettings.Encrypt = true
 		clientSettingsB.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
-		// clientSettingsB.EncryptionSettings.TlsTimeout = 120 * time.Second
 		if contractTest != contractTestAsymmetric {
 			clientSettingsB.EncryptionSettings.EncryptionControlUseCompanion = false
 		}

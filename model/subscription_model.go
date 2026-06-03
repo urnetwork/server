@@ -1159,27 +1159,14 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 	var posts []func() any
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		// party -> (used transfer byte count, is-checkpoint).
-		// Pull ALL close records (checkpoint or non-checkpoint). A
-		// checkpoint says "I'm pausing — might come back"; a non-
-		// checkpoint says "I'm done." For settlement we accept any
-		// combination as terminal *except* when both sides only
-		// checkpointed — in that case both sides intend to come
-		// back and the contract should stay open. If either side
-		// has said "done" non-checkpoint and the other has at
-		// least said "I'm pausing here at byte N," there's no more
-		// legitimate activity coming and the contract is ready to
-		// settle (using the checkpoint's reported byte count as
-		// that side's final contribution).
-		//
-		// Without this rule, the receiver's `CheckpointContract`
-		// from `ReceiveSequence.Run`'s defer combined with the
-		// sender's `CloseContract` from `SendSequence.Run`'s defer
-		// would leave the contract in an unsettleable limbo: source
-		// row is checkpoint=false, destination row is
-		// checkpoint=true, and the contract sits open forever with
-		// its escrow still deducted from the source network's
-		// balance.
+		// party -> close record. Pull all close rows (checkpoint or not).
+		// Settle on any combination except both-sides-checkpoint (both intend
+		// to resume — leave the contract open). A non-checkpoint "done" plus the
+		// other side's checkpoint is terminal: no more activity is coming, so use
+		// the checkpoint's byte count as that side's final contribution. Without
+		// this, the receiver's `CheckpointContract` (ReceiveSequence.Run defer)
+		// plus the sender's `CloseContract` (SendSequence.Run defer) would strand
+		// the contract open forever with escrow still deducted.
 		type closeRecord struct {
 			usedTransferByteCount ByteCount
 			checkpoint            bool
@@ -1220,9 +1207,8 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 		sourceUsedTransferByteCount := sourceClose.usedTransferByteCount
 		destinationUsedTransferByteCount := destinationClose.usedTransferByteCount
 
-		// Settle when both parties have a close row AND at least one
-		// is non-checkpoint. Both-sides-checkpointed means both sides
-		// said "I might come back" — leave the contract open.
+		// Settle when both parties have a close row and at least one is
+		// non-checkpoint; both-sides-checkpoint means both may resume — stay open.
 		if sourceOk && destinationOk && !(sourceClose.checkpoint && destinationClose.checkpoint) {
 			hasEscrow := false
 
@@ -1339,13 +1325,10 @@ func settleEscrowInTx(
 					&party,
 					&checkpoint,
 				))
-				// Count the checkpoint row's reported byte count
-				// like any other close. `settleContract`'s decision
-				// to settle already established that at least one
-				// party is non-checkpoint, which means no more
-				// activity is coming — the checkpoint's
-				// `used_transfer_byte_count` is that party's final
-				// contribution.
+				// Count the checkpoint row's byte count like any other close:
+				// settleContract already established one party is non-checkpoint,
+				// so no more activity is coming and the checkpoint's
+				// `used_transfer_byte_count` is that party's final contribution.
 				if checkpoint {
 					checkpointCount += 1
 				}
@@ -1357,10 +1340,8 @@ func settleEscrowInTx(
 			returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
 			return
 		}
-		// Defensive: refuse to settle if BOTH parties are
-		// checkpoint. `settleContract` shouldn't have routed us
-		// here in that case, but if it ever does, that's a logic
-		// bug we'd rather flag than silently settle.
+		// Defensive: refuse to settle if both parties are checkpoint.
+		// settleContract shouldn't route here; flag the logic bug rather than settle.
 		if checkpointCount == 2 {
 			returnErr = fmt.Errorf("Cannot settle contract with both parties checkpoint.")
 			return
@@ -1709,15 +1690,10 @@ func GetOpenContractIdsWithPartialClose(
 			contractIdPartialCloseParties[contractId] = parties[0]
 		case 2:
 			// Both sides have a close row. If exactly one is
-			// `ContractPartyCheckpoint`, the contract is stuck in
-			// the limbo state where one side is definitively done
-			// and the other only paused via `CheckpointContract`.
-			// Surface it under the non-checkpoint party so callers
-			// (e.g., test cleanup) can finalize it the same way
-			// they finalize a true 1-party partial close. Without
-			// this, the test's cleanup loop misses these contracts
-			// entirely and they keep their escrow deducted from
-			// the network balance.
+			// `ContractPartyCheckpoint` (one side done, the other only paused via
+			// `CheckpointContract`), surface it under the non-checkpoint party so
+			// callers (e.g. test cleanup) finalize it like a 1-party partial close.
+			// Otherwise the cleanup loop misses it and its escrow stays deducted.
 			var nonCheckpoint ContractParty
 			checkpointCount := 0
 			for _, p := range parties {

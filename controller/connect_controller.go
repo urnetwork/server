@@ -177,9 +177,8 @@ func CreateContract(
 	destinationId := server.RequireIdFromBytes(createContract.DestinationId)
 	var provideMode model.ProvideMode
 
-	// V(2) diagnostic: log every contract request up front, including companion
-	// requests that get rejected below (those never reach the success-path
-	// [contract][cert] log). In symmetric mode we expect companion=false here.
+	// V(2) diagnostic: log every contract request up front, including the
+	// companion requests rejected below (which never reach [contract][cert]).
 	glog.V(2).Infof("[contract][req]%s->%s companion=%t\n", clientId, destinationId, createContract.Companion)
 
 	if createContract.Companion {
@@ -224,26 +223,11 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
-	// look up the destination's published TLS certificate chain (if any)
-	// so the sender can verify it during the per-peer TLS handshake. The
-	// certificate is keyed on `client_id` only (independent of provide
-	// mode) — every encryption-enabled client publishes exactly one cert
-	// via `EncryptedKey`, and that cert is the receiver-role identity for
-	// every contract whose destination is this client. A nil chain means
-	// the destination did not publish a cert; senders accept any cert
-	// (skip verification) in that case — see Contract proto.
-	//
-	// Alongside the cert chain, return the destination's signature over
-	// the chain by its long-lived client identity key
-	// (`Contract.destination_client_key_signed_tls_certificate`) and the
-	// destination's public client identity key
-	// (`Contract.destination_client_public_key`). The sender uses these
-	// for the long-lived-identity verification path (Option 1 + Option
-	// 4): the public key value attached here is the platform's claim
-	// about the destination's identity; the sender SHOULD cross-check
-	// it against the unauthenticated `/key/<client_id>` lookup before
-	// trusting it (defeats a MITM platform that substitutes both the
-	// cert and the verifying key in lockstep).
+	// Attach the destination's published cert chain, the chain signature, and
+	// its public client key to the contract. The sender verifies the cert during
+	// the per-peer TLS handshake (nil chain → skip), and cross-checks the public
+	// key against the unauthenticated `/key/<client_id>` lookup to defeat a
+	// man-in-the-middle platform that swaps both cert and key in lockstep.
 	var provideTlsCertificatePem []byte
 	var clientKeySignedTlsCertificate []byte
 	var destinationClientPublicKey []byte
@@ -269,9 +253,8 @@ func CreateContract(
 
 	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
 
-	// V(2) diagnostic: verify (a) no companion contracts are created in
-	// symmetric mode, and (b) whether a destination TLS cert is attached to the
-	// contract — the attached cert is what arms sender-side cert verification.
+	// V(2) diagnostic: confirm no companion contracts in symmetric mode, and
+	// whether a destination cert is attached (the cert arms sender-side verification).
 	glog.V(2).Infof(
 		"[contract][cert]%s->%s companion=%t provideMode=%s certBlocks=%d certPemLen=%d clientKeySig=%d pubKey=%d\n",
 		clientId, destinationId, createContract.Companion, provideMode,
@@ -532,19 +515,11 @@ func Provide(
 	return nil
 }
 
-// SetEncryptedKey stores the client's published TLS certificate chain
-// — and the client's signature over that chain by its long-lived
-// identity key — so the platform can attach both to every contract
-// whose destination is this client. Certificates are keyed on
-// `client_id` only — a single cert per client regardless of provide
-// mode. An empty chain clears the stored cert (e.g., when a client
-// opts out of publishing).
-//
-// The signature is the value the receiving sender will verify against
-// the destination's public client key (fetched out-of-band) before
-// admitting the cert chain to the per-peer session's trusted set. If
-// the publishing client doesn't include a signature, the chain is
-// still stored but the signature column is left null.
+// SetEncryptedKey validates the published TLS cert chain and stores it with the
+// client's signature over it (by its long-lived identity key). The platform
+// attaches both to every contract destined for this client; the sender verifies
+// the signature against the destination's public key before trusting the chain.
+// An empty chain clears it; a nil signature is allowed (older clients).
 func SetEncryptedKey(
 	ctx context.Context,
 	clientId server.Id,
@@ -569,12 +544,10 @@ func SetEncryptedKey(
 	return nil
 }
 
-// SetClientKey stores the client's published long-lived public client
-// identity key (Ed25519, 32 bytes). Keyed on `client_id`; rotation
-// overwrites. The value is served by the unauthenticated
-// `/key/<client_id>` API and is also attached to every contract whose
-// destination is this client. An empty / nil key clears the stored
-// value.
+// SetClientKey stores the client's published long-lived public identity key
+// (Ed25519, 32 bytes), keyed on `client_id` (rotation overwrites). Served by
+// the unauthenticated `/key/<client_id>` API and attached to every contract
+// destined for this client. An empty/nil key clears it.
 func SetClientKey(
 	ctx context.Context,
 	clientId server.Id,
@@ -587,13 +560,10 @@ func SetClientKey(
 	return nil
 }
 
-// GetClientKeyArgs / GetClientKeyResult / GetClientKey back the
-// unauthenticated `GET /key/<client_id>` route. The handler URL-routes
-// the client id into `ClientId`; the controller looks it up in the
-// `client_key` table. A client that has never published a key returns
-// `{"public_key": null}` with HTTP 200, so callers can distinguish
-// "not yet published" from a network error without parsing status
-// codes.
+// GetClientKeyArgs / GetClientKeyResult / GetClientKey back the unauthenticated
+// `GET /key/<client_id>` route. A client that has never published a key returns
+// `{"public_key": null}` with HTTP 200, so callers can tell "not yet published"
+// from a network error without parsing status codes.
 type GetClientKeyArgs struct {
 	ClientId server.Id `json:"client_id"`
 }
@@ -615,10 +585,8 @@ func GetClientKey(
 	}, nil
 }
 
-// concatenatePemBlocks joins each PEM block in the wire-level chain into one
-// byte slice. PEM is designed to be concatenable: tools like x509.ParseCertificate
-// loop on `pem.Decode` and re-extract each block in order. Returns nil when
-// no chain is provided.
+// concatenatePemBlocks joins the wire-level PEM chain into one byte slice
+// (`pem.Decode` re-extracts each block in order). Returns nil for an empty chain.
 func concatenatePemBlocks(chain [][]byte) []byte {
 	if len(chain) == 0 {
 		return nil
@@ -634,10 +602,8 @@ func concatenatePemBlocks(chain [][]byte) []byte {
 	return out
 }
 
-// splitPemBlocks is the inverse of concatenatePemBlocks. Given a concatenated
-// PEM bytes blob, returns the individual blocks (one entry per
-// `-----BEGIN CERTIFICATE-----` ... `-----END CERTIFICATE-----`). Returns nil
-// when the blob is empty or contains no PEM blocks.
+// splitPemBlocks is the inverse of concatenatePemBlocks: it splits a concatenated
+// PEM blob back into its individual blocks. Returns nil when the blob has none.
 func splitPemBlocks(blob []byte) [][]byte {
 	if len(blob) == 0 {
 		return nil

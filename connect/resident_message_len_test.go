@@ -8,20 +8,17 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// TestResidentAdmitsMinimumMessageLenLimit verifies that a message of exactly
-// `MinimumMessageLenLimit()` bytes passes through the resident exchange's
-// framing layer when that layer is built from default settings.
+// TestResidentAdmitsMinimumMessageLenLimit verifies that an exactly
+// `MinimumMessageLenLimit()`-byte message passes through the resident
+// exchange's framing layer built from default settings.
 //
 // `MinimumMessageLenLimit()` is the worst-case single-pack wire size of the
-// per-peer encryption handshake's TLS server flight. Every framer along the
-// resident exchange flow must admit it. This is the regression guard for
-// `DefaultConnectHandlerSettings` passing `MinimumMessageLenLimit()` as its
-// framer max. `DefaultFramerSettings` has no global default, so each context
-// declares its own cap; if the resident exchange flow declared one too small,
-// the oversized handshake pack would be rejected here ("Max message len
-// exceeded"), `SendSequence` would retransmit it forever, and the per-peer
-// session would deadlock. With the cap at `MinimumMessageLenLimit()`, the
-// message round-trips.
+// per-peer encryption handshake's TLS server flight, which every framer along
+// the resident exchange flow must admit. This guards `DefaultConnectHandlerSettings`
+// passing it as the framer max. `DefaultFramerSettings` has no global default,
+// so each context sets its own cap; too small a cap would reject the handshake
+// pack here ("Max message len exceeded"), `SendSequence` would retransmit it
+// forever, and the per-peer session would deadlock.
 //
 // `ExchangeSettings` embeds `ConnectHandlerSettings`, so its `FramerSettings`
 // is the same object backing the connect-handler framer and the websocket
@@ -31,8 +28,8 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 
 	minLen := int(connect.DefaultClientSettings().MinimumMessageLenLimit())
 
-	// Settings-level invariant: the resident exchange framer cap must admit
-	// at least the connect runtime minimum message length.
+	// Invariant: the resident exchange framer cap admits the connect runtime
+	// minimum message length.
 	if settings.FramerSettings.MaxMessageLen < minLen {
 		t.Fatalf(
 			"resident exchange framer MaxMessageLen %d < MinimumMessageLenLimit %d",
@@ -41,9 +38,9 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 		)
 	}
 
-	// Functional: a `minLen`-byte message must round-trip through the
-	// resident's ExchangeBuffer write/read framing path (the resident-to-
-	// resident forwarding I/O), unchanged and without a framer error.
+	// Functional: a `minLen`-byte message must round-trip unchanged through the
+	// resident's ExchangeBuffer framing path (resident-to-resident forwarding
+	// I/O) without a framer error.
 	sendBuffer := NewDefaultExchangeBuffer(settings)
 	receiveBuffer := NewDefaultExchangeBuffer(settings)
 
@@ -55,14 +52,13 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 	for i := range sent {
 		sent[i] = byte(i % 251)
 	}
-	// Independent copy for comparison: WriteMessage returns its input to the
-	// message pool on success, so `sent` must not be read afterward.
+	// Independent copy: WriteMessage returns its input to the message pool on
+	// success, so `sent` must not be read afterward.
 	expected := make([]byte, minLen)
 	copy(expected, sent)
 
-	// net.Pipe is synchronous (unbuffered) and the framer splits a message
-	// this size into two writes, so the write must run concurrently with the
-	// read.
+	// net.Pipe is unbuffered and the framer splits a message this size into two
+	// writes, so write must run concurrently with read.
 	writeErr := make(chan error, 1)
 	go func() {
 		writeErr <- sendBuffer.WriteMessage(connWrite, sent)

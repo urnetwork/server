@@ -10,34 +10,17 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Client identity-key model: long-lived Ed25519 public keys published
-// by clients via the `ClientKey` control message. Keyed on
-// `client_id`; one key per client.
+// Client identity-key model: long-lived Ed25519 public keys published by
+// clients via the `ClientKey` control message, one per `client_id`.
 //
-// Storage:
-//   - Redis is the source of truth. There is no backing SQL table.
-//     A single string key `ckey_<clientId>` holds the raw 32-byte
-//     Ed25519 public key. No TTL — entries persist until explicitly
-//     removed.
-//
-// Lifecycle:
-//   - `SetClientPublicKey` writes (or, on empty value, deletes) the
-//     redis entry.
-//   - `RemoveClientPublicKey` deletes the redis entry, called by
-//     `RemoveDisconnectedNetworkClients` when the owning
-//     `network_client` row is reaped, so a recycled client_id never
-//     inherits a stale predecessor's key.
-//   - `GetClientPublicKey` returns the current redis value, or nil
-//     when no key has been published (or it was removed).
+// Redis is the source of truth (no SQL table): the string key `ckey_<clientId>`
+// holds the raw 32-byte key with no TTL, so entries persist until removed.
 
 func clientPublicKeyRedisKey(clientId server.Id) string {
 	return fmt.Sprintf("ckey_%s", clientId)
 }
 
-// GetClientPublicKey returns the 32-byte Ed25519 long-lived public
-// identity key the client published via `ClientKey`, or nil when the
-// client has not published a key (or the key was removed because the
-// client_id was reaped).
+// GetClientPublicKey returns the published key, or nil if none was published.
 func GetClientPublicKey(
 	ctx context.Context,
 	clientId server.Id,
@@ -56,10 +39,7 @@ func GetClientPublicKey(
 	return
 }
 
-// SetClientPublicKey stores the client's published 32-byte Ed25519
-// long-lived public identity key into redis. Passing an empty / nil
-// key removes the entry. No TTL — entries live until
-// `RemoveClientPublicKey` is called or the value is overwritten.
+// SetClientPublicKey stores the published key; an empty/nil key removes it.
 func SetClientPublicKey(
 	ctx context.Context,
 	clientId server.Id,
@@ -75,10 +55,9 @@ func SetClientPublicKey(
 	})
 }
 
-// RemoveClientPublicKey deletes the redis entry for `clientId`.
-// Called from `RemoveDisconnectedNetworkClients` so a client_id that
-// gets reaped doesn't leave its public key behind in redis. Safe to
-// call when no entry exists.
+// RemoveClientPublicKey deletes the entry, called from
+// `RemoveDisconnectedNetworkClients` so a reaped client_id doesn't leave its key
+// behind. Safe to call when no entry exists.
 func RemoveClientPublicKey(
 	ctx context.Context,
 	clientId server.Id,

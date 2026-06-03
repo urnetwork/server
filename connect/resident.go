@@ -173,6 +173,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeChaosSettings: *DefaultExchangeChaosSettings(),
 	}
 }
+
 func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
 	return &ExchangeChaosSettings{
 		ResidentShutdownPerSecond: 0.0,

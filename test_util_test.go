@@ -9,13 +9,12 @@ import (
 	"github.com/go-playground/assert/v2"
 )
 
-// These tests exercise the real TestEnv.Run, including its per-attempt
-// environment setup/teardown, to prove that a flaky failure on early attempts
-// is retried and rescued, while a failure that persists across every attempt
-// still fails the test.
+// These tests exercise the real TestEnv.Run (including per-attempt environment
+// setup/teardown): a flaky failure on early attempts is retried and rescued,
+// while a failure that persists across every attempt still fails the test.
 //
-// ApplyDbMigrations is false (the callbacks touch no schema) and RerunTimeout is
-// zero so the reruns happen back-to-back.
+// ApplyDbMigrations is false (callbacks touch no schema) and RerunTimeout is
+// zero so reruns happen back-to-back.
 
 func retryTestEnv(rerunCount int) *TestEnv {
 	return &TestEnv{
@@ -25,11 +24,10 @@ func retryTestEnv(rerunCount int) *TestEnv {
 	}
 }
 
-// TestRunRetriesUntilPass proves every failure mode is retried: the first
-// attempt panics, the second fails (t.Fail), the third fails an assertion
-// (assert.Equal, which calls FailNow -> runtime.Goexit), and the fourth passes.
-// Because each failure is recorded only on the retryTB wrapper, the real
-// *testing.T is never failed and the overall test passes.
+// TestRunRetriesUntilPass checks every failure mode is retried: attempt 1
+// panics, 2 calls t.Fail, 3 fails an assertion (assert.Equal -> FailNow ->
+// runtime.Goexit), and 4 passes. Each failure is recorded only on the retryTB
+// wrapper, so the real *testing.T never fails and the test passes.
 func TestRunRetriesUntilPass(t *testing.T) {
 	var attempts atomic.Int32
 	retryTestEnv(3).Run(t, func(tb testing.TB) {
@@ -48,14 +46,13 @@ func TestRunRetriesUntilPass(t *testing.T) {
 	}
 }
 
-// TestRunFailsAfterExhaustion proves the retry does not silently swallow real
-// failures: a failure that persists across every attempt must still fail the
-// test. Run calls t.FailNow once the reruns are exhausted, so we run that case
-// in a subprocess and require it to exit non-zero.
+// TestRunFailsAfterExhaustion checks retry does not swallow real failures: a
+// failure that persists across every attempt must still fail the test. Run
+// calls t.FailNow once reruns are exhausted, so we run that case in a subprocess
+// and require it to exit non-zero.
 func TestRunFailsAfterExhaustion(t *testing.T) {
 	if os.Getenv("URNETWORK_RERUN_EXHAUSTION_CHILD") == "1" {
-		// Child process: always fails, so Run should exhaust its reruns and fail
-		// this test.
+		// Child process: always fails, so Run exhausts its reruns and fails.
 		retryTestEnv(1).Run(t, func(tb testing.TB) {
 			tb.Fatal("persistent failure")
 		})
