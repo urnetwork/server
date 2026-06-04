@@ -12,7 +12,7 @@ import (
 )
 
 func TestGoogleJwk(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

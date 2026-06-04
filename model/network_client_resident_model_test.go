@@ -16,7 +16,7 @@ import (
 )
 
 func TestNominateResident(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// run n parallel nominations
 		// after nomination, each gets the current value
 		// all the current values should agree
@@ -108,7 +108,7 @@ func TestNominateResident(t *testing.T) {
 }
 
 func TestResidentTtl(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// nominate a resident
 		// after ttl, it should go away
 

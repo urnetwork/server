@@ -86,7 +86,7 @@ func TestStreamHop(t *testing.T) {
 func TestStream(t *testing.T) {
 	// in parallel add and remove contracts from a shared set of paths that include a client id
 	// ensure that the final state for the client id matches the state accumulated from the events
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		keyCount := 32 * 1024
 		contractCount := 4 * keyCount

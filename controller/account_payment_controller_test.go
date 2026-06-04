@@ -18,7 +18,7 @@ import (
 var sendPaymentTransactionId = "123456"
 
 func TestSubscriptionSendPayment(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -256,7 +256,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 }
 
 func TestFeeToUsd(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		coinbaseClient := &mockCoinbaseClient{
 			FetchExchangeRatesFunc: func(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error) {
 				staticData := &CoinbaseExchangeRatesResults{

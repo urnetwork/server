@@ -13,7 +13,7 @@ import (
 )
 
 func TestNetworkCreateGuestMode(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkCreate := NetworkCreateArgs{
@@ -34,13 +34,13 @@ func TestNetworkCreateGuestMode(t *testing.T) {
 		result, err := NetworkCreate(networkCreate, clientSession)
 		assert.Equal(t, err, nil)
 
-		assert.MatchRegex(t, result.Network.NetworkName, regex)
+		assert.Equal(t, regex.MatchString(result.Network.NetworkName), true)
 
 	})
 }
 
 func TestNetworkUpgradeGuestMode(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -101,7 +101,7 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 }
 
 func TestUpgradeGuestExistingUser(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		userId := server.NewId()
@@ -156,7 +156,7 @@ func TestUpgradeGuestExistingUser(t *testing.T) {
 }
 
 func TestUpgradeGuestExistingWalletUser(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		userId := server.NewId()
@@ -223,7 +223,7 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 }
 
 func TestUpgradeGuestByWallet(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 		// networkId := server.NewId()
@@ -283,7 +283,7 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 }
 
 func TestNetworkCreateTermsFail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkCreate := NetworkCreateArgs{
@@ -301,7 +301,7 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 }
 
 func TestNetworkUpdate(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -351,7 +351,7 @@ func TestNetworkUpdate(t *testing.T) {
 }
 
 func TestNetworkNameValidation(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		// too short
 		networkName := ""

@@ -21,7 +21,7 @@ import (
 )
 
 func TestByteCount(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		assert.Equal(t, ByteCountHumanReadable(ByteCount(0)), "0b")
 		assert.Equal(t, ByteCountHumanReadable(ByteCount(5*1024*1024*1024*1024)), "5tib")
 
@@ -59,7 +59,7 @@ func TestByteCount(t *testing.T) {
 }
 
 func TestNanoCents(t *testing.T) {
-	(&server.TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		usd := float64(1.55)
 		a := UsdToNanoCents(usd)
 		usd2 := NanoCentsToUsd(a)
@@ -71,7 +71,7 @@ func TestNanoCents(t *testing.T) {
 }
 
 func TestEscrow(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
@@ -318,7 +318,7 @@ func TestEscrow(t *testing.T) {
 }
 
 func TestCompanionEscrowAndCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// tests companion and checkpoint
 		// this is a more realistic use case
 		ctx := context.Background()
@@ -601,7 +601,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 // TODO escrow benchmark to see how many contracts can be opened and closed in some time period (e.g. 15s)
 
 func TestSubscriptionPaymentId(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -628,7 +628,7 @@ func TestSubscriptionPaymentId(t *testing.T) {
 }
 
 func TestInitialBalance(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -670,7 +670,7 @@ func TestInitialBalance(t *testing.T) {
 }
 
 func TestClosePartialContract(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -794,7 +794,7 @@ func TestClosePartialContract(t *testing.T) {
 }
 
 func TestClosePartialContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -899,7 +899,7 @@ func TestClosePartialContractWithCheckpoint(t *testing.T) {
 }
 
 func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -1012,8 +1012,12 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 				)
 				assert.Equal(t, err, nil)
 
+				// non-checkpoint + checkpoint now settles (`settleContract`):
+				// the non-checkpoint side is done, so the checkpoint's byte
+				// count is its final contribution. Pre-fix: was `false`,
+				// contract stayed open until force-close.
 				_, closed = GetContractClose(ctx, contractId)
-				assert.Equal(t, closed, false)
+				assert.Equal(t, closed, true)
 			}
 		}
 
@@ -1027,7 +1031,7 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 }
 
 func TestClosePartialContractNoEscrow(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1152,7 +1156,7 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 }
 
 func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		userIdA := server.NewId()
@@ -1215,7 +1219,7 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 }
 
 func TestGetOpenTransferByteCount(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1287,7 +1291,7 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 }
 
 func TestAccountIsPro(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -1329,3 +1333,200 @@ func TestAccountIsPro(t *testing.T) {
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
+
+// TestSettleContractCheckpointPlusClose verifies the asymmetric path: one
+// party non-checkpoint, the other checkpoint only. The contract must settle (the
+// checkpoint's byte count is that party's final contribution). Pre-fix it held
+// `open=true` forever with the escrow stranded on the source network's balance.
+func TestSettleContractCheckpointPlusClose(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		// Case 1: source non-checkpoint, destination checkpoint. Must settle.
+		contractId, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId, clientIdA, 512*1024, false) // source, non-checkpoint
+		assert.Equal(t, nil, err)
+		_, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, false, closed) // not yet — destination hasn't reported
+
+		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId)
+		assert.Equal(t, true, closed) // settled — was the bug before the fix
+
+		// Case 2: destination non-checkpoint, source checkpoint. Must also settle.
+		contractId2, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId2, clientIdA, 512*1024, true) // source, checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, false, closed)
+
+		err = CloseContract(ctx, contractId2, clientIdB, 512*1024, false) // destination, non-checkpoint
+		assert.Equal(t, nil, err)
+		_, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, true, closed)
+	})
+}
+
+// TestSettleContractBothCheckpointStaysOpen verifies the one state we still
+// hold off on: both parties checkpointed only (both might resume), so do not
+// settle yet.
+func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		contractId, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		err = CloseContract(ctx, contractId, clientIdA, 512*1024, true) // source, checkpoint
+		assert.Equal(t, nil, err)
+		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
+		assert.Equal(t, nil, err)
+
+		_, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, false, closed) // both checkpointed → still active
+	})
+}
+
+// TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose verifies the
+// listing surfaces 2-party contracts where exactly one party is
+// `ContractPartyCheckpoint`, mapped to the non-checkpoint party. The new
+// `settleContract` rule means this state no longer arises normally, but the
+// listing must still handle pre-fix rows and reads before settlement runs.
+func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		for _, networkId := range []server.Id{networkIdA, networkIdB} {
+			AddBasicTransferBalance(
+				ctx,
+				networkId,
+				initialTransferBalance,
+				server.NowUtc(),
+				server.NowUtc().Add(30*24*time.Hour),
+			)
+		}
+
+		// Both-checkpoint: stays open, must not appear (list rule is
+		// "exactly one checkpoint" → finalize; both → still active).
+		contractIdBoth, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdBoth, clientIdA, 0, true))
+		assert.Equal(t, nil, CloseContract(ctx, contractIdBoth, clientIdB, 0, true))
+
+		// One-party-source-only: classic partial close.
+		contractIdSourceOnly, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdSourceOnly, clientIdA, 0, false))
+
+		// One-party-destination-only: classic partial close.
+		contractIdDestOnly, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+		assert.Equal(t, nil, CloseContract(ctx, contractIdDestOnly, clientIdB, 0, false))
+
+		// Zero-close: opened but neither side closed. Must not appear.
+		contractIdZero, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		partial := GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
+
+		// `contractIdSourceOnly` listed under Source.
+		party, ok := partial[contractIdSourceOnly]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, ContractPartySource, party)
+
+		// `contractIdDestOnly` listed under Destination.
+		party, ok = partial[contractIdDestOnly]
+		assert.Equal(t, true, ok)
+		assert.Equal(t, ContractPartyDestination, party)
+
+		// `contractIdBoth` (both checkpointed) not listed.
+		_, ok = partial[contractIdBoth]
+		assert.Equal(t, false, ok)
+
+		// `contractIdZero` (no closes) not listed.
+		_, ok = partial[contractIdZero]
+		assert.Equal(t, false, ok)
+	})
+}

@@ -850,6 +850,79 @@ func GetProvideSecretKey(
 	return
 }
 
+// GetClientTlsCertificateAndSignature returns the published TLS cert chain
+// (concatenated PEM, leaf first) and the client's Ed25519 signature over it.
+// Either may be nil: not-published yields both nil; a client pre-dating
+// client-key signing yields a cert and nil signature.
+func GetClientTlsCertificateAndSignature(
+	ctx context.Context,
+	clientId server.Id,
+) (tlsCertificatePem []byte, clientKeySignedTlsCertificate []byte, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					tls_certificate_pem,
+					client_key_signed_tls_certificate
+				FROM client_tls_certificate
+				WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&tlsCertificatePem, &clientKeySignedTlsCertificate))
+			}
+		})
+	})
+	return
+}
+
+// SetClientTlsCertificateWithSignature stores the PEM cert chain and the
+// client's signature over it (by its long-lived identity key), published via
+// `EncryptedKey`. An empty/nil chain clears both. A non-empty chain with a nil
+// signature is allowed (older clients that don't sign yet).
+func SetClientTlsCertificateWithSignature(
+	ctx context.Context,
+	clientId server.Id,
+	tlsCertificatePem []byte,
+	clientKeySignedTlsCertificate []byte,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		if 0 < len(tlsCertificatePem) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_tls_certificate (
+					client_id,
+					tls_certificate_pem,
+					client_key_signed_tls_certificate,
+					set_time
+				) VALUES ($1, $2, $3, $4)
+				ON CONFLICT (client_id) DO UPDATE
+				SET tls_certificate_pem = EXCLUDED.tls_certificate_pem,
+				    client_key_signed_tls_certificate = EXCLUDED.client_key_signed_tls_certificate,
+				    set_time = EXCLUDED.set_time
+				`,
+				clientId,
+				tlsCertificatePem,
+				clientKeySignedTlsCertificate,
+				server.NowUtc(),
+			))
+		} else {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM client_tls_certificate
+				WHERE client_id = $1
+				`,
+				clientId,
+			))
+		}
+	})
+}
+
 func SetProvide(
 	ctx context.Context,
 	clientId server.Id,
@@ -1178,15 +1251,31 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		))
 	}, server.TxReadCommitted)
 
+	// Capture the deleted client_ids so we can sweep their identity keys from
+	// redis below. Keys live only in redis (no DB cascade), so a recycled
+	// client_id would otherwise inherit the previous owner's key.
+	var reapedClientIds []server.Id
+	collectReaped := func(rows server.PgResult, err error) {
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var clientId server.Id
+				server.Raise(rows.Scan(&clientId))
+				reapedClientIds = append(reapedClientIds, clientId)
+			}
+		})
+	}
+
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		rows, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM network_client
 			WHERE network_client.create_time < $1 AND active = false
+			RETURNING client_id
 			`,
 			minTime.UTC(),
-		))
+		)
+		collectReaped(rows, err)
 
 	}, server.TxReadCommitted)
 
@@ -1194,7 +1283,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 	// important: to delete clients without a source id (top level clients),
 	//            the app will need to create a new client id for these clients when it notices the existing jwt fails
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		rows, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM network_client
@@ -1208,10 +1297,19 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 					AND network_client_connection.client_id IS NULL
 			) t
 			WHERE network_client.client_id = t.client_id
+			RETURNING network_client.client_id
 			`,
 			minTime.UTC(),
-		))
+		)
+		collectReaped(rows, err)
 	})
+
+	// Sweep per-client redis state for each reaped client_id. Outside the DB tx
+	// since redis isn't transactional with Postgres; a failure just leaves keys
+	// until the next sweep or overwrite.
+	for _, clientId := range reapedClientIds {
+		RemoveClientPublicKey(ctx, clientId)
+	}
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 
@@ -1246,6 +1344,25 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			    WHERE network_client.client_id IS NULL
 			) t
 			WHERE provide_key.client_id = t.client_id
+			`,
+		))
+
+	}, server.TxReadCommitted)
+
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+
+		// (cascade) remove TLS certificates without a network client
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM client_tls_certificate
+			USING (
+				SELECT client_tls_certificate.client_id
+				FROM client_tls_certificate
+					LEFT JOIN network_client ON network_client.client_id = client_tls_certificate.client_id
+				WHERE network_client.client_id IS NULL
+			) t
+			WHERE client_tls_certificate.client_id = t.client_id
 			`,
 		))
 

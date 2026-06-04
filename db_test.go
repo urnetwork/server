@@ -10,7 +10,7 @@ import (
 )
 
 func TestIdPgCodec(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		Db(ctx, func(conn PgConn) {
@@ -89,7 +89,7 @@ func TestIdPgCodec(t *testing.T) {
 }
 
 func TestBatch(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		Db(ctx, func(conn PgConn) {
@@ -140,7 +140,7 @@ func TestBatch(t *testing.T) {
 }
 
 func TestTempTable(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		n := 1000
@@ -252,7 +252,7 @@ func (self *C) Values() []any {
 }
 
 func TestRetry(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		Db(ctx, func(conn PgConn) {
@@ -313,7 +313,7 @@ func TestRetry(t *testing.T) {
 }
 
 func TestRetryInnerError(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		Db(ctx, func(conn PgConn) {
@@ -375,7 +375,7 @@ func TestRetryInnerError(t *testing.T) {
 }
 
 func TestSerializableTx(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		k := 5
@@ -490,7 +490,7 @@ func TestSerializableTx(t *testing.T) {
 }
 
 func TestUpdateTx(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		k := 5

@@ -10,7 +10,7 @@ import (
 )
 
 func TestByJwtLegacy(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -36,7 +36,7 @@ func TestByJwtLegacy(t *testing.T) {
 }
 
 func TestByJwtFull(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -69,7 +69,7 @@ func TestByJwtFull(t *testing.T) {
 }
 
 func TestByJwtFullWithClientId(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()

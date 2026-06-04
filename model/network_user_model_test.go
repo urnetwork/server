@@ -13,7 +13,7 @@ import (
 )
 
 func TestNetworkUser(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -58,7 +58,7 @@ func TestNetworkUser(t *testing.T) {
 }
 
 func TestAddUserAuthPassword(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -122,7 +122,7 @@ func TestAddUserAuthPassword(t *testing.T) {
 }
 
 func TestAddUserAuthWallet(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
@@ -194,7 +194,7 @@ func TestAddUserAuthWallet(t *testing.T) {
 }
 
 func TestFindNetworkIdByEmail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkId := server.NewId()

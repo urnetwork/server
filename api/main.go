@@ -156,6 +156,8 @@ Options:
 		router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
 		router.NewRoute("POST", "/device/set-provide", handlers.DeviceSetProvide),
 		router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
+		// Unauthenticated public-key lookup; see handlers.GetClientKey.
+		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
 		router.NewRoute("GET", "/hello", handlers.Hello),
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
 		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),

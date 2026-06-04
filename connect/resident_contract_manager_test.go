@@ -10,7 +10,7 @@ package main
 // "github.com/urnetwork/server/model"
 
 /*
-func TestCreateContract(t *testing.T) { server.DefaultTestEnv().Run(func() {
+func TestCreateContract(t *testing.T) { server.DefaultTestEnv().Run(t, func(t testing.TB) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	settings := DefaultExchangeSettings()

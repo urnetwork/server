@@ -19,7 +19,7 @@ import (
 )
 
 func TestSearchSubstringLocal(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -34,7 +34,7 @@ func TestSearchSubstringLocal(t *testing.T) {
 }
 
 func TestSearchSubstringRandomLocal(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -51,7 +51,7 @@ func TestSearchSubstringRandomLocal(t *testing.T) {
 }
 
 func TestSearchSubstringLocalNoWait(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -65,7 +65,7 @@ func TestSearchSubstringLocalNoWait(t *testing.T) {
 }
 
 func TestSearchSubstringRandomLocalNoWait(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

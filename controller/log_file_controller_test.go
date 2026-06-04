@@ -19,7 +19,7 @@ func testBody() io.ReadCloser {
 }
 
 func TestLogFileShouldFail(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		// create feedback
 		ctx := context.Background()

@@ -7,7 +7,7 @@ import (
 )
 
 func TestApplyDbMigrations(t *testing.T) {
-	(&TestEnv{ApplyDbMigrations: false}).Run(func() {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		ApplyDbMigrations(ctx)

@@ -12,7 +12,7 @@ import (
 )
 
 func TestAccountWallet(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -147,7 +147,7 @@ func TestAccountWallet(t *testing.T) {
 }
 
 func TestSeekerNFTVerification(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 

@@ -15,7 +15,7 @@ import (
 )
 
 func TestCancelAccountPayment(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -130,7 +130,7 @@ func TestCancelAccountPayment(t *testing.T) {
 
 func TestGetNetworkProvideStats(t *testing.T) {
 
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 
@@ -243,7 +243,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 }
 
 func TestPaymentPlanSubsidy(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)

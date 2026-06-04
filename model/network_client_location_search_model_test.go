@@ -22,7 +22,7 @@ func TestLocationsSearch(t *testing.T) {
 
 	// search around for lcoation and group
 
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		server.Tx(ctx, func(tx server.PgTx) {

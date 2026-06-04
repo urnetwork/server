@@ -8,7 +8,7 @@ import (
 )
 
 func TestBlockchainParsing(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		blockchain := "sol"
 		parsedBlockchain, err := ParseBlockchain(blockchain)

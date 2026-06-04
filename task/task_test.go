@@ -52,7 +52,7 @@ func Work1Post(
 }
 
 func TestTask(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		RescheduleTimeout = 1 * time.Second
 		ReleaseTimeout = 1 * time.Second
 

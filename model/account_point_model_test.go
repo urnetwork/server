@@ -16,7 +16,7 @@ import (
 )
 
 func TestAccountPoints(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 		networkId := server.NewId()
@@ -62,7 +62,7 @@ func TestAccountPoints(t *testing.T) {
  * Test that the account points are paid out correctly to networks per payout.
  */
 func TestAccountPointsPerPayout(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		subsidyConfigCopy := *EnvSubsidyConfig()
 		subsidyConfigCopy.ForcePoints = true
 		subsidyConfig := &subsidyConfigCopy
@@ -393,7 +393,7 @@ func TestAccountPointsPerPayout(t *testing.T) {
 }
 
 func TestReliabilityPoints(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
 

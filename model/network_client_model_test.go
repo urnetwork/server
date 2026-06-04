@@ -12,7 +12,7 @@ import (
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		clientId := server.NewId()
@@ -56,7 +56,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 }
 
 func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		clientId := server.NewId()
@@ -96,7 +96,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 }
 
 func TestNetworkClientLifecycle(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		clientId := server.NewId()
@@ -133,7 +133,7 @@ func TestNetworkClientLifecycle(t *testing.T) {
 // FIXME test GetNetworkClients, SetPendingNetworkClientConnection
 
 func TestSetProvide(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

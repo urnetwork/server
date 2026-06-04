@@ -56,7 +56,7 @@ func TestSignProxyIdHosts(t *testing.T) {
 }
 
 func TestCreateProxyClient(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		ResetProxyClientIpv4(ctx)

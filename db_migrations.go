@@ -2780,4 +2780,19 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS transfer_contract_open_payer_network_id_transfer_byte_count
         ON transfer_contract (open, payer_network_id, transfer_byte_count)
     `),
+
+	// Per-client TLS certificate for the encryption handshake, keyed on
+	// `client_id`, published via `EncryptedKey`. `tls_certificate_pem` is
+	// concatenated PEM (leaf first); `client_key_signed_tls_certificate` is the
+	// client's Ed25519 signature over the chain (nullable for older clients).
+	newSqlMigration(`
+        CREATE TABLE client_tls_certificate (
+            client_id uuid NOT NULL,
+            tls_certificate_pem bytea NOT NULL,
+            client_key_signed_tls_certificate bytea NULL,
+            set_time timestamp NOT NULL,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
 }

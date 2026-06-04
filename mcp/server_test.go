@@ -18,7 +18,7 @@ import (
 )
 
 // startTestServer starts a test server and returns its URL and cleanup function
-func startTestServer(t *testing.T) (string, func()) {
+func startTestServer(t testing.TB) (string, func()) {
 	// Find available port
 	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -67,7 +67,7 @@ func startTestServer(t *testing.T) (string, func()) {
 }
 
 func TestProvidersList(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		serverURL, cleanup := startTestServer(t)
 		defer cleanup()
 
@@ -115,7 +115,7 @@ func TestProvidersList(t *testing.T) {
 		textContent, ok := result.Content[0].(*mcp.TextContent)
 		assert.Equal(t, ok, true)
 
-		assert.MatchRegex(t, textContent.Text, MsgNoProviderLocations)
+		assert.Equal(t, strings.Contains(textContent.Text, MsgNoProviderLocations), true)
 
 		/**
 		 * Setup location group

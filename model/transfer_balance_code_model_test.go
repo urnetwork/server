@@ -12,7 +12,7 @@ import (
 )
 
 func TestBalanceCode(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()
@@ -83,7 +83,7 @@ func TestBalanceCode(t *testing.T) {
 }
 
 func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		networkIdA := server.NewId()

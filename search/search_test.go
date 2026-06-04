@@ -19,7 +19,7 @@ import (
 )
 
 func TestSearchSubstring(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -29,7 +29,7 @@ func TestSearchSubstring(t *testing.T) {
 	})
 }
 
-func searchSubstring(t *testing.T, ctx context.Context, testSearch Search) {
+func searchSubstring(t testing.TB, ctx context.Context, testSearch Search) {
 	id1 := server.NewId()
 	id2 := server.NewId()
 
@@ -92,7 +92,7 @@ func searchSubstring(t *testing.T, ctx context.Context, testSearch Search) {
 }
 
 func TestSearchSubstringRandom(t *testing.T) {
-	server.DefaultTestEnv().Run(func() {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -104,7 +104,7 @@ func TestSearchSubstringRandom(t *testing.T) {
 	})
 }
 
-func searchSubstringRandom(t *testing.T, ctx context.Context, testSearch Search, d int) {
+func searchSubstringRandom(t testing.TB, ctx context.Context, testSearch Search, d int) {
 	// number of values
 	n := 500
 	// number of sub tests
