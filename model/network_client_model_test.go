@@ -9,6 +9,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
@@ -194,5 +196,33 @@ func TestSetProvide(t *testing.T) {
 			ProvideModePublic: true,
 		})
 
+	})
+}
+
+func TestRemoveNetworkClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		// Create a mock session
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// Generate random IDs to test the ANY($1) binding
+		clientIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+
+		args := &RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}
+
+		// This will panic if the driver fails to cast []server.Id to uuid[]
+		_, err := RemoveNetworkClients(args, sess)
+
+		// Assert that the function ran without returning an error
+		assert.Equal(t, err, nil)
 	})
 }

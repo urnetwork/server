@@ -445,6 +445,43 @@ func RemoveNetworkClient(
 	return removeClientResult, removeClientErr
 }
 
+type RemoveNetworkClientsArgs struct {
+	ClientIds []server.Id `json:"client_ids"`
+}
+
+type RemoveNetworkClientsResult struct{}
+
+func RemoveNetworkClients(
+	removeClients *RemoveNetworkClientsArgs,
+	session *session.ClientSession,
+) (*RemoveNetworkClientsResult, error) {
+	var removeClientsResult *RemoveNetworkClientsResult
+	if len(removeClients.ClientIds) == 0 {
+		return &RemoveNetworkClientsResult{}, nil
+	}
+
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		_, err := tx.Exec(
+			session.Ctx,
+			`
+				UPDATE network_client
+				SET
+					active = false
+				WHERE
+					client_id = ANY($1) AND
+					network_id = $2
+			`,
+			removeClients.ClientIds,
+			session.ByJwt.NetworkId,
+		)
+		server.Raise(err)
+
+		removeClientsResult = &RemoveNetworkClientsResult{}
+	})
+
+	return removeClientsResult, nil
+}
+
 type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
 }
