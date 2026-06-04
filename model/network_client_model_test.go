@@ -221,7 +221,7 @@ func TestRemoveNetworkClients(t *testing.T) {
 
 		// This will panic if the driver fails to cast []server.Id to uuid[]
 		_, err := RemoveNetworkClients(args, sess)
-		
+
 		// Assert that the function ran without returning an error
 		assert.Equal(t, err, nil)
 	})
