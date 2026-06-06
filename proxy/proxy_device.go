@@ -302,11 +302,13 @@ func (self *ProxyDevice) Run() {
 				case <-self.ctx.Done():
 					return
 				case receive <- packet:
+					self.UpdateActivity()
 					return
 				case <-notify:
 				}
 			} else {
 				self.tun.Write(packet)
+				self.UpdateActivity()
 				return
 			}
 		}
@@ -322,6 +324,9 @@ func (self *ProxyDevice) Run() {
 		if err != nil {
 			return
 		}
+		if !self.UpdateActivity() {
+			return
+		}
 		success := self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
 		if !success {
 			connect.MessagePoolReturn(packet)
@@ -330,6 +335,9 @@ func (self *ProxyDevice) Run() {
 }
 
 func (self *ProxyDevice) Send(packet []byte) bool {
+	if !self.UpdateActivity() {
+		return false
+	}
 	return self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
 }
 
