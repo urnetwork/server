@@ -798,25 +798,162 @@ func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB 
 	return ProvideModePublic
 }
 
-func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
-	provideModes = map[ProvideMode]bool{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT provide_mode FROM provide_key
-				WHERE client_id = $1
-			`,
-			clientId,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var provideMode ProvideMode
-				server.Raise(result.Scan(&provideMode))
-				provideModes[provideMode] = true
-			}
+func provideModesKey(clientId server.Id) string {
+	return fmt.Sprintf("{pm_%s}pms", clientId)
+}
+
+func provideModeSecretKeyKey(clientId server.Id, provideMode ProvideMode) string {
+	return fmt.Sprintf("{pm_%s}sk_%d", clientId, provideMode)
+}
+
+// MigrateProvideMode backfills the redis provide-key state from postgres for
+// clients whose provide_key rows predate the redis layer. The db is the source
+// of truth, so existing redis keys are overwritten.
+//
+// All of a client's keys share the {pm_<clientId>} hash tag and so can be
+// written in a single pipeline; keys for different clients live in different
+// slots and must not share a pipeline.
+func MigrateProvideMode(ctx context.Context, blockSize int) {
+	for b := 0; true; b += 1 {
+		clientSecretKeys := map[server.Id]map[ProvideMode][]byte{}
+
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					provide_key.client_id,
+					provide_key.provide_mode,
+					provide_key.secret_key
+				FROM provide_key
+				INNER JOIN (
+					SELECT
+						DISTINCT client_id
+					FROM provide_key
+					ORDER BY client_id
+					LIMIT $1
+					OFFSET $2
+				) t ON t.client_id = provide_key.client_id
+				`,
+				blockSize,
+				b*blockSize,
+			)
+			server.WithPgResult(result, err, func() {
+				i := 0
+				for result.Next() {
+					if (i+1)%1000 == 0 {
+						glog.Infof("[migrate][provide-mode][b%d][%d/]\n", b, i+1)
+					}
+
+					var clientId server.Id
+					var provideMode ProvideMode
+					var secretKey []byte
+					server.Raise(result.Scan(&clientId, &provideMode, &secretKey))
+					secretKeys, ok := clientSecretKeys[clientId]
+					if !ok {
+						secretKeys = map[ProvideMode][]byte{}
+						clientSecretKeys[clientId] = secretKeys
+					}
+					secretKeys[provideMode] = secretKey
+					i += 1
+				}
+			})
 		})
+
+		clientIds := maps.Keys(clientSecretKeys)
+
+		out := make(chan server.Id)
+
+		for _, clientId := range clientIds {
+			go server.HandleError(func() {
+				defer func() {
+					select {
+					case <-ctx.Done():
+					case out <- clientId:
+					}
+				}()
+
+				server.Redis(ctx, func(r server.RedisClient) {
+
+					secretKeys := clientSecretKeys[clientId]
+
+					// all keys share the {pm_<clientId>} hash tag
+					pipe := r.TxPipeline()
+
+					provideModesList := maps.Keys(secretKeys)
+					provideModesListJson, _ := json.Marshal(provideModesList)
+					// no ttl
+					pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, -1)
+
+					for provideMode, secretKey := range secretKeys {
+						// no ttl
+						pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, -1)
+					}
+
+					_, err := pipe.Exec(ctx)
+					server.Raise(err)
+
+				})
+
+			})
+
+		}
+
+		for i := range len(clientIds) {
+			select {
+			case <-ctx.Done():
+			case <-out:
+				if (i+1)%10 == 0 {
+					glog.Infof("[migrate][provide-mode][b%d][%d/%d]\n", b, i+1, len(clientIds))
+				}
+			}
+		}
+
+		glog.Infof("[migrate][provide-mode][b%d]done (%d clients)\n", b, len(clientIds))
+	}
+}
+
+func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
+		if provideModesListJson == "" {
+			// not in redis; fall back to the db below
+			return
+		}
+		var provideModesList []ProvideMode
+		err := json.Unmarshal([]byte(provideModesListJson), &provideModesList)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		provideModes = map[ProvideMode]bool{}
+		for _, provideMode := range provideModesList {
+			provideModes[provideMode] = true
+		}
 	})
+
+	// TODO this can be removed once provide_key older than the redis set have been removed
+	if provideModes == nil && returnErr == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT provide_mode FROM provide_key
+					WHERE client_id = $1
+				`,
+				clientId,
+			)
+			server.WithPgResult(result, err, func() {
+				provideModes = map[ProvideMode]bool{}
+				for result.Next() {
+					var provideMode ProvideMode
+					server.Raise(result.Scan(&provideMode))
+					provideModes[provideMode] = true
+				}
+			})
+		})
+	}
+
 	return
 }
 
@@ -825,28 +962,40 @@ func GetProvideSecretKey(
 	clientId server.Id,
 	provideMode ProvideMode,
 ) (secretKey []byte, returnErr error) {
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					secret_key
-				FROM provide_key
-				WHERE
-					client_id = $1 AND
-					provide_mode = $2
-			`,
-			clientId,
-			provideMode,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&secretKey))
-			} else {
-				returnErr = fmt.Errorf("Provide secret key not set.")
-			}
-		})
+	server.Redis(ctx, func(r server.RedisClient) {
+		secretKeyStr, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, provideMode)).Result()
+		if secretKeyStr != "" {
+			secretKey = []byte(secretKeyStr)
+		}
+		// otherwise leave secretKey nil and fall back to the db below
 	})
+
+	// TODO this can be removed once provide_key older than the redis set have been removed
+	if secretKey == nil && returnErr == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						secret_key
+					FROM provide_key
+					WHERE
+						client_id = $1 AND
+						provide_mode = $2
+				`,
+				clientId,
+				provideMode,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&secretKey))
+				} else {
+					returnErr = fmt.Errorf("Provide secret key not set.")
+				}
+			})
+		})
+	}
+
 	return
 }
 
@@ -928,17 +1077,31 @@ func SetProvide(
 	clientId server.Id,
 	secretKeys map[ProvideMode][]byte,
 ) {
+	var removedProvideModes []ProvideMode
+
 	server.Tx(ctx, func(tx server.PgTx) {
+		// reset in case the tx is retried on a transient error
+		removedProvideModes = nil
+
 		changeTime := server.NowUtc()
 
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM provide_key
 			WHERE client_id = $1
+			RETURNING provide_key.provide_mode
 			`,
 			clientId,
-		))
+		)
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var provideMode ProvideMode
+				server.Raise(result.Scan(&provideMode))
+				removedProvideModes = append(removedProvideModes, provideMode)
+			}
+		})
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for provideMode, secretKey := range secretKeys {
@@ -971,6 +1134,28 @@ func SetProvide(
 		))
 
 	})
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+
+		provideModesList := maps.Keys(secretKeys)
+		provideModesListJson, _ := json.Marshal(provideModesList)
+		// no ttl
+		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, -1)
+
+		for provideMode, secretKey := range secretKeys {
+			// no ttl
+			pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, -1)
+		}
+		for _, provideMode := range removedProvideModes {
+			if _, ok := secretKeys[provideMode]; !ok {
+				pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
+			}
+		}
+
+		_, err := pipe.Exec(ctx)
+		server.Raise(err)
+	})
 }
 
 func GetProvideKeyChanges(
@@ -1000,26 +1185,10 @@ func GetProvideKeyChanges(
 				server.Raise(result.Scan(&changedCount))
 			}
 		})
-
-		result, err = tx.Query(
-			ctx,
-			`
-			SELECT
-				provide_mode
-			FROM provide_key
-			WHERE client_id = $1
-			`,
-			clientId,
-		)
-		server.WithPgResult(result, err, func() {
-			provideModes = map[ProvideMode]bool{}
-			for result.Next() {
-				var provideMode ProvideMode
-				server.Raise(result.Scan(&provideMode))
-				provideModes[provideMode] = true
-			}
-		})
 	})
+
+	provideModes, _ = GetProvideModes(ctx, clientId)
+
 	return
 }
 
@@ -1311,10 +1480,13 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 		RemoveClientPublicKey(ctx, clientId)
 	}
 
+	var removedProxyIds []server.Id
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		// reset in case the tx is retried on a transient error
+		removedProxyIds = nil
 
 		// (cascade) remove proxy device config without a network client
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM proxy_device_config
@@ -1325,15 +1497,33 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			    WHERE network_client.client_id IS NULL
 			) t
 			WHERE proxy_device_config.client_id = t.client_id
+			RETURNING proxy_device_config.proxy_id
 			`,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var proxyId server.Id
+				server.Raise(result.Scan(&proxyId))
+				removedProxyIds = append(removedProxyIds, proxyId)
+			}
+		})
 
 	}, server.TxReadCommitted)
 
+	server.Redis(ctx, func(r server.RedisClient) {
+		for _, proxyId := range removedProxyIds {
+			err := r.Del(ctx, proxyDeviceConfigKey(proxyId)).Err()
+			server.Raise(err)
+		}
+	})
+
+	clientProvideModes := map[server.Id][]ProvideMode{}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		// reset in case the tx is retried on a transient error
+		clientProvideModes = map[server.Id][]ProvideMode{}
 
 		// (cascade) remove provide keys without a network client
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM provide_key
@@ -1344,10 +1534,32 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			    WHERE network_client.client_id IS NULL
 			) t
 			WHERE provide_key.client_id = t.client_id
+			RETURNING provide_key.client_id, provide_key.provide_mode
 			`,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var provideMode ProvideMode
+				server.Raise(result.Scan(&clientId, &provideMode))
+				clientProvideModes[clientId] = append(clientProvideModes[clientId], provideMode)
+			}
+		})
 
 	}, server.TxReadCommitted)
+
+	server.Redis(ctx, func(r server.RedisClient) {
+
+		for clientId, provideModes := range clientProvideModes {
+			pipe := r.TxPipeline()
+			pipe.Del(ctx, provideModesKey(clientId))
+			for _, provideMode := range provideModes {
+				pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
+			}
+			_, err := pipe.Exec(ctx)
+			server.Raise(err)
+		}
+	})
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 

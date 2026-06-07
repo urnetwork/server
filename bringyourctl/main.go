@@ -78,6 +78,8 @@ Usage:
     bringyourctl proxy keygen
     bringyourctl proxy reset-client-ipv4
     bringyourctl proxy inspect <proxy_id>
+    bringyourctl model migrate provide-mode
+    bringyourctl model migrate proxy-device-config
     bringyourctl refresh-transfer-balances
 
 Options:
@@ -244,6 +246,14 @@ Options:
 			proxyResetClientIpv4(opts)
 		} else if inspect, _ := opts.Bool("inspect"); inspect {
 			proxyInspect(opts)
+		}
+	} else if model_, _ := opts.Bool("model"); model_ {
+		if migrate, _ := opts.Bool("migrate"); migrate {
+			if provideMode, _ := opts.Bool("provide-mode"); provideMode {
+				modelMigrateProvideMode(opts)
+			} else if proxyDeviceConfig, _ := opts.Bool("proxy-device-config"); proxyDeviceConfig {
+				modelMigrateProxyDeviceConfig(opts)
+			}
 		}
 	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
 		refreshTransferBalances(opts)
@@ -1152,4 +1162,16 @@ func refreshTransferBalances(opts docopt.Opts) {
 		&controller.RefreshTransferBalancesArgs{},
 		clientSession,
 	)
+}
+
+func modelMigrateProvideMode(opts docopt.Opts) {
+	ctx := context.Background()
+	model.MigrateProvideMode(ctx, 50000)
+	fmt.Println("Provide mode migration completed successfully.")
+}
+
+func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
+	ctx := context.Background()
+	model.MigrateProxyDeviceConfig(ctx, 50000)
+	fmt.Println("Proxy device config migration completed successfully.")
 }

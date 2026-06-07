@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	mathrand "math/rand"
 	"testing"
 	"time"
@@ -194,5 +195,193 @@ func TestSetProvide(t *testing.T) {
 			ProvideModePublic: true,
 		})
 
+	})
+}
+
+// GetProvideModes / GetProvideSecretKey must fall back to postgres when the
+// redis cache is cold (data written before the redis layer existed, or evicted).
+// Regression: a redis miss used to leak a non-nil error even though the db
+// fallback found the data, which callers treat as "no permission".
+func TestGetProvideFallsBackToDb(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		secretKey := make([]byte, 32)
+		mathrand.Read(secretKey)
+		secretKeys := map[ProvideMode][]byte{
+			ProvideModePublic: secretKey,
+		}
+
+		SetProvide(ctx, clientId, secretKeys)
+
+		// drop the cache so the reads are forced through the db fallback
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, provideModesKey(clientId))
+			r.Del(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic))
+		})
+
+		provideModes, err := GetProvideModes(ctx, clientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic: true,
+		})
+
+		k, err := GetProvideSecretKey(ctx, clientId, ProvideModePublic)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, k, secretKey)
+	})
+}
+
+func TestGetProvideModesNotSet(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+
+		// a client that never provided returns an empty set and no error
+		provideModes, err := GetProvideModes(ctx, clientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{})
+
+		// the secret key for a never-provided client is an error
+		_, err = GetProvideSecretKey(ctx, clientId, ProvideModePublic)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// Re-providing with fewer modes must drop the removed mode's secret key from
+// both postgres and redis. Exercises the multi-mode json round-trip and the
+// removedProvideModes cleanup, neither of which the single-mode TestSetProvide
+// covers.
+func TestSetProvideRemovesStaleModes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		key := func() []byte {
+			k := make([]byte, 32)
+			mathrand.Read(k)
+			return k
+		}
+
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic:  key(),
+			ProvideModeNetwork: key(),
+		})
+
+		provideModes, err := GetProvideModes(ctx, clientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic:  true,
+			ProvideModeNetwork: true,
+		})
+
+		publicKey := key()
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: publicKey,
+		})
+
+		provideModes, err = GetProvideModes(ctx, clientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, provideModes, map[ProvideMode]bool{
+			ProvideModePublic: true,
+		})
+
+		// the dropped mode is gone from the api and from redis
+		_, err = GetProvideSecretKey(ctx, clientId, ProvideModeNetwork)
+		assert.NotEqual(t, err, nil)
+		server.Redis(ctx, func(r server.RedisClient) {
+			v, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
+			assert.Equal(t, v, "")
+		})
+
+		k, err := GetProvideSecretKey(ctx, clientId, ProvideModePublic)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, k, publicKey)
+	})
+}
+
+// The maintenance cascade reaps provide_key rows whose network_client is gone;
+// it must clear the redis entries too, not just postgres.
+func TestRemoveDisconnectedClearsProvideRedis(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// a client_id with no backing network_client row
+		clientId := server.NewId()
+		secretKey := make([]byte, 32)
+		mathrand.Read(secretKey)
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: secretKey,
+		})
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			v, _ := r.Get(ctx, provideModesKey(clientId)).Result()
+			assert.NotEqual(t, v, "")
+		})
+
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc())
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()
+			assert.Equal(t, pm, "")
+			sk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
+			assert.Equal(t, sk, "")
+		})
+	})
+}
+
+// MigrateProvideMode backfills redis for clients whose provide_key rows predate
+// the redis layer. Seed via SetProvide (which writes both stores), drop the
+// redis keys to simulate the pre-redis state, then assert the migration rebuilds
+// them from the db. Two modes exercise the provideModesKey json-list round-trip.
+func TestMigrateProvideMode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		key := func() []byte {
+			k := make([]byte, 32)
+			mathrand.Read(k)
+			return k
+		}
+
+		clientId := server.NewId()
+		publicKey := key()
+		networkKey := key()
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic:  publicKey,
+			ProvideModeNetwork: networkKey,
+		})
+
+		// drop the redis keys, leaving only the db rows for the migration to read
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, provideModesKey(clientId))
+			r.Del(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic))
+			r.Del(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork))
+		})
+
+		MigrateProvideMode(ctx)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			provideModesListJson, err := r.Get(ctx, provideModesKey(clientId)).Result()
+			assert.Equal(t, err, nil)
+			var provideModesList []ProvideMode
+			err = json.Unmarshal([]byte(provideModesListJson), &provideModesList)
+			assert.Equal(t, err, nil)
+			provideModes := map[ProvideMode]bool{}
+			for _, provideMode := range provideModesList {
+				provideModes[provideMode] = true
+			}
+			assert.Equal(t, provideModes, map[ProvideMode]bool{
+				ProvideModePublic:  true,
+				ProvideModeNetwork: true,
+			})
+
+			publicSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
+			assert.Equal(t, []byte(publicSk), publicKey)
+			networkSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
+			assert.Equal(t, []byte(networkSk), networkKey)
+		})
 	})
 }

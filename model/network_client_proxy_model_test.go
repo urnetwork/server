@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	mathrand "math/rand"
 	"strings"
 	"testing"
@@ -83,5 +84,99 @@ func TestCreateProxyClient(t *testing.T) {
 
 			glog.Infof("[ncpm][%d/%d]ip=%s\n", i+1, n, proxyClient.WgConfig.ClientIpv4)
 		}
+	})
+}
+
+// GetProxyDeviceConfig must serve from redis when warm and fall back to postgres
+// when cold; an explicit remove must clear both stores.
+func TestProxyDeviceConfigCacheAndFallback(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		proxyDeviceConfig := &ProxyDeviceConfig{}
+		proxyDeviceConfig.ClientId = server.NewId()
+		err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+		assert.Equal(t, err, nil)
+		proxyId := proxyDeviceConfig.ProxyId
+
+		// cache hit
+		got := GetProxyDeviceConfig(ctx, proxyId)
+		assert.Equal(t, got != nil, true)
+		assert.Equal(t, got.ClientId, proxyDeviceConfig.ClientId)
+
+		// cache cold -> db fallback
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, proxyDeviceConfigKey(proxyId))
+		})
+		got = GetProxyDeviceConfig(ctx, proxyId)
+		assert.Equal(t, got != nil, true)
+		assert.Equal(t, got.ClientId, proxyDeviceConfig.ClientId)
+
+		// explicit remove clears both stores
+		RemoveProxyDeviceConfig(ctx, proxyId)
+		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyId) == nil, true)
+		server.Redis(ctx, func(r server.RedisClient) {
+			v, _ := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
+			assert.Equal(t, v, "")
+		})
+	})
+}
+
+// The maintenance cascade reaps proxy_device_config rows whose network_client is
+// gone; it must clear the (no-ttl) redis entry too, otherwise GetProxyDeviceConfig
+// keeps serving the stale config forever.
+func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// a client_id with no backing network_client row
+		proxyDeviceConfig := &ProxyDeviceConfig{}
+		proxyDeviceConfig.ClientId = server.NewId()
+		err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+		assert.Equal(t, err, nil)
+		proxyId := proxyDeviceConfig.ProxyId
+
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc())
+
+		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyId) == nil, true)
+		server.Redis(ctx, func(r server.RedisClient) {
+			v, _ := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
+			assert.Equal(t, v, "")
+		})
+	})
+}
+
+// MigrateProxyDeviceConfig backfills redis for proxies whose proxy_device_config
+// rows predate the redis layer. CreateProxyDeviceConfig writes both stores;
+// dropping the redis key simulates the pre-redis state, then the migration must
+// rebuild it from the db row.
+func TestMigrateProxyDeviceConfig(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		proxyDeviceConfig := &ProxyDeviceConfig{}
+		proxyDeviceConfig.ClientId = server.NewId()
+		err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+		assert.Equal(t, err, nil)
+		proxyId := proxyDeviceConfig.ProxyId
+
+		// drop the redis key, leaving only the db row for the migration to read
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, proxyDeviceConfigKey(proxyId))
+		})
+
+		MigrateProxyDeviceConfig(ctx)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			configJson, err := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
+			assert.Equal(t, err, nil)
+			assert.NotEqual(t, configJson, "")
+
+			var got ProxyDeviceConfig
+			err = json.Unmarshal([]byte(configJson), &got)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, got.ClientId, proxyDeviceConfig.ClientId)
+			assert.Equal(t, got.ProxyId, proxyId)
+		})
 	})
 }

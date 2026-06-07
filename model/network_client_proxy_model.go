@@ -193,6 +193,92 @@ type ProxyDeviceState struct {
 	DnsResolverSettings *connect.DnsResolverSettings `json:"dns_resolver_settings"`
 }
 
+func proxyDeviceConfigKey(proxyId server.Id) string {
+	return fmt.Sprintf("{pd_%s}c", proxyId)
+}
+
+// MigrateProxyDeviceConfig backfills the redis proxy-device-config state from
+// postgres for proxies whose proxy_device_config rows predate the redis layer.
+// The db is the source of truth, so existing redis keys are overwritten.
+//
+// Each proxy's key has its own {pd_<proxyId>} hash tag (one key per proxy), so
+// the writes are issued individually rather than pipelined.
+func MigrateProxyDeviceConfig(ctx context.Context, blockSize int) {
+	for b := 0; true; b += 1 {
+		proxyDeviceConfigJsons := map[server.Id]string{}
+
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					proxy_id,
+					config_json
+				FROM proxy_device_config
+				ORDER BY proxy_id
+				LIMIT $1
+				OFFSET $2
+				`,
+				blockSize,
+				b*blockSize,
+			)
+			server.WithPgResult(result, err, func() {
+				i := 0
+				for result.Next() {
+					if (i+1)%1000 == 0 {
+						glog.Infof("[migrate][proxy-device-config][b%d][%d/]\n", b, i+1)
+					}
+
+					var proxyId server.Id
+					var configJson string
+					server.Raise(result.Scan(&proxyId, &configJson))
+					proxyDeviceConfigJsons[proxyId] = configJson
+					i += 1
+				}
+			})
+		})
+
+		proxyIds := maps.Keys(proxyDeviceConfigJsons)
+
+		if len(proxyIds) == 0 {
+			break
+		}
+
+		out := make(chan server.Id)
+		for _, proxyId := range proxyIds {
+			go server.HandleError(func() {
+				defer func() {
+					select {
+					case <-ctx.Done():
+					case out <- proxyId:
+					}
+				}()
+
+				server.Redis(ctx, func(r server.RedisClient) {
+
+					// no ttl
+					err := r.Set(ctx, proxyDeviceConfigKey(proxyId), proxyDeviceConfigJsons[proxyId], -1).Err()
+					server.Raise(err)
+
+				})
+
+			})
+		}
+
+		for i := range len(proxyIds) {
+			select {
+			case <-ctx.Done():
+			case <-out:
+				if (i+1)%10 == 0 {
+					glog.Infof("[migrate][proxy-device-config][b%d][%d/%d]\n", b, i+1, len(proxyIds))
+				}
+			}
+		}
+
+		glog.Infof("[migrate][proxy-device-config][b%d]done (%d proxies)\n", b, len(proxyIds))
+	}
+}
+
 func GetProxyDeviceConnection(ctx context.Context, proxyId server.Id) (proxyDeviceConnection *ProxyDeviceConnection) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -258,11 +344,14 @@ func GetProxyDeviceConnectionForClient(
 
 func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDeviceConfig) (returnErr error) {
 
+	var proxyDeviceConfigJson []byte
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		proxyDeviceConfig.ProxyId = server.NewId()
 		proxyDeviceConfig.InstanceId = server.NewId()
 
-		proxyDeviceConfigJson, err := json.Marshal(proxyDeviceConfig)
+		var err error
+		proxyDeviceConfigJson, err = json.Marshal(proxyDeviceConfig)
 		if err != nil {
 			returnErr = err
 			return
@@ -285,11 +374,20 @@ func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDevice
 			proxyDeviceConfigJson,
 		))
 	})
+
+	if returnErr != nil {
+		return returnErr
+	}
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		// no ttl
+		r.Set(ctx, proxyDeviceConfigKey(proxyDeviceConfig.ProxyId), proxyDeviceConfigJson, -1)
+	})
+
 	return nil
 }
 
 func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
-
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -301,29 +399,39 @@ func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
 		))
 	})
 
+	server.Redis(ctx, func(r server.RedisClient) {
+		r.Del(ctx, proxyDeviceConfigKey(proxyId))
+	})
 }
 
 func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceConfig {
 	var proxyDeviceConfigJson string
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				config_json
-			FROM proxy_device_config
-			WHERE
-				proxy_id = $1
-			`,
-			proxyId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&proxyDeviceConfigJson))
-			}
-		})
+	server.Redis(ctx, func(r server.RedisClient) {
+		proxyDeviceConfigJson, _ = r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
 	})
+
+	// TODO this can be removed when older proxy_device_config before the redis set have been cleared out
+	if proxyDeviceConfigJson == "" {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					config_json
+				FROM proxy_device_config
+				WHERE
+					proxy_id = $1
+				`,
+				proxyId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&proxyDeviceConfigJson))
+				}
+			})
+		})
+	}
 
 	if proxyDeviceConfigJson == "" {
 		return nil
