@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
+	"net"
+	"strings"
 	"sync"
 	"time"
-	// "strings"
-	"net"
 	// "net/netip"
 	// "fmt"
 
@@ -205,8 +205,13 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 				if r != nil {
 					switch v := r.(type) {
 					case error:
-						if v.Error() == "redis: client is closed" {
+						m := strings.ToLower(v.Error())
+						if strings.Contains(m, "redis: client is closed") {
 							// the callback waited too long to first command, try again
+							return
+							//  i/o timeout
+						} else if strings.Contains(m, "dial tcp") {
+							// tcp dial error, continue
 							return
 						}
 					}
