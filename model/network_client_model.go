@@ -862,6 +862,10 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 
 		clientIds := maps.Keys(clientSecretKeys)
 
+		if len(clientIds) == 0 {
+			break
+		}
+
 		out := make(chan server.Id)
 
 		for _, clientId := range clientIds {
