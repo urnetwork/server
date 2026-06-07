@@ -91,11 +91,11 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 		}
 		if !tb.Failed() {
 			if 0 < i {
-				glog.Infof("[FLAKY]test passed iteration[%d/%d]", i+1, n)
+				glog.Infof("[flaky]test passed iteration[%d/%d]", i+1, n)
 			}
 			return
 		}
-		glog.Infof("[FLAKY]test failed iteration[%d/%d]. err = %v", i+1, n, panicValue)
+		glog.Infof("[flaky]test failed iteration[%d/%d] err = %v", i+1, n, panicValue)
 		if i+1 < n {
 			select {
 			case <-time.After(self.RerunTimeout):
