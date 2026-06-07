@@ -460,7 +460,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				}
 				if glog.V(2) {
 					glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
-				} else {
+				} else if glog.V(1) {
 					glog.Infof("[db]transient error, retry = %v\n", pgErr)
 				}
 				continue
@@ -604,7 +604,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				}
 				if glog.V(2) {
 					glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
-				} else {
+				} else if glog.V(1) {
 					glog.Infof("[db]transient error, retry = %v\n", pgErr)
 				}
 				continue
@@ -623,7 +623,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				}
 				if glog.V(2) {
 					glog.Infof("[db]commit error, retry: %s\n", ErrorJson(commitErr, debug.Stack()))
-				} else {
+				} else if glog.V(1) {
 					glog.Infof("[db]commit error, retry = %v\n", commitErr)
 				}
 				continue
