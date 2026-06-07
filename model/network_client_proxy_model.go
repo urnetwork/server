@@ -412,26 +412,26 @@ func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceCo
 	})
 
 	// TODO this can be removed when older proxy_device_config before the redis set have been cleared out
-	if proxyDeviceConfigJson == "" {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-				SELECT
-					config_json
-				FROM proxy_device_config
-				WHERE
-					proxy_id = $1
-				`,
-				proxyId,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&proxyDeviceConfigJson))
-				}
-			})
-		})
-	}
+	// if proxyDeviceConfigJson == "" {
+	// 	server.Db(ctx, func(conn server.PgConn) {
+	// 		result, err := conn.Query(
+	// 			ctx,
+	// 			`
+	// 			SELECT
+	// 				config_json
+	// 			FROM proxy_device_config
+	// 			WHERE
+	// 				proxy_id = $1
+	// 			`,
+	// 			proxyId,
+	// 		)
+	// 		server.WithPgResult(result, err, func() {
+	// 			if result.Next() {
+	// 				server.Raise(result.Scan(&proxyDeviceConfigJson))
+	// 			}
+	// 		})
+	// 	})
+	// }
 
 	if proxyDeviceConfigJson == "" {
 		return nil

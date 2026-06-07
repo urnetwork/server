@@ -933,26 +933,26 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 	})
 
 	// TODO this can be removed once provide_key older than the redis set have been removed
-	if provideModes == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT provide_mode FROM provide_key
-					WHERE client_id = $1
-				`,
-				clientId,
-			)
-			server.WithPgResult(result, err, func() {
-				provideModes = map[ProvideMode]bool{}
-				for result.Next() {
-					var provideMode ProvideMode
-					server.Raise(result.Scan(&provideMode))
-					provideModes[provideMode] = true
-				}
-			})
-		})
-	}
+	// if provideModes == nil && returnErr == nil {
+	// 	server.Db(ctx, func(conn server.PgConn) {
+	// 		result, err := conn.Query(
+	// 			ctx,
+	// 			`
+	// 				SELECT provide_mode FROM provide_key
+	// 				WHERE client_id = $1
+	// 			`,
+	// 			clientId,
+	// 		)
+	// 		server.WithPgResult(result, err, func() {
+	// 			provideModes = map[ProvideMode]bool{}
+	// 			for result.Next() {
+	// 				var provideMode ProvideMode
+	// 				server.Raise(result.Scan(&provideMode))
+	// 				provideModes[provideMode] = true
+	// 			}
+	// 		})
+	// 	})
+	// }
 
 	return
 }
@@ -971,30 +971,30 @@ func GetProvideSecretKey(
 	})
 
 	// TODO this can be removed once provide_key older than the redis set have been removed
-	if secretKey == nil && returnErr == nil {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT
-						secret_key
-					FROM provide_key
-					WHERE
-						client_id = $1 AND
-						provide_mode = $2
-				`,
-				clientId,
-				provideMode,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&secretKey))
-				} else {
-					returnErr = fmt.Errorf("Provide secret key not set.")
-				}
-			})
-		})
-	}
+	// if secretKey == nil && returnErr == nil {
+	// 	server.Db(ctx, func(conn server.PgConn) {
+	// 		result, err := conn.Query(
+	// 			ctx,
+	// 			`
+	// 				SELECT
+	// 					secret_key
+	// 				FROM provide_key
+	// 				WHERE
+	// 					client_id = $1 AND
+	// 					provide_mode = $2
+	// 			`,
+	// 			clientId,
+	// 			provideMode,
+	// 		)
+	// 		server.WithPgResult(result, err, func() {
+	// 			if result.Next() {
+	// 				server.Raise(result.Scan(&secretKey))
+	// 			} else {
+	// 				returnErr = fmt.Errorf("Provide secret key not set.")
+	// 			}
+	// 		})
+	// 	})
+	// }
 
 	return
 }
