@@ -77,6 +77,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 
 		readTimeout := 30 * time.Second
 		writeTimeout := 15 * time.Second
+		poolTimeout := 5 * time.Minute
 		dialTimeout := 30 * time.Second
 		dialRetries := 4
 
@@ -116,11 +117,13 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ContextTimeoutEnabled: false,
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
+				PoolTimeout:           poolTimeout,
 				Dialer:                dialContext,
 				// DialerRetries: maxRetries,
-				DialTimeout:           dialTimeout,
-				DialerRetries:         dialRetries,
-				FailingTimeoutSeconds: 0,
+				DialTimeout:   dialTimeout,
+				DialerRetries: dialRetries,
+				// FailingTimeoutSeconds: 0,
+				MaxRedirects: 8,
 			}
 			self.client = redis.NewClusterClient(options)
 		} else {
@@ -144,11 +147,12 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ContextTimeoutEnabled: false,
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
+				PoolTimeout:           poolTimeout,
 				Dialer:                dialContext,
 				// DialerRetries: maxRetries,
-				DialTimeout:           dialTimeout,
-				DialerRetries:         dialRetries,
-				FailingTimeoutSeconds: 0,
+				DialTimeout:   dialTimeout,
+				DialerRetries: dialRetries,
+				// FailingTimeoutSeconds: 0,
 			}
 			self.client = redis.NewClient(options)
 		}
@@ -187,8 +191,33 @@ func Redis(ctx context.Context, callback func(RedisClient)) {
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.
 	// context := context.Background()
-	client := client()
-	callback(client)
+
+	complete := false
+	for !complete {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		func() {
+			defer func() {
+				r := recover()
+				if r != nil {
+					switch v := r.(type) {
+					case error:
+						if v.Error() == "redis: client is closed" {
+							// the callback waited too long to first command, try again
+							return
+						}
+					}
+					panic(r)
+				}
+			}()
+			client := client()
+			callback(client)
+			complete = true
+		}()
+	}
 }
 
 // channel messages can be: RedisMessage, RedisSubscription
