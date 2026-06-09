@@ -1,37 +1,21 @@
-package main
+package proxy
 
 import (
 	"context"
-	// "crypto/tls"
 	"encoding/base64"
-	// "encoding/json"
 	"fmt"
-	// "io"
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
-	// "sync"
-	"syscall"
 	"time"
 
-	// "github.com/elazarl/goproxy"
-	// socks5 "github.com/things-go/go-socks5"
-	"github.com/docopt/docopt-go"
-
-	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
 )
-
-// this value is set via the linker, e.g.
-// -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
-var Version string
 
 const InternalSocksPort = 8080
 const InternalHttpPort = 8081
@@ -49,6 +33,7 @@ func DefaultProxySettings() *ProxySettings {
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
+		EventRateLimitTimeout:    1 * time.Second,
 	}
 }
 
@@ -61,172 +46,7 @@ type ProxySettings struct {
 	NotificationTimeout      time.Duration
 	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
-}
-
-func main() {
-	usage := `BringYour proxy server.
-
-Usage:
-  proxy [--port=<port>]
-  proxy -h | --help
-  proxy --version
-
-Options:
-  -h --help     Show this screen.
-  --version     Show version.
-  -p --port=<port>  Listen port [default: 80].`
-
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
-	if err != nil {
-		panic(err)
-	}
-
-	settings := DefaultProxySettings()
-
-	// use up to a 4gib message pool per instance
-	connect.ResizeMessagePools(connect.Gib(4))
-
-	quitEvent := server.NewEventWithContext(context.Background())
-	defer quitEvent.Set()
-
-	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
-	defer closeFn()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// drain on sigterm
-	go server.HandleError(func() {
-		defer cancel()
-		select {
-		case <-ctx.Done():
-		case <-quitEvent.Ctx.Done():
-			// FIXME drain
-		}
-	})
-
-	proxyDeviceManager := NewProxyDeviceManagerWithDefaults(ctx)
-	defer proxyDeviceManager.Close()
-
-	transportTls, err := server.NewTransportTlsFromConfigWithDefaults()
-	if err != nil {
-		panic(err)
-	}
-
-	port, _ := opts.Int("--port")
-
-	server.Warmup()
-
-	newSocks5Server(
-		ctx,
-		cancel,
-		proxyDeviceManager,
-		transportTls,
-		settings,
-	)
-
-	newHttpServer(
-		ctx,
-		cancel,
-		proxyDeviceManager,
-		transportTls,
-		settings,
-	)
-
-	wg := newWgServer(
-		ctx,
-		cancel,
-		proxyDeviceManager,
-		settings,
-	)
-
-	warmup := func(proxyClient *model.ProxyClient) error {
-		return wg.AddProxyClients(proxyClient)
-	}
-
-	newApiServer(
-		ctx,
-		cancel,
-		proxyDeviceManager,
-		transportTls,
-		warmup,
-		InternalApiPort,
-		settings,
-	)
-
-	// if server.RequireEnv() != "local" {
-	// 	newWatchdog(
-	// 		ctx,
-	// 		5*time.Second,
-	// 		InternalHttpPort,
-	// 	)
-	// }
-
-	notif := newProxyClientNotification(ctx, settings)
-	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
-		if 0 < settings.WarmupTimeout {
-			warmupStartTime := server.NowUtc().Add(-settings.WarmupTimeout)
-			for _, proxyClient := range proxyClients {
-				if warmupStartTime.Before(proxyClient.CreateTime) {
-					// warmup the device
-					_, err := proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
-					if err != nil {
-						glog.Infof("[proxy][%s]warmup err=%s\n", proxyClient.ProxyId, err)
-					} else {
-						glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
-					}
-				}
-			}
-		}
-
-		err := wg.AddProxyClients(proxyClients...)
-		if err != nil {
-			glog.Infof("[proxy]wg add proxy clients err=%s\n", err)
-		}
-	})
-	defer sub()
-
-	routes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
-	}
-
-	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
-
-	glog.Infof(
-		"Listen %s:%d, api (:%d), socks5 (:%d), http (:%d), https (:%d)",
-		listenIpv4,
-		listenPort,
-		InternalApiPort,
-		InternalSocksPort,
-		InternalHttpPort,
-		InternalHttpsPort,
-	)
-
-	reusePort := false
-
-	httpServerOptions := server.HttpServerOptions{
-		ReadTimeout:     15 * time.Second,
-		WriteTimeout:    30 * time.Second,
-		IdleTimeout:     5 * time.Minute,
-		ShutdownTimeout: 30 * time.Second,
-	}
-
-	err = server.HttpListenAndServeWithReusePort(
-		ctx,
-		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-		router.NewRouter(ctx, routes),
-		reusePort,
-		httpServerOptions,
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	select {
-	case <-ctx.Done():
-	}
-
-	os.Exit(1)
+	EventRateLimitTimeout    time.Duration
 }
 
 type socks5Server struct {
@@ -237,7 +57,7 @@ type socks5Server struct {
 	settings           *ProxySettings
 }
 
-func newSocks5Server(
+func NewSocks5Server(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
@@ -283,8 +103,13 @@ func (self *socks5Server) run() {
 		proxyId := model.RequireEncodedProxyId(username)
 
 		if r.DestAddr.FQDN != "" {
-			addrPort, _ := netip.ParseAddrPort(addr)
-			addr = fmt.Sprintf("%s:%d", r.DestAddr.FQDN, addrPort.Port())
+			// Dial by FQDN so the tun does DNS resolution (DoH). SocksProxy.Resolve
+			// preserves the FQDN (returns nil), so `addr` is host:port, not ip:port
+			// — use SplitHostPort to read the port (ParseAddrPort fails on a
+			// hostname and would zero the port -> "host unreachable").
+			if _, port, err := net.SplitHostPort(addr); err == nil {
+				addr = net.JoinHostPort(r.DestAddr.FQDN, port)
+			}
 		}
 
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
@@ -292,7 +117,7 @@ func (self *socks5Server) run() {
 			return nil, err
 		}
 
-		return pd.Tun().DialContext(ctx, network, addr)
+		return pd.DialContext(ctx, network, addr)
 	}
 
 	socksProxy := proxy.NewSocksProxy()
@@ -342,7 +167,7 @@ type httpServer struct {
 	settings           *ProxySettings
 }
 
-func newHttpServer(
+func NewHttpServer(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
@@ -406,7 +231,7 @@ func (self *httpServer) run() {
 			return nil, err
 		}
 
-		return pd.Tun().DialContext(r.Context(), network, addr)
+		return pd.DialContext(r.Context(), network, addr)
 	}
 
 	httpProxy := proxy.NewHttpProxy()
@@ -502,7 +327,7 @@ type wgServer struct {
 	wgProxy            *proxy.WgProxy
 }
 
-func newWgServer(
+func NewWgServer(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,
