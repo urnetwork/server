@@ -8,7 +8,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"sync"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -38,9 +37,6 @@ var MaxContractTransferByteCount = func() model.ByteCount {
 		2 * settings.ContractManagerSettings.StandardContractTransferByteCount,
 	)
 }()
-
-// allow the return contract to be created for up to this timeout after the source contract was closed
-var OriginContractLinger = 300 * time.Second
 
 type ConnectControlArgs struct {
 	Pack string `json:"pack"`
@@ -266,7 +262,7 @@ func CreateContract(
 		return nil, err
 	}
 
-	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode)
+	contractId, transferByteCount, priority, streamId, err := nextContract(ctx, clientId, createContract, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -334,6 +330,7 @@ func nextContract(
 	clientId server.Id,
 	createContract *protocol.CreateContract,
 	provideMode model.ProvideMode,
+	contractManagerSettings *connect.ContractManagerSettings,
 ) (server.Id, model.ByteCount, model.Priority, *server.Id, error) {
 	destinationId := server.Id(createContract.DestinationId)
 
@@ -386,6 +383,7 @@ func nextContract(
 		provideMode,
 		forceStream,
 		streamVersion,
+		contractManagerSettings,
 	)
 }
 
@@ -399,6 +397,7 @@ func newContract(
 	provideMode model.ProvideMode,
 	forceStream bool,
 	streamVersion int,
+	contractManagerSettings *connect.ContractManagerSettings,
 ) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
 	sourceNetworkId, err := model.FindClientNetwork(ctx, sourceId)
 	if err != nil {
@@ -450,7 +449,7 @@ func newContract(
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
-			OriginContractLinger,
+			contractManagerSettings.OriginContractLinger,
 		)
 		if err != nil {
 			returnErr = err

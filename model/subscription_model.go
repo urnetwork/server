@@ -1160,13 +1160,16 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// party -> close record. Pull all close rows (checkpoint or not).
-		// Settle on any combination except both-sides-checkpoint (both intend
-		// to resume — leave the contract open). A non-checkpoint "done" plus the
-		// other side's checkpoint is terminal: no more activity is coming, so use
-		// the checkpoint's byte count as that side's final contribution. Without
-		// this, the receiver's `CheckpointContract` (ReceiveSequence.Run defer)
-		// plus the sender's `CloseContract` (SendSequence.Run defer) would strand
-		// the contract open forever with escrow still deducted.
+		// Inline settlement fires only when BOTH parties have done a
+		// non-checkpoint close ("done"). A checkpoint means "pausing — the
+		// sender may send again on this contract" (ReceiveSequence.Run defer),
+		// so any one-sided checkpoint leaves the contract open and resumable
+		// instead of settling on the hot request path. Genuinely-abandoned
+		// checkpoint contracts (one side done + the other still checkpoint, or
+		// both checkpoint) are finalized off the request path by the
+		// CloseExpiredContracts task -> ForceCloseOpenContractIds, which converts
+		// the checkpoint rows to non-checkpoint closes before settling once they
+		// age past the expiry window.
 		type closeRecord struct {
 			usedTransferByteCount ByteCount
 			checkpoint            bool
@@ -1207,9 +1210,10 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 		sourceUsedTransferByteCount := sourceClose.usedTransferByteCount
 		destinationUsedTransferByteCount := destinationClose.usedTransferByteCount
 
-		// Settle when both parties have a close row and at least one is
-		// non-checkpoint; both-sides-checkpoint means both may resume — stay open.
-		if sourceOk && destinationOk && !(sourceClose.checkpoint && destinationClose.checkpoint) {
+		// Settle only when both parties have closed non-checkpoint. If either
+		// side is still a checkpoint, leave the contract open to be resumed; the
+		// background expiry task finalizes it if no final close ever arrives.
+		if sourceOk && destinationOk && !sourceClose.checkpoint && !destinationClose.checkpoint {
 			hasEscrow := false
 
 			result, err := tx.Query(

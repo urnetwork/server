@@ -1012,12 +1012,11 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 				)
 				assert.Equal(t, err, nil)
 
-				// non-checkpoint + checkpoint now settles (`settleContract`):
-				// the non-checkpoint side is done, so the checkpoint's byte
-				// count is its final contribution. Pre-fix: was `false`,
-				// contract stayed open until force-close.
+				// non-checkpoint + checkpoint does NOT settle inline: the
+				// checkpoint side may still resume, so the contract stays open
+				// and is finalized below by ForceCloseAllOpenContractIds.
 				_, closed = GetContractClose(ctx, contractId)
-				assert.Equal(t, closed, true)
+				assert.Equal(t, closed, false)
 			}
 		}
 
@@ -1334,10 +1333,11 @@ func TestAccountIsPro(t *testing.T) {
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data
 
-// TestSettleContractCheckpointPlusClose verifies the asymmetric path: one
-// party non-checkpoint, the other checkpoint only. The contract must settle (the
-// checkpoint's byte count is that party's final contribution). Pre-fix it held
-// `open=true` forever with the escrow stranded on the source network's balance.
+// TestSettleContractCheckpointPlusClose verifies the asymmetric path: one party
+// non-checkpoint, the other checkpoint only. This does NOT settle inline — the
+// checkpoint side may still resume, so the contract stays open on the hot path
+// and is finalized only off-path by the expiry task (ForceCloseOpenContractIds),
+// which converts the checkpoint to a non-checkpoint close before settling.
 func TestSettleContractCheckpointPlusClose(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1364,7 +1364,8 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 			)
 		}
 
-		// Case 1: source non-checkpoint, destination checkpoint. Must settle.
+		// Case 1: source non-checkpoint, destination checkpoint.
+		// Stays open inline — the destination may resume.
 		contractId, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1379,9 +1380,9 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 		err = CloseContract(ctx, contractId, clientIdB, 512*1024, true) // destination, checkpoint
 		assert.Equal(t, nil, err)
 		_, closed = GetContractClose(ctx, contractId)
-		assert.Equal(t, true, closed) // settled — was the bug before the fix
+		assert.Equal(t, false, closed) // one-sided checkpoint does not settle inline
 
-		// Case 2: destination non-checkpoint, source checkpoint. Must also settle.
+		// Case 2: source checkpoint, destination non-checkpoint. Also stays open.
 		contractId2, _, err := CreateContract(
 			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
 			ByteCount(1024*1024),
@@ -1396,7 +1397,19 @@ func TestSettleContractCheckpointPlusClose(t *testing.T) {
 		err = CloseContract(ctx, contractId2, clientIdB, 512*1024, false) // destination, non-checkpoint
 		assert.Equal(t, nil, err)
 		_, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, false, closed)
+
+		// The expiry task finalizes both: it converts the lingering checkpoint
+		// row to a non-checkpoint close, then settles.
+		ForceCloseAllOpenContractIds(ctx, time.Now())
+
+		contractClose, closed := GetContractClose(ctx, contractId)
 		assert.Equal(t, true, closed)
+		assert.Equal(t, contractClose.Outcome, ContractOutcomeSettled)
+
+		contractClose, closed = GetContractClose(ctx, contractId2)
+		assert.Equal(t, true, closed)
+		assert.Equal(t, contractClose.Outcome, ContractOutcomeSettled)
 	})
 }
 
@@ -1447,9 +1460,9 @@ func TestSettleContractBothCheckpointStaysOpen(t *testing.T) {
 
 // TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose verifies the
 // listing surfaces 2-party contracts where exactly one party is
-// `ContractPartyCheckpoint`, mapped to the non-checkpoint party. The new
-// `settleContract` rule means this state no longer arises normally, but the
-// listing must still handle pre-fix rows and reads before settlement runs.
+// `ContractPartyCheckpoint`, mapped to the non-checkpoint party. This state
+// arises normally (one side done, the other paused via a checkpoint) and is
+// what the expiry task consumes to finalize the contract.
 func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

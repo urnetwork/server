@@ -165,7 +165,7 @@ func TestMigrateProxyDeviceConfig(t *testing.T) {
 			r.Del(ctx, proxyDeviceConfigKey(proxyId))
 		})
 
-		MigrateProxyDeviceConfig(ctx)
+		MigrateProxyDeviceConfig(ctx, 50000)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			configJson, err := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()

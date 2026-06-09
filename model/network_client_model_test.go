@@ -361,7 +361,7 @@ func TestMigrateProvideMode(t *testing.T) {
 			r.Del(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork))
 		})
 
-		MigrateProvideMode(ctx)
+		MigrateProvideMode(ctx, 50000)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			provideModesListJson, err := r.Get(ctx, provideModesKey(clientId)).Result()
