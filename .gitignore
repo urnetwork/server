@@ -8,14 +8,14 @@
 # binaries
 client/build
 bringyourctl/bringyourctl
-api/api
-mcp/mcp
-taskworker/taskworker
+cli/api/api
+cli/mcp/mcp
+cli/taskworker/taskworker
 gpt/gpt
-connect/connect
+cli/connect/connect
 connect/connect.test
 connect/profile
-proxy/proxy
+cli/proxy/proxy
 main
 
 temp/*
