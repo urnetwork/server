@@ -79,20 +79,35 @@ func (self *proxyClientNotification) watch(host string, block string) {
 				return
 			case <-event:
 				// coealsce remaining events into a single event
-				drained := false
-				for !drained {
-					select {
-					case <-event:
-					default:
-						drained = true
+				func() {
+					rateLimit := time.After(self.settings.EventRateLimitTimeout)
+					for {
+						select {
+						case <-self.ctx.Done():
+							return
+						case <-event:
+						case <-rateLimit:
+							return
+						}
 					}
-				}
-				glog.V(2).Infof("[proxy]notify\n")
-				monitor.NotifyAll()
+				}()
+				func() {
+					for {
+						select {
+						case <-self.ctx.Done():
+							return
+						case <-event:
+						default:
+							return
+						}
+					}
+				}()
 				select {
 				case <-self.ctx.Done():
 					return
-				case <-time.After(self.settings.EventRateLimitTimeout):
+				default:
+					glog.V(2).Infof("[proxy]notify\n")
+					monitor.NotifyAll()
 				}
 			}
 		}
