@@ -21,7 +21,7 @@
 //
 // Run with: go test -tags encryption_reset_draft ./connect/ -run EncryptionHandshakeReset
 
-package main
+package connect
 
 import (
 	"context"

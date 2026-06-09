@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -30,7 +30,7 @@ type proxyClientNotification struct {
 	proxyClientsCallbacks *connect.CallbackList[ProxyClientsFunction]
 }
 
-func newProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
+func NewProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	p := &proxyClientNotification{
 		ctx:                   cancelCtx,
@@ -78,8 +78,22 @@ func (self *proxyClientNotification) watch(host string, block string) {
 			case <-self.ctx.Done():
 				return
 			case <-event:
-				glog.Infof("[proxy]notify\n")
+				// coealsce remaining events into a single event
+				drained := false
+				for !drained {
+					select {
+					case <-event:
+					default:
+						drained = true
+					}
+				}
+				glog.V(2).Infof("[proxy]notify\n")
 				monitor.NotifyAll()
+				select {
+				case <-self.ctx.Done():
+					return
+				case <-time.After(self.settings.EventRateLimitTimeout):
+				}
 			}
 		}
 	})

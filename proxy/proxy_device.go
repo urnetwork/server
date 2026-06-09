@@ -1,8 +1,9 @@
-package main
+package proxy
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -27,6 +28,11 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
+
+	// NetworkSpace, when set, overrides the default platform network space.
+	// Integration tests use this to point proxy devices at local api/connect
+	// servers (see sdk.Testing_NewNetworkSpaceWithUrls).
+	NetworkSpace *sdk.NetworkSpace
 }
 
 type ProxyDeviceManager struct {
@@ -49,15 +55,18 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 
 	// share one network space across all clients
 	// this reuses the client strategy and keep alive connections
-	connectSettings := connect.DefaultConnectSettings()
-	// FIXME use only ipv4 when communicating back to the platform
-	connectSettings.DisableIpv6 = true
-	networkSpace := sdk.NewPlatformNetworkSpace(
-		cancelCtx,
-		server.RequireEnv(),
-		server.RequireDomain(),
-		connectSettings,
-	)
+	networkSpace := settings.NetworkSpace
+	if networkSpace == nil {
+		connectSettings := connect.DefaultConnectSettings()
+		// FIXME use only ipv4 when communicating back to the platform
+		connectSettings.DisableIpv6 = true
+		networkSpace = sdk.NewPlatformNetworkSpace(
+			cancelCtx,
+			server.RequireEnv(),
+			server.RequireDomain(),
+			connectSettings,
+		)
+	}
 
 	return &ProxyDeviceManager{
 		ctx:          cancelCtx,
@@ -344,6 +353,10 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 func (self *ProxyDevice) SetReceive(receive chan []byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.receive == receive {
+		// already in this mode; avoid monitor churn / waking the receive callback
+		return
+	}
 	self.receiveMonitor.NotifyAll()
 	self.receive = receive
 	self.receiveNotify = self.receiveMonitor.NotifyChannel()
@@ -357,6 +370,17 @@ func (self *ProxyDevice) receiveWithNotify() (chan []byte, chan struct{}) {
 
 func (self *ProxyDevice) Tun() *proxy.Tun {
 	return self.tun
+}
+
+// DialContext dials a connection through the device's tun. A tun-based dial
+// means the device is being used as an http/socks proxy, so it first resets any
+// wg "receive" mode (set via SetReceive). A device serves one proxy mode at a
+// time — in practice a device is only ever wg, http, or socks — but resetting
+// the mode on a new call lets the same device be reused if the mode changes,
+// instead of stranding outbound packets on a stale wg receive channel.
+func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	self.SetReceive(nil)
+	return self.tun.DialContext(ctx, network, addr)
 }
 
 func (self *ProxyDevice) WaitForReady(ctx context.Context, timeout time.Duration) bool {

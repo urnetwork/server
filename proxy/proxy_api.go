@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -26,7 +26,7 @@ type apiServer struct {
 	settings           *ProxySettings
 }
 
-func newApiServer(
+func NewApiServer(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	proxyDeviceManager *ProxyDeviceManager,

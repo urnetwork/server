@@ -20,6 +20,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	connectserver "github.com/urnetwork/server/connect"
 	// "github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 )
@@ -56,7 +57,7 @@ Options:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	exchange := NewExchangeFromEnvWithDefaults(ctx)
+	exchange := connectserver.NewExchangeFromEnvWithDefaults(ctx)
 	defer exchange.Close()
 
 	// drain on sigterm
@@ -82,7 +83,7 @@ Options:
 		}
 	})
 
-	connectRouter := NewConnectRouterWithDefaults(ctx, cancel, exchange)
+	connectRouter := connectserver.NewConnectRouterWithDefaults(ctx, cancel, exchange)
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),

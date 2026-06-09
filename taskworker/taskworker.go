@@ -1,147 +1,24 @@
-package main
+package taskworker
 
 import (
 	"context"
-	// "fmt"
-	// "net/http"
-	"net"
-	"os"
-	"strconv"
-	"syscall"
 	"time"
-	// "runtime"
-
-	"github.com/docopt/docopt-go"
-
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	// "github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-func main() {
-	usage := `BringYour task worker.
-
-Usage:
-  taskworker [--port=<port>] [--count=<count>] [--batch_size=<batch_size>]
-  taskworker init-tasks
-  taskworker -h | --help
-  taskworker --version
-
-Options:
-  -h --help     Show this screen.
-  --version     Show version.
-  -p --port=<port>  Listen port [default: 80].
-  -n --count=<count>  Number of worker processes [default: 8].
-  -b --batch_size=<batch_size>  Batch size [default: 4].`
-
-	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
-	if err != nil {
-		panic(err)
-	}
-
-	quitEvent := server.NewEventWithContext(context.Background())
-	closeFn := quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
-	defer closeFn()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if initTasks_, _ := opts.Bool("init-tasks"); initTasks_ {
-		initTasks(ctx)
-	} else {
-		// note the total parallelism is count*batch_size
-		count, _ := opts.Int("--count")
-		batchSize, _ := opts.Int("--batch_size")
-		port, _ := opts.Int("--port")
-
-		glog.Infof(
-			"[taskworker]starting %s %s %d task workers with batch size %d\n",
-			server.RequireEnv(),
-			server.RequireVersion(),
-			count,
-			batchSize,
-		)
-
-		initTasks(ctx)
-
-		// one TaskWorker can be shared with many go routines calling EvalTasks
-		settings := task.DefaultTaskWorkerSettings()
-		settings.BatchSize = batchSize
-		taskWorker := initTaskWorker(ctx)
-		for i := 0; i < count; i += 1 {
-			go server.HandleError(func() {
-				defer cancel()
-				for {
-					// try again after unhandled errors. these signal a transient issue such as db load
-					server.HandleError(taskWorker.Run)
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(1 * time.Second):
-					}
-				}
-			})
-		}
-
-		// drain on sigterm
-		go server.HandleError(func() {
-			defer cancel()
-			select {
-			case <-ctx.Done():
-				return
-			case <-quitEvent.Ctx.Done():
-				taskWorker.Drain()
-			}
-		})
-
-		routes := []*router.Route{
-			router.NewRoute("GET", "/status", router.WarpStatus),
-		}
-
-		glog.Infof(
-			"[taskworker]serving %s %s on *:%d\n",
-			server.RequireEnv(),
-			server.RequireVersion(),
-			port,
-		)
-
-		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
-
-		reusePort := false
-
-		httpServerOptions := server.HttpServerOptions{
-			ReadTimeout:     15 * time.Second,
-			WriteTimeout:    30 * time.Second,
-			IdleTimeout:     5 * time.Minute,
-			ShutdownTimeout: 30 * time.Second,
-		}
-
-		err := server.HttpListenAndServeWithReusePort(
-			ctx,
-			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-			router.NewRouter(ctx, routes),
-			reusePort,
-			httpServerOptions,
-		)
-		if err != nil {
-			panic(err)
-		}
-		glog.Infof("[taskworker]close\n")
-	}
-}
-
-func initTasks(ctx context.Context) {
+// InitTasks schedules the recurring tasks. It is invoked at startup by the
+// taskworkercli command (and by the `init-tasks` subcommand).
+func InitTasks(ctx context.Context) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
-		// **important** make sure the required functions are loaded in `initTaskWorker`
+		// **important** make sure the required functions are loaded in `InitTaskWorker`
 		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
@@ -177,7 +54,9 @@ func initTasks(ctx context.Context) {
 	})
 }
 
-func initTaskWorker(ctx context.Context) *task.TaskWorker {
+// InitTaskWorker creates a TaskWorker with all task targets registered.
+// One TaskWorker can be shared with many goroutines calling EvalTasks.
+func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 
 	taskWorker := task.NewTaskWorkerWithDefaults(ctx)
 
