@@ -1,0 +1,154 @@
+package proxy
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"golang.org/x/exp/maps"
+
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/glog/v2026"
+	// "github.com/urnetwork/proxy/v2026"
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+	// "github.com/urnetwork/server/v2026/router"
+)
+
+// this is used to migrate from older configurations that mistakenly used the fully qualified host
+const DebugWatchFqHost = true
+
+type ProxyClientsFunction = func(proxyClients []*model.ProxyClient)
+
+type proxyClientNotification struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	settings *ProxySettings
+
+	proxyClientsCallbacks *connect.CallbackList[ProxyClientsFunction]
+}
+
+func NewProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	p := &proxyClientNotification{
+		ctx:                   cancelCtx,
+		cancel:                cancel,
+		settings:              settings,
+		proxyClientsCallbacks: connect.NewCallbackList[ProxyClientsFunction](),
+	}
+	go server.HandleError(p.run, cancel)
+	return p
+}
+
+func (self *proxyClientNotification) run() {
+	defer self.cancel()
+
+	proxyHost := server.RequireHost()
+	block := server.RequireBlock()
+
+	if DebugWatchFqHost && !strings.Contains(proxyHost, ".") {
+		fqProxyHost := fmt.Sprintf("%s.%s", proxyHost, server.RequireDomain())
+		go server.HandleError(func() {
+			self.watch(fqProxyHost, block)
+		})
+	}
+
+	go server.HandleError(func() {
+		self.watch(proxyHost, block)
+	})
+
+	select {
+	case <-self.ctx.Done():
+	}
+}
+
+func (self *proxyClientNotification) watch(host string, block string) {
+	monitor := connect.NewMonitor()
+
+	go server.HandleError(func() {
+		defer self.cancel()
+
+		event, unsub := server.Subscribe(self.ctx, model.ProxyClientChannel(host, block))
+		defer unsub()
+
+		for {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-event:
+				// coealsce remaining events into a single event
+				func() {
+					rateLimit := time.After(self.settings.EventRateLimitTimeout)
+					for {
+						select {
+						case <-self.ctx.Done():
+							return
+						case <-event:
+						case <-rateLimit:
+							return
+						}
+					}
+				}()
+				func() {
+					for {
+						select {
+						case <-self.ctx.Done():
+							return
+						case <-event:
+						default:
+							return
+						}
+					}
+				}()
+				select {
+				case <-self.ctx.Done():
+					return
+				default:
+					glog.V(2).Infof("[proxy]notify\n")
+					monitor.NotifyAll()
+				}
+			}
+		}
+	})
+
+	nextChangeId := int64(0)
+	for {
+		notify := monitor.NotifyChannel()
+		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
+			self.ctx,
+			host,
+			block,
+			nextChangeId,
+		)
+		if err != nil {
+			glog.Infof("[proxy]err=%s\n", err)
+		} else if 0 < len(proxyClients) {
+			glog.Infof("[proxy]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
+			self.proxyClients(maps.Values(proxyClients))
+			nextChangeId = maxChangeId + 1
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-notify:
+		case <-time.After(self.settings.NotificationTimeout):
+		}
+	}
+}
+
+func (self *proxyClientNotification) proxyClients(proxyClients []*model.ProxyClient) {
+	for _, proxyClientsCallback := range self.proxyClientsCallbacks.Get() {
+		server.HandleError(func() {
+			proxyClientsCallback(proxyClients)
+		})
+	}
+}
+
+func (self *proxyClientNotification) AddProxyClientsCallback(proxyClientsCallback ProxyClientsFunction) func() {
+	callbackId := self.proxyClientsCallbacks.Add(proxyClientsCallback)
+	return func() {
+		self.proxyClientsCallbacks.Remove(callbackId)
+	}
+}
