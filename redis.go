@@ -8,8 +8,12 @@ import (
 	"time"
 	// "net/netip"
 	// "fmt"
+	"fmt"
+	"runtime"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/glog"
 )
 
 // type aliases to simplify user code
@@ -19,6 +23,7 @@ type RedisMessage = *redis.Message
 type RedisSubscription = *redis.Subscription
 
 const RedisNil = redis.Nil
+const NoTtl = time.Duration(0)
 
 type safeRedisClient struct {
 	mutex  sync.Mutex
@@ -182,56 +187,123 @@ func RedisReset() {
 	safeClient.reset()
 }
 
-func client() redis.UniversalClient {
-	return safeClient.open()
+// func client() redis.UniversalClient {
+// 	return safeClient.open()
+// }
+
+func isRedisConnectionError(err error) bool {
+	m := strings.ToLower(err.Error())
+	if strings.Contains(m, "redis: client is closed") {
+		// the callback waited too long to first command, try again
+		return true
+		//  i/o timeout
+	} else if strings.Contains(m, "dial tcp") {
+		// tcp dial error, continue
+		return true
+	} else {
+		return false
+	}
 }
 
-func Redis(ctx context.Context, callback func(RedisClient)) {
+func Redis(ctx context.Context, callback func(RedisClient), options ...any) {
 	// From the go-redis code:
 	// >> Client is a Redis client representing a pool of zero or more underlying connections.
 	// >> It's safe for concurrent use by multiple goroutines.
 	// context := context.Background()
+	c := func() {
+		redisWithClient(ctx, safeClient, callback, options...)
+	}
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[redis] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
+	}
+}
 
-	complete := false
-	for !complete {
-		select {
-		case <-ctx.Done():
-			return
-		default:
+func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
+	retryOptions := OptRetryDefault()
+	// debugOptions := OptNoDebug()
+	for _, option := range options {
+		switch v := option.(type) {
+		case DbRetryOptions:
+			retryOptions = v
 		}
+	}
+
+	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
+	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	for {
+		client := pool.open()
+
+		connErr := client.Ping(ctx).Err()
+		if connErr != nil {
+			if retryOptions.rerunOnConnectionError {
+				select {
+				case <-ctx.Done():
+					panic(DbContextDoneError)
+				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(connErr)
+					}
+					continue
+				}
+			}
+			panic(connErr)
+		}
+
 		func() {
 			defer func() {
-				r := recover()
-				if r != nil {
-					switch v := r.(type) {
+				if err := recover(); err != nil {
+					switch v := err.(type) {
 					case error:
-						m := strings.ToLower(v.Error())
-						if strings.Contains(m, "redis: client is closed") {
-							// the callback waited too long to first command, try again
-							return
-							//  i/o timeout
-						} else if strings.Contains(m, "dial tcp") {
-							// tcp dial error, continue
-							return
+						if isRedisConnectionError(v) && retryOptions.rerunOnConnectionError {
+							connErr = v
+						} else {
+							panic(v)
 						}
+					default:
+						panic(v)
 					}
-					panic(r)
 				}
 			}()
-			client := client()
 			callback(client)
-			complete = true
 		}()
+
+		if connErr != nil {
+			if retryOptions.rerunOnConnectionError {
+				select {
+				case <-ctx.Done():
+					panic(DbContextDoneError)
+				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(connErr)
+					}
+					continue
+				}
+			}
+			panic(connErr)
+		}
+
+		return
 	}
 }
 
 // channel messages can be: RedisMessage, RedisSubscription
-func Subscribe(ctx context.Context, channels ...string) (<-chan any, func()) {
-	client := client()
-	pubsub := client.SSubscribe(ctx, channels...)
-	return pubsub.ChannelWithSubscriptions(), func() {
-		pubsub.Close()
-	}
+func Subscribe(ctx context.Context, channels ...string) (update <-chan any, unsub func()) {
+	Redis(ctx, func(client RedisClient) {
+		pubsub := client.SSubscribe(ctx, channels...)
+		update = pubsub.ChannelWithSubscriptions()
+		unsub = func() {
+			pubsub.Close()
+		}
+	})
+	return
 }
 
 func RedisSetIfEqual(r RedisClient, ctx context.Context, key string, test []byte, value []byte, ttl time.Duration) *redis.Cmd {
