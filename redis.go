@@ -42,7 +42,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		maxConnections := redisConfigKeys.RequireInt("max_connections")
 		maxRetries := 4
 		connectionMaxLifetime := "8h"
-		connectionMaxIdleTime := "1m"
+		connectionMaxIdleTime := "60m"
 		if allMaxRetries := redisConfigKeys.Int("max_retries"); 0 < len(allMaxRetries) {
 			maxRetries = allMaxRetries[0]
 		}
@@ -192,13 +192,16 @@ func RedisReset() {
 // }
 
 func isRedisConnectionError(err error) bool {
-	m := strings.ToLower(err.Error())
+	// m := strings.ToLower(err.Error())
+	m := err.Error()
 	if strings.Contains(m, "redis: client is closed") {
 		// the callback waited too long to first command, try again
 		return true
 		//  i/o timeout
 	} else if strings.Contains(m, "dial tcp") {
 		// tcp dial error, continue
+		return true
+	} else if strings.Contains(m, "i/o timeout") {
 		return true
 	} else {
 		return false
