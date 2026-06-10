@@ -1546,6 +1546,53 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		}
 	})
 
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		// (cascade) remove proxy clients without a proxy device config.
+		// proxy_client rows are otherwise never deleted, and each wg proxy
+		// instance restores all rows for its (host, block) as wg device peers
+		// at startup, which is bounded by the device max peer count - so stale
+		// rows must be reaped. A proxy_device_config row is always committed
+		// before its proxy_client row, so a proxy_client without a config is
+		// stale, not in-flight.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM proxy_client
+			USING (
+				SELECT proxy_client.proxy_id
+			    FROM proxy_client
+			    	LEFT JOIN proxy_device_config ON proxy_device_config.proxy_id = proxy_client.proxy_id
+			    WHERE proxy_device_config.proxy_id IS NULL
+			) t
+			WHERE proxy_client.proxy_id = t.proxy_id
+			`,
+		))
+	}, server.TxReadCommitted)
+
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		// (cascade) remove change rows whose proxy client is gone, so the
+		// startup full sync (GetProxyClientsSince from 0) stays bounded
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM proxy_client_change
+			USING (
+				SELECT
+					proxy_client_change.proxy_host,
+					proxy_client_change.block,
+					proxy_client_change.change_id
+			    FROM proxy_client_change
+			    	LEFT JOIN proxy_client ON proxy_client.proxy_id = proxy_client_change.proxy_id
+			    WHERE proxy_client.proxy_id IS NULL
+			) t
+			WHERE
+				proxy_client_change.proxy_host = t.proxy_host AND
+				proxy_client_change.block = t.block AND
+				proxy_client_change.change_id = t.change_id
+			`,
+		))
+	}, server.TxReadCommitted)
+
 	clientProvideModes := map[server.Id][]ProvideMode{}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		// reset in case the tx is retried on a transient error

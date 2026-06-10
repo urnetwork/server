@@ -122,7 +122,7 @@ Options:
 	// }
 
 	notif := proxy.NewProxyClientNotification(ctx, settings)
-	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) {
+	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
 		if 0 < settings.WarmupTimeout {
 			warmupStartTime := server.NowUtc().Add(-settings.WarmupTimeout)
 			for _, proxyClient := range proxyClients {
@@ -138,12 +138,25 @@ Options:
 			}
 		}
 
+		// a returned error means the notification re-delivers these clients on
+		// the next poll instead of advancing past them
 		err := wg.AddProxyClients(proxyClients...)
 		if err != nil {
 			glog.Infof("[proxy]wg add proxy clients err=%s\n", err)
 		}
+		return err
 	})
 	defer sub()
+
+	// periodically reconcile the wg peers against the full set of proxy
+	// clients for this host/block
+	fullSyncSub := notif.AddProxyClientsFullSyncCallback(func(proxyClients []*model.ProxyClient, syncStartTime time.Time) {
+		err := wg.SyncProxyClients(proxyClients, syncStartTime)
+		if err != nil {
+			glog.Infof("[proxy]wg sync proxy clients err=%s\n", err)
+		}
+	})
+	defer fullSyncSub()
 
 	routes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),

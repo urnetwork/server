@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +87,13 @@ type proxyTestHarness struct {
 	cancel        context.CancelFunc
 	signedProxyId string
 	proxyClient   *model.ProxyClient
+
+	// the wg server runs under its own child context so a test can stop it
+	// (simulating an instance restart) without tearing down the harness
+	proxySettings      *ProxySettings
+	proxyDeviceManager *ProxyDeviceManager
+	wg                 *wgServer
+	wgCancel           context.CancelFunc
 }
 
 func setProxyTestEnv() {
@@ -304,12 +312,11 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 
 	NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
-	wg := NewWgServer(ctx, cancel, proxyDeviceManager, proxySettings)
+	wgCtx, wgCancel := context.WithCancel(ctx)
+	wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, proxySettings)
 	NewApiServer(ctx, cancel, proxyDeviceManager, transportTls, nil, InternalApiPort, proxySettings)
 
-	// give the proxy listeners a moment to bind. In particular the wg server's
-	// ListenAndServe runs IpcSet with ReplacePeers:true, which wipes peers — so
-	// the wg client must be registered AFTER that, or its peer key is removed.
+	// give the proxy listeners a moment to bind
 	select {
 	case <-time.After(1 * time.Second):
 	}
@@ -332,10 +339,14 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 	fmt.Printf("[progress]proxy device ready\n")
 
 	return &proxyTestHarness{
-		ctx:           ctx,
-		cancel:        cancel,
-		signedProxyId: signedProxyId,
-		proxyClient:   proxyClient,
+		ctx:                ctx,
+		cancel:             cancel,
+		signedProxyId:      signedProxyId,
+		proxyClient:        proxyClient,
+		proxySettings:      proxySettings,
+		proxyDeviceManager: proxyDeviceManager,
+		wg:                 wg,
+		wgCancel:           wgCancel,
 	}
 }
 
@@ -418,6 +429,69 @@ func TestProxy(t *testing.T) {
 	})
 }
 
+// TestProxyWgRestartReconnect simulates a proxy instance restart for the wg
+// path. The wg server is stopped (losing all in-memory wireguard state:
+// sessions, peer table, learned endpoints) and a new one is started on the
+// same port with the same server key, with the peers restored the way the
+// startup full sync does. The SAME wireguard client — still holding the now
+// dead session, never reconfigured or restarted — must detect the dead session
+// through its own timers, re-handshake, and resume traffic.
+func TestProxyWgRestartReconnect(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestProxyWgRestartReconnect\n")
+		h := setupProxyTest(t)
+		defer h.cancel()
+
+		// a long-lived wg client + netstack that survive the server restart
+		wgCtx, wgCancel := context.WithCancel(h.ctx)
+		defer wgCancel()
+		transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig)
+		defer closeWgClient()
+
+		// establish the session and confirm traffic
+		requireProxyGet(t, "wg-before-restart", transport)
+
+		// stop the wg server, releasing its socket and all in-memory state
+		fmt.Printf("[progress]restarting wg server\n")
+		h.wgCancel()
+		waitFor(t, 15*time.Second, "wg port release", func() bool {
+			pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", InternalWgPort))
+			if err != nil {
+				return false
+			}
+			pc.Close()
+			return true
+		})
+		// drop pooled tcp connections through the dead tunnel so the first
+		// post-restart attempt dials fresh (the dial's syns are the client
+		// traffic that triggers the wg re-handshake)
+		transport.CloseIdleConnections()
+
+		// new wg server: same vault key, same port, empty peer table
+		wg2Ctx, wg2Cancel := context.WithCancel(h.ctx)
+		defer wg2Cancel()
+		wg2 := NewWgServer(wg2Ctx, wg2Cancel, h.proxyDeviceManager, h.proxySettings)
+
+		// restore the peers the way the notification startup full sync does
+		if err := wg2.SyncProxyClients([]*model.ProxyClient{h.proxyClient}, server.NowUtc()); err != nil {
+			t.Fatalf("wg: restore clients after restart: %v", err)
+		}
+
+		// the client's first sends go into the dead session; its new-handshake
+		// timer (~15s of unanswered data) then re-initiates, the restored peer
+		// answers, and traffic resumes
+		restartTime := time.Now()
+		requireProxyGet(t, "wg-after-restart", transport)
+		fmt.Printf("[progress]wg reconnected %v after restart\n", time.Since(restartTime).Round(time.Second))
+	})
+}
+
 func waitFor(t testing.TB, timeout time.Duration, desc string, cond func() bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -486,15 +560,28 @@ func testProxySocks(t testing.TB, h *proxyTestHarness) {
 // WireGuard client and an HTTP GET routed over the tunnel.
 func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 	fmt.Printf("[progress]wireguard leg\n")
-	wgConfig := h.proxyClient.WgConfig
-	if wgConfig == nil {
-		t.Fatalf("wg: proxy client has no wg config")
-	}
 
 	// per-call ctx so the netstack bridge goroutines are torn down when this leg
 	// returns (important when the leg sequence runs in a loop).
 	wgCtx, wgCancel := context.WithCancel(h.ctx)
 	defer wgCancel()
+
+	transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig)
+	// close synchronously at leg end: each leg connects as the same peer (same
+	// key/ip), and a lingering previous client device would flap the server
+	// peer's endpoint into the next leg
+	defer closeWgClient()
+	requireProxyGet(t, "wireguard", transport)
+}
+
+// startWgClient brings up an in-process userspace WireGuard client and a
+// netstack bound to the client's tunnel address, returning an http transport
+// that dials through the tunnel and a close function for the client device
+// (also invoked if ctx is canceled first).
+func startWgClient(t testing.TB, ctx context.Context, wgConfig *model.WgConfig) (*http.Transport, func()) {
+	if wgConfig == nil {
+		t.Fatalf("wg: proxy client has no wg config")
+	}
 
 	clientPrivate, err := wgtypes.ParseKey(wgConfig.ClientPrivateKey)
 	if err != nil {
@@ -513,7 +600,14 @@ func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 		conn.NewDefaultBind(),
 		logger.NewLogger(logger.LogLevelError, "wgclient: "),
 	)
-	defer clientDevice.Close()
+	var closeOnce sync.Once
+	closeWgClient := func() {
+		closeOnce.Do(clientDevice.Close)
+	}
+	go func() {
+		<-ctx.Done()
+		closeWgClient()
+	}()
 
 	zeroPort := 0
 	wgClientConfig := wgtypes.Config{
@@ -541,15 +635,14 @@ func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 		t.Fatalf("wg: bring client up: %v", err)
 	}
 
-	wgStack, err := newWgClientStack(wgCtx, wgConfig.ClientIpv4, mtu, clientTun)
+	wgStack, err := newWgClientStack(ctx, wgConfig.ClientIpv4, mtu, clientTun)
 	if err != nil {
 		t.Fatalf("wg: create client netstack: %v", err)
 	}
 
-	transport := &http.Transport{
+	return &http.Transport{
 		DialContext: wgStack.DialContext,
-	}
-	requireProxyGet(t, "wireguard", transport)
+	}, closeWgClient
 }
 
 // requireProxyGet issues a GET to the real target through the given transport,

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +35,7 @@ func DefaultProxySettings() *ProxySettings {
 		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
 		EventRateLimitTimeout:    1 * time.Second,
+		ReconcileTimeout:         30 * time.Minute,
 	}
 }
 
@@ -47,6 +49,11 @@ type ProxySettings struct {
 	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
 	EventRateLimitTimeout    time.Duration
+	// how often the wg peers are reconciled against the full set of proxy
+	// clients for this host/block. The reconcile re-applies the full set
+	// (healing clients dropped by a partial restore) and removes peers whose
+	// proxy client no longer exists. <= 0 disables the reconcile.
+	ReconcileTimeout time.Duration
 }
 
 type socks5Server struct {
@@ -364,43 +371,151 @@ func (self *wgServer) run() {
 	}
 }
 
-func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
+type wgClientCounts struct {
+	total             int
+	noWgConfig        int
+	publicKeyMismatch int
+	invalidAuthToken  int
+}
+
+// validWgClients converts proxy clients to wg clients, dropping clients that
+// fail validation. The drops are logged individually and tallied in the
+// returned counts.
+func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[netip.Addr]*proxy.WgClient, *wgClientCounts) {
 	serverConfig := model.LoadServerProxyConfig()
 
+	counts := &wgClientCounts{
+		total: len(proxyClients),
+	}
 	clients := map[netip.Addr]*proxy.WgClient{}
 	for _, proxyClient := range proxyClients {
-		if proxyClient.WgConfig != nil {
-			valid := true
-			if proxyClient.WgConfig.ProxyPublicKey != serverConfig.Wg.PublicKey {
-				glog.Infof("[wg][%s]public key mismatch %s<>%s\n", proxyClient.ProxyId, proxyClient.WgConfig.ProxyPublicKey, serverConfig.Wg.PublicKey)
-				valid = false
-			}
-			// verify that the access token is still valid
-			if proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken); err != nil {
-				glog.Infof("[wg][%s]signed proxy id err=%s\n", proxyClient.ProxyId, err)
-				valid = false
-			} else if proxyId != proxyClient.ProxyId {
-				glog.Infof("[wg][%s]signed proxy id mismatch %s\n", proxyClient.ProxyId, proxyId)
-				valid = false
-			}
-			if valid {
-				glog.Infof("[wg][%s]add client %s %s\n", proxyClient.ProxyId, proxyClient.WgConfig.ClientPublicKey, proxyClient.WgConfig.ClientIpv4)
-				tun := func() (proxy.WgTun, error) {
-					return self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
-				}
-				client := &proxy.WgClient{
-					PublicKey:  proxyClient.WgConfig.ClientPublicKey,
-					ClientIpv4: proxyClient.WgConfig.ClientIpv4,
-					Tun:        tun,
-				}
-				clients[proxyClient.WgConfig.ClientIpv4] = client
-			}
+		if proxyClient.WgConfig == nil {
+			counts.noWgConfig += 1
+			continue
 		}
+		if proxyClient.WgConfig.ProxyPublicKey != serverConfig.Wg.PublicKey {
+			glog.Infof("[wg][%s]public key mismatch %s<>%s\n", proxyClient.ProxyId, proxyClient.WgConfig.ProxyPublicKey, serverConfig.Wg.PublicKey)
+			counts.publicKeyMismatch += 1
+			continue
+		}
+		// verify that the access token is still valid
+		if proxyId, err := model.ParseSignedProxyId(proxyClient.AuthToken); err != nil {
+			glog.Infof("[wg][%s]signed proxy id err=%s\n", proxyClient.ProxyId, err)
+			counts.invalidAuthToken += 1
+			continue
+		} else if proxyId != proxyClient.ProxyId {
+			glog.Infof("[wg][%s]signed proxy id mismatch %s\n", proxyClient.ProxyId, proxyId)
+			counts.invalidAuthToken += 1
+			continue
+		}
+		glog.V(1).Infof("[wg][%s]add client %s %s\n", proxyClient.ProxyId, proxyClient.WgConfig.ClientPublicKey, proxyClient.WgConfig.ClientIpv4)
+		// the factory is called from wg device goroutines, which do not recover
+		// panics. Model calls raise on a canceled ctx (e.g. instance shutdown
+		// with in-flight client packets), so convert panics to an error - the
+		// device drops the packet instead of crashing the process.
+		tun := func() (tun proxy.WgTun, err error) {
+			if r := server.HandleError(func() {
+				tun, err = self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+			}); r != nil {
+				if rErr, ok := r.(error); ok {
+					err = rErr
+				} else {
+					err = fmt.Errorf("open proxy device: %v", r)
+				}
+			}
+			return
+		}
+		client := &proxy.WgClient{
+			PublicKey:  proxyClient.WgConfig.ClientPublicKey,
+			ClientIpv4: proxyClient.WgConfig.ClientIpv4,
+			Tun:        tun,
+		}
+		clients[proxyClient.WgConfig.ClientIpv4] = client
 	}
-	if 0 < len(clients) {
-		return self.wgProxy.AddClients(clients)
+	return clients, counts
+}
+
+func (self *wgServer) logClientCounts(op string, applied int, removed int, counts *wgClientCounts) {
+	glog.Infof(
+		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token), peers %d/%d\n",
+		op,
+		applied,
+		counts.total,
+		removed,
+		counts.noWgConfig,
+		counts.publicKeyMismatch,
+		counts.invalidAuthToken,
+		self.wgProxy.ClientCount(),
+		proxy.MaxClients,
+	)
+}
+
+func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
+	clients, counts := self.validWgClients(proxyClients)
+
+	if len(clients) == 0 {
+		if 0 < counts.total {
+			self.logClientCounts("add", 0, 0, counts)
+		}
+		return nil
+	}
+
+	applied, err := self.wgProxy.AddClients(clients)
+	if err != nil {
+		glog.Infof("[wg]add clients err=%s\n", err)
+	}
+	self.logClientCounts("add", len(applied), 0, counts)
+
+	if len(applied) == 0 {
+		// a total failure is treated as transient and retried by the caller
+		// (the notification does not advance past it). Partial failures are
+		// logged above and healed by the periodic reconcile.
+		return errors.Join(fmt.Errorf("no wg clients applied (%d valid)", len(clients)), err)
 	}
 	return nil
+}
+
+// SyncProxyClients reconciles the wg device against the full set of proxy
+// clients for this host/block: it (re)applies the current clients, healing any
+// previous partial restore, and removes peers whose proxy client no longer
+// exists (e.g. reaped rows), keeping the device peer table bounded. Only peers
+// applied before syncStartTime are eligible for removal, so a client warmed up
+// concurrently with the db snapshot is never removed.
+func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncStartTime time.Time) error {
+	clients, counts := self.validWgClients(proxyClients)
+
+	applied, addErr := self.wgProxy.AddClients(clients)
+	if addErr != nil {
+		glog.Infof("[wg]sync add clients err=%s\n", addErr)
+	}
+
+	staleAddrs := []netip.Addr{}
+	if 0 < len(clients) {
+		for addr := range self.wgProxy.Clients() {
+			if _, ok := clients[addr]; !ok {
+				staleAddrs = append(staleAddrs, addr)
+			}
+		}
+	} else if 0 < self.wgProxy.ClientCount() {
+		// an empty full set with live peers is more likely a sync issue (e.g.
+		// host/block misconfiguration) than a true mass removal - never remove
+		// every peer at once
+		glog.Infof("[wg]sync returned no clients with %d peers registered; skipping removals\n", self.wgProxy.ClientCount())
+	}
+	removed := 0
+	var removeErr error
+	if 0 < len(staleAddrs) {
+		peerCount := self.wgProxy.ClientCount()
+		// `RemoveClients` re-checks the add time cutoff under its state lock
+		removeErr = self.wgProxy.RemoveClients(syncStartTime, staleAddrs...)
+		if removeErr != nil {
+			glog.Infof("[wg]sync remove clients err=%s\n", removeErr)
+		}
+		removed = peerCount - self.wgProxy.ClientCount()
+	}
+	self.logClientCounts("sync", len(applied), removed, counts)
+
+	return errors.Join(addErr, removeErr)
 }
 
 func authHeaderProxyId(authHeader string) (server.Id, error) {

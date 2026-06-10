@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	mathrand "math/rand"
+	"slices"
 	"strings"
 	"testing"
 
@@ -82,6 +83,10 @@ func TestCreateProxyClient(t *testing.T) {
 			assert.Equal(t, err, nil)
 			assert.NotEqual(t, proxyClient, nil)
 
+			// the client config must keep an idle client sending so it detects a
+			// dead session (e.g. proxy instance restart) and re-handshakes
+			assert.Equal(t, strings.Contains(proxyClient.WgConfig.Config, "PersistentKeepalive = 25"), true)
+
 			glog.Infof("[ncpm][%d/%d]ip=%s\n", i+1, n, proxyClient.WgConfig.ClientIpv4)
 		}
 	})
@@ -143,6 +148,74 @@ func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
 			v, _ := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
 			assert.Equal(t, v, "")
 		})
+	})
+}
+
+// The reap cascade must remove proxy_client rows (and their change rows) whose
+// proxy_device_config is gone, while keeping clients with a live network_client,
+// so that the wg peer restore at instance startup stays bounded by the live set.
+func TestRemoveDisconnectedReapsProxyClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		newProxyClient := func(withNetworkClient bool) *ProxyClient {
+			clientId := server.NewId()
+			if withNetworkClient {
+				Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "test", "test")
+			}
+
+			proxyDeviceConfig := &ProxyDeviceConfig{}
+			proxyDeviceConfig.ClientId = clientId
+			err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
+			assert.Equal(t, err, nil)
+
+			proxyClient, err := CreateProxyClient(
+				ctx,
+				proxyDeviceConfig.ProxyId,
+				proxyDeviceConfig.ClientId,
+				proxyDeviceConfig.InstanceId,
+				CreateProxyClientOptions{},
+			)
+			assert.Equal(t, err, nil)
+			return proxyClient
+		}
+
+		liveProxyClient := newProxyClient(true)
+		// no network_client row: the device config is reaped, and then the
+		// proxy_client row must be reaped too
+		staleProxyClient := newProxyClient(false)
+
+		host := liveProxyClient.ProxyHost
+		block := liveProxyClient.Block
+		assert.Equal(t, host, staleProxyClient.ProxyHost)
+		assert.Equal(t, block, staleProxyClient.Block)
+
+		// before the reap the startup sync sees both
+		proxyClients, _, err := GetProxyClientsSince(ctx, host, block, 0)
+		assert.Equal(t, err, nil)
+		_, ok := proxyClients[liveProxyClient.ProxyId]
+		assert.Equal(t, ok, true)
+		_, ok = proxyClients[staleProxyClient.ProxyId]
+		assert.Equal(t, ok, true)
+
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc(), server.NowUtc())
+
+		// after the reap the live client remains and the stale client is gone
+		proxyClients, _, err = GetProxyClientsSince(ctx, host, block, 0)
+		assert.Equal(t, err, nil)
+		_, ok = proxyClients[liveProxyClient.ProxyId]
+		assert.Equal(t, ok, true)
+		_, ok = proxyClients[staleProxyClient.ProxyId]
+		assert.Equal(t, ok, false)
+
+		got, err := GetProxyClient(ctx, staleProxyClient.ProxyId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, got == nil, true)
+
+		// the stale client's change rows are pruned too
+		proxyIds, _ := GetProxyIdsSince(ctx, host, block, 0)
+		assert.Equal(t, slices.Contains(proxyIds, liveProxyClient.ProxyId), true)
+		assert.Equal(t, slices.Contains(proxyIds, staleProxyClient.ProxyId), false)
 	})
 }
 

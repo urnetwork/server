@@ -1698,7 +1698,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	}
 
 	if sourceId != self.clientId {
-		glog.Infof("[rf]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
+		glog.V(1).Infof("[rf]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
 		// the message is not from the client
 		// clients are not allowed to forward from other clients
 		// drop

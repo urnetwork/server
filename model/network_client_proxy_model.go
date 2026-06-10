@@ -705,6 +705,12 @@ func CreateProxyClient(
 
 			clientAddr := IntToIpv4(clientIpv4)
 
+			// PersistentKeepalive keeps the client sending even when idle, so it
+			// detects a dead session (e.g. proxy instance restart) and
+			// re-handshakes on its own within the rekey/reject window (~2-3min).
+			// It also keeps the client's NAT mapping open. Without it an idle
+			// client never notices a server restart and the tunnel appears
+			// permanently dead until new client traffic.
 			config := fmt.Sprintf(
 				`[Interface]
 PrivateKey = %s
@@ -714,7 +720,8 @@ DNS = 1.1.1.1
 [Peer]
 PublicKey = %s
 Endpoint = %s
-AllowedIPs = 0.0.0.0/0`,
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25`,
 				clientPrivateKey,
 				clientAddr,
 				proxyPublicKey,
