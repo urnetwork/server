@@ -46,7 +46,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -86,7 +86,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 
 		time.Sleep(1 * time.Second)
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -124,7 +124,7 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -321,7 +321,7 @@ func TestRemoveDisconnectedClearsProvideRedis(t *testing.T) {
 			assert.NotEqual(t, v, "")
 		})
 
-		RemoveDisconnectedNetworkClients(ctx, server.NowUtc())
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc(), server.NowUtc())
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()

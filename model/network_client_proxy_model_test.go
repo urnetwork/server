@@ -136,7 +136,7 @@ func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
 		assert.Equal(t, err, nil)
 		proxyId := proxyDeviceConfig.ProxyId
 
-		RemoveDisconnectedNetworkClients(ctx, server.NowUtc())
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc(), server.NowUtc())
 
 		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyId) == nil, true)
 		server.Redis(ctx, func(r server.RedisClient) {

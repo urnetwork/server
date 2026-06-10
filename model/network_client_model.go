@@ -887,11 +887,11 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 					provideModesList := maps.Keys(secretKeys)
 					provideModesListJson, _ := json.Marshal(provideModesList)
 					// no ttl
-					pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, -1)
+					pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, server.NoTtl)
 
 					for provideMode, secretKey := range secretKeys {
 						// no ttl
-						pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, -1)
+						pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, server.NoTtl)
 					}
 
 					_, err := pipe.Exec(ctx)
@@ -937,26 +937,26 @@ func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[
 	})
 
 	// TODO this can be removed once provide_key older than the redis set have been removed
-	// if provideModes == nil && returnErr == nil {
-	// 	server.Db(ctx, func(conn server.PgConn) {
-	// 		result, err := conn.Query(
-	// 			ctx,
-	// 			`
-	// 				SELECT provide_mode FROM provide_key
-	// 				WHERE client_id = $1
-	// 			`,
-	// 			clientId,
-	// 		)
-	// 		server.WithPgResult(result, err, func() {
-	// 			provideModes = map[ProvideMode]bool{}
-	// 			for result.Next() {
-	// 				var provideMode ProvideMode
-	// 				server.Raise(result.Scan(&provideMode))
-	// 				provideModes[provideMode] = true
-	// 			}
-	// 		})
-	// 	})
-	// }
+	if provideModes == nil && returnErr == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT provide_mode FROM provide_key
+					WHERE client_id = $1
+				`,
+				clientId,
+			)
+			server.WithPgResult(result, err, func() {
+				provideModes = map[ProvideMode]bool{}
+				for result.Next() {
+					var provideMode ProvideMode
+					server.Raise(result.Scan(&provideMode))
+					provideModes[provideMode] = true
+				}
+			})
+		})
+	}
 
 	return
 }
@@ -975,30 +975,30 @@ func GetProvideSecretKey(
 	})
 
 	// TODO this can be removed once provide_key older than the redis set have been removed
-	// if secretKey == nil && returnErr == nil {
-	// 	server.Db(ctx, func(conn server.PgConn) {
-	// 		result, err := conn.Query(
-	// 			ctx,
-	// 			`
-	// 				SELECT
-	// 					secret_key
-	// 				FROM provide_key
-	// 				WHERE
-	// 					client_id = $1 AND
-	// 					provide_mode = $2
-	// 			`,
-	// 			clientId,
-	// 			provideMode,
-	// 		)
-	// 		server.WithPgResult(result, err, func() {
-	// 			if result.Next() {
-	// 				server.Raise(result.Scan(&secretKey))
-	// 			} else {
-	// 				returnErr = fmt.Errorf("Provide secret key not set.")
-	// 			}
-	// 		})
-	// 	})
-	// }
+	if secretKey == nil && returnErr == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						secret_key
+					FROM provide_key
+					WHERE
+						client_id = $1 AND
+						provide_mode = $2
+				`,
+				clientId,
+				provideMode,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&secretKey))
+				} else {
+					returnErr = fmt.Errorf("Provide secret key not set.")
+				}
+			})
+		})
+	}
 
 	return
 }
@@ -1145,11 +1145,11 @@ func SetProvide(
 		provideModesList := maps.Keys(secretKeys)
 		provideModesListJson, _ := json.Marshal(provideModesList)
 		// no ttl
-		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, -1)
+		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, server.NoTtl)
 
 		for provideMode, secretKey := range secretKeys {
 			// no ttl
-			pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, -1)
+			pipe.Set(ctx, provideModeSecretKeyKey(clientId, provideMode), secretKey, server.NoTtl)
 		}
 		for _, provideMode := range removedProvideModes {
 			if _, ok := secretKeys[provideMode]; !ok {
@@ -1319,6 +1319,21 @@ func ConnectNetworkClient(
 			handlerId,
 			expectedLatencyMillis,
 		))
+
+		// refresh auth_time as a durable last-seen marker. connection rows are
+		// retained only briefly by `RemoveDisconnectedNetworkClients`, so the
+		// disconnected-client reap keys off auth_time to mean "not seen for the
+		// client window" rather than "created long ago".
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client
+				SET auth_time = $2
+				WHERE client_id = $1
+			`,
+			clientId,
+			connectTime,
+		))
 	})
 
 	return
@@ -1352,7 +1367,14 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 	return disconnectErr
 }
 
-func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
+// `minConnectionTime` bounds how long disconnected connection rows are
+// retained. `minClientTime` bounds when disconnected clients are reaped —
+// a client is reaped only if it has not authed or connected since
+// `minClientTime` (see the auth_time refresh in `ConnectNetworkClient`).
+// Keep the client window much larger than the connection window: provisioned
+// child clients (e.g. proxy devices, see `proxy_device_config`) cannot
+// recover from a reaped client_id.
+func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1362,7 +1384,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 					connected = false AND
 					disconnect_time < $1
 			`,
-			minTime.UTC(),
+			minConnectionTime.UTC(),
 		))
 	}, server.TxReadCommitted)
 
@@ -1446,13 +1468,16 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 			WHERE network_client.create_time < $1 AND active = false
 			RETURNING client_id
 			`,
-			minTime.UTC(),
+			minClientTime.UTC(),
 		)
 		collectReaped(rows, err)
 
 	}, server.TxReadCommitted)
 
-	// remove network clients with a parent and without a connection
+	// remove network clients with a parent, not seen since `minClientTime`,
+	// and without a connection. auth_time (not create_time) is the reap key:
+	// it is refreshed on every auth and every connect, so a client in regular
+	// use is never reaped no matter how old it is.
 	// important: to delete clients without a source id (top level clients),
 	//            the app will need to create a new client id for these clients when it notices the existing jwt fails
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -1465,14 +1490,14 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minTime time.Time) {
 				FROM network_client
 			    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
 				WHERE
-					network_client.create_time < $1
+					network_client.auth_time < $1
 					AND network_client.source_client_id IS NOT NULL
 					AND network_client_connection.client_id IS NULL
 			) t
 			WHERE network_client.client_id = t.client_id
 			RETURNING network_client.client_id
 			`,
-			minTime.UTC(),
+			minClientTime.UTC(),
 		)
 		collectReaped(rows, err)
 	})

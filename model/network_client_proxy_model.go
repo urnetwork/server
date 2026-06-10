@@ -257,7 +257,7 @@ func MigrateProxyDeviceConfig(ctx context.Context, blockSize int) {
 				server.Redis(ctx, func(r server.RedisClient) {
 
 					// no ttl
-					err := r.Set(ctx, proxyDeviceConfigKey(proxyId), proxyDeviceConfigJsons[proxyId], -1).Err()
+					err := r.Set(ctx, proxyDeviceConfigKey(proxyId), proxyDeviceConfigJsons[proxyId], server.NoTtl).Err()
 					server.Raise(err)
 
 				})
@@ -381,7 +381,7 @@ func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDevice
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		// no ttl
-		r.Set(ctx, proxyDeviceConfigKey(proxyDeviceConfig.ProxyId), proxyDeviceConfigJson, -1)
+		r.Set(ctx, proxyDeviceConfigKey(proxyDeviceConfig.ProxyId), proxyDeviceConfigJson, server.NoTtl)
 	})
 
 	return nil
@@ -412,26 +412,26 @@ func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceCo
 	})
 
 	// TODO this can be removed when older proxy_device_config before the redis set have been cleared out
-	// if proxyDeviceConfigJson == "" {
-	// 	server.Db(ctx, func(conn server.PgConn) {
-	// 		result, err := conn.Query(
-	// 			ctx,
-	// 			`
-	// 			SELECT
-	// 				config_json
-	// 			FROM proxy_device_config
-	// 			WHERE
-	// 				proxy_id = $1
-	// 			`,
-	// 			proxyId,
-	// 		)
-	// 		server.WithPgResult(result, err, func() {
-	// 			if result.Next() {
-	// 				server.Raise(result.Scan(&proxyDeviceConfigJson))
-	// 			}
-	// 		})
-	// 	})
-	// }
+	if proxyDeviceConfigJson == "" {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					config_json
+				FROM proxy_device_config
+				WHERE
+					proxy_id = $1
+				`,
+				proxyId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&proxyDeviceConfigJson))
+				}
+			})
+		})
+	}
 
 	if proxyDeviceConfigJson == "" {
 		return nil
