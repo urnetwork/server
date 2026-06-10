@@ -391,6 +391,10 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				case <-ctx.Done():
 					panic(DbContextDoneError)
 				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(connErr)
+					}
+					continue
 				}
 			}
 			panic(connErr)
@@ -408,6 +412,10 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				case <-ctx.Done():
 					panic(DbContextDoneError)
 				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(connErr)
+					}
+					continue
 				}
 			}
 			panic(connErr)
@@ -454,16 +462,16 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				case <-ctx.Done():
 					panic(DbContextDoneError)
 				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(pgErr)
+					}
+					if glog.V(2) {
+						glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
+					} else if glog.V(1) {
+						glog.Infof("[db]transient error, retry = %v\n", pgErr)
+					}
+					continue
 				}
-				if retryEndTime.Before(NowUtc()) {
-					panic(pgErr)
-				}
-				if glog.V(2) {
-					glog.Infof("[db]transient error, retry: %s\n", ErrorJson(pgErr, debug.Stack()))
-				} else if glog.V(1) {
-					glog.Infof("[db]transient error, retry = %v\n", pgErr)
-				}
-				continue
 			}
 			panic(pgErr)
 		}
@@ -473,8 +481,11 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				case <-ctx.Done():
 					panic(DbContextDoneError)
 				case <-time.After(retryOptions.retryTimeout()):
+					if retryEndTime.Before(NowUtc()) {
+						panic(connErr)
+					}
+					continue
 				}
-				continue
 			}
 			panic(connErr)
 		}
