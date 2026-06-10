@@ -78,8 +78,12 @@ func RemoveDisconnectedNetworkClients(
 	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveDisconnectedNetworkClientsResult, error) {
-	minTime := server.NowUtc().Add(-8 * time.Hour)
-	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minTime)
+	// connection rows are kept briefly for diagnostics; clients are reaped
+	// only after 30 days unseen (auth_time), since provisioned child clients
+	// (e.g. proxy devices) cannot recover from a reaped client_id
+	minConnectionTime := server.NowUtc().Add(-8 * time.Hour)
+	minClientTime := server.NowUtc().Add(-30 * 24 * time.Hour)
+	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minConnectionTime, minClientTime)
 	return &RemoveDisconnectedNetworkClientsResult{}, nil
 }
 
