@@ -103,9 +103,9 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		minConnections := dbConfigKeys.RequireInt("min_connections")
 		maxConnections := dbConfigKeys.RequireInt("max_connections")
 		healthCheckPeriod := "1s"
-		connectionMaxLifetime := "1h"
+		connectionMaxLifetime := "8h"
 		connectionMaxLifetimeJitter := "15m"
-		connectionMaxIdleTime := "5m"
+		connectionMaxIdleTime := "60m"
 		if healthCheckPeriods := dbConfigKeys.String("health_check_period"); 0 < len(healthCheckPeriods) {
 			healthCheckPeriod = healthCheckPeriods[0]
 		}
