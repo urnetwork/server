@@ -11,7 +11,6 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
-	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -28,6 +27,12 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
+
+	// when set, these override the default device security policies for all
+	// devices opened by this manager (see ProxyDeviceSettings). Integration
+	// tests use this to allow local target servers through the device path.
+	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 
 	// NetworkSpace, when set, overrides the default platform network space.
 	// Integration tests use this to point proxy devices at local api/connect
@@ -60,6 +65,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		connectSettings := connect.DefaultConnectSettings()
 		// FIXME use only ipv4 when communicating back to the platform
 		connectSettings.DisableIpv6 = true
+		// embedded devices must be silent: this host runs thousands of clients.
+		// the network space logger silences the shared client strategy.
+		connectSettings.Log = connect.NewNoopLogger()
 		networkSpace = sdk.NewPlatformNetworkSpace(
 			cancelCtx,
 			server.RequireEnv(),
@@ -85,6 +93,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		}
 
 		settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
+		settings.IngressSecurityPolicyGenerator = self.settings.IngressSecurityPolicyGenerator
+		settings.EgressSecurityPolicyGenerator = self.settings.EgressSecurityPolicyGenerator
 		pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, self.networkSpace, settings)
 		if err != nil {
 			return nil, err
@@ -206,7 +216,7 @@ type ProxyDevice struct {
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
 	deviceLocal *sdk.DeviceLocal
-	tun         *proxy.Tun
+	tun         *connect.Tun
 	settings    *ProxyDeviceSettings
 
 	stateLock        sync.Mutex
@@ -244,7 +254,10 @@ func NewProxyDevice(
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	deviceLocal, err := sdk.NewPlatformDeviceLocalWithDefaults(
+	deviceLocalSettings := sdk.DefaultDeviceLocalSettings()
+	// embedded devices must be silent: this host runs thousands of clients
+	deviceLocalSettings.DisableLogging = true
+	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,
 		byJwt.Sign(),
@@ -252,8 +265,10 @@ func NewProxyDevice(
 		settings.ProxyDeviceSpec,
 		server.RequireVersion(),
 		sdk.RequireIdFromBytes(proxyDeviceConfig.InstanceId.Bytes()),
+		deviceLocalSettings,
 	)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	deviceLocal.SetIngressSecurityPolicyGenerator(settings.IngressSecurityPolicyGenerator)
@@ -266,15 +281,18 @@ func NewProxyDevice(
 		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
-	tunSettings := proxy.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
+	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
 
-	tun, err := proxy.CreateTunWithResolver(
+	tun, err := connect.CreateTunWithResolver(
 		cancelCtx,
 		tunSettings,
 		dnsResolverSettings,
 	)
 	if err != nil {
+		// release in the same order as `Close`
+		cancel()
+		deviceLocal.Close()
 		return nil, err
 	}
 
@@ -325,20 +343,24 @@ func (self *ProxyDevice) Run() {
 	sub := self.deviceLocal.AddReceivePacketCallback(receiveCallback)
 	defer sub()
 
+	// read in batches to reduce wakeups under load
+	packets := make([][]byte, 64)
 	for {
 		if !self.UpdateActivity() {
 			return
 		}
-		packet, err := self.tun.Read()
+		n, err := self.tun.ReadBatch(packets)
 		if err != nil {
 			return
 		}
 		if !self.UpdateActivity() {
 			return
 		}
-		success := self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
-		if !success {
-			connect.MessagePoolReturn(packet)
+		for _, packet := range packets[0:n] {
+			success := self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
+			if !success {
+				connect.MessagePoolReturn(packet)
+			}
 		}
 	}
 }
@@ -368,7 +390,7 @@ func (self *ProxyDevice) receiveWithNotify() (chan []byte, chan struct{}) {
 	return self.receive, self.receiveNotify
 }
 
-func (self *ProxyDevice) Tun() *proxy.Tun {
+func (self *ProxyDevice) Tun() *connect.Tun {
 	return self.tun
 }
 

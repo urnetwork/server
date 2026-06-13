@@ -1351,6 +1351,13 @@ func testConnect(
 
 		settings := DefaultExchangeSettings()
 		settings.ExchangeBufferSize = 0
+		// exercise the forward path with deterministic, reliable delivery:
+		// a 0-size forward queue plus a blocking forward (ForwardTimeout set to
+		// WriteTimeout) so a relayed message is never silently dropped. In
+		// production ForwardTimeout is 0 (non-blocking) so the receive loop is
+		// never stalled by a single slow route; here we want determinism.
+		settings.ForwardBufferSize = 0
+		settings.ForwardTimeout = settings.WriteTimeout
 		settings.ExchangeResidentTtl = sequenceIdleTimeout
 		settings.ForwardIdleTimeout = sequenceIdleTimeout
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
@@ -1404,6 +1411,12 @@ func testConnect(
 	clientSettingsA.SendBufferSettings.MinResendInterval = minResendInterval
 	clientSettingsA.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
+	// ack per received message instead of coalescing. The production default
+	// coalesces acks over a 10ms window; this test sets MinResendInterval=10ms
+	// and 0-size buffers, so a coalesce window on the same order as the resend
+	// interval makes ack timing nondeterministic. Per-message acks keep the
+	// deadlock/ordering assertions deterministic.
+	clientSettingsA.ReceiveBufferSettings.AckCompressTimeout = 0
 	// clientSettingsA.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsA.ForwardBufferSettings.SequenceBufferSize = 0
 	// disable scheduled network events
@@ -1442,6 +1455,8 @@ func testConnect(
 	clientSettingsB.SendBufferSettings.MinResendInterval = minResendInterval
 	clientSettingsB.ReceiveBufferSettings.GapTimeout = receiveTimeout
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
+	// ack per received message instead of coalescing (see clientSettingsA)
+	clientSettingsB.ReceiveBufferSettings.AckCompressTimeout = 0
 	// clientSettingsB.ReceiveBufferSettings.AckBufferSize = 0
 	clientSettingsB.ForwardBufferSettings.SequenceBufferSize = 0
 	// disable scheduled network events

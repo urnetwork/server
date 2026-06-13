@@ -2795,4 +2795,12 @@ var migrations = []any{
             PRIMARY KEY (client_id)
         )
     `),
+
+	// a disputed contract is not `open` (`open` is generated as
+	// `dispute = false AND outcome IS NULL`), so the expired dispute scan in
+	// `ForceCloseOpenContractIds` needs its own index
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_dispute_create_time
+        ON transfer_contract (dispute, outcome, create_time)
+    `),
 }

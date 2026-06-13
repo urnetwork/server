@@ -1929,6 +1929,26 @@ func Testing_CreateDevice(
 	})
 }
 
+// Testing_DeleteProvideMirror removes the redis-mirrored provide state for a
+// client, simulating an incomplete migration or lost redis state. The db
+// `provide_key` rows are left in place so tests can exercise the db fallback
+// in `GetProvideModes`/`GetProvideSecretKey`.
+func Testing_DeleteProvideMirror(ctx context.Context, clientId server.Id) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		// all of a client's keys share the {pm_<clientId>} hash tag (same slot)
+		keys := []string{provideModesKey(clientId)}
+		for _, provideMode := range []ProvideMode{
+			ProvideModeNetwork,
+			ProvideModeFriendsAndFamily,
+			ProvideModePublic,
+			ProvideModeStream,
+		} {
+			keys = append(keys, provideModeSecretKeyKey(clientId, provideMode))
+		}
+		r.Del(ctx, keys...)
+	})
+}
+
 func ClientError(ctx context.Context, networkId server.Id, clientId server.Id, connectionId server.Id, op string, err error) {
 	ttl := 5 * time.Minute
 	warnThreshold := int64(30)

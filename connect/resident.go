@@ -1,10 +1,12 @@
 package connect
 
 import (
+	"bufio"
 	"context"
-	// "encoding/binary"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"math"
 	// "io"
 	"math/rand"
 	"net"
@@ -21,6 +23,7 @@ import (
 
 	"golang.org/x/exp/maps"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
@@ -62,11 +65,52 @@ type ByteCount = model.ByteCount
 
 var ControlId = server.Id(connect.ControlId)
 
+var forwardDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "forward_dropped_messages",
+		Help:      "Messages dropped because the forward buffer to the destination resident was full",
+	},
+)
+
+var forwardReceiveDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "forward_receive_dropped_messages",
+		Help:      "Messages dropped because the resident client's forward buffer was full on the receive side of an exchange forward",
+	},
+)
+
+var abuseDroppedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "abuse_dropped_messages",
+		Help:      "Messages dropped because they failed a resident abuse check (bad source, forward limit, or no active contract)",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(forwardDroppedCounter)
+	prometheus.MustRegister(forwardReceiveDroppedCounter)
+	prometheus.MustRegister(abuseDroppedCounter)
+}
+
 // use 0 for deadlock testing
 // the client can suffer from head of queue blocking when the forwards/clients are changing rates
 // (flow control in the application protocol level should establish a steady rate)
 // a larger exchange buffer size helps mitigate this
-const defaultExchangeBufferSize = 4096
+// note this also bounds the hidden queueing per hop. The end-to-end queue across all hops
+// must drain well inside the client resend timeout floor (`MinResendInterval`, 2s), or
+// delayed acks trigger mass spurious retransmission under load.
+const defaultExchangeBufferSize = 1024
+
+// the resident forward `send` queue to a peer resident. This must stay large
+// enough in production for congestion control to work freely across the hop.
+// use 0 for deadlock testing (see `ForwardBufferSize`).
+const defaultForwardBufferSize = 1024
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
@@ -76,6 +120,28 @@ type ExchangeSettings struct {
 
 	ExchangeBufferSize int
 
+	// `send` queue depth of a `ResidentForward` to a peer resident. Kept
+	// separate from `ExchangeBufferSize` so production can hold a deep queue
+	// for congestion control while deadlock tests set it to 0.
+	ForwardBufferSize int
+	// timeout for enqueuing onto a `ResidentForward` when the resident reads a
+	// message off its client receive loop and forwards it to a peer resident
+	// (`handleClientForward`). In production this is 0 (non-blocking): the
+	// receive loop must never stall on a single slow route, so a message that
+	// cannot be enqueued is dropped and the sender resends. Tests with 0-size
+	// buffers set this to `WriteTimeout` so the forward blocks instead of
+	// dropping, keeping delivery deterministic. Note `AddForward` delivery to
+	// the local client uses the normal `WriteTimeout`, not this.
+	ForwardTimeout time.Duration
+
+	// pending messages on an exchange connection are coalesced into a single
+	// writev up to these limits, to amortize the per-message syscall cost
+	ExchangeWriteBatchCount     int
+	ExchangeWriteBatchByteCount ByteCount
+	// read buffer for exchange connections, to amortize the framer's
+	// header+body reads across messages
+	ExchangeReadBufferByteCount int
+
 	MinContractTransferByteCount ByteCount
 
 	StartInternalPort                int
@@ -83,7 +149,6 @@ type ExchangeSettings struct {
 
 	// ResidentIdleTimeout time.Duration
 	ForwardIdleTimeout time.Duration
-	AbuseMinTimeout    time.Duration
 	ControlMinTimeout  time.Duration
 
 	ExchangeConnectTimeout             time.Duration
@@ -132,6 +197,14 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 
 		ExchangeBufferSize: bufferSize,
 
+		ForwardBufferSize: defaultForwardBufferSize,
+		// non-blocking receive-forward delivery in production
+		ForwardTimeout: 0,
+
+		ExchangeWriteBatchCount:     256,
+		ExchangeWriteBatchByteCount: ByteCount(256 * 1024),
+		ExchangeReadBufferByteCount: 64 * 1024,
+
 		// 64kib minimum contract
 		// this is set high enough to limit the number of parallel contracts and avoid contract spam
 		MinContractTransferByteCount: ByteCount(64 * 1024),
@@ -143,7 +216,6 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 
 		// ResidentIdleTimeout: 300 * time.Minute,
 		ForwardIdleTimeout: 15 * time.Minute,
-		AbuseMinTimeout:    5 * time.Second,
 		ControlMinTimeout:  5 * time.Millisecond,
 
 		ExchangeConnectTimeout:             15 * time.Second,
@@ -550,21 +622,62 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
+			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+			// gather pending messages into `batch` without blocking, bounded by
+			// the write batch limits, and write them with a single writev.
+			// returns false to end the send loop (closed channel or write error).
+			writeBatch := func(message []byte, ok bool) bool {
+				if !ok {
+					return false
+				}
+				resident.UpdateActivity()
+				open := true
+				batch = append(batch[:0], message)
+				batchByteCount := ByteCount(len(message))
+			gather:
+				for open && len(batch) < self.settings.ExchangeWriteBatchCount && batchByteCount < self.settings.ExchangeWriteBatchByteCount {
+					select {
+					case next, nextOk := <-send:
+						if !nextOk {
+							open = false
+						} else {
+							batch = append(batch, next)
+							batchByteCount += ByteCount(len(next))
+						}
+					default:
+						break gather
+					}
+				}
+				err := sendBuffer.WriteMessages(conn, batch)
+				batch = batch[:0]
+				if err != nil {
+					return false
+				}
+				if glog.V(1) {
+					glog.Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
+				}
+				return open
+			}
 			for {
+				// fast path without arming the ping timer
 				select {
 				case <-handleCtx.Done():
 					return
 				case message, ok := <-send:
-					if !ok {
+					if !writeBatch(message, ok) {
 						return
 					}
-					resident.UpdateActivity()
-					if err := sendBuffer.WriteMessage(conn, message); err != nil {
+					continue
+				default:
+				}
+
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-send:
+					if !writeBatch(message, ok) {
 						return
 					}
-
-					glog.V(1).Infof("[ecrs] %s/%s\n", resident.clientId, resident.residentId)
-
 				case <-time.After(self.settings.ExchangePingTimeout):
 					// send a ping
 					if err := sendBuffer.WriteMessage(conn, make([]byte, 0)); err != nil {
@@ -595,7 +708,20 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					continue
 				}
 
-				glog.V(2).Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+				if glog.V(2) {
+					glog.Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
+				}
+
+				// fast path without arming a timer
+				select {
+				case receive <- message:
+					resident.UpdateActivity()
+					if glog.V(2) {
+						glog.Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+					}
+					continue
+				default:
+				}
 
 				select {
 				case <-handleCtx.Done():
@@ -603,7 +729,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					return
 				case receive <- message:
 					resident.UpdateActivity()
-					glog.V(2).Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+					if glog.V(2) {
+						glog.Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
+					}
 				case <-time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
 					connect.MessagePoolReturn(message)
@@ -659,13 +787,26 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					continue
 				}
 
+				// fast path without arming a timer
+				select {
+				case forward <- message:
+					resident.UpdateActivity()
+					if glog.V(2) {
+						glog.Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+					}
+					continue
+				default:
+				}
+
 				select {
 				case <-handleCtx.Done():
 					connect.MessagePoolReturn(message)
 					return
 				case forward <- message:
 					resident.UpdateActivity()
-					glog.V(2).Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+					if glog.V(2) {
+						glog.Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
+					}
 				case <-time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
 					connect.MessagePoolReturn(message)
@@ -777,6 +918,12 @@ type ExchangeBuffer struct {
 	settings *ExchangeSettings
 
 	framer *connect.Framer
+
+	// reads are buffered to amortize the framer's header+body reads.
+	// a buffer must be used with a single connection for all reads
+	// (header and messages), or buffered bytes would be lost.
+	reader     *bufio.Reader
+	readerConn net.Conn
 }
 
 func NewDefaultExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
@@ -792,6 +939,14 @@ func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 	return NewDefaultExchangeBuffer(settings)
 }
 
+func (self *ExchangeBuffer) connReader(conn net.Conn) *bufio.Reader {
+	if self.readerConn != conn {
+		self.reader = bufio.NewReaderSize(conn, self.settings.ExchangeReadBufferByteCount)
+		self.readerConn = conn
+	}
+	return self.reader
+}
+
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
 	b := bytes.NewBuffer(nil)
 	e := gob.NewEncoder(b)
@@ -804,7 +959,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
-	headerBytes, err := self.framer.Read(conn)
+	headerBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
 	}
@@ -832,9 +987,54 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 	return err
 }
 
+// WriteMessages writes a batch of framed messages with a single writev
+// (one length-header iovec plus one body iovec per message), amortizing the
+// per-message syscall cost of `WriteMessage`. The whole batch shares one
+// `WriteTimeout` like every other layer. On success all messages are
+// returned to the message pool.
+func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch [][]byte) error {
+	if len(transferFrameBytesBatch) == 0 {
+		return nil
+	}
+	if len(transferFrameBytesBatch) == 1 {
+		return self.WriteMessage(conn, transferFrameBytesBatch[0])
+	}
+
+	for _, transferFrameBytes := range transferFrameBytesBatch {
+		messageLen := len(transferFrameBytes)
+		if self.settings.FramerSettings.MaxMessageLen < messageLen {
+			return fmt.Errorf("Max message len exceeded (%d<%d)", self.settings.FramerSettings.MaxMessageLen, messageLen)
+		}
+		if math.MaxUint16 < messageLen {
+			return fmt.Errorf("Max possible message len exceeded (%d<%d)", math.MaxUint16, messageLen)
+		}
+	}
+
+	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+
+	headers := connect.MessagePoolGet(4 * len(transferFrameBytesBatch))
+	defer connect.MessagePoolReturn(headers)
+
+	buffers := make(net.Buffers, 0, 2*len(transferFrameBytesBatch))
+	for i, transferFrameBytes := range transferFrameBytesBatch {
+		header := headers[4*i : 4*i+4]
+		binary.BigEndian.PutUint16(header[0:2], uint16(len(transferFrameBytes)))
+		binary.BigEndian.PutUint16(header[2:4], uint16(0))
+		buffers = append(buffers, header, transferFrameBytes)
+	}
+
+	if _, err := buffers.WriteTo(conn); err != nil {
+		return err
+	}
+	for _, transferFrameBytes := range transferFrameBytesBatch {
+		connect.MessagePoolReturn(transferFrameBytes)
+	}
+	return nil
+}
+
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
-	return self.framer.Read(conn)
+	return self.framer.Read(self.connReader(conn))
 }
 
 type ExchangeOp byte
@@ -912,6 +1112,7 @@ func NewExchangeConnection(
 	}()
 
 	sendBuffer := NewDefaultExchangeBuffer(settings)
+	receiveBuffer := NewReceiveOnlyExchangeBuffer(settings)
 
 	// write header
 	err = sendBuffer.WriteHeader(ctx, conn, &header)
@@ -921,7 +1122,9 @@ func NewExchangeConnection(
 
 	// the connection echoes back the header if connected to the resident
 	// else the connection is closed
-	_, err = sendBuffer.ReadHeader(ctx, conn)
+	// the header must be read with the receive buffer, which owns all reads
+	// on the connection (the buffered reader may read past the header)
+	_, err = receiveBuffer.ReadHeader(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -934,7 +1137,7 @@ func NewExchangeConnection(
 		cancel:        cancel,
 		conn:          conn,
 		sendBuffer:    sendBuffer,
-		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
+		receiveBuffer: receiveBuffer,
 		send:          make(chan []byte, settings.ExchangeBufferSize),
 		receive:       make(chan []byte, settings.ExchangeBufferSize),
 		settings:      settings,
@@ -978,12 +1181,24 @@ func (self *ExchangeConnection) Run() {
 					continue
 				}
 
+				// fast path without arming a timer
+				select {
+				case self.receive <- message:
+					if glog.V(2) {
+						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					}
+					continue
+				default:
+				}
+
 				select {
 				case <-self.ctx.Done():
 					connect.MessagePoolReturn(message)
 					return
 				case self.receive <- message:
-					glog.V(2).Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					if glog.V(2) {
+						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+					}
 				case <-time.After(self.settings.WriteTimeout):
 					glog.V(1).Infof("[ecr]drop %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 					connect.MessagePoolReturn(message)
@@ -1021,19 +1236,61 @@ func (self *ExchangeConnection) Run() {
 	go server.HandleError(func() {
 		defer self.cancel()
 
+		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+		// gather pending messages into `batch` without blocking, bounded by the
+		// write batch limits, and write them with a single writev.
+		// returns false to end the send loop (closed channel or write error).
+		writeBatch := func(message []byte, ok bool) bool {
+			if !ok {
+				return false
+			}
+			open := true
+			batch = append(batch[:0], message)
+			batchByteCount := ByteCount(len(message))
+		gather:
+			for open && len(batch) < self.settings.ExchangeWriteBatchCount && batchByteCount < self.settings.ExchangeWriteBatchByteCount {
+				select {
+				case next, nextOk := <-self.send:
+					if !nextOk {
+						open = false
+					} else {
+						batch = append(batch, next)
+						batchByteCount += ByteCount(len(next))
+					}
+				default:
+					break gather
+				}
+			}
+			err := self.sendBuffer.WriteMessages(self.conn, batch)
+			batch = batch[:0]
+			if err != nil {
+				return false
+			}
+			if glog.V(2) {
+				glog.Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
+			}
+			return open
+		}
 		for {
+			// fast path without arming the ping timer
 			select {
 			case <-self.ctx.Done():
 				return
 			case message, ok := <-self.send:
-				if !ok {
+				if !writeBatch(message, ok) {
 					return
 				}
-				err := self.sendBuffer.WriteMessage(self.conn, message)
-				if err != nil {
+				continue
+			default:
+			}
+
+			select {
+			case <-self.ctx.Done():
+				return
+			case message, ok := <-self.send:
+				if !writeBatch(message, ok) {
 					return
 				}
-				glog.V(2).Infof("[ecs] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 			case <-time.After(self.settings.ExchangePingTimeout):
 				// send a ping
 				if err := self.sendBuffer.WriteMessage(self.conn, make([]byte, 0)); err != nil {
@@ -1156,6 +1413,12 @@ func (self *ResidentTransport) Run() {
 							self.cancel()
 							return
 						}
+						// fast path without arming a timer
+						select {
+						case connection.send <- message:
+							continue
+						default:
+						}
 						select {
 						case <-handleCtx.Done():
 							return
@@ -1178,6 +1441,12 @@ func (self *ResidentTransport) Run() {
 						// need a new connection
 						return
 					}
+					// fast path without arming a timer
+					select {
+					case self.receive <- message:
+						continue
+					default:
+					}
 					select {
 					case <-handleCtx.Done():
 						return
@@ -1193,6 +1462,7 @@ func (self *ResidentTransport) Run() {
 
 	}
 
+	skippedReconnectWait := false
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
@@ -1229,10 +1499,25 @@ func (self *ResidentTransport) Run() {
 			}
 		}
 
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-reconnect.After():
+		if resident == nil && !skippedReconnectWait {
+			// there is no resident to reconnect to, so nominate immediately
+			// rather than waiting the reconnect timeout. This is the common
+			// cold-connect path. `skippedReconnectWait` bounds the skip to
+			// every other iteration, so a repeatedly failing nomination still
+			// backs off below.
+			skippedReconnectWait = true
+			select {
+			case <-self.ctx.Done():
+				return
+			default:
+			}
+		} else {
+			skippedReconnectWait = false
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-reconnect.After():
+			}
 		}
 
 		var residentIdToReplace *server.Id
@@ -1306,7 +1591,7 @@ func NewResidentForward(
 		cancel:           cancel,
 		exchange:         exchange,
 		clientId:         clientId,
-		send:             make(chan []byte, exchange.settings.ExchangeBufferSize),
+		send:             make(chan []byte, exchange.settings.ForwardBufferSize),
 		lastActivityTime: time.Now(),
 	}
 	return transport
@@ -1338,6 +1623,12 @@ func (self *ResidentForward) Run() {
 				if !ok {
 					// transport closed
 					return
+				}
+				// fast path without arming a timer
+				select {
+				case connection.send <- message:
+					continue
+				default:
 				}
 				select {
 				case <-handleCtx.Done():
@@ -1469,7 +1760,6 @@ type Resident struct {
 	// destination id -> forward
 	forwards map[server.Id]*ResidentForward
 
-	abuseLimiter   *limiter
 	controlLimiter *limiter
 
 	lastActivityTime time.Time
@@ -1527,7 +1817,6 @@ func NewResident(
 		residentController:      residentController,
 		transports:              map[*clientTransport]bool{},
 		forwards:                map[server.Id]*ResidentForward{},
-		abuseLimiter:            newLimiter(cancelCtx, exchange.settings.AbuseMinTimeout),
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 		lastActivityTime:        time.Now(),
 	}
@@ -1698,11 +1987,13 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	}
 
 	if sourceId != self.clientId {
-		glog.V(1).Infof("[rf]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
+		glog.V(1).Infof("[rf]abuse not from client (%s<>%s) ->%s len=%d\n", sourceId, self.clientId, destinationId, len(transferFrameBytes))
 		// the message is not from the client
 		// clients are not allowed to forward from other clients
-		// drop
-		self.abuseLimiter.delay()
+		// drop without delay. This is called from the client receive loop,
+		// which must not block: a delay here freezes all forwarding for the
+		// client (data and acks), which gridlocks bidirectional transfer.
+		abuseDroppedCounter.Inc()
 		return
 	}
 
@@ -1732,7 +2023,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		}()
 		if limit {
 			glog.Infof("[rf]abuse forward limit %s->%s", sourceId, destinationId)
-			self.abuseLimiter.delay()
+			abuseDroppedCounter.Inc()
 			return nil
 		}
 
@@ -1741,7 +2032,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		if self.exchange.settings.ForwardEnforceActiveContracts {
 			if !self.residentContractManager.HasActiveContract(sourceId, destinationId) {
 				glog.V(1).Infof("[rf]abuse no active contract %s->%s\n", sourceId, destinationId)
-				self.abuseLimiter.delay()
+				abuseDroppedCounter.Inc()
 				return nil
 			}
 		}
@@ -1809,20 +2100,34 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			return false
 		}
 
+		// fast path: enqueue without blocking
 		select {
 		case <-forward.Done():
 			return false
 		case forward.send <- transferFrameBytes:
 			return true
-		// case <-time.After(self.exchange.settings.WriteTimeout):
-		// 	glog.V(1).Infof("[rf]drop %s->%s", sourceId, destinationId)
-		// 	return false
 		default:
-			// forwards are non blocking to avoid slower clients blocking the transfer loop
-			// the traffic on the client to client connect should manage its own transfer buffer,
-			// to avoid saturating the connection to the point where it needs buffering
-			return false
 		}
+
+		// forwards are non blocking in production (ForwardTimeout 0) to avoid a
+		// slow forward backpressuring the transfer loop; the client-to-client
+		// connection manages its own transfer buffer, to avoid saturating the
+		// connection to the point where it needs buffering. Tests set
+		// ForwardTimeout to WriteTimeout for deterministic, reliable delivery
+		// over 0-size buffers.
+		if 0 < self.exchange.settings.ForwardTimeout {
+			select {
+			case <-forward.Done():
+				return false
+			case forward.send <- transferFrameBytes:
+				return true
+			case <-time.After(self.exchange.settings.ForwardTimeout):
+			}
+		}
+
+		forwardDroppedCounter.Inc()
+		glog.V(1).Infof("[rf]drop full %s->%s\n", sourceId, destinationId)
+		return false
 	}
 
 	if glog.V(2) {
@@ -1842,8 +2147,9 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	if sourceId != self.clientId {
 		glog.V(1).Infof("[rr]abuse not from client (%s<>%s)\n", sourceId, self.clientId)
 		// only messages from the resident client are processed by the resident
-		// drop
-		self.abuseLimiter.delay()
+		// drop without delay (this is called from the client receive dispatch,
+		// which must not block)
+		abuseDroppedCounter.Inc()
 		return
 	}
 
@@ -1920,7 +2226,12 @@ func (self *Resident) AddForward() (
 				if !ok {
 					return
 				}
-				self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
+				if !self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout) {
+					forwardReceiveDroppedCounter.Inc()
+					glog.V(1).Infof("[rf]drop receive full %s\n", self.clientId)
+					connect.MessagePoolReturn(message)
+				}
+
 			}
 		}
 	})

@@ -105,6 +105,9 @@ type ConnectHandlerSettings struct {
 	FramerSettings            *connect.FramerSettings
 	TransportTlsSettings      *server.TransportTlsSettings
 	ConnectionAnnounceTimeout time.Duration
+	// per-connection latency/speed test schedule.
+	// nil selects a default based on the transport version.
+	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
 }
@@ -342,7 +345,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
 		}
 		var testConfig *TestConfig
-		if transportVersion < 2 {
+		if self.settings.ConnectionTestConfig != nil {
+			testConfig = self.settings.ConnectionTestConfig
+		} else if transportVersion < 2 {
 			testConfig = V0TestConfig()
 		} else {
 			testConfig = DefaultTestConfig()
@@ -444,6 +449,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					pingTracker.Receive()
 
+					// fast path without arming a timer
+					select {
+					case residentTransport.send <- message:
+						if glog.V(2) {
+							glog.Infof("[rtr] <-%s\n", clientId)
+						}
+						continue
+					default:
+					}
+
 					select {
 					case <-handleCtx.Done():
 						connect.MessagePoolReturn(message)
@@ -452,7 +467,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.MessagePoolReturn(message)
 						return
 					case residentTransport.send <- message:
-						glog.V(2).Infof("[rtr] <-%s\n", clientId)
+						if glog.V(2) {
+							glog.Infof("[rtr] <-%s\n", clientId)
+						}
 					case <-time.After(self.settings.ReadTimeout):
 						connect.MessagePoolReturn(message)
 					}
@@ -477,8 +494,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				}
 				// reliability tracking
 				announce.SendMessage(ByteCount(len(message)))
-				glog.V(2).Infof("[ts] ->%s\n", clientId)
+				if glog.V(2) {
+					glog.Infof("[ts] ->%s\n", clientId)
+				}
 				return nil
+			}
+
+			writeUser := func(message []byte, ok bool) bool {
+				if !ok {
+					return false
+				}
+				if len(message) <= 16 {
+					glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+					connect.MessagePoolReturn(message)
+					return true
+				}
+				return write(message) == nil
 			}
 
 			// speed test state: when non-zero, the writer is driving a speed
@@ -526,13 +557,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						case <-residentTransport.Done():
 							return
 						case message, ok := <-residentTransport.receive:
-							if !ok {
-								return
-							}
-							if len(message) <= 16 {
-								glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
-								connect.MessagePoolReturn(message)
-							} else if write(message) != nil {
+							if !writeUser(message, ok) {
 								return
 							}
 						default:
@@ -542,20 +567,23 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
+				// fast path without arming the ping timer
+				select {
+				case message, ok := <-residentTransport.receive:
+					if !writeUser(message, ok) {
+						return
+					}
+					continue
+				default:
+				}
+
 				select {
 				case <-handleCtx.Done():
 					return
 				case <-residentTransport.Done():
 					return
 				case message, ok := <-residentTransport.receive:
-					if !ok {
-						return
-					}
-
-					if len(message) <= 16 {
-						glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
-						connect.MessagePoolReturn(message)
-					} else if write(message) != nil {
+					if !writeUser(message, ok) {
 						return
 					}
 
@@ -915,12 +943,24 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 				pingTracker.Receive()
 
+				// fast path without arming a timer
+				select {
+				case residentTransport.send <- message:
+					if glog.V(2) {
+						glog.Infof("[rtr] <-%s\n", clientId)
+					}
+					continue
+				default:
+				}
+
 				select {
 				case <-handleCtx.Done():
 					connect.MessagePoolReturn(message)
 					return
 				case residentTransport.send <- message:
-					glog.V(2).Infof("[rtr] <-%s\n", clientId)
+					if glog.V(2) {
+						glog.Infof("[rtr] <-%s\n", clientId)
+					}
 				case <-time.After(self.settings.ReadTimeout):
 					connect.MessagePoolReturn(message)
 				}
@@ -930,25 +970,45 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		go server.HandleError(func() {
 			defer handleCancel()
 
+			writeUser := func(message []byte, ok bool) bool {
+				if !ok {
+					return false
+				}
+				stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				err := framer.Write(stream, message)
+				connect.MessagePoolReturn(message)
+				if err != nil {
+					glog.V(2).Infof("[ts]h3 err = %s\n", err)
+					return false
+				}
+				// reliability tracking
+				announce.SendMessage(ByteCount(len(message)))
+				if glog.V(2) {
+					glog.Infof("[ts] ->%s\n", clientId)
+				}
+				return true
+			}
+
 			for {
+				// fast path without arming the ping timer
 				select {
 				case <-handleCtx.Done():
 					return
 				case message, ok := <-residentTransport.receive:
-					if !ok {
+					if !writeUser(message, ok) {
 						return
 					}
+					continue
+				default:
+				}
 
-					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-					err := framer.Write(stream, message)
-					connect.MessagePoolReturn(message)
-					if err != nil {
-						glog.V(2).Infof("[ts]h3 err = %s\n", err)
+				select {
+				case <-handleCtx.Done():
+					return
+				case message, ok := <-residentTransport.receive:
+					if !writeUser(message, ok) {
 						return
 					}
-					// reliability tracking
-					announce.SendMessage(ByteCount(len(message)))
-					glog.V(2).Infof("[ts] ->%s\n", clientId)
 				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
 					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := framer.Write(stream, make([]byte, 0))

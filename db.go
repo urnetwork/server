@@ -216,9 +216,34 @@ type DbRetryOptions struct {
 	// debugRetryTimeout time.Duration
 }
 
-func (self *DbRetryOptions) retryTimeout() time.Duration {
+func (self *DbRetryOptions) Backoff() *retryBackoff {
+	return &retryBackoff{
+		retryMinTimeout: self.retryMinTimeout,
+		retryMaxTimeout: self.retryMaxTimeout,
+	}
+}
+
+// exponential backoff with jitter
+// each call to `NextRetryTimeout` advances the attempt, growing the backoff window
+// from `retryMinTimeout` up to `retryMaxTimeout`
+type retryBackoff struct {
+	retryMinTimeout time.Duration
+	retryMaxTimeout time.Duration
+	attempt         int
+}
+
+func (self *retryBackoff) NextRetryTimeout() time.Duration {
+	// cap the shift so the backoff does not overflow
+	backoff := self.retryMaxTimeout
+	if t := self.retryMinTimeout << uint(min(self.attempt, 16)); t < self.retryMaxTimeout {
+		backoff = t
+	}
+	self.attempt += 1
+	if backoff <= self.retryMinTimeout {
+		return self.retryMinTimeout
+	}
 	return self.retryMinTimeout + time.Duration(
-		mathrand.Int63n(int64(self.retryMaxTimeout-self.retryMinTimeout)),
+		mathrand.Int63n(int64(backoff-self.retryMinTimeout)),
 	)
 }
 
@@ -382,6 +407,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	backoff := retryOptions.Backoff()
 	for {
 		var pgErr error
 		conn, connErr := pool.open().Acquire(ctx)
@@ -390,7 +416,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -411,7 +437,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -461,7 +487,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(pgErr)
 					}
@@ -480,7 +506,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -557,6 +583,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	backoff := retryOptions.Backoff()
 	for {
 		var pgErr error
 		var commitErr error
@@ -608,7 +635,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -627,7 +654,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)
