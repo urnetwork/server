@@ -24,6 +24,12 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		MaxTestTimeout:           24 * time.Hour,
 		LatencySampleWindowCount: 4,
 		SpeedSampleWindowCount:   4,
+
+		PassiveSpeedWindowDuration: 5 * time.Second,
+		PassiveSpeedMinByteCount:   512 * model.Kib,
+		// aligned with the `bytesPerSecondCutoff` used by provider ranking
+		SyntheticSpeedBytesPerSecond: 4 * model.Mib,
+		SyntheticSpeedTimeout:        60 * time.Second,
 	}
 }
 
@@ -36,6 +42,21 @@ type ConnectionAnnounceSettings struct {
 
 	LatencySampleWindowCount int
 	SpeedSampleWindowCount   int
+
+	// passive speed measures the actual traffic rate in windows of
+	// `PassiveSpeedWindowDuration`, and updates the speed result whenever a
+	// new maximum is reached. Windows that move less than
+	// `PassiveSpeedMinByteCount` are not counted as samples.
+	PassiveSpeedWindowDuration time.Duration
+	PassiveSpeedMinByteCount   ByteCount
+	// a connection that has not passively demonstrated at least
+	// `SyntheticSpeedBytesPerSecond` after `SyntheticSpeedTimeout` runs a
+	// synthetic speed test. Connections with faster active traffic prove
+	// their speed passively and are never disrupted by a synthetic test
+	// (during a test the client transport echoes all messages upstream
+	// instead of delivering them).
+	SyntheticSpeedBytesPerSecond ByteCount
+	SyntheticSpeedTimeout        time.Duration
 }
 
 type LatencyTest struct {
@@ -88,6 +109,8 @@ type ConnectionAnnounce struct {
 
 	settings *ConnectionAnnounceSettings
 
+	startTime time.Time
+
 	stateLock           sync.Mutex
 	connectionId        *server.Id
 	receiveMessageCount uint64
@@ -104,6 +127,11 @@ type ConnectionAnnounce struct {
 	speedTest           *SpeedTest
 	speedTestSendTime   time.Time
 	maxBytesPerSecond   model.ByteCount
+
+	passiveWindowStartTime        time.Time
+	passiveWindowSendByteCount    ByteCount
+	passiveWindowReceiveByteCount ByteCount
+	passiveMaxBytesPerSecond      ByteCount
 
 	testConfig         *TestConfig
 	PendingLatencyTest chan *LatencyTest
@@ -144,17 +172,19 @@ func NewConnectionAnnounce(
 	settings *ConnectionAnnounceSettings,
 ) *ConnectionAnnounce {
 	announce := &ConnectionAnnounce{
-		ctx:                ctx,
-		cancel:             cancel,
-		networkId:          networkId,
-		clientId:           clientId,
-		clientAddress:      clientAddress,
-		handlerId:          handlerId,
-		announceTimeout:    announceTimeout,
-		settings:           settings,
-		testConfig:         testConfig,
-		PendingLatencyTest: make(chan *LatencyTest),
-		PendingSpeedTest:   make(chan *SpeedTest),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		networkId:              networkId,
+		clientId:               clientId,
+		clientAddress:          clientAddress,
+		handlerId:              handlerId,
+		announceTimeout:        announceTimeout,
+		settings:               settings,
+		testConfig:             testConfig,
+		startTime:              time.Now(),
+		passiveWindowStartTime: time.Now(),
+		PendingLatencyTest:     make(chan *LatencyTest),
+		PendingSpeedTest:       make(chan *SpeedTest),
 	}
 	go server.HandleError(announce.run, cancel)
 	return announce
@@ -180,7 +210,7 @@ func (self *ConnectionAnnounce) run() {
 				if self.latencyTest == nil && self.speedTest == nil {
 					if self.testConfig.AllowLatency() {
 						nextLatency = true
-					} else if self.testConfig.AllowSpeed() {
+					} else if self.allowSyntheticSpeedWithLock() {
 						nextSpeed = true
 					}
 				}
@@ -236,6 +266,19 @@ func (self *ConnectionAnnounce) run() {
 		self.setSpeedWithLock()
 	}()
 
+	// continuously measure the passive speed of the connection.
+	// active traffic proves the connection speed without a synthetic test.
+	go server.HandleError(func() {
+		for {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-time.After(self.settings.PassiveSpeedWindowDuration):
+			}
+			self.samplePassiveSpeed()
+		}
+	}, self.cancel)
+
 	nextTestTime := server.NowUtc().Add(self.settings.MaxTestTimeout)
 	nextTest := func() time.Duration {
 		timeout := nextTestTime.Sub(server.NowUtc())
@@ -252,7 +295,7 @@ func (self *ConnectionAnnounce) run() {
 				self.speedCount = 0
 				if self.testConfig.AllowLatency() {
 					nextLatency = true
-				} else if self.testConfig.AllowSpeed() {
+				} else if self.allowSyntheticSpeedWithLock() {
 					nextSpeed = true
 				}
 			}
@@ -325,13 +368,10 @@ func (self *ConnectionAnnounce) run() {
 					func() {
 						self.stateLock.Lock()
 						defer self.stateLock.Unlock()
-						if self.latencyTest == nil && self.speedTest == nil {
-
-						}
 						if self.testConfig.AllowLatency() {
 							nextLatency = (self.latencyCount == 0)
 						}
-						if !nextLatency && self.testConfig.AllowSpeed() {
+						if !nextLatency && self.allowSyntheticSpeedWithLock() {
 							nextSpeed = (self.speedCount == 0)
 						}
 					}()
@@ -397,6 +437,7 @@ func (self *ConnectionAnnounce) ReceiveMessage(messageByteCount ByteCount) {
 
 	self.receiveMessageCount += 1
 	self.receiveByteCount += messageByteCount
+	self.passiveWindowReceiveByteCount += messageByteCount
 }
 
 func (self *ConnectionAnnounce) SendMessage(messageByteCount ByteCount) {
@@ -405,6 +446,53 @@ func (self *ConnectionAnnounce) SendMessage(messageByteCount ByteCount) {
 
 	self.sendMessageCount += 1
 	self.sendByteCount += messageByteCount
+	self.passiveWindowSendByteCount += messageByteCount
+}
+
+// samplePassiveSpeed closes the current passive window and updates the speed
+// result when the window rate is a new maximum for the connection
+func (self *ConnectionAnnounce) samplePassiveSpeed() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	now := time.Now()
+	windowMillis := ByteCount(now.Sub(self.passiveWindowStartTime) / time.Millisecond)
+	windowByteCount := max(self.passiveWindowSendByteCount, self.passiveWindowReceiveByteCount)
+	self.passiveWindowStartTime = now
+	self.passiveWindowSendByteCount = 0
+	self.passiveWindowReceiveByteCount = 0
+
+	if windowByteCount < self.settings.PassiveSpeedMinByteCount {
+		return
+	}
+	if windowMillis <= 0 {
+		return
+	}
+
+	bytesPerSecond := 1000 * windowByteCount / windowMillis
+	if self.passiveMaxBytesPerSecond < bytesPerSecond {
+		self.passiveMaxBytesPerSecond = bytesPerSecond
+		glog.V(1).Infof("[ta][%s]passive speed %.2fmib/s\n", self.clientId, float64(bytesPerSecond)/float64(1024*1024))
+		self.setSpeedSampleWithLock(bytesPerSecond)
+	}
+}
+
+// a synthetic speed test runs only when the connection has not passively
+// demonstrated `SyntheticSpeedBytesPerSecond` after `SyntheticSpeedTimeout`.
+// Busy connections prove their speed with passive samples, and a synthetic
+// test would disrupt active traffic since the client transport echoes all
+// messages upstream during the test instead of delivering them.
+func (self *ConnectionAnnounce) allowSyntheticSpeedWithLock() bool {
+	if !self.testConfig.AllowSpeed() {
+		return false
+	}
+	if self.settings.SyntheticSpeedBytesPerSecond <= self.passiveMaxBytesPerSecond {
+		return false
+	}
+	if time.Now().Sub(self.startTime) < self.settings.SyntheticSpeedTimeout {
+		return false
+	}
+	return true
 }
 
 func (self *ConnectionAnnounce) Close() {
@@ -462,7 +550,7 @@ func (self *ConnectionAnnounce) ReceiveLatency(latencyTest *LatencyTest) (succes
 			nextLatency = self.latencyCount < self.settings.MaxLatencyCount
 			if !nextLatency {
 				self.setLatencyWithLock()
-				if self.testConfig.AllowSpeed() {
+				if self.allowSyntheticSpeedWithLock() {
 					nextSpeed = (self.speedCount == 0 && self.speedTest == nil)
 				}
 			}
@@ -572,29 +660,35 @@ func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool
 }
 
 func (self *ConnectionAnnounce) setSpeedWithLock() {
-	if 0 < self.speedCount && self.connectionId != nil {
-		// average of `SpeedSampleWindowCount` samples
-		server.Tx(self.ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				self.ctx,
-				`
-				INSERT INTO network_client_speed (
-					connection_id,
-					bytes_per_second,
-					sample_count
-				)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (connection_id) DO UPDATE
-				SET
-					bytes_per_second = ((LEAST(network_client_speed.sample_count + $3, $4) - 1) * network_client_speed.bytes_per_second + $2) / LEAST(network_client_speed.sample_count + $3, $4),
-					sample_count = network_client_speed.sample_count + $3
-				`,
-				*self.connectionId,
-				self.maxBytesPerSecond,
-				1,
-				self.settings.SpeedSampleWindowCount,
-			))
-		})
+	if 0 < self.speedCount {
+		self.setSpeedSampleWithLock(self.maxBytesPerSecond)
 	}
+}
 
+func (self *ConnectionAnnounce) setSpeedSampleWithLock(bytesPerSecond ByteCount) {
+	if self.connectionId == nil {
+		return
+	}
+	// average of `SpeedSampleWindowCount` samples
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			self.ctx,
+			`
+			INSERT INTO network_client_speed (
+				connection_id,
+				bytes_per_second,
+				sample_count
+			)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (connection_id) DO UPDATE
+			SET
+				bytes_per_second = ((LEAST(network_client_speed.sample_count + $3, $4) - 1) * network_client_speed.bytes_per_second + $2) / LEAST(network_client_speed.sample_count + $3, $4),
+				sample_count = network_client_speed.sample_count + $3
+			`,
+			*self.connectionId,
+			bytesPerSecond,
+			1,
+			self.settings.SpeedSampleWindowCount,
+		))
+	})
 }

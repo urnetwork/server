@@ -290,6 +290,27 @@ func GetActiveTransferBalanceByteCount(ctx context.Context, networkId server.Id)
 	return net
 }
 
+// Testing_NetEscrowByteCount reads the raw redis net escrow counter for a
+// balance without clamping, so tests can assert exact reconciliation (drift in
+// either direction) after all contracts for the balance settle.
+func Testing_NetEscrowByteCount(ctx context.Context, balanceId server.Id) ByteCount {
+	var byteCount ByteCount
+	server.Redis(ctx, func(r server.RedisClient) {
+		if v, err := r.Get(ctx, netEscrowKey(balanceId)).Int64(); err == nil {
+			byteCount = ByteCount(v)
+		}
+	})
+	return byteCount
+}
+
+// Testing_DeleteNetEscrow removes the redis net escrow counter for a balance,
+// simulating lost mirrored state.
+func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		r.Del(ctx, netEscrowKey(balanceId))
+	})
+}
+
 func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance *TransferBalance) {
 	balanceId := server.NewId()
 
@@ -557,7 +578,8 @@ func createTransferEscrowInTx(
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
 		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range orderedTransferBalances {
-				netEscrowCmds[transferBalance.balanceId] = r.Get(ctx, netEscrowKey(transferBalance.balanceId))
+				// all net escrow keys share the {escrow} hash tag (one slot)
+				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
 			}
 			return nil
 		})
@@ -1138,7 +1160,7 @@ func CloseContract(
 				server.NowUtc(),
 			))
 		}
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
@@ -1260,7 +1282,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		posts, _, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
@@ -1531,7 +1553,7 @@ func settleEscrowInTx(
 
 					}
 				})
-			})
+			}, server.TxReadCommitted)
 			return nil
 		})
 
@@ -1566,7 +1588,7 @@ func settleEscrowInTx(
 						}
 					}
 				})
-			})
+			}, server.TxReadCommitted)
 			return nil
 		})
 
@@ -1591,7 +1613,7 @@ func settleEscrowInTx(
 						}
 					}
 				})
-			})
+			}, server.TxReadCommitted)
 			return nil
 		})
 
@@ -1970,6 +1992,7 @@ func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error 
 // - no closes
 // - single close
 // - one or more checkpoints
+// - dispute (settled with both sides accepted)
 func ForceCloseOpenContractIds(
 	ctx context.Context,
 	minTime time.Time,
@@ -2060,6 +2083,13 @@ func ForceCloseOpenContractIds(
 	}
 
 	openContracts := []*OpenContract{}
+	// cooperatively partition contracts across the block tasks
+	appendBlockOpenContract := func(openContract *OpenContract) {
+		if 0 < blockSize && int(openContract.contractId.Hash()%uint64(blockSize)) != blockIndex%blockSize {
+			return
+		}
+		openContracts = append(openContracts, openContract)
+	}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -2128,19 +2158,57 @@ func ForceCloseOpenContractIds(
 					&openContract.destinationCheckpoint,
 				))
 
-				if 0 < blockSize {
-					if int(openContract.contractId.Hash()%uint64(blockSize)) == blockIndex%blockSize {
-						openContracts = append(openContracts, openContract)
-					}
-				} else {
-					openContracts = append(openContracts, openContract)
-				}
+				appendBlockOpenContract(openContract)
 			}
 		})
 	})
 
-	glog.Infof("[sm]found %d contracts to close\n", len(openContracts))
+	openContractCount := len(openContracts)
 
+	// settle expired disputes
+	// a disputed contract is not `open` (`open` is generated as
+	// `dispute = false AND outcome IS NULL`), so scan for disputes separately
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    contract_id,
+                    source_id,
+                    destination_id
+                FROM transfer_contract
+                WHERE
+                    dispute AND
+                    outcome IS NULL AND
+                    create_time <= $1
+                ORDER BY create_time
+                LIMIT $2
+            `,
+			minTime.UTC(),
+			maxCount,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				openContract := &OpenContract{
+					dispute: true,
+				}
+				server.Raise(result.Scan(
+					&openContract.contractId,
+					&openContract.sourceId,
+					&openContract.destinationId,
+				))
+				appendBlockOpenContract(openContract)
+			}
+		})
+	})
+
+	glog.Infof("[sm]found %d contracts to close (%d disputes)\n", len(openContracts), len(openContracts)-openContractCount)
+
+	// quarantine a contract that cannot be settled by marking it settled
+	// without settling the escrow.
+	// `outcome IS NULL` so that a concurrent close/settle is not overwritten.
+	// `dispute = false` so that a contract that entered dispute mid-close is
+	// left for the dispute scan to settle correctly on a later pass.
 	closeMalformedContract := func(tag string, openContract *OpenContract, err error) {
 		glog.Infof("%sforce close malformed contract: %s\n", tag, err)
 
@@ -2153,13 +2221,15 @@ func ForceCloseOpenContractIds(
                         outcome = $2,
                         close_time = $3
                     WHERE
-                        contract_id = $1
+                        contract_id = $1 AND
+                        outcome IS NULL AND
+                        dispute = false
                 `,
 				openContract.contractId,
 				ContractOutcomeSettled,
 				server.NowUtc(),
 			))
-		})
+		}, server.TxReadCommitted)
 	}
 
 	closeContract := func(tag string, openContract *OpenContract) error {
@@ -2171,7 +2241,7 @@ func ForceCloseOpenContractIds(
 			server.Tx(ctx, func(tx server.PgTx) {
 				setContractDisputeInTx(ctx, tx, openContract.contractId, false)
 				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
-			})
+			}, server.TxReadCommitted)
 			if err != nil {
 				return err
 			}
@@ -2271,7 +2341,7 @@ func ForceCloseOpenContractIds(
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
 				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
-			})
+			}, server.TxReadCommitted)
 			if err != nil {
 				return err
 			}

@@ -79,7 +79,30 @@ const (
 	// flush out intermittent failures (provider return-path / contract races)
 	// explicitly.
 	testProxyIterations = 16
+
+	testInitialBalance = model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024)
 )
+
+// proxyTestOptions parameterizes setupProxyTestWithOptions. The defaults
+// reproduce the original setupProxyTest behavior.
+type proxyTestOptions struct {
+	// initial transfer balance redeemed for the proxy device network
+	pdInitialBalance model.ByteCount
+	// initial transfer balance redeemed for the provider network
+	providerInitialBalance model.ByteCount
+	// when true, the proxy device and the provider allow all packet
+	// destinations. The production policies filter loopback/private
+	// destinations for public provide relationships, which would block the
+	// local target servers the contract/load tests egress to.
+	disableSecurityPolicies bool
+}
+
+func defaultProxyTestOptions() *proxyTestOptions {
+	return &proxyTestOptions{
+		pdInitialBalance:       testInitialBalance,
+		providerInitialBalance: testInitialBalance,
+	}
+}
 
 // proxyTestHarness holds the handles a test needs after setup.
 type proxyTestHarness struct {
@@ -94,6 +117,13 @@ type proxyTestHarness struct {
 	proxyDeviceManager *ProxyDeviceManager
 	wg                 *wgServer
 	wgCancel           context.CancelFunc
+
+	// network/client identities for contract and balance assertions
+	pdNetworkId       server.Id
+	pdClientId        server.Id
+	providerNetworkId server.Id
+	providerClientId  server.Id
+	proxyId           server.Id
 }
 
 func setProxyTestEnv() {
@@ -114,7 +144,30 @@ func setProxyTestEnv() {
 // setupProxyTest wires up the full local environment and returns a harness.
 // It must be called inside DefaultTestEnv().Run (db + redis + migrations ready).
 func setupProxyTest(t testing.TB) *proxyTestHarness {
+	return setupProxyTestWithOptions(t, defaultProxyTestOptions())
+}
+
+func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestHarness {
 	setProxyTestEnv()
+
+	// the proxy servers bind fixed ports; when several tests in this package
+	// each run their own setup sequentially in one process, wait for the
+	// previous teardown to release them
+	waitFor(t, 15*time.Second, "proxy ports released", func() bool {
+		for _, port := range []int{InternalSocksPort, InternalHttpPort, InternalHttpsPort, InternalApiPort} {
+			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+			if err != nil {
+				return false
+			}
+			l.Close()
+		}
+		pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", InternalWgPort))
+		if err != nil {
+			return false
+		}
+		pc.Close()
+		return true
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -181,7 +234,7 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 
 	model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
 	model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
-	redeemBalance(t, ctx, providerNetworkId)
+	redeemBalance(t, ctx, providerNetworkId, opts.providerInitialBalance)
 
 	providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
 		Client(providerDeviceId, providerClientId).Sign()
@@ -223,7 +276,11 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 
 	// egress to the real internet via a user-space NAT
 	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
-	providerRemoteNat := connect.NewRemoteUserNatProviderWithDefaults(providerClient, providerLocalUserNat)
+	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
+	if opts.disableSecurityPolicies {
+		providerNatSettings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
+	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
 	go func() {
 		<-ctx.Done()
 		providerRemoteNat.Close()
@@ -254,7 +311,7 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 
 	model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
 	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "proxydevice")
-	redeemBalance(t, ctx, pdNetworkId)
+	redeemBalance(t, ctx, pdNetworkId, opts.pdInitialBalance)
 
 	// the proxy device connects "by location" pinned directly to the provider
 	// client id, which the real find-providers2 path resolves.
@@ -304,6 +361,10 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 
 	pdmSettings := DefaultProxyDeviceManagerSettings()
 	pdmSettings.NetworkSpace = networkSpace
+	if opts.disableSecurityPolicies {
+		pdmSettings.IngressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		pdmSettings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
 	proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
 	go func() {
 		<-ctx.Done()
@@ -347,17 +408,22 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 		proxyDeviceManager: proxyDeviceManager,
 		wg:                 wg,
 		wgCancel:           wgCancel,
+		pdNetworkId:        pdNetworkId,
+		pdClientId:         pdClientId,
+		providerNetworkId:  providerNetworkId,
+		providerClientId:   providerClientId,
+		proxyId:            proxyId,
 	}
 }
 
-func redeemBalance(t testing.TB, ctx context.Context, networkId server.Id) {
-	initialTransferBalance := model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024)
+func redeemBalance(t testing.TB, ctx context.Context, networkId server.Id, initialTransferBalance model.ByteCount) {
 	balanceCode, err := model.CreateBalanceCode(
 		ctx,
 		initialTransferBalance,
 		365*24*time.Hour,
 		0,
-		fmt.Sprintf("test-%s", networkId),
+		// unique per call so a network can be topped up repeatedly
+		fmt.Sprintf("test-%s-%s", networkId, server.NewId()),
 		"",
 		"",
 	)

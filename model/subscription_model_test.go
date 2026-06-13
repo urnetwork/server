@@ -1543,3 +1543,76 @@ func TestGetOpenContractIdsWithPartialCloseCheckpointPlusClose(t *testing.T) {
 		assert.Equal(t, false, ok)
 	})
 }
+
+// TestForceCloseDisputedContract verifies the expiry task settles disputed
+// contracts. A dispute (close byte counts diverging beyond
+// `AcceptableTransfersByteDifference`) takes the contract out of the `open`
+// set, so the dispute scan in `ForceCloseOpenContractIds` must find it and
+// settle it with both sides accepted (the average byte count).
+func TestForceCloseDisputedContract(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		clientIdA := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialTransferBalance := ByteCount(30 * 1024 * 1024 * 1024)
+		AddBasicTransferBalance(
+			ctx,
+			networkIdA,
+			initialTransferBalance,
+			server.NowUtc(),
+			server.NowUtc().Add(30*24*time.Hour),
+		)
+
+		contractId, _, err := CreateContract(
+			ctx, networkIdA, clientIdA, networkIdB, clientIdB,
+			ByteCount(1024*1024*1024),
+		)
+		assert.Equal(t, nil, err)
+
+		// close with byte counts that diverge beyond the acceptable difference
+		sourceUsed := ByteCount(0)
+		destinationUsed := ByteCount(AcceptableTransfersByteDifference + 2)
+		assert.Equal(t, nil, CloseContract(ctx, contractId, clientIdA, sourceUsed, false))
+		assert.Equal(t, nil, CloseContract(ctx, contractId, clientIdB, destinationUsed, false))
+
+		// the contract is now in dispute: not open and no outcome
+		openContractIds := GetOpenContractIds(ctx, clientIdA, clientIdB)
+		assert.Equal(t, 0, len(openContractIds))
+		_, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, false, closed)
+
+		ForceCloseAllOpenContractIds(ctx, time.Now())
+
+		// the dispute is settled with both sides accepted
+		contractClose, closed := GetContractClose(ctx, contractId)
+		assert.Equal(t, true, closed)
+		assert.Equal(t, false, contractClose.Dispute)
+		assert.Equal(t, string(ContractOutcomeSettled), contractClose.Outcome)
+
+		// the escrow is settled with the average of the two sides,
+		// and the rest is returned to the payer's balance
+		settledByteCount := (sourceUsed + destinationUsed) / 2
+		transferBalances := GetActiveTransferBalances(ctx, networkIdA)
+		netBalanceByteCount := ByteCount(0)
+		for _, transferBalance := range transferBalances {
+			netBalanceByteCount += transferBalance.BalanceByteCount
+		}
+		assert.Equal(t, initialTransferBalance-settledByteCount, netBalanceByteCount)
+
+		// a second pass finds nothing left to close
+		ForceCloseAllOpenContractIds(ctx, time.Now())
+		contractClose, closed = GetContractClose(ctx, contractId)
+		assert.Equal(t, true, closed)
+		assert.Equal(t, string(ContractOutcomeSettled), contractClose.Outcome)
+	})
+}

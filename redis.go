@@ -241,6 +241,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
+	backoff := retryOptions.Backoff()
 	for {
 		client := pool.open()
 
@@ -250,7 +251,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -283,7 +284,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
-				case <-time.After(retryOptions.retryTimeout()):
+				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}

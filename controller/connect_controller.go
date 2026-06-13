@@ -266,7 +266,11 @@ func CreateContract(
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
-		// server.Logger().Printf("CONTROL CREATE CONTRACT ERROR: %s\n", err)
+		// always log the underlying error: the client only sees
+		// InsufficientBalance, which also covers unrelated causes here (e.g. a
+		// reaped client id failing FindClientNetwork, or a missing companion
+		// origin contract), so this line is the only place to tell them apart
+		glog.Infof("[contract][error]%s->%s companion=%t transferByteCount=%d err = %v\n", clientId, destinationId, createContract.Companion, model.ByteCount(createContract.TransferByteCount), err)
 		contractError := protocol.ContractError_InsufficientBalance
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
