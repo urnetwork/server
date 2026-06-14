@@ -105,12 +105,12 @@ func init() {
 // note this also bounds the hidden queueing per hop. The end-to-end queue across all hops
 // must drain well inside the client resend timeout floor (`MinResendInterval`, 2s), or
 // delayed acks trigger mass spurious retransmission under load.
-const defaultExchangeBufferSize = 1024
+const defaultExchangeBufferSize = 4096
 
 // the resident forward `send` queue to a peer resident. This must stay large
 // enough in production for congestion control to work freely across the hop.
 // use 0 for deadlock testing (see `ForwardBufferSize`).
-const defaultForwardBufferSize = 1024
+const defaultForwardBufferSize = 4096
 
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
