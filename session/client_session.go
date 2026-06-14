@@ -44,7 +44,11 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	clientAddress := req.Header.Get("X-UR-Forwarded-For")
 
 	if clientAddress == "" {
-		clientAddress = req.Header.Get("X-Forwarded-For")
+		clientIpStr := req.Header.Get("X-Forwarded-For")
+		clientPortStr := req.Header.Get("X-Forwarded-Source-Port")
+		if clientIpStr != "" && clientPortStr != "" {
+			clientAddress = fmt.Sprintf("%s:%s", clientIpStr, clientPortStr)
+		}
 	}
 
 	if clientAddress == "" {
