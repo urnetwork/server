@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
@@ -342,9 +343,42 @@ func NewWgServer(
 ) *wgServer {
 	serverConfig := model.LoadServerProxyConfig()
 
+	// Fail fast on an inconsistent wg keypair. Clients are issued wg configs with
+	// `serverConfig.Wg.PublicKey` as the `[Peer] PublicKey`, and the wg device
+	// authenticates the handshake with `serverConfig.Wg.PrivateKey`. If the
+	// public key does not actually belong to the private key (e.g. one was
+	// rotated without the other), every wg client is silently dropped: either
+	// `validWgClients` rejects it on a public-key mismatch, or the Noise
+	// handshake fails because the client encrypts to a key the device does not
+	// hold. SOCKS/HTTP are unaffected (they do not use these keys), so the
+	// failure is otherwise invisible. Verify the pair before serving.
+	if serverConfig.Wg.PrivateKey == "" || serverConfig.Wg.PublicKey == "" {
+		panic(fmt.Errorf(
+			"[wg]wg keypair is not configured (private_key set=%t, public_key set=%t); set wg.private_key and wg.public_key in proxy.yml",
+			serverConfig.Wg.PrivateKey != "",
+			serverConfig.Wg.PublicKey != "",
+		))
+	}
+	derivedPublicKey, err := proxy.WgPublicKeyForPrivateKey(serverConfig.Wg.PrivateKey)
+	if err != nil {
+		panic(fmt.Errorf("[wg]invalid wg.private_key in proxy.yml: %w", err))
+	}
+	if derivedPublicKey != serverConfig.Wg.PublicKey {
+		panic(fmt.Errorf(
+			"[wg]wg keypair mismatch: public key derived from wg.private_key (%s) does not match configured wg.public_key (%s); every wg client would be silently dropped — fix the wg keypair in proxy.yml",
+			derivedPublicKey,
+			serverConfig.Wg.PublicKey,
+		))
+	}
+	glog.Infof("[wg]keypair verified, public key %s\n", serverConfig.Wg.PublicKey)
+
 	wgProxySettings := proxy.DefaultWgProxySettings()
 	wgProxySettings.PrivateKey = serverConfig.Wg.PrivateKey
 	wgProxySettings.FirewallMark = server.RequireFwMark()
+	// embedded devices must be silent: this host runs thousands of clients.
+	// silence wg device/proxy logging the same as the network space and
+	// deviceLocal in proxy_device.go, otherwise it falls through to glog.
+	wgProxySettings.Log = connect.NewNoopLogger()
 	wgProxy := proxy.NewWgProxy(ctx, wgProxySettings)
 
 	s := &wgServer{
@@ -450,6 +484,18 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 	)
 }
 
+// logAppliedClients logs one line per client whose wg peer config was just
+// applied to the device, keyed by client ipv4. This is the authoritative signal
+// that a peer is installed: if a client cannot connect and its ipv4 never
+// appears here, the problem is upstream (not delivered/validated/installed); if
+// it does appear, the peer exists and the problem is the transport (e.g. UDP
+// DNAT/SNAT to the wg port) or the handshake.
+func (self *wgServer) logAppliedClients(op string, applied map[netip.Addr]*proxy.WgClient) {
+	for addr, client := range applied {
+		glog.Infof("[wg]%s peer installed client_ipv4=%s public_key=%s\n", op, addr, client.PublicKey)
+	}
+}
+
 func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
 	clients, counts := self.validWgClients(proxyClients)
 
@@ -464,6 +510,7 @@ func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error 
 	if err != nil {
 		glog.Infof("[wg]add clients err=%s\n", err)
 	}
+	self.logAppliedClients("add", applied)
 	self.logClientCounts("add", len(applied), 0, counts)
 
 	if len(applied) == 0 {
@@ -488,6 +535,7 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 	if addErr != nil {
 		glog.Infof("[wg]sync add clients err=%s\n", addErr)
 	}
+	self.logAppliedClients("sync", applied)
 
 	staleAddrs := []netip.Addr{}
 	if 0 < len(clients) {
