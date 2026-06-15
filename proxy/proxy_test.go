@@ -558,6 +558,142 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 	})
 }
 
+// TestProxyIdleDeviceRecreate exercises the idle device lifecycle in the device
+// manager: a proxy id whose device goes idle (canceled via CancelIfIdle) is
+// cleaned up (Run() exits on the canceled tun ctx, the cleanup closes the
+// DeviceLocal and removes the proxy id from the manager), and a subsequent
+// request for the same proxy id must create a brand new, working device rather
+// than hand back the dead one.
+func TestProxyIdleDeviceRecreate(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestProxyIdleDeviceRecreate\n")
+		h := setupProxyTest(t)
+		defer h.cancel()
+
+		// the device opened during setup, reachable for the proxy id
+		pd1, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatalf("open proxy device: %v", err)
+		}
+		// confirm the device serves https before we idle it
+		testProxyHttps(t, h)
+
+		// ---- idle the device via CancelIfIdle ----
+		// push last activity past the idle timeout (under the state lock, the same
+		// way UpdateActivity/CancelIfIdle touch it) so CancelIfIdle cancels the
+		// device, exactly as the manager's background idle checker would.
+		func() {
+			pd1.stateLock.Lock()
+			defer pd1.stateLock.Unlock()
+			pd1.lastActivityTime = pd1.lastActivityTime.Add(-2 * pd1.settings.ProxyDeviceIdleTimeout)
+		}()
+		if !pd1.CancelIfIdle() {
+			t.Fatalf("CancelIfIdle did not cancel the idle device")
+		}
+
+		// ---- wait for the idle device to be cleaned up ----
+		// Run() exits on the canceled tun ctx; the cleanup closes the DeviceLocal
+		// and removes the proxy id from the manager.
+		waitFor(t, 15*time.Second, "idle device removed from manager", func() bool {
+			h.proxyDeviceManager.stateLock.Lock()
+			defer h.proxyDeviceManager.stateLock.Unlock()
+			_, ok := h.proxyDeviceManager.proxyDevices[h.proxyId]
+			return !ok
+		})
+		// the cleanup closes the DeviceLocal before removing the map entry, so by
+		// now the old device is fully torn down
+		if !pd1.deviceLocal.GetDone() {
+			t.Fatalf("idle device's DeviceLocal was not closed by cleanup")
+		}
+
+		// ---- a new request must create a new, working device ----
+		pd2, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatalf("re-open proxy device after idle cleanup: %v", err)
+		}
+		if pd2 == pd1 {
+			t.Fatalf("expected a new proxy device after idle cleanup, got the dead instance back")
+		}
+		if pd2.deviceLocal.GetDone() {
+			t.Fatalf("recreated proxy device is already closed")
+		}
+		if ready := pd2.WaitForReady(h.ctx, 60*time.Second); !ready {
+			t.Fatalf("recreated proxy device did not become ready")
+		}
+		// and it must actually serve traffic again
+		testProxyHttps(t, h)
+		fmt.Printf("[progress]idle device recreated and serving\n")
+	})
+}
+
+// TestProxyDeadDeviceRecreate covers the case the idle path does not: the
+// device's egress dies while its context stays live. In production this is the
+// resident moving / the connection idling out and the egress window collapsing —
+// none of which cancel the proxy device context, so UpdateActivity (a context-only
+// check) keeps reporting the device active. OpenProxyDevice must instead notice
+// the device can no longer serve and recreate it.
+//
+// The egress death is simulated by closing the DeviceLocal directly, which leaves
+// the proxy device context live but collapses the egress window
+// (GetWindowStatus().MinSatisfied == false) — the same observable a real resident
+// move / idle collapse produces.
+func TestProxyDeadDeviceRecreate(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestProxyDeadDeviceRecreate\n")
+		h := setupProxyTest(t)
+		defer h.cancel()
+
+		pd1, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatalf("open proxy device: %v", err)
+		}
+		if ready := pd1.WaitForReady(h.ctx, 60*time.Second); !ready {
+			t.Fatalf("proxy device did not become ready")
+		}
+		// confirm it serves https, which also marks it everReady via the reuse gate
+		testProxyHttps(t, h)
+
+		// ---- kill the egress without canceling the device context ----
+		pd1.deviceLocal.Close()
+
+		// precondition: the old context-only check still reports the dead device
+		// as active (this is the bug), but its egress window is gone
+		if !pd1.UpdateActivity() {
+			t.Fatalf("precondition: expected pd1 context still live after deviceLocal.Close()")
+		}
+		if pd1.deviceLocal.GetWindowStatus().MinSatisfied {
+			t.Fatalf("precondition: expected egress window collapsed after deviceLocal.Close()")
+		}
+
+		// ---- a new request must recreate the device, not hand back the dead one ----
+		pd2, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatalf("re-open proxy device after egress died: %v", err)
+		}
+		if pd2 == pd1 {
+			t.Fatalf("expected a new proxy device after the egress died, got the dead instance back")
+		}
+		if ready := pd2.WaitForReady(h.ctx, 60*time.Second); !ready {
+			t.Fatalf("recreated proxy device did not become ready")
+		}
+		// and it must actually serve traffic again
+		testProxyHttps(t, h)
+		fmt.Printf("[progress]dead device recreated and serving\n")
+	})
+}
+
 func waitFor(t testing.TB, timeout time.Duration, desc string, cond func() bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

@@ -150,7 +150,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 	defer pdState.StateLock.Unlock()
 
 	if pd := pdState.ProxyDevice; pd != nil {
-		if pd.UpdateActivity() {
+		if pd.Active() {
+			pd.UpdateActivity()
 			return pd, nil
 		} else {
 			pd.Cancel()
@@ -219,6 +220,10 @@ type ProxyDevice struct {
 
 	stateLock        sync.Mutex
 	lastActivityTime time.Time
+	// set once the egress window has been satisfied at least once. A device that
+	// was ready and has since lost its window is dead and must be recreated; a
+	// device that has never been ready is still warming up and is kept.
+	everReady bool
 
 	receiveMonitor *connect.Monitor
 	receiveNotify  chan struct{}
@@ -454,6 +459,40 @@ type windowStatusChangeListener struct {
 
 func (self *windowStatusChangeListener) WindowStatusChanged(windowStatus *sdk.WindowStatus) {
 	self.callback(windowStatus)
+}
+
+// Active reports whether the device can still serve traffic and is the gate for
+// reusing an existing device in OpenProxyDevice. The context must be live (not
+// idled out via CancelIfIdle, closed, or torn down), and the device must either
+// still be warming up — it has never reached a satisfied egress window — or
+// currently have a satisfied window.
+//
+// A device that reached ready and has since lost its egress window is NOT active:
+// the egress path was dropped (e.g. the resident moved or the connection idled
+// out and the window collapsed). None of those cancel the device context, so
+// UpdateActivity alone (which only checks the context) would keep handing back a
+// device that can no longer carry traffic — and because each reuse bumps
+// lastActivityTime, the idle timer would never fire to recycle it. Gating reuse
+// on the actual egress window lets OpenProxyDevice recreate the device instead.
+func (self *ProxyDevice) Active() bool {
+	select {
+	case <-self.ctx.Done():
+		return false
+	default:
+	}
+
+	// read window status outside stateLock (DeviceLocal has its own lock)
+	minSatisfied := self.deviceLocal.GetWindowStatus().MinSatisfied
+
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if minSatisfied {
+		self.everReady = true
+		return true
+	}
+	// keep a device that has not yet had a chance to connect; only a device that
+	// was ready and lost its window is treated as dead
+	return !self.everReady
 }
 
 func (self *ProxyDevice) UpdateActivity() bool {
