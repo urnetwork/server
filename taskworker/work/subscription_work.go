@@ -5,6 +5,8 @@ import (
 	mathrand "math/rand"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -164,6 +166,67 @@ func RemoveCompletedContractsPost(
 	tx server.PgTx,
 ) error {
 	ScheduleRemoveCompletedContracts(clientSession, tx)
+	return nil
+}
+
+// Reconcile net escrow
+//
+// The redis net escrow counter is an approximate mirror with no ttl and no
+// other reconciliation, so leaked reservations (dropped settle posts, crashes,
+// quarantined closes) accumulate over the life of a balance and eventually
+// surface as spurious "Insufficient balance" errors. This periodically resets
+// each active balance's counter to the postgres source of truth.
+
+type ReconcileNetEscrowArgs struct {
+}
+
+type ReconcileNetEscrowResult struct {
+}
+
+func ScheduleReconcileNetEscrow(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		ReconcileNetEscrow,
+		&ReconcileNetEscrowArgs{},
+		clientSession,
+		task.RunOnce("reconcile_net_escrow"),
+		task.RunAt(server.NowUtc().Add(5*time.Minute)),
+		task.MaxTime(30*time.Minute),
+	)
+}
+
+func ReconcileNetEscrow(
+	reconcileNetEscrow *ReconcileNetEscrowArgs,
+	clientSession *session.ClientSession,
+) (*ReconcileNetEscrowResult, error) {
+	driftByNetworkId, balanceCount := model.ReconcileNetEscrow(clientSession.Ctx, true)
+
+	overReserved := model.ByteCount(0)
+	underReserved := model.ByteCount(0)
+	for _, drift := range driftByNetworkId {
+		if 0 < drift {
+			overReserved += drift
+		} else {
+			underReserved += -drift
+		}
+	}
+	glog.Infof(
+		"[sm]reconcile net escrow: %d balances, %d networks drifted, over-reserved %s, under-reserved %s\n",
+		balanceCount,
+		len(driftByNetworkId),
+		model.ByteCountHumanReadable(overReserved),
+		model.ByteCountHumanReadable(underReserved),
+	)
+	return &ReconcileNetEscrowResult{}, nil
+}
+
+func ReconcileNetEscrowPost(
+	reconcileNetEscrow *ReconcileNetEscrowArgs,
+	reconcileNetEscrowResult *ReconcileNetEscrowResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleReconcileNetEscrow(clientSession, tx)
 	return nil
 }
 

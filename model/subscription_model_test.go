@@ -1616,3 +1616,69 @@ func TestForceCloseDisputedContract(t *testing.T) {
 		assert.Equal(t, string(ContractOutcomeSettled), contractClose.Outcome)
 	})
 }
+
+// TestReconcileNetEscrowCorrectsDrift reproduces a net escrow counter that has
+// drifted upward (a leaked reservation) and verifies ReconcileNetEscrow resets
+// it to the postgres source of truth -- clearing the spurious "Insufficient
+// balance" -- while a dry run only reports the drift and a live contract's
+// reservation is preserved.
+func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "a", userId)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		initialBalance := ByteCount(10 * 1024 * 1024 * 1024)
+		AddBasicTransferBalance(ctx, networkId, initialBalance, server.NowUtc(), server.NowUtc().Add(30*24*time.Hour))
+
+		balances := GetActiveTransferBalances(ctx, networkId)
+		assert.Equal(t, 1, len(balances))
+		balanceId := balances[0].BalanceId
+
+		// simulate a leaked reservation: inflate the counter with no open contract
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.IncrBy(ctx, netEscrowKey(balanceId), int64(initialBalance))
+		})
+		// the drift makes the full balance appear unavailable
+		assert.Equal(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
+		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		assert.NotEqual(t, nil, err)
+
+		// a dry run reports the drift but does not change anything
+		driftByNetworkId, _ := ReconcileNetEscrow(ctx, false)
+		assert.Equal(t, initialBalance, driftByNetworkId[networkId])
+		assert.Equal(t, initialBalance, Testing_NetEscrowByteCount(ctx, balanceId))
+		assert.Equal(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
+
+		// applying resets the counter to the true reserved (0) and restores availability
+		driftByNetworkId, _ = ReconcileNetEscrow(ctx, true)
+		assert.Equal(t, initialBalance, driftByNetworkId[networkId])
+		assert.Equal(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
+		assert.Equal(t, initialBalance, GetActiveTransferBalanceByteCount(ctx, networkId))
+
+		// contracts work again, and the new reservation is mirrored in the counter
+		_, _, err = CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		assert.Equal(t, nil, err)
+		assert.Equal(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
+
+		// drift on top of a live reservation: reconcile removes only the drift and
+		// keeps the open contract's reservation (the targeted per-network form)
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.IncrBy(ctx, netEscrowKey(balanceId), int64(5*1024*1024))
+		})
+		drift, balanceCount := ReconcileNetEscrowForNetwork(ctx, networkId, true)
+		assert.Equal(t, 1, balanceCount)
+		assert.Equal(t, ByteCount(5*1024*1024), drift)
+		assert.Equal(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
+		assert.Equal(t, initialBalance-ByteCount(1024*1024), GetActiveTransferBalanceByteCount(ctx, networkId))
+	})
+}

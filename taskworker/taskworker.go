@@ -37,6 +37,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
+		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
@@ -147,6 +148,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveCompletedContracts,
 			work.RemoveCompletedContractsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ReconcileNetEscrow,
+			work.ReconcileNetEscrowPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.DbMaintenance,

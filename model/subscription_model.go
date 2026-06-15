@@ -311,6 +311,290 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 	})
 }
 
+// ReconcileNetEscrow compares the redis net escrow counters for all active
+// transfer balances against the postgres source of truth and, when apply is
+// true, resets them to it -- correcting accumulated drift. It returns the drift
+// it found per network either way.
+//
+// The `netEscrowKey` counter is an approximate, non-atomic mirror with no ttl
+// and no other reconciliation: a leaked `IncrBy` (a quarantined malformed
+// close, a dispute that never settled, or a settle whose redis `DecrBy` post
+// was dropped/crashed before running) stays in the counter for the life of the
+// balance. Upward drift makes `createTransferEscrowInTx` compute the available
+// balance too low and reject contracts with "Insufficient balance" even when
+// the postgres balance is plentiful; downward drift lets a balance over-commit.
+//
+// The reserved bytes for a balance is the sum of its escrow rows whose contract
+// is still open. `transfer_contract.outcome` is claimed atomically in the
+// settle transaction (`claimContractOutcomeInTx`), so `outcome IS NULL` is the
+// reliable signal that a reservation is live -- unlike `transfer_escrow.settled`,
+// which is itself set in a best-effort post and can leak. A disputed contract
+// (`outcome` still null, generated `open` false) still holds its reservation, so
+// it is matched by `outcome IS NULL` and would be missed by `open`.
+//
+// When apply is true the counter is written with SET, so a concurrent
+// `IncrBy`/`DecrBy` in the small window between the postgres read and the redis
+// write can be lost; the next run re-derives the value and converges. The
+// lost-write bias is toward a lower counter (more available), the same fail-open
+// direction as a missing counter (see `TestProxyContractRedisMirrorLoss`). When
+// apply is false the counters are only read (a dry run): the returned drift
+// reports the accumulated error without changing anything.
+//
+// Drift is the signed difference (previous counter minus reconciled value)
+// summed per network. Positive drift means the counter was over-reserved -- the
+// direction that starves the available balance and produces spurious
+// "Insufficient balance". Only networks with nonzero net drift are returned.
+func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
+	now := server.NowUtc()
+	driftByNetworkId = map[server.Id]ByteCount{}
+
+	pending := openEscrowReservedByBalance(ctx, nil)
+
+	// visit every active balance -- the same set `createTransferEscrowInTx`
+	// reads -- paginated by balance_id (the primary key) so the scan is bounded
+	// and resumable
+	const batchSize = 1000
+	var cursor server.Id
+	for {
+		type balanceRow struct {
+			balanceId server.Id
+			networkId server.Id
+		}
+		rows := []balanceRow{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+                    SELECT balance_id, network_id
+                    FROM transfer_balance
+                    WHERE
+                        active = true AND
+                        start_time <= $1 AND $1 < end_time AND
+                        balance_id > $2
+                    ORDER BY balance_id
+                    LIMIT $3
+                `,
+				now,
+				cursor,
+				batchSize,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var row balanceRow
+					server.Raise(result.Scan(&row.balanceId, &row.networkId))
+					rows = append(rows, row)
+				}
+			})
+		})
+		if len(rows) == 0 {
+			break
+		}
+		balanceIds := make([]server.Id, len(rows))
+		for i, row := range rows {
+			balanceIds[i] = row.balanceId
+		}
+		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
+		for _, row := range rows {
+			driftByNetworkId[row.networkId] += drift[row.balanceId]
+		}
+		balanceCount += len(rows)
+		cursor = rows[len(rows)-1].balanceId
+		if len(rows) < batchSize {
+			break
+		}
+	}
+
+	for networkId, drift := range driftByNetworkId {
+		if drift == 0 {
+			delete(driftByNetworkId, networkId)
+		}
+	}
+
+	return
+}
+
+// ReconcileNetEscrowForNetwork reconciles the redis net escrow counters for one
+// network's active balances. See [ReconcileNetEscrow]; this is the targeted form
+// used to immediately clear (or, with apply false, just measure) drift on a
+// single affected network. The returned drift is the signed total over the
+// network's balances (previous counters minus reconciled values).
+func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, apply bool) (driftByteCount ByteCount, balanceCount int) {
+	now := server.NowUtc()
+
+	balanceIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT balance_id
+                FROM transfer_balance
+                WHERE
+                    network_id = $1 AND
+                    active = true AND
+                    start_time <= $2 AND $2 < end_time
+            `,
+			networkId,
+			now,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				server.Raise(result.Scan(&balanceId))
+				balanceIds = append(balanceIds, balanceId)
+			}
+		})
+	})
+	if len(balanceIds) == 0 {
+		return
+	}
+
+	pending := openEscrowReservedByBalance(ctx, &networkId)
+	drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
+	for _, d := range drift {
+		driftByteCount += d
+	}
+	return driftByteCount, len(balanceIds)
+}
+
+// openEscrowReservedByBalance returns the reserved (open-contract) escrow bytes
+// per balance, the source of truth for the net escrow counter. When networkId
+// is non-nil the scan is restricted to that network's balances.
+func openEscrowReservedByBalance(ctx context.Context, networkId *server.Id) map[server.Id]ByteCount {
+	pending := map[server.Id]ByteCount{}
+	server.Db(ctx, func(conn server.PgConn) {
+		var result server.PgResult
+		var err error
+		if networkId == nil {
+			result, err = conn.Query(
+				ctx,
+				`
+                    SELECT
+                        transfer_escrow.balance_id,
+                        SUM(transfer_escrow.balance_byte_count)
+                    FROM transfer_escrow
+                    INNER JOIN transfer_contract ON
+                        transfer_contract.contract_id = transfer_escrow.contract_id
+                    WHERE
+                        transfer_contract.outcome IS NULL
+                    GROUP BY transfer_escrow.balance_id
+                `,
+			)
+		} else {
+			result, err = conn.Query(
+				ctx,
+				`
+                    SELECT
+                        transfer_escrow.balance_id,
+                        SUM(transfer_escrow.balance_byte_count)
+                    FROM transfer_escrow
+                    INNER JOIN transfer_contract ON
+                        transfer_contract.contract_id = transfer_escrow.contract_id
+                    INNER JOIN transfer_balance ON
+                        transfer_balance.balance_id = transfer_escrow.balance_id
+                    WHERE
+                        transfer_contract.outcome IS NULL AND
+                        transfer_balance.network_id = $1
+                    GROUP BY transfer_escrow.balance_id
+                `,
+				*networkId,
+			)
+		}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var reserved ByteCount
+				server.Raise(result.Scan(&balanceId, &reserved))
+				pending[balanceId] = reserved
+			}
+		})
+	})
+	return pending
+}
+
+// reconcileNetEscrowBatch reads the current net escrow counter for each balance
+// and returns the signed drift against the reserved (true) value (previous
+// counter minus reserved; positive means over-reserved). When apply is true it
+// then resets each counter to its reserved value -- zero (no live reservation)
+// deletes the key so it reads as zero, matching the "missing counter is zero"
+// invariant.
+func reconcileNetEscrowBatch(
+	ctx context.Context,
+	pending map[server.Id]ByteCount,
+	balanceIds []server.Id,
+	apply bool,
+) (drift map[server.Id]ByteCount) {
+	drift = map[server.Id]ByteCount{}
+	server.Redis(ctx, func(r server.RedisClient) {
+		// all net escrow keys share the {escrow} hash tag (one slot)
+		getCmds := map[server.Id]*redis.StringCmd{}
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, balanceId := range balanceIds {
+				getCmds[balanceId] = pipe.Get(ctx, netEscrowKey(balanceId))
+			}
+			return nil
+		})
+		for _, balanceId := range balanceIds {
+			previous, _ := getCmds[balanceId].Int64() // missing key -> 0
+			drift[balanceId] = ByteCount(previous) - pending[balanceId]
+		}
+
+		if !apply {
+			return
+		}
+
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, balanceId := range balanceIds {
+				if reserved := pending[balanceId]; 0 < reserved {
+					pipe.Set(ctx, netEscrowKey(balanceId), reserved, 0)
+				} else {
+					pipe.Del(ctx, netEscrowKey(balanceId))
+				}
+			}
+			return nil
+		})
+	})
+	return
+}
+
+// releaseNetEscrowForContract returns a quarantined contract's reserved bytes to
+// its balances by decrementing the redis net escrow counters. The caller must
+// have just claimed the contract (`outcome IS NULL` -> settled) so the
+// reservation is released exactly once; the normal settle path owns the `DecrBy`
+// otherwise.
+func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
+	escrowed := map[server.Id]ByteCount{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT balance_id, balance_byte_count
+                FROM transfer_escrow
+                WHERE contract_id = $1
+            `,
+			contractId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				var byteCount ByteCount
+				server.Raise(result.Scan(&balanceId, &byteCount))
+				escrowed[balanceId] = byteCount
+			}
+		})
+	})
+	if len(escrowed) == 0 {
+		return
+	}
+	server.Redis(ctx, func(r server.RedisClient) {
+		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			for balanceId, byteCount := range escrowed {
+				pipe.DecrBy(ctx, netEscrowKey(balanceId), byteCount)
+			}
+			return nil
+		})
+	})
+}
+
 func AddTransferBalanceInTx(ctx context.Context, tx server.PgTx, transferBalance *TransferBalance) {
 	balanceId := server.NewId()
 
@@ -2212,8 +2496,9 @@ func ForceCloseOpenContractIds(
 	closeMalformedContract := func(tag string, openContract *OpenContract, err error) {
 		glog.Infof("%sforce close malformed contract: %s\n", tag, err)
 
+		claimed := false
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
+			commandTag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
                     UPDATE transfer_contract
@@ -2229,7 +2514,16 @@ func ForceCloseOpenContractIds(
 				ContractOutcomeSettled,
 				server.NowUtc(),
 			))
+			claimed = commandTag.RowsAffected() == 1
 		}, server.TxReadCommitted)
+
+		// the quarantine settles the contract with no payout, so release its
+		// reservation back to the payer's available balance instead of leaking
+		// it into the net escrow counter. only when this call claimed the
+		// contract -- otherwise a concurrent settle/dispute owns the release.
+		if claimed {
+			releaseNetEscrowForContract(ctx, openContract.contractId)
+		}
 	}
 
 	closeContract := func(tag string, openContract *OpenContract) error {

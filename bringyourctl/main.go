@@ -64,6 +64,7 @@ Usage:
 		bringyourctl wallets sync-circle
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
+    bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
     bringyourctl task ls
     bringyourctl task rm <task_id>
     bringyourctl auth login <auth_code>
@@ -197,6 +198,9 @@ Options:
 		}
 		if close, _ := opts.Bool("close"); close {
 			closeContract(opts)
+		}
+		if reconcile, _ := opts.Bool("reconcile-net-escrow"); reconcile {
+			reconcileNetEscrow(opts)
 		}
 	} else if wallets, _ := opts.Bool("wallets"); wallets {
 		if syncCircle, _ := opts.Bool("sync-circle"); syncCircle {
@@ -908,6 +912,87 @@ func closeContract(opts docopt.Opts) {
 
 	fmt.Printf("Contract closed %s \n", contractIdStr)
 
+}
+
+// reconcileNetEscrow resets the redis net escrow counters to the postgres
+// source of truth, clearing accumulated drift that causes spurious
+// "Insufficient balance" errors, and prints the drift per network so the
+// accumulated error can be tracked. With --network_id it targets a single
+// network; without it, it sweeps every active balance. With --dry-run it only
+// measures and prints the drift without writing anything.
+//
+// Drift is the signed difference (current counter minus the true reserved
+// value). Positive drift is over-reservation: it starves the available balance
+// and is what produces "Insufficient balance". Negative drift is
+// under-reservation (over-available).
+func reconcileNetEscrow(opts docopt.Opts) {
+	ctx := context.Background()
+
+	dryRun, _ := opts.Bool("--dry-run")
+	apply := !dryRun
+
+	verb := "reconciled"
+	if dryRun {
+		verb = "measured drift (dry run, not applied)"
+	}
+
+	if networkIdStr, _ := opts.String("--network_id"); networkIdStr != "" {
+		networkId, err := server.ParseId(networkIdStr)
+		if err != nil {
+			panic(err)
+		}
+		drift, balanceCount := model.ReconcileNetEscrowForNetwork(ctx, networkId, apply)
+		fmt.Printf("%s: network %s, %d active balance(s), drift %s\n", verb, networkId, balanceCount, signedByteCount(drift))
+		return
+	}
+
+	driftByNetworkId, balanceCount := model.ReconcileNetEscrow(ctx, apply)
+
+	// largest absolute drift first
+	networkIds := maps.Keys(driftByNetworkId)
+	absDrift := func(networkId server.Id) int64 {
+		d := driftByNetworkId[networkId]
+		if d < 0 {
+			return -d
+		}
+		return d
+	}
+	slices.SortFunc(networkIds, func(a server.Id, b server.Id) int {
+		if absDrift(a) == absDrift(b) {
+			return a.Cmp(b)
+		} else if absDrift(b) < absDrift(a) {
+			return -1
+		}
+		return 1
+	})
+
+	overReserved := int64(0)
+	underReserved := int64(0)
+	for _, networkId := range networkIds {
+		drift := driftByNetworkId[networkId]
+		if 0 < drift {
+			overReserved += drift
+		} else {
+			underReserved += -drift
+		}
+		fmt.Printf("  %s  %s\n", networkId, signedByteCount(drift))
+	}
+	fmt.Printf(
+		"%s: %d active balance(s), %d network(s) drifted\n  over-reserved (starves balance): %s\n  under-reserved (over-available): %s\n",
+		verb,
+		balanceCount,
+		len(driftByNetworkId),
+		model.ByteCountHumanReadable(overReserved),
+		model.ByteCountHumanReadable(underReserved),
+	)
+}
+
+// signedByteCount formats a signed drift with an explicit + or - sign.
+func signedByteCount(byteCount int64) string {
+	if byteCount < 0 {
+		return "-" + model.ByteCountHumanReadable(-byteCount)
+	}
+	return "+" + model.ByteCountHumanReadable(byteCount)
 }
 
 func populateMissingCircleAccountWallets() {
