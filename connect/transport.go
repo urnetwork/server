@@ -198,8 +198,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// `X-Forwarded-For` is added by the warp lb
 	clientAddress := r.Header.Get("X-UR-Forwarded-For")
 	if clientAddress == "" {
-		clientIpStr := req.Header.Get("X-Forwarded-For")
-		clientPortStr := req.Header.Get("X-Forwarded-Source-Port")
+		clientIpStr := r.Header.Get("X-Forwarded-For")
+		clientPortStr := r.Header.Get("X-Forwarded-Source-Port")
 		if clientIpStr != "" && clientPortStr != "" {
 			clientAddress = fmt.Sprintf("%s:%s", clientIpStr, clientPortStr)
 		}
