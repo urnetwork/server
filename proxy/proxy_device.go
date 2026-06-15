@@ -45,7 +45,7 @@ type ProxyDeviceManager struct {
 	cancel   context.CancelFunc
 	settings *ProxyDeviceManagerSettings
 
-	networkSpace *sdk.NetworkSpace
+	// networkSpace *sdk.NetworkSpace
 
 	stateLock    sync.Mutex
 	proxyDevices map[server.Id]*proxyDeviceState
@@ -58,29 +58,11 @@ func NewProxyDeviceManagerWithDefaults(ctx context.Context) *ProxyDeviceManager 
 func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSettings) *ProxyDeviceManager {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	// share one network space across all clients
-	// this reuses the client strategy and keep alive connections
-	networkSpace := settings.NetworkSpace
-	if networkSpace == nil {
-		connectSettings := connect.DefaultConnectSettings()
-		// FIXME use only ipv4 when communicating back to the platform
-		connectSettings.DisableIpv6 = true
-		// embedded devices must be silent: this host runs thousands of clients.
-		// the network space logger silences the shared client strategy.
-		connectSettings.Log = connect.NewNoopLogger()
-		networkSpace = sdk.NewPlatformNetworkSpace(
-			cancelCtx,
-			server.RequireEnv(),
-			server.RequireDomain(),
-			connectSettings,
-		)
-	}
-
 	return &ProxyDeviceManager{
-		ctx:          cancelCtx,
-		cancel:       cancel,
-		settings:     settings,
-		networkSpace: networkSpace,
+		ctx:      cancelCtx,
+		cancel:   cancel,
+		settings: settings,
+		// networkSpace: networkSpace,
 		proxyDevices: map[server.Id]*proxyDeviceState{},
 	}
 }
@@ -92,10 +74,26 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			return nil, fmt.Errorf("Proxy device does not exist.")
 		}
 
+		networkSpace := self.settings.NetworkSpace
+		if networkSpace == nil {
+			connectSettings := connect.DefaultConnectSettings()
+			// FIXME use only ipv4 when communicating back to the platform
+			connectSettings.DisableIpv6 = true
+			// embedded devices must be silent: this host runs thousands of clients.
+			// the network space logger silences the shared client strategy.
+			connectSettings.Log = connect.NewNoopLogger()
+			networkSpace = sdk.NewPlatformNetworkSpace(
+				self.ctx,
+				server.RequireEnv(),
+				server.RequireDomain(),
+				connectSettings,
+			)
+		}
+
 		settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
 		settings.IngressSecurityPolicyGenerator = self.settings.IngressSecurityPolicyGenerator
 		settings.EgressSecurityPolicyGenerator = self.settings.EgressSecurityPolicyGenerator
-		pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, self.networkSpace, settings)
+		pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
 		if err != nil {
 			return nil, err
 		}
