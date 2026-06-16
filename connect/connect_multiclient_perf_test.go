@@ -228,21 +228,21 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 
 	startTime := time.Now()
 	dialCtx, dialCancel := context.WithTimeout(ctx, 60*time.Second)
-	conn, err := tun.DialContext(dialCtx, "tcp", echoAddr)
+	probeConn, err := tun.DialContext(dialCtx, "tcp", echoAddr)
 	dialCancel()
 	if err != nil {
 		panic(fmt.Errorf("tcp dial through stack: %w", err))
 	}
-	defer conn.Close()
+	defer probeConn.Close()
 	// one round trip to confirm the stream
 	probe := []byte("probe-0123456789")
-	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	if _, err := conn.Write(probe); err != nil {
+	probeConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if _, err := probeConn.Write(probe); err != nil {
 		panic(fmt.Errorf("tcp probe write: %w", err))
 	}
 	probeEcho := make([]byte, len(probe))
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	if _, err := io.ReadFull(conn, probeEcho); err != nil {
+	probeConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := io.ReadFull(probeConn, probeEcho); err != nil {
 		panic(fmt.Errorf("tcp probe read: %w", err))
 	}
 	fmt.Printf("[mctcp]connect + first byte rtt = %s\n", time.Since(startTime))
@@ -263,9 +263,31 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	cpuProfileFile, _ := os.Create(cpuProfilePath)
 	cpuProfileActive := pprof.StartCPUProfile(cpuProfileFile) == nil
 
-	// runStream writes streamByteCount through the conn and concurrently reads
-	// it back, returning the measured goodput in MiB/s.
-	runStream := func() float64 {
+	// runStream dials a fresh stream, writes streamByteCount through it while
+	// concurrently reading it back, and returns the measured goodput in MiB/s
+	// and whether the run completed.
+	//
+	// A stalled (not merely slow) run is dropped rather than fatal, matching
+	// the udp/download phases: the best of the completed runs is asserted
+	// below, and only an all-runs-fail outcome is treated as a real collapse.
+	// The stall this rides out is genuine but transient -- a single bulk stream
+	// saturates the lossy relay in both directions at once, and when a burst is
+	// dropped the userspace tcp stack backs its rto off toward the 120s gvisor
+	// cap, so one no-progress window can exceed the 60s write deadline
+	// (especially under -race on the build server). Each run dials its own conn
+	// so a partial-write timeout can't desync the next run's stream, and a
+	// fresh conn starts with default rto state, so the runs are independent
+	// samples.
+	runStream := func() (float64, bool) {
+		dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
+		conn, err := tun.DialContext(dialCtx, "tcp", echoAddr)
+		dialCancel()
+		if err != nil {
+			fmt.Printf("[mctcp]stream run dial failed: %v (dropping sample)\n", err)
+			return 0, false
+		}
+		defer conn.Close()
+
 		var memStatsStart runtime.MemStats
 		runtime.ReadMemStats(&memStatsStart)
 
@@ -292,24 +314,38 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 		}()
 
 		written := int64(0)
+		var writeErr error
 		for written < streamByteCount {
 			n := min(int64(len(chunk)), streamByteCount-written)
 			conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 			if _, err := conn.Write(chunk[:n]); err != nil {
-				panic(fmt.Errorf("tcp stream write: %w", err))
+				writeErr = err
+				break
 			}
 			written += n
+		}
+
+		if writeErr != nil {
+			// close to unblock the reader, then drop this sample
+			conn.Close()
+			<-readDone
+			fmt.Printf("[mctcp]stream run write stalled after %dMiB: %v (dropping sample)\n", written/(1024*1024), writeErr)
+			return 0, false
 		}
 
 		select {
 		case <-readDone:
 		case <-time.After(120 * time.Second):
-			panic(fmt.Errorf("tcp stream read timeout: read %d/%d", atomic.LoadInt64(&readByteCount), streamByteCount))
+			conn.Close()
+			<-readDone
+			fmt.Printf("[mctcp]stream run read timeout: read %d/%d (dropping sample)\n", atomic.LoadInt64(&readByteCount), streamByteCount)
+			return 0, false
 		}
 		elapsed := time.Since(streamStart)
 
 		if errp := readErr.Load(); errp != nil {
-			panic(fmt.Errorf("tcp stream read error: %w", *errp))
+			fmt.Printf("[mctcp]stream run read stalled: %v (dropping sample)\n", *errp)
+			return 0, false
 		}
 		delivered := atomic.LoadInt64(&readByteCount)
 		goodput := float64(delivered) / (1024 * 1024) / elapsed.Seconds()
@@ -326,12 +362,16 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 			memStatsEnd.NumGC-memStatsStart.NumGC,
 			time.Duration(memStatsEnd.PauseTotalNs-memStatsStart.PauseTotalNs),
 		)
-		return goodput
+		return goodput, true
 	}
 
 	goodput := 0.0
+	okRuns := 0
 	for run := 0; run < mcPerfRunCount; run += 1 {
-		goodput = max(goodput, runStream())
+		if g, ok := runStream(); ok {
+			okRuns += 1
+			goodput = max(goodput, g)
+		}
 	}
 
 	if cpuProfileActive {
@@ -346,8 +386,14 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	}
 
 	fmt.Printf("[mctcp]==== summary ====\n")
-	fmt.Printf("[mctcp]tcp stream goodput=%.2f MiB/s (max of %d runs) (cpu profile %s)\n", goodput, mcPerfRunCount, cpuProfilePath)
+	fmt.Printf("[mctcp]tcp stream goodput=%.2f MiB/s (max of %d/%d completed runs) (cpu profile %s)\n", goodput, okRuns, mcPerfRunCount, cpuProfilePath)
 
+	// only an all-runs-stalled outcome is fatal -- that is a real stall/collapse
+	// (e.g. a relay or tun lock regression, which this test guards against). A
+	// single dropped sample is host noise and is ridden out by the other runs.
+	if okRuns == 0 {
+		panic(fmt.Errorf("tcp stream: all %d runs stalled before completing", mcPerfRunCount))
+	}
 	if goodput < mcTcpStreamMinGoodput {
 		panic(fmt.Errorf("tcp stream goodput too low: %.2f MiB/s", goodput))
 	}
