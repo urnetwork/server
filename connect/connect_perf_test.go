@@ -583,6 +583,8 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	}
 
 	blastResults := []*blastResult{}
+	// blast is run concurrently for the bidirectional test, so guard the append.
+	var blastResultsLock sync.Mutex
 
 	// blast sends messages of contentSize from client to destination for duration,
 	// then waits for the in-flight backlog to settle. noAck measures the
@@ -747,7 +749,11 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			gcCount:      memStatsEnd.NumGC - memStatsStart.NumGC,
 			gcPauseTotal: time.Duration(memStatsEnd.PauseTotalNs - memStatsStart.PauseTotalNs),
 		}
-		blastResults = append(blastResults, result)
+		func() {
+			blastResultsLock.Lock()
+			defer blastResultsLock.Unlock()
+			blastResults = append(blastResults, result)
+		}()
 		fmt.Printf(
 			"[perf]%s size=%d sent=%d delivered=%d (%.1f%%) elapsed=%.2fs goodput=%.2f MiB/s rate=%.0f msg/s drain=%s ack p50=%s p90=%s p99=%s max=%s allocs/msg=%dB gc=%d pause=%s\n",
 			result.label,
