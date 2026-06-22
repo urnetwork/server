@@ -52,8 +52,13 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 			NetworkId: clientSession.ByJwt.NetworkId,
 		}
 
-		_, err = model.RedeemBalanceCode(args, ctx)
+		redeemResult, err := model.RedeemBalanceCode(args, ctx)
 		assert.Equal(t, err, nil)
+		// A failed redeem is reported via result.Error with a nil Go error (the
+		// user-facing channel, mirrored by networkCreateRedeemBalanceCodeInTx).
+		// Without this check a silent "Unknown balance code." passes here and
+		// resurfaces as a confusing 0-vs-1 mismatch on the fetch below.
+		assert.Equal(t, redeemResult.Error, nil)
 
 		redeemed, err = GetNetworkRedeemedBalanceCodes(
 			clientSession,

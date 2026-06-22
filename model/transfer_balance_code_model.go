@@ -434,10 +434,11 @@ func FetchNetworkRedeemedBalanceCodes(
 				balance_code_secret
 			FROM transfer_balance_code
 			WHERE
-				network_id = $1 AND redeemed = TRUE AND end_time > NOW()
+				network_id = $1 AND redeemed = TRUE AND end_time > $2
 			ORDER BY end_time ASC
            `,
 			session.ByJwt.NetworkId,
+			server.NowUtc(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
