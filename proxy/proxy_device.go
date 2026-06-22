@@ -150,8 +150,7 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 	defer pdState.StateLock.Unlock()
 
 	if pd := pdState.ProxyDevice; pd != nil {
-		if pd.Active() {
-			pd.UpdateActivity()
+		if pd.Active() && pd.UpdateActivity() {
 			return pd, nil
 		} else {
 			pd.Cancel()
