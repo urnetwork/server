@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -47,7 +48,12 @@ type ProxyDeviceManager struct {
 
 	// networkSpace *sdk.NetworkSpace
 
-	stateLock    sync.Mutex
+	// stateLock guards the proxyDevices map. It is read-mostly: every
+	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
+	// the first open for a proxy id — or a teardown removing an entry — takes the
+	// write lock. This keeps the new-connection / new-client path from
+	// serializing on one global mutex.
+	stateLock    sync.RWMutex
 	proxyDevices map[server.Id]*proxyDeviceState
 }
 
@@ -68,102 +74,162 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 }
 
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
-	nextProxyDevice := func() (*ProxyDevice, error) {
-		proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
-		if proxyDeviceConfig == nil {
-			return nil, fmt.Errorf("Proxy device does not exist.")
-		}
-
-		networkSpace := self.settings.NetworkSpace
-		if networkSpace == nil {
-			connectSettings := connect.DefaultConnectSettings()
-			// FIXME use only ipv4 when communicating back to the platform
-			connectSettings.DisableIpv6 = true
-			// embedded devices must be silent: this host runs thousands of clients.
-			// the network space logger silences the shared client strategy.
-			connectSettings.Log = connect.NewNoopLogger()
-			networkSpace = sdk.NewPlatformNetworkSpace(
-				self.ctx,
-				server.RequireEnv(),
-				server.RequireDomain(),
-				connectSettings,
-			)
-		}
-
-		settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
-		settings.IngressSecurityPolicyGenerator = self.settings.IngressSecurityPolicyGenerator
-		settings.EgressSecurityPolicyGenerator = self.settings.EgressSecurityPolicyGenerator
-		pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
-		if err != nil {
-			return nil, err
-		}
-
-		go server.HandleError(func() {
-			defer func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-
-				pd.Close()
-				if pdState, ok := self.proxyDevices[proxyId]; ok {
-					func() {
-						pdState.StateLock.Lock()
-						defer pdState.StateLock.Unlock()
-
-						if pd == pdState.ProxyDevice {
-							delete(self.proxyDevices, proxyId)
-						}
-					}()
-				}
-			}()
-			pd.Run()
-		})
-
-		go server.HandleError(func() {
-			for {
-				if pd.CancelIfIdle() {
-					return
-				}
-
-				select {
-				case <-pd.Done():
-					return
-				case <-time.After(self.settings.CheckProxyDeviceIdleTimeout):
-				}
-			}
-		})
-
-		return pd, nil
-	}
-
 	pdState := func() *proxyDeviceState {
+		// fast path: an existing entry, read concurrently (the common case)
+		self.stateLock.RLock()
+		pdState, ok := self.proxyDevices[proxyId]
+		self.stateLock.RUnlock()
+		if ok {
+			return pdState
+		}
+		// slow path: create the entry under the write lock, double-checking in
+		// case another opener created it between the RUnlock and the Lock
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		pdState, ok := self.proxyDevices[proxyId]
-		if !ok {
+		if pdState, ok = self.proxyDevices[proxyId]; !ok {
 			pdState = &proxyDeviceState{}
 			self.proxyDevices[proxyId] = pdState
 		}
 		return pdState
 	}()
 
-	pdState.StateLock.Lock()
-	defer pdState.StateLock.Unlock()
+	for {
+		pdState.StateLock.Lock()
 
-	if pd := pdState.ProxyDevice; pd != nil {
-		if pd.Active() && pd.UpdateActivity() {
-			return pd, nil
-		} else {
+		// reuse a live device
+		if pd := pdState.ProxyDevice; pd != nil {
+			if pd.Active() && pd.UpdateActivity() {
+				pdState.StateLock.Unlock()
+				return pd, nil
+			}
+			// idled out, or the egress window collapsed: drop the dead device
 			pd.Cancel()
 			pdState.ProxyDevice = nil
 		}
+
+		// if another opener is already creating a device for this proxy id, wait
+		// for its result instead of creating a duplicate — and wait WITHOUT
+		// holding any lock, so a slow creation never serializes other proxy ids
+		// (or, via the wg data path, other clients).
+		if c := pdState.creating; c != nil {
+			pdState.StateLock.Unlock()
+			select {
+			case <-c.done:
+			case <-self.ctx.Done():
+				return nil, fmt.Errorf("Proxy device manager closed.")
+			}
+			if c.err != nil {
+				return nil, c.err
+			}
+			// a device was published; loop to validate and adopt it
+			continue
+		}
+
+		// become the creator: publish an in-flight marker, release the lock, then
+		// create the device (db load + DeviceLocal + tun) with NO lock held so the
+		// cold start never blocks other proxy ids/clients (fix E).
+		c := &deviceCreation{done: make(chan struct{})}
+		pdState.creating = c
+		pdState.StateLock.Unlock()
+
+		pd, err := self.newProxyDevice(proxyId)
+
+		pdState.StateLock.Lock()
+		pdState.creating = nil
+		if err == nil {
+			pdState.ProxyDevice = pd
+		}
+		pdState.StateLock.Unlock()
+
+		// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
+		// only the error needs to be shared directly
+		c.err = err
+		close(c.done)
+
+		if err != nil {
+			return nil, err
+		}
+		return pd, nil
+	}
+}
+
+// newProxyDevice creates a fresh proxy device for the proxy id and starts its
+// run + idle-check goroutines. It does db + network + tun setup, so it must be
+// called WITHOUT holding any manager or pdState lock (see OpenProxyDevice).
+func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
+	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
+	if proxyDeviceConfig == nil {
+		return nil, fmt.Errorf("Proxy device does not exist.")
 	}
 
-	pd, err := nextProxyDevice()
+	networkSpace := self.settings.NetworkSpace
+	if networkSpace == nil {
+		connectSettings := connect.DefaultConnectSettings()
+		// FIXME use only ipv4 when communicating back to the platform
+		connectSettings.DisableIpv6 = true
+		// embedded devices must be silent: this host runs thousands of clients.
+		// the network space logger silences the shared client strategy.
+		connectSettings.Log = connect.NewNoopLogger()
+		networkSpace = sdk.NewPlatformNetworkSpace(
+			self.ctx,
+			server.RequireEnv(),
+			server.RequireDomain(),
+			connectSettings,
+		)
+	}
+
+	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
+	settings.IngressSecurityPolicyGenerator = self.settings.IngressSecurityPolicyGenerator
+	settings.EgressSecurityPolicyGenerator = self.settings.EgressSecurityPolicyGenerator
+	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
 	if err != nil {
 		return nil, err
 	}
 
-	pdState.ProxyDevice = pd
+	go server.HandleError(func() {
+		defer func() {
+			// forget the device (if it is still the installed one), then close it
+			// OUTSIDE the manager lock: deviceLocal/tun close can block, and holding
+			// stateLock across it would stall OpenProxyDevice for every other proxy
+			// id — and, via the wg data path, every other client (fix C).
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+
+				if pdState, ok := self.proxyDevices[proxyId]; ok {
+					pdState.StateLock.Lock()
+					defer pdState.StateLock.Unlock()
+
+					if pd == pdState.ProxyDevice {
+						pdState.ProxyDevice = nil
+					}
+					// drop the empty entry to keep the map bounded under churn, but
+					// only when nothing is installed and no creation is in flight (a
+					// concurrent opener may hold this pdState, about to publish).
+					if pdState.ProxyDevice == nil && pdState.creating == nil {
+						delete(self.proxyDevices, proxyId)
+					}
+				}
+			}()
+			pd.Close()
+		}()
+		pd.Run()
+	})
+
+	go server.HandleError(func() {
+		for {
+			if pd.CancelIfIdle() {
+				return
+			}
+
+			select {
+			case <-pd.Done():
+				return
+			case <-time.After(self.settings.CheckProxyDeviceIdleTimeout):
+			}
+		}
+	})
+
 	return pd, nil
 }
 
@@ -179,6 +245,18 @@ func (self *ProxyDeviceManager) Close() {
 type proxyDeviceState struct {
 	StateLock   sync.Mutex
 	ProxyDevice *ProxyDevice
+	// creating is non-nil while an opener is creating a device for this proxy id.
+	// Other openers wait on it instead of creating a duplicate, and without
+	// holding StateLock across the (slow) creation.
+	creating *deviceCreation
+}
+
+// deviceCreation lets concurrent openers for the same proxy id wait on an
+// in-flight device creation: done is closed when it finishes, and err carries a
+// creation failure to the waiters (success is read back from pdState.ProxyDevice).
+type deviceCreation struct {
+	done chan struct{}
+	err  error
 }
 
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
@@ -217,13 +295,19 @@ type ProxyDevice struct {
 	tun         *connect.Tun
 	settings    *ProxyDeviceSettings
 
-	stateLock        sync.Mutex
-	lastActivityTime time.Time
+	// liveness/activity are tracked with atomics, not stateLock, so the wg
+	// per-packet hot path (activateClient -> Active/UpdateActivity) takes no
+	// per-device lock and — crucially — is never serialized under the wg proxy's
+	// single global state lock.
+	lastActivityNanos atomic.Int64
 	// set once the egress window has been satisfied at least once. A device that
 	// was ready and has since lost its window is dead and must be recreated; a
 	// device that has never been ready is still warming up and is kept.
-	everReady bool
+	everReady atomic.Bool
 
+	// stateLock guards only the receive-mode fields below (swapped rarely, via
+	// SetReceive), not the activity/liveness state above.
+	stateLock      sync.Mutex
 	receiveMonitor *connect.Monitor
 	receiveNotify  chan struct{}
 	receive        chan []byte
@@ -305,9 +389,9 @@ func NewProxyDevice(
 		deviceLocal:       deviceLocal,
 		tun:               tun,
 		settings:          settings,
-		lastActivityTime:  time.Now(),
 		receiveMonitor:    connect.NewMonitor(),
 	}
+	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
@@ -470,9 +554,9 @@ func (self *windowStatusChangeListener) WindowStatusChanged(windowStatus *sdk.Wi
 // the egress path was dropped (e.g. the resident moved or the connection idled
 // out and the window collapsed). None of those cancel the device context, so
 // UpdateActivity alone (which only checks the context) would keep handing back a
-// device that can no longer carry traffic — and because each reuse bumps
-// lastActivityTime, the idle timer would never fire to recycle it. Gating reuse
-// on the actual egress window lets OpenProxyDevice recreate the device instead.
+// device that can no longer carry traffic — and because each reuse bumps the
+// activity timestamp, the idle timer would never fire to recycle it. Gating
+// reuse on the actual egress window lets OpenProxyDevice recreate the device.
 func (self *ProxyDevice) Active() bool {
 	select {
 	case <-self.ctx.Done():
@@ -480,29 +564,26 @@ func (self *ProxyDevice) Active() bool {
 	default:
 	}
 
-	// read window status outside stateLock (DeviceLocal has its own lock)
-	minSatisfied := self.deviceLocal.GetWindowStatus().MinSatisfied
-
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if minSatisfied {
-		self.everReady = true
+	// the window status is authoritative (DeviceLocal has its own lock). It is
+	// read here rather than cached because a device whose egress collapses does
+	// not always emit a window-status event (e.g. deviceLocal.Close nils the
+	// client), and a stale "satisfied" cache would keep handing back a dead
+	// device. everReady is a sticky atomic so this whole check takes no lock.
+	if self.deviceLocal.GetWindowStatus().MinSatisfied {
+		self.everReady.Store(true)
 		return true
 	}
 	// keep a device that has not yet had a chance to connect; only a device that
 	// was ready and lost its window is treated as dead
-	return !self.everReady
+	return !self.everReady.Load()
 }
 
 func (self *ProxyDevice) UpdateActivity() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
-		self.lastActivityTime = time.Now()
+		self.lastActivityNanos.Store(time.Now().UnixNano())
 		return true
 	}
 }
@@ -514,10 +595,7 @@ func (self *ProxyDevice) CancelIfIdle() bool {
 	default:
 	}
 
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	idleTimeout := time.Now().Sub(self.lastActivityTime)
+	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
 	if self.settings.ProxyDeviceIdleTimeout <= idleTimeout {
 		self.cancel()
 		return true

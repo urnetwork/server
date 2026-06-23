@@ -585,14 +585,10 @@ func TestProxyIdleDeviceRecreate(t *testing.T) {
 		testProxyHttps(t, h)
 
 		// ---- idle the device via CancelIfIdle ----
-		// push last activity past the idle timeout (under the state lock, the same
-		// way UpdateActivity/CancelIfIdle touch it) so CancelIfIdle cancels the
-		// device, exactly as the manager's background idle checker would.
-		func() {
-			pd1.stateLock.Lock()
-			defer pd1.stateLock.Unlock()
-			pd1.lastActivityTime = pd1.lastActivityTime.Add(-2 * pd1.settings.ProxyDeviceIdleTimeout)
-		}()
+		// push last activity past the idle timeout (the atomic activity timestamp
+		// the manager's idle checker reads) so CancelIfIdle cancels the device,
+		// exactly as the background idle checker would.
+		pd1.lastActivityNanos.Store(time.Now().Add(-2 * pd1.settings.ProxyDeviceIdleTimeout).UnixNano())
 		if !pd1.CancelIfIdle() {
 			t.Fatalf("CancelIfIdle did not cancel the idle device")
 		}
