@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// "errors"
@@ -1576,8 +1577,9 @@ type ResidentForward struct {
 
 	send chan []byte
 
-	stateLock        sync.Mutex
-	lastActivityTime time.Time
+	// activity is tracked with an atomic, not a mutex, so UpdateActivity is
+	// lock-free on the per-frame forward path
+	lastActivityNanos atomic.Int64
 }
 
 func NewResidentForward(
@@ -1587,13 +1589,13 @@ func NewResidentForward(
 ) *ResidentForward {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	transport := &ResidentForward{
-		ctx:              cancelCtx,
-		cancel:           cancel,
-		exchange:         exchange,
-		clientId:         clientId,
-		send:             make(chan []byte, exchange.settings.ForwardBufferSize),
-		lastActivityTime: time.Now(),
+		ctx:      cancelCtx,
+		cancel:   cancel,
+		exchange: exchange,
+		clientId: clientId,
+		send:     make(chan []byte, exchange.settings.ForwardBufferSize),
 	}
+	transport.lastActivityNanos.Store(time.Now().UnixNano())
 	return transport
 }
 
@@ -1685,14 +1687,11 @@ func (self *ResidentForward) Run() {
 }
 
 func (self *ResidentForward) UpdateActivity() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
-		self.lastActivityTime = time.Now()
+		self.lastActivityNanos.Store(time.Now().UnixNano())
 		return true
 	}
 }
@@ -1704,10 +1703,7 @@ func (self *ResidentForward) CancelIfIdle() bool {
 	default:
 	}
 
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	idleTimeout := time.Now().Sub(self.lastActivityTime)
+	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
 	if self.exchange.settings.ForwardIdleTimeout <= idleTimeout {
 		self.cancel()
 		return true
@@ -1753,7 +1749,10 @@ type Resident struct {
 	residentContractManager *residentContractManager
 	residentController      *residentController
 
-	stateLock sync.Mutex
+	// stateLock guards the transports and forwards maps. It is an RWMutex because
+	// the per-frame forward lookup in handleClientForward is a read; only forward
+	// create/replace and transport add/remove take the write lock.
+	stateLock sync.RWMutex
 
 	transports map[*clientTransport]bool
 
@@ -1762,7 +1761,9 @@ type Resident struct {
 
 	controlLimiter *limiter
 
-	lastActivityTime time.Time
+	// activity is tracked with an atomic, not stateLock, so UpdateActivity is
+	// lock-free on the per-frame inbound and forward paths
+	lastActivityNanos atomic.Int64
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
@@ -1818,8 +1819,8 @@ func NewResident(
 		transports:              map[*clientTransport]bool{},
 		forwards:                map[server.Id]*ResidentForward{},
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
-		lastActivityTime:        time.Now(),
 	}
+	resident.lastActivityNanos.Store(time.Now().UnixNano())
 
 	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
 	resident.clientReceiveUnsub = clientReceiveUnsub
@@ -2001,9 +2002,10 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 
 	initForward := func() *ResidentForward {
 		// Fast path: reuse a live existing forward without doing any slow work.
+		// This is the per-frame lookup, so it takes only a read lock.
 		if existing := func() *ResidentForward {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
 			if f := self.forwards[destinationId]; f != nil && f.UpdateActivity() {
 				return f
 			}
@@ -2016,8 +2018,8 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		// momentarily exceeded by one if multiple goroutines race past this
 		// point, which is acceptable).
 		limit := func() bool {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
 			_, ok := self.forwards[destinationId]
 			return !ok && self.exchange.settings.MaxConcurrentForwardsPerResident <= len(self.forwards)
 		}()
@@ -2249,14 +2251,11 @@ func (self *Resident) AddForward() (
 // }
 
 func (self *Resident) UpdateActivity() bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
-		self.lastActivityTime = time.Now()
+		self.lastActivityNanos.Store(time.Now().UnixNano())
 		return true
 	}
 }
@@ -2269,10 +2268,7 @@ func (self *Resident) CancelIfIdle() bool {
 	default:
 	}
 
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	idleTimeout := time.Now().Sub(self.lastActivityTime)
+	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
 	if self.exchange.settings.ExchangeResidentTtl <= idleTimeout {
 		self.cancel()
 		return true
