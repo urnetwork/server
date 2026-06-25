@@ -42,8 +42,8 @@ Options:
 
 	settings := proxy.DefaultProxySettings()
 
-	// use up to a 4gib message pool per instance
-	connect.ResizeMessagePools(connect.Gib(4))
+	// use up to a 16gib message pool per instance
+	connect.ResizeMessagePools(connect.Gib(16))
 
 	quitEvent := server.NewEventWithContext(context.Background())
 	defer quitEvent.Set()

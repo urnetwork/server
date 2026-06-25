@@ -111,7 +111,9 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 			if err != nil {
 				glog.Errorf("[t][%s]total could not decrement err = %s\n", self.clientIpHashHex, err)
 			} else {
-				glog.V(1).Infof("[t][%s]total -1 @%d\n", self.clientIpHashHex, totalCount)
+				if glog.V(1) {
+					glog.Infof("[t][%s]total -1 @%d\n", self.clientIpHashHex, totalCount)
+				}
 			}
 		}
 	}
@@ -148,11 +150,15 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 		return
 	}
 
-	glog.V(1).Infof("[t][%s]total +1 @%d\n", self.clientIpHashHex, totalCount)
+	if glog.V(1) {
+		glog.Infof("[t][%s]total +1 @%d\n", self.clientIpHashHex, totalCount)
+	}
 
 	if int64(self.settings.MaxTotalConnectionCount) < totalCount {
 		delay := self.settings.TotalConnectionDelay
-		glog.V(1).Infof("[t][%s]total rate limit @%d (+%2.fs delay)\n", self.clientIpHashHex, totalCount, float64(delay/time.Millisecond)/1000.0)
+		if glog.V(1) {
+			glog.Infof("[t][%s]total rate limit @%d (+%2.fs delay)\n", self.clientIpHashHex, totalCount, float64(delay/time.Millisecond)/1000.0)
+		}
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")
@@ -166,7 +172,9 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 	if int64(self.settings.BurstConnectionCount) < burstCount {
 		// delay connections above the burst limit
 		delay := time.Duration(burstCount-int64(self.settings.BurstConnectionCount)) * self.settings.BurstConnectionDelay
-		glog.V(1).Infof("[t][%s]burst rate limit @%d (+%.2fs delay)\n", self.clientIpHashHex, burstCount, float64(delay/time.Millisecond)/1000.0)
+		if glog.V(1) {
+			glog.Infof("[t][%s]burst rate limit @%d (+%.2fs delay)\n", self.clientIpHashHex, burstCount, float64(delay/time.Millisecond)/1000.0)
+		}
 		select {
 		case <-self.ctx.Done():
 			err = fmt.Errorf("Done.")

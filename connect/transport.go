@@ -228,14 +228,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
 	if err != nil {
-		glog.V(1).Infof("[t]rate limit err = %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[t]rate limit err = %s\n", err)
+		}
 		return
 	}
 
 	// attemp to parse the auth message from the header
 	// if that fails, expect the auth message as the first message
 	auth, transportVersion := func() (*protocol.Auth, int) {
-		glog.V(2).Infof("[c]header: %v\n", r.Header)
+		if glog.V(2) {
+			glog.Infof("[c]header: %v\n", r.Header)
+		}
 
 		headerAuth := r.Header.Get("Authorization")
 		headerAppVersion := r.Header.Get("X-UR-AppVersion")
@@ -523,6 +527,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			speedTestChunksRemaining := 0
 			chunk := make([]byte, 1024)
 
+			// reusable ping timer (hot-path timer reuse): the slow select arms a
+			// timer each iteration user traffic is briefly idle between bursts.
+			pingTimer := time.NewTimer(0)
+			defer pingTimer.Stop()
+
 			for {
 				if 0 < speedTestChunksRemaining {
 					// drive the speed test in parallel with user traffic.
@@ -581,6 +590,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				default:
 				}
 
+				pingTimer.Reset(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout()))
 				select {
 				case <-handleCtx.Done():
 					return
@@ -591,7 +601,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 
-				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
+				case <-pingTimer.C:
 					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 					err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0))
 					if err != nil {
@@ -720,7 +730,9 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	// 	return
 	// }
 
-	glog.V(2).Infof("[c]h3 listen %s:%d\n", listenIpv4, listenPort)
+	if glog.V(2) {
+		glog.Infof("[c]h3 listen %s:%d\n", listenIpv4, listenPort)
+	}
 
 	// serverAddr := &net.UDPAddr{
 	// 	IP:   listenIp,
@@ -756,7 +768,9 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 	defer listener.Close()
 
 	for {
-		glog.V(2).Infof("[c]h3 wait to accept connection %s:%d\n", listenIpv4, listenPort)
+		if glog.V(2) {
+			glog.Infof("[c]h3 wait to accept connection %s:%d\n", listenIpv4, listenPort)
+		}
 		conn, err := listener.Accept(handleCtx)
 		if err != nil {
 			glog.Infof("[c]h3 accept connection %s:%d err = %s\n", listenIpv4, listenPort, err)
@@ -931,7 +945,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 				message, err := framer.Read(stream)
 				if err != nil {
-					glog.V(2).Infof("[tr]h3 err = %s\n", err)
+					if glog.V(2) {
+						glog.Infof("[tr]h3 err = %s\n", err)
+					}
 					return
 				}
 
@@ -982,7 +998,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				err := framer.Write(stream, message)
 				connect.MessagePoolReturn(message)
 				if err != nil {
-					glog.V(2).Infof("[ts]h3 err = %s\n", err)
+					if glog.V(2) {
+						glog.Infof("[ts]h3 err = %s\n", err)
+					}
 					return false
 				}
 				// reliability tracking

@@ -2,40 +2,38 @@ package server
 
 import (
 	"bytes"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash/fnv"
 
 	"database/sql/driver"
 
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/oklog/ulid/v2"
+
+	"github.com/urnetwork/connect"
 )
 
-type Id [16]byte
+// Id is the server's 16-byte identifier. It wraps connect.Id so the core
+// implementation (generation, parsing, formatting, comparison) lives in a
+// single place — see ../connect — while the server layers on its database glue:
+// the pgx codec below and the database/sql Scanner/Valuer and JSON codecs.
+type Id connect.Id
 
 func NewId() Id {
-	return Id(ulid.Make())
+	return Id(connect.NewId())
 }
 
 func IdFromBytes(idBytes []byte) (Id, error) {
-	if len(idBytes) != 16 {
-		return Id{}, errors.New("Id must be 16 bytes")
-	}
-	return Id(idBytes), nil
+	id, err := connect.IdFromBytes(idBytes)
+	return Id(id), err
 }
 
 func RequireIdFromBytes(idBytes []byte) Id {
-	id, err := IdFromBytes(idBytes)
-	if err != nil {
-		panic(err)
-	}
-	return id
+	return Id(connect.RequireIdFromBytes(idBytes))
 }
 
 func ParseId(idStr string) (Id, error) {
-	return parseUuid(idStr)
+	id, err := connect.ParseId(idStr)
+	return Id(id), err
 }
 
 func RequireParseId(idStr string) Id {
@@ -47,19 +45,11 @@ func RequireParseId(idStr string) Id {
 }
 
 func (self Id) Less(b Id) bool {
-	return self.Cmp(b) < 0
+	return connect.Id(self).LessThan(connect.Id(b))
 }
 
 func (self Id) Cmp(b Id) int {
-	for i, v := range self {
-		if v < b[i] {
-			return -1
-		}
-		if b[i] < v {
-			return 1
-		}
-	}
-	return 0
+	return connect.Id(self).Cmp(connect.Id(b))
 }
 
 func (self Id) Bytes() []byte {
@@ -67,7 +57,7 @@ func (self Id) Bytes() []byte {
 }
 
 func (self Id) String() string {
-	return encodeUuid(self)
+	return connect.Id(self).String()
 }
 
 // Scan implements the database/sql Scanner interface.
@@ -78,11 +68,11 @@ func (self *Id) Scan(src any) error {
 
 	switch src := src.(type) {
 	case string:
-		buf, err := parseUuid(src)
+		id, err := connect.ParseId(src)
 		if err != nil {
 			return err
 		}
-		*self = buf
+		*self = Id(id)
 		return nil
 	}
 
@@ -91,13 +81,13 @@ func (self *Id) Scan(src any) error {
 
 // Value implements the database/sql/driver Valuer interface.
 func (self Id) Value() (driver.Value, error) {
-	return encodeUuid(self), nil
+	return connect.Id(self).String(), nil
 }
 
 func (self Id) MarshalJSON() ([]byte, error) {
 	var buff bytes.Buffer
 	buff.WriteByte('"')
-	buff.WriteString(encodeUuid(self))
+	buff.WriteString(connect.Id(self).String())
 	buff.WriteByte('"')
 	return buff.Bytes(), nil
 }
@@ -109,43 +99,18 @@ func (self *Id) UnmarshalJSON(src []byte) error {
 	if len(src) != 38 {
 		return fmt.Errorf("invalid length for UUID: %v", len(src))
 	}
-	buf, err := parseUuid(string(src[1 : len(src)-1]))
+	id, err := connect.ParseId(string(src[1 : len(src)-1]))
 	if err != nil {
 		return err
 	}
-	*self = buf
+	*self = Id(id)
 	return nil
 }
 
-func (self *Id) Hash() uint64 {
+func (self Id) Hash() uint64 {
 	h := fnv.New64()
 	h.Write(self[0:16])
 	return h.Sum64()
-}
-
-// parseUuid converts a string UUID in standard form to a byte array.
-func parseUuid(src string) (dst [16]byte, err error) {
-	switch len(src) {
-	case 36:
-		src = src[0:8] + src[9:13] + src[14:18] + src[19:23] + src[24:]
-	case 32:
-		// dashes already stripped, assume valid
-	default:
-		// assume invalid.
-		return dst, fmt.Errorf("cannot parse UUID %v", src)
-	}
-
-	buf, err := hex.DecodeString(src)
-	if err != nil {
-		return dst, err
-	}
-
-	copy(dst[:], buf)
-	return dst, err
-}
-
-func encodeUuid(src [16]byte) string {
-	return fmt.Sprintf("%x-%x-%x-%x-%x", src[0:4], src[4:6], src[6:8], src[8:10], src[10:16])
 }
 
 func pgxRegisterIdType(typeMap *pgtype.Map) {
@@ -220,7 +185,7 @@ func (self *PgIdCodec) DecodeDatabaseSQLValue(m *pgtype.Map, oid uint32, format 
 		return nil, err
 	}
 
-	return encodeUuid(id), nil
+	return id.String(), nil
 }
 
 func (self *PgIdCodec) DecodeValue(m *pgtype.Map, oid uint32, format int16, src []byte) (any, error) {
@@ -260,9 +225,9 @@ func (encodePlanUUIDCodecTextIdValuer) Encode(value any, buf []byte) ([]byte, er
 		if v == nil {
 			return nil, nil
 		}
-		return append(buf, encodeUuid(*v)...), nil
+		return append(buf, v.String()...), nil
 	case Id:
-		return append(buf, encodeUuid(v)...), nil
+		return append(buf, v.String()...), nil
 	default:
 		return nil, fmt.Errorf("Unknown value %T (expected Id or *Id)", v)
 	}
@@ -313,10 +278,10 @@ func (scanPlanBinaryUUIDToTextScanner) Scan(src []byte, dst any) error {
 		return fmt.Errorf("invalid length for UUID: %v", len(src))
 	}
 
-	var buf [16]byte
+	var buf Id
 	copy(buf[:], src)
 
-	return scanner.ScanText(pgtype.Text{String: encodeUuid(buf), Valid: true})
+	return scanner.ScanText(pgtype.Text{String: buf.String(), Valid: true})
 }
 
 type scanPlanTextAnyToIdScanner struct{}
@@ -328,22 +293,20 @@ func (scanPlanTextAnyToIdScanner) Scan(src []byte, dst any) error {
 			*v = nil
 			return nil
 		}
-		buf, err := parseUuid(string(src))
+		id, err := ParseId(string(src))
 		if err != nil {
 			return err
 		}
-		id := Id(buf)
 		*v = &id
 		return nil
 	case *Id:
 		if src == nil {
 			return fmt.Errorf("Cannot scan a nil value into *Id (use **Id)")
 		}
-		buf, err := parseUuid(string(src))
+		id, err := ParseId(string(src))
 		if err != nil {
 			return err
 		}
-		id := Id(buf)
 		*v = id
 		return nil
 	default:

@@ -96,11 +96,15 @@ func (self *socks5Server) run() {
 
 		addrPort, err := netip.ParseAddrPort(userAddr)
 		if err != nil {
-			glog.V(1).Infof("[socks]user address %s err=%s\n", userAddr, err)
+			if glog.V(1) {
+				glog.Infof("[socks]user address %s err=%s\n", userAddr, err)
+			}
 			return false
 		}
 
-		glog.V(1).Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
+		if glog.V(1) {
+			glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
+		}
 
 		return self.proxyDeviceManager.ValidCaller(proxyId, addrPort.Addr())
 	}
@@ -442,7 +446,9 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 			counts.invalidAuthToken += 1
 			continue
 		}
-		glog.V(1).Infof("[wg][%s]add client %s %s\n", proxyClient.ProxyId, proxyClient.WgConfig.ClientPublicKey, proxyClient.WgConfig.ClientIpv4)
+		if glog.V(1) {
+			glog.Infof("[wg][%s]add client %s %s\n", proxyClient.ProxyId, proxyClient.WgConfig.ClientPublicKey, proxyClient.WgConfig.ClientIpv4)
+		}
 		// the factory is called from wg device goroutines, which do not recover
 		// panics. Model calls raise on a canceled ctx (e.g. instance shutdown
 		// with in-flight client packets), so convert panics to an error - the
