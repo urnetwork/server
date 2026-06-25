@@ -411,13 +411,20 @@ func (self *ProxyDevice) Run() {
 		for {
 			receive, notify := self.receiveWithNotify()
 			if receive != nil {
+				// the callback only borrows packet (ownership stays with the
+				// caller, which recycles it after we return). share a copy so
+				// ownership transfers to the receive consumer on a successful
+				// send; the consumer returns it to the pool after use.
+				sharedPacket := connect.MessagePoolShareReadOnly(packet)
 				select {
 				case <-self.ctx.Done():
+					connect.MessagePoolReturn(sharedPacket)
 					return
-				case receive <- packet:
+				case receive <- sharedPacket:
 					self.UpdateActivity()
 					return
 				case <-notify:
+					connect.MessagePoolReturn(sharedPacket)
 				}
 			} else {
 				self.tun.Write(packet)
