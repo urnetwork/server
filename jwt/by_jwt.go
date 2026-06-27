@@ -5,8 +5,9 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
-	"encoding/json"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -102,6 +103,49 @@ func byEcdsaSigningKey() *ecdsa.PrivateKey {
 	return nil
 }
 
+// jwtKid is a stable key id for a public key: the base64url (no padding) SHA-256
+// of its PKIX DER encoding. The signer and verifier derive the same id from the
+// same key, so it is used as the JOSE `kid` header to select the exact
+// verification key instead of trying every key.
+func jwtKid(publicKey crypto.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(der)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+// publicKey returns the public key for a loaded private key.
+func publicKey(byPrivateKey crypto.PrivateKey) crypto.PublicKey {
+	return byPrivateKey.(interface{ Public() crypto.PublicKey }).Public()
+}
+
+// byPublicKeysByKid maps each loaded key's kid to its public key, for O(1)
+// verification-key lookup from a token's `kid` header.
+var byPublicKeysByKid = sync.OnceValue(func() map[string]crypto.PublicKey {
+	publicKeysByKid := map[string]crypto.PublicKey{}
+	for _, byPrivateKey := range byPrivateKeys() {
+		kid, err := jwtKid(publicKey(byPrivateKey))
+		if err != nil {
+			glog.Errorf("[jwt]could not compute kid: %s\n", err)
+			continue
+		}
+		publicKeysByKid[kid] = publicKey(byPrivateKey)
+	}
+	return publicKeysByKid
+})
+
+// byPublicKeys is the full set of verification keys, newest first (same order as
+// byPrivateKeys). It is the fallback when a token has no recognized `kid`.
+var byPublicKeys = sync.OnceValue(func() []gojwt.VerificationKey {
+	publicKeys := []gojwt.VerificationKey{}
+	for _, byPrivateKey := range byPrivateKeys() {
+		publicKeys = append(publicKeys, publicKey(byPrivateKey))
+	}
+	return publicKeys
+})
+
 // the bringyour authorization model is:
 // Network
 //
@@ -183,44 +227,30 @@ func NewByJwtWithCreateTime(
 }
 
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
-	var token *gojwt.Token
-	var err error
-
 	// todo - remove this once clients support refresh
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithoutClaimsValidation(),
 	}
 
-	// attempt all signing keys
-	for _, byPrivateKey := range byPrivateKeys() {
-		// todo - ParseWithClaims instead of jwt.Parse
-		// this will get newly added RegisteredClaims which includes ExipiresAt
-		token, err = gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
-			return byPrivateKey.(interface{ Public() crypto.PublicKey }).Public(), nil
-		}, parserOptions...)
-		if err == nil {
-			break
+	// select the verification key by the token's `kid` header when present and
+	// recognized; otherwise fall back to trying every key. kid is only an
+	// optimization, so an absent or unknown kid never changes which tokens
+	// verify. parse directly into the ByJwt struct (which is a gojwt.Claims via
+	// its embedded RegisteredClaims) to avoid a MapClaims map plus a json
+	// marshal/unmarshal round-trip on every request.
+	keyFunc := func(token *gojwt.Token) (any, error) {
+		if kid, ok := token.Header["kid"].(string); ok {
+			if matchedPublicKey, ok := byPublicKeysByKid()[kid]; ok {
+				return matchedPublicKey, nil
+			}
 		}
-	}
-	if token == nil {
-		return nil, errors.New("Could not verify signed token.")
-	}
-
-	// if !token.Valid {
-	// 	return nil, errors.New("Invalid token.")
-	// }
-
-	claims := token.Claims.(gojwt.MapClaims)
-
-	claimsJson, err := json.Marshal(claims)
-	if err != nil {
-		return nil, err
+		return gojwt.VerificationKeySet{Keys: byPublicKeys()}, nil
 	}
 
 	byJwt := &ByJwt{}
-	err = json.Unmarshal(claimsJson, byJwt)
+	_, err := gojwt.ParseWithClaims(jwtSigned, byJwt, keyFunc, parserOptions...)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("Could not verify signed token.")
 	}
 
 	err = fixByJwt(ctx, byJwt)
@@ -232,20 +262,9 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 }
 
 func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
-	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
-	if err != nil {
-		return nil, err
-	}
-
-	claims := token.Claims.(gojwt.MapClaims)
-
-	claimsJson, err := json.Marshal(claims)
-	if err != nil {
-		return nil, err
-	}
-
+	// parse claims straight into the ByJwt struct, same as ParseByJwt
 	byJwt := &ByJwt{}
-	err = json.Unmarshal(claimsJson, byJwt)
+	_, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt)
 	if err != nil {
 		return nil, err
 	}
@@ -595,6 +614,11 @@ func sign(claims gojwt.Claims) string {
 		panic(fmt.Errorf("No signing key found"))
 	}
 	token := gojwt.NewWithClaims(signingMethod, claims)
+	// tag the token with the signing key's kid so the verifier can select the
+	// exact key instead of trying all of them
+	if kid, err := jwtKid(publicKey(key)); err == nil {
+		token.Header["kid"] = kid
+	}
 	jwtSigned, err := token.SignedString(key)
 	if err != nil {
 		panic(err)

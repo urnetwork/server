@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"bytes"
 	"fmt"
 	"io"
 	"reflect"
@@ -20,6 +19,15 @@ import (
 	// "github.com/urnetwork/server/jwt"
 )
 
+// compiled once at package load; these run on the error path of every request,
+// so per-call regexp.MustCompile would be pure waste.
+var (
+	// strips /vXXXX version path segments from an impl's canonical name
+	implNameVersionRegex = regexp.MustCompile("/v\\d+")
+	// peels a leading "<code> " off an error message into an http status code
+	httpErrorCodeRegex = regexp.MustCompile("^(\\d+)\\s+(.*)$")
+)
+
 // const BanMessage = "This client has been temporarily banned by bandit. support@ur.io"
 
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
@@ -27,20 +35,31 @@ type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, err
 type BodyFormatFunction func(*http.Request) (io.Reader, error)
 type FormatFunction[R any] func(result R) (complete bool)
 
-func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
-	formatter := func(result R) bool {
-		responseJson, err := json.Marshal(result)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return true
-		}
+// writeJsonResponse marshals result as JSON and writes it. This is the default
+// response path; calling it directly avoids building a closure per response
+// (unlike going through JsonFormatter). The verbose log is guarded so the `%T`
+// boxing and formatting do not run when V(2) is off.
+func writeJsonResponse[R any](w http.ResponseWriter, result R) {
+	responseJson, err := json.Marshal(result)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-		glog.V(2).Infof("[h]response (%T): %s\n", result, responseJson)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(responseJson)
+	if v := glog.V(2); v {
+		v.Infof("[h]response (%T): %s\n", result, responseJson)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(responseJson)
+}
+
+// JsonFormatter returns a FormatFunction that writes result as JSON. The default
+// path uses writeJsonResponse directly; this remains for explicit formatter lists.
+func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
+	return func(result R) bool {
+		writeJsonResponse(w, result)
 		return true
 	}
-	return formatter
 }
 
 func wrap[R any](
@@ -75,13 +94,13 @@ func wrap[R any](
 		}
 	}
 
-	JsonFormatter[R](w)(result)
+	writeJsonResponse(w, result)
 }
 
 func implName[R any](impl ImplFunction[R]) string {
 	name := runtime.FuncForPC(reflect.ValueOf(impl).Pointer()).Name()
 	// remove all /vXXXX paths in the canonical module
-	name = regexp.MustCompile("/v\\d+").ReplaceAllString(name, "")
+	name = implNameVersionRegex.ReplaceAllString(name, "")
 	return name
 }
 
@@ -224,9 +243,12 @@ func wrapWithInput[T any, R any](
 		return
 	}
 
-	glog.V(2).Infof("[h]request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
+	// guarded: the body->string copy and ReplaceAll must not run when V(2) is off
+	if v := glog.V(2); v {
+		v.Infof("[h]request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
+	}
 
-	err = json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&input)
+	err = json.Unmarshal(bodyBytes, &input)
 	if err != nil {
 		glog.Infof("[h]request decoding error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -251,7 +273,7 @@ func wrapWithInput[T any, R any](
 		}
 	}
 
-	JsonFormatter[R](w)(result)
+	writeJsonResponse(w, result)
 }
 
 // guarantees NetworkId+UserId
@@ -415,8 +437,7 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 
 	// error messages that start with <number><space>
 	// have the number peeled off and converted to the status code
-	codeRe := regexp.MustCompile("^(\\d+)\\s+(.*)$")
-	if groups := codeRe.FindStringSubmatch(message); groups != nil {
+	if groups := httpErrorCodeRegex.FindStringSubmatch(message); groups != nil {
 		statusCode, _ = strconv.Atoi(groups[1])
 		message = groups[2]
 		statusError = true

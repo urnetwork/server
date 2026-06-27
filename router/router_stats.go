@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// a hot route would otherwise grow one duration entry per request per bucket;
+// cap the sample so memory stays bounded. the sum and counts remain exact, only
+// the percentile is estimated from this reservoir.
+const maxSuccessDurationSamples = 1024
+
 type routeStat struct {
 	netSuccessDuration time.Duration
 	successDurations   []time.Duration
@@ -25,6 +31,24 @@ type routeStat struct {
 
 func (self *routeStat) computeStats() {
 	slices.Sort(self.successDurations)
+}
+
+// recordSuccessDuration folds one success into the stat. netSuccessDuration and
+// successCount stay exact; successDurations is a uniform random reservoir
+// (algorithm R) capped at maxSuccessDurationSamples so a hot route's bucket can
+// not grow without bound.
+func (self *routeStat) recordSuccessDuration(duration time.Duration) {
+	self.netSuccessDuration += duration
+	self.successCount += 1
+	if len(self.successDurations) < maxSuccessDurationSamples {
+		self.successDurations = append(self.successDurations, duration)
+		return
+	}
+	// replace a random slot with probability maxSuccessDurationSamples/successCount
+	j := rand.Int64N(self.successCount)
+	if j < maxSuccessDurationSamples {
+		self.successDurations[j] = duration
+	}
 }
 
 func (self *routeStat) meanSuccessDuration() time.Duration {
@@ -209,9 +233,7 @@ func (self *RouterStats) Success(route string, duration time.Duration) {
 		}
 		routeStats[route] = stat
 	}
-	stat.netSuccessDuration += duration
-	stat.successDurations = append(stat.successDurations, duration)
-	stat.successCount += 1
+	stat.recordSuccessDuration(duration)
 }
 
 func (self *RouterStats) Error(route string) {
