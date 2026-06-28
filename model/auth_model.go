@@ -435,23 +435,26 @@ func handleLoginWallet(
 	ctx context.Context,
 ) (result *AuthLoginResult, returnErr error) {
 	/**
-	 * Handle wallet login
+	 * Handle wallet login by validating the server-issued challenge.
+	 * UseWalletAuthChallenge verifies the signature, checks the timestamp,
+	 * and marks the challenge as used atomically.
 	 */
-
-	isValid, err := VerifySignature(
-		walletAuth.Blockchain,
-		walletAuth.PublicKey,
-		walletAuth.Message,
-		walletAuth.Signature,
-	)
-
+	useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+		Blockchain: walletAuth.Blockchain,
+		PublicKey:  walletAuth.PublicKey,
+		Message:    walletAuth.Message,
+		Signature:  walletAuth.Signature,
+	}, ctx)
 	if err != nil {
 		returnErr = err
 		return
 	}
-
-	if !isValid {
-		returnErr = errors.New("invalid signature")
+	if !useResult.Valid {
+		msg := "invalid wallet challenge"
+		if useResult.Error != nil {
+			msg = useResult.Error.Message
+		}
+		returnErr = errors.New(msg)
 		return
 	}
 

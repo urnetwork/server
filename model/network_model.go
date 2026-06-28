@@ -356,27 +356,28 @@ func NetworkCreate(
 				},
 			}, nil
 		}
-
 		networkCreate.WalletAuth.Blockchain = parsedBlockchain.String()
 
 		/**
-		 * verify the wallet signature
+		 * validate the wallet challenge
 		 */
-		isValid, err := VerifySignature(
-			networkCreate.WalletAuth.Blockchain,
-			networkCreate.WalletAuth.PublicKey,
-			networkCreate.WalletAuth.Message,
-			networkCreate.WalletAuth.Signature,
-		)
-
+		useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: networkCreate.WalletAuth.Blockchain,
+			PublicKey:  networkCreate.WalletAuth.PublicKey,
+			Message:    networkCreate.WalletAuth.Message,
+			Signature:  networkCreate.WalletAuth.Signature,
+		}, session.Ctx)
 		if err != nil {
 			return nil, err
 		}
-
-		if !isValid {
+		if !useResult.Valid {
+			msg := "invalid wallet challenge"
+			if useResult.Error != nil {
+				msg = useResult.Error.Message
+			}
 			return &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "invalid wallet signature",
+					Message: msg,
 				},
 			}, nil
 		}
