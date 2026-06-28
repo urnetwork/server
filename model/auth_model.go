@@ -45,6 +45,9 @@ type WalletAuthArgs struct {
 	Signature  string `json:"wallet_signature,omitempty"`
 	Message    string `json:"wallet_message,omitempty"`
 	Blockchain string `json:"blockchain,omitempty"`
+	// new fields; kept optional for backwards compat during deploy window
+	Challenge string `json:"challenge,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
 }
 
 type AuthLoginArgs struct {
