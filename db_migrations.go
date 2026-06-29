@@ -2803,4 +2803,23 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS transfer_contract_dispute_create_time
         ON transfer_contract (dispute, outcome, create_time)
     `),
+
+	newSqlMigration(`
+		CREATE TABLE wallet_auth_challenge (
+			challenge_id uuid NOT NULL,
+			challenge_value varchar(128) NOT NULL,
+			wallet_address text NULL,
+			blockchain varchar(32) NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			expire_time timestamp NOT NULL,
+			used bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (challenge_id),
+			UNIQUE (challenge_value)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX wallet_auth_challenge_expire_time_used
+		ON wallet_auth_challenge (expire_time, used)
+	`),
 }
