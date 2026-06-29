@@ -220,6 +220,7 @@ func (self *TestEnv) setup() func() {
 						OWNER=%s 
 						ENCODING=UTF8
 						LOCALE='en_US.UTF-8'
+						TEMPLATE='template0'
 				`,
 				testPgDbName,
 				pg["user"],
