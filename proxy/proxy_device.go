@@ -359,6 +359,9 @@ func NewProxyDevice(
 	}
 	deviceLocal.SetIngressSecurityPolicyGenerator(settings.IngressSecurityPolicyGenerator)
 	deviceLocal.SetEgressSecurityPolicyGenerator(settings.EgressSecurityPolicyGenerator)
+	// the proxy egresses DNS and HTTP unchanged (pass-through); disable the upgrade mux
+	// so each of the many proxy devices avoids the per-device tun/stack it would create
+	deviceLocal.SetUpgradeMuxSettings(nil)
 
 	var dnsResolverSettings *connect.DnsResolverSettings
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
@@ -367,6 +370,8 @@ func NewProxyDevice(
 		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
+	// the proxy runs on the shared gVisor stack, so its TCP buffers come from the default
+	// settings (up to 1MB per connection) rather than a per-tun override.
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
 
