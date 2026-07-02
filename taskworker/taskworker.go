@@ -41,6 +41,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
+		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
@@ -166,8 +167,9 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.RemoveExpiredAuthAttemptsPost,
 		),
 		task.NewTaskTargetWithPost(
-			work.RemoveExpiredAuthAttempts,
-			work.RemoveExpiredAuthAttemptsPost,
+			work.RemoveExpiredWalletAuthChallenges,
+			work.RemoveExpiredWalletAuthChallengesPost,
+			"github.com/urnetwork/server/taskworker/work.RemoveExpiredWalletAuthChallenges",
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,
