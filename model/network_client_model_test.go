@@ -10,6 +10,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
@@ -138,7 +140,6 @@ func TestSetProvide(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		newSecretKeys := func() map[ProvideMode][]byte {
 			k := make([]byte, 32)
 			mathrand.Read(k)
@@ -151,7 +152,6 @@ func TestSetProvide(t *testing.T) {
 		secretKeys := newSecretKeys()
 
 		startTime := server.NowUtc()
-
 		changeCount, provideModes := GetProvideKeyChanges(ctx, clientId, startTime)
 		assert.Equal(t, changeCount, 0)
 		assert.Equal(t, provideModes, map[ProvideMode]bool{})
@@ -214,7 +214,6 @@ func TestGetProvideFallsBackToDb(t *testing.T) {
 		}
 
 		SetProvide(ctx, clientId, secretKeys)
-
 		// drop the cache so the reads are forced through the db fallback
 		server.Redis(ctx, func(r server.RedisClient) {
 			r.Del(ctx, provideModesKey(clientId))
@@ -238,7 +237,6 @@ func TestGetProvideModesNotSet(t *testing.T) {
 		ctx := context.Background()
 
 		clientId := server.NewId()
-
 		// a client that never provided returns an empty set and no error
 		provideModes, err := GetProvideModes(ctx, clientId)
 		assert.Equal(t, err, nil)
@@ -382,6 +380,81 @@ func TestMigrateProvideMode(t *testing.T) {
 			assert.Equal(t, []byte(publicSk), publicKey)
 			networkSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
 			assert.Equal(t, []byte(networkSk), networkKey)
+		})
+	})
+}
+
+func TestRemoveNetworkClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		// Create a mock session
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// Generate random IDs to test the ANY($1) binding
+		clientIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+
+		args := &RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}
+
+		// This will panic if the driver fails to cast []server.Id to uuid[]
+		_, err := RemoveNetworkClients(args, sess)
+
+		// Assert that the function ran without returning an error
+		assert.Equal(t, err, nil)
+	})
+}
+
+func TestRemoveNetworkClientsOnlyRemovesOwnNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		ourNetworkId := server.NewId()
+		otherNetworkId := server.NewId()
+
+		// Seed clients in two networks.  Use SQL so we can explicitly set network_id
+		// without depending on unrelated model code paths.
+		ourClientId := server.NewId()
+		otherClientId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO network_client (client_id, network_id, active)
+				VALUES
+					($1, $2, true),
+					($3, $4, true)
+			`, ourClientId, ourNetworkId, otherClientId, otherNetworkId)
+			server.Raise(err)
+		})
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: ourNetworkId,
+			},
+		}
+
+		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{ClientIds: []server.Id{ourClientId, otherClientId}}, sess)
+		assert.Equal(t, err, nil)
+
+		// our client is disabled
+		server.Tx(ctx, func(tx server.PgTx) {
+			var ourActive bool
+			err := tx.QueryRow(ctx, `SELECT active FROM network_client WHERE client_id = $1`, ourClientId).Scan(&ourActive)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, ourActive, false)
+
+			// other-network client must stay active
+			var otherActive bool
+			err = tx.QueryRow(ctx, `SELECT active FROM network_client WHERE client_id = $1`, otherClientId).Scan(&otherActive)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, otherActive, true)
 		})
 	})
 }
