@@ -2822,4 +2822,19 @@ var migrations = []any{
 		CREATE INDEX wallet_auth_challenge_expire_time_used
 		ON wallet_auth_challenge (expire_time, used)
 	`),
+	newSqlMigration(`
+		CREATE TABLE wallet_auth_challenge_attempt (
+			wallet_auth_challenge_attempt_id uuid NOT NULL,
+			client_address_hash bytea NOT NULL,
+			client_address_port int NOT NULL,
+			attempt_time timestamp NOT NULL DEFAULT now(),
+			success bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (wallet_auth_challenge_attempt_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_port_attempt_time
+		ON wallet_auth_challenge_attempt (client_address_hash, client_address_port, attempt_time)
+	`),
 }

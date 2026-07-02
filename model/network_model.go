@@ -352,7 +352,15 @@ func NetworkCreate(
 		if err != nil {
 			return &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "unsupported blockchain for wallet authentication",
+					Message: "400 unsupported blockchain for wallet authentication",
+				},
+			}, nil
+		}
+		// Wallet authentication is Solana-only.
+		if parsedBlockchain != SOL {
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "400 unsupported blockchain for wallet authentication",
 				},
 			}, nil
 		}
@@ -371,7 +379,7 @@ func NetworkCreate(
 			return nil, err
 		}
 		if !useResult.Valid {
-			msg := "invalid wallet challenge"
+			msg := "400 invalid wallet challenge"
 			if useResult.Error != nil {
 				msg = useResult.Error.Message
 			}

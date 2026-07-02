@@ -45,9 +45,6 @@ type WalletAuthArgs struct {
 	Signature  string `json:"wallet_signature,omitempty"`
 	Message    string `json:"wallet_message,omitempty"`
 	Blockchain string `json:"blockchain,omitempty"`
-	// new fields; kept optional for backwards compat during deploy window
-	Challenge string `json:"challenge,omitempty"`
-	Timestamp int64  `json:"timestamp,omitempty"`
 }
 
 type AuthLoginArgs struct {
@@ -86,7 +83,6 @@ func AuthLogin(
 	login AuthLoginArgs,
 	session *session.ClientSession,
 ) (*AuthLoginResult, error) {
-
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
@@ -450,7 +446,7 @@ func handleLoginWallet(
 		return
 	}
 	if !useResult.Valid {
-		msg := "invalid wallet challenge"
+		msg := "401 invalid wallet challenge"
 		if useResult.Error != nil {
 			msg = useResult.Error.Message
 		}
@@ -488,14 +484,10 @@ func handleLoginWallet(
 	/**
 	 * Check if the user exists associated with this public key
 	 */
-
-	// var userId *server.Id
-	// var authType string
 	found := false
 	var networkId server.Id
 	var networkName string
 	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 		result, err := conn.Query(
 			ctx,
 			`

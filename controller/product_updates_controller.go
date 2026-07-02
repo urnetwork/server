@@ -133,7 +133,7 @@ func BrevoWebhook(
 }
 
 type BrevoListArgs struct {
-	Emails []string `json:"emails",omitempty`
+	Emails []string `json:"emails,omitempty"`
 }
 
 // {"contacts":{"success":["brien@ur.io"],"failure":[]}}%

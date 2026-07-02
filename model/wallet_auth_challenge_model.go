@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
@@ -17,9 +18,9 @@ import (
 const (
 	WalletAuthChallengeLifetime = 5 * time.Minute
 	WalletAuthChallengeSkewPast = 1 * time.Minute
-	// Use the same lifetime for max future clock skew so a challenge
-	// cannot be hoarded beyond its own expiry.
-	WalletAuthChallengeSkewFuture = 5 * time.Minute
+	// Allow a small future skew for legitimate clock drift, but not enough
+	// to hoard a challenge beyond its own expiry.
+	WalletAuthChallengeSkewFuture = 1 * time.Minute
 	WalletAuthChallengeValueBytes = 32
 )
 
@@ -62,15 +63,31 @@ func CreateWalletAuthChallenge(
 	if args.Blockchain != nil {
 		blockchain = strings.ToLower(strings.TrimSpace(*args.Blockchain))
 	}
-	// default empty/missing blockchain to solana to match existing behavior
+	// Wallet authentication is Solana-only.
 	if blockchain == "" {
 		blockchain = SOL.String()
+	} else if blockchain != "sol" && blockchain != "solana" {
+		return &WalletAuthChallengeResult{
+			Error: &WalletAuthChallengeResultError{
+				Message: "400 unsupported blockchain for wallet authentication",
+			},
+		}
 	}
+	blockchain = SOL.String()
 
 	var walletAddress *string
 	if args.WalletAddress != nil {
 		w := strings.TrimSpace(*args.WalletAddress)
-		walletAddress = &w
+		if w != "" {
+			if _, err := solana.PublicKeyFromBase58(w); err != nil {
+				return &WalletAuthChallengeResult{
+					Error: &WalletAuthChallengeResultError{
+						Message: "400 invalid wallet address",
+					},
+				}
+			}
+			walletAddress = &w
+		}
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -148,6 +165,24 @@ func UseWalletAuthChallenge(
 	args *UseWalletAuthChallengeArgs,
 	ctx context.Context,
 ) (*UseWalletAuthChallengeResult, error) {
+	blockchain := strings.ToLower(strings.TrimSpace(args.Blockchain))
+	if blockchain == "" {
+		blockchain = SOL.String()
+	} else if blockchain != "sol" && blockchain != "solana" {
+		return &UseWalletAuthChallengeResult{
+			Valid: false,
+			Error: &WalletAuthChallengeResultError{Message: "400 unsupported blockchain for wallet authentication"},
+		}, nil
+	}
+	blockchain = SOL.String()
+
+	if _, err := solana.PublicKeyFromBase58(args.PublicKey); err != nil {
+		return &UseWalletAuthChallengeResult{
+			Valid: false,
+			Error: &WalletAuthChallengeResultError{Message: "400 invalid wallet address"},
+		}, nil
+	}
+
 	challengeValue, timestamp, err := parseWalletAuthChallengeMessage(args.Message)
 	if err != nil {
 		return &UseWalletAuthChallengeResult{
@@ -172,11 +207,6 @@ func UseWalletAuthChallenge(
 		}, nil
 	}
 
-	blockchain := args.Blockchain
-	if blockchain == "" {
-		blockchain = SOL.String()
-	}
-
 	isValid, err := VerifySignature(blockchain, args.PublicKey, args.Message, args.Signature)
 	if err != nil {
 		return nil, err
@@ -190,13 +220,15 @@ func UseWalletAuthChallenge(
 
 	var used bool
 	var expireTime time.Time
+	var createTime time.Time
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, dbErr := tx.Query(
 			ctx,
 			`
 				SELECT
 					used,
-					expire_time
+					expire_time,
+					create_time
 				FROM wallet_auth_challenge
 				WHERE challenge_value = $1
 				FOR UPDATE
@@ -211,10 +243,17 @@ func UseWalletAuthChallenge(
 				err = errors.New("challenge not found")
 				return
 			}
-			server.Raise(result.Scan(&used, &expireTime))
+			server.Raise(result.Scan(&used, &expireTime, &createTime))
 		})
 
 		if err != nil {
+			return
+		}
+
+		if messageTime.Before(createTime.Add(-WalletAuthChallengeSkewPast)) ||
+			messageTime.After(createTime.Add(WalletAuthChallengeSkewFuture)) ||
+			messageTime.Unix() != createTime.Unix() {
+			err = errors.New("challenge timestamp mismatch")
 			return
 		}
 
@@ -244,9 +283,16 @@ func UseWalletAuthChallenge(
 	})
 
 	if err != nil {
+		code := "401"
+		switch err.Error() {
+		case "challenge already used", "challenge expired":
+			code = "403"
+		case "challenge timestamp mismatch":
+			code = "400"
+		}
 		return &UseWalletAuthChallengeResult{
 			Valid: false,
-			Error: &WalletAuthChallengeResultError{Message: fmt.Sprintf("401 %s", err.Error())},
+			Error: &WalletAuthChallengeResultError{Message: fmt.Sprintf("%s %s", code, err.Error())},
 		}, nil
 	}
 

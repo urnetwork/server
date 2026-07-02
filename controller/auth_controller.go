@@ -29,10 +29,18 @@ func AuthWalletChallenge(
 	args AuthWalletChallengeArgs,
 	session *session.ClientSession,
 ) (*AuthWalletChallengeResult, error) {
+	walletAuthChallengeAttemptId, allow := model.WalletAuthChallengeAttempt(session)
+	if !allow {
+		return nil, model.MaxWalletAuthChallengeAttemptsError()
+	}
+
 	result := model.CreateWalletAuthChallenge(model.WalletAuthChallengeArgs{
 		WalletAddress: args.WalletAddress,
 		Blockchain:    args.Blockchain,
 	}, session.Ctx)
+
+	model.SetWalletAuthChallengeAttemptSuccess(session.Ctx, walletAuthChallengeAttemptId, result.Error == nil)
+
 	return result, nil
 }
 

@@ -634,17 +634,28 @@ func addWalletAuth(
 
 	walletAuth := addWalletAuth.WalletAuth
 
-	isValid, err := VerifySolanaSignature(
-		walletAuth.PublicKey,
-		walletAuth.Message,
-		walletAuth.Signature,
-	)
+	if walletAuth.Signature != "" && walletAuth.Message != "" {
+		isValid, err := VerifySolanaSignature(
+			walletAuth.PublicKey,
+			walletAuth.Message,
+			walletAuth.Signature,
+		)
+		if err != nil {
+			return err
+		}
+		if !isValid {
+			return errors.New("invalid signature")
+		}
+	}
+
+	if walletAuth.Blockchain == "" {
+		walletAuth.Blockchain = SOL.String()
+	}
+	parsedBlockchain, err := ParseBlockchain(walletAuth.Blockchain)
 	if err != nil {
 		return err
 	}
-	if !isValid {
-		return errors.New("invalid signature")
-	}
+	walletAuth.Blockchain = parsedBlockchain.String()
 
 	server.Tx(ctx, func(tx server.PgTx) {
 

@@ -207,5 +207,13 @@ func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
 			`,
 			minTime.UTC(),
 		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM wallet_auth_challenge_attempt
+				WHERE attempt_time < $1
+			`,
+			minTime.UTC(),
+		))
 	})
 }
