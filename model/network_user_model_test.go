@@ -240,3 +240,39 @@ func TestFindNetworkIdByEmail(t *testing.T) {
 
 	})
 }
+
+func TestFindNetworkIdByWalletAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "wallet_lookup"
+		publicKey := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
+		message := "Welcome to URnetwork"
+
+		Testing_CreateNetworkByWallet(
+			ctx,
+			networkId,
+			networkName,
+			userId,
+			publicKey,
+			signature,
+			message,
+		)
+
+		retrievedNetworkId, err := FindNetworkIdByWalletAddress(ctx, publicKey)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *retrievedNetworkId, networkId)
+
+		/**
+		 * Test not found
+		 */
+
+		retrievedNetworkId, err = FindNetworkIdByWalletAddress(ctx, "unknown_wallet_address")
+		assert.Equal(t, err, nil)
+		assert.Equal(t, retrievedNetworkId, nil)
+
+	})
+}

@@ -83,7 +83,6 @@ func AuthLogin(
 	login AuthLoginArgs,
 	session *session.ClientSession,
 ) (*AuthLoginResult, error) {
-
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
@@ -432,23 +431,26 @@ func handleLoginWallet(
 	ctx context.Context,
 ) (result *AuthLoginResult, returnErr error) {
 	/**
-	 * Handle wallet login
+	 * Handle wallet login by validating the server-issued challenge.
+	 * UseWalletAuthChallenge verifies the signature, checks the timestamp,
+	 * and marks the challenge as used atomically.
 	 */
-
-	isValid, err := VerifySignature(
-		walletAuth.Blockchain,
-		walletAuth.PublicKey,
-		walletAuth.Message,
-		walletAuth.Signature,
-	)
-
+	useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+		Blockchain: walletAuth.Blockchain,
+		PublicKey:  walletAuth.PublicKey,
+		Message:    walletAuth.Message,
+		Signature:  walletAuth.Signature,
+	}, ctx)
 	if err != nil {
 		returnErr = err
 		return
 	}
-
-	if !isValid {
-		returnErr = errors.New("invalid signature")
+	if !useResult.Valid {
+		msg := "401 invalid wallet challenge"
+		if useResult.Error != nil {
+			msg = useResult.Error.Message
+		}
+		returnErr = errors.New(msg)
 		return
 	}
 
@@ -482,14 +484,10 @@ func handleLoginWallet(
 	/**
 	 * Check if the user exists associated with this public key
 	 */
-
-	// var userId *server.Id
-	// var authType string
 	found := false
 	var networkId server.Id
 	var networkName string
 	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 		result, err := conn.Query(
 			ctx,
 			`

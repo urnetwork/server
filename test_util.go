@@ -217,9 +217,11 @@ func (self *TestEnv) setup() func() {
 				`
 					CREATE DATABASE %s
 					WITH
-						OWNER=%s 
+						OWNER=%s
 						ENCODING=UTF8
-						LOCALE='en_US.UTF-8'
+						LC_COLLATE='en_US.UTF-8'
+						LC_CTYPE='en_US.UTF-8'
+						TEMPLATE='template0'
 				`,
 				testPgDbName,
 				pg["user"],

@@ -18,6 +18,32 @@ var SsoRedirectUrl = sync.OnceValue(func() string {
 	return c["web_connect"].(map[string]any)["redirect_url"].(string)
 })
 
+type AuthWalletChallengeArgs struct {
+	WalletAddress *string `json:"wallet_address,omitempty"`
+	Blockchain    *string `json:"blockchain,omitempty"`
+}
+
+type AuthWalletChallengeResult = model.WalletAuthChallengeResult
+
+func AuthWalletChallenge(
+	args AuthWalletChallengeArgs,
+	session *session.ClientSession,
+) (*AuthWalletChallengeResult, error) {
+	walletAuthChallengeAttemptId, allow := model.WalletAuthChallengeAttempt(session)
+	if !allow {
+		return nil, model.MaxWalletAuthChallengeAttemptsError()
+	}
+
+	result := model.CreateWalletAuthChallenge(model.WalletAuthChallengeArgs{
+		WalletAddress: args.WalletAddress,
+		Blockchain:    args.Blockchain,
+	}, session.Ctx)
+
+	model.SetWalletAuthChallengeAttemptSuccess(session.Ctx, walletAuthChallengeAttemptId, result.Error == nil)
+
+	return result, nil
+}
+
 func AuthLogin(
 	login model.AuthLoginArgs,
 	session *session.ClientSession,
