@@ -41,11 +41,11 @@ func TestWalletAuthChallengeAttemptFailedRateLimit(t *testing.T) {
 		// matching the semantics of UserAuthAttempt
 		threshold := WalletAuthChallengeAttemptFailedCountThreshold
 		for i := 0; i < threshold-1; i += 1 {
-			_, allow := WalletAuthChallengeAttempt(clientSession)
+			attemptId, allow := WalletAuthChallengeAttempt(clientSession)
 			assert.Equal(t, allow, true)
 			SetWalletAuthChallengeAttemptSuccess(
 				clientSession.Ctx,
-				server.NewId(),
+				attemptId,
 				false,
 			)
 		}
