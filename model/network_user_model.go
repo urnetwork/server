@@ -634,18 +634,19 @@ func addWalletAuth(
 
 	walletAuth := addWalletAuth.WalletAuth
 
-	if walletAuth.Signature != "" && walletAuth.Message != "" {
-		isValid, err := VerifySolanaSignature(
-			walletAuth.PublicKey,
-			walletAuth.Message,
-			walletAuth.Signature,
-		)
-		if err != nil {
-			return err
-		}
-		if !isValid {
-			return errors.New("invalid signature")
-		}
+	if walletAuth.Signature == "" || walletAuth.Message == "" {
+		return errors.New("wallet signature and message are required")
+	}
+	isValid, err := VerifySolanaSignature(
+		walletAuth.PublicKey,
+		walletAuth.Message,
+		walletAuth.Signature,
+	)
+	if err != nil {
+		return err
+	}
+	if !isValid {
+		return errors.New("invalid signature")
 	}
 
 	if walletAuth.Blockchain == "" {
@@ -654,6 +655,9 @@ func addWalletAuth(
 	parsedBlockchain, err := ParseBlockchain(walletAuth.Blockchain)
 	if err != nil {
 		return err
+	}
+	if parsedBlockchain != SOL {
+		return errors.New("wallet auth only supports solana")
 	}
 	walletAuth.Blockchain = parsedBlockchain.String()
 
