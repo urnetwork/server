@@ -76,6 +76,8 @@ Options:
 
 	server.Warmup()
 
+	server.StartStatsPusher(ctx)
+
 	proxy.NewSocks5Server(
 		ctx,
 		cancel,

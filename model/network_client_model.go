@@ -1507,6 +1507,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// until the next sweep or overwrite.
 	for _, clientId := range reapedClientIds {
 		RemoveClientPublicKey(ctx, clientId)
+		// clear the reaped client's verify egress index entries so a
+		// reassigned ip is never miscredited (sn/VALIDATOR.md §8.2)
+		RemoveVerifyEgressForClient(ctx, clientId)
 	}
 
 	var removedProxyIds []server.Id

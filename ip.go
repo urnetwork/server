@@ -66,6 +66,24 @@ func ClientIpHashForAddr(addr netip.Addr) [32]byte {
 	return [32]byte(clientIpHash)
 }
 
+// ClientIpHashForAddrPrefix is ClientIpHashForAddr with caller-chosen network
+// prefixes instead of the fixed /29-v4 & /56-v6 bucketing. The `/verify` head
+// routable-IP score (sn/VALIDATOR.md §8.1, D27) uses this because its "distinct
+// IP" granularity is a subnet-configurable parameter (default /29 v4, /48 v6).
+// Same keyed (peppered) hash, so raw egress ips are never stored.
+func ClientIpHashForAddrPrefix(addr netip.Addr, v4Prefix int, v6Prefix int) [32]byte {
+	addr = addr.Unmap()
+	if addr.Is4() {
+		addr = netip.PrefixFrom(addr, v4Prefix).Masked().Addr()
+	} else if addr.Is6() {
+		addr = netip.PrefixFrom(addr, v6Prefix).Masked().Addr()
+	}
+	h := sha256.New()
+	h.Write(addr.AsSlice())
+	h.Write(clientIpHashPepper())
+	return [32]byte(h.Sum(nil))
+}
+
 func SplitClientAddress(clientAddress string) (host string, port int, err error) {
 	columnCount := strings.Count(clientAddress, ":")
 	bracketCount := strings.Count(clientAddress, "[")
