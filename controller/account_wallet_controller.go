@@ -62,7 +62,10 @@ func CreateAccountWalletExternal(
 	// if a payout wallet doesn't exist for the network
 	// set payout wallet
 	if payoutWallet == nil {
-		model.SetPayoutWallet(session.Ctx, session.ByJwt.NetworkId, *walletId)
+		err := model.SetPayoutWallet(session.Ctx, session.ByJwt.NetworkId, *walletId)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &model.CreateAccountWalletResult{WalletId: *walletId}, nil

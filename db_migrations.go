@@ -2972,4 +2972,14 @@ var migrations = []any{
             PRIMARY KEY (ckey)
         )
     `),
+
+	// stable per-payment idempotency key for the payment processor submit.
+	// Created on the first submit attempt and reused on retries, so a crash
+	// between the processor call and recording `payment_record` cannot
+	// double-send funds. Cleared together with `payment_record` when a failed
+	// transaction is reset for a fresh attempt.
+	newSqlMigration(`
+        ALTER TABLE account_payment
+        ADD COLUMN circle_idempotency_key uuid NULL
+    `),
 }

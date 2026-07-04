@@ -864,7 +864,8 @@ func adminWalletTransfer(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	res, err := client.CreateTransferTransaction(ctx, amountUsd, destinationAddress, blockchain)
+	// a one-off manual transfer gets a fresh idempotency key
+	res, err := client.CreateTransferTransaction(ctx, server.NewId(), amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}

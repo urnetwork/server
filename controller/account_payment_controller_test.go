@@ -90,6 +90,7 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		destinationWalletAddress := "0x1234567890"
 
 		args := &model.CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
 			Blockchain:       "MATIC",
 			WalletAddress:    destinationWalletAddress,
 			DefaultTokenType: "USDC",
@@ -99,7 +100,8 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 		wallet := model.GetAccountWallet(ctx, *walletId)
 
-		model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+		err = model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+		assert.Equal(t, err, nil)
 
 		paymentPlan, err := model.PlanPayments(ctx)
 		assert.Equal(t, err, nil)
@@ -255,6 +257,215 @@ func TestSubscriptionSendPayment(t *testing.T) {
 	})
 }
 
+func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		netTransferByteCount := model.ByteCount(1024 * 1024 * 1024 * 1024)
+		netRevenue := model.UsdToNanoCents(10.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		type capturedSend struct {
+			idempotencyKey server.Id
+			address        string
+		}
+		sends := []capturedSend{}
+		sendErr := error(nil)
+
+		mockCircleClient := &mockCircleApiClient{
+			GetTransactionFunc: defaultGetTransactionDataHandler,
+			CreateTransferTransactionFunc: func(
+				ctx context.Context,
+				idempotencyKey server.Id,
+				amount float64,
+				destinationAddress string,
+				network string,
+			) (*CreateTransferTransactionResult, error) {
+				sends = append(sends, capturedSend{
+					idempotencyKey: idempotencyKey,
+					address:        destinationAddress,
+				})
+				if sendErr != nil {
+					return nil, sendErr
+				}
+				return &CreateTransferTransactionResult{
+					Id:    sendPaymentTransactionId,
+					State: "INITIATED",
+				}, nil
+			},
+			EstimateTransferFeeFunc: defaultEstimateFeeHandler,
+		}
+		SetCircleClient(mockCircleClient)
+
+		SetMessageSender(&mockAWSMessageSender{
+			SendMessageFunc: func(userAuth string, template Template, sendOpts ...any) error {
+				return nil
+			},
+		})
+
+		balanceCode, err := model.CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			365*24*time.Hour,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
+		assert.Equal(t, err, nil)
+		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, ctx)
+
+		wallet1Address := "0x1111"
+		wallet1Id := model.CreateAccountWalletExternal(destinationSession, &model.CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    wallet1Address,
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, wallet1Id, nil)
+		err = model.SetPayoutWallet(ctx, destinationNetworkId, *wallet1Id)
+		assert.Equal(t, err, nil)
+
+		// provide enough traffic to exceed the min payout
+		usedTransferByteCount := model.ByteCount(1024 * 1024 * 1024)
+		paid := model.NanoCents(0)
+		for paid < model.UsdToNanoCents(model.EnvSubsidyConfig().MinWalletPayoutUsd) {
+			transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = model.CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = model.CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paid += model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		paymentPlan, err := model.PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		payment, ok := paymentPlan.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, *payment.WalletId, *wallet1Id)
+
+		advanceArgs := &AdvancePaymentArgs{
+			PaymentId: payment.PaymentId,
+		}
+
+		// the network removes its payout wallet before the payment is sent.
+		// funds must not be sent to the deactivated wallet.
+		removeResult := model.RemoveWallet(*wallet1Id, destinationSession)
+		assert.Equal(t, removeResult.Success, true)
+
+		result, err := AdvancePayment(advanceArgs, destinationSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Complete, false)
+		assert.Equal(t, result.Canceled, true)
+		assert.Equal(t, len(sends), 0)
+
+		// the payment is held, not canceled, so it can pay out
+		// after the network sets a valid wallet
+		heldPayment, err := model.GetPayment(ctx, payment.PaymentId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, heldPayment.Canceled, false)
+		assert.Equal(t, heldPayment.Completed, false)
+		assert.Equal(t, heldPayment.PaymentRecord, nil)
+
+		// the network sets a new payout wallet
+		wallet2Address := "0x2222"
+		wallet2Id := model.CreateAccountWalletExternal(destinationSession, &model.CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    wallet2Address,
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, wallet2Id, nil)
+		err = model.SetPayoutWallet(ctx, destinationNetworkId, *wallet2Id)
+		assert.Equal(t, err, nil)
+
+		// the first submit fails after the processor call.
+		// the same idempotency key must be reused on the retry,
+		// so the processor cannot double-send the funds.
+		sendErr = fmt.Errorf("simulated processor error")
+		result, err = AdvancePayment(advanceArgs, destinationSession)
+		assert.NotEqual(t, err, nil)
+		assert.Equal(t, len(sends), 1)
+		assert.Equal(t, sends[0].address, wallet2Address)
+
+		sendErr = nil
+		result, err = AdvancePayment(advanceArgs, destinationSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Complete, false)
+		assert.Equal(t, result.Canceled, false)
+		assert.Equal(t, len(sends), 2)
+		assert.Equal(t, sends[1].idempotencyKey, sends[0].idempotencyKey)
+		assert.Equal(t, sends[1].address, wallet2Address)
+
+		sentPayment, err := model.GetPayment(ctx, payment.PaymentId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *sentPayment.WalletId, *wallet2Id)
+		assert.Equal(t, *sentPayment.WalletAddress, wallet2Address)
+		assert.Equal(t, *sentPayment.PaymentRecord, sendPaymentTransactionId)
+
+		// a failed transaction resets the record and gets a fresh
+		// idempotency key, so a new transaction can be created
+		mockCircleClient.GetTransactionFunc = func(ctx context.Context, transactionId string) (*GetTransactionResult, error) {
+			return &GetTransactionResult{
+				Transaction: CircleTransaction{
+					State:      "FAILED",
+					Id:         transactionId,
+					Blockchain: "MATIC",
+				},
+				ResponseBodyBytes: []byte(`{"state":"FAILED"}`),
+			}, nil
+		}
+		result, err = AdvancePayment(advanceArgs, destinationSession)
+		assert.NotEqual(t, err, nil)
+
+		mockCircleClient.GetTransactionFunc = defaultGetTransactionDataHandler
+		result, err = AdvancePayment(advanceArgs, destinationSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(sends), 3)
+		assert.NotEqual(t, sends[2].idempotencyKey, sends[0].idempotencyKey)
+		assert.Equal(t, sends[2].address, wallet2Address)
+
+		// complete the payment
+		mockTxHash := "0xabcdef"
+		mockCircleClient.GetTransactionFunc = func(ctx context.Context, transactionId string) (*GetTransactionResult, error) {
+			return &GetTransactionResult{
+				Transaction: CircleTransaction{
+					State:      "COMPLETE",
+					Id:         transactionId,
+					Blockchain: "MATIC",
+					TxHash:     mockTxHash,
+				},
+				ResponseBodyBytes: []byte(`{"state":"COMPLETE"}`),
+			}, nil
+		}
+		result, err = AdvancePayment(advanceArgs, destinationSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Complete, true)
+
+		completedPayment, err := model.GetPayment(ctx, payment.PaymentId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, completedPayment.Completed, true)
+		assert.Equal(t, *completedPayment.WalletId, *wallet2Id)
+		assert.Equal(t, *completedPayment.WalletAddress, wallet2Address)
+
+	})
+}
+
 func TestFeeToUsd(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		coinbaseClient := &mockCoinbaseClient{
@@ -289,6 +500,7 @@ type mockCircleApiClient struct {
 	) (*GetTransactionResult, error)
 	CreateTransferTransactionFunc func(
 		ctx context.Context,
+		idempotencyKey server.Id,
 		amount float64,
 		destinationAddress string,
 		network string,
@@ -310,12 +522,14 @@ func (m *mockCircleApiClient) GetTransaction(
 
 func (m *mockCircleApiClient) CreateTransferTransaction(
 	ctx context.Context,
+	idempotencyKey server.Id,
 	amount float64,
 	destinationAddress string,
 	network string,
 ) (*CreateTransferTransactionResult, error) {
 	return m.CreateTransferTransactionFunc(
 		ctx,
+		idempotencyKey,
 		amount,
 		destinationAddress,
 		network,
@@ -354,6 +568,7 @@ func defaultGetTransactionDataHandler(ctx context.Context, transactionId string)
 
 func defaultSendPaymentHandler(
 	ctx context.Context,
+	idempotencyKey server.Id,
 	amount float64,
 	destinationAddress string,
 	network string,

@@ -341,8 +341,10 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	netPayoutByteCountPaid := ByteCount(0)
 	netPayoutByteCountUnpaid := ByteCount(0)
 	activeUserCount := 0
+	// paid and unpaid user counts are recorded for reporting only.
+	// the subsidy weighs all traffic equally regardless of paid status.
 	paidUserCount := 0
-	unpaidUserCount := 0
+	trafficUserCount := 0
 	netRevenue := NanoCents(0)
 	for payerNetworkId, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
 		payerNetPayoutByteCountPaid := ByteCount(0)
@@ -361,14 +363,15 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		if 0 < payerNetPayoutByteCountPaid {
 			paidUserCount += 1
 		}
-		if 0 < payerNetPayoutByteCountUnpaid {
-			unpaidUserCount += 1
+		if 0 < payerNetPayoutByteCountPaid+payerNetPayoutByteCountUnpaid {
+			trafficUserCount += 1
 		}
 		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
-	var subsidyStartTime time.Time
-	var subsidyEndTime time.Time
+	// note the aggregates are NULL when no swept contracts exist
+	var subsidyStartTimePtr *time.Time
+	var subsidyEndTimePtr *time.Time
 	result, err = self.tx.Query(
 		self.ctx,
 		`
@@ -385,12 +388,17 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&subsidyStartTime, &subsidyEndTime))
-		} else {
-			subsidyEndTime = server.NowUtc()
-			subsidyStartTime = subsidyStartTime.Add(-time.Duration(self.subsidyConfig.Days) * 24 * time.Hour)
+			server.Raise(result.Scan(&subsidyStartTimePtr, &subsidyEndTimePtr))
 		}
 	})
+
+	if subsidyStartTimePtr == nil || subsidyEndTimePtr == nil {
+		// no swept contracts to compute a subsidy time range
+		glog.Infof("[plan]subsidy empty\n")
+		return
+	}
+	subsidyStartTime := *subsidyStartTimePtr
+	subsidyEndTime := *subsidyEndTimePtr
 
 	if !subsidyStartTime.Before(subsidyEndTime) {
 		// empty time range
@@ -464,32 +472,29 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		1.0,
 	)
 	subsidyNetPayoutUsd := subsidyScale * subsidyPayoutUsd
-	subsidyNetPayoutUsdPaid := min(subsidyNetPayoutUsd, float64(paidUserCount)*self.subsidyConfig.MaxPayoutUsdPerPaidUser)
-	subsidyNetPayoutUsdUnpaid := subsidyNetPayoutUsd - subsidyNetPayoutUsdPaid
-	glog.Infof("[plan]payout $%.2f ($%.2f/$%.2f)\n", subsidyNetPayoutUsd, subsidyNetPayoutUsdPaid, subsidyNetPayoutUsdUnpaid)
+	glog.Infof("[plan]payout $%.2f\n", subsidyNetPayoutUsd)
 
 	// this is added up as the exact net payment, which may be rounded from `subsidyNetPayout`
 	netPayout := NanoCents(0)
 
-	for _, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
-		netPayerPayoutByteCountPaid := ByteCount(0)
-		netPayerPayoutByteCountUnpaid := ByteCount(0)
-		for _, sweep := range payeeNetworkSweeps {
-			netPayerPayoutByteCountPaid += sweep.netPayoutByteCountPaid
-			netPayerPayoutByteCountUnpaid += sweep.netPayoutByteCountUnpaid
-		}
+	// paid and free traffic are weighted equally
+	// (the point/token payout system does not distinguish traffic by revenue)
+	if 0 < trafficUserCount {
+		for _, payeeNetworkSweeps := range payerPayeeNetworkSweeps {
+			netPayerPayoutByteCount := ByteCount(0)
+			for _, sweep := range payeeNetworkSweeps {
+				netPayerPayoutByteCount += sweep.netPayoutByteCountPaid + sweep.netPayoutByteCountUnpaid
+			}
+			if netPayerPayoutByteCount <= 0 {
+				continue
+			}
 
-		for _, sweep := range payeeNetworkSweeps {
-			// each user is weighted equally, relative to their own traffic
-			if 0 < netPayerPayoutByteCountPaid {
-				paidWeight := float64(sweep.netPayoutByteCountPaid) / float64(netPayerPayoutByteCountPaid)
-				sweep.payout += UsdToNanoCents(paidWeight * subsidyNetPayoutUsdPaid / float64(paidUserCount))
+			for _, sweep := range payeeNetworkSweeps {
+				// each user is weighted equally, relative to their own traffic
+				weight := float64(sweep.netPayoutByteCountPaid+sweep.netPayoutByteCountUnpaid) / float64(netPayerPayoutByteCount)
+				sweep.payout += UsdToNanoCents(weight * subsidyNetPayoutUsd / float64(trafficUserCount))
+				netPayout += sweep.payout
 			}
-			if 0 < netPayerPayoutByteCountUnpaid {
-				unpaidWeight := float64(sweep.netPayoutByteCountUnpaid) / float64(netPayerPayoutByteCountUnpaid)
-				sweep.payout += UsdToNanoCents(unpaidWeight * subsidyNetPayoutUsdUnpaid / float64(unpaidUserCount))
-			}
-			netPayout += sweep.payout
 		}
 	}
 
@@ -665,6 +670,9 @@ func (self *PaymentPlanner) setWallets() {
 		maps.Keys(self.networkPayments)...,
 	)
 
+	// note `account_wallet.network_id` must match the payment network,
+	// so that a payout is never assigned to another network's wallet
+	// (e.g. a corrupt `payout_wallet` row from before ownership validation)
 	result, err := self.tx.Query(
 		self.ctx,
 		`
@@ -678,6 +686,7 @@ func (self *PaymentPlanner) setWallets() {
 
         LEFT JOIN account_wallet ON
             account_wallet.wallet_id = payout_wallet.wallet_id AND
+            account_wallet.network_id = temp_payment_network_ids.network_id AND
             account_wallet.active = true
 		`,
 	)
