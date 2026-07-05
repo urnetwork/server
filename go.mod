@@ -134,4 +134,4 @@ replace github.com/urnetwork/glog => ../glog
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
 
-replace github.com/urnetwork/sn => ../../urfoundation/sn
+replace github.com/urnetwork/sn => ../sn
