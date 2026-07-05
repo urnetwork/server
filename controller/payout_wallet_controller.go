@@ -15,7 +15,10 @@ func SetPayoutWallet(
 ) (*model.SetPayoutWalletResult, error) {
 
 	networkId := session.ByJwt.NetworkId
-	model.SetPayoutWallet(session.Ctx, networkId, setWalletPayout.WalletId)
+	err := model.SetPayoutWallet(session.Ctx, networkId, setWalletPayout.WalletId)
+	if err != nil {
+		return nil, err
+	}
 
 	return &model.SetPayoutWalletResult{}, nil
 

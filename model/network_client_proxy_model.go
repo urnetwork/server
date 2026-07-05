@@ -808,6 +808,24 @@ PersistentKeepalive = 25`,
 				proxyId.String(),
 			)
 		})
+
+		// verify egress feeder (proxy-allocated egress, sn/VALIDATOR.md §8):
+		// register the allocated egress ipv4 in the bijection-gated egress
+		// index. `RefreshVerifyProxyEgress` re-feeds it periodically while
+		// the allocation exists, so it ages out after release (§8.2).
+		if proxyClient.WgConfig != nil {
+			FeedVerifyEgress(ctx, clientId, proxyClient.WgConfig.ClientIpv4, DefaultVerifySettings())
+			// TODO(verify §8.2): clear egress on proxy release; currently ages
+			// out via EgressTtl. There is no clean single release site to hook:
+			// proxy_client rows are freed only by the bulk cascade DELETE in
+			// RemoveDisconnectedNetworkClients (network_client_model.go), which
+			// drops rows without loading their client_id/client_ipv4. The common
+			// case (client fully reaped) is already covered — that path calls
+			// RemoveVerifyEgressForClient(clientId), which clears every egress ip
+			// for the client, including this one. The residual gap (a proxy_client
+			// freed while its network_client persists) is bounded by the read-time
+			// reverse-bijection re-check in ResolveVerifyEgress (LOW).
+		}
 	}
 
 	return

@@ -21,8 +21,12 @@ type CircleApi interface {
 		destinationAddress string,
 		network string,
 	) (*FeeEstimateResult, error)
+	// `idempotencyKey` must be stable across retries of the same logical
+	// transfer, so the processor deduplicates resubmits instead of
+	// double-sending funds
 	CreateTransferTransaction(
 		ctx context.Context,
+		idempotencyKey server.Id,
 		amountInUsd float64,
 		destinationAddress string,
 		network string,
@@ -57,6 +61,7 @@ type CreateTransferTransactionResult struct {
 
 func (c *CoreCircleApiClient) CreateTransferTransaction(
 	ctx context.Context,
+	idempotencyKey server.Id,
 	amountInUsd float64,
 	destinationAddress string,
 	network string,
@@ -85,7 +90,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 		ctx,
 		uri,
 		map[string]any{
-			"idempotencyKey":         server.NewId(),
+			"idempotencyKey":         idempotencyKey,
 			"amounts":                []string{fmt.Sprintf("%f", amountInUsd)},
 			"destinationAddress":     destinationAddress,
 			"entitySecretCiphertext": cipher,

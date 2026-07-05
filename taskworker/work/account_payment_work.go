@@ -41,11 +41,13 @@ func Payout(
 	schedulePayout *SchedulePayoutArgs,
 	clientSession *session.ClientSession,
 ) (*SchedulePayoutResult, error) {
-	// FIXME disable payments until we figure out the account bug
-	// err := controller.SendPayments(clientSession)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	// payouts were disabled while funds were being sent to the wrong wallets.
+	// wallet ownership is now validated at every layer (set/plan/advance) and
+	// submits are idempotent, so payouts are re-enabled.
+	err := controller.SendPayments(clientSession)
+	if err != nil {
+		return nil, err
+	}
 
 	return &SchedulePayoutResult{
 		Success: true,

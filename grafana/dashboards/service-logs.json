@@ -1,0 +1,92 @@
+{
+    "uid": "urnetwork-logs",
+    "title": "urnetwork / service logs",
+    "tags": ["urnetwork"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "refresh": "30s",
+    "time": {
+        "from": "now-1h",
+        "to": "now"
+    },
+    "templating": {
+        "list": [
+            {
+                "name": "env",
+                "label": "env",
+                "type": "query",
+                "datasource": {"type": "loki", "uid": "warp-loki"},
+                "query": "label_values(env)",
+                "refresh": 2,
+                "sort": 1
+            },
+            {
+                "name": "service",
+                "label": "service",
+                "type": "query",
+                "datasource": {"type": "loki", "uid": "warp-loki"},
+                "query": "label_values({env=\"$env\"}, service)",
+                "refresh": 2,
+                "sort": 1,
+                "multi": true,
+                "includeAll": true
+            },
+            {
+                "name": "block",
+                "label": "block",
+                "type": "query",
+                "datasource": {"type": "loki", "uid": "warp-loki"},
+                "query": "label_values({env=\"$env\", service=~\"$service\"}, block)",
+                "refresh": 2,
+                "sort": 1,
+                "multi": true,
+                "includeAll": true
+            },
+            {
+                "name": "query",
+                "label": "query",
+                "type": "textbox",
+                "query": ""
+            }
+        ]
+    },
+    "panels": [
+        {
+            "id": 1,
+            "type": "timeseries",
+            "title": "log volume",
+            "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+            "datasource": {"type": "loki", "uid": "warp-loki"},
+            "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+            "options": {"legend": {"displayMode": "list"}},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, block) (rate({env=\"$env\", service=~\"$service\", block=~\"$block\"} |= \"$query\" [$__auto]))",
+                    "legendFormat": "{{service}} {{block}}"
+                }
+            ]
+        },
+        {
+            "id": 2,
+            "type": "logs",
+            "title": "logs",
+            "gridPos": {"h": 18, "w": 24, "x": 0, "y": 6},
+            "datasource": {"type": "loki", "uid": "warp-loki"},
+            "options": {
+                "showTime": true,
+                "showLabels": false,
+                "wrapLogMessage": true,
+                "sortOrder": "Descending",
+                "dedupStrategy": "none",
+                "enableLogDetails": true
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "{env=\"$env\", service=~\"$service\", block=~\"$block\"} |= \"$query\""
+                }
+            ]
+        }
+    ]
+}
