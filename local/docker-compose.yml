@@ -1,0 +1,121 @@
+# Local test/dev backing stores for github.com/urnetwork/server.
+#
+#   postgres  ->  local-pg.bringyour.com:5432     (role/db per vault/local/pg.yml)
+#   redis     ->  local-redis.bringyour.com:6379  (no auth, single node)
+#
+# Don't run this directly with `docker compose up`. Use ./run-local.sh, which
+# reads the credentials + ports from vault/local/{pg,redis}.yml (the single
+# source of truth), stands up the dedicated loopback address these ports bind
+# to, and manages the /etc/hosts aliases. The APP_DB_* vars are required (`:?`)
+# so a bare `docker compose up` fails fast with a pointer back to run-local.sh.
+#
+# ADDRESSING (why not 127.0.0.1):
+#   Tests create and DROP databases, so pointing the local hostnames at
+#   127.0.0.1 is dangerous: a tunnel/port-forward to a real (prod) database
+#   commonly listens on 127.0.0.1:5432, and tests would nuke it. So we never use
+#   127.0.0.1. The containers live on a dedicated bridge network (below), and
+#   the ports are published on a dedicated loopback-alias IP (LOCAL_BIND_IP,
+#   default 10.213.0.1) that run-local.sh adds to the loopback interface. That
+#   address is distinct from 127.0.0.1, so there is no way to collide with a
+#   prod tunnel; the worst case when the stack is down is "connection refused".
+#   (On Docker Desktop / macOS the container IPs themselves are not routable
+#   from the host, which is why host access goes through the published ports on
+#   the loopback alias rather than the container's network IP.)
+#
+# IMPORTANT: the postgres image must be the glibc (debian) build, NOT alpine.
+# The test harness (server/test_util.go) creates each per-test database
+# `WITH ... LOCALE='en_US.UTF-8'`, and that locale only exists in the debian
+# image. postgres:18 matches production (Ubuntu postgresql-18).
+
+name: urnetwork-local
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: urnetwork-local-pg
+    networks: [urnetwork-local]
+    ports:
+      - "${LOCAL_BIND_IP:-10.213.0.1}:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      # Initialize the cluster (and thus template1) with the en_US.UTF-8 locale
+      # spelled EXACTLY that way. The test harness (server/test_util.go) runs
+      #   CREATE DATABASE <name> ... LOCALE='en_US.UTF-8'
+      # without a TEMPLATE, so it copies template1; postgres 18 rejects the copy
+      # unless template1's collation string matches 'en_US.UTF-8' character for
+      # character. The stock image initializes with LANG=en_US.utf8 (lowercase,
+      # no hyphen), which does NOT match and makes every test fail with
+      # "new collation (en_US.UTF-8) is incompatible with the collation of the
+      # template database (en_US.utf8)". Forcing --locale here fixes that.
+      LANG: en_US.UTF-8
+      POSTGRES_INITDB_ARGS: --locale=en_US.UTF-8
+      # Throwaway local superuser. The application role + database are created
+      # by initdb/01-init-app-db.sh from the APP_DB_* values below, which
+      # run-local.sh sources from vault/local/pg.yml.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+      APP_DB_USER: ${APP_DB_USER:?run ./run-local.sh (reads vault/local/pg.yml)}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?run ./run-local.sh (reads vault/local/pg.yml)}
+      APP_DB_NAME: ${APP_DB_NAME:?run ./run-local.sh (reads vault/local/pg.yml)}
+    # The default max_connections (100) is below the sum of the server's pools
+    # (api 64 + connect 32 + default 16 + maintenance; see config/local/db.yml),
+    # so parallel tests/services could exhaust it. Bump it generously for local
+    # use (prod runs max_connections=1024).
+    command:
+      - postgres
+      - -c
+      - max_connections=512
+      - -c
+      - shared_buffers=256MB
+    volumes:
+      # postgres 18+ images store data in a major-version subdir and want the
+      # volume mounted at /var/lib/postgresql (NOT /var/lib/postgresql/data,
+      # the <=17 convention -- 18 refuses to start if it finds data there).
+      - pgdata:/var/lib/postgresql
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    container_name: urnetwork-local-redis
+    networks: [urnetwork-local]
+    ports:
+      - "${LOCAL_BIND_IP:-10.213.0.1}:${REDIS_PORT:-6379}:6379"
+    # No password, single node (cluster: false in vault/local/redis.yml). The
+    # tests only use logical db 10 and FlushDB, so persistence is pointless
+    # here -- disable RDB + AOF to keep the container fast and stateless.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+
+# Dedicated bridge network so the containers are isolated from the default
+# bridge and from anything else on the host. The subnet is fixed for
+# determinism and is deliberately kept separate from LOCAL_BIND_IP's address
+# (10.213.0.1) so a loopback alias for host access never overlaps the docker
+# subnet. Override LOCAL_DOCKER_SUBNET if 10.213.1.0/24 collides with your env.
+networks:
+  urnetwork-local:
+    name: urnetwork-local
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${LOCAL_DOCKER_SUBNET:-10.213.1.0/24}
+
+volumes:
+  pgdata:
