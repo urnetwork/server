@@ -19,8 +19,8 @@ import (
 	"math/big"
 	"net/http"
 
-	"github.com/urnetwork/sn/merkle"
-	"github.com/urnetwork/sn/ss58"
+	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/ss58"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"

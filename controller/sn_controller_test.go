@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-playground/assert/v2"
 
-	"github.com/urnetwork/sn/merkle"
+	"github.com/urfoundation/sn/merkle"
 
 	"github.com/urnetwork/server/model"
 )
