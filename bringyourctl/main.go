@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,7 +60,7 @@ Usage:
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
-    bringyourctl payouts plan [--send]
+    bringyourctl payouts plan [--send] [--dry-run]
     bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -675,25 +676,86 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 
 func planPayouts(opts docopt.Opts) {
 	send, _ := opts.Bool("--send")
+	dryRun, _ := opts.Bool("--dry-run")
+
+	if send && dryRun {
+		fmt.Println("--dry-run cannot be combined with --send")
+		return
+	}
+
+	ctx := context.Background()
 
 	if send {
 		glog.Infof("[payouts]send\n")
-		ctx := context.Background()
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		controller.SendPayments(clientSession)
+		return
+	}
+
+	// A real plan (no --dry-run) persists the plan: it creates the payments,
+	// marks the swept contracts paid, and applies points. A dry run computes the
+	// same plan but persists nothing, so it can be previewed first.
+	var plan *model.PaymentPlan
+	var err error
+	if dryRun {
+		plan, err = model.PlanPaymentsDryRun(ctx)
 	} else {
-		plan, err := model.PlanPayments(context.Background())
-		if err != nil {
-			fmt.Printf("payout plan err = %s\n", err)
-			return
-		}
+		plan, err = model.PlanPayments(ctx)
+	}
+	if err != nil {
+		fmt.Printf("payout plan err = %s\n", err)
+		return
+	}
+
+	printPayoutPlan(plan, dryRun)
+}
+
+func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
+	if dryRun {
+		fmt.Println("DRY RUN - nothing was persisted. Preview of the payment plan:")
+		fmt.Println("Payout Plan (preview): ", plan.PaymentPlanId)
+	} else {
 		fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
-		fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
-		fmt.Println(strings.Repeat("-", 56))
-		for _, payment := range plan.NetworkPayments {
-			payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
-			fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+	}
+
+	// largest payout first, so the plan reads consistently across runs
+	payments := maps.Values(plan.NetworkPayments)
+	slices.SortFunc(payments, func(a, b *model.AccountPayment) int {
+		return cmp.Compare(b.Payout, a.Payout)
+	})
+
+	fmt.Printf("%-40s %-40s %16s\n", "Network ID", "Wallet ID", "Payout (USD)")
+	fmt.Println(strings.Repeat("-", 98))
+
+	total := model.NanoCents(0)
+	missingWallet := 0
+	for _, payment := range payments {
+		walletStr := "(no payout wallet)"
+		if payment.WalletId != nil {
+			walletStr = payment.WalletId.String()
+		} else {
+			missingWallet += 1
 		}
+		fmt.Printf("%-40s %-40s %16.4f\n", payment.NetworkId, walletStr, model.NanoCentsToUsd(payment.Payout))
+		total += payment.Payout
+	}
+
+	fmt.Println(strings.Repeat("-", 98))
+	fmt.Printf("%d payment(s), %.4f USD total\n", len(payments), model.NanoCentsToUsd(total))
+	if missingWallet > 0 {
+		fmt.Printf("%d payment(s) have no payout wallet and will be held until a wallet is set\n", missingWallet)
+	}
+	if len(plan.WithheldNetworkIds) > 0 {
+		fmt.Printf("%d network(s) withheld below the minimum payout threshold\n", len(plan.WithheldNetworkIds))
+	}
+	if s := plan.SubsidyPayment; s != nil {
+		fmt.Printf(
+			"subsidy: %.4f USD net payout over %s .. %s (%d active users)\n",
+			model.NanoCentsToUsd(s.NetPayout),
+			s.StartTime.Format(time.RFC3339),
+			s.EndTime.Format(time.RFC3339),
+			s.ActiveUserCount,
+		)
 	}
 }
 

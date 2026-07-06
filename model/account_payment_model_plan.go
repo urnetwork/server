@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	// "slices"
 	// "sync"
@@ -56,15 +57,54 @@ type PaymentPlanner struct {
 	subsidyPayment *SubsidyPayment
 }
 
-func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig) (paymentPlan *PaymentPlan, returnErr error) {
-	now := server.NowUtc()
-	UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+// errPaymentPlanDryRun is panicked at the end of the planning transaction to
+// force a rollback for a dry run. The whole plan is computed (and all of its
+// writes staged) inside the transaction; rolling the transaction back discards
+// every write so nothing is persisted, while the in-memory `PaymentPlan`
+// returned to the caller is still complete. Rolling back the whole transaction
+// is used instead of guarding each individual write so that a dry run cannot
+// ever accidentally persist a payment, mark a sweep paid, or apply points.
+var errPaymentPlanDryRun = errors.New("payment plan dry run")
+
+func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool) (paymentPlan *PaymentPlan, returnErr error) {
+	if dryRun {
+		// recover the rollback sentinel so a dry run returns the computed plan
+		// normally. Any other panic (e.g. a real db error) still propagates.
+		defer func() {
+			if r := recover(); r != nil {
+				if r == errPaymentPlanDryRun {
+					return
+				}
+				panic(r)
+			}
+		}()
+	} else {
+		// refresh the reliability inputs used by this plan. This is a persistent
+		// write, so it is skipped for a dry run; a dry run then previews using
+		// the reliability values from the last refresh.
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
+	}
 
 	// network_id -> list of child referral networks
 	networkReferrals := GetNetworkReferralsMap(ctx)
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		if dryRun {
+			// force this transaction to roll back however the callback exits, so
+			// the dry run persists nothing. `paymentPlan` is populated before
+			// this fires, so the caller still receives the full computed plan.
+			defer func() {
+				if r := recover(); r != nil {
+					// a real error is already unwinding; let it propagate. The
+					// transaction rolls back on any panic either way.
+					panic(r)
+				}
+				panic(errPaymentPlanDryRun)
+			}()
+		}
+
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,

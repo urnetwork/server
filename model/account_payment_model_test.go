@@ -130,6 +130,111 @@ func TestCancelAccountPayment(t *testing.T) {
 	})
 }
 
+// A dry run must compute the same plan a real run would, but persist nothing:
+// no payments, no swept contracts marked paid. A real run immediately after
+// must therefore still see the same contracts and produce the same payout.
+func TestPlanPaymentsDryRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
+		netRevenue := UsdToNanoCents(10.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		subscriptionYearDuration := 365 * 24 * time.Hour
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			subscriptionYearDuration,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, sourceSession.Ctx)
+
+		destinationWalletAddress := "0x1234567890"
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    destinationWalletAddress,
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		// sweep enough volume that the payout clears the minimum wallet threshold
+		// (otherwise the payment would be withheld from the plan)
+		paid := NanoCents(0)
+		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
+		for paid < 2*UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+			transferEscrow, err := CreateTransferEscrow(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				usedTransferByteCount,
+			)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		// dry run: computes the plan but must not persist anything
+		dryPlan, err := PlanPaymentsDryRun(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, maps.Keys(dryPlan.NetworkPayments), []server.Id{destinationNetworkId})
+		dryPayment := dryPlan.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, dryPayment.Payout > 0, true)
+
+		// nothing persisted: the dry-run payment does not exist, and there are no
+		// pending payments at all
+		persistedDryPayment, err := GetPayment(ctx, dryPayment.PaymentId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, persistedDryPayment, (*AccountPayment)(nil))
+		assert.Equal(t, len(GetPendingPayments(ctx)), 0)
+		assert.Equal(t, len(GetPendingPaymentsInPlan(ctx, dryPlan.PaymentPlanId)), 0)
+
+		// a real run immediately after sees the same (still unpaid) contracts and
+		// produces the same payout, and this time it does persist
+		realPlan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, maps.Keys(realPlan.NetworkPayments), []server.Id{destinationNetworkId})
+		realPayment := realPlan.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, realPayment.Payout, dryPayment.Payout)
+
+		persistedRealPayment, err := GetPayment(ctx, realPayment.PaymentId)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, persistedRealPayment, (*AccountPayment)(nil))
+		assert.Equal(t, persistedRealPayment.Payout, realPayment.Payout)
+		assert.Equal(t, len(GetPendingPayments(ctx)), 1)
+	})
+}
+
 func TestGetNetworkProvideStats(t *testing.T) {
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

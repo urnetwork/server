@@ -391,7 +391,18 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 }
 
 func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (paymentPlan *PaymentPlan, returnErr error) {
-	return CreatePaymentPlan(ctx, subsidyConfig)
+	return CreatePaymentPlan(ctx, subsidyConfig, false)
+}
+
+// PlanPaymentsDryRun computes a payment plan exactly like PlanPayments but
+// persists nothing: no payments are created, no escrow sweeps are marked paid,
+// and no points or reliability multipliers are written. Use it to preview the
+// plan (the wallets and amounts that would be paid) before committing a real
+// plan. Because the reliability inputs are not refreshed for a dry run, the
+// reliability portion of the preview reflects the last reliability refresh
+// rather than a fresh one.
+func PlanPaymentsDryRun(ctx context.Context) (paymentPlan *PaymentPlan, returnErr error) {
+	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), true)
 }
 
 func GetSubsidyPayment(ctx context.Context, paymentPlanId server.Id) (paymentPlan *SubsidyPayment) {
