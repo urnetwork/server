@@ -94,6 +94,14 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
 		// Unauthenticated public-key lookup; see handlers.GetClientKey.
 		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
+		// routing verification (sn/VALIDATOR.md); auth is the protocol's own
+		// Ed25519 signatures, not a JWT — see handlers.Verify
+		router.NewRoute("POST", "/verify", handlers.Verify),
+		router.NewRoute("GET", "/verify/keys", handlers.GetVerifyKeys),
+		// subnet control plane (sn/PLAN.md §5, D-13)
+		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
+		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
+		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/hello", handlers.Hello),
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
 		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),

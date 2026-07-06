@@ -2180,11 +2180,21 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			return false
 		}
 
+		// this is a forward callback: `transferFrameBytes` is valid only for the
+		// call, and the connect client returns it after. The bytes are retained on
+		// the forward send channel (and later written to the exchange connection,
+		// which returns them to the pool), so share for the handoff and return the
+		// share on any path that does not enqueue. The share value is a local
+		// because a select evaluates every case's send value once, regardless of
+		// which case fires — an inline share would over-share on the paths not taken.
+		shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
+
 		// fast path: enqueue without blocking
 		select {
 		case <-forward.Done():
+			connect.MessagePoolReturn(shared)
 			return false
-		case forward.send <- transferFrameBytes:
+		case forward.send <- shared:
 			return true
 		default:
 		}
@@ -2198,13 +2208,15 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		if 0 < self.exchange.settings.ForwardTimeout {
 			select {
 			case <-forward.Done():
+				connect.MessagePoolReturn(shared)
 				return false
-			case forward.send <- transferFrameBytes:
+			case forward.send <- shared:
 				return true
 			case <-time.After(self.exchange.settings.ForwardTimeout):
 			}
 		}
 
+		connect.MessagePoolReturn(shared)
 		forwardDroppedCounter.Inc()
 		if glog.V(1) {
 			glog.Infof("[rf]drop full %s->%s\n", sourceId, destinationId)

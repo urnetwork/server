@@ -87,13 +87,9 @@ func SendPayments(clientSession *session.ClientSession) error {
 		}
 	}
 
-	for _, payment := range plan.NetworkPayments {
-		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-			ScheduleAdvancePayment(&AdvancePaymentArgs{
-				PaymentId: payment.PaymentId,
-			}, clientSession, tx)
-		})
-	}
+	// schedule all pending payments, which includes the payments in this plan
+	// and payments held from earlier plans (e.g. waiting on a valid wallet)
+	SchedulePendingPayments(clientSession)
 
 	return nil
 }
@@ -329,6 +325,14 @@ func advancePayment(
 
 		// get the user wallet to send the payment to
 		accountWallet := model.GetAccountWallet(clientSession.Ctx, *payment.WalletId)
+		// never send funds to a missing, deactivated, or foreign wallet.
+		// like the missing wallet case, hold the payment until the network
+		// sets a valid payout wallet. The pending payment sweep will retry it.
+		if accountWallet == nil || !accountWallet.Active || accountWallet.NetworkId != payment.NetworkId {
+			glog.Warningf("[%s]payment wallet %s is not a valid payout wallet for network %s. Holding payment.\n", payment.PaymentId, *payment.WalletId, payment.NetworkId)
+			canceled = true
+			return
+		}
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
 			returnErr = fmt.Errorf("[%s]Payment wallet error = %s", payment.PaymentId, err)
@@ -380,9 +384,19 @@ func advancePayment(
 			return
 		}
 
+		// the idempotency key is stable across retries of this payment.
+		// creating it also pins the payment wallet (`UpdatePaymentWallet`),
+		// so a retried submit pays the same address the processor already saw
+		idempotencyKey, err := model.GetOrCreatePaymentIdempotencyKey(clientSession.Ctx, payment.PaymentId)
+		if err != nil {
+			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %s", payment.PaymentId, err)
+			return
+		}
+
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
 			clientSession.Ctx,
+			idempotencyKey,
 			payoutAmount,
 			accountWallet.WalletAddress,
 			formattedBlockchain,
@@ -394,13 +408,19 @@ func advancePayment(
 		}
 
 		// set the payment record
-		model.SetPaymentRecord(
+		err = model.SetPaymentRecord(
 			clientSession.Ctx,
 			payment.PaymentId,
 			"USDC", // For token type
 			payoutAmount,
 			transferResult.Id,
 		)
+		if err != nil {
+			// the transfer was already submitted. Return an error so the task
+			// retries; the stable idempotency key makes the resubmit safe.
+			returnErr = fmt.Errorf("[%s]Payment record error = %s", payment.PaymentId, err)
+			return
+		}
 	}
 	return
 }

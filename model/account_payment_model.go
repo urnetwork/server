@@ -24,7 +24,6 @@ type SubsidyConfig struct {
 	SubscriptionNetRevenueFraction            float64 `yaml:"subscription_net_revenue_fraction"`
 	MinPayoutUsd                              float64 `yaml:"min_payout_usd"`
 	ActiveUserByteCountThresholdHumanReadable string  `yaml:"active_user_byte_count_threshold"`
-	MaxPayoutUsdPerPaidUser                   float64 `yaml:"max_payout_usd_per_paid_user"`
 	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
 	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
 	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
@@ -280,7 +279,12 @@ func GetPendingPaymentsInPlan(ctx context.Context, paymentPlanId server.Id) []*A
 }
 
 func UpdatePaymentWallet(ctx context.Context, paymentId server.Id) {
-	// note the wallet cannot be updated once there is a payment record
+	// note the wallet cannot be updated once there is a payment record or
+	// a submit attempt (idempotency key). A retried submit replays the original
+	// transaction at the processor, so the wallet on record must stay pinned to
+	// the wallet the funds were actually sent to.
+	// note `account_wallet.network_id` must match the payment network,
+	// so that a payout is never redirected to another network's wallet
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -299,11 +303,13 @@ func UpdatePaymentWallet(ctx context.Context, paymentId server.Id) {
 
 			    INNER JOIN account_wallet ON
 			        account_wallet.wallet_id = payout_wallet.wallet_id AND
+			        account_wallet.network_id = account_payment.network_id AND
 			        account_wallet.active = true
 
 		        WHERE
 		        	account_payment.payment_id = $1 AND
 		        	account_payment.payment_record IS NULL AND
+		        	account_payment.circle_idempotency_key IS NULL AND
 		        	account_payment.completed = false AND
 		        	account_payment.canceled = false
 
@@ -313,6 +319,42 @@ func UpdatePaymentWallet(ctx context.Context, paymentId server.Id) {
 			paymentId,
 		))
 	})
+}
+
+// returns the stable idempotency key for submitting this payment to the
+// payment processor. The key is created on the first submit attempt and reused
+// on retries, so a crash between the processor call and `SetPaymentRecord`
+// cannot double-send funds. `RemovePaymentRecord` clears the key so that a
+// failed transaction is retried with a fresh key (a reused key would replay
+// the failed transaction at the processor instead of creating a new one).
+func GetOrCreatePaymentIdempotencyKey(ctx context.Context, paymentId server.Id) (idempotencyKey server.Id, returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+	            UPDATE account_payment
+	            SET
+	                circle_idempotency_key = COALESCE(circle_idempotency_key, $2)
+	            WHERE
+	                payment_id = $1 AND
+	                NOT completed AND NOT canceled
+	            RETURNING circle_idempotency_key
+	        `,
+			paymentId,
+			server.NewId(),
+		)
+		set := false
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&idempotencyKey))
+				set = true
+			}
+		})
+		if !set {
+			returnErr = fmt.Errorf("Invalid payment.")
+		}
+	})
+	return
 }
 
 type PaymentPlan struct {
@@ -349,7 +391,18 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 }
 
 func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (paymentPlan *PaymentPlan, returnErr error) {
-	return CreatePaymentPlan(ctx, subsidyConfig)
+	return CreatePaymentPlan(ctx, subsidyConfig, false)
+}
+
+// PlanPaymentsDryRun computes a payment plan exactly like PlanPayments but
+// persists nothing: no payments are created, no escrow sweeps are marked paid,
+// and no points or reliability multipliers are written. Use it to preview the
+// plan (the wallets and amounts that would be paid) before committing a real
+// plan. Because the reliability inputs are not refreshed for a dry run, the
+// reliability portion of the preview reflects the last reliability refresh
+// rather than a fresh one.
+func PlanPaymentsDryRun(ctx context.Context) (paymentPlan *PaymentPlan, returnErr error) {
+	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), true)
 }
 
 func GetSubsidyPayment(ctx context.Context, paymentPlanId server.Id) (paymentPlan *SubsidyPayment) {
@@ -441,7 +494,8 @@ func RemovePaymentRecord(
 			`
                 UPDATE account_payment
                 SET
-                    payment_record = NULL
+                    payment_record = NULL,
+                    circle_idempotency_key = NULL
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled

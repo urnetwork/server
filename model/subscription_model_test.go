@@ -188,6 +188,7 @@ func TestEscrow(t *testing.T) {
 		assert.Equal(t, netBalanceByteCount, netTransferByteCount-paidByteCount)
 
 		args := &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
 			Blockchain:       "matic",
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
@@ -198,7 +199,8 @@ func TestEscrow(t *testing.T) {
 		wallet := GetAccountWallet(ctx, *walletId)
 		assert.NotEqual(t, wallet, nil)
 
-		SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+		err = SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
+		assert.Equal(t, err, nil)
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
@@ -448,6 +450,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		assert.Equal(t, netBalanceByteCount, 2*netTransferByteCount-paidByteCount)
 
 		args := &CreateAccountWalletExternalArgs{
+			NetworkId:        sourceNetworkId,
 			Blockchain:       "matic",
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
@@ -457,7 +460,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		wallet := GetAccountWallet(ctx, *walletId)
 
-		SetPayoutWallet(ctx, sourceNetworkId, wallet.WalletId)
+		err = SetPayoutWallet(ctx, sourceNetworkId, wallet.WalletId)
+		assert.Equal(t, err, nil)
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold

@@ -278,7 +278,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
 	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
 	if opts.disableSecurityPolicies {
-		providerNatSettings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 	}
 	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
 	go func() {
@@ -362,8 +362,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	pdmSettings := DefaultProxyDeviceManagerSettings()
 	pdmSettings.NetworkSpace = networkSpace
 	if opts.disableSecurityPolicies {
-		pdmSettings.IngressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-		pdmSettings.EgressSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 	}
 	proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
 	go func() {

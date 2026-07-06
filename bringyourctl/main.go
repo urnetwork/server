@@ -1,10 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
+	"strconv"
 
 	"slices"
 	"strings"
@@ -57,7 +60,7 @@ Usage:
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
-    bringyourctl payouts plan [--send]
+    bringyourctl payouts plan [--send] [--dry-run]
     bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -82,6 +85,11 @@ Usage:
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
     bringyourctl refresh-transfer-balances
+    bringyourctl st status [--epoch=<epoch>]
+    bringyourctl st deposit [--alpha_rao=<alpha_rao>]
+    bringyourctl st commit --epoch=<epoch>
+    bringyourctl st finalize --epoch=<epoch>
+    bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
     -h --help     Show this screen.
@@ -261,6 +269,21 @@ Options:
 		}
 	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
 		refreshTransferBalances(opts)
+	} else if st_, _ := opts.Bool("st"); st_ {
+		// manual ops fallback for the st epoch pipeline (D-3/D-11)
+		if status, _ := opts.Bool("status"); status {
+			stStatus(opts)
+		} else if deposit, _ := opts.Bool("deposit"); deposit {
+			stDeposit(opts)
+		} else if commit, _ := opts.Bool("commit"); commit {
+			stCommit(opts)
+		} else if finalize, _ := opts.Bool("finalize"); finalize {
+			stFinalize(opts)
+		}
+	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
+		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
+			grafanaLoadDefaults(opts)
+		}
 	} else {
 		fmt.Println(usage)
 	}
@@ -653,25 +676,86 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 
 func planPayouts(opts docopt.Opts) {
 	send, _ := opts.Bool("--send")
+	dryRun, _ := opts.Bool("--dry-run")
+
+	if send && dryRun {
+		fmt.Println("--dry-run cannot be combined with --send")
+		return
+	}
+
+	ctx := context.Background()
 
 	if send {
 		glog.Infof("[payouts]send\n")
-		ctx := context.Background()
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		controller.SendPayments(clientSession)
+		return
+	}
+
+	// A real plan (no --dry-run) persists the plan: it creates the payments,
+	// marks the swept contracts paid, and applies points. A dry run computes the
+	// same plan but persists nothing, so it can be previewed first.
+	var plan *model.PaymentPlan
+	var err error
+	if dryRun {
+		plan, err = model.PlanPaymentsDryRun(ctx)
 	} else {
-		plan, err := model.PlanPayments(context.Background())
-		if err != nil {
-			fmt.Printf("payout plan err = %s\n", err)
-			return
-		}
+		plan, err = model.PlanPayments(ctx)
+	}
+	if err != nil {
+		fmt.Printf("payout plan err = %s\n", err)
+		return
+	}
+
+	printPayoutPlan(plan, dryRun)
+}
+
+func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
+	if dryRun {
+		fmt.Println("DRY RUN - nothing was persisted. Preview of the payment plan:")
+		fmt.Println("Payout Plan (preview): ", plan.PaymentPlanId)
+	} else {
 		fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
-		fmt.Printf("%-40s %-16s\n", "Wallet ID", "Payout Amount")
-		fmt.Println(strings.Repeat("-", 56))
-		for _, payment := range plan.NetworkPayments {
-			payoutUsd := fmt.Sprintf("%.4f\n", model.NanoCentsToUsd(payment.Payout))
-			fmt.Printf("%-40s %-16s\n", payment.WalletId, payoutUsd)
+	}
+
+	// largest payout first, so the plan reads consistently across runs
+	payments := maps.Values(plan.NetworkPayments)
+	slices.SortFunc(payments, func(a, b *model.AccountPayment) int {
+		return cmp.Compare(b.Payout, a.Payout)
+	})
+
+	fmt.Printf("%-40s %-40s %16s\n", "Network ID", "Wallet ID", "Payout (USD)")
+	fmt.Println(strings.Repeat("-", 98))
+
+	total := model.NanoCents(0)
+	missingWallet := 0
+	for _, payment := range payments {
+		walletStr := "(no payout wallet)"
+		if payment.WalletId != nil {
+			walletStr = payment.WalletId.String()
+		} else {
+			missingWallet += 1
 		}
+		fmt.Printf("%-40s %-40s %16.4f\n", payment.NetworkId, walletStr, model.NanoCentsToUsd(payment.Payout))
+		total += payment.Payout
+	}
+
+	fmt.Println(strings.Repeat("-", 98))
+	fmt.Printf("%d payment(s), %.4f USD total\n", len(payments), model.NanoCentsToUsd(total))
+	if missingWallet > 0 {
+		fmt.Printf("%d payment(s) have no payout wallet and will be held until a wallet is set\n", missingWallet)
+	}
+	if len(plan.WithheldNetworkIds) > 0 {
+		fmt.Printf("%d network(s) withheld below the minimum payout threshold\n", len(plan.WithheldNetworkIds))
+	}
+	if s := plan.SubsidyPayment; s != nil {
+		fmt.Printf(
+			"subsidy: %.4f USD net payout over %s .. %s (%d active users)\n",
+			model.NanoCentsToUsd(s.NetPayout),
+			s.StartTime.Format(time.RFC3339),
+			s.EndTime.Format(time.RFC3339),
+			s.ActiveUserCount,
+		)
 	}
 }
 
@@ -842,7 +926,8 @@ func adminWalletTransfer(opts docopt.Opts) {
 
 	client := controller.NewCircleClient()
 
-	res, err := client.CreateTransferTransaction(ctx, amountUsd, destinationAddress, blockchain)
+	// a one-off manual transfer gets a fresh idempotency key
+	res, err := client.CreateTransferTransaction(ctx, server.NewId(), amountUsd, destinationAddress, blockchain)
 	if err != nil {
 		panic(err)
 	}
@@ -1259,4 +1344,165 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 	ctx := context.Background()
 	model.MigrateProxyDeviceConfig(ctx, 50000)
 	fmt.Println("Proxy device config migration completed successfully.")
+}
+
+// st — manual ops fallback for the subtensor epoch pipeline (sn/PLAN.md §6,
+// D-3/D-11). These call the exact controller flows the st_work tasks run,
+// so a manual action is recorded/idempotent the same way.
+
+func stStatus(opts docopt.Opts) {
+	ctx := context.Background()
+
+	state, err := controller.StGetEpochState(ctx)
+	if err != nil {
+		panic(err)
+	}
+	closeBlock := state.EpochStartBlock + state.TEpochBlocks
+	fmt.Printf("epoch (rolled):    %d\n", state.Epoch)
+	fmt.Printf("epoch (pending):   %d\n", state.PendingEpoch)
+	fmt.Printf("head block:        %d (%s)\n", state.HeadBlock, state.HeadBlockTime.Format(time.RFC3339))
+	fmt.Printf("epoch start:       block %d\n", state.EpochStartBlock)
+	fmt.Printf("intended close:    block %d\n", closeBlock)
+	fmt.Printf("windows:           commit +%d, trails +%d, finalize +%d blocks\n",
+		state.CommitWindowBlocks, state.TrailsWindowBlocks, state.FinalizeOffsetBlocks)
+
+	// default detail epoch: the last closed epoch (the one in its
+	// commit/finalize pipeline), else the current epoch
+	epoch := state.Epoch
+	if epochStr, err := opts.String("--epoch"); err == nil && epochStr != "" {
+		parsed, err := strconv.ParseUint(epochStr, 10, 64)
+		if err != nil {
+			panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+		}
+		epoch = parsed
+	} else if 0 < state.Epoch {
+		epoch = state.Epoch - 1
+	}
+
+	pool, err := controller.StGetPoolState(ctx, epoch)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("epoch %d on chain:\n", epoch)
+	if pool.CommittedRoot == ([32]byte{}) {
+		fmt.Printf("  payout root:     (not committed)\n")
+	} else {
+		fmt.Printf("  payout root:     0x%x\n", pool.CommittedRoot)
+	}
+	fmt.Printf("  finalized:       %t\n", pool.Finalized)
+	// v0.4 (D25): no on-chain DT ledger — deposits are summed from the mirrored
+	// Deposited event log
+	depositNoId, err := controller.StNoId()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("  deposits:        %s rao (Deposited events)\n", model.SumStDepositedRao(ctx, epoch, depositNoId))
+	fmt.Printf("  pool total:      %s rao\n", pool.PoolTotalRao)
+	fmt.Printf("  claimed:         %s rao\n", pool.ClaimedRao)
+
+	if stEpoch := model.GetStEpoch(ctx, epoch); stEpoch != nil {
+		fmt.Printf("epoch %d mirror:\n", epoch)
+		fmt.Printf("  status:          %s\n", stEpoch.Status)
+		fmt.Printf("  start block:     %d\n", stEpoch.StartBlock)
+		fmt.Printf("  commit deadline: block %d\n", stEpoch.CommitDeadlineBlock)
+		fmt.Printf("  finalize block:  %d\n", stEpoch.FinalizeBlock)
+		leaves := model.GetStPayoutLeaves(ctx, epoch, func() uint64 {
+			noId, err := controller.StNoId()
+			if err != nil {
+				panic(err)
+			}
+			return noId
+		}())
+		fmt.Printf("  payout leaves:   %d\n", len(leaves))
+	} else {
+		fmt.Printf("epoch %d mirror:   (no st_epoch row)\n", epoch)
+	}
+
+	publishes := model.GetStPublishes(ctx, epoch)
+	fmt.Printf("epoch %d publishes: %d\n", epoch, len(publishes))
+	for _, publish := range publishes {
+		txHash := ""
+		if publish.TxHash != nil {
+			txHash = *publish.TxHash
+		}
+		errorMessage := ""
+		if publish.Error != nil {
+			errorMessage = *publish.Error
+		}
+		fmt.Printf("  %s %-12s %-9s %s %s\n",
+			publish.CreateTime.Format(time.RFC3339), publish.Kind, publish.Status, txHash, errorMessage)
+	}
+}
+
+func stDeposit(opts docopt.Opts) {
+	ctx := context.Background()
+
+	var overrideRao *big.Int
+	if alphaRaoStr, err := opts.String("--alpha_rao"); err == nil && alphaRaoStr != "" {
+		parsed, ok := new(big.Int).SetString(alphaRaoStr, 10)
+		if !ok || parsed.Sign() <= 0 {
+			panic(fmt.Errorf("bad --alpha_rao %q (expected a positive rao amount)", alphaRaoStr))
+		}
+		overrideRao = parsed
+	}
+
+	// deposit() credits the contract's current epoch
+	state, err := controller.StGetEpochState(ctx)
+	if err != nil {
+		panic(err)
+	}
+	epoch := state.PendingEpoch
+
+	outcome, err := controller.StDepositForEpoch(ctx, epoch, overrideRao)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("deposit epoch %d: %s\n", epoch, outcome)
+}
+
+func stCommit(opts docopt.Opts) {
+	ctx := context.Background()
+
+	epochStr, _ := opts.String("--epoch")
+	epoch, err := strconv.ParseUint(epochStr, 10, 64)
+	if err != nil {
+		panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+	}
+
+	// recompute the leaves if the epoch was never closed by the pipeline
+	noId, err := controller.StNoId()
+	if err != nil {
+		panic(err)
+	}
+	if leaves := model.GetStPayoutLeaves(ctx, epoch, noId); len(leaves) == 0 {
+		fmt.Printf("no stored leaves for epoch %d; computing\n", epoch)
+		root, leafCount, err := controller.StComputeEpochPayout(ctx, epoch)
+		if err != nil {
+			panic(err)
+		}
+		model.SetStEpochStatus(ctx, epoch, model.StEpochStatusClosed)
+		fmt.Printf("computed %d leaves, root 0x%x\n", leafCount, root)
+	}
+
+	outcome, err := controller.StCommitEpochRoot(ctx, epoch)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("commit epoch %d: %s\n", epoch, outcome)
+}
+
+func stFinalize(opts docopt.Opts) {
+	ctx := context.Background()
+
+	epochStr, _ := opts.String("--epoch")
+	epoch, err := strconv.ParseUint(epochStr, 10, 64)
+	if err != nil {
+		panic(fmt.Errorf("bad --epoch %q: %s", epochStr, err))
+	}
+
+	outcome, err := controller.StFinalizeEpochPoke(ctx, epoch)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
 }

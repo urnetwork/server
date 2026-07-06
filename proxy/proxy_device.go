@@ -29,11 +29,11 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 
-	// when set, these override the default device security policies for all
-	// devices opened by this manager (see ProxyDeviceSettings). Integration
-	// tests use this to allow local target servers through the device path.
-	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
-	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	// when set, this overrides the default client security policy for all devices
+	// opened by this manager (see ProxyDeviceSettings). Integration tests use it
+	// (DisableSecurityPolicyWithStats) to allow local target servers through the
+	// device path.
+	ClientSecurityPolicyGenerator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 
 	// NetworkSpace, when set, overrides the default platform network space.
 	// Integration tests use this to point proxy devices at local api/connect
@@ -179,8 +179,7 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	}
 
 	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
-	settings.IngressSecurityPolicyGenerator = self.settings.IngressSecurityPolicyGenerator
-	settings.EgressSecurityPolicyGenerator = self.settings.EgressSecurityPolicyGenerator
+	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
 	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
 	if err != nil {
 		return nil, err
@@ -274,13 +273,12 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 }
 
 type ProxyDeviceSettings struct {
-	ProxyDeviceDescription         string
-	ProxyDeviceSpec                string
-	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
-	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
-	Mtu                            int
-	ProxyDeviceIdleTimeout         time.Duration
-	SequenceBufferSize             int
+	ProxyDeviceDescription        string
+	ProxyDeviceSpec               string
+	ClientSecurityPolicyGenerator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
+	Mtu                           int
+	ProxyDeviceIdleTimeout        time.Duration
+	SequenceBufferSize            int
 }
 
 type ProxyDevice struct {
@@ -357,8 +355,10 @@ func NewProxyDevice(
 		cancel()
 		return nil, err
 	}
-	deviceLocal.SetIngressSecurityPolicyGenerator(settings.IngressSecurityPolicyGenerator)
-	deviceLocal.SetEgressSecurityPolicyGenerator(settings.EgressSecurityPolicyGenerator)
+	deviceLocal.SetClientSecurityPolicyGenerator(settings.ClientSecurityPolicyGenerator)
+	// the proxy egresses DNS and HTTP unchanged (pass-through); disable the upgrade mux
+	// so each of the many proxy devices avoids the per-device tun/stack it would create
+	deviceLocal.SetUpgradeMuxSettings(nil)
 
 	var dnsResolverSettings *connect.DnsResolverSettings
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
@@ -367,6 +367,10 @@ func NewProxyDevice(
 		dnsResolverSettings = initialDeviceState.DnsResolverSettings
 	}
 
+	// The manager creates one ProxyDevice per client and closes it on disconnect.
+	// Each Tun owns a private gVisor stack that Close() destroys, so a disconnecting
+	// client fully reclaims its connections' endpoints. TCP buffers come from these
+	// settings (up to 1MB per connection).
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
 

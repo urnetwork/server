@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -13,16 +14,25 @@ type SetPayoutWalletArgs struct {
 
 type SetPayoutWalletResult struct{}
 
-func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.Id) {
+// the wallet must be an active wallet owned by the network,
+// so that a payout can never be directed to another network's wallet
+func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO payout_wallet (
 						network_id,
 						wallet_id
 				)
-				VALUES ($1, $2)
+				SELECT
+						account_wallet.network_id,
+						account_wallet.wallet_id
+				FROM account_wallet
+				WHERE
+						account_wallet.wallet_id = $2 AND
+						account_wallet.network_id = $1 AND
+						account_wallet.active = true
 				ON CONFLICT (network_id) DO UPDATE
 				SET
 						wallet_id = $2
@@ -30,7 +40,12 @@ func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.I
 			networkId,
 			walletId,
 		))
+		if tag.RowsAffected() != 1 {
+			returnErr = fmt.Errorf("Wallet must be an active wallet owned by the network.")
+			return
+		}
 	})
+	return
 }
 
 func GetPayoutWalletId(ctx context.Context, networkId server.Id) *server.Id {

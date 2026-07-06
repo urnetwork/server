@@ -102,30 +102,7 @@ Options:
 		port,
 	)
 
-	// if os.Getenv("SKIP_METRICS") == "" {
-	// 	pushMetrics := push.New("push-gateway.cluster.bringyour.dev", "my_job").
-	// 		Gatherer(prometheus.DefaultGatherer).
-	// 		Grouping("warp_block", server.RequireBlock()).
-	// 		Grouping("warp_env", server.RequireEnv()).
-	// 		Grouping("warp_version", server.RequireVersion()).
-	// 		Grouping("warp_service", server.RequireService()).
-	// 		Grouping("warp_config_version", server.RequireConfigVersion()).
-	// 		Grouping("warp_host", server.RequireHost())
-
-	// 	go func() {
-	// 		for {
-	// 			select {
-	// 			case <-quitEvent.Ctx.Done():
-	// 				return
-	// 			case <-time.NewTicker(30 * time.Second).C:
-	// 				err := pushMetrics.Push()
-	// 				if err != nil {
-	// 					glog.Errorf("[api]pushMetrics.Push = %s\n", err)
-	// 				}
-	// 			}
-	// 		}
-	// 	}()
-	// }
+	server.StartStatsPusher(ctx)
 
 	// rateLimitHandler := NewConnectionHandlerRateLimitWithDefaults(quitEvent.Ctx, handlerId)
 	// defer rateLimitHandler.Close()

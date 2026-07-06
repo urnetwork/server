@@ -428,11 +428,18 @@ func NetworkCreate(
 				/**
 				 * Set the payout wallet for the network
 				 */
-				SetPayoutWallet(
-					session.Ctx,
-					networkCreateResult.NetworkId,
-					*walletId,
-				)
+				if walletId != nil {
+					err := SetPayoutWallet(
+						session.Ctx,
+						networkCreateResult.NetworkId,
+						*walletId,
+					)
+					if err != nil {
+						glog.Errorf("[net]could not set payout wallet for network %s: %s\n", networkCreateResult.NetworkId, err)
+					}
+				} else {
+					glog.Errorf("[net]could not create payout wallet for network %s\n", networkCreateResult.NetworkId)
+				}
 			}
 
 			isGuest := false

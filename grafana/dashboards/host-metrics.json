@@ -1,0 +1,1056 @@
+{
+  "uid": "urnetwork-hosts",
+  "title": "urnetwork / host metrics",
+  "description": "Host system metrics (node_exporter set) pushed by fluent-bit via main-grafana.local. Flags hosts under load and hosts that are unresponsive/degraded.",
+  "tags": [
+    "urnetwork",
+    "hosts"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(node_load1, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(node_load1{env=\"$env\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "fleet status",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "hosts reporting",
+      "description": "Hosts currently pushing node metrics. A drop here means one or more hosts stopped reporting.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(group by (host)(node_load1{env=\"$env\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "hosts degraded (stale > 120s)",
+      "description": "Hosts whose last sample is older than 120s (still within the metric staleness window). A host down longer than ~5m drops out of 'hosts reporting' entirely.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((time() - max by (host)(timestamp(node_load1{env=\"$env\"}))) > 120) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "hosts under load (load/core > 1)",
+      "description": "Hosts whose 1m load average exceeds one per CPU core.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((max by (host)(node_load1{env=\"$env\"}) / count by (host)(node_cpu_seconds_total{env=\"$env\",mode=\"idle\"})) > 1) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "total cpu cores",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count by (host)(node_cpu_seconds_total{env=\"$env\",mode=\"idle\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "host status (load + responsiveness)",
+      "description": "One row per host. Cells are colored by threshold: 'since last report' flags unresponsive/degraded hosts; cpu/load/mem/fs flag hosts under load. Sorted by 'since last report' so degraded hosts surface first.",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "since last report"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 180
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "cpu"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 80
+                    },
+                    {
+                      "color": "red",
+                      "value": 95
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "load / core"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 3
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "memory"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 85
+                    },
+                    {
+                      "color": "red",
+                      "value": 95
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #E"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "root fs"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 85
+                    },
+                    {
+                      "color": "red",
+                      "value": 95
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "since last report",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "host": "host"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max by (host) (timestamp(node_load1{env=\"$env\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "100 * (1 - avg by (host)(rate(node_cpu_seconds_total{env=\"$env\",mode=\"idle\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (host)(node_load1{env=\"$env\"}) / count by (host)(node_cpu_seconds_total{env=\"$env\",mode=\"idle\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "expr": "100 * (1 - sum by (host)(node_memory_MemAvailable_bytes{env=\"$env\"}) / sum by (host)(node_memory_MemTotal_bytes{env=\"$env\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "expr": "100 * (1 - max by (host)(node_filesystem_avail_bytes{env=\"$env\",mountpoint=\"/\"}) / max by (host)(node_filesystem_size_bytes{env=\"$env\",mountpoint=\"/\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "per-host detail",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "cpu utilization %",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (1 - avg by (host)(rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",mode=\"idle\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "load average (per core)",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host)(node_load1{env=\"$env\",host=~\"$host\"}) / count by (host)(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",mode=\"idle\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "memory used %",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (1 - sum by (host)(node_memory_MemAvailable_bytes{env=\"$env\",host=~\"$host\"}) / sum by (host)(node_memory_MemTotal_bytes{env=\"$env\",host=~\"$host\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "root filesystem used %",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (1 - max by (host)(node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",mountpoint=\"/\"}) / max by (host)(node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",mountpoint=\"/\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "network throughput (bit/s)",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host)(rate(node_network_receive_bytes_total{env=\"$env\",host=~\"$host\",device!~\"lo|docker.*|veth.*|warp.*|br.*\"}[$__rate_interval])) * 8",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host)(rate(node_network_transmit_bytes_total{env=\"$env\",host=~\"$host\",device!~\"lo|docker.*|veth.*|warp.*|br.*\"}[$__rate_interval])) * 8",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "disk io (byte/s)",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host)(rate(node_disk_read_bytes_total{env=\"$env\",host=~\"$host\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host)(rate(node_disk_written_bytes_total{env=\"$env\",host=~\"$host\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    }
+  ]
+}

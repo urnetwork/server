@@ -53,6 +53,10 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleUpdateClientLocations(clientSession, tx)
 		work.ScheduleUpdateReliabilities(clientSession, tx, server.NowUtc().Add(-1*time.Hour))
 		work.ScheduleCleanupExpiredPaymentIntents(clientSession, tx)
+		work.ScheduleSweepVerifyTrails(clientSession, tx)
+		work.ScheduleRollupVerifyProviderStats(clientSession, tx)
+		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
+		work.ScheduleStSyncChain(clientSession, tx)
 	})
 }
 
@@ -222,6 +226,38 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.CleanupExpiredPaymentIntents,
 			work.CleanupExpiredPaymentIntentsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SweepVerifyTrails,
+			work.SweepVerifyTrailsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupVerifyProviderStats,
+			work.RollupVerifyProviderStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RefreshVerifyProxyEgress,
+			work.RefreshVerifyProxyEgressPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StSyncChain,
+			work.StSyncChainPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StEpochClose,
+			work.StEpochClosePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StCommitRoot,
+			work.StCommitRootPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StDeposit,
+			work.StDepositPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StFinalizePoke,
+			work.StFinalizePokePost,
 		),
 	)
 

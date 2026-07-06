@@ -2837,4 +2837,183 @@ var migrations = []any{
 		CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_port_attempt_time
 		ON wallet_auth_challenge_attempt (client_address_hash, client_address_port, attempt_time)
 	`),
+
+	// `/verify` published proofs (sn/VALIDATOR.md §6.2): one row per
+	// completed (status=1) or expired (status=2) trail. `hops_json` is
+	// `[{"client_id", "time_ms"}, ...]`; sigs are null when expired. Poison
+	// trails (§9) are never written here.
+	newSqlMigration(`
+        CREATE TABLE verify_trail (
+            trail_id uuid PRIMARY KEY,
+            vpk bytea NOT NULL,
+            server_key_id smallint NOT NULL,
+            server_nonce bytea NOT NULL,
+            depth smallint NOT NULL,
+            status smallint NOT NULL,
+            hops_json text NOT NULL,
+            final_sig bytea,
+            verifier_sig bytea,
+            create_time timestamp NOT NULL,
+            complete_time timestamp
+        )
+    `),
+
+	// `/verify` per-provider stat rollups (sn/VALIDATOR.md §7), upserted
+	// periodically from the redis histograms. This exact shape is consumed by
+	// the subnet scoring pipeline — do not change columns in place.
+	newSqlMigration(`
+        CREATE TABLE verify_provider_stats (
+            period_start timestamp NOT NULL,
+            period_end timestamp NOT NULL,
+            client_id uuid NOT NULL,
+            assignments bigint NOT NULL,
+            confirmations bigint NOT NULL,
+            latency_p50_ms int,
+            latency_p90_ms int,
+            latency_p99_ms int,
+
+            PRIMARY KEY (period_start, client_id)
+        )
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS verify_provider_stats_client_id_period_start
+        ON verify_provider_stats (client_id, period_start)
+    `),
+
+	// Subtensor (st) settlement subsystem (PLAN.md §5/§6).
+	// `st_wallet` is a network's subnet claim wallet — deliberately separate
+	// from account_wallet/payout_wallet so the USDC payout planner never
+	// sees subnet wallets (D-2).
+	newSqlMigration(`
+        CREATE TABLE st_wallet (
+            network_id uuid NOT NULL,
+            coldkey_ss58 varchar(64) NOT NULL,
+            coldkey_pubkey bytea NOT NULL,
+            set_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (network_id)
+        )
+    `),
+
+	// mirror of the contract epoch machine; all *_block columns are contract
+	// (EVM) block numbers — the contract clock is authoritative.
+	// status: open | closed | committed | finalized
+	newSqlMigration(`
+        CREATE TABLE st_epoch (
+            epoch bigint NOT NULL,
+            start_block bigint NOT NULL,
+            commit_deadline_block bigint NOT NULL,
+            trails_deadline_block bigint NOT NULL,
+            finalize_block bigint NOT NULL,
+            status varchar(16) NOT NULL,
+            finalized_time timestamp NULL,
+
+            PRIMARY KEY (epoch)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS st_epoch_status ON st_epoch (status, epoch)
+    `),
+
+	// one payout tree leaf per (epoch, no_id, coldkey) — the contract dedups
+	// miner claims by (noId, coldkey). leaf_index is the deterministic input
+	// order used to rebuild the tree byte-exactly. network_id is a
+	// representative contributing network (informational).
+	newSqlMigration(`
+        CREATE TABLE st_payout_leaf (
+            epoch bigint NOT NULL,
+            no_id bigint NOT NULL,
+            network_id uuid NOT NULL,
+            coldkey bytea NOT NULL,
+            share_bps int NOT NULL,
+            leaf_index int NOT NULL,
+
+            PRIMARY KEY (epoch, no_id, leaf_index),
+            UNIQUE (epoch, no_id, coldkey)
+        )
+    `),
+
+	// one row per attempted chain write (commit/deposit/finalize).
+	// status: pending | confirmed | failed | skipped
+	newSqlMigration(`
+        CREATE TABLE st_publish (
+            publish_id uuid NOT NULL,
+            epoch bigint NOT NULL,
+            kind varchar(32) NOT NULL,
+            tx_hash varchar(80) NULL,
+            status varchar(16) NOT NULL,
+            error varchar(1024) NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (publish_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS st_publish_epoch_kind ON st_publish (epoch, kind, create_time)
+    `),
+
+	// mirrored contract event log (eth_getLogs sync, SP-4). kind is the
+	// contract event name; data_json the decoded args.
+	newSqlMigration(`
+        CREATE TABLE st_event (
+            block_number bigint NOT NULL,
+            log_index int NOT NULL,
+            tx_hash varchar(80) NOT NULL,
+            kind varchar(64) NOT NULL,
+            data_json text NOT NULL,
+
+            PRIMARY KEY (block_number, log_index)
+        )
+    `),
+
+	// single-row high-water mark for the event sync (next block to scan)
+	newSqlMigration(`
+        CREATE TABLE st_chain_sync (
+            singleton_id int NOT NULL DEFAULT 1 CHECK (singleton_id = 1),
+            high_water_block bigint NOT NULL,
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (singleton_id)
+        )
+    `),
+
+	// the epoch share computation scans sweeps by time window
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_sweep_time
+        ON transfer_escrow_sweep (sweep_time)
+    `),
+
+	// mirror of the on-chain head-binding registry (WHITEPAPER §8.4/§11.4):
+	// a provider promoted to the head tier, keyed by its client public key
+	// (ckey — the 32-byte Ed25519 key GetClientPublicKey returns, the
+	// contract's `clientId`) and bound to a head-tier hotkey/uid. Driven by
+	// HeadBound/HeadUnbound events in block order; `active` is false after an
+	// unbind. update_block is the contract block of the last transition and
+	// guards out-of-order replays. The epoch-close payout excludes active
+	// ckeys from every pool (paid natively by Yuma — never paid twice). The
+	// set is small (~200) so a full active read per close is fine.
+	newSqlMigration(`
+        CREATE TABLE st_head_binding (
+            ckey bytea NOT NULL,
+            hotkey bytea NOT NULL,
+            uid bigint NOT NULL,
+            active bool NOT NULL,
+            update_block bigint NOT NULL,
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (ckey)
+        )
+    `),
+
+	// stable per-payment idempotency key for the payment processor submit.
+	// Created on the first submit attempt and reused on retries, so a crash
+	// between the processor call and recording `payment_record` cannot
+	// double-send funds. Cleared together with `payment_record` when a failed
+	// transaction is reset for a fresh attempt.
+	newSqlMigration(`
+        ALTER TABLE account_payment
+        ADD COLUMN circle_idempotency_key uuid NULL
+    `),
 }
