@@ -347,14 +347,16 @@ func AuthNetworkClient(
 				`,
 				authClient.ClientId,
 			)
-			var deviceId *server.Id
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(deviceId))
-				}
-			})
+		var deviceId server.Id
+		var hasDevice bool
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&deviceId))
+				hasDevice = true
+			}
+		})
 
-			if deviceId == nil {
+		if !hasDevice {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Client needs to be migrated (support@ur.io).",
@@ -368,7 +370,7 @@ func AuthNetworkClient(
 				`
 					UPDATE device
 					SET
-						device_spec = $2,
+						device_spec = $2
 					WHERE
 						device_id = $1
 				`,
@@ -384,7 +386,7 @@ func AuthNetworkClient(
 				return
 			}
 
-			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId).Sign()
+			byJwtWithClientId := session.ByJwt.Client(deviceId, *authClient.ClientId).Sign()
 			authClientResult = &AuthNetworkClientResult{
 				ByClientJwt: &byJwtWithClientId,
 				ClientId:    authClient.ClientId,
