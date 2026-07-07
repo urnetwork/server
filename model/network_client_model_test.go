@@ -10,6 +10,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
@@ -383,5 +385,59 @@ func TestMigrateProvideMode(t *testing.T) {
 			networkSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
 			assert.Equal(t, []byte(networkSk), networkKey)
 		})
+	})
+}
+
+func TestAuthNetworkClientReuse(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "test-reuse"
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		authSessionId := server.NewId()
+		byJwt := jwt.NewByJwt(networkId, userId, networkName, false, false, authSessionId)
+		signed := byJwt.Sign()
+		parsedByJwt, parseErr := jwt.ParseByJwt(ctx, signed)
+		assert.Equal(t, parseErr, nil)
+
+		cancelCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		sess := &session.ClientSession{
+			Ctx:    cancelCtx,
+			Cancel: cancel,
+			ByJwt:  parsedByJwt,
+		}
+
+		// Mint a fresh client (ClientId == nil)
+		createResult, createErr := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "test-client",
+				ClientId:    nil,
+			},
+			sess,
+		)
+		assert.Equal(t, createErr, nil)
+		assert.NotEqual(t, createResult, nil)
+		assert.NotEqual(t, createResult.ByClientJwt, nil)
+		assert.NotEqual(t, createResult.ClientId, nil)
+		createdId := *createResult.ClientId
+
+		// Reuse the client (ClientId != nil) — this was the broken path
+		reuseResult, reuseErr := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "test-client-reuse",
+				ClientId:    &createdId,
+			},
+			sess,
+		)
+		assert.Equal(t, reuseErr, nil)
+		assert.NotEqual(t, reuseResult, nil)
+		assert.NotEqual(t, reuseResult.ByClientJwt, nil)
+		assert.NotEqual(t, reuseResult.ClientId, nil)
+		assert.Equal(t, *reuseResult.ClientId, createdId)
 	})
 }
