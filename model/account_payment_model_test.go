@@ -130,6 +130,155 @@ func TestCancelAccountPayment(t *testing.T) {
 	})
 }
 
+// A bounded plan (maxDuration > 0) must only include sweeps within
+// [.., min(now, oldestUnpaidSweep+maxDuration)), leaving newer sweeps for a
+// later plan. Running bounded plans repeatedly must drain a backlog
+// oldest-first: each run pays exactly its slice, and together they pay
+// everything an unbounded plan would have paid at once.
+func TestPlanPaymentsMaxDuration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024) // 1 TiB
+		netRevenue := UsdToNanoCents(100.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 365*24*time.Hour, netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, sourceSession.Ctx)
+
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    "0x1234567890",
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		// close a cohort of contracts whose total provider revenue share clears
+		// the wallet minimum, so the cohort is never withheld for being small.
+		usedTransferByteCount := ByteCount(50 * 1024 * 1024 * 1024) // 50 GiB
+		closeCohort := func() {
+			paid := NanoCents(0)
+			for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+				transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			}
+		}
+
+		// backdate unpaid sweeps into a chosen time window. Only sweep_time
+		// matters to the bound, so the contract times can stay at ~now. When
+		// minSweepTime is set, only sweeps at/after it are moved, which targets
+		// just the most recent cohort and leaves earlier cohorts in place.
+		setUnpaidSweepTime := func(sweepTime time.Time, minSweepTime *time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				if minSweepTime == nil {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_escrow_sweep SET sweep_time = $1 WHERE payment_id IS NULL`,
+						sweepTime,
+					))
+				} else {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_escrow_sweep SET sweep_time = $1 WHERE payment_id IS NULL AND sweep_time >= $2`,
+						sweepTime, *minSweepTime,
+					))
+				}
+			})
+		}
+
+		sumUnpaidBytes := func() ByteCount {
+			var total ByteCount
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx,
+					`SELECT COALESCE(SUM(payout_byte_count), 0)::bigint FROM transfer_escrow_sweep WHERE payment_id IS NULL`,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&total))
+					}
+				})
+			})
+			return total
+		}
+
+		now := server.NowUtc()
+		oldCohortTime := now.Add(-20 * 24 * time.Hour)
+		newCohortTime := now.Add(-5 * 24 * time.Hour)
+		cohortSplit := now.Add(-10 * 24 * time.Hour) // between the two cohorts
+		maxDuration := 10 * 24 * time.Hour
+
+		// cohort A: oldest, 20 days ago
+		closeCohort()
+		setUnpaidSweepTime(oldCohortTime, nil)
+		expectedBytesA := sumUnpaidBytes()
+		assert.Equal(t, 0 < expectedBytesA, true)
+
+		// cohort B: 5 days ago (only the freshly-created, not-yet-backdated sweeps)
+		closeCohort()
+		setUnpaidSweepTime(newCohortTime, &cohortSplit)
+		expectedBytesB := sumUnpaidBytes() - expectedBytesA
+		assert.Equal(t, 0 < expectedBytesB, true)
+
+		// baseline: an unbounded plan would pay both cohorts at once. Use a dry
+		// run so it persists nothing and the real bounded plans below still see
+		// the full backlog.
+		dryAll, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), true, 0)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, dryAll.NetworkPayments[destinationNetworkId].PayoutByteCount, expectedBytesA+expectedBytesB)
+
+		// plan 1: window is [.., oldCohortTime+10d = now-10d); includes cohort A,
+		// excludes cohort B (now-5d).
+		plan1, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan1.NetworkPayments), 1)
+		payment1, ok := plan1.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, payment1.PayoutByteCount, expectedBytesA)
+		// cohort B is untouched, still unpaid for a later plan
+		assert.Equal(t, sumUnpaidBytes(), expectedBytesB)
+
+		// plan 2: nothing older than cohort B remains, so the window anchors on
+		// cohort B and drains it.
+		plan2, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan2.NetworkPayments), 1)
+		payment2, ok := plan2.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, payment2.PayoutByteCount, expectedBytesB)
+		// everything is now paid
+		assert.Equal(t, sumUnpaidBytes(), ByteCount(0))
+
+		// plan 3: nothing left to pay
+		plan3, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan3.NetworkPayments), 0)
+	})
+}
+
 // A dry run must compute the same plan a real run would, but persist nothing:
 // no payments, no swept contracts marked paid. A real run immediately after
 // must therefore still see the same contracts and produce the same payout.

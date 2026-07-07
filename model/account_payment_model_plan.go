@@ -30,6 +30,15 @@ type PaymentPlanner struct {
 	ctx           context.Context
 	subsidyConfig *SubsidyConfig
 
+	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
+	// sweeps so a large backlog is drained in bounded slices instead of one
+	// oversized plan. 0 means unbounded (all unpaid sweeps).
+	maxDuration time.Duration
+	// computed sweep-time upper bound for a bounded plan. `bounded` is only set
+	// when maxDuration > 0 and there is at least one unpaid sweep to anchor on.
+	bounded    bool
+	upperBound time.Time
+
 	// all the planning is done inside a transaction
 	tx server.PgTx
 
@@ -66,7 +75,7 @@ type PaymentPlanner struct {
 // ever accidentally persist a payment, mark a sweep paid, or apply points.
 var errPaymentPlanDryRun = errors.New("payment plan dry run")
 
-func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool) (paymentPlan *PaymentPlan, returnErr error) {
+func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
 	if dryRun {
 		// recover the rollback sentinel so a dry run returns the computed plan
 		// normally. Any other panic (e.g. a real db error) still propagates.
@@ -108,6 +117,7 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
+			maxDuration:            maxDuration,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
 			networkReferrals:       networkReferrals,
@@ -164,6 +174,56 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	return
 }
 
+// computePlanUpperBound restricts a bounded plan (maxDuration > 0) to the
+// window [.., min(now, oldestUnpaidSweep+maxDuration)). Only an upper bound is
+// needed; the lower edge is implicit because already-paid sweeps are excluded
+// from every planning query by the unpaid filter. Anchoring on the oldest
+// unpaid sweep (rather than now) drains a backlog oldest-first, one maxDuration
+// slice per run, which keeps any single plan small enough to fit in memory.
+// When maxDuration is 0, or there are no unpaid sweeps to anchor on, the plan
+// is left unbounded (the historical behavior).
+func (self *PaymentPlanner) computePlanUpperBound() {
+	if self.maxDuration <= 0 {
+		return
+	}
+
+	var oldestUnpaid *time.Time
+	result, err := self.tx.Query(
+		self.ctx,
+		`
+		SELECT MIN(transfer_escrow_sweep.sweep_time)
+
+		FROM transfer_escrow_sweep
+
+		LEFT JOIN account_payment ON
+			account_payment.payment_id = transfer_escrow_sweep.payment_id
+
+		WHERE
+			account_payment.payment_id IS NULL OR
+			account_payment.canceled = true
+		`,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&oldestUnpaid))
+		}
+	})
+
+	if oldestUnpaid == nil {
+		// no unpaid sweeps; the plan will be empty, nothing to bound
+		return
+	}
+
+	self.bounded = true
+	self.upperBound = server.MinTime(server.NowUtc(), oldestUnpaid.Add(self.maxDuration))
+	glog.Infof(
+		"[plan]bounded to sweep_time < %s (oldest unpaid %s + %s)\n",
+		self.upperBound.Format(time.RFC3339),
+		oldestUnpaid.Format(time.RFC3339),
+		self.maxDuration,
+	)
+}
+
 func (self *PaymentPlanner) planPayments() (returnErr error) {
 	self.networkEscrowIds = map[server.Id][]*EscrowId{}
 
@@ -173,9 +233,22 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// networkId -> parent referralNetworkId
 	self.referralNetworks = map[server.Id]server.Id{}
 
+	// when maxDuration is set, restrict the swept set to a bounded sweep-time
+	// window so this plan stays small. sets self.bounded / self.upperBound.
+	self.computePlanUpperBound()
+
+	// only an upper bound is needed: the lower edge is implicit because
+	// already-paid sweeps are excluded by the unpaid filter below.
+	sweepTimeBound := ""
+	sweepTimeArgs := []any{}
+	if self.bounded {
+		sweepTimeBound = "AND transfer_escrow_sweep.sweep_time < $1"
+		sweepTimeArgs = append(sweepTimeArgs, self.upperBound)
+	}
+
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
-		`
+		fmt.Sprintf(`
         CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
 
         AS
@@ -190,9 +263,11 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
             account_payment.payment_id = transfer_escrow_sweep.payment_id
 
         WHERE
-            account_payment.payment_id IS NULL OR
-            account_payment.canceled = true
-        `,
+            (account_payment.payment_id IS NULL OR
+            account_payment.canceled = true)
+            %s
+        `, sweepTimeBound),
+		sweepTimeArgs...,
 	))
 
 	result, err := self.tx.Query(
@@ -409,12 +484,23 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
+	// the subsidy time range is derived from the swept contracts. Bound it by
+	// the same sweep-time window as the paid set so the subsidy scale/amount
+	// match the sweeps actually being paid in this bounded plan; otherwise the
+	// subsidy would be sized off the full history while paid over a slice.
+	subsidyRangeBound := ""
+	subsidyRangeArgs := []any{}
+	if self.bounded {
+		subsidyRangeBound = "WHERE transfer_escrow_sweep.sweep_time < $1"
+		subsidyRangeArgs = append(subsidyRangeArgs, self.upperBound)
+	}
+
 	// note the aggregates are NULL when no swept contracts exist
 	var subsidyStartTimePtr *time.Time
 	var subsidyEndTimePtr *time.Time
 	result, err = self.tx.Query(
 		self.ctx,
-		`
+		fmt.Sprintf(`
     	SELECT
             MIN(transfer_contract.create_time) AS subsidy_start_time,
             MAX(transfer_contract.close_time) AS subsidy_end_time
@@ -424,7 +510,9 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
         INNER JOIN transfer_contract ON
         	transfer_contract.contract_id = transfer_escrow_sweep.contract_id
 
-        `,
+        %s
+        `, subsidyRangeBound),
+		subsidyRangeArgs...,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {

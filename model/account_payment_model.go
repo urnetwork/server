@@ -391,7 +391,16 @@ func PlanPayments(ctx context.Context) (paymentPlan *PaymentPlan, returnErr erro
 }
 
 func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (paymentPlan *PaymentPlan, returnErr error) {
-	return CreatePaymentPlan(ctx, subsidyConfig, false)
+	return CreatePaymentPlan(ctx, subsidyConfig, false, 0)
+}
+
+// PlanPaymentsWithMaxDuration is like PlanPayments but bounds the plan to at
+// most maxDuration of the oldest unpaid sweeps, so a large backlog since the
+// last payout can be drained in bounded slices instead of one oversized plan
+// that runs out of memory. maxDuration == 0 is unbounded (identical to
+// PlanPayments). Call it repeatedly to advance through a backlog.
+func PlanPaymentsWithMaxDuration(ctx context.Context, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
+	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
 }
 
 // PlanPaymentsDryRun computes a payment plan exactly like PlanPayments but
@@ -402,7 +411,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 // reliability portion of the preview reflects the last reliability refresh
 // rather than a fresh one.
 func PlanPaymentsDryRun(ctx context.Context) (paymentPlan *PaymentPlan, returnErr error) {
-	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), true)
+	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), true, 0)
+}
+
+// PlanPaymentsDryRunWithMaxDuration is PlanPaymentsDryRun with the same
+// maxDuration bounding as PlanPaymentsWithMaxDuration.
+func PlanPaymentsDryRunWithMaxDuration(ctx context.Context, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
+	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), true, maxDuration)
 }
 
 func GetSubsidyPayment(ctx context.Context, paymentPlanId server.Id) (paymentPlan *SubsidyPayment) {

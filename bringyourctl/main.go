@@ -60,7 +60,7 @@ Usage:
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
-    bringyourctl payouts plan [--send] [--dry-run]
+    bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -110,6 +110,7 @@ Options:
     --amount_usd=<amount_usd>   Amount in USD.
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
+    --max_duration=<max_duration>  Bound a payout plan to at most this much of the oldest unpaid sweeps, e.g. 14d, 1.5d, 336h.
     -c --count=<count>	Number to process [default: 1000].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -677,10 +678,28 @@ func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
 func planPayouts(opts docopt.Opts) {
 	send, _ := opts.Bool("--send")
 	dryRun, _ := opts.Bool("--dry-run")
+	maxDurationStr, _ := opts.String("--max_duration")
 
 	if send && dryRun {
 		fmt.Println("--dry-run cannot be combined with --send")
 		return
+	}
+
+	// --max_duration bounds the planning window to keep a single plan small.
+	// --send runs the automated payout path, which is intentionally unbounded,
+	// so the two cannot be combined.
+	var maxDuration time.Duration
+	if maxDurationStr != "" {
+		if send {
+			fmt.Println("--max_duration cannot be combined with --send")
+			return
+		}
+		var err error
+		maxDuration, err = server.ParseDurationExtended(maxDurationStr)
+		if err != nil {
+			fmt.Printf("invalid --max_duration %q: %s\n", maxDurationStr, err)
+			return
+		}
 	}
 
 	ctx := context.Background()
@@ -694,13 +713,14 @@ func planPayouts(opts docopt.Opts) {
 
 	// A real plan (no --dry-run) persists the plan: it creates the payments,
 	// marks the swept contracts paid, and applies points. A dry run computes the
-	// same plan but persists nothing, so it can be previewed first.
+	// same plan but persists nothing, so it can be previewed first. maxDuration
+	// of 0 (flag omitted) plans the full backlog, matching the previous behavior.
 	var plan *model.PaymentPlan
 	var err error
 	if dryRun {
-		plan, err = model.PlanPaymentsDryRun(ctx)
+		plan, err = model.PlanPaymentsDryRunWithMaxDuration(ctx, maxDuration)
 	} else {
-		plan, err = model.PlanPayments(ctx)
+		plan, err = model.PlanPaymentsWithMaxDuration(ctx, maxDuration)
 	}
 	if err != nil {
 		fmt.Printf("payout plan err = %s\n", err)

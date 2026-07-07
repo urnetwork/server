@@ -4,6 +4,7 @@ import (
 	"context"
 	mathrand "math/rand"
 	"sync/atomic"
+	"time"
 
 	"testing"
 
@@ -39,6 +40,63 @@ func TestPorts(t *testing.T) {
 			uniquePorts2[port] = true
 		}
 		assert.Equal(t, uniquePorts, uniquePorts2)
+	}
+}
+
+func TestParseDurationExtended(t *testing.T) {
+	valid := []struct {
+		in   string
+		want time.Duration
+	}{
+		// day unit
+		{"1d", 24 * time.Hour},
+		{"2d", 48 * time.Hour},
+		{"14d", 14 * 24 * time.Hour},
+		// fractional days
+		{"1.5d", 36 * time.Hour},
+		{".5d", 12 * time.Hour},
+		{"0.25d", 6 * time.Hour},
+		// days combined with standard units, either order
+		{"1d12h", 36 * time.Hour},
+		{"12h1d", 36 * time.Hour},
+		{"1d1h1m", 24*time.Hour + time.Hour + time.Minute},
+		// signs and surrounding whitespace
+		{"-1.5d", -36 * time.Hour},
+		{"+2d", 48 * time.Hour},
+		{" 3d ", 3 * 24 * time.Hour},
+		// no day unit: identical to time.ParseDuration
+		{"336h", 336 * time.Hour},
+		{"90m", 90 * time.Minute},
+		{"1h30m", 90 * time.Minute},
+		{"1.5h", 90 * time.Minute},
+		{"500ms", 500 * time.Millisecond},
+		{"0", 0},
+	}
+	for _, tc := range valid {
+		got, err := ParseDurationExtended(tc.in)
+		if err != nil {
+			t.Errorf("ParseDurationExtended(%q) unexpected error: %s", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ParseDurationExtended(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"   ",
+		"d",     // day unit with no value
+		"d1",    // value after the unit
+		"1.5",   // no unit at all
+		"abc",   // not a duration
+		"1x",    // unknown unit
+		"1.5dd", // malformed day component
+	}
+	for _, in := range invalid {
+		if _, err := ParseDurationExtended(in); err == nil {
+			t.Errorf("ParseDurationExtended(%q) expected an error, got nil", in)
+		}
 	}
 }
 
