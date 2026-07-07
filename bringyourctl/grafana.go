@@ -28,11 +28,18 @@ func grafanaLoadDefaults(opts docopt.Opts) {
 
 	fmt.Printf("Loading default dashboards into %s (folder %s)\n", grafanaUrl, grafana.FolderTitle)
 
-	titles, err := grafana.LoadDefaults(context.Background(), grafanaUrl, "admin", adminPassword)
+	titles, public, err := grafana.LoadDefaults(context.Background(), grafanaUrl, "admin", adminPassword)
 	if err != nil {
 		panic(err)
 	}
 	for _, title := range titles {
 		fmt.Printf("- %s\n", title)
+	}
+	if 0 < len(public) {
+		fmt.Printf("\nPublic dashboards (read-only, no login):\n")
+		for _, pd := range public {
+			fmt.Printf("- %s\n    %s/public-dashboards/%s\n", pd.Title, grafanaUrl, pd.AccessToken)
+		}
+		fmt.Printf("\nPublic directory: %s/stats\n", grafanaUrl)
 	}
 }

@@ -1,0 +1,101 @@
+{
+    "uid": "urnetwork-public-traffic",
+    "title": "urnetwork / network stats",
+    "tags": ["urnetwork", "public"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "refresh": "5m",
+    "time": {
+        "from": "now-24h",
+        "to": "now"
+    },
+    "panels": [
+        {
+            "id": 1,
+            "type": "stat",
+            "title": "total traffic",
+            "gridPos": {"h": 6, "w": 12, "x": 0, "y": 0},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "decbytes"}, "overrides": []},
+            "interval": "15m",
+            "options": {
+                "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "area",
+                "textMode": "value"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(increase(urnetwork_connect_transfer_bytes[15m]))"
+                }
+            ]
+        },
+        {
+            "id": 2,
+            "type": "stat",
+            "title": "active clients now",
+            "gridPos": {"h": 6, "w": 12, "x": 12, "y": 0},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+            "options": {
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "area",
+                "textMode": "value"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(urnetwork_connect_resident_clients)"
+                }
+            ]
+        },
+        {
+            "id": 3,
+            "type": "timeseries",
+            "title": "traffic per 15m",
+            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "decbytes",
+                    "custom": {"drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1}
+                },
+                "overrides": []
+            },
+            "interval": "15m",
+            "options": {"legend": {"displayMode": "hidden"}, "tooltip": {"mode": "single"}},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(increase(urnetwork_connect_transfer_bytes[15m]))",
+                    "legendFormat": "traffic"
+                }
+            ]
+        },
+        {
+            "id": 4,
+            "type": "timeseries",
+            "title": "active clients",
+            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}
+                },
+                "overrides": []
+            },
+            "interval": "15m",
+            "options": {"legend": {"displayMode": "hidden"}, "tooltip": {"mode": "single"}},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(urnetwork_connect_resident_clients)",
+                    "legendFormat": "active clients"
+                }
+            ]
+        }
+    ]
+}

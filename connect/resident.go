@@ -93,10 +93,25 @@ var abuseDroppedCounter = prometheus.NewCounter(
 	},
 )
 
+// residentClientsGauge is the number of distinct connected client devices with
+// a resident on this node (one resident per client id). summed across nodes in
+// grafana it is the total active clients. kept in sync with the residents map
+// under stateLock. this differs from connected_clients (transport.go), which
+// counts transport connections and can be several per client
+var residentClientsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "resident_clients",
+		Help:      "Number of distinct connected client devices (residents) on this node",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(forwardDroppedCounter)
 	prometheus.MustRegister(forwardReceiveDroppedCounter)
 	prometheus.MustRegister(abuseDroppedCounter)
+	prometheus.MustRegister(residentClientsGauge)
 }
 
 // use 0 for deadlock testing
@@ -407,6 +422,7 @@ func (self *Exchange) NominateLocalResident(
 			if currentResident := self.residents[clientId]; resident == currentResident {
 				delete(self.residents, clientId)
 			}
+			residentClientsGauge.Set(float64(len(self.residents)))
 		}()
 
 		server.HandleError(resident.Run)
@@ -466,6 +482,7 @@ func (self *Exchange) NominateLocalResident(
 		defer self.stateLock.Unlock()
 		replacedResident = self.residents[clientId]
 		self.residents[clientId] = resident
+		residentClientsGauge.Set(float64(len(self.residents)))
 	}()
 	if replacedResident != nil {
 		replacedResident.Cancel()
