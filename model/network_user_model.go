@@ -49,9 +49,9 @@ func GetNetworkUser(
 
 	var networkUser *NetworkUser
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	server.Db(ctx, func(conn server.PgConn) {
 
-		result, err := tx.Query(
+		result, err := conn.Query(
 			ctx,
 			`
 			SELECT

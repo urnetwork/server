@@ -675,6 +675,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		self.ctx,
 		self.tx,
 		subsidyStartTime,
+		subsidyEndTime,
 		subsidyScale,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
@@ -943,7 +944,14 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		pointsPerPayout,
 	))
 
-	// TODO the `ApplyAccountPointsInTx` could be done in a batch to speed up the plan
+	// Collect every account_point row and insert them as a single batch at the
+	// end, instead of one round-trip per row. A large plan applies points to
+	// every payee plus their referral parents/children, so these per-row
+	// inserts dominated the time to commit the plan.
+	queuedPoints := []ApplyAccountPointsArgs{}
+	queuePoints := func(args ApplyAccountPointsArgs) {
+		queuedPoints = append(queuedPoints, args)
+	}
 
 	/**
 	 * Apply reliability points
@@ -964,7 +972,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 				PaymentPlanId:    &self.paymentPlanId,
 			}
-			ApplyAccountPointsInTx(self.ctx, self.tx, reliabilityPointsArgs)
+			queuePoints(reliabilityPointsArgs)
 		}
 	}
 
@@ -994,11 +1002,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 			}
 
-			ApplyAccountPointsInTx(
-				self.ctx,
-				self.tx,
-				accountPointsArgs,
-			)
+			queuePoints(accountPointsArgs)
 
 		}
 
@@ -1021,7 +1025,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 			}
 
-			ApplyAccountPointsInTx(self.ctx, self.tx, accountPointsArgs)
+			queuePoints(accountPointsArgs)
 		}
 
 		/**
@@ -1044,7 +1048,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 					AccountPaymentId: &payment.PaymentId,
 				}
 
-				ApplyAccountPointsInTx(self.ctx, self.tx, accountPointsArgs)
+				queuePoints(accountPointsArgs)
 			}
 		}
 
@@ -1054,7 +1058,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		visited := make(map[server.Id]struct{})
 		payoutChildrenReferralNetworksInTx(
 			self.ctx,
-			self.tx,
+			queuePoints,
 			scaledAccountPoints,
 			EnvSubsidyConfig().ReferralChildPayoutFraction,
 			payment.NetworkId,
@@ -1067,4 +1071,6 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		)
 	}
 
+	// flush every queued account_point row in a single batched insert
+	ApplyAccountPointsBatchInTx(self.ctx, self.tx, queuedPoints)
 }

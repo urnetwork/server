@@ -106,8 +106,8 @@ func GetReferralNetworkByChildNetworkId(
 
 	var referralNetwork *ReferralNetwork
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
 				SELECT
@@ -170,8 +170,8 @@ func GetReferralsByReferralNetworkId(
 
 	var networkReferrals []*NetworkReferral
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
 				SELECT

@@ -99,9 +99,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 			return nil, fmt.Errorf("Missing key for server name \"%s\".", hostName)
 		}
 		glog.V(1).Infof("[tls]found tls config for %s\n", hostName)
-		// make a copy
-		tlsConfigCopy := *tlsConfig
-		return &tlsConfigCopy, nil
+		return tlsConfig.Clone(), nil
 	}
 
 	selfSigned := func() (*tls.Config, error) {
@@ -127,9 +125,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 		}
 
 		self.tlsConfigs[hostName] = tlsConfig
-		// make  acopy
-		tlsConfigCopy := *tlsConfig
-		return &tlsConfigCopy, nil
+		return tlsConfig.Clone(), nil
 	}
 
 	if !self.allowedHosts[hostName] {
@@ -224,9 +220,7 @@ func (self *TransportTls) GetTlsConfig(hostName string) (*tls.Config, error) {
 
 	glog.V(1).Infof("[tls]found tls config for %s\n", hostName)
 
-	// make a copy
-	tlsConfigCopy := *tlsConfig
-	return &tlsConfigCopy, nil
+	return tlsConfig.Clone(), nil
 }
 
 func selfSign(

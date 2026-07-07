@@ -1036,17 +1036,15 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err := self.framer.Write(conn, transferFrameBytes)
-	if err == nil {
-		connect.MessagePoolReturn(transferFrameBytes)
-	}
+	connect.MessagePoolReturn(transferFrameBytes)
 	return err
 }
 
 // WriteMessages writes a batch of framed messages with a single writev
 // (one length-header iovec plus one body iovec per message), amortizing the
 // per-message syscall cost of `WriteMessage`. The whole batch shares one
-// `WriteTimeout` like every other layer. On success all messages are
-// returned to the message pool.
+// `WriteTimeout` like every other layer. The input messages are always
+// returned to the message pool (success or error paths).
 func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch [][]byte) error {
 	if len(transferFrameBytesBatch) == 0 {
 		return nil
@@ -1058,9 +1056,15 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	for _, transferFrameBytes := range transferFrameBytesBatch {
 		messageLen := len(transferFrameBytes)
 		if self.settings.FramerSettings.MaxMessageLen < messageLen {
+			for _, b := range transferFrameBytesBatch {
+				connect.MessagePoolReturn(b)
+			}
 			return fmt.Errorf("Max message len exceeded (%d<%d)", self.settings.FramerSettings.MaxMessageLen, messageLen)
 		}
 		if math.MaxUint16 < messageLen {
+			for _, b := range transferFrameBytesBatch {
+				connect.MessagePoolReturn(b)
+			}
 			return fmt.Errorf("Max possible message len exceeded (%d<%d)", math.MaxUint16, messageLen)
 		}
 	}
@@ -1081,13 +1085,12 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	// WriteTo drains its receiver, so write through a local copy; self.writeBuffers
 	// keeps its backing for the next batch.
 	buffers := self.writeBuffers
-	if _, err := buffers.WriteTo(conn); err != nil {
-		return err
-	}
+	n, err := buffers.WriteTo(conn)
+	_ = n // total bytes written before err (if any); WriteTo handles partials internally
 	for _, transferFrameBytes := range transferFrameBytesBatch {
 		connect.MessagePoolReturn(transferFrameBytes)
 	}
-	return nil
+	return err
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {

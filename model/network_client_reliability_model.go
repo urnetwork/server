@@ -356,16 +356,16 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 }
 
 func GetAllNetworkReliabilityScores(ctx context.Context) (networkScores map[server.Id]ReliabilityScore) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		networkScores = GetAllNetworkReliabilityScoresInTx(tx, ctx)
+	server.Db(ctx, func(conn server.PgConn) {
+		networkScores = getAllNetworkReliabilityScores(conn, ctx)
 	})
 	return
 }
 
-func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+func getAllNetworkReliabilityScores(q server.PgCanQuery, ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 
-	result, err := tx.Query(
+	result, err := q.Query(
 		ctx,
 		`
 		SELECT
@@ -401,17 +401,21 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 	return networkScores
 }
 
+func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+	return getAllNetworkReliabilityScores(tx, ctx)
+}
+
 func GetAllMultipliedNetworkReliabilityScores(ctx context.Context) (networkScores map[server.Id]ReliabilityScore) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		networkScores = GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
+	server.Db(ctx, func(conn server.PgConn) {
+		networkScores = getAllMultipliedNetworkReliabilityScores(conn, ctx)
 	})
 	return
 }
 
-func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+func getAllMultipliedNetworkReliabilityScores(q server.PgCanQuery, ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 
-	result, err := tx.Query(
+	result, err := q.Query(
 		ctx,
 		`
 		SELECT
@@ -448,6 +452,10 @@ func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Co
 	})
 
 	return networkScores
+}
+
+func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+	return getAllMultipliedNetworkReliabilityScores(tx, ctx)
 }
 
 type ReliabilityWindow struct {

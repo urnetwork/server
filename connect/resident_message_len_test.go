@@ -52,8 +52,8 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 	for i := range sent {
 		sent[i] = byte(i % 251)
 	}
-	// Independent copy: WriteMessage returns its input to the message pool on
-	// success, so `sent` must not be read afterward.
+	// WriteMessage takes ownership of the input buffer and returns it to the
+	// message pool (on success or error), so `sent` must not be read afterward.
 	expected := make([]byte, minLen)
 	copy(expected, sent)
 

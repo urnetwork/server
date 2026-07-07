@@ -2029,8 +2029,8 @@ func GetOpenContractIds(
 ) map[server.Id][]ContractParty {
 	contractIdPartialCloseParties := map[server.Id][]ContractParty{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT
@@ -2097,8 +2097,8 @@ func GetExpiredOpenContractIds(
 ) map[server.Id]bool {
 	contractIdPartialCloseParties := map[server.Id]map[ContractParty]bool{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT
@@ -2186,8 +2186,8 @@ func GetOpenContractIdsForSourceOrDestination(
 ) map[TransferPair]map[server.Id]ContractParty {
 	pairContractIdPartialCloseParties := map[TransferPair]map[server.Id]ContractParty{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT

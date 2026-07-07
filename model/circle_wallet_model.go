@@ -18,8 +18,8 @@ func GetCircleUCByCircleUCUserId(
 ) *CircleUC {
 	var circleUC *CircleUC
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT

@@ -511,7 +511,11 @@ func balanceCodeCheck(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("%s\n", result)
+	if b, err := json.MarshalIndent(result, "", "  "); err == nil {
+		fmt.Printf("%s\n", b)
+	} else {
+		fmt.Printf("%+v\n", result)
+	}
 }
 
 func sendNetworkWelcome(opts docopt.Opts) {
