@@ -8,7 +8,7 @@ import (
 )
 
 func GetLeaderboard(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputNoAuth(controller.GetLeaderboard, w, r)
+	router.WrapWithInputRequireAuth(controller.GetLeaderboard, w, r)
 }
 
 func GetLeaderboardNetworkRanking(w http.ResponseWriter, r *http.Request) {

@@ -1820,7 +1820,7 @@ func GetNetworkClientConnectionStatus(ctx context.Context, connectionId server.I
 }
 
 type DeviceSetNameArgs struct {
-	DeviceId   server.Id `json:"client_id"`
+	DeviceId   server.Id `json:"device_id"`
 	DeviceName string    `json:"device_name"`
 }
 
@@ -1843,10 +1843,12 @@ func DeviceSetName(
 				UPDATE device SET
 					device_name = $2
 				WHERE
-					device_id = $1
+					device_id = $1 AND
+					network_id = $3
 			`,
 			setName.DeviceId,
 			setName.DeviceName,
+			clientSession.ByJwt.NetworkId,
 		))
 		if tag.RowsAffected() != 1 {
 			setNameResult = &DeviceSetNameResult{
@@ -1876,8 +1878,15 @@ type DeviceSetProvideError struct {
 }
 
 func DeviceSetProvide(setProvide *DeviceSetProvideArgs, clientSession *session.ClientSession) (*DeviceSetProvideResult, error) {
-	// FIXME we don't support remote setting of local settings at the moment
-	return nil, fmt.Errorf("Not implemented.")
+	// Remote provide-mode setting is not supported: the provide secret keys are
+	// device-held (see SetProvide's secretKeys arg) and a remote API call does
+	// not have them. Return a spec-conformant error rather than a 500 until the
+	// security model is changed to support server-side provide keys.
+	return &DeviceSetProvideResult{
+		Error: &DeviceSetProvideError{
+			Message: "Remote provide-mode setting is not supported.",
+		},
+	}, nil
 }
 
 func Testing_CreateDevice(

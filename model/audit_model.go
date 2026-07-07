@@ -394,7 +394,7 @@ func computeStatsExtender(ctx context.Context, stats *Stats, conn server.PgConn)
 					superspeed: true,
 				}
 				activeExtenders[extenderId] = providerState
-			case AuditEventTypeProviderOnlineNotSuperspeed:
+			case AuditEventTypeExtenderOnlineNotSuperspeed:
 				providerState := &ExtenderState{
 					networkId:  networkId,
 					superspeed: false,
@@ -732,7 +732,7 @@ func computeStatsPackets(ctx context.Context, stats *Stats, conn server.PgConn) 
 		// GiB
 		stats.AllPacketsSummary = allPacketsSummary
 		// packets to average pps
-		stats.AllTransferSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60*60*24)))
+		stats.AllPacketsSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60*60*24)))
 	})
 }
 

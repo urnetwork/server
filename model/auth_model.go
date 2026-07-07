@@ -10,6 +10,7 @@ import (
 	// "strconv"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"time"
 
 	// "github.com/urnetwork/glog"
@@ -57,10 +58,28 @@ type AuthLoginArgs struct {
 type AuthLoginResult struct {
 	UserName    *string                 `json:"user_name,omitempty"`
 	UserAuth    *string                 `json:"user_auth,omitempty"`
-	WalletAuth  *WalletAuthArgs         `json:"wallet_login,omitempty"`
+	WalletAuth  *WalletAuthArgs         `json:"wallet_auth,omitempty"`
 	AuthAllowed *[]string               `json:"auth_allowed,omitempty"`
 	Error       *AuthLoginResultError   `json:"error,omitempty"`
 	Network     *AuthLoginResultNetwork `json:"network,omitempty"`
+}
+
+// MarshalJSON dual-emits the deprecated `wallet_login` alias alongside the spec
+// field `wallet_auth` during the rename migration (be lenient in what we send).
+func (r AuthLoginResult) MarshalJSON() ([]byte, error) {
+	type alias AuthLoginResult
+	b, err := json.Marshal(alias(r))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	if v, ok := m["wallet_auth"]; ok {
+		m["wallet_login"] = v
+	}
+	return json.Marshal(m)
 }
 
 type AuthLoginResultError struct {

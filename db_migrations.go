@@ -2982,4 +2982,49 @@ var migrations = []any{
         ALTER TABLE account_payment
         ADD COLUMN circle_idempotency_key uuid NULL
     `),
+
+	// Per-provider statistics APIs (/stats/providers, /stats/providers-last-n,
+	// /stats/provider-last-n) aggregate transfer_contract by destination_id
+	// (the provider client) over a time window. These indexes turn the
+	// per-provider scans into index ranges instead of full-table scans.
+	// transfer bytes bucket by close_time (settled); contracts/clients by
+	// create_time (opened).
+	//
+	// On the large existing tables (transfer_contract, network_client_connection)
+	// these must be built manually with CREATE INDEX CONCURRENTLY out of band —
+	// migrations run inside a transaction, where CONCURRENTLY is illegal and a
+	// plain CREATE INDEX takes a write-blocking lock (see FIXME above). The
+	// IF NOT EXISTS gate makes this migration a no-op once they are pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_destination_id_create_time
+        ON transfer_contract (destination_id, create_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_destination_id_close_time
+        ON transfer_contract (destination_id, close_time)
+    `),
+	// per-provider uptime / connected-events scans by client over a window
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_client_id_connect_time
+        ON network_client_connection (client_id, connect_time)
+    `),
+
+	// search-interest rollup. FindProviders2 increments a per-provider match
+	// counter in redis on the hot path (never writes pg); RollupSearchProviderStats
+	// drains those counters into this table once per hour. Same (period_start,
+	// client_id) rollup shape as verify_provider_stats.
+	newSqlMigration(`
+        CREATE TABLE search_provider_stats (
+            period_start timestamp NOT NULL,
+            period_end timestamp NOT NULL,
+            client_id uuid NOT NULL,
+            match_count bigint NOT NULL,
+
+            PRIMARY KEY (period_start, client_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS search_provider_stats_client_id_period_start
+        ON search_provider_stats (client_id, period_start)
+    `),
 }

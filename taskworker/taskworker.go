@@ -54,6 +54,8 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleCleanupExpiredPaymentIntents(clientSession, tx)
 		work.ScheduleSweepVerifyTrails(clientSession, tx)
 		work.ScheduleRollupVerifyProviderStats(clientSession, tx)
+		work.ScheduleRollupSearchProviderStats(clientSession, tx)
+		work.ScheduleRemoveOldSearchProviderStats(clientSession, tx)
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 	})
@@ -232,6 +234,14 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RollupVerifyProviderStats,
 			work.RollupVerifyProviderStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupSearchProviderStats,
+			work.RollupSearchProviderStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldSearchProviderStats,
+			work.RemoveOldSearchProviderStatsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RefreshVerifyProxyEgress,

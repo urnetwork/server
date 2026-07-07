@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/glog"
@@ -37,6 +38,26 @@ var MaxContractTransferByteCount = func() model.ByteCount {
 		2 * settings.ContractManagerSettings.StandardContractTransferByteCount,
 	)
 }()
+
+// urnetwork_connect_transfer_bytes counts bytes transferred on the connect
+// path, summed from the acked byte counts of closed and checkpointed transfer
+// contracts (see CloseContract). the acked byte count reported at each
+// checkpoint is incremental (the contract_close table accumulates it with
+// used_transfer_byte_count + $3), so adding it on every successful close is the
+// running total of transferred bytes. exported to grafana via the default
+// prometheus registry (see server/grafana.go StartStatsPusher)
+var transferByteCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "transfer_bytes",
+		Help:      "Bytes transferred on the connect path, summed from closed and checkpointed transfer contracts",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(transferByteCounter)
+}
 
 type ConnectControlArgs struct {
 	Pack string `json:"pack"`
@@ -674,5 +695,10 @@ func CloseContract(
 	checkpoint := closeContract.Checkpoint
 
 	err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+	if err == nil {
+		// the acked byte count is incremental per checkpoint, so this sums to
+		// the total transferred bytes (matching the contract_close accumulation)
+		transferByteCounter.Add(float64(usedTransferByteCount))
+	}
 	return err
 }

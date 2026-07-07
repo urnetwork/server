@@ -31,8 +31,13 @@ func GetNetworkReferralCode(
 }
 
 type ValidateNetworkReferralCodeResult struct {
-	IsValid  bool `json:"is_valid"`
-	IsCapped bool `json:"is_capped"`
+	IsValid  bool                       `json:"is_valid"`
+	IsCapped bool                       `json:"is_capped"`
+	Error    *ValidateReferralCodeError `json:"error,omitempty"`
+}
+
+type ValidateReferralCodeError struct {
+	Message string `json:"message"`
 }
 
 type ValidateReferralCodeArgs struct {
