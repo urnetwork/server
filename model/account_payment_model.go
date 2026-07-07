@@ -394,11 +394,13 @@ func PlanPaymentsWithConfig(ctx context.Context, subsidyConfig *SubsidyConfig) (
 	return CreatePaymentPlan(ctx, subsidyConfig, false, 0)
 }
 
-// PlanPaymentsWithMaxDuration is like PlanPayments but bounds the plan to at
-// most maxDuration of the oldest unpaid sweeps, so a large backlog since the
-// last payout can be drained in bounded slices instead of one oversized plan
-// that runs out of memory. maxDuration == 0 is unbounded (identical to
-// PlanPayments). Call it repeatedly to advance through a backlog.
+// PlanPaymentsWithMaxDuration is like PlanPayments but bounds the plan to the
+// first maxDuration of contract close time following the most recent subsidy
+// epoch, so a large backlog since the last payout can be drained in bounded
+// slices instead of one oversized plan that runs out of memory. Each plan
+// records a new subsidy epoch whose end advances the frontier, so calling this
+// repeatedly walks forward through the backlog one slice at a time. maxDuration
+// == 0 is unbounded (identical to PlanPayments).
 func PlanPaymentsWithMaxDuration(ctx context.Context, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
 	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
 }

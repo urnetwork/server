@@ -110,7 +110,7 @@ Options:
     --amount_usd=<amount_usd>   Amount in USD.
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
-    --max_duration=<max_duration>  Bound a payout plan to at most this much of the oldest unpaid sweeps, e.g. 14d, 1.5d, 336h.
+    --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     -c --count=<count>	Number to process [default: 1000].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -698,6 +698,15 @@ func planPayouts(opts docopt.Opts) {
 		maxDuration, err = server.ParseDurationExtended(maxDurationStr)
 		if err != nil {
 			fmt.Printf("invalid --max_duration %q: %s\n", maxDurationStr, err)
+			return
+		}
+		// Each slice advances the frontier only by forming a new subsidy epoch,
+		// and an epoch shorter than the minimum subsidy duration is dropped. A
+		// window at or below that minimum could never advance, so reject it up
+		// front instead of silently replanning the same slice forever.
+		minDuration := model.EnvSubsidyConfig().MinDurationPerPayout()
+		if maxDuration <= minDuration {
+			fmt.Printf("--max_duration must be greater than the minimum subsidy duration %s so each slice forms a subsidy epoch and the payout frontier advances\n", minDuration)
 			return
 		}
 	}

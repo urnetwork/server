@@ -130,11 +130,12 @@ func TestCancelAccountPayment(t *testing.T) {
 	})
 }
 
-// A bounded plan (maxDuration > 0) must only include sweeps within
-// [.., min(now, oldestUnpaidSweep+maxDuration)), leaving newer sweeps for a
-// later plan. Running bounded plans repeatedly must drain a backlog
-// oldest-first: each run pays exactly its slice, and together they pay
-// everything an unbounded plan would have paid at once.
+// A bounded plan (maxDuration > 0) anchors on the most recent subsidy epoch end
+// and includes only contracts closing before anchor+maxDuration, leaving later
+// contracts for a later plan. Because each plan records a new subsidy epoch that
+// advances the anchor, running bounded plans repeatedly drains a backlog forward
+// one slice per run, and together they pay everything an unbounded plan would
+// have paid at once.
 func TestPlanPaymentsMaxDuration(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
@@ -190,23 +191,49 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 			}
 		}
 
-		// backdate unpaid sweeps into a chosen time window. Only sweep_time
-		// matters to the bound, so the contract times can stay at ~now. When
-		// minSweepTime is set, only sweeps at/after it are moved, which targets
-		// just the most recent cohort and leaves earlier cohorts in place.
-		setUnpaidSweepTime := func(sweepTime time.Time, minSweepTime *time.Time) {
+		// backdate the currently-unpaid cohort's contract create/close time into a
+		// chosen historical window. The bound is on close_time, so this is what
+		// places a cohort inside or outside a plan's slice; create_time is set
+		// behind close_time so the cohort still spans enough time to form a
+		// subsidy epoch. When onlyClosedAfter is set, only contracts still closing
+		// at/after it are moved, which targets just the freshly-created cohort and
+		// leaves earlier, already-backdated cohorts in place.
+		moveUnpaidContracts := func(createTime, closeTime time.Time, onlyClosedAfter *time.Time) {
 			server.Tx(ctx, func(tx server.PgTx) {
-				if minSweepTime == nil {
+				if onlyClosedAfter == nil {
 					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_escrow_sweep SET sweep_time = $1 WHERE payment_id IS NULL`,
-						sweepTime,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 )`,
+						createTime, closeTime,
 					))
 				} else {
 					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_escrow_sweep SET sweep_time = $1 WHERE payment_id IS NULL AND sweep_time >= $2`,
-						sweepTime, *minSweepTime,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 ) AND close_time >= $3`,
+						createTime, closeTime, *onlyClosedAfter,
 					))
 				}
+			})
+		}
+
+		// seed a prior subsidy epoch [startTime, endTime]. A bounded plan anchors
+		// on the most recent subsidy end, so this is the frontier the drain
+		// continues from (a fresh deployment with no epoch plans unbounded).
+		seedSubsidyEpoch := func(startTime, endTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO subsidy_payment (
+						payment_plan_id, start_time, end_time,
+						active_user_count, paid_user_count,
+						net_payout_byte_count_paid, net_payout_byte_count_unpaid,
+						net_revenue_nano_cents, net_payout_nano_cents
+					) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0)`,
+					server.NewId(), startTime, endTime,
+				))
 			})
 		}
 
@@ -226,20 +253,23 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		}
 
 		now := server.NowUtc()
-		oldCohortTime := now.Add(-20 * 24 * time.Hour)
-		newCohortTime := now.Add(-5 * 24 * time.Hour)
-		cohortSplit := now.Add(-10 * 24 * time.Hour) // between the two cohorts
-		maxDuration := 10 * 24 * time.Hour
+		maxDuration := 20 * 24 * time.Hour
+		// the frontier the drain continues from: the last payout covered up to here
+		subsidyEnd := now.Add(-60 * 24 * time.Hour)
+		seedSubsidyEpoch(subsidyEnd.Add(-5*24*time.Hour), subsidyEnd)
 
-		// cohort A: oldest, 20 days ago
+		// cohort A closes inside the first slice [subsidyEnd, subsidyEnd+maxDuration
+		// = now-40d): closed now-50d, created now-58d.
 		closeCohort()
-		setUnpaidSweepTime(oldCohortTime, nil)
+		moveUnpaidContracts(now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour), nil)
 		expectedBytesA := sumUnpaidBytes()
 		assert.Equal(t, 0 < expectedBytesA, true)
 
-		// cohort B: 5 days ago (only the freshly-created, not-yet-backdated sweeps)
+		// cohort B closes after the first slice (now-38d), so it is deferred to a
+		// later plan. Only the freshly-created, not-yet-backdated contracts move.
 		closeCohort()
-		setUnpaidSweepTime(newCohortTime, &cohortSplit)
+		recentThreshold := now.Add(-24 * time.Hour)
+		moveUnpaidContracts(now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour), &recentThreshold)
 		expectedBytesB := sumUnpaidBytes() - expectedBytesA
 		assert.Equal(t, 0 < expectedBytesB, true)
 
@@ -250,8 +280,8 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, dryAll.NetworkPayments[destinationNetworkId].PayoutByteCount, expectedBytesA+expectedBytesB)
 
-		// plan 1: window is [.., oldCohortTime+10d = now-10d); includes cohort A,
-		// excludes cohort B (now-5d).
+		// plan 1: window is close_time < subsidyEnd+maxDuration = now-40d; includes
+		// cohort A (closed now-50d), excludes cohort B (closed now-38d).
 		plan1, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(plan1.NetworkPayments), 1)
@@ -261,8 +291,9 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		// cohort B is untouched, still unpaid for a later plan
 		assert.Equal(t, sumUnpaidBytes(), expectedBytesB)
 
-		// plan 2: nothing older than cohort B remains, so the window anchors on
-		// cohort B and drains it.
+		// plan 1 recorded a new subsidy epoch ending at cohort A's close (now-50d),
+		// advancing the frontier. plan 2 anchors there: window close_time < now-30d
+		// now reaches cohort B and drains it.
 		plan2, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, len(plan2.NetworkPayments), 1)

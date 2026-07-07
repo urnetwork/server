@@ -174,52 +174,52 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	return
 }
 
-// computePlanUpperBound restricts a bounded plan (maxDuration > 0) to the
-// window [.., min(now, oldestUnpaidSweep+maxDuration)). Only an upper bound is
+// computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts
+// closing before min(now, lastSubsidyEnd+maxDuration). Only an upper bound is
 // needed; the lower edge is implicit because already-paid sweeps are excluded
-// from every planning query by the unpaid filter. Anchoring on the oldest
-// unpaid sweep (rather than now) drains a backlog oldest-first, one maxDuration
-// slice per run, which keeps any single plan small enough to fit in memory.
-// When maxDuration is 0, or there are no unpaid sweeps to anchor on, the plan
-// is left unbounded (the historical behavior).
+// from every planning query by the unpaid filter, and the subsidy epoch is
+// clamped forward past any existing epoch.
+//
+// The anchor is the end of the most recent subsidy epoch — i.e. how far the
+// last payout covered. Advancing from there drains a backlog forward one
+// maxDuration slice per run: each plan records a new subsidy_payment whose
+// end_time extends the frontier, so the next plan continues where this one
+// stopped, even when several plans run back to back. (Anchoring on the oldest
+// unpaid sweep instead would pin the window on ancient below-minimum dust that
+// never gets paid, so the frontier never advanced and every plan replanned the
+// same empty slice.)
+//
+// When maxDuration is 0, or no subsidy epoch exists yet to anchor on, the plan
+// is left unbounded.
 func (self *PaymentPlanner) computePlanUpperBound() {
 	if self.maxDuration <= 0 {
 		return
 	}
 
-	var oldestUnpaid *time.Time
+	var lastSubsidyEnd *time.Time
 	result, err := self.tx.Query(
 		self.ctx,
-		`
-		SELECT MIN(transfer_escrow_sweep.sweep_time)
-
-		FROM transfer_escrow_sweep
-
-		LEFT JOIN account_payment ON
-			account_payment.payment_id = transfer_escrow_sweep.payment_id
-
-		WHERE
-			account_payment.payment_id IS NULL OR
-			account_payment.canceled = true
-		`,
+		`SELECT MAX(end_time) FROM subsidy_payment`,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&oldestUnpaid))
+			server.Raise(result.Scan(&lastSubsidyEnd))
 		}
 	})
 
-	if oldestUnpaid == nil {
-		// no unpaid sweeps; the plan will be empty, nothing to bound
+	if lastSubsidyEnd == nil {
+		// no subsidy epoch to anchor on (e.g. a fresh deployment); leave the
+		// plan unbounded, matching maxDuration == 0.
+		glog.Infof("[plan]no subsidy epoch to anchor a bounded plan; planning unbounded\n")
 		return
 	}
 
 	self.bounded = true
-	self.upperBound = server.MinTime(server.NowUtc(), oldestUnpaid.Add(self.maxDuration))
+	self.upperBound = server.MinTime(server.NowUtc(), lastSubsidyEnd.Add(self.maxDuration))
 	glog.Infof(
-		"[plan]bounded to sweep_time < %s (oldest unpaid %s + %s)\n",
+		"[plan]bounded to close_time < %s (last subsidy end %s + %s)\n",
 		self.upperBound.Format(time.RFC3339),
-		oldestUnpaid.Format(time.RFC3339),
+		lastSubsidyEnd.Format(time.RFC3339),
 		self.maxDuration,
 	)
 }
@@ -233,17 +233,23 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// networkId -> parent referralNetworkId
 	self.referralNetworks = map[server.Id]server.Id{}
 
-	// when maxDuration is set, restrict the swept set to a bounded sweep-time
+	// when maxDuration is set, restrict the swept set to a bounded close-time
 	// window so this plan stays small. sets self.bounded / self.upperBound.
 	self.computePlanUpperBound()
 
 	// only an upper bound is needed: the lower edge is implicit because
-	// already-paid sweeps are excluded by the unpaid filter below.
-	sweepTimeBound := ""
-	sweepTimeArgs := []any{}
+	// already-paid sweeps are excluded by the unpaid filter below. The bound is
+	// on transfer_contract.close_time — the same axis the subsidy epoch anchor
+	// is measured on — so each slice lines up with a subsidy epoch.
+	closeTimeJoin := ""
+	closeTimeBound := ""
+	closeTimeArgs := []any{}
 	if self.bounded {
-		sweepTimeBound = "AND transfer_escrow_sweep.sweep_time < $1"
-		sweepTimeArgs = append(sweepTimeArgs, self.upperBound)
+		closeTimeJoin = `
+        INNER JOIN transfer_contract ON
+            transfer_contract.contract_id = transfer_escrow_sweep.contract_id`
+		closeTimeBound = "AND transfer_contract.close_time < $1"
+		closeTimeArgs = append(closeTimeArgs, self.upperBound)
 	}
 
 	server.RaisePgResult(self.tx.Exec(
@@ -261,13 +267,14 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 
         LEFT JOIN account_payment ON
             account_payment.payment_id = transfer_escrow_sweep.payment_id
+        %s
 
         WHERE
             (account_payment.payment_id IS NULL OR
             account_payment.canceled = true)
             %s
-        `, sweepTimeBound),
-		sweepTimeArgs...,
+        `, closeTimeJoin, closeTimeBound),
+		closeTimeArgs...,
 	))
 
 	result, err := self.tx.Query(
@@ -485,13 +492,13 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	}
 
 	// the subsidy time range is derived from the swept contracts. Bound it by
-	// the same sweep-time window as the paid set so the subsidy scale/amount
+	// the same close-time window as the paid set so the subsidy scale/amount
 	// match the sweeps actually being paid in this bounded plan; otherwise the
 	// subsidy would be sized off the full history while paid over a slice.
 	subsidyRangeBound := ""
 	subsidyRangeArgs := []any{}
 	if self.bounded {
-		subsidyRangeBound = "WHERE transfer_escrow_sweep.sweep_time < $1"
+		subsidyRangeBound = "WHERE transfer_contract.close_time < $1"
 		subsidyRangeArgs = append(subsidyRangeArgs, self.upperBound)
 	}
 
