@@ -30,6 +30,11 @@ type PaymentPlanner struct {
 	ctx           context.Context
 	subsidyConfig *SubsidyConfig
 
+	// dryRun mirrors the plan's dry-run mode. It selects where the reliability
+	// recompute runs: in its own committed transaction for a real plan, or
+	// inside the plan tx (so it rolls back with everything else) for a dry run.
+	dryRun bool
+
 	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
 	// sweeps so a large backlog is drained in bounded slices instead of one
 	// oversized plan. 0 means unbounded (all unpaid sweeps).
@@ -76,6 +81,19 @@ type PaymentPlanner struct {
 var errPaymentPlanDryRun = errors.New("payment plan dry run")
 
 func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
+	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true)
+}
+
+// createPaymentPlan is CreatePaymentPlan with explicit control over whether the
+// shared reliability inputs are refreshed at the top of the plan.
+//
+// refreshReliabilityInputs refreshes the (window-independent) 30-day client
+// location reliabilities the reliability payout depends on. The loop driver
+// (PlanPaymentsWithMaxDurationLoop) drains a backlog as many bounded slices back
+// to back; that refresh is identical for every slice, so the loop refreshes once
+// on the first slice and passes false afterward instead of repeating the same
+// heavy refresh on every slice.
+func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
 	if dryRun {
 		// recover the rollback sentinel so a dry run returns the computed plan
 		// normally. Any other panic (e.g. a real db error) still propagates.
@@ -87,7 +105,7 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 				panic(r)
 			}
 		}()
-	} else {
+	} else if refreshReliabilityInputs {
 		// refresh the reliability inputs used by this plan. This is a persistent
 		// write, so it is skipped for a dry run; a dry run then previews using
 		// the reliability values from the last refresh.
@@ -117,6 +135,7 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
+			dryRun:                 dryRun,
 			maxDuration:            maxDuration,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
@@ -671,12 +690,16 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	/**
 	 * reliability payout
 	 */
+	// a real plan recomputes reliability scores in its own committed tx (see
+	// calculateReliabilityPayoutInTx); a dry run keeps it inside this tx so it
+	// rolls back with the rest of the plan.
 	networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
 		self.ctx,
 		self.tx,
 		subsidyStartTime,
 		subsidyEndTime,
 		subsidyScale,
+		!self.dryRun,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
 

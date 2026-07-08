@@ -405,6 +405,84 @@ func PlanPaymentsWithMaxDuration(ctx context.Context, maxDuration time.Duration)
 	return CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
 }
 
+// PlanPaymentsWithMaxDurationLoop drains the unpaid backlog by planning bounded
+// maxDuration slices back to back until the payout frontier reaches now, so a
+// single command call catches up instead of requiring one invocation per slice.
+//
+// Each slice is planned and committed independently, so progress is durable: a
+// failure only loses the in-flight slice, and everything already committed stays
+// paid (the next call resumes from the advanced frontier). The shared 30-day
+// reliability inputs are refreshed once on the first slice rather than per slice.
+//
+// The loop stops when either:
+//   - a slice advances the frontier to at/after now — the backlog is fully
+//     drained; or
+//   - a slice forms no new subsidy epoch (SubsidyPayment == nil) — nothing left
+//     that can advance the frontier: the remaining window is below the minimum
+//     payout duration, there are no unpaid sweeps, or the next sweeps sit beyond
+//     a gap wider than maxDuration. (The upper bound is capped at now, so the
+//     frontier never lands strictly past now; this no-advance condition is what
+//     ends the drain as it reaches now.)
+//
+// maxDuration <= 0 plans a single unbounded plan, matching
+// PlanPaymentsWithMaxDuration(ctx, 0).
+//
+// onSlice, if non-nil, is invoked after each committed slice (for progress
+// output). The committed plans are returned in order even when an error is
+// returned partway, so callers can report what did complete.
+func PlanPaymentsWithMaxDurationLoop(
+	ctx context.Context,
+	maxDuration time.Duration,
+	onSlice func(*PaymentPlan),
+) ([]*PaymentPlan, error) {
+	if maxDuration <= 0 {
+		plan, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, 0)
+		if err != nil {
+			return nil, err
+		}
+		if onSlice != nil {
+			onSlice(plan)
+		}
+		return []*PaymentPlan{plan}, nil
+	}
+
+	plans := []*PaymentPlan{}
+	var lastFrontier time.Time
+	for i := 0; ; i += 1 {
+		// refresh the shared reliability inputs only on the first slice; the
+		// window is the same for every slice in this drain.
+		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration, i == 0)
+		if err != nil {
+			return plans, err
+		}
+		plans = append(plans, plan)
+		if onSlice != nil {
+			onSlice(plan)
+		}
+
+		// a slice that formed no subsidy epoch cannot advance the frontier, so
+		// this drain has gone as far as it can (see the doc comment).
+		if plan.SubsidyPayment == nil {
+			break
+		}
+		frontier := plan.SubsidyPayment.EndTime
+
+		// defensive: a recorded epoch always ends after the previous frontier, so
+		// this should not trigger — but never replan the same window forever.
+		if !lastFrontier.IsZero() && !frontier.After(lastFrontier) {
+			glog.Infof("[plan]frontier did not advance past %s; stopping drain\n", frontier)
+			break
+		}
+		lastFrontier = frontier
+
+		// the frontier reached now: the backlog is fully drained.
+		if !frontier.Before(server.NowUtc()) {
+			break
+		}
+	}
+	return plans, nil
+}
+
 // PlanPaymentsDryRun computes a payment plan exactly like PlanPayments but
 // persists nothing: no payments are created, no escrow sweeps are marked paid,
 // and no points or reliability multipliers are written. Use it to preview the

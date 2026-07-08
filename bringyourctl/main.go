@@ -726,21 +726,38 @@ func planPayouts(opts docopt.Opts) {
 
 	// A real plan (no --dry-run) persists the plan: it creates the payments,
 	// marks the swept contracts paid, and applies points. A dry run computes the
-	// same plan but persists nothing, so it can be previewed first. maxDuration
-	// of 0 (flag omitted) plans the full backlog, matching the previous behavior.
-	var plan *model.PaymentPlan
-	var err error
+	// same plan but persists nothing, so it can be previewed first.
 	if dryRun {
-		plan, err = model.PlanPaymentsDryRunWithMaxDuration(ctx, maxDuration)
-	} else {
-		plan, err = model.PlanPaymentsWithMaxDuration(ctx, maxDuration)
-	}
-	if err != nil {
-		fmt.Printf("payout plan err = %s\n", err)
+		// A dry run rolls its transaction back, so the frontier never advances —
+		// looping would replan the same slice forever. Preview a single slice.
+		plan, err := model.PlanPaymentsDryRunWithMaxDuration(ctx, maxDuration)
+		if err != nil {
+			fmt.Printf("payout plan err = %s\n", err)
+			return
+		}
+		printPayoutPlan(plan, true)
 		return
 	}
 
-	printPayoutPlan(plan, dryRun)
+	// When maxDuration is set, drain the backlog slice by slice — each slice is
+	// its own committed plan — until the frontier reaches now, so one command
+	// call catches up instead of needing one invocation per slice. maxDuration of
+	// 0 (flag omitted) plans the whole backlog as a single plan.
+	sliceCount := 0
+	plans, err := model.PlanPaymentsWithMaxDurationLoop(ctx, maxDuration, func(p *model.PaymentPlan) {
+		sliceCount += 1
+		if maxDuration > 0 {
+			fmt.Printf("\n===== slice %d =====\n", sliceCount)
+		}
+		printPayoutPlan(p, false)
+	})
+	if err != nil {
+		fmt.Printf("payout plan err = %s\n", err)
+		// fall through to summarize whatever slices did commit
+	}
+	if len(plans) > 1 {
+		printPayoutLoopSummary(plans)
+	}
 }
 
 func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
@@ -790,6 +807,26 @@ func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
 			s.ActiveUserCount,
 		)
 	}
+}
+
+// printPayoutLoopSummary prints the grand total across all slices a bounded
+// drain committed (PlanPaymentsWithMaxDurationLoop), after each slice's own
+// plan has been printed.
+func printPayoutLoopSummary(plans []*model.PaymentPlan) {
+	totalPayments := 0
+	total := model.NanoCents(0)
+	for _, plan := range plans {
+		for _, payment := range plan.NetworkPayments {
+			totalPayments += 1
+			total += payment.Payout
+		}
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("=", 98))
+	fmt.Printf(
+		"drained %d slice(s): %d payment(s), %.4f USD total\n",
+		len(plans), totalPayments, model.NanoCentsToUsd(total),
+	)
 }
 
 func listPendingPayouts(opts docopt.Opts) {
