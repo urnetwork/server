@@ -26,6 +26,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/stats/provider-last-90", handlers.StatsProviderLast90),
 		router.NewRoute("POST", "/stats/leaderboard", handlers.GetLeaderboard),
 		router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
+		router.NewRoute("POST", "/auth/wallet-nonce", handlers.AuthWalletNonce),
 		router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
 		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
 		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),

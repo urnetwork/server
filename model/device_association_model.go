@@ -512,10 +512,12 @@ func DeviceConfirmShare(
                     device_share.device_association_id = $1 AND
                     network.network_name = $2 AND
                     device_share.guest_network_id = network.network_id AND
+                    device_share.source_network_id = $3 AND
                     device_share.confirmed = false
             `,
 			deviceAssociationId,
 			confirmShare.AssociatedNetworkName,
+			clientSession.ByJwt.NetworkId,
 		))
 		if tag.RowsAffected() == 0 {
 			return
@@ -792,11 +794,13 @@ func DeviceConfirmAdopt(
                     network.network_name = $2 AND
                     device_adopt.owner_network_id = network.network_id AND
                     device_adopt.confirmed = false AND
+                    device_adopt.adopt_secret = $4 AND
                     $3 < device_adopt.expire_time
             `,
 			deviceAssociationId,
 			confirmAdopt.AssociatedNetworkName,
 			adoptTime,
+			confirmAdopt.AdoptSecret,
 		))
 
 		if tag.RowsAffected() == 0 {

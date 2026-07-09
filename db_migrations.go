@@ -3027,4 +3027,18 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS search_provider_stats_client_id_period_start
         ON search_provider_stats (client_id, period_start)
     `),
+
+	// wallet-login challenge nonces. Single-use, short-lived server-issued nonces
+	// that the client includes in the message it signs for wallet login, so a
+	// captured (message, signature) pair cannot be replayed (see handleLoginWallet).
+	newSqlMigration(`
+        CREATE TABLE auth_wallet_nonce (
+            nonce varchar(256) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            used bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY (nonce)
+        )
+    `),
 }

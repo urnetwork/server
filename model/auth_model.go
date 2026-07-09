@@ -46,6 +46,10 @@ type WalletAuthArgs struct {
 	Signature  string `json:"wallet_signature,omitempty"`
 	Message    string `json:"wallet_message,omitempty"`
 	Blockchain string `json:"blockchain,omitempty"`
+	// Nonce is a server-issued single-use challenge (see AuthWalletNonceCreate) that
+	// the client must embed in Message and echo here for wallet login, to prevent
+	// signature replay. Optional during client rollout; enforced when present.
+	Nonce string `json:"wallet_nonce,omitempty"`
 }
 
 type AuthLoginArgs struct {
@@ -454,6 +458,15 @@ func handleLoginWallet(
 	 * Handle wallet login
 	 */
 
+	// Transition-safe replay protection: if the client supplies a server-issued
+	// nonce (see AuthWalletNonceCreate), it must be bound into the signed message so
+	// the signature commits to it. Clients that do not yet send a nonce still work;
+	// once all wallet-login clients send one, presence should become mandatory.
+	if walletAuth.Nonce != "" && !strings.Contains(walletAuth.Message, walletAuth.Nonce) {
+		returnErr = errors.New("invalid signature")
+		return
+	}
+
 	isValid, err := VerifySignature(
 		walletAuth.Blockchain,
 		walletAuth.PublicKey,
@@ -469,6 +482,20 @@ func handleLoginWallet(
 	if !isValid {
 		returnErr = errors.New("invalid signature")
 		return
+	}
+
+	// Consume the nonce single-use, only after the signature is verified. A replayed
+	// (message, signature, nonce) triple then fails here because the nonce is already
+	// used or expired.
+	if walletAuth.Nonce != "" {
+		consumed := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			consumed = consumeWalletAuthNonce(ctx, tx, walletAuth.Nonce)
+		})
+		if !consumed {
+			returnErr = errors.New("invalid or expired wallet nonce")
+			return
+		}
 	}
 
 	walletAuths, err := getWalletAuthsByAddress(
@@ -937,6 +964,13 @@ func AuthVerifyCreateCode(
 		return result, nil
 	}
 
+	// Rate-limit code sends (keyed by user_auth + client address) so an attacker
+	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
+	// Each send intentionally consumes attempt budget (not marked success).
+	if _, allow := UserAuthAttempt(userAuth, session); !allow {
+		return nil, maxUserAuthAttemptsError()
+	}
+
 	created := false
 	var verifyCode string
 
@@ -1025,6 +1059,13 @@ func AuthPasswordResetCreateCode(
 			},
 		}
 		return result, nil
+	}
+
+	// Rate-limit code sends (keyed by user_auth + client address) so an attacker
+	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
+	// Each send intentionally consumes attempt budget (not marked success).
+	if _, allow := UserAuthAttempt(userAuth, session); !allow {
+		return nil, maxUserAuthAttemptsError()
 	}
 
 	created := false

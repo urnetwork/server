@@ -3,6 +3,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gagliardetto/solana-go"
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/glog"
 
@@ -326,6 +328,72 @@ func TestLoginWithWallet(t *testing.T) {
 		assert.NotEqual(t, result, nil)
 		assert.NotEqual(t, result.Network.ByJwt, nil)
 
+	})
+}
+
+// TestWalletLoginNonceSingleUse verifies the wallet-login replay fix: a server-issued
+// nonce embedded in the signed message is single-use, so replaying a captured
+// (message, signature, nonce) triple is rejected the second time.
+func TestWalletLoginNonceSingleUse(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		wallet := solana.NewWallet()
+
+		nonceResult, err := AuthWalletNonceCreate(clientSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, nonceResult.Nonce, "")
+
+		// the client signs a message that embeds the server-issued nonce
+		message := "Welcome to URnetwork " + nonceResult.Nonce
+		sig, err := wallet.PrivateKey.Sign([]byte(message))
+		assert.Equal(t, err, nil)
+
+		walletAuth := &WalletAuthArgs{
+			PublicKey:  wallet.PublicKey().String(),
+			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+			Nonce:      nonceResult.Nonce,
+		}
+
+		// first use: valid signature + valid nonce -> accepted (nonce consumed)
+		_, err = handleLoginWallet(walletAuth, ctx)
+		assert.Equal(t, err, nil)
+
+		// replay the identical triple: the nonce is already consumed -> rejected
+		_, err = handleLoginWallet(walletAuth, ctx)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// TestWalletLoginNonceMustBindMessage verifies that a supplied nonce must actually be
+// embedded in the signed message, so an attacker cannot pair a fresh nonce with an old
+// signature over a message that never committed to it.
+func TestWalletLoginNonceMustBindMessage(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		wallet := solana.NewWallet()
+
+		nonceResult, err := AuthWalletNonceCreate(clientSession)
+		assert.Equal(t, err, nil)
+
+		// the signed message does NOT contain the nonce
+		message := "Welcome to URnetwork"
+		sig, err := wallet.PrivateKey.Sign([]byte(message))
+		assert.Equal(t, err, nil)
+
+		_, err = handleLoginWallet(&WalletAuthArgs{
+			PublicKey:  wallet.PublicKey().String(),
+			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+			Nonce:      nonceResult.Nonce,
+		}, ctx)
+		assert.NotEqual(t, err, nil)
 	})
 }
 
