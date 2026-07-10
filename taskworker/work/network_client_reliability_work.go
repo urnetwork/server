@@ -182,6 +182,52 @@ func UpdateReliabilitiesPost(
 	return nil
 }
 
+// RollupClientReliabilityStats drains the per-block redis reliability
+// counters (written by the connection announce hot path) into
+// `client_reliability` and advances the drain high-water mark. It runs
+// continuously (rescheduled a minute after each completion) so pg lags the
+// hot path by only a couple of blocks.
+
+type RollupClientReliabilityStatsArgs struct {
+}
+
+type RollupClientReliabilityStatsResult struct {
+}
+
+func ScheduleRollupClientReliabilityStats(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RollupClientReliabilityStats,
+		&RollupClientReliabilityStatsArgs{},
+		clientSession,
+		task.RunOnce("rollup_client_reliability_stats"),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(15*time.Minute),
+		task.Priority(task.TaskPriorityFastest),
+	)
+}
+
+func RollupClientReliabilityStats(
+	rollupClientReliabilityStats *RollupClientReliabilityStatsArgs,
+	clientSession *session.ClientSession,
+) (*RollupClientReliabilityStatsResult, error) {
+	model.RollupClientReliabilityStats(
+		clientSession.Ctx,
+		server.NowUtc(),
+	)
+	return &RollupClientReliabilityStatsResult{}, nil
+}
+
+func RollupClientReliabilityStatsPost(
+	rollupClientReliabilityStats *RollupClientReliabilityStatsArgs,
+	rollupClientReliabilityStatsResult *RollupClientReliabilityStatsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRollupClientReliabilityStats(clientSession, tx)
+	return nil
+}
+
 type RemoveOldNetworkReliabilityWindowArgs struct {
 }
 

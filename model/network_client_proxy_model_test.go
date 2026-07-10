@@ -117,20 +117,37 @@ func TestProxyDeviceConfigCacheAndFallback(t *testing.T) {
 		assert.Equal(t, got != nil, true)
 		assert.Equal(t, got.ClientId, proxyDeviceConfig.ClientId)
 
-		// explicit remove clears both stores
+		// a wg peer row for the config, which the explicit remove must cascade
+		proxyClient, err := CreateProxyClient(
+			ctx,
+			proxyDeviceConfig.ProxyId,
+			proxyDeviceConfig.ClientId,
+			proxyDeviceConfig.InstanceId,
+			CreateProxyClientOptions{},
+		)
+		assert.Equal(t, err, nil)
+
+		// explicit remove clears both stores and the proxy_client rows
 		RemoveProxyDeviceConfig(ctx, proxyId)
 		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyId) == nil, true)
 		server.Redis(ctx, func(r server.RedisClient) {
 			v, _ := r.Get(ctx, proxyDeviceConfigKey(proxyId)).Result()
 			assert.Equal(t, v, "")
 		})
+		removedProxyClient, err := GetProxyClient(ctx, proxyId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, removedProxyClient == nil, true)
+		proxyClients, _, err := GetProxyClientsSince(ctx, proxyClient.ProxyHost, proxyClient.Block, 0)
+		assert.Equal(t, err, nil)
+		_, ok := proxyClients[proxyId]
+		assert.Equal(t, ok, false)
 	})
 }
 
-// The maintenance cascade reaps proxy_device_config rows whose network_client is
-// gone; it must clear the (no-ttl) redis entry too, otherwise GetProxyDeviceConfig
-// keeps serving the stale config forever.
-func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
+// The orphan safety-net sweep reaps proxy_device_config rows whose
+// network_client is gone; it must clear the (no-ttl) redis entry too, otherwise
+// GetProxyDeviceConfig keeps serving the stale config forever.
+func TestSweepOrphanClearsProxyConfigRedis(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -141,7 +158,7 @@ func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
 		assert.Equal(t, err, nil)
 		proxyId := proxyDeviceConfig.ProxyId
 
-		RemoveDisconnectedNetworkClients(ctx, server.NowUtc(), server.NowUtc())
+		SweepOrphanNetworkClientData(ctx, 1000)
 
 		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyId) == nil, true)
 		server.Redis(ctx, func(r server.RedisClient) {
@@ -151,10 +168,11 @@ func TestRemoveDisconnectedClearsProxyConfigRedis(t *testing.T) {
 	})
 }
 
-// The reap cascade must remove proxy_client rows (and their change rows) whose
-// proxy_device_config is gone, while keeping clients with a live network_client,
-// so that the wg peer restore at instance startup stays bounded by the live set.
-func TestRemoveDisconnectedReapsProxyClients(t *testing.T) {
+// The orphan safety-net sweep must remove proxy_client rows (and their change
+// rows) whose proxy_device_config is gone, while keeping clients with a live
+// network_client, so that the wg peer restore at instance startup stays bounded
+// by the live set.
+func TestSweepOrphanReapsProxyClients(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -198,9 +216,9 @@ func TestRemoveDisconnectedReapsProxyClients(t *testing.T) {
 		_, ok = proxyClients[staleProxyClient.ProxyId]
 		assert.Equal(t, ok, true)
 
-		RemoveDisconnectedNetworkClients(ctx, server.NowUtc(), server.NowUtc())
+		SweepOrphanNetworkClientData(ctx, 1000)
 
-		// after the reap the live client remains and the stale client is gone
+		// after the sweep the live client remains and the stale client is gone
 		proxyClients, _, err = GetProxyClientsSince(ctx, host, block, 0)
 		assert.Equal(t, err, nil)
 		_, ok = proxyClients[liveProxyClient.ProxyId]

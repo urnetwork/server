@@ -30,6 +30,8 @@ func InitTasks(ctx context.Context) {
 		}
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
+		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
+		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
@@ -42,6 +44,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
+		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
@@ -129,6 +132,14 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
+			work.SweepOrphanNetworkClientData,
+			work.SweepOrphanNetworkClientDataPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SweepOrphanContractData,
+			work.SweepOrphanContractDataPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,
 			"github.com/urnetwork/server/model.IndexSearchLocations",
@@ -178,6 +189,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,
 			work.RemoveOldClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupClientReliabilityStats,
+			work.RollupClientReliabilityStatsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientReliabilityScores,

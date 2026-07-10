@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -19,5 +20,15 @@ func StatsLast90(w http.ResponseWriter, r *http.Request) {
 }
 
 func TransferStats(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.TransferStats, w, r)
+	// paid/unpaid totals move only on sweeps and payouts, and GetTransferStats
+	// aggregates three tables per call — serve repeat polls from cache
+	router.WrapRequireAuth(
+		router.CacheWithAuth(
+			controller.TransferStats,
+			"api_transfer_stats",
+			60*time.Second,
+		),
+		w,
+		r,
+	)
 }

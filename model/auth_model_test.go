@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -665,3 +666,111 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 
 // FIXME test concurrent redeem
 // FIXME test expire all auth
+
+// Creating a new verify code invalidates the user's previous codes (only the
+// latest code verifies), and the invalidation update touches only live
+// (used = false) rows. Expired rows are reaped by RemoveExpiredVerifyCodes.
+func TestAuthVerifyCodeInvalidation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, networkId, "test", userId)
+
+		byJwt := jwt.NewByJwt(networkId, userId, "test", false, false)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+		createCode := func() string {
+			result, err := AuthVerifyCreateCode(
+				AuthVerifyCreateCodeArgs{
+					UserAuth: userAuth,
+				},
+				clientSession,
+			)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, result.Error, nil)
+			assert.NotEqual(t, result.VerifyCode, nil)
+			return *result.VerifyCode
+		}
+
+		// stay within AttemptFailedCountThreshold: each create/verify consumes
+		// auth attempt budget
+		code1 := createCode()
+		code2 := createCode()
+		assert.NotEqual(t, code1, code2)
+
+		// only the latest code is live
+		countUnused := func() int {
+			c := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT COUNT(*) FROM user_auth_verify
+					WHERE user_id = $1 AND used = false
+					`,
+					userId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&c))
+					}
+				})
+			})
+			return c
+		}
+		assert.Equal(t, countUnused(), 1)
+
+		// an invalidated code does not verify
+		verifyResult, err := AuthVerify(
+			AuthVerifyArgs{
+				UserAuth:   userAuth,
+				VerifyCode: code1,
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, verifyResult.Error, nil)
+
+		// the latest code verifies
+		verifyResult, err = AuthVerify(
+			AuthVerifyArgs{
+				UserAuth:   userAuth,
+				VerifyCode: code2,
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, verifyResult.Error, nil)
+		assert.Equal(t, countUnused(), 0)
+
+		// age out the rows and reap them
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE user_auth_verify
+				SET verify_time = now() - INTERVAL '30 days'
+				WHERE user_id = $1
+				`,
+				userId,
+			))
+		})
+		RemoveExpiredVerifyCodes(ctx, server.NowUtc().Add(-24*time.Hour))
+
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM user_auth_verify WHERE user_id = $1`,
+				userId,
+			)
+			server.WithPgResult(result, err, func() {
+				assert.Equal(t, result.Next(), true)
+				var c int
+				server.Raise(result.Scan(&c))
+				assert.Equal(t, c, 0)
+			})
+		})
+	})
+}

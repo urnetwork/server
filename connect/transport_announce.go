@@ -430,7 +430,11 @@ func (self *ConnectionAnnounce) run() {
 					established = provideEnabled
 					stats.ConnectionNewCount = 1
 				}
-				model.AddClientReliabilityStatsRange(
+				// record to redis only (never pg): the per-sync stats of every
+				// connected provider were the single largest statement load on
+				// the database. RollupClientReliabilityStats drains the redis
+				// counters into `client_reliability` per block.
+				model.RecordClientReliabilityStatsRange(
 					self.ctx,
 					self.networkId,
 					self.clientId,

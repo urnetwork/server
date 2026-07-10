@@ -169,6 +169,54 @@ func RemoveCompletedContractsPost(
 	return nil
 }
 
+// SweepOrphanContractData is the low-cadence safety net for
+// contract_close/transfer_escrow/transfer_escrow_sweep rows whose contract no
+// longer exists. RemoveCompletedContracts cascades dependents together with
+// the contract deletes on every run, so this only catches orphans from
+// interrupted statements or older releases. Each pass is a full anti-join scan
+// of the dependent tables, which is why it runs daily and not on the retention
+// cadence.
+
+type SweepOrphanContractDataArgs struct {
+}
+
+type SweepOrphanContractDataResult struct {
+	RemovedCount int64 `json:"removed_count"`
+}
+
+func ScheduleSweepOrphanContractData(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		SweepOrphanContractData,
+		&SweepOrphanContractDataArgs{},
+		clientSession,
+		task.RunOnce("sweep_orphan_contract_data"),
+		task.RunAt(server.NowUtc().Add(24*time.Hour)),
+		task.MaxTime(4*time.Hour),
+	)
+}
+
+func SweepOrphanContractData(
+	sweepOrphanContractData *SweepOrphanContractDataArgs,
+	clientSession *session.ClientSession,
+) (*SweepOrphanContractDataResult, error) {
+	limit := 50000
+	removedCount := model.SweepOrphanContractData(clientSession.Ctx, limit)
+	return &SweepOrphanContractDataResult{
+		RemovedCount: removedCount,
+	}, nil
+}
+
+func SweepOrphanContractDataPost(
+	sweepOrphanContractData *SweepOrphanContractDataArgs,
+	sweepOrphanContractDataResult *SweepOrphanContractDataResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleSweepOrphanContractData(clientSession, tx)
+	return nil
+}
+
 // Reconcile net escrow
 //
 // The redis net escrow counter is an approximate mirror with no ttl and no

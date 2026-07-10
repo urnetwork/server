@@ -3041,4 +3041,101 @@ var migrations = []any{
             PRIMARY KEY (nonce)
         )
     `),
+
+	// the task poll orders by (available_block, run_priority DESC,
+	// run_max_time_seconds DESC) FOR UPDATE SKIP LOCKED. The old index
+	// (available_block, run_priority, task_id) cannot produce that order
+	// (mixed sort directions), so every poll fetched and sorted the entire
+	// ready backlog before applying LIMIT. This index matches the poll's sort
+	// exactly, so the poll streams in index order and stops at LIMIT.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS pending_task_poll_order
+        ON pending_task (available_block, run_priority DESC, run_max_time_seconds DESC)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS pending_task_available_block
+    `),
+	// queue tables live and die by dead-tuple density: every claim/release
+	// updates rows and every finished task deletes one, so at the default 20%
+	// scale factor the live set is buried in dead tuples between vacuums
+	newSqlMigration(`
+        ALTER TABLE pending_task SET (
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+
+	// GetTransferStats sums account_payment.payout_byte_count by
+	// (network_id, completed); only (network_id, canceled) existed, so the
+	// completed filter and the summed column both went to the heap
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_payment_network_id_completed
+        ON account_payment (network_id, completed) INCLUDE (payout_byte_count)
+    `),
+
+	// RemoveCompletedContracts deletes transfer_balance by end_time; without
+	// this index each pass was a full seq scan of the live balances
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_balance_end_time
+        ON transfer_balance (end_time)
+    `),
+
+	// ForceCloseOpenContractIds polls `WHERE open AND create_time <= $1 ORDER
+	// BY create_time LIMIT n`. The btree (create_time, open, contract_id)
+	// walks every old *closed* contract to find the open ones. This partial
+	// index contains only open contracts (small), is perfectly ordered for the
+	// poll, and — unlike the dropped (open, create_time) full index — cannot
+	// be chosen for queries that don't filter on open.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_partial_create_time
+        ON transfer_contract (create_time) WHERE open
+    `),
+
+	// high-water mark for the client_reliability redis rollup
+	// (RollupClientReliabilityStats): all blocks <= max_drained_block are
+	// fully drained from redis into `client_reliability`. Score computations
+	// clamp their block ranges to this mark so windows only span fully
+	// materialized blocks.
+	newSqlMigration(`
+        CREATE TABLE client_reliability_rollup (
+            singleton_id int NOT NULL DEFAULT 1 CHECK (singleton_id = 1),
+            max_drained_block bigint NOT NULL,
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (singleton_id)
+        )
+    `),
+
+	// transfer_contract index consolidation. Every index on this table is
+	// maintained on each of the ~20M contract inserts/day and again on every
+	// close (the generated `open` column flips, so closes are never HOT).
+	//
+	// The expired-dispute scan (`WHERE dispute AND outcome IS NULL AND
+	// create_time <= $1 ORDER BY create_time`) is the only user of the
+	// full-width (dispute, outcome, create_time) index, which carries an entry
+	// for every contract. This partial index has entries only for undecided
+	// disputes (a tiny set) and provides the same order.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created. Created before the drops
+	// below so the dispute scan never loses coverage.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_dispute_partial_create_time
+        ON transfer_contract (create_time) WHERE (dispute AND outcome IS NULL)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_dispute_create_time
+    `),
+	// the only payer_network_id query is the open-bytes SUM
+	// (GetOpenTransferByteCount), which is served index-only by
+	// (open, payer_network_id, transfer_byte_count) — this one is redundant
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_payer_network_id
+    `),
 }

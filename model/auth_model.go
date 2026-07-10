@@ -996,13 +996,16 @@ func AuthVerifyCreateCode(
 			return
 		}
 
-		// delete existing codes and create a new code
+		// invalidate existing codes and create a new code.
+		// `used = false` bounds the update to the user's live codes; without it
+		// every code send rewrote the user's entire code history (already-used
+		// rows included), which bloated the table and serialized concurrent sends
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE user_auth_verify
 				SET used = true
-				WHERE user_id = $1
+				WHERE user_id = $1 AND used = false
 			`,
 			userId,
 		))
@@ -1439,7 +1442,9 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 func RemoveExpiredVerifyCodes(ctx context.Context, minTime time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		verifyMinTime := server.NowUtc().Add(-VerifyCodeTimeout)
-		tx.Exec(
+		// raise on error so a silently failing cleanup cannot quietly let the
+		// table grow unbounded again (see AuthVerifyCreateCode)
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			DELETE FROM user_auth_verify
@@ -1449,7 +1454,7 @@ func RemoveExpiredVerifyCodes(ctx context.Context, minTime time.Time) {
 			`,
 			minTime.UTC(),
 			verifyMinTime.UTC(),
-		)
+		))
 	})
 
 	return
