@@ -405,6 +405,15 @@ func (self *Exchange) NominateLocalResident(
 		instanceId,
 		residentId,
 	)
+	if resident.peerNetworkId != nil {
+		model.AddNetworkPeer(
+			self.ctx,
+			*resident.peerNetworkId,
+			resident.peerProfile,
+			residentId,
+			self.settings.ExchangeResidentTtl,
+		)
+	}
 	go server.HandleError(func() {
 		defer func() {
 			cleanupCtx := context.Background()
@@ -413,6 +422,14 @@ func (self *Exchange) NominateLocalResident(
 				clientId,
 				resident.residentId,
 			)
+			if resident.peerNetworkId != nil {
+				model.RemoveNetworkPeer(
+					cleanupCtx,
+					*resident.peerNetworkId,
+					clientId,
+					resident.residentId,
+				)
+			}
 		}()
 
 		defer func() {
@@ -472,6 +489,26 @@ func (self *Exchange) NominateLocalResident(
 					glog.Infof("[r]not current %s\n", clientId)
 				}
 				return
+			}
+
+			// heartbeat the network peer registration on the same poll.
+			// Refresh only while the client holds a transport to this
+			// resident: a resident can outlive its client's connection
+			// (e.g. kept active by inbound forward pings up to
+			// `ForwardIdleTimeout`), and without a refresh the registration
+			// expires after `ExchangeResidentTtl` and other residents prune
+			// it to a disconnect marker, bounding disconnect detection.
+			if resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+				server.HandleError(func() {
+					if !model.RefreshNetworkPeer(self.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
+						// the registration was lost (e.g. expired while the
+						// client was disconnected, or pruned at an expiry
+						// race); re-add with a fresh profile
+						if _, topLevel, peerProfile := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
+							model.AddNetworkPeer(self.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
+						}
+					}
+				})
 			}
 		}
 	})
@@ -1832,6 +1869,13 @@ type Resident struct {
 	instanceId server.Id
 	residentId server.Id
 
+	// set when the client is a top-level client of its network.
+	// Top-level clients are registered in the network peer registry and
+	// receive network peer updates (see model/peer_model.go).
+	peerNetworkId *server.Id
+	// the initial peer registration, captured at create
+	peerProfile *model.NetworkPeer
+
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
 	residentContractManager *residentContractManager
@@ -1909,6 +1953,17 @@ func NewResident(
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 	}
 	resident.lastActivityNanos.Store(time.Now().UnixNano())
+
+	// only top-level clients are network peers and get peer subscriptions.
+	// Networks over the top-level client limit (created before the limit)
+	// are excluded: their peer replay and event fan-out would scale with
+	// the connected top-level client count.
+	if networkId, topLevel, peerProfile := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peerProfile != nil {
+		if model.NetworkPeersEnabled(cancelCtx, networkId) {
+			resident.peerNetworkId = &networkId
+			resident.peerProfile = peerProfile
+		}
+	}
 
 	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
 	resident.clientReceiveUnsub = clientReceiveUnsub
@@ -2009,10 +2064,76 @@ func (self *Resident) Run() {
 	)
 	defer streamHopListener.Close()
 
+	// only top-level clients get network peer updates.
+	// The listener sends the complete list on subscribe (reset) and diffs after.
+	if self.peerNetworkId != nil {
+		networkPeerListener := model.NewNetworkPeerListener(
+			self.ctx,
+			*self.peerNetworkId,
+			self.handleNetworkPeerEvent,
+			self.exchange.settings.StreamPollTimeout,
+		)
+		defer networkPeerListener.Close()
+	}
+
 	select {
 	case <-self.ctx.Done():
 	case <-self.client.Done():
 	}
+}
+
+// the number of peers per `NetworkPeersUpdate` frame
+const networkPeersUpdateBatchSize = 50
+
+// handleNetworkPeerEvent translates peer registry events into control frames
+// for the client, excluding the client itself from the peer list
+func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
+	frames := []*protocol.Frame{}
+	if event.NetworkPeerEventType == model.NetworkPeerEventTypeReset {
+		frames = append(frames, connect.RequireToFrameWithDefaultProtocolVersion(&protocol.NetworkPeersReset{}))
+	}
+
+	peers := []*protocol.NetworkPeer{}
+	flush := func() {
+		if 0 < len(peers) {
+			frames = append(frames, connect.RequireToFrameWithDefaultProtocolVersion(&protocol.NetworkPeersUpdate{
+				Peers: peers,
+			}))
+			peers = []*protocol.NetworkPeer{}
+		}
+	}
+	for _, peer := range event.Peers {
+		if peer.ClientId == self.clientId {
+			continue
+		}
+		peers = append(peers, networkPeerToProtocol(peer))
+		if networkPeersUpdateBatchSize <= len(peers) {
+			flush()
+		}
+	}
+	flush()
+
+	for _, frame := range frames {
+		self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+	}
+}
+
+func networkPeerToProtocol(peer *model.NetworkPeer) *protocol.NetworkPeer {
+	p := &protocol.NetworkPeer{
+		ClientId:   peer.ClientId.Bytes(),
+		Principal:  peer.Principal,
+		Roles:      peer.Roles,
+		DeviceName: peer.DeviceName,
+		DeviceSpec: peer.DeviceSpec,
+	}
+	for _, provideMode := range peer.ProvideModes {
+		p.ProvideModes = append(p.ProvideModes, protocol.ProvideMode(provideMode))
+	}
+	if peer.DisconnectTime != nil {
+		disconnectTime := uint64(peer.DisconnectTime.UnixMilli())
+		p.DisconnectTime = &disconnectTime
+	}
+	return p
 }
 
 /*
@@ -2255,7 +2376,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 }
 
 // `connect.ReceiveFunction`
-func (self *Resident) handleClientReceive(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+func (self *Resident) handleClientReceive(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 	sourceId := server.Id(source.SourceId)
 
 	if sourceId != self.clientId {
@@ -2376,6 +2497,15 @@ func (self *Resident) UpdateActivity() bool {
 		self.lastActivityNanos.Store(time.Now().UnixNano())
 		return true
 	}
+}
+
+// TransportCount is the number of client transports attached to this
+// resident. Zero means the client currently has no connection to the
+// platform via this resident.
+func (self *Resident) TransportCount() int {
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
+	return len(self.transports)
 }
 
 // idle if no activity in `ExchangeResidentTtl`

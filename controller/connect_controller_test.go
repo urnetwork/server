@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
+
 	"github.com/go-playground/assert/v2"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -117,13 +120,15 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 		newFundedNetwork := func() server.Id {
 			networkId := server.NewId()
 			userId := server.NewId()
-			model.Testing_CreateNetwork(ctx, networkId, "test", userId)
+			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+			// unique purchase event id: balance codes reject a reused
+			// purchase event, including the empty one
 			balanceCode, err := model.CreateBalanceCode(
 				ctx,
 				model.ByteCount(1024*1024*1024*1024),
 				365*24*time.Hour,
 				model.UsdToNanoCents(10.00),
-				"", "", "",
+				server.NewId().String(), "", "",
 			)
 			assert.Equal(t, err, nil)
 			_, err = model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
@@ -224,6 +229,291 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 			if result.Error != nil {
 				assert.Equal(t, *result.Error, protocol.ContractError_NoPermission)
 			}
+		}
+	})
+}
+
+// TestCreateContractCompanionNetworkNormalization guards the boundaries of the
+// companion -> network normalization: a companion request between same-network
+// peers where the destination advertises the network mode settles as a
+// non-companion network contract (no escrow), and nothing else does. A cross
+// network companion must never normalize — that would hand strangers the
+// no-escrow path — and a same-network destination that advertises only Stream
+// keeps the companion fallback.
+func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		streamKey := []byte("test-provide-secret-key-stream00")
+		networkKey := []byte("test-provide-secret-key-network0")
+		publicKey := []byte("test-provide-secret-key-public00")
+
+		newClient := func(networkId server.Id) server.Id {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+			return clientId
+		}
+
+		newFundedNetwork := func() server.Id {
+			networkId := server.NewId()
+			userId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+			err := model.AddBasicTransferBalance(
+				ctx,
+				networkId,
+				model.ByteCount(1024*1024*1024*1024),
+				server.NowUtc(),
+				server.NowUtc().Add(365*24*time.Hour),
+			)
+			assert.Equal(t, err, nil)
+			return networkId
+		}
+
+		createCompanionContract := func(source server.Id, destination server.Id) *protocol.CreateContractResult {
+			frames, err := CreateContract(ctx, source, &protocol.CreateContract{
+				DestinationId:     destination.Bytes(),
+				TransferByteCount: uint64(1024 * 1024),
+				Companion:         true,
+			}, connect.DefaultContractManagerSettings())
+			assert.Equal(t, err, nil)
+			assert.Equal(t, len(frames), 1)
+			message, err := connect.FromFrame(frames[0])
+			assert.Equal(t, err, nil)
+			result, ok := message.(*protocol.CreateContractResult)
+			assert.Equal(t, ok, true)
+			return result
+		}
+
+		// Scenario 1: normalize. Same-network peers, destination advertises the
+		// network mode. The companion request settles as a non-companion network
+		// contract: no origin contract is needed (a real companion would reject
+		// without one), the priority is trusted, and no escrow is opened.
+		{
+			networkId := newFundedNetwork()
+			source := newClient(networkId)
+			destination := newClient(networkId)
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: networkKey,
+				model.ProvideModeStream:  streamKey,
+			})
+
+			openByteCount := model.GetOpenTransferByteCount(ctx, networkId)
+
+			result := createCompanionContract(source, destination)
+
+			assert.Equal(t, result.Error == nil, true)
+			assert.Equal(t, result.Contract != nil, true)
+			if result.Contract != nil {
+				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Network)
+
+				storedContract := &protocol.StoredContract{}
+				err := proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
+				assert.Equal(t, err, nil)
+				assert.Equal(t, storedContract.Priority != nil, true)
+				if storedContract.Priority != nil {
+					assert.Equal(t, int(*storedContract.Priority), int(model.TrustedPriority))
+				}
+			}
+
+			// the normalized contract is no-escrow: the payer network's open
+			// escrow bytes are unchanged
+			assert.Equal(t, model.GetOpenTransferByteCount(ctx, networkId), openByteCount)
+		}
+
+		// Scenario 2: no normalization for a same-network destination that
+		// advertises only Stream (older or provide-off client). The companion
+		// request keeps the companion Stream path, riding the forward origin.
+		{
+			networkId := newFundedNetwork()
+			source := newClient(networkId)
+			destination := newClient(networkId)
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModeStream: streamKey,
+			})
+
+			// forward origin (destination -> source) for the companion to ride
+			_, err := model.CreateContractNoEscrow(ctx, networkId, destination, networkId, source, model.ByteCount(1024*1024))
+			assert.Equal(t, err, nil)
+
+			result := createCompanionContract(source, destination)
+
+			assert.Equal(t, result.Error == nil, true)
+			assert.Equal(t, result.Contract != nil, true)
+			if result.Contract != nil {
+				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+			}
+		}
+
+		// Scenario 3: no normalization across networks, even when the destination
+		// advertises the network mode. The relationship is Public, so the
+		// companion request must keep the companion Stream path. Normalizing here
+		// would grant strangers no-escrow contracts.
+		{
+			sourceNetworkId := newFundedNetwork()
+			destinationNetworkId := newFundedNetwork()
+			source := newClient(sourceNetworkId)
+			destination := newClient(destinationNetworkId)
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: networkKey,
+				model.ProvideModePublic:  publicKey,
+				model.ProvideModeStream:  streamKey,
+			})
+
+			// forward origin (destination -> source) for the companion to ride
+			_, err := model.CreateContractNoEscrow(ctx, destinationNetworkId, destination, sourceNetworkId, source, model.ByteCount(1024*1024))
+			assert.Equal(t, err, nil)
+
+			result := createCompanionContract(source, destination)
+
+			assert.Equal(t, result.Error == nil, true)
+			assert.Equal(t, result.Contract != nil, true)
+			if result.Contract != nil {
+				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+			}
+		}
+	})
+}
+
+// TestCreateContractIdentityStamping guards the identity privacy invariant:
+// the source client's roles and principal are sealed into the stored contract
+// only when the settled provide mode is network. Public and Stream contracts —
+// including the same-network companion Stream fallback — must carry no
+// identity, otherwise client identity metadata leaks to strangers.
+func TestCreateContractIdentityStamping(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		streamKey := []byte("test-provide-secret-key-stream00")
+		networkKey := []byte("test-provide-secret-key-network0")
+		publicKey := []byte("test-provide-secret-key-public00")
+
+		newClientWithIdentity := func(networkId server.Id, roles []string, principal string) server.Id {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						UPDATE network_client
+						SET principal = $2
+						WHERE client_id = $1
+					`,
+					clientId,
+					principal,
+				))
+				for _, role := range roles {
+					server.RaisePgResult(tx.Exec(
+						ctx,
+						`
+							INSERT INTO network_client_role (client_id, role)
+							VALUES ($1, $2)
+						`,
+						clientId,
+						role,
+					))
+				}
+			})
+			return clientId
+		}
+
+		newFundedNetwork := func() server.Id {
+			networkId := server.NewId()
+			userId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+			err := model.AddBasicTransferBalance(
+				ctx,
+				networkId,
+				model.ByteCount(1024*1024*1024*1024),
+				server.NowUtc(),
+				server.NowUtc().Add(365*24*time.Hour),
+			)
+			assert.Equal(t, err, nil)
+			return networkId
+		}
+
+		createContract := func(source server.Id, destination server.Id, companion bool) *protocol.StoredContract {
+			frames, err := CreateContract(ctx, source, &protocol.CreateContract{
+				DestinationId:     destination.Bytes(),
+				TransferByteCount: uint64(1024 * 1024),
+				Companion:         companion,
+			}, connect.DefaultContractManagerSettings())
+			assert.Equal(t, err, nil)
+			assert.Equal(t, len(frames), 1)
+			message, err := connect.FromFrame(frames[0])
+			assert.Equal(t, err, nil)
+			result, ok := message.(*protocol.CreateContractResult)
+			assert.Equal(t, ok, true)
+			assert.Equal(t, result.Error == nil, true)
+			assert.Equal(t, result.Contract != nil, true)
+			storedContract := &protocol.StoredContract{}
+			err = proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
+			assert.Equal(t, err, nil)
+			return storedContract
+		}
+
+		roles := []string{"role1", "role2"}
+		principal := "svc-a"
+
+		// Scenario 1: same-network contract at the network mode carries the
+		// source's identity (twice, to also cover the identity cache hit path)
+		{
+			networkId := newFundedNetwork()
+			source := newClientWithIdentity(networkId, roles, principal)
+			destination := newClientWithIdentity(networkId, nil, "")
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: networkKey,
+				model.ProvideModeStream:  streamKey,
+			})
+
+			for range 2 {
+				storedContract := createContract(source, destination, false)
+				assert.Equal(t, storedContract.Roles, roles)
+				assert.Equal(t, storedContract.Principal, principal)
+			}
+		}
+
+		// Scenario 2: a cross-network public contract carries no identity even
+		// though the source has roles and a principal
+		{
+			sourceNetworkId := newFundedNetwork()
+			destinationNetworkId := newFundedNetwork()
+			source := newClientWithIdentity(sourceNetworkId, roles, principal)
+			destination := newClientWithIdentity(destinationNetworkId, nil, "")
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModePublic: publicKey,
+				model.ProvideModeStream: streamKey,
+			})
+
+			storedContract := createContract(source, destination, false)
+			assert.Equal(t, len(storedContract.Roles), 0)
+			assert.Equal(t, storedContract.Principal, "")
+		}
+
+		// Scenario 3: the same-network companion Stream fallback (destination
+		// advertises only Stream) carries no identity
+		{
+			networkId := newFundedNetwork()
+			source := newClientWithIdentity(networkId, roles, principal)
+			destination := newClientWithIdentity(networkId, nil, "")
+
+			model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{
+				model.ProvideModeStream: streamKey,
+			})
+
+			// forward origin (destination -> source) for the companion to ride
+			_, err := model.CreateContractNoEscrow(ctx, networkId, destination, networkId, source, model.ByteCount(1024*1024))
+			assert.Equal(t, err, nil)
+
+			storedContract := createContract(source, destination, false)
+			assert.Equal(t, len(storedContract.Roles), 0)
+			assert.Equal(t, storedContract.Principal, "")
 		}
 	})
 }

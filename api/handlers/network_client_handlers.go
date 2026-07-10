@@ -23,3 +23,7 @@ func RemoveNetwork(w http.ResponseWriter, r *http.Request) {
 func NetworkClients(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(model.GetNetworkClients, w, r)
 }
+
+func NetworkPeers(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(model.GetNetworkPeersForSession, w, r)
+}

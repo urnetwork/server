@@ -1536,26 +1536,26 @@ func testConnect(
 	// 	}
 	// }
 
-	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 		// printReceive("a", frames)
 		select {
 		case receiveA <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
-			provideMode: provideMode,
+			provideMode: peer.ProvideMode,
 		}:
 		default:
 			panic(errors.New("Receive overflow."))
 		}
 	})
 
-	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 		// printReceive("b", frames)
 		select {
 		case receiveB <- &Message{
 			sourceId:    source.SourceId,
 			frames:      frames,
-			provideMode: provideMode,
+			provideMode: peer.ProvideMode,
 		}:
 		default:
 			panic(errors.New("Receive overflow."))
@@ -2452,8 +2452,10 @@ func Testing_NewControllerOutOfBandControl(
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback func(resultFrames []*protocol.Frame, err error)) {
-	go func() {
+	// recover panics (e.g. a canceled ctx raised out of the db layer at test
+	// teardown) instead of crashing the test binary
+	go server.HandleError(func() {
 		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
 		callback(resultFrames, err)
-	}()
+	})
 }

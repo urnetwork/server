@@ -164,6 +164,10 @@ type ByJwt struct {
 	ClientId       *server.Id  `json:"client_id,omitempty"`
 	GuestMode      bool        `json:"guest_mode,omitempty"`
 	Pro            bool        `json:"pro,omitempty"`
+	// identity roles and principal, assigned at client or auth code creation.
+	// The values have no meaning to the network.
+	Roles     []string `json:"roles,omitempty"`
+	Principal string   `json:"principal,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -303,6 +307,9 @@ func (self *ByJwt) Sign() string {
 	return sign(self)
 }
 
+// the client jwt inherits the session roles and principal by default;
+// callers that assign client-specific values set them on the returned jwt
+// before signing
 func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 	return &ByJwt{
 		NetworkId:      self.NetworkId,
@@ -312,6 +319,8 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
 		Pro:            self.Pro,
+		Roles:          self.Roles,
+		Principal:      self.Principal,
 		DeviceId:       &deviceId,
 		ClientId:       &clientId,
 		RegisteredClaims: gojwt.RegisteredClaims{
@@ -329,6 +338,8 @@ func (self *ByJwt) User() *ByJwt {
 		AuthSessionIds: self.AuthSessionIds,
 		GuestMode:      self.GuestMode,
 		Pro:            self.Pro,
+		Roles:          self.Roles,
+		Principal:      self.Principal,
 		RegisteredClaims: gojwt.RegisteredClaims{
 			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
@@ -473,7 +484,8 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 			    network.network_id,
 			    network.admin_user_id,
 			    network.network_name,
-			    network_client.device_id
+			    network_client.device_id,
+			    network_client.principal
 
 			FROM network_client
 
@@ -490,11 +502,13 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 				var userId server.Id
 				var networkName string
 				var deviceId server.Id
+				var principal string
 				server.Raise(result.Scan(
 					&networkId,
 					&userId,
 					&networkName,
 					&deviceId,
+					&principal,
 				))
 
 				guestMode := false
@@ -508,8 +522,30 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 					guestMode,
 					pro,
 				).Client(deviceId, clientId)
+				byJwt.Principal = principal
 			} else {
 				returnErr = fmt.Errorf("Client not found.")
+			}
+		})
+
+		if byJwt == nil {
+			return
+		}
+
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT role FROM network_client_role
+			WHERE client_id = $1
+			ORDER BY role
+		    `,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var role string
+				server.Raise(result.Scan(&role))
+				byJwt.Roles = append(byJwt.Roles, role)
 			}
 		})
 	})

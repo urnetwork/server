@@ -43,6 +43,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
+		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),
 		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2), router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),

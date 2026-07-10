@@ -3138,4 +3138,32 @@ var migrations = []any{
 	newSqlMigration(`
         DROP INDEX IF EXISTS transfer_contract_payer_network_id
     `),
+
+	// network peers: string roles and an identity principal per client,
+	// assigned at creation and immutable after (see model/peer_model.go).
+	// The role values have no meaning to the network.
+	newSqlMigration(`
+        CREATE TABLE network_client_role (
+            client_id uuid NOT NULL,
+            role varchar(128) NOT NULL,
+
+            PRIMARY KEY (client_id, role)
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN principal varchar(256) NOT NULL DEFAULT ''
+    `),
+	// auth codes carry roles and a principal so that logins minted from the
+	// code (and clients created by those sessions) inherit them
+	newSqlMigration(`
+        CREATE TABLE auth_code_role (
+            auth_code_id uuid NOT NULL,
+            role varchar(128) NOT NULL,
+
+            PRIMARY KEY (auth_code_id, role)
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE auth_code ADD COLUMN principal varchar(256) NOT NULL DEFAULT ''
+    `),
 }

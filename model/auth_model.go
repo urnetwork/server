@@ -1242,6 +1242,12 @@ const MaxAuthCodeUses = 100
 type AuthCodeCreateArgs struct {
 	DurationMinutes float64 `json:"duration_minutes,omitempty"`
 	Uses            int     `json:"uses,omitempty"`
+
+	// identity roles and principal carried by logins minted from this code.
+	// Only a network-level non-guest session may set these; when omitted, the
+	// session's own roles and principal are inherited.
+	Roles     []string `json:"roles,omitempty"`
+	Principal string   `json:"principal,omitempty"`
 }
 
 type AuthCodeCreateResult struct {
@@ -1275,6 +1281,16 @@ func AuthCodeCreate(
 	// 	}
 	// 	return
 	// }
+
+	roles, principal, message := validateClientIdentityArgs(codeCreate.Roles, codeCreate.Principal, session)
+	if message != "" {
+		codeCreateResult = &AuthCodeCreateResult{
+			Error: &AuthCodeCreateError{
+				Message: message,
+			},
+		}
+		return
+	}
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
@@ -1347,8 +1363,9 @@ func AuthCodeCreate(
 	            create_time,
 	            end_time,
 	            uses,
-	            remaining_uses
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+	            remaining_uses,
+	            principal
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
 			`,
 			authCodeId,
 			session.ByJwt.NetworkId,
@@ -1357,7 +1374,25 @@ func AuthCodeCreate(
 			createTime,
 			endTime,
 			uses,
+			principal,
 		))
+
+		if 0 < len(roles) {
+			server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
+				for _, role := range roles {
+					batch.Queue(
+						`
+						INSERT INTO auth_code_role (
+							auth_code_id,
+							role
+						) VALUES ($1, $2)
+						`,
+						authCodeId,
+						role,
+					)
+				}
+			})
+		}
 
 		// propagate the auth sessions
 		if 0 < len(session.ByJwt.AuthSessionIds) {
@@ -1434,6 +1469,15 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 			WHERE auth_code_session.auth_code_id = temp_auth_code_id.auth_code_id
 			`,
 		)
+
+		tx.Exec(
+			ctx,
+			`
+			DELETE FROM auth_code_role
+			USING temp_auth_code_id
+			WHERE auth_code_role.auth_code_id = temp_auth_code_id.auth_code_id
+			`,
+		)
 	})
 
 	return
@@ -1487,6 +1531,7 @@ func AuthCodeLogin(
 					auth_code.user_id,
 					auth_code.create_time,
 					auth_code.remaining_uses,
+					auth_code.principal,
 					network.network_name
 
 				FROM auth_code
@@ -1508,6 +1553,7 @@ func AuthCodeLogin(
 		var userId server.Id
 		var createTime time.Time
 		var remainingUses int
+		var principal string
 		var networkName string
 
 		server.WithPgResult(result, err, func() {
@@ -1519,6 +1565,7 @@ func AuthCodeLogin(
 					&userId,
 					&createTime,
 					&remainingUses,
+					&principal,
 					&networkName,
 				)
 			}
@@ -1531,6 +1578,24 @@ func AuthCodeLogin(
 			}
 			return
 		}
+
+		roles := []string{}
+		result, err = tx.Query(
+			session.Ctx,
+			`
+				SELECT role FROM auth_code_role
+				WHERE auth_code_id = $1
+				ORDER BY role
+			`,
+			authCodeId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var role string
+				server.Raise(result.Scan(&role))
+				roles = append(roles, role)
+			}
+		})
 
 		result, err = tx.Query(
 			session.Ctx,
@@ -1600,6 +1665,15 @@ func AuthCodeLogin(
 				`,
 				authCodeId,
 			))
+
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					DELETE FROM auth_code_role
+					WHERE auth_code_id = $1
+				`,
+				authCodeId,
+			))
 		}
 
 		isGuestMode := false
@@ -1618,6 +1692,8 @@ func AuthCodeLogin(
 			isPro,
 			authSessionIds...,
 		)
+		byJwt.Roles = roles
+		byJwt.Principal = principal
 
 		codeLoginResult = &AuthCodeLoginResult{
 			ByJwt: byJwt.Sign(),

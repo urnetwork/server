@@ -39,6 +39,15 @@ const NetworkClientHandlerHeartbeatTimeout = 60 * time.Second
 // 2025-08-29 increase this for now to allow larger providers to come online
 const LimitClientIdsPerNetwork = 100000
 
+// top-level clients (no `source_client_id`) are the network peers
+// (see peer_model.go). Only top-level clients get peer subscriptions,
+// so the active count per network is limited.
+const LimitTopLevelClientIdsPerNetwork = 100
+
+const MaxClientRoleCount = 32
+const MaxClientRoleLength = 128
+const MaxClientPrincipalLength = 256
+
 // aligns with `protocol.ProvideMode`
 type ProvideMode = int
 
@@ -93,6 +102,13 @@ type AuthNetworkClientArgs struct {
 	Description    string     `json:"description"`
 	DeviceSpec     string     `json:"device_spec"`
 
+	// identity roles and principal, assigned at creation and immutable after.
+	// Only a network-level non-guest session may set these; when omitted, the
+	// session's own roles and principal (e.g. from an auth code) are inherited.
+	// The values have no meaning to the network.
+	Roles     []string `json:"roles,omitempty"`
+	Principal string   `json:"principal,omitempty"`
+
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 }
 
@@ -134,11 +150,62 @@ type ProxyAuthResult struct {
 	Password string `json:"password"`
 }
 
+// validateClientIdentityArgs resolves the roles and principal a new client or
+// auth code is created with. Explicit values require a network-level non-guest
+// session; when omitted, the session's own roles and principal are inherited.
+func validateClientIdentityArgs(
+	roles []string,
+	principal string,
+	session *session.ClientSession,
+) (resolvedRoles []string, resolvedPrincipal string, message string) {
+	if 0 < len(roles) || principal != "" {
+		if session.ByJwt.GuestMode || session.ByJwt.ClientId != nil {
+			message = "Roles and principal can only be assigned by a network session."
+			return
+		}
+	} else {
+		// inherit the session identity (e.g. a session logged in with an auth code)
+		roles = session.ByJwt.Roles
+		principal = session.ByJwt.Principal
+	}
+
+	if MaxClientRoleCount < len(roles) {
+		message = fmt.Sprintf("Too many roles (limit %d).", MaxClientRoleCount)
+		return
+	}
+	if MaxClientPrincipalLength < len(principal) {
+		message = fmt.Sprintf("Principal too long (limit %d).", MaxClientPrincipalLength)
+		return
+	}
+	rolesSet := map[string]bool{}
+	for _, role := range roles {
+		if role == "" || MaxClientRoleLength < len(role) {
+			message = fmt.Sprintf("Invalid role (limit %d).", MaxClientRoleLength)
+			return
+		}
+		rolesSet[role] = true
+	}
+	resolvedRoles = maps.Keys(rolesSet)
+	slices.Sort(resolvedRoles)
+	resolvedPrincipal = principal
+	return
+}
+
 func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
 ) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
+		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, session)
+		if message != "" {
+			authClientResult = &AuthNetworkClientResult{
+				Error: &AuthNetworkClientError{
+					Message: message,
+				},
+			}
+			return
+		}
+
 		var clientId server.Id
 
 		server.Tx(session.Ctx, func(tx server.PgTx) {
@@ -148,6 +215,36 @@ func AuthNetworkClient(
 			var deviceId server.Id
 
 			if authClient.SourceClientId == nil {
+				// only top-level clients get peer subscriptions,
+				// so the active count is hard limited (see peer_model.go)
+				result, err := tx.Query(
+					session.Ctx,
+					`
+						SELECT COUNT(*) AS top_level_client_count
+						FROM network_client
+						WHERE
+							network_id = $1 AND
+							active = true AND
+							source_client_id IS NULL
+					`,
+					session.ByJwt.NetworkId,
+				)
+				topLevelClientCount := 0
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&topLevelClientCount))
+					}
+				})
+				if LimitTopLevelClientIdsPerNetwork <= topLevelClientCount {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							ClientLimitExceeded: true,
+							Message:             "Client limit exceeded.",
+						},
+					}
+					return
+				}
+
 				deviceId = server.NewId()
 
 				server.RaisePgResult(tx.Exec(
@@ -208,9 +305,10 @@ func AuthNetworkClient(
 						description,
 						create_time,
 						auth_time,
-						source_client_id
+						source_client_id,
+						principal
 					)
-					VALUES ($1, $2, $3, $4, $5, $5, $6)
+					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
 				`,
 				clientId,
 				session.ByJwt.NetworkId,
@@ -218,14 +316,42 @@ func AuthNetworkClient(
 				authClient.Description,
 				createTime,
 				authClient.SourceClientId,
+				principal,
 			))
 
-			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId).Sign()
+			if 0 < len(roles) {
+				server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
+					for _, role := range roles {
+						batch.Queue(
+							`
+							INSERT INTO network_client_role (
+								client_id,
+								role
+							) VALUES ($1, $2)
+							`,
+							clientId,
+							role,
+						)
+					}
+				})
+			}
+
+			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId)
+			byJwtWithClientId.Roles = roles
+			byJwtWithClientId.Principal = principal
+			byClientJwtSigned := byJwtWithClientId.Sign()
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt: &byJwtWithClientId,
+				ByClientJwt: &byClientJwtSigned,
 				ClientId:    &clientId,
 			}
 		})
+
+		if authClientResult != nil && authClientResult.Error == nil {
+			setClientIdentityCache(session.Ctx, clientId, &ClientIdentity{
+				Roles:     roles,
+				Principal: principal,
+			})
+		}
 
 		if authClientResult != nil && authClientResult.Error == nil && authClient.ProxyConfig != nil {
 			var lockSubnets []netip.Prefix
@@ -312,6 +438,16 @@ func AuthNetworkClient(
 	} else {
 		// note `ProxyConfig` is ignored in this case
 
+		// roles and principal are assigned at creation and immutable after
+		if 0 < len(authClient.Roles) || authClient.Principal != "" {
+			authClientResult = &AuthNetworkClientResult{
+				Error: &AuthNetworkClientError{
+					Message: "Roles and principal are assigned at creation and cannot be changed.",
+				},
+			}
+			return
+		}
+
 		// important: must check `network_id = session network_id`
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
@@ -351,7 +487,9 @@ func AuthNetworkClient(
 			var deviceId *server.Id
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(deviceId))
+					var deviceIdValue server.Id
+					server.Raise(result.Scan(&deviceIdValue))
+					deviceId = &deviceIdValue
 				}
 			})
 
@@ -369,7 +507,7 @@ func AuthNetworkClient(
 				`
 					UPDATE device
 					SET
-						device_spec = $2,
+						device_spec = $2
 					WHERE
 						device_id = $1
 				`,
@@ -385,9 +523,45 @@ func AuthNetworkClient(
 				return
 			}
 
-			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId).Sign()
+			// the client jwt carries the client's stored identity
+			var principal string
+			roles := []string{}
+			result, err = tx.Query(
+				session.Ctx,
+				`
+					SELECT principal FROM network_client
+					WHERE client_id = $1
+				`,
+				authClient.ClientId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&principal))
+				}
+			})
+			result, err = tx.Query(
+				session.Ctx,
+				`
+					SELECT role FROM network_client_role
+					WHERE client_id = $1
+					ORDER BY role
+				`,
+				authClient.ClientId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var role string
+					server.Raise(result.Scan(&role))
+					roles = append(roles, role)
+				}
+			})
+
+			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId)
+			byJwtWithClientId.Roles = roles
+			byJwtWithClientId.Principal = principal
+			byClientJwtSigned := byJwtWithClientId.Sign()
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt: &byJwtWithClientId,
+				ByClientJwt: &byClientJwtSigned,
 				ClientId:    authClient.ClientId,
 			}
 		})
@@ -500,6 +674,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					device.device_spec,
 					network_client.create_time,
 					network_client.auth_time,
+					network_client.principal,
 					provide_key.provide_mode,
 					proxy_client.proxy_client_json
 				FROM network_client
@@ -534,6 +709,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					&deviceSpec_,
 					&clientInfo.CreateTime,
 					&clientInfo.AuthTime,
+					&clientInfo.Principal,
 					&clientInfo.ProvideMode,
 					&proxyClientJson,
 				))
@@ -551,6 +727,33 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 					}
 				}
 				clientInfos[clientInfo.ClientId] = clientInfo
+			}
+		})
+
+		result, err = conn.Query(
+			session.Ctx,
+			`
+				SELECT
+					network_client_role.client_id,
+					network_client_role.role
+				FROM network_client
+				INNER JOIN network_client_role ON
+					network_client_role.client_id = network_client.client_id
+				WHERE
+					network_client.network_id = $1 AND
+					network_client.active = true
+				ORDER BY network_client_role.role
+			`,
+			session.ByJwt.NetworkId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var role string
+				server.Raise(result.Scan(&clientId, &role))
+				if clientInfo, ok := clientInfos[clientId]; ok {
+					clientInfo.Roles = append(clientInfo.Roles, role)
+				}
 			}
 		})
 
@@ -660,6 +863,10 @@ type NetworkClient struct {
 	CreateTime time.Time `json:"create_time"`
 	AuthTime   time.Time `json:"auth_time"`
 
+	// identity roles and principal assigned at creation
+	Roles     []string `json:"roles,omitempty"`
+	Principal string   `json:"principal,omitempty"`
+
 	ProvideMode *ProvideMode `json:"provide_mode,omitempty"`
 	ProxyClient *ProxyClient `json:"proxy_client,omitempty"`
 }
@@ -678,6 +885,7 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 					device.device_spec,
 					network_client.create_time,
 					network_client.auth_time,
+					network_client.principal,
 					provide_key.provide_mode,
 					proxy_client.proxy_client_json
 				FROM network_client
@@ -710,6 +918,7 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 					&deviceSpec_,
 					&networkClient.CreateTime,
 					&networkClient.AuthTime,
+					&networkClient.Principal,
 					&networkClient.ProvideMode,
 					&proxyClientJson,
 				))
@@ -726,6 +935,27 @@ func GetNetworkClient(ctx context.Context, clientId server.Id) *NetworkClient {
 						networkClient.ProxyClient = &proxyClient
 					}
 				}
+			}
+		})
+
+		if networkClient == nil {
+			return
+		}
+
+		result, err = conn.Query(
+			ctx,
+			`
+				SELECT role FROM network_client_role
+				WHERE client_id = $1
+				ORDER BY role
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var role string
+				server.Raise(result.Scan(&role))
+				networkClient.Roles = append(networkClient.Roles, role)
 			}
 		})
 	})
@@ -797,6 +1027,86 @@ func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB 
 	// FIXME these exist in the association model now, can be added
 
 	return ProvideModePublic
+}
+
+// the roles and identity principal assigned to a client at creation.
+// The values have no meaning to the network.
+type ClientIdentity struct {
+	Roles     []string `json:"roles,omitempty"`
+	Principal string   `json:"principal,omitempty"`
+}
+
+// note this shares the {pm_<clientId>} hash tag with the provide mode keys
+func clientIdentityKey(clientId server.Id) string {
+	return fmt.Sprintf("{pm_%s}rp", clientId)
+}
+
+func setClientIdentityCache(ctx context.Context, clientId server.Id, identity *ClientIdentity) {
+	identityJson, err := json.Marshal(identity)
+	if err != nil {
+		return
+	}
+	server.Redis(ctx, func(r server.RedisClient) {
+		// no ttl; the identity is immutable post-create
+		r.Set(ctx, clientIdentityKey(clientId), identityJson, server.NoTtl)
+	})
+}
+
+// GetClientIdentity returns the roles and principal assigned to the client at
+// creation. Redis first with a db fallback that fills the cache (the identity
+// is immutable post-create). The empty identity is cached too, since most
+// clients have no roles or principal.
+func GetClientIdentity(ctx context.Context, clientId server.Id) (identity *ClientIdentity) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		identityJson, _ := r.Get(ctx, clientIdentityKey(clientId)).Result()
+		if identityJson == "" {
+			// not in redis; fall back to the db below
+			return
+		}
+		var identity_ ClientIdentity
+		if err := json.Unmarshal([]byte(identityJson), &identity_); err == nil {
+			identity = &identity_
+		}
+	})
+	if identity != nil {
+		return
+	}
+
+	identity = &ClientIdentity{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT principal FROM network_client
+				WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&identity.Principal))
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			`
+				SELECT role FROM network_client_role
+				WHERE client_id = $1
+				ORDER BY role
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var role string
+				server.Raise(result.Scan(&role))
+				identity.Roles = append(identity.Roles, role)
+			}
+		})
+	})
+	setClientIdentityCache(ctx, clientId, identity)
+	return
 }
 
 func provideModesKey(clientId server.Id) string {
@@ -1161,6 +1471,13 @@ func SetProvide(
 		_, err := pipe.Exec(ctx)
 		server.Raise(err)
 	})
+
+	// update the peer registry so connected network peers see the change
+	provideModes := map[ProvideMode]bool{}
+	for provideMode := range secretKeys {
+		provideModes[provideMode] = true
+	}
+	UpdateNetworkPeerProvideModes(ctx, clientId, provideModes)
 }
 
 func GetProvideKeyChanges(

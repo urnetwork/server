@@ -367,7 +367,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 
 	addConsumer := func(client *connect.Client, stats *perfPeerStats, onMessage func(m *perfReceivedMessage)) {
 		receive := make(chan *perfReceivedMessage, 1<<16)
-		client.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+		client.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 			for _, frame := range frames {
 				m, err := connect.FromFrame(frame)
 				if err != nil {

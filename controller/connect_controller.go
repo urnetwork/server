@@ -234,6 +234,17 @@ func CreateContract(
 	if companion {
 		// companion contracts use `ProvideModeStream`
 		provideMode = model.ProvideModeStream
+
+		// network peers never fall back to stream: when the companion reply
+		// is same-network and the destination advertises the network mode,
+		// settle it as a non-companion network contract (the no-escrow path,
+		// same as the forward direction between network peers)
+		if GetProvideRelationship(ctx, clientId, destinationId) == model.ProvideModeNetwork &&
+			GetProvideModes(ctx, destinationId)[model.ProvideModeNetwork] {
+			glog.V(2).Infof("[contract][network-normalize]%s->%s companion settled as network\n", clientId, destinationId)
+			provideMode = model.ProvideModeNetwork
+			companion = false
+		}
 	} else {
 		provideRelationship := GetProvideRelationship(ctx, clientId, destinationId)
 		provideModes := GetProvideModes(ctx, destinationId)
@@ -351,6 +362,15 @@ func CreateContract(
 	}
 	if streamId != nil {
 		storedContract.StreamId = streamId.Bytes()
+	}
+	// the source's roles and principal are sealed into the signed contract
+	// bytes only when the provide mode is network. For all other provide
+	// modes they are not set.
+	if provideMode == model.ProvideModeNetwork {
+		if identity := model.GetClientIdentity(ctx, clientId); identity != nil {
+			storedContract.Roles = identity.Roles
+			storedContract.Principal = identity.Principal
+		}
 	}
 	storedContractBytes, _ := proto.Marshal(storedContract)
 

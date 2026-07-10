@@ -84,6 +84,7 @@ func registry() []specEndpoint {
 		{"POST", "/network/auth-client", rt(model.AuthNetworkClientArgs{}), rt(model.AuthNetworkClientResult{})},
 		{"POST", "/network/remove-client", rt(model.RemoveNetworkClientArgs{}), rt(model.RemoveNetworkClientResult{})},
 		{"GET", "/network/clients", nil, rt(model.NetworkClientsResult{})},
+		{"GET", "/network/peers", nil, rt(model.NetworkPeersResult{})},
 		{"GET", "/network/provider-locations", nil, rt(model.FindLocationsResult{})},
 		{"POST", "/network/find-provider-locations", rt(model.FindLocationsArgs{}), rt(model.FindLocationsResult{})},
 		{"POST", "/network/find-providers2", rt(model.FindProviders2Args{}), rt(model.FindProviders2Result{})}, {"GET", "/network/ranking", nil, rt(controller.GetNetworkRankingResult{})},

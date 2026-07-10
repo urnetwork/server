@@ -166,6 +166,95 @@ func TestAuthCode(t *testing.T) {
 	})
 }
 
+func TestAuthCodeIdentity(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "test"
+		guestMode := false
+		isPro := false
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		byJwt := jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			guestMode,
+			isPro,
+		)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+		// an auth code with roles and a principal
+		authCodeCreate := &AuthCodeCreateArgs{
+			Roles:     []string{"role2", "role1"},
+			Principal: "svc-a",
+		}
+
+		authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, authCodeCreateResult.Error, nil)
+		assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
+
+		// the login mints the roles and principal into the jwt
+		authCodeLogin := &AuthCodeLoginArgs{
+			AuthCode: authCodeCreateResult.AuthCode,
+		}
+
+		authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
+
+		loginByJwt, err := jwt.ParseByJwt(ctx, authCodeLoginResult.ByJwt)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, loginByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, loginByJwt.Principal, "svc-a")
+
+		// a client created by the service session inherits the identity
+		// into the client jwt
+		serviceSession := session.Testing_CreateClientSession(ctx, loginByJwt)
+		authClientResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "service device",
+			},
+			serviceSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, authClientResult.Error, nil)
+
+		clientByJwt, err := jwt.ParseByJwt(ctx, *authClientResult.ByClientJwt)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, clientByJwt.ClientId, nil)
+		assert.Equal(t, clientByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, clientByJwt.Principal, "svc-a")
+
+		// LoadByJwtFromClientId rebuilds the identity from the db
+		loadedByJwt, err := jwt.LoadByJwtFromClientId(ctx, *clientByJwt.ClientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, loadedByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, loadedByJwt.Principal, "svc-a")
+
+		// a guest session cannot create an auth code with roles or principal
+		guestSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			true,
+			isPro,
+		))
+		authCodeCreateResult, err = AuthCodeCreate(
+			&AuthCodeCreateArgs{
+				Principal: "svc-b",
+			},
+			guestSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, authCodeCreateResult.Error, nil)
+	})
+}
+
 func TestVerifySolanaSignature(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 

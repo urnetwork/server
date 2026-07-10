@@ -150,12 +150,12 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 
 	receiveA := make(chan struct{}, 1<<16)
 	receiveB := make(chan struct{}, 1<<16)
-	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientA.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 		for range frames {
 			receiveA <- struct{}{}
 		}
 	})
-	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, provideMode protocol.ProvideMode) {
+	clientB.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
 		for range frames {
 			receiveB <- struct{}{}
 		}
