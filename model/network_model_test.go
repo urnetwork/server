@@ -299,6 +299,66 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 	})
 }
 
+// TestUpgradeGuestByWalletInvalidSignatureRejected reproduces a Class-A auth bug
+// adjacent to the adopt_secret / confirm-share fixes: UpgradeGuest's wallet branch
+// (network_model.go ~1261) binds WalletAuth.PublicKey to the caller's own account
+// WITHOUT ever calling VerifySignature — unlike NetworkCreate's wallet branch
+// (network_model.go:365) and handleLoginWallet (auth_model.go:457), which both verify.
+// So a guest can claim any wallet address (e.g. a victim's) with a bogus signature,
+// squatting the wallet identity and blocking the real owner from ever registering it
+// (networkCreateWalletAuth gates on network_user.wallet_address).
+//
+// This asserts the secure expectation (invalid signature => wallet NOT bound), so it
+// FAILS on the current code and will pass once UpgradeGuest verifies the signature.
+func TestUpgradeGuestByWalletInvalidSignatureRejected(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+		Testing_CreateGuestNetwork(
+			ctx,
+			networkId,
+			fmt.Sprintf("guest-%s", networkId.String()),
+			userId,
+		)
+
+		// A real-format Solana address the caller does NOT control, paired with a
+		// well-formed but cryptographically invalid signature (64 zero bytes).
+		victimWallet := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		invalidSignature := base64.StdEncoding.EncodeToString(make([]byte, 64))
+
+		before := GetNetworkUser(ctx, userId)
+		assert.Equal(t, before.AuthType, AuthTypeGuest)
+		assert.Equal(t, before.WalletAddress, nil)
+
+		args := UpgradeGuestArgs{
+			NetworkName: "abcdef",
+			WalletAuth: &WalletAuthArgs{
+				PublicKey:  victimWallet,
+				Signature:  invalidSignature,
+				Message:    "Welcome to URnetwork",
+				Blockchain: "solana",
+			},
+		}
+		result, err := UpgradeGuest(args, clientSession)
+
+		// Security invariant: without a valid signature proving control of the key,
+		// the guest account must NOT be bound to that wallet address.
+		user := GetNetworkUser(ctx, userId)
+		if user.WalletAddress != nil {
+			t.Fatalf("SECURITY: UpgradeGuest bound wallet_address=%q to the guest account with an "+
+				"INVALID signature — no proof of key control. The wallet branch never calls "+
+				"VerifySignature (NetworkCreate and handleLoginWallet do). auth_type=%q err=%v result=%+v",
+				*user.WalletAddress, user.AuthType, err, result)
+		}
+	})
+}
+
 func TestNetworkCreateTermsFail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

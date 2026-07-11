@@ -79,6 +79,70 @@ func MaxTime(a time.Time, b time.Time) time.Time {
 	}
 }
 
+// ParseDurationExtended is like time.ParseDuration but additionally accepts a
+// `d` (day) unit, where one day is exactly 24h. Days may be fractional and may
+// be combined with the standard units, e.g. "1.5d", "14d", "1d12h". A string
+// with no `d` unit is handed to time.ParseDuration unchanged, so all of the
+// stdlib's units and edge cases are preserved.
+func ParseDurationExtended(s string) (time.Duration, error) {
+	body := strings.TrimSpace(s)
+	if body == "" {
+		return 0, fmt.Errorf("invalid duration %q", s)
+	}
+
+	neg := false
+	switch body[0] {
+	case '+':
+		body = body[1:]
+	case '-':
+		neg = true
+		body = body[1:]
+	}
+
+	// Pull out every `d` (day) component, summing them, and hand whatever
+	// remains to time.ParseDuration. None of the stdlib units contain a `d`,
+	// so removing the day components never corrupts a standard unit. This keeps
+	// standard-unit semantics (fractional values, overflow checks) delegated to
+	// the stdlib and only layers the day unit on top.
+	days := 0.0
+	foundDay := false
+	remainder := dayComponentRegex().ReplaceAllStringFunc(body, func(match string) string {
+		// match is like "1.5d"; strip the trailing `d`
+		v, err := strconv.ParseFloat(match[:len(match)-1], 64)
+		if err != nil {
+			// leave the malformed component in place so the remainder parse fails
+			return match
+		}
+		foundDay = true
+		days += v
+		return ""
+	})
+
+	total := time.Duration(0)
+	if foundDay {
+		total += time.Duration(days * 24 * float64(time.Hour))
+	}
+
+	if remainder = strings.TrimSpace(remainder); remainder != "" {
+		d, err := time.ParseDuration(remainder)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q", s)
+		}
+		total += d
+	} else if !foundDay {
+		return 0, fmt.Errorf("invalid duration %q", s)
+	}
+
+	if neg {
+		total = -total
+	}
+	return total, nil
+}
+
+var dayComponentRegex = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile(`[0-9]*\.?[0-9]+d`)
+})
+
 func Raise(err error) {
 	if err != nil {
 		panic(err)

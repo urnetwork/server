@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	mathrand "math/rand"
+	"math/big"
 	"net/mail"
 	"strings"
 	"sync"
@@ -104,8 +104,12 @@ const (
 func createVerifyCode(verifyCodeType VerifyCodeType) string {
 
 	if verifyCodeType == VerifyCodeNumeric {
-		code := mathrand.Int63n(1000000)
-		return fmt.Sprintf("%06d", code)
+		// crypto/rand for an unbiased 6-digit code (this is an auth credential)
+		code, err := rand.Int(rand.Reader, big.NewInt(1000000))
+		if err != nil {
+			panic(err)
+		}
+		return fmt.Sprintf("%06d", code.Int64())
 	} else {
 		verifyCode := make([]byte, 4)
 		_, err := rand.Read(verifyCode)

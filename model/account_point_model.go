@@ -89,6 +89,47 @@ func ApplyAccountPointsInTx(
 	return nil
 }
 
+// ApplyAccountPointsBatchInTx inserts many account_point rows in a single
+// batched round-trip instead of one Exec per row. The payment plan applies
+// points to every payee plus their referral parents/children, which is
+// thousands of rows on a large plan; queuing them as one batch is what keeps
+// the plan transaction from paying a network round-trip per point.
+func ApplyAccountPointsBatchInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	argsList []ApplyAccountPointsArgs,
+) {
+	if len(argsList) == 0 {
+		return
+	}
+
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		for _, args := range argsList {
+			batch.Queue(
+				`
+					INSERT INTO account_point (
+							account_point_id,
+							network_id,
+							event,
+							point_value,
+							payment_plan_id,
+							linked_network_id,
+							account_payment_id
+					)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+				`,
+				server.NewId(),
+				args.NetworkId,
+				args.Event,
+				args.PointValue,
+				args.PaymentPlanId,
+				args.LinkedNetworkId,
+				args.AccountPaymentId,
+			)
+		}
+	})
+}
+
 func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints []AccountPoint) {
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -360,7 +401,9 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 			visited := make(map[server.Id]struct{})
 			reports := payoutChildrenReferralNetworksInTx(
 				ctx,
-				tx,
+				func(args ApplyAccountPointsArgs) {
+					ApplyAccountPointsInTx(ctx, tx, args)
+				},
 				scaledAccountPoints,
 				subsidyConfig.ReferralChildPayoutFraction,
 				payment.NetworkId,
@@ -426,11 +469,17 @@ func calculateReliabilityPayout(
 	UpdateClientLocationReliabilities(ctx, subsidyStartTime, now)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// this standalone path (tests/tooling) keeps the historical
+		// [subsidyStartTime, now] window
 		networkSubsidyAmounts = calculateReliabilityPayoutInTx(
 			ctx,
 			tx,
 			subsidyStartTime,
+			now,
 			subsidyScale,
+			// this standalone path already runs in its own committed tx, so keep
+			// the recompute inline rather than opening a nested maintenance tx
+			false,
 		)
 	})
 	return
@@ -444,14 +493,38 @@ func calculateReliabilityPayoutInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	subsidyStartTime time.Time,
+	subsidyEndTime time.Time,
 	subsidyScale float64,
+	persist bool,
 ) map[server.Id]NetworkReliabilitySubsidy {
 
-	now := server.NowUtc()
 	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
 
+	// Recompute reliability scores over the subsidy window
+	// [subsidyStartTime, subsidyEndTime] — the window this subsidy actually
+	// pays for — instead of scanning all the way to now. During a backlog
+	// drain subsidyEndTime can be far behind now, so scanning to now would
+	// re-scan weeks of client_reliability that belong to later subsidy periods
+	// and bloat this transaction; bounding to the window keeps the scan (and
+	// the commit) proportional to the slice being paid.
 	// note `complete=false` is used here since dependencies are computed outside of the tx at the top of the plan function
-	UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, now, false)
+	//
+	// The recompute is a global DELETE + windowed-aggregation INSERT — the
+	// single longest-running statement in a plan. For a real (committed) plan,
+	// run it in its own committed transaction (UpdateNetworkReliabilityScores
+	// uses server.MaintenanceTx) rather than inside the plan tx: it does not need
+	// to be atomic with the payout writes, and pulling it out keeps the heavy
+	// aggregation off the plan tx's connection and out of its rollback scope, so
+	// a slow recompute no longer stretches (or, on a socket timeout, kills) the
+	// plan transaction. The plan tx is ReadCommitted, so the read below sees the
+	// just-committed scores. For a dry run the recompute must stay inside the
+	// plan tx so it is rolled back with the rest of the plan and nothing is
+	// persisted.
+	if persist {
+		UpdateNetworkReliabilityScores(ctx, subsidyStartTime, subsidyEndTime, false)
+	} else {
+		UpdateNetworkReliabilityScoresInTx(tx, ctx, subsidyStartTime, subsidyEndTime, false)
+	}
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
@@ -503,9 +576,13 @@ func calculateReliabilityPayoutInTx(
 
 }
 
+// payoutChildrenReferralNetworksInTx walks the referral tree and hands each
+// child's account_point row to `apply` rather than inserting it directly, so
+// the caller decides how to persist: the plan collects the rows and inserts
+// them as one batch, while tooling can apply them one at a time.
 func payoutChildrenReferralNetworksInTx(
 	ctx context.Context,
-	tx server.PgTx,
+	apply func(ApplyAccountPointsArgs),
 	basePayoutAmount NanoPoints,
 	payoutFraction float64,
 	networkId server.Id,
@@ -556,10 +633,7 @@ func payoutChildrenReferralNetworksInTx(
 			AccountPaymentId: accountPaymentId,
 		}
 
-		err := ApplyAccountPointsInTx(ctx, tx, args)
-		if err != nil {
-			glog.Errorf("[plan]could not apply referral points to %s: %v\n", childNetworkId, err)
-		}
+		apply(args)
 
 		accountPointsReports = append(accountPointsReports, AccountPointReport{
 			NetworkId:         childNetworkId,
@@ -573,7 +647,7 @@ func payoutChildrenReferralNetworksInTx(
 		// recursively payout to child referral networks
 		reports := payoutChildrenReferralNetworksInTx(
 			ctx,
-			tx,
+			apply,
 			basePayoutAmount,
 			payoutFraction*0.5, // reduce the payout fraction for each level of referral
 			childNetworkId,

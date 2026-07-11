@@ -30,6 +30,8 @@ func InitTasks(ctx context.Context) {
 		}
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
+		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
+		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
@@ -43,6 +45,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
+		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
@@ -55,6 +58,8 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleCleanupExpiredPaymentIntents(clientSession, tx)
 		work.ScheduleSweepVerifyTrails(clientSession, tx)
 		work.ScheduleRollupVerifyProviderStats(clientSession, tx)
+		work.ScheduleRollupSearchProviderStats(clientSession, tx)
+		work.ScheduleRemoveOldSearchProviderStats(clientSession, tx)
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 	})
@@ -128,6 +133,14 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			"github.com/urnetwork/server/taskworker/work.DeleteDisconnectedNetworkClients",
 		),
 		task.NewTaskTargetWithPost(
+			work.SweepOrphanNetworkClientData,
+			work.SweepOrphanNetworkClientDataPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SweepOrphanContractData,
+			work.SweepOrphanContractDataPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,
 			"github.com/urnetwork/server/model.IndexSearchLocations",
@@ -178,6 +191,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,
 			work.RemoveOldClientReliabilityStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupClientReliabilityStats,
+			work.RollupClientReliabilityStatsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientReliabilityScores,
@@ -234,6 +251,14 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.RollupVerifyProviderStats,
 			work.RollupVerifyProviderStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupSearchProviderStats,
+			work.RollupSearchProviderStatsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldSearchProviderStats,
+			work.RemoveOldSearchProviderStatsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RefreshVerifyProxyEgress,

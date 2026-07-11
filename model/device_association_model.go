@@ -7,6 +7,7 @@ import (
 	// "strings"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"image/color"
 	"time"
 
@@ -511,10 +512,12 @@ func DeviceConfirmShare(
                     device_share.device_association_id = $1 AND
                     network.network_name = $2 AND
                     device_share.guest_network_id = network.network_id AND
+                    device_share.source_network_id = $3 AND
                     device_share.confirmed = false
             `,
 			deviceAssociationId,
 			confirmShare.AssociatedNetworkName,
+			clientSession.ByJwt.NetworkId,
 		))
 		if tag.RowsAffected() == 0 {
 			return
@@ -544,10 +547,28 @@ type DeviceCreateAdoptCodeArgs struct {
 }
 
 type DeviceCreateAdoptCodeResult struct {
-	AdoptCode       string                       `json:"adopt_code,omitempty"`
-	AdoptSecret     string                       `json:"share_code,omitempty"`
-	DurationMinutes float64                      `json:"duration_minutes,omitempty"`
-	Error           *DeviceCreateAdoptCodeResult `json:"error,omitempty"`
+	AdoptCode       string                      `json:"adopt_code,omitempty"`
+	AdoptSecret     string                      `json:"adopt_secret,omitempty"`
+	DurationMinutes float64                     `json:"duration_minutes,omitempty"`
+	Error           *DeviceCreateAdoptCodeError `json:"error,omitempty"`
+}
+
+// MarshalJSON dual-emits the deprecated `share_code` alias alongside the spec
+// field `adopt_secret` during the rename migration.
+func (r DeviceCreateAdoptCodeResult) MarshalJSON() ([]byte, error) {
+	type alias DeviceCreateAdoptCodeResult
+	b, err := json.Marshal(alias(r))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	if v, ok := m["adopt_secret"]; ok {
+		m["share_code"] = v
+	}
+	return json.Marshal(m)
 }
 
 type DeviceCreateAdoptCodeError struct {
@@ -773,11 +794,13 @@ func DeviceConfirmAdopt(
                     network.network_name = $2 AND
                     device_adopt.owner_network_id = network.network_id AND
                     device_adopt.confirmed = false AND
+                    device_adopt.adopt_secret = $4 AND
                     $3 < device_adopt.expire_time
             `,
 			deviceAssociationId,
 			confirmAdopt.AssociatedNetworkName,
 			adoptTime,
+			confirmAdopt.AdoptSecret,
 		))
 
 		if tag.RowsAffected() == 0 {

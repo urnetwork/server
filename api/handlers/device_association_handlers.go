@@ -93,3 +93,7 @@ func DeviceRemoveAssociation(w http.ResponseWriter, r *http.Request) {
 func DeviceSetAssociationName(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(model.DeviceSetAssociationName, w, r)
 }
+
+func DeviceSetName(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.DeviceSetName, w, r)
+}

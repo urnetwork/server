@@ -73,8 +73,8 @@ func GetNetworkReferralCode(ctx context.Context, networkId server.Id) *NetworkRe
 
 	var networkReferralCode *NetworkReferralCode
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
 						SELECT

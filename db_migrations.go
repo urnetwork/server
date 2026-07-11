@@ -3016,4 +3016,188 @@ var migrations = []any{
         ALTER TABLE account_payment
         ADD COLUMN circle_idempotency_key uuid NULL
     `),
+
+	// Per-provider statistics APIs (/stats/providers, /stats/providers-last-n,
+	// /stats/provider-last-n) aggregate transfer_contract by destination_id
+	// (the provider client) over a time window. These indexes turn the
+	// per-provider scans into index ranges instead of full-table scans.
+	// transfer bytes bucket by close_time (settled); contracts/clients by
+	// create_time (opened).
+	//
+	// On the large existing tables (transfer_contract, network_client_connection)
+	// these must be built manually with CREATE INDEX CONCURRENTLY out of band —
+	// migrations run inside a transaction, where CONCURRENTLY is illegal and a
+	// plain CREATE INDEX takes a write-blocking lock (see FIXME above). The
+	// IF NOT EXISTS gate makes this migration a no-op once they are pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_destination_id_create_time
+        ON transfer_contract (destination_id, create_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_destination_id_close_time
+        ON transfer_contract (destination_id, close_time)
+    `),
+	// per-provider uptime / connected-events scans by client over a window
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_connection_client_id_connect_time
+        ON network_client_connection (client_id, connect_time)
+    `),
+
+	// search-interest rollup. FindProviders2 increments a per-provider match
+	// counter in redis on the hot path (never writes pg); RollupSearchProviderStats
+	// drains those counters into this table once per hour. Same (period_start,
+	// client_id) rollup shape as verify_provider_stats.
+	newSqlMigration(`
+        CREATE TABLE search_provider_stats (
+            period_start timestamp NOT NULL,
+            period_end timestamp NOT NULL,
+            client_id uuid NOT NULL,
+            match_count bigint NOT NULL,
+
+            PRIMARY KEY (period_start, client_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS search_provider_stats_client_id_period_start
+        ON search_provider_stats (client_id, period_start)
+    `),
+
+	// wallet-login challenge nonces. Single-use, short-lived server-issued nonces
+	// that the client includes in the message it signs for wallet login, so a
+	// captured (message, signature) pair cannot be replayed (see handleLoginWallet).
+	newSqlMigration(`
+        CREATE TABLE auth_wallet_nonce (
+            nonce varchar(256) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            used bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY (nonce)
+        )
+    `),
+
+	// the task poll orders by (available_block, run_priority DESC,
+	// run_max_time_seconds DESC) FOR UPDATE SKIP LOCKED. The old index
+	// (available_block, run_priority, task_id) cannot produce that order
+	// (mixed sort directions), so every poll fetched and sorted the entire
+	// ready backlog before applying LIMIT. This index matches the poll's sort
+	// exactly, so the poll streams in index order and stops at LIMIT.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS pending_task_poll_order
+        ON pending_task (available_block, run_priority DESC, run_max_time_seconds DESC)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS pending_task_available_block
+    `),
+	// queue tables live and die by dead-tuple density: every claim/release
+	// updates rows and every finished task deletes one, so at the default 20%
+	// scale factor the live set is buried in dead tuples between vacuums
+	newSqlMigration(`
+        ALTER TABLE pending_task SET (
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+
+	// GetTransferStats sums account_payment.payout_byte_count by
+	// (network_id, completed); only (network_id, canceled) existed, so the
+	// completed filter and the summed column both went to the heap
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_payment_network_id_completed
+        ON account_payment (network_id, completed) INCLUDE (payout_byte_count)
+    `),
+
+	// RemoveCompletedContracts deletes transfer_balance by end_time; without
+	// this index each pass was a full seq scan of the live balances
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_balance_end_time
+        ON transfer_balance (end_time)
+    `),
+
+	// ForceCloseOpenContractIds polls `WHERE open AND create_time <= $1 ORDER
+	// BY create_time LIMIT n`. The btree (create_time, open, contract_id)
+	// walks every old *closed* contract to find the open ones. This partial
+	// index contains only open contracts (small), is perfectly ordered for the
+	// poll, and — unlike the dropped (open, create_time) full index — cannot
+	// be chosen for queries that don't filter on open.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_partial_create_time
+        ON transfer_contract (create_time) WHERE open
+    `),
+
+	// high-water mark for the client_reliability redis rollup
+	// (RollupClientReliabilityStats): all blocks <= max_drained_block are
+	// fully drained from redis into `client_reliability`. Score computations
+	// clamp their block ranges to this mark so windows only span fully
+	// materialized blocks.
+	newSqlMigration(`
+        CREATE TABLE client_reliability_rollup (
+            singleton_id int NOT NULL DEFAULT 1 CHECK (singleton_id = 1),
+            max_drained_block bigint NOT NULL,
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (singleton_id)
+        )
+    `),
+
+	// transfer_contract index consolidation. Every index on this table is
+	// maintained on each of the ~20M contract inserts/day and again on every
+	// close (the generated `open` column flips, so closes are never HOT).
+	//
+	// The expired-dispute scan (`WHERE dispute AND outcome IS NULL AND
+	// create_time <= $1 ORDER BY create_time`) is the only user of the
+	// full-width (dispute, outcome, create_time) index, which carries an entry
+	// for every contract. This partial index has entries only for undecided
+	// disputes (a tiny set) and provides the same order.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created. Created before the drops
+	// below so the dispute scan never loses coverage.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_dispute_partial_create_time
+        ON transfer_contract (create_time) WHERE (dispute AND outcome IS NULL)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_dispute_create_time
+    `),
+	// the only payer_network_id query is the open-bytes SUM
+	// (GetOpenTransferByteCount), which is served index-only by
+	// (open, payer_network_id, transfer_byte_count) — this one is redundant
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_contract_payer_network_id
+    `),
+
+	// network peers: string roles and an identity principal per client,
+	// assigned at creation and immutable after (see model/peer_model.go).
+	// The role values have no meaning to the network.
+	newSqlMigration(`
+        CREATE TABLE network_client_role (
+            client_id uuid NOT NULL,
+            role varchar(128) NOT NULL,
+
+            PRIMARY KEY (client_id, role)
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN principal varchar(256) NOT NULL DEFAULT ''
+    `),
+	// auth codes carry roles and a principal so that logins minted from the
+	// code (and clients created by those sessions) inherit them
+	newSqlMigration(`
+        CREATE TABLE auth_code_role (
+            auth_code_id uuid NOT NULL,
+            role varchar(128) NOT NULL,
+
+            PRIMARY KEY (auth_code_id, role)
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE auth_code ADD COLUMN principal varchar(256) NOT NULL DEFAULT ''
+    `),
 }

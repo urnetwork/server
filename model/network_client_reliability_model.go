@@ -2,10 +2,19 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
+	"fmt"
 	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/exp/maps"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -58,6 +67,10 @@ type ClientReliabilityStats struct {
 	ConnectionNewCount         uint64
 }
 
+// AddClientReliabilityStats writes stats directly to pg. This is the
+// fixture/backfill path — the announce hot path must use
+// RecordClientReliabilityStatsRange (redis + rollup) instead, since direct
+// per-sync upserts were the single largest statement load on the database.
 func AddClientReliabilityStats(
 	ctx context.Context,
 	networkId server.Id,
@@ -130,6 +143,394 @@ func AddClientReliabilityStatsRange(
 	})
 }
 
+// Redis rollup for the reliability stats hot path.
+//
+// The connection announce loop reports per-client stats every half block for
+// every connected provider, which as direct pg upserts was the single largest
+// statement load on the database. Instead, RecordClientReliabilityStatsRange
+// increments counters in a per-block redis hash (never touching pg), and the
+// serial RollupClientReliabilityStats task drains each block into
+// `client_reliability` with bulk upserts once the block can no longer receive
+// writes. Mirrors the RecordProviderSearchMatches/RollupSearchProviderStats
+// pattern.
+//
+// Consistency: the recorder refuses to write to blocks older than the
+// previous block (relative to wall clock), and the rollup only drains a block
+// once two full blocks have elapsed since its start. So by the time a block is
+// drained it can no longer change, the drain can overwrite pg rows with
+// absolute counts, and a re-drain after a crash is idempotent. A stalled
+// recorder (>1 block behind) drops that sync's stats with a log line rather
+// than corrupting a drained block.
+
+// one redis hash per block: field = <hash hex>:<network_id>:<client_id>:<counter index>,
+// value = accumulated counter
+func clientReliabilityStatsKey(blockNumber int64) string {
+	return fmt.Sprintf("client_reliability_stats.%d", blockNumber)
+}
+
+// redis SET of block numbers that have pending (un-drained) counters
+const clientReliabilityBlocksKey = "client_reliability_stats_blocks"
+
+// memory backstop for the per-block counters; in normal operation the rollup
+// deletes a block's hash within ~2 blocks + one rollup period
+const clientReliabilityStatsRedisTtl = 15 * time.Minute
+
+const clientReliabilityCounterCount = 8
+
+// index order of the packed counters; must match the drain insert below
+const (
+	reliabilityCounterConnectionNew         = 0
+	reliabilityCounterConnectionEstablished = 1
+	reliabilityCounterProvideEnabled        = 2
+	reliabilityCounterProvideChanged        = 3
+	reliabilityCounterReceiveMessage        = 4
+	reliabilityCounterReceiveByte           = 5
+	reliabilityCounterSendMessage           = 6
+	reliabilityCounterSendByte              = 7
+)
+
+func (self *ClientReliabilityStats) counters() [clientReliabilityCounterCount]int64 {
+	return [clientReliabilityCounterCount]int64{
+		reliabilityCounterConnectionNew:         int64(self.ConnectionNewCount),
+		reliabilityCounterConnectionEstablished: int64(self.ConnectionEstablishedCount),
+		reliabilityCounterProvideEnabled:        int64(self.ProvideEnabledCount),
+		reliabilityCounterProvideChanged:        int64(self.ProvideChangedCount),
+		reliabilityCounterReceiveMessage:        int64(self.ReceiveMessageCount),
+		reliabilityCounterReceiveByte:           int64(self.ReceiveByteCount),
+		reliabilityCounterSendMessage:           int64(self.SendMessageCount),
+		reliabilityCounterSendByte:              int64(self.SendByteCount),
+	}
+}
+
+func reliabilityBlockNumber(t time.Time) int64 {
+	return t.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+}
+
+// RecordClientReliabilityStatsRange is the hot-path replacement for
+// AddClientReliabilityStatsRange: it accumulates the stats in redis and never
+// writes pg. It is best-effort — a redis error is swallowed (with a log) so a
+// stats hiccup can never take down the reporting connection.
+func RecordClientReliabilityStatsRange(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	clientAddressHash [32]byte,
+	statsStartTime time.Time,
+	statsEndTime time.Time,
+	stats *ClientReliabilityStats,
+) {
+	server.HandleError(func() {
+		startBlockNumber := reliabilityBlockNumber(statsStartTime)
+		endBlockNumber := reliabilityBlockNumber(statsEndTime)
+
+		// never write to a block the rollup may already have drained. Writers
+		// touch only the current and previous block; the rollup drains a block
+		// only after two full blocks have elapsed, so the two can never race.
+		minBlockNumber := reliabilityBlockNumber(server.NowUtc()) - 1
+		if startBlockNumber < minBlockNumber {
+			glog.Infof(
+				"[ncr]drop reliability stats for stale blocks [%d, %d) client_id=%s\n",
+				startBlockNumber,
+				min(minBlockNumber, endBlockNumber+1),
+				clientId,
+			)
+			startBlockNumber = minBlockNumber
+			if endBlockNumber < startBlockNumber {
+				return
+			}
+		}
+
+		counters := stats.counters()
+		fieldPrefix := fmt.Sprintf(
+			"%s:%s:%s",
+			hex.EncodeToString(clientAddressHash[:]),
+			networkId,
+			clientId,
+		)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			blockNumberStrs := []interface{}{}
+			for blockNumber := startBlockNumber; blockNumber <= endBlockNumber; blockNumber += 1 {
+				statsKey := clientReliabilityStatsKey(blockNumber)
+				// every command targets the same hash key (one slot), so
+				// batching in a transaction is cluster-safe
+				r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+					for i, count := range counters {
+						if count != 0 {
+							pipe.HIncrBy(ctx, statsKey, fmt.Sprintf("%s:%d", fieldPrefix, i), count)
+						}
+					}
+					// backstop ttl only — the rollup normally deletes the
+					// block hash shortly after the block closes
+					pipe.Expire(ctx, statsKey, clientReliabilityStatsRedisTtl)
+					return nil
+				})
+				blockNumberStrs = append(blockNumberStrs, strconv.FormatInt(blockNumber, 10))
+			}
+			// the blocks set is a different key (different slot), so it must be
+			// separate commands, not part of the transactions above
+			if 0 < len(blockNumberStrs) {
+				r.SAdd(ctx, clientReliabilityBlocksKey, blockNumberStrs...)
+				r.Expire(ctx, clientReliabilityBlocksKey, clientReliabilityStatsRedisTtl)
+			}
+		})
+	})
+}
+
+// RollupClientReliabilityStats drains closed per-block redis counters into
+// `client_reliability` with bulk upserts, and advances the drain high-water
+// mark (`client_reliability_rollup`) that the score computations clamp their
+// windows to. A block is drained only once two full blocks have elapsed since
+// its start, at which point the recorder can no longer write to it; the drain
+// then overwrites with absolute counts, so a re-drain after a partial failure
+// is idempotent.
+func RollupClientReliabilityStats(ctx context.Context, now time.Time) {
+	currentBlockNumber := reliabilityBlockNumber(now)
+	// blocks <= this are final: the recorder writes only to the current and
+	// previous block
+	maxFinalBlockNumber := currentBlockNumber - 2
+
+	// raise on error rather than treating "cannot list" as "nothing pending":
+	// advancing the high-water mark past blocks that are still buffered in
+	// redis would make the score windows silently skip them
+	var blockNumberStrs []string
+	server.Redis(ctx, func(r server.RedisClient) {
+		var err error
+		blockNumberStrs, err = r.SMembers(ctx, clientReliabilityBlocksKey).Result()
+		server.Raise(err)
+	})
+
+	blockNumbers := []int64{}
+	for _, blockNumberStr := range blockNumberStrs {
+		blockNumber, err := strconv.ParseInt(blockNumberStr, 10, 64)
+		if err != nil {
+			server.Redis(ctx, func(r server.RedisClient) {
+				r.SRem(ctx, clientReliabilityBlocksKey, blockNumberStr)
+			})
+			continue
+		}
+		if blockNumber <= maxFinalBlockNumber {
+			blockNumbers = append(blockNumbers, blockNumber)
+		}
+	}
+	// ascending so pg fills in block order
+	slices.Sort(blockNumbers)
+
+	for _, blockNumber := range blockNumbers {
+		statsKey := clientReliabilityStatsKey(blockNumber)
+
+		// raise on error: an empty read would delete the bucket below and
+		// silently drop the block's stats
+		var fields map[string]string
+		server.Redis(ctx, func(r server.RedisClient) {
+			var err error
+			fields, err = r.HGetAll(ctx, statsKey).Result()
+			server.Raise(err)
+		})
+
+		upsertClientReliabilityStatsBlock(ctx, blockNumber, fields)
+
+		// the block is fully in pg; drop the redis bucket.
+		// a crash between the upsert and here re-drains the unchanged bucket
+		// on the next run, which overwrites the same values.
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, statsKey)
+			r.SRem(ctx, clientReliabilityBlocksKey, strconv.FormatInt(blockNumber, 10))
+		})
+	}
+
+	// every block <= maxFinalBlockNumber is now either drained or was never
+	// written; advance the high-water mark even when idle so the score windows
+	// keep tracking the clock
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO client_reliability_rollup (singleton_id, max_drained_block, update_time)
+			VALUES (1, $1, $2)
+			ON CONFLICT (singleton_id) DO UPDATE
+			SET
+				max_drained_block = GREATEST(client_reliability_rollup.max_drained_block, $1),
+				update_time = $2
+			`,
+			maxFinalBlockNumber,
+			server.NowUtc(),
+		))
+	})
+}
+
+// upsertClientReliabilityStatsBlock writes one drained block's counters into
+// `client_reliability` as chunked multi-row upserts. Counts are absolute for
+// the block (the block can no longer change once drained), so the upsert
+// overwrites rather than adds and re-running is idempotent.
+func upsertClientReliabilityStatsBlock(
+	ctx context.Context,
+	blockNumber int64,
+	fields map[string]string,
+) {
+	type rowKey struct {
+		clientAddressHashHex string
+		networkIdStr         string
+		clientIdStr          string
+	}
+	rows := map[rowKey]*[clientReliabilityCounterCount]int64{}
+	for field, countStr := range fields {
+		parts := strings.Split(field, ":")
+		if len(parts) != 4 {
+			glog.Infof("[ncr]rollup drop malformed field %s\n", field)
+			continue
+		}
+		counterIndex, err := strconv.Atoi(parts[3])
+		if err != nil || counterIndex < 0 || clientReliabilityCounterCount <= counterIndex {
+			glog.Infof("[ncr]rollup drop malformed field %s\n", field)
+			continue
+		}
+		count, err := strconv.ParseInt(countStr, 10, 64)
+		if err != nil {
+			glog.Infof("[ncr]rollup drop malformed count %s=%s\n", field, countStr)
+			continue
+		}
+		key := rowKey{
+			clientAddressHashHex: parts[0],
+			networkIdStr:         parts[1],
+			clientIdStr:          parts[2],
+		}
+		counters, ok := rows[key]
+		if !ok {
+			counters = &[clientReliabilityCounterCount]int64{}
+			rows[key] = counters
+		}
+		counters[counterIndex] += count
+	}
+
+	orderedKeys := maps.Keys(rows)
+	slices.SortFunc(orderedKeys, func(a rowKey, b rowKey) int {
+		if c := strings.Compare(a.clientAddressHashHex, b.clientAddressHashHex); c != 0 {
+			return c
+		}
+		return strings.Compare(a.clientIdStr, b.clientIdStr)
+	})
+
+	rollupChunkCount := 5000
+	for chunk := range slices.Chunk(orderedKeys, rollupChunkCount) {
+		clientAddressHashes := [][]byte{}
+		networkIdStrs := []string{}
+		clientIdStrs := []string{}
+		counterColumns := [clientReliabilityCounterCount][]int64{}
+		for i := range counterColumns {
+			counterColumns[i] = []int64{}
+		}
+		for _, key := range chunk {
+			clientAddressHash, err := hex.DecodeString(key.clientAddressHashHex)
+			if err != nil || len(clientAddressHash) != 32 {
+				glog.Infof("[ncr]rollup drop malformed client address hash %s\n", key.clientAddressHashHex)
+				continue
+			}
+			if _, err := server.ParseId(key.networkIdStr); err != nil {
+				glog.Infof("[ncr]rollup drop malformed network id %s\n", key.networkIdStr)
+				continue
+			}
+			if _, err := server.ParseId(key.clientIdStr); err != nil {
+				glog.Infof("[ncr]rollup drop malformed client id %s\n", key.clientIdStr)
+				continue
+			}
+			clientAddressHashes = append(clientAddressHashes, clientAddressHash)
+			networkIdStrs = append(networkIdStrs, key.networkIdStr)
+			clientIdStrs = append(clientIdStrs, key.clientIdStr)
+			counters := rows[key]
+			for i := range counterColumns {
+				counterColumns[i] = append(counterColumns[i], counters[i])
+			}
+		}
+		if len(clientAddressHashes) == 0 {
+			continue
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_reliability (
+					block_number,
+					client_address_hash,
+					network_id,
+					client_id,
+					connection_new_count,
+					connection_established_count,
+					provide_enabled_count,
+					provide_changed_count,
+					receive_message_count,
+					receive_byte_count,
+					send_message_count,
+					send_byte_count
+				)
+				SELECT
+					$1,
+					t.client_address_hash,
+					t.network_id,
+					t.client_id,
+					t.connection_new_count,
+					t.connection_established_count,
+					t.provide_enabled_count,
+					t.provide_changed_count,
+					t.receive_message_count,
+					t.receive_byte_count,
+					t.send_message_count,
+					t.send_byte_count
+				FROM unnest(
+					$2::bytea[],
+					$3::uuid[],
+					$4::uuid[],
+					$5::bigint[],
+					$6::bigint[],
+					$7::bigint[],
+					$8::bigint[],
+					$9::bigint[],
+					$10::bigint[],
+					$11::bigint[],
+					$12::bigint[]
+				) AS t(
+					client_address_hash,
+					network_id,
+					client_id,
+					connection_new_count,
+					connection_established_count,
+					provide_enabled_count,
+					provide_changed_count,
+					receive_message_count,
+					receive_byte_count,
+					send_message_count,
+					send_byte_count
+				)
+				ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
+				SET
+					network_id = EXCLUDED.network_id,
+					connection_new_count = EXCLUDED.connection_new_count,
+					connection_established_count = EXCLUDED.connection_established_count,
+					provide_enabled_count = EXCLUDED.provide_enabled_count,
+					provide_changed_count = EXCLUDED.provide_changed_count,
+					receive_message_count = EXCLUDED.receive_message_count,
+					receive_byte_count = EXCLUDED.receive_byte_count,
+					send_message_count = EXCLUDED.send_message_count,
+					send_byte_count = EXCLUDED.send_byte_count
+				`,
+				blockNumber,
+				clientAddressHashes,
+				networkIdStrs,
+				clientIdStrs,
+				counterColumns[reliabilityCounterConnectionNew],
+				counterColumns[reliabilityCounterConnectionEstablished],
+				counterColumns[reliabilityCounterProvideEnabled],
+				counterColumns[reliabilityCounterProvideChanged],
+				counterColumns[reliabilityCounterReceiveMessage],
+				counterColumns[reliabilityCounterReceiveByte],
+				counterColumns[reliabilityCounterSendMessage],
+				counterColumns[reliabilityCounterSendByte],
+			))
+		})
+	}
+}
+
 func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) {
 	minTime := maxTime.Add(-ClientExpiration)
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
@@ -169,6 +570,44 @@ type ReliabilityScore struct {
 	ReliabilityWeight            float64
 }
 
+// the score queries below share this shape: rows are valid `client_reliability`
+// entries joined to a valid location, and each row contributes
+// 1/valid_client_count, where valid_client_count is the number of valid
+// clients sharing the row's (block_number, client_address_hash). The count
+// comes from a pre-aggregated GROUP BY subquery (`valid_counts`) instead of a
+// window function over the joined set: the window forced a sort of every row
+// in the block range, while the subquery streams off the
+// (valid, block_number, client_address_hash) index and merge-joins back in
+// index order, so no full-range sort is needed. valid_client_count counts by
+// client_reliability.valid alone (not the location join), matching the bucket
+// window aggregation and the per-ip normalization intent.
+
+// reliabilityRollupBlockShift returns how many blocks to shift a score window
+// back so that it ends at the redis-rollup high-water mark (the newest block
+// fully drained into `client_reliability` by RollupClientReliabilityStats).
+// Shifting (rather than truncating) preserves the window width, so the
+// weight normalization ($2-$1) keeps its scale. Returns 0 when the rollup has
+// never run (pre-rollup deploys) or is already caught up.
+func reliabilityRollupBlockShift(ctx context.Context, tx server.PgTx, maxBlockNumber int64) (shift int64) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT max_drained_block FROM client_reliability_rollup
+		WHERE singleton_id = 1
+		`,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var maxDrainedBlock int64
+			server.Raise(result.Scan(&maxDrainedBlock))
+			if maxDrainedBlock+1 < maxBlockNumber {
+				shift = maxBlockNumber - (maxDrainedBlock + 1)
+			}
+		}
+	})
+	return
+}
+
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -178,18 +617,21 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 		}
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM client_connection_reliability_score
-			`,
-		))
+		var shift int64
+		{
+			maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+			shift = reliabilityRollupBlockShift(ctx, tx, maxBlockNumber)
+		}
 
 		for lookbackIndex, lookback := range ClientLookbacks {
 			minTime := maxTime.Add(-lookback)
-			minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
-			maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+			minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
+			maxBlockNumber := (maxTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) + 1) - shift
 
+			// upsert the fresh scores, then remove rows not refreshed in this
+			// round (identified by a stale max_block_number). This replaces the
+			// previous delete-all-and-reinsert, which rewrote the entire table
+			// every round and kept it permanently bloated.
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -207,39 +649,69 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					country_location_id
 				)
 				SELECT
-				    t.client_id,
+				    client_reliability.client_id,
 				    $3,
 				    SUM(1.0) AS independent_reliability_score,
 				    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
-				    SUM(1.0/t.valid_client_count) AS reliability_score,
-				    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+				    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
+				    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 				    $1 AS min_block_number,
 					$2 AS max_block_number,
-					t.city_location_id,
-					t.region_location_id,
-					t.country_location_id
-				FROM (
+					network_client_location_reliability.city_location_id,
+					network_client_location_reliability.region_location_id,
+					network_client_location_reliability.country_location_id
+				FROM client_reliability
+				INNER JOIN (
 					SELECT
-						client_reliability.client_id,
-						network_client_location_reliability.city_location_id,
-						network_client_location_reliability.region_location_id,
-						network_client_location_reliability.country_location_id,
-				        COUNT(*) OVER (PARTITION BY client_reliability.block_number, client_reliability.client_address_hash) valid_client_count
-				    FROM client_reliability
-				    INNER JOIN network_client_location_reliability ON
-						network_client_location_reliability.client_id = client_reliability.client_id AND
-						network_client_location_reliability.valid = true
-				    WHERE
-						client_reliability.valid = true AND
-				    	$1 <= client_reliability.block_number AND
-				    	client_reliability.block_number < $2
-				) t
-				GROUP BY t.client_id, t.city_location_id, t.region_location_id, t.country_location_id
-				ORDER BY t.client_id
+						block_number,
+						client_address_hash,
+						COUNT(*) AS valid_client_count
+					FROM client_reliability
+					WHERE
+						valid = true AND
+						$1 <= block_number AND
+						block_number < $2
+					GROUP BY block_number, client_address_hash
+				) valid_counts ON
+					valid_counts.block_number = client_reliability.block_number AND
+					valid_counts.client_address_hash = client_reliability.client_address_hash
+				INNER JOIN network_client_location_reliability ON
+					network_client_location_reliability.client_id = client_reliability.client_id AND
+					network_client_location_reliability.valid = true
+				WHERE
+					client_reliability.valid = true AND
+					$1 <= client_reliability.block_number AND
+					client_reliability.block_number < $2
+				GROUP BY
+					client_reliability.client_id,
+					network_client_location_reliability.city_location_id,
+					network_client_location_reliability.region_location_id,
+					network_client_location_reliability.country_location_id
+				ON CONFLICT (client_id, lookback_index) DO UPDATE
+				SET
+					independent_reliability_score = EXCLUDED.independent_reliability_score,
+					independent_reliability_weight = EXCLUDED.independent_reliability_weight,
+					reliability_score = EXCLUDED.reliability_score,
+					reliability_weight = EXCLUDED.reliability_weight,
+					min_block_number = EXCLUDED.min_block_number,
+					max_block_number = EXCLUDED.max_block_number,
+					city_location_id = EXCLUDED.city_location_id,
+					region_location_id = EXCLUDED.region_location_id,
+					country_location_id = EXCLUDED.country_location_id
 				`,
 				minBlockNumber,
 				maxBlockNumber,
 				lookbackIndex,
+			))
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM client_connection_reliability_score
+				WHERE lookback_index = $1 AND max_block_number != $2
+				`,
+				lookbackIndex,
+				maxBlockNumber,
 			))
 
 		}
@@ -304,13 +776,14 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		DELETE FROM network_connection_reliability_score
-		`,
-	))
+	shift := reliabilityRollupBlockShift(ctx, tx, maxBlockNumber)
+	minBlockNumber -= shift
+	maxBlockNumber -= shift
 
+	// upsert the fresh scores, then remove rows not refreshed in this round
+	// (identified by a stale max_block_number). This replaces the previous
+	// delete-all-and-reinsert, which rewrote the entire table every round and
+	// kept it permanently bloated.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -325,47 +798,73 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			max_block_number
 		)
 		SELECT
-		    t.network_id,
-		    t.country_location_id,
+		    client_reliability.network_id,
+		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
-		    SUM(1.0/t.valid_client_count) AS reliability_score,
-		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
+		    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 		    $1 AS min_block_number,
 			$2 AS max_block_number
-		FROM (
+		FROM client_reliability
+		INNER JOIN (
 			SELECT
-				client_reliability.network_id,
-				network_client_location_reliability.country_location_id,
-		        COUNT(*) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
-		    FROM client_reliability
-		    INNER JOIN network_client_location_reliability ON
-				network_client_location_reliability.client_id = client_reliability.client_id AND
-				network_client_location_reliability.valid = true
-		    WHERE
-		    	client_reliability.valid = true AND
-		    	$1 <= client_reliability.block_number AND
-		    	client_reliability.block_number < $2
-		) t
-		GROUP BY t.network_id, t.country_location_id
-		ORDER BY t.network_id, t.country_location_id
+				block_number,
+				client_address_hash,
+				COUNT(*) AS valid_client_count
+			FROM client_reliability
+			WHERE
+				valid = true AND
+				$1 <= block_number AND
+				block_number < $2
+			GROUP BY block_number, client_address_hash
+		) valid_counts ON
+			valid_counts.block_number = client_reliability.block_number AND
+			valid_counts.client_address_hash = client_reliability.client_address_hash
+		INNER JOIN network_client_location_reliability ON
+			network_client_location_reliability.client_id = client_reliability.client_id AND
+			network_client_location_reliability.valid = true
+		WHERE
+			client_reliability.valid = true AND
+			$1 <= client_reliability.block_number AND
+			client_reliability.block_number < $2
+		GROUP BY
+			client_reliability.network_id,
+			network_client_location_reliability.country_location_id
+		ON CONFLICT (network_id, country_location_id) DO UPDATE
+		SET
+			independent_reliability_score = EXCLUDED.independent_reliability_score,
+			independent_reliability_weight = EXCLUDED.independent_reliability_weight,
+			reliability_score = EXCLUDED.reliability_score,
+			reliability_weight = EXCLUDED.reliability_weight,
+			min_block_number = EXCLUDED.min_block_number,
+			max_block_number = EXCLUDED.max_block_number
 		`,
 		minBlockNumber,
+		maxBlockNumber,
+	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM network_connection_reliability_score
+		WHERE max_block_number != $1
+		`,
 		maxBlockNumber,
 	))
 }
 
 func GetAllNetworkReliabilityScores(ctx context.Context) (networkScores map[server.Id]ReliabilityScore) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		networkScores = GetAllNetworkReliabilityScoresInTx(tx, ctx)
+	server.Db(ctx, func(conn server.PgConn) {
+		networkScores = getAllNetworkReliabilityScores(conn, ctx)
 	})
 	return
 }
 
-func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+func getAllNetworkReliabilityScores(q server.PgCanQuery, ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 
-	result, err := tx.Query(
+	result, err := q.Query(
 		ctx,
 		`
 		SELECT
@@ -401,17 +900,21 @@ func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map
 	return networkScores
 }
 
+func GetAllNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+	return getAllNetworkReliabilityScores(tx, ctx)
+}
+
 func GetAllMultipliedNetworkReliabilityScores(ctx context.Context) (networkScores map[server.Id]ReliabilityScore) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		networkScores = GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
+	server.Db(ctx, func(conn server.PgConn) {
+		networkScores = getAllMultipliedNetworkReliabilityScores(conn, ctx)
 	})
 	return
 }
 
-func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+func getAllMultipliedNetworkReliabilityScores(q server.PgCanQuery, ctx context.Context) map[server.Id]ReliabilityScore {
 	networkScores := map[server.Id]ReliabilityScore{}
 
-	result, err := tx.Query(
+	result, err := q.Query(
 		ctx,
 		`
 		SELECT
@@ -448,6 +951,10 @@ func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Co
 	})
 
 	return networkScores
+}
+
+func GetAllMultipliedNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context) map[server.Id]ReliabilityScore {
+	return getAllMultipliedNetworkReliabilityScores(tx, ctx)
 }
 
 type ReliabilityWindow struct {
@@ -687,6 +1194,11 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 		minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 		maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
+		// buckets are absolute, so cap (not shift) the range at the rollup
+		// high-water mark. A trailing partial bucket converges on later runs
+		// because each bucket is upserted whole.
+		maxBlockNumber -= reliabilityRollupBlockShift(ctx, tx, maxBlockNumber)
+
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
 		// round to whole blocks
@@ -699,12 +1211,9 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			maxBlockNumber += int64(blockCountPerBucket) - c
 		}
 
-		// server.RaisePgResult(tx.Exec(
-		// 	ctx,
-		// 	`
-		// 	DELETE FROM network_connection_reliability_window
-		// 	`,
-		// ))
+		if maxBlockNumber <= minBlockNumber {
+			return
+		}
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -717,25 +1226,30 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 				total_client_count
 			)
 			SELECT
-			    t.network_id,
-			    t.bucket_number,
-			    SUM(CASE WHEN t.valid = true THEN 1.0/t.valid_client_count ELSE 0 END) / $3 AS reliability_weight,
-			    COUNT(DISTINCT t.client_id) FILTER (WHERE t.valid = true) AS client_count,
-			    COUNT(DISTINCT t.client_id) AS total_client_count
-			FROM (
+			    client_reliability.network_id,
+			    client_reliability.block_number / $3 AS bucket_number,
+			    SUM(CASE WHEN client_reliability.valid = true THEN 1.0/valid_counts.valid_client_count ELSE 0 END) / $3 AS reliability_weight,
+			    COUNT(DISTINCT client_reliability.client_id) FILTER (WHERE client_reliability.valid = true) AS client_count,
+			    COUNT(DISTINCT client_reliability.client_id) AS total_client_count
+			FROM client_reliability
+			LEFT JOIN (
 				SELECT
-					valid,
-					network_id,
-					client_id,
-					block_number / $3 AS bucket_number,
-			        COUNT(*) FILTER (WHERE valid = true) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
-			    FROM client_reliability
-			    WHERE
-			    	$1 <= block_number AND
-			    	block_number < $2
-			) t
-			GROUP BY t.network_id, t.bucket_number
-			ORDER BY t.network_id, t.bucket_number
+					block_number,
+					client_address_hash,
+					COUNT(*) AS valid_client_count
+				FROM client_reliability
+				WHERE
+					valid = true AND
+					$1 <= block_number AND
+					block_number < $2
+				GROUP BY block_number, client_address_hash
+			) valid_counts ON
+				valid_counts.block_number = client_reliability.block_number AND
+				valid_counts.client_address_hash = client_reliability.client_address_hash
+			WHERE
+				$1 <= client_reliability.block_number AND
+				client_reliability.block_number < $2
+			GROUP BY client_reliability.network_id, bucket_number
 			ON CONFLICT (network_id, bucket_number) DO UPDATE
 			SET
 				reliability_weight = EXCLUDED.reliability_weight,
@@ -795,13 +1309,14 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-		DELETE FROM network_connection_reliability_window_score
-		`,
-	))
+	shift := reliabilityRollupBlockShift(ctx, tx, maxBlockNumber)
+	minBlockNumber -= shift
+	maxBlockNumber -= shift
 
+	// upsert the fresh scores, then remove rows not refreshed in this round
+	// (identified by a stale max_block_number). This replaces the previous
+	// delete-all-and-reinsert, which rewrote the entire table every round and
+	// kept it permanently bloated.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -816,32 +1331,58 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 			max_block_number
 		)
 		SELECT
-		    t.network_id,
-		    t.country_location_id,
+		    client_reliability.network_id,
+		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
-		    SUM(1.0/t.valid_client_count) AS reliability_score,
-		    SUM(1.0/t.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
+		    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
 		    $1 AS min_block_number,
 			$2 AS max_block_number
-		FROM (
+		FROM client_reliability
+		INNER JOIN (
 			SELECT
-				client_reliability.network_id,
-				network_client_location_reliability.country_location_id,
-		        COUNT(*) OVER (PARTITION BY block_number, client_address_hash) valid_client_count
-		    FROM client_reliability
-		    INNER JOIN network_client_location_reliability ON
-				network_client_location_reliability.client_id = client_reliability.client_id AND
-				network_client_location_reliability.valid = true
-		    WHERE
-		    	client_reliability.valid = true AND
-		    	$1 <= client_reliability.block_number AND
-		    	client_reliability.block_number < $2
-		) t
-		GROUP BY t.network_id, t.country_location_id
-		ORDER BY t.network_id, t.country_location_id
+				block_number,
+				client_address_hash,
+				COUNT(*) AS valid_client_count
+			FROM client_reliability
+			WHERE
+				valid = true AND
+				$1 <= block_number AND
+				block_number < $2
+			GROUP BY block_number, client_address_hash
+		) valid_counts ON
+			valid_counts.block_number = client_reliability.block_number AND
+			valid_counts.client_address_hash = client_reliability.client_address_hash
+		INNER JOIN network_client_location_reliability ON
+			network_client_location_reliability.client_id = client_reliability.client_id AND
+			network_client_location_reliability.valid = true
+		WHERE
+			client_reliability.valid = true AND
+			$1 <= client_reliability.block_number AND
+			client_reliability.block_number < $2
+		GROUP BY
+			client_reliability.network_id,
+			network_client_location_reliability.country_location_id
+		ON CONFLICT (network_id, country_location_id) DO UPDATE
+		SET
+			independent_reliability_score = EXCLUDED.independent_reliability_score,
+			independent_reliability_weight = EXCLUDED.independent_reliability_weight,
+			reliability_score = EXCLUDED.reliability_score,
+			reliability_weight = EXCLUDED.reliability_weight,
+			min_block_number = EXCLUDED.min_block_number,
+			max_block_number = EXCLUDED.max_block_number
 		`,
 		minBlockNumber,
+		maxBlockNumber,
+	))
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM network_connection_reliability_window_score
+		WHERE max_block_number != $1
+		`,
 		maxBlockNumber,
 	))
 }
@@ -1019,7 +1560,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var relativeLatencyMillis int
 			var hasSpeedTest bool
 			var hasLatencyTest bool
-			clientAddressHashSlice := clientAddressHash[:]
+			var clientAddressHashSlice []byte
 			server.Raise(result.Scan(
 				&clientId,
 				&networkId,
@@ -1034,6 +1575,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&hasSpeedTest,
 				&hasLatencyTest,
 			))
+			// scanning assigns a fresh slice, so copy into the fixed-size key
+			copy(clientAddressHash[:], clientAddressHashSlice)
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
@@ -1125,7 +1668,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			var relativeLatencyMillis int
 			var hasSpeedTest bool
 			var hasLatencyTest bool
-			clientAddressHashSlice := clientAddressHash[:]
+			var clientAddressHashSlice []byte
 			server.Raise(result.Scan(
 				&clientId,
 				&networkId,
@@ -1140,6 +1683,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 				&hasSpeedTest,
 				&hasLatencyTest,
 			))
+			// scanning assigns a fresh slice, so copy into the fixed-size key
+			copy(clientAddressHash[:], clientAddressHashSlice)
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{

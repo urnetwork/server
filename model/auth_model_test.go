@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -162,6 +163,95 @@ func TestAuthCode(t *testing.T) {
 		assert.NotEqual(t, authCodeLoginResult2.Error, nil)
 
 		RemoveExpiredAuthCodes(ctx, server.NowUtc())
+	})
+}
+
+func TestAuthCodeIdentity(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		networkName := "test"
+		guestMode := false
+		isPro := false
+
+		Testing_CreateNetwork(ctx, networkId, networkName, userId)
+
+		byJwt := jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			guestMode,
+			isPro,
+		)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+		// an auth code with roles and a principal
+		authCodeCreate := &AuthCodeCreateArgs{
+			Roles:     []string{"role2", "role1"},
+			Principal: "svc-a",
+		}
+
+		authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, authCodeCreateResult.Error, nil)
+		assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
+
+		// the login mints the roles and principal into the jwt
+		authCodeLogin := &AuthCodeLoginArgs{
+			AuthCode: authCodeCreateResult.AuthCode,
+		}
+
+		authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
+
+		loginByJwt, err := jwt.ParseByJwt(ctx, authCodeLoginResult.ByJwt)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, loginByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, loginByJwt.Principal, "svc-a")
+
+		// a client created by the service session inherits the identity
+		// into the client jwt
+		serviceSession := session.Testing_CreateClientSession(ctx, loginByJwt)
+		authClientResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "service device",
+			},
+			serviceSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, authClientResult.Error, nil)
+
+		clientByJwt, err := jwt.ParseByJwt(ctx, *authClientResult.ByClientJwt)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, clientByJwt.ClientId, nil)
+		assert.Equal(t, clientByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, clientByJwt.Principal, "svc-a")
+
+		// LoadByJwtFromClientId rebuilds the identity from the db
+		loadedByJwt, err := jwt.LoadByJwtFromClientId(ctx, *clientByJwt.ClientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, loadedByJwt.Roles, []string{"role1", "role2"})
+		assert.Equal(t, loadedByJwt.Principal, "svc-a")
+
+		// a guest session cannot create an auth code with roles or principal
+		guestSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			true,
+			isPro,
+		))
+		authCodeCreateResult, err = AuthCodeCreate(
+			&AuthCodeCreateArgs{
+				Principal: "svc-b",
+			},
+			guestSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, authCodeCreateResult.Error, nil)
 	})
 }
 
@@ -341,6 +431,72 @@ func TestLoginWithWallet(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result, nil)
 		assert.NotEqual(t, result.Network.ByJwt, nil)
+	})
+}
+
+// TestWalletLoginNonceSingleUse verifies the wallet-login replay fix: a server-issued
+// nonce embedded in the signed message is single-use, so replaying a captured
+// (message, signature, nonce) triple is rejected the second time.
+func TestWalletLoginNonceSingleUse(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		wallet := solana.NewWallet()
+
+		nonceResult, err := AuthWalletNonceCreate(clientSession)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, nonceResult.Nonce, "")
+
+		// the client signs a message that embeds the server-issued nonce
+		message := "Welcome to URnetwork " + nonceResult.Nonce
+		sig, err := wallet.PrivateKey.Sign([]byte(message))
+		assert.Equal(t, err, nil)
+
+		walletAuth := &WalletAuthArgs{
+			PublicKey:  wallet.PublicKey().String(),
+			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+			Nonce:      nonceResult.Nonce,
+		}
+
+		// first use: valid signature + valid nonce -> accepted (nonce consumed)
+		_, err = handleLoginWallet(walletAuth, ctx)
+		assert.Equal(t, err, nil)
+
+		// replay the identical triple: the nonce is already consumed -> rejected
+		_, err = handleLoginWallet(walletAuth, ctx)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// TestWalletLoginNonceMustBindMessage verifies that a supplied nonce must actually be
+// embedded in the signed message, so an attacker cannot pair a fresh nonce with an old
+// signature over a message that never committed to it.
+func TestWalletLoginNonceMustBindMessage(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		wallet := solana.NewWallet()
+
+		nonceResult, err := AuthWalletNonceCreate(clientSession)
+		assert.Equal(t, err, nil)
+
+		// the signed message does NOT contain the nonce
+		message := "Welcome to URnetwork"
+		sig, err := wallet.PrivateKey.Sign([]byte(message))
+		assert.Equal(t, err, nil)
+
+		_, err = handleLoginWallet(&WalletAuthArgs{
+			PublicKey:  wallet.PublicKey().String(),
+			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+			Nonce:      nonceResult.Nonce,
+		}, ctx)
+		assert.NotEqual(t, err, nil)
 	})
 }
 
@@ -612,3 +768,111 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 
 // FIXME test concurrent redeem
 // FIXME test expire all auth
+
+// Creating a new verify code invalidates the user's previous codes (only the
+// latest code verifies), and the invalidation update touches only live
+// (used = false) rows. Expired rows are reaped by RemoveExpiredVerifyCodes.
+func TestAuthVerifyCodeInvalidation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, networkId, "test", userId)
+
+		byJwt := jwt.NewByJwt(networkId, userId, "test", false, false)
+		clientSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+		createCode := func() string {
+			result, err := AuthVerifyCreateCode(
+				AuthVerifyCreateCodeArgs{
+					UserAuth: userAuth,
+				},
+				clientSession,
+			)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, result.Error, nil)
+			assert.NotEqual(t, result.VerifyCode, nil)
+			return *result.VerifyCode
+		}
+
+		// stay within AttemptFailedCountThreshold: each create/verify consumes
+		// auth attempt budget
+		code1 := createCode()
+		code2 := createCode()
+		assert.NotEqual(t, code1, code2)
+
+		// only the latest code is live
+		countUnused := func() int {
+			c := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT COUNT(*) FROM user_auth_verify
+					WHERE user_id = $1 AND used = false
+					`,
+					userId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&c))
+					}
+				})
+			})
+			return c
+		}
+		assert.Equal(t, countUnused(), 1)
+
+		// an invalidated code does not verify
+		verifyResult, err := AuthVerify(
+			AuthVerifyArgs{
+				UserAuth:   userAuth,
+				VerifyCode: code1,
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, verifyResult.Error, nil)
+
+		// the latest code verifies
+		verifyResult, err = AuthVerify(
+			AuthVerifyArgs{
+				UserAuth:   userAuth,
+				VerifyCode: code2,
+			},
+			clientSession,
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, verifyResult.Error, nil)
+		assert.Equal(t, countUnused(), 0)
+
+		// age out the rows and reap them
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE user_auth_verify
+				SET verify_time = now() - INTERVAL '30 days'
+				WHERE user_id = $1
+				`,
+				userId,
+			))
+		})
+		RemoveExpiredVerifyCodes(ctx, server.NowUtc().Add(-24*time.Hour))
+
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM user_auth_verify WHERE user_id = $1`,
+				userId,
+			)
+			server.WithPgResult(result, err, func() {
+				assert.Equal(t, result.Next(), true)
+				var c int
+				server.Raise(result.Scan(&c))
+				assert.Equal(t, c, 0)
+			})
+		})
+	})
+}

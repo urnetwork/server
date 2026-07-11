@@ -2029,8 +2029,8 @@ func GetOpenContractIds(
 ) map[server.Id][]ContractParty {
 	contractIdPartialCloseParties := map[server.Id][]ContractParty{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT
@@ -2097,8 +2097,8 @@ func GetExpiredOpenContractIds(
 ) map[server.Id]bool {
 	contractIdPartialCloseParties := map[server.Id]map[ContractParty]bool{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT
@@ -2186,8 +2186,8 @@ func GetOpenContractIdsForSourceOrDestination(
 ) map[TransferPair]map[server.Id]ContractParty {
 	pairContractIdPartialCloseParties := map[TransferPair]map[server.Id]ContractParty{}
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
                 SELECT
@@ -3192,26 +3192,48 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		})
 	})
 
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+	// each removal below deletes a bounded batch of candidate contracts and
+	// cascades contract_close/transfer_escrow/transfer_escrow_sweep for those
+	// same contract ids in one statement, so dependent rows never linger as
+	// orphans. The candidate subqueries deliberately have no DISTINCT and no
+	// ORDER BY: any batch will do for retention, duplicate candidate rows are
+	// harmless in DELETE ... USING (a row deletes once), and without a sort the
+	// scan stops as soon as LIMIT candidates are found instead of materializing
+	// every eligible contract. SweepOrphanContractData is the low-cadence
+	// safety net for orphans from any other path (e.g. crashes mid-statement
+	// from older releases).
 
-		// remove completed transfer contracts
+	// remove completed transfer contracts.
+	// driven from transfer_escrow_sweep (not account_payment) because sweeps
+	// are deleted here as they are processed, so the scan is bounded by the
+	// live sweep set; completed payments accumulate forever
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-			DELETE FROM transfer_contract
-		    USING (
-		    	SELECT
-				    DISTINCT contract_id
-				FROM account_payment
-				INNER JOIN transfer_escrow_sweep ON
-				    transfer_escrow_sweep.payment_id = account_payment.payment_id
-
+			WITH candidate AS (
+				SELECT transfer_escrow_sweep.contract_id
+				FROM transfer_escrow_sweep
+				INNER JOIN account_payment ON
+				    account_payment.payment_id = transfer_escrow_sweep.payment_id
 				WHERE account_payment.completed AND account_payment.complete_time <= $1
-				ORDER BY contract_id
 				LIMIT $2
-		    ) t
-			WHERE
-			    transfer_contract.contract_id = t.contract_id
+			), deleted_close AS (
+				DELETE FROM contract_close
+				USING candidate
+				WHERE contract_close.contract_id = candidate.contract_id
+			), deleted_escrow AS (
+				DELETE FROM transfer_escrow
+				USING candidate
+				WHERE transfer_escrow.contract_id = candidate.contract_id
+			), deleted_sweep AS (
+				DELETE FROM transfer_escrow_sweep
+				USING candidate
+				WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
+			)
+			DELETE FROM transfer_contract
+			USING candidate
+			WHERE transfer_contract.contract_id = candidate.contract_id
 			`,
 			minTime.UTC(),
 			maxRowCount,
@@ -3226,94 +3248,124 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-			DELETE FROM transfer_contract
-			USING (
-				SELECT
-					DISTINCT transfer_contract.contract_id
+			WITH candidate AS (
+				SELECT transfer_contract.contract_id
 				FROM transfer_contract
-				LEFT JOIN transfer_escrow_sweep ON transfer_escrow_sweep.contract_id = transfer_contract.contract_id
 				WHERE
 					transfer_contract.create_time < $1 AND
 					transfer_contract.open = false AND
-					transfer_escrow_sweep.contract_id IS NULL
-				ORDER BY contract_id
+					NOT EXISTS (
+						SELECT 1 FROM transfer_escrow_sweep
+						WHERE transfer_escrow_sweep.contract_id = transfer_contract.contract_id
+					)
 				LIMIT $2
-			) t
-			WHERE transfer_contract.contract_id = t.contract_id
+			), deleted_close AS (
+				DELETE FROM contract_close
+				USING candidate
+				WHERE contract_close.contract_id = candidate.contract_id
+			), deleted_escrow AS (
+				DELETE FROM transfer_escrow
+				USING candidate
+				WHERE transfer_escrow.contract_id = candidate.contract_id
+			)
+			DELETE FROM transfer_contract
+			USING candidate
+			WHERE transfer_contract.contract_id = candidate.contract_id
 			`,
 			minTime.UTC(),
 			maxRowCount,
 		))
 
 	}, server.TxReadCommitted)
+}
 
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+// SweepOrphanContractData removes contract_close/transfer_escrow/
+// transfer_escrow_sweep rows whose transfer_contract no longer exists.
+// RemoveCompletedContracts cascades these atomically with the contract delete,
+// so this is a low-cadence safety net for orphans left by older releases or
+// interrupted statements, not the primary cleanup mechanism. Each pass deletes
+// in bounded batches (streaming NOT EXISTS scans with LIMIT, no sort) until a
+// batch comes up short.
+func SweepOrphanContractData(ctx context.Context, limit int) (removedCount int64) {
+	removedCount += sweepOrphanBatches(
+		ctx,
+		`
+		DELETE FROM contract_close
+		USING (
+			SELECT contract_id, party
+			FROM contract_close
+			WHERE NOT EXISTS (
+				SELECT 1 FROM transfer_contract
+				WHERE transfer_contract.contract_id = contract_close.contract_id
+			)
+			LIMIT $1
+		) t
+		WHERE
+			contract_close.contract_id = t.contract_id AND
+			contract_close.party = t.party
+		`,
+		limit,
+	)
 
-		// (cascade) remove contract close where the transfer contract no longer exists
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM contract_close
-			USING (
-				SELECT
-					DISTINCT contract_close.contract_id
-		    	FROM contract_close
-		        LEFT JOIN transfer_contract ON transfer_contract.contract_id = contract_close.contract_id
-				WHERE transfer_contract.contract_id IS NULL
-				ORDER BY contract_id
-				LIMIT $1
-			) t
-			WHERE contract_close.contract_id = t.contract_id
-			`,
-			maxRowCount,
-		))
+	removedCount += sweepOrphanBatches(
+		ctx,
+		`
+		DELETE FROM transfer_escrow
+		USING (
+			SELECT contract_id, balance_id
+			FROM transfer_escrow
+			WHERE NOT EXISTS (
+				SELECT 1 FROM transfer_contract
+				WHERE transfer_contract.contract_id = transfer_escrow.contract_id
+			)
+			LIMIT $1
+		) t
+		WHERE
+			transfer_escrow.contract_id = t.contract_id AND
+			transfer_escrow.balance_id = t.balance_id
+		`,
+		limit,
+	)
 
-	}, server.TxReadCommitted)
+	removedCount += sweepOrphanBatches(
+		ctx,
+		`
+		DELETE FROM transfer_escrow_sweep
+		USING (
+			SELECT contract_id, balance_id, network_id
+			FROM transfer_escrow_sweep
+			WHERE NOT EXISTS (
+				SELECT 1 FROM transfer_contract
+				WHERE transfer_contract.contract_id = transfer_escrow_sweep.contract_id
+			)
+			LIMIT $1
+		) t
+		WHERE
+			transfer_escrow_sweep.contract_id = t.contract_id AND
+			transfer_escrow_sweep.balance_id = t.balance_id AND
+			transfer_escrow_sweep.network_id = t.network_id
+		`,
+		limit,
+	)
 
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+	return
+}
 
-		// (cascade) remove contract escrow where the transfer contract no longer exists
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM transfer_escrow
-			USING (
-				SELECT
-					DISTINCT transfer_escrow.contract_id
-	       		FROM transfer_escrow
-				LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow.contract_id
-				WHERE transfer_contract.contract_id IS NULL
-				ORDER BY contract_id
-				LIMIT $1
-			) t
-			WHERE transfer_escrow.contract_id = t.contract_id
-			`,
-			maxRowCount,
-		))
-
-	}, server.TxReadCommitted)
-
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-
-		// (cascade) remove contract escrow sweep where the transfer contract no longer exists
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM transfer_escrow_sweep
-			USING (
-				SELECT
-					DISTINCT transfer_escrow_sweep.contract_id
-			   	FROM transfer_escrow_sweep
-			    LEFT JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-			    WHERE transfer_contract.contract_id IS NULL
-			    ORDER BY contract_id
-			    LIMIT $1
-			) t
-			WHERE transfer_escrow_sweep.contract_id = t.contract_id;
-			`,
-			maxRowCount,
-		))
-	}, server.TxReadCommitted)
+// sweepOrphanBatches repeatedly runs a bounded DELETE (one batch per
+// maintenance tx, so no long lock is held) until a batch deletes fewer than
+// `limit` rows, meaning the orphan set is drained.
+func sweepOrphanBatches(ctx context.Context, sql string, limit int) (removedCount int64) {
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(ctx, sql, limit))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		removedCount += batchCount
+		if batchCount < int64(limit) {
+			return
+		}
+	}
 }
 
 func GetOpenTransferByteCount(

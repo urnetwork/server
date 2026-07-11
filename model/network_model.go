@@ -1271,6 +1271,26 @@ func UpgradeGuest(
 			/**
 			 * Upgrade from guest from wallet
 			 */
+
+			/**
+			 * verify the wallet signature (proof of key control) before binding the
+			 * wallet address to this account, matching NetworkCreate and handleLoginWallet
+			 */
+			isValid, err := VerifySignature(
+				upgradeGuest.WalletAuth.Blockchain,
+				upgradeGuest.WalletAuth.PublicKey,
+				upgradeGuest.WalletAuth.Message,
+				upgradeGuest.WalletAuth.Signature,
+			)
+			if err != nil || !isValid {
+				result = &UpgradeGuestResult{
+					Error: &UpgradeGuestError{
+						Message: "invalid wallet signature",
+					},
+				}
+				return
+			}
+
 			var userId *server.Id
 
 			userCheck, err := tx.Query(

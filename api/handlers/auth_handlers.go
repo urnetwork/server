@@ -23,6 +23,10 @@ func AuthLogin(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.AuthLogin, w, r)
 }
 
+func AuthWalletNonce(w http.ResponseWriter, r *http.Request) {
+	router.WrapNoAuth(model.AuthWalletNonceCreate, w, r)
+}
+
 func AuthLoginWithPassword(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.AuthLoginWithPassword, w, r)
 }

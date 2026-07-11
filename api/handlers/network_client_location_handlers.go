@@ -38,7 +38,3 @@ func NetworkFindProviders(w http.ResponseWriter, r *http.Request) {
 func NetworkFindProviders2(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(model.FindProviders2, w, r)
 }
-
-func NetworkCreateProviderSpec(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputNoAuth(model.CreateProviderSpec, w, r)
-}

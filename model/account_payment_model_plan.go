@@ -30,6 +30,20 @@ type PaymentPlanner struct {
 	ctx           context.Context
 	subsidyConfig *SubsidyConfig
 
+	// dryRun mirrors the plan's dry-run mode. It selects where the reliability
+	// recompute runs: in its own committed transaction for a real plan, or
+	// inside the plan tx (so it rolls back with everything else) for a dry run.
+	dryRun bool
+
+	// when > 0, bound this plan to at most maxDuration of the oldest unpaid
+	// sweeps so a large backlog is drained in bounded slices instead of one
+	// oversized plan. 0 means unbounded (all unpaid sweeps).
+	maxDuration time.Duration
+	// computed sweep-time upper bound for a bounded plan. `bounded` is only set
+	// when maxDuration > 0 and there is at least one unpaid sweep to anchor on.
+	bounded    bool
+	upperBound time.Time
+
 	// all the planning is done inside a transaction
 	tx server.PgTx
 
@@ -66,7 +80,20 @@ type PaymentPlanner struct {
 // ever accidentally persist a payment, mark a sweep paid, or apply points.
 var errPaymentPlanDryRun = errors.New("payment plan dry run")
 
-func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool) (paymentPlan *PaymentPlan, returnErr error) {
+func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
+	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true)
+}
+
+// createPaymentPlan is CreatePaymentPlan with explicit control over whether the
+// shared reliability inputs are refreshed at the top of the plan.
+//
+// refreshReliabilityInputs refreshes the (window-independent) 30-day client
+// location reliabilities the reliability payout depends on. The loop driver
+// (PlanPaymentsWithMaxDurationLoop) drains a backlog as many bounded slices back
+// to back; that refresh is identical for every slice, so the loop refreshes once
+// on the first slice and passes false afterward instead of repeating the same
+// heavy refresh on every slice.
+func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
 	if dryRun {
 		// recover the rollback sentinel so a dry run returns the computed plan
 		// normally. Any other panic (e.g. a real db error) still propagates.
@@ -78,7 +105,7 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 				panic(r)
 			}
 		}()
-	} else {
+	} else if refreshReliabilityInputs {
 		// refresh the reliability inputs used by this plan. This is a persistent
 		// write, so it is skipped for a dry run; a dry run then previews using
 		// the reliability values from the last refresh.
@@ -108,6 +135,8 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		planner := &PaymentPlanner{
 			ctx:                    ctx,
 			subsidyConfig:          subsidyConfig,
+			dryRun:                 dryRun,
+			maxDuration:            maxDuration,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
 			networkReferrals:       networkReferrals,
@@ -164,6 +193,56 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	return
 }
 
+// computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts
+// closing before min(now, lastSubsidyEnd+maxDuration). Only an upper bound is
+// needed; the lower edge is implicit because already-paid sweeps are excluded
+// from every planning query by the unpaid filter, and the subsidy epoch is
+// clamped forward past any existing epoch.
+//
+// The anchor is the end of the most recent subsidy epoch — i.e. how far the
+// last payout covered. Advancing from there drains a backlog forward one
+// maxDuration slice per run: each plan records a new subsidy_payment whose
+// end_time extends the frontier, so the next plan continues where this one
+// stopped, even when several plans run back to back. (Anchoring on the oldest
+// unpaid sweep instead would pin the window on ancient below-minimum dust that
+// never gets paid, so the frontier never advanced and every plan replanned the
+// same empty slice.)
+//
+// When maxDuration is 0, or no subsidy epoch exists yet to anchor on, the plan
+// is left unbounded.
+func (self *PaymentPlanner) computePlanUpperBound() {
+	if self.maxDuration <= 0 {
+		return
+	}
+
+	var lastSubsidyEnd *time.Time
+	result, err := self.tx.Query(
+		self.ctx,
+		`SELECT MAX(end_time) FROM subsidy_payment`,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&lastSubsidyEnd))
+		}
+	})
+
+	if lastSubsidyEnd == nil {
+		// no subsidy epoch to anchor on (e.g. a fresh deployment); leave the
+		// plan unbounded, matching maxDuration == 0.
+		glog.Infof("[plan]no subsidy epoch to anchor a bounded plan; planning unbounded\n")
+		return
+	}
+
+	self.bounded = true
+	self.upperBound = server.MinTime(server.NowUtc(), lastSubsidyEnd.Add(self.maxDuration))
+	glog.Infof(
+		"[plan]bounded to close_time < %s (last subsidy end %s + %s)\n",
+		self.upperBound.Format(time.RFC3339),
+		lastSubsidyEnd.Format(time.RFC3339),
+		self.maxDuration,
+	)
+}
+
 func (self *PaymentPlanner) planPayments() (returnErr error) {
 	self.networkEscrowIds = map[server.Id][]*EscrowId{}
 
@@ -173,9 +252,28 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// networkId -> parent referralNetworkId
 	self.referralNetworks = map[server.Id]server.Id{}
 
+	// when maxDuration is set, restrict the swept set to a bounded close-time
+	// window so this plan stays small. sets self.bounded / self.upperBound.
+	self.computePlanUpperBound()
+
+	// only an upper bound is needed: the lower edge is implicit because
+	// already-paid sweeps are excluded by the unpaid filter below. The bound is
+	// on transfer_contract.close_time — the same axis the subsidy epoch anchor
+	// is measured on — so each slice lines up with a subsidy epoch.
+	closeTimeJoin := ""
+	closeTimeBound := ""
+	closeTimeArgs := []any{}
+	if self.bounded {
+		closeTimeJoin = `
+        INNER JOIN transfer_contract ON
+            transfer_contract.contract_id = transfer_escrow_sweep.contract_id`
+		closeTimeBound = "AND transfer_contract.close_time < $1"
+		closeTimeArgs = append(closeTimeArgs, self.upperBound)
+	}
+
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
-		`
+		fmt.Sprintf(`
         CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP
 
         AS
@@ -188,11 +286,14 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 
         LEFT JOIN account_payment ON
             account_payment.payment_id = transfer_escrow_sweep.payment_id
+        %s
 
         WHERE
-            account_payment.payment_id IS NULL OR
-            account_payment.canceled = true
-        `,
+            (account_payment.payment_id IS NULL OR
+            account_payment.canceled = true)
+            %s
+        `, closeTimeJoin, closeTimeBound),
+		closeTimeArgs...,
 	))
 
 	result, err := self.tx.Query(
@@ -409,12 +510,23 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
+	// the subsidy time range is derived from the swept contracts. Bound it by
+	// the same close-time window as the paid set so the subsidy scale/amount
+	// match the sweeps actually being paid in this bounded plan; otherwise the
+	// subsidy would be sized off the full history while paid over a slice.
+	subsidyRangeBound := ""
+	subsidyRangeArgs := []any{}
+	if self.bounded {
+		subsidyRangeBound = "WHERE transfer_contract.close_time < $1"
+		subsidyRangeArgs = append(subsidyRangeArgs, self.upperBound)
+	}
+
 	// note the aggregates are NULL when no swept contracts exist
 	var subsidyStartTimePtr *time.Time
 	var subsidyEndTimePtr *time.Time
 	result, err = self.tx.Query(
 		self.ctx,
-		`
+		fmt.Sprintf(`
     	SELECT
             MIN(transfer_contract.create_time) AS subsidy_start_time,
             MAX(transfer_contract.close_time) AS subsidy_end_time
@@ -424,7 +536,9 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
         INNER JOIN transfer_contract ON
         	transfer_contract.contract_id = transfer_escrow_sweep.contract_id
 
-        `,
+        %s
+        `, subsidyRangeBound),
+		subsidyRangeArgs...,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
@@ -576,11 +690,16 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	/**
 	 * reliability payout
 	 */
+	// a real plan recomputes reliability scores in its own committed tx (see
+	// calculateReliabilityPayoutInTx); a dry run keeps it inside this tx so it
+	// rolls back with the rest of the plan.
 	networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
 		self.ctx,
 		self.tx,
 		subsidyStartTime,
+		subsidyEndTime,
 		subsidyScale,
+		!self.dryRun,
 	)
 	self.networkReliabilitySubsidies = networkReliabilitySubsidies
 
@@ -848,7 +967,14 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		pointsPerPayout,
 	))
 
-	// TODO the `ApplyAccountPointsInTx` could be done in a batch to speed up the plan
+	// Collect every account_point row and insert them as a single batch at the
+	// end, instead of one round-trip per row. A large plan applies points to
+	// every payee plus their referral parents/children, so these per-row
+	// inserts dominated the time to commit the plan.
+	queuedPoints := []ApplyAccountPointsArgs{}
+	queuePoints := func(args ApplyAccountPointsArgs) {
+		queuedPoints = append(queuedPoints, args)
+	}
 
 	/**
 	 * Apply reliability points
@@ -869,7 +995,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 				PaymentPlanId:    &self.paymentPlanId,
 			}
-			ApplyAccountPointsInTx(self.ctx, self.tx, reliabilityPointsArgs)
+			queuePoints(reliabilityPointsArgs)
 		}
 	}
 
@@ -899,11 +1025,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 			}
 
-			ApplyAccountPointsInTx(
-				self.ctx,
-				self.tx,
-				accountPointsArgs,
-			)
+			queuePoints(accountPointsArgs)
 
 		}
 
@@ -926,7 +1048,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 				AccountPaymentId: &payment.PaymentId,
 			}
 
-			ApplyAccountPointsInTx(self.ctx, self.tx, accountPointsArgs)
+			queuePoints(accountPointsArgs)
 		}
 
 		/**
@@ -949,7 +1071,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 					AccountPaymentId: &payment.PaymentId,
 				}
 
-				ApplyAccountPointsInTx(self.ctx, self.tx, accountPointsArgs)
+				queuePoints(accountPointsArgs)
 			}
 		}
 
@@ -959,7 +1081,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		visited := make(map[server.Id]struct{})
 		payoutChildrenReferralNetworksInTx(
 			self.ctx,
-			self.tx,
+			queuePoints,
 			scaledAccountPoints,
 			EnvSubsidyConfig().ReferralChildPayoutFraction,
 			payment.NetworkId,
@@ -972,4 +1094,6 @@ func (self *PaymentPlanner) applyPayoutPoints(
 		)
 	}
 
+	// flush every queued account_point row in a single batched insert
+	ApplyAccountPointsBatchInTx(self.ctx, self.tx, queuedPoints)
 }

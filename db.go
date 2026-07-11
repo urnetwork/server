@@ -46,6 +46,12 @@ type PgNamedArgs = pgx.NamedArgs
 type PgBatch = *pgx.Batch
 type PgBatchResults = pgx.BatchResults
 
+// PgCanQuery is satisfied by PgConn, PgTx, and any other value that can execute queries.
+// It lets helper functions accept either a raw connection or a transaction uniformly.
+type PgCanQuery interface {
+	Query(ctx context.Context, sql string, args ...any) (PgResult, error)
+}
+
 const TxSerializable = pgx.Serializable
 const TxRepeatableRead = pgx.RepeatableRead
 const TxReadCommitted = pgx.ReadCommitted

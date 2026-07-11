@@ -130,6 +130,349 @@ func TestCancelAccountPayment(t *testing.T) {
 	})
 }
 
+// A bounded plan (maxDuration > 0) anchors on the most recent subsidy epoch end
+// and includes only contracts closing before anchor+maxDuration, leaving later
+// contracts for a later plan. Because each plan records a new subsidy epoch that
+// advances the anchor, running bounded plans repeatedly drains a backlog forward
+// one slice per run, and together they pay everything an unbounded plan would
+// have paid at once.
+func TestPlanPaymentsMaxDuration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024) // 1 TiB
+		netRevenue := UsdToNanoCents(100.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 365*24*time.Hour, netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, sourceSession.Ctx)
+
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    "0x1234567890",
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		// close a cohort of contracts whose total provider revenue share clears
+		// the wallet minimum, so the cohort is never withheld for being small.
+		usedTransferByteCount := ByteCount(50 * 1024 * 1024 * 1024) // 50 GiB
+		closeCohort := func() {
+			paid := NanoCents(0)
+			for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+				transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			}
+		}
+
+		// backdate the currently-unpaid cohort's contract create/close time into a
+		// chosen historical window. The bound is on close_time, so this is what
+		// places a cohort inside or outside a plan's slice; create_time is set
+		// behind close_time so the cohort still spans enough time to form a
+		// subsidy epoch. When onlyClosedAfter is set, only contracts still closing
+		// at/after it are moved, which targets just the freshly-created cohort and
+		// leaves earlier, already-backdated cohorts in place.
+		moveUnpaidContracts := func(createTime, closeTime time.Time, onlyClosedAfter *time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				if onlyClosedAfter == nil {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 )`,
+						createTime, closeTime,
+					))
+				} else {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 ) AND close_time >= $3`,
+						createTime, closeTime, *onlyClosedAfter,
+					))
+				}
+			})
+		}
+
+		// seed a prior subsidy epoch [startTime, endTime]. A bounded plan anchors
+		// on the most recent subsidy end, so this is the frontier the drain
+		// continues from (a fresh deployment with no epoch plans unbounded).
+		seedSubsidyEpoch := func(startTime, endTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO subsidy_payment (
+						payment_plan_id, start_time, end_time,
+						active_user_count, paid_user_count,
+						net_payout_byte_count_paid, net_payout_byte_count_unpaid,
+						net_revenue_nano_cents, net_payout_nano_cents
+					) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0)`,
+					server.NewId(), startTime, endTime,
+				))
+			})
+		}
+
+		sumUnpaidBytes := func() ByteCount {
+			var total ByteCount
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx,
+					`SELECT COALESCE(SUM(payout_byte_count), 0)::bigint FROM transfer_escrow_sweep WHERE payment_id IS NULL`,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&total))
+					}
+				})
+			})
+			return total
+		}
+
+		now := server.NowUtc()
+		maxDuration := 20 * 24 * time.Hour
+		// the frontier the drain continues from: the last payout covered up to here
+		subsidyEnd := now.Add(-60 * 24 * time.Hour)
+		seedSubsidyEpoch(subsidyEnd.Add(-5*24*time.Hour), subsidyEnd)
+
+		// cohort A closes inside the first slice [subsidyEnd, subsidyEnd+maxDuration
+		// = now-40d): closed now-50d, created now-58d.
+		closeCohort()
+		moveUnpaidContracts(now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour), nil)
+		expectedBytesA := sumUnpaidBytes()
+		assert.Equal(t, 0 < expectedBytesA, true)
+
+		// cohort B closes after the first slice (now-38d), so it is deferred to a
+		// later plan. Only the freshly-created, not-yet-backdated contracts move.
+		closeCohort()
+		recentThreshold := now.Add(-24 * time.Hour)
+		moveUnpaidContracts(now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour), &recentThreshold)
+		expectedBytesB := sumUnpaidBytes() - expectedBytesA
+		assert.Equal(t, 0 < expectedBytesB, true)
+
+		// baseline: an unbounded plan would pay both cohorts at once. Use a dry
+		// run so it persists nothing and the real bounded plans below still see
+		// the full backlog.
+		dryAll, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), true, 0)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, dryAll.NetworkPayments[destinationNetworkId].PayoutByteCount, expectedBytesA+expectedBytesB)
+
+		// plan 1: window is close_time < subsidyEnd+maxDuration = now-40d; includes
+		// cohort A (closed now-50d), excludes cohort B (closed now-38d).
+		plan1, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan1.NetworkPayments), 1)
+		payment1, ok := plan1.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, payment1.PayoutByteCount, expectedBytesA)
+		// cohort B is untouched, still unpaid for a later plan
+		assert.Equal(t, sumUnpaidBytes(), expectedBytesB)
+
+		// plan 1 recorded a new subsidy epoch ending at cohort A's close (now-50d),
+		// advancing the frontier. plan 2 anchors there: window close_time < now-30d
+		// now reaches cohort B and drains it.
+		plan2, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan2.NetworkPayments), 1)
+		payment2, ok := plan2.NetworkPayments[destinationNetworkId]
+		assert.Equal(t, ok, true)
+		assert.Equal(t, payment2.PayoutByteCount, expectedBytesB)
+		// everything is now paid
+		assert.Equal(t, sumUnpaidBytes(), ByteCount(0))
+
+		// plan 3: nothing left to pay
+		plan3, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(plan3.NetworkPayments), 0)
+	})
+}
+
+// PlanPaymentsWithMaxDurationLoop must drain the whole backlog in a single call:
+// the same two-cohort backlog that TestPlanPaymentsMaxDuration drains with three
+// manual bounded plans should be fully paid after one loop call, across separate
+// committed slices whose frontier advances forward.
+func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024) // 1 TiB
+		netRevenue := UsdToNanoCents(100.00)
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		balanceCode, err := CreateBalanceCode(ctx, netTransferByteCount, 365*24*time.Hour, netRevenue, "", "", "")
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, sourceSession.Ctx)
+
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "MATIC",
+			WalletAddress:    "0x1234567890",
+			DefaultTokenType: "USDC",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		usedTransferByteCount := ByteCount(50 * 1024 * 1024 * 1024) // 50 GiB
+		closeCohort := func() {
+			paid := NanoCents(0)
+			for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+				transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+				assert.Equal(t, err, nil)
+				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			}
+		}
+
+		moveUnpaidContracts := func(createTime, closeTime time.Time, onlyClosedAfter *time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				if onlyClosedAfter == nil {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 )`,
+						createTime, closeTime,
+					))
+				} else {
+					server.RaisePgResult(tx.Exec(ctx,
+						`UPDATE transfer_contract SET create_time = $1, close_time = $2
+						 WHERE contract_id IN (
+						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
+						 ) AND close_time >= $3`,
+						createTime, closeTime, *onlyClosedAfter,
+					))
+				}
+			})
+		}
+
+		seedSubsidyEpoch := func(startTime, endTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO subsidy_payment (
+						payment_plan_id, start_time, end_time,
+						active_user_count, paid_user_count,
+						net_payout_byte_count_paid, net_payout_byte_count_unpaid,
+						net_revenue_nano_cents, net_payout_nano_cents
+					) VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0)`,
+					server.NewId(), startTime, endTime,
+				))
+			})
+		}
+
+		sumUnpaidBytes := func() ByteCount {
+			var total ByteCount
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx,
+					`SELECT COALESCE(SUM(payout_byte_count), 0)::bigint FROM transfer_escrow_sweep WHERE payment_id IS NULL`,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&total))
+					}
+				})
+			})
+			return total
+		}
+
+		now := server.NowUtc()
+		maxDuration := 20 * 24 * time.Hour
+		subsidyEnd := now.Add(-60 * 24 * time.Hour)
+		seedSubsidyEpoch(subsidyEnd.Add(-5*24*time.Hour), subsidyEnd)
+
+		// cohort A closes inside the first slice; cohort B one slice later.
+		closeCohort()
+		moveUnpaidContracts(now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour), nil)
+		expectedBytesA := sumUnpaidBytes()
+		assert.Equal(t, 0 < expectedBytesA, true)
+
+		closeCohort()
+		recentThreshold := now.Add(-24 * time.Hour)
+		moveUnpaidContracts(now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour), &recentThreshold)
+		expectedBytesB := sumUnpaidBytes() - expectedBytesA
+		assert.Equal(t, 0 < expectedBytesB, true)
+
+		// a single loop call drains the whole backlog, slice by slice.
+		var sliceEnds []time.Time
+		plans, err := PlanPaymentsWithMaxDurationLoop(ctx, maxDuration, func(p *PaymentPlan) {
+			if p.SubsidyPayment != nil {
+				sliceEnds = append(sliceEnds, p.SubsidyPayment.EndTime)
+			}
+		})
+		assert.Equal(t, err, nil)
+
+		// everything is paid after the single loop call
+		assert.Equal(t, sumUnpaidBytes(), ByteCount(0))
+
+		// the two cohorts were paid across separate committed slices, and the
+		// total paid to the destination matches the full backlog.
+		assert.Equal(t, 2 <= len(plans), true)
+		paidToDestination := ByteCount(0)
+		for _, p := range plans {
+			if payment, ok := p.NetworkPayments[destinationNetworkId]; ok {
+				paidToDestination += payment.PayoutByteCount
+			}
+		}
+		assert.Equal(t, paidToDestination, expectedBytesA+expectedBytesB)
+
+		// each subsidy slice advanced the frontier strictly forward
+		assert.Equal(t, 2 <= len(sliceEnds), true)
+		for i := 1; i < len(sliceEnds); i += 1 {
+			assert.Equal(t, sliceEnds[i-1].Before(sliceEnds[i]), true)
+		}
+
+		// a subsequent loop call has nothing left to pay
+		plans2, err := PlanPaymentsWithMaxDurationLoop(ctx, maxDuration, nil)
+		assert.Equal(t, err, nil)
+		for _, p := range plans2 {
+			assert.Equal(t, len(p.NetworkPayments), 0)
+		}
+	})
+}
+
 // A dry run must compute the same plan a real run would, but persist nothing:
 // no payments, no swept contracts marked paid. A real run immediately after
 // must therefore still see the same contracts and produce the same payout.

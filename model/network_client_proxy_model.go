@@ -397,6 +397,28 @@ func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
 			`,
 			proxyId,
 		))
+
+		// (cascade) remove the proxy's wg peer rows and their change rows with
+		// the config, so a removed config never leaves a stale peer for the
+		// instance startup restore. Orphans from any other path are caught by
+		// the daily SweepOrphanNetworkClientData safety net.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM proxy_client
+			WHERE proxy_id = $1
+			`,
+			proxyId,
+		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM proxy_client_change
+			WHERE proxy_id = $1
+			`,
+			proxyId,
+		))
 	})
 
 	server.Redis(ctx, func(r server.RedisClient) {
