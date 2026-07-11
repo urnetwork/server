@@ -39,7 +39,12 @@ func AuthWalletChallenge(
 		Blockchain:    args.Blockchain,
 	}, session.Ctx)
 
-	model.SetWalletAuthChallengeAttemptSuccess(session.Ctx, walletAuthChallengeAttemptId, result.Error == nil)
+	success := result.Error == nil
+	model.SetWalletAuthChallengeAttemptSuccess(session.Ctx, walletAuthChallengeAttemptId, success)
+
+	if !success {
+		return nil, fmt.Errorf(result.Error.Message)
+	}
 
 	return result, nil
 }
