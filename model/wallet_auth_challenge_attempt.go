@@ -85,7 +85,7 @@ func WalletAuthChallengeAttempt(
 				WHERE
 					client_address_hash = $1 AND
 					client_address_port = $2 AND
-					now() - INTERVAL '1 seconds' * $3 <= attempt_time
+					now() - INTERVAL '1 seconds' * $3 <= attempt_time AND success = false
 				ORDER BY attempt_time DESC
 				LIMIT $4
 			`,
