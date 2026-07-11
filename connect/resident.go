@@ -406,13 +406,23 @@ func (self *Exchange) NominateLocalResident(
 		residentId,
 	)
 	if resident.peerNetworkId != nil {
-		model.AddNetworkPeer(
-			self.ctx,
-			*resident.peerNetworkId,
-			resident.peerProfile,
-			residentId,
-			self.settings.ExchangeResidentTtl,
-		)
+		if resident.peerCategory == model.NetworkPeerCategoryProxy {
+			// proxy clients are counted but not visible peers
+			model.AddNetworkProxyPeer(
+				self.ctx,
+				*resident.peerNetworkId,
+				clientId,
+				self.settings.ExchangeResidentTtl,
+			)
+		} else {
+			model.AddNetworkPeer(
+				self.ctx,
+				*resident.peerNetworkId,
+				resident.peerProfile,
+				residentId,
+				self.settings.ExchangeResidentTtl,
+			)
+		}
 	}
 	go server.HandleError(func() {
 		defer func() {
@@ -423,12 +433,20 @@ func (self *Exchange) NominateLocalResident(
 				resident.residentId,
 			)
 			if resident.peerNetworkId != nil {
-				model.RemoveNetworkPeer(
-					cleanupCtx,
-					*resident.peerNetworkId,
-					clientId,
-					resident.residentId,
-				)
+				if resident.peerCategory == model.NetworkPeerCategoryProxy {
+					model.RemoveNetworkProxyPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+					)
+				} else {
+					model.RemoveNetworkPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+						resident.residentId,
+					)
+				}
 			}
 		}()
 
@@ -500,11 +518,16 @@ func (self *Exchange) NominateLocalResident(
 			// it to a disconnect marker, bounding disconnect detection.
 			if resident.peerNetworkId != nil && 0 < resident.TransportCount() {
 				server.HandleError(func() {
+					if resident.peerCategory == model.NetworkPeerCategoryProxy {
+						// AddNetworkProxyPeer doubles as the heartbeat
+						model.AddNetworkProxyPeer(self.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+						return
+					}
 					if !model.RefreshNetworkPeer(self.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 						// the registration was lost (e.g. expired while the
 						// client was disconnected, or pruned at an expiry
 						// race); re-add with a fresh profile
-						if _, topLevel, peerProfile := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
+						if _, topLevel, _, peerProfile := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
 							model.AddNetworkPeer(self.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 						}
 					}
@@ -1875,6 +1898,9 @@ type Resident struct {
 	peerNetworkId *server.Id
 	// the initial peer registration, captured at create
 	peerProfile *model.NetworkPeer
+	// the peer category. Proxy clients are registered for counting but get no
+	// peer subscription and never appear in the peer list.
+	peerCategory model.NetworkPeerCategory
 
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
@@ -1958,10 +1984,11 @@ func NewResident(
 	// Networks over the top-level client limit (created before the limit)
 	// are excluded: their peer replay and event fan-out would scale with
 	// the connected top-level client count.
-	if networkId, topLevel, peerProfile := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peerProfile != nil {
+	if networkId, topLevel, category, peerProfile := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peerProfile != nil {
 		if model.NetworkPeersEnabled(cancelCtx, networkId) {
 			resident.peerNetworkId = &networkId
 			resident.peerProfile = peerProfile
+			resident.peerCategory = category
 		}
 	}
 
@@ -2064,9 +2091,11 @@ func (self *Resident) Run() {
 	)
 	defer streamHopListener.Close()
 
-	// only top-level clients get network peer updates.
-	// The listener sends the complete list on subscribe (reset) and diffs after.
-	if self.peerNetworkId != nil {
+	// only top-level client-category peers get network peer updates.
+	// The listener sends the complete list on subscribe (reset) and diffs
+	// after. Proxy clients are counted but not subscribed — a hosted device
+	// does not consume the peer list.
+	if self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,
 			*self.peerNetworkId,

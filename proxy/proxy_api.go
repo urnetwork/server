@@ -53,8 +53,16 @@ func NewApiServer(
 func (self *apiServer) run() {
 	defer self.cancel()
 
+	// the device rpc control endpoint shares this TLS listener: a DeviceRemote
+	// (e.g. a browser) connects with the device's signed proxy id to control the
+	// hosted DeviceLocal. It authenticates the same way as /warmup (signed proxy
+	// id) and terminates the same per-proxy SNI TLS, so it belongs here rather
+	// than on the forward-proxy listener.
+	deviceRpc := NewDeviceRpcHandler(self.proxyDeviceManager, self.settings)
+
 	routes := []*router.Route{
 		router.NewRoute("POST", "/warmup", self.HandleWarmup),
+		router.NewRoute("GET", deviceRpcPath, deviceRpc.ServeHTTP),
 	}
 
 	router := router.NewRouter(self.ctx, routes)

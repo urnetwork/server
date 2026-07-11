@@ -284,7 +284,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		assert.Equal(t, authClientResult.Error, nil)
 		clientId = *authClientResult.ClientId
 
-		_, topLevel, profile := GetNetworkPeerProfile(ctx, clientId)
+		_, topLevel, _, profile := GetNetworkPeerProfile(ctx, clientId)
 		assert.Equal(t, topLevel, true)
 		AddNetworkPeer(ctx, networkId, profile, residentId, 60*time.Second)
 
@@ -356,9 +356,11 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, authClientResult.Error, nil)
 		clientId := *authClientResult.ClientId
 
-		profileNetworkId, topLevel, profile := GetNetworkPeerProfile(ctx, clientId)
+		profileNetworkId, topLevel, category, profile := GetNetworkPeerProfile(ctx, clientId)
 		assert.Equal(t, profileNetworkId, networkId)
 		assert.Equal(t, topLevel, true)
+		// an ordinary client is the client category
+		assert.Equal(t, category, NetworkPeerCategoryClient)
 		assert.Equal(t, profile.ClientId, clientId)
 		// roles are deduped and sorted
 		assert.Equal(t, profile.Roles, []string{"role1", "role2"})
@@ -386,7 +388,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, sourceClientResult.Error, nil)
 
-		_, topLevel, profile = GetNetworkPeerProfile(ctx, *sourceClientResult.ClientId)
+		_, topLevel, _, profile = GetNetworkPeerProfile(ctx, *sourceClientResult.ClientId)
 		assert.Equal(t, topLevel, false)
 		assert.NotEqual(t, profile, nil)
 
@@ -441,9 +443,98 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, authClientResult.Error, nil)
 
-		_, _, profile = GetNetworkPeerProfile(ctx, *authClientResult.ClientId)
+		_, _, _, profile = GetNetworkPeerProfile(ctx, *authClientResult.ClientId)
 		assert.Equal(t, profile.Roles, []string{"service-role"})
 		assert.Equal(t, profile.Principal, "svc-inherited")
+	})
+}
+
+func TestNetworkProxyPeer(t *testing.T) {
+	// proxy clients count toward a network's connected total but never appear
+	// in the peer list and emit no peer events
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+
+		// an ordinary client
+		clientResult, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "client"}, userSession)
+		assert.Equal(t, err, nil)
+		clientId := *clientResult.ClientId
+
+		// a proxy client: a top-level client with a proxy_device_config row
+		proxyResult, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "proxy"}, userSession)
+		assert.Equal(t, err, nil)
+		proxyClientId := *proxyResult.ClientId
+		proxyInstanceId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO proxy_device_config (proxy_id, client_id, instance_id, config_json)
+					VALUES ($1, $2, $3, '{}')
+				`,
+				server.NewId(),
+				proxyClientId,
+				proxyInstanceId,
+			))
+		})
+
+		// the profile detects the proxy category
+		_, topLevel, category, profile := GetNetworkPeerProfile(ctx, proxyClientId)
+		assert.Equal(t, topLevel, true)
+		assert.Equal(t, category, NetworkPeerCategoryProxy)
+		assert.NotEqual(t, profile, nil)
+		_, _, clientCategory, _ := GetNetworkPeerProfile(ctx, clientId)
+		assert.Equal(t, clientCategory, NetworkPeerCategoryClient)
+
+		residentId := server.NewId()
+		ttl := 60 * time.Second
+
+		// a listener sees the client peer but never the proxy peer
+		c := newTestNetworkPeerAccumulator()
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 1*time.Second)
+		defer listener.Close()
+
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId}, residentId, ttl)
+		AddNetworkProxyPeer(ctx, networkId, proxyClientId, ttl)
+
+		select {
+		case <-time.After(1 * time.Second):
+		}
+
+		// the peer list contains only the client
+		_, peers := GetNetworkPeers(ctx, networkId)
+		connected, _ := splitNetworkPeers(peers)
+		assert.Equal(t, len(connected), 1)
+		assert.NotEqual(t, connected[clientId], nil)
+		assert.Equal(t, connected[proxyClientId], nil)
+
+		// the listener only saw the client peer
+		listenerConnected := c.Connected()
+		assert.Equal(t, len(listenerConnected), 1)
+		assert.NotEqual(t, listenerConnected[clientId], nil)
+		assert.Equal(t, listenerConnected[proxyClientId], nil)
+
+		// the combined count includes both
+		assert.Equal(t, GetNetworkConnectedCount(ctx, networkId), 2)
+
+		// removing the proxy peer drops the count but emits no marker/event
+		eventCount := c.EventCount()
+		RemoveNetworkProxyPeer(ctx, networkId, proxyClientId)
+		assert.Equal(t, GetNetworkConnectedCount(ctx, networkId), 1)
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		assert.Equal(t, c.EventCount(), eventCount)
+		assert.Equal(t, len(c.Markers()), 0)
 	})
 }
 

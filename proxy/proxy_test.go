@@ -72,6 +72,7 @@ const (
 	testConnectClientPort  = 7200
 	testConnectServicePort = 7300
 	testApiPort            = 7400
+	testDeviceRpcPort      = 7500
 
 	testTargetUrl = "https://api.bringyour.com/hello"
 
@@ -95,6 +96,10 @@ type proxyTestOptions struct {
 	// destinations for public provide relationships, which would block the
 	// local target servers the contract/load tests egress to.
 	disableSecurityPolicies bool
+	// when true, stand up the device rpc endpoint over a plain http listener so
+	// the e2e can drive it over ws (the way server/connect exposes its handler
+	// for tests). Used by the device rpc e2e.
+	enableDeviceRpc bool
 }
 
 func defaultProxyTestOptions() *proxyTestOptions {
@@ -124,6 +129,16 @@ type proxyTestHarness struct {
 	providerNetworkId server.Id
 	providerClientId  server.Id
 	proxyId           server.Id
+
+	// device rpc e2e handles (set when opts.enableDeviceRpc)
+	pdUserId      server.Id
+	pdDeviceId    server.Id
+	pdInstanceId  server.Id
+	pdByClientJwt string
+	platformUrl   string
+	networkSpace  *sdk.NetworkSpace
+	// ws url of the device rpc endpoint the DeviceRemote connects to
+	deviceRpcUrl string
 }
 
 func setProxyTestEnv() {
@@ -370,6 +385,29 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		proxyDeviceManager.Close()
 	}()
 
+	deviceRpcUrl := ""
+	if opts.enableDeviceRpc {
+		// expose the device rpc endpoint the way server/connect exposes its
+		// handler for tests: the same handler wired into a plain http listener,
+		// dialed over ws. Production serves it over the proxy api TLS listener
+		// (NewApiServer); here we avoid the self-signed TLS trust setup. The
+		// DeviceRemote connects here directly with the signed proxy id — no
+		// resident or proxy_host indirection.
+		deviceRpc := NewDeviceRpcHandler(proxyDeviceManager, proxySettings)
+		deviceRpcHttp := &http.Server{
+			Addr: fmt.Sprintf("127.0.0.1:%d", testDeviceRpcPort),
+			Handler: router.NewRouter(ctx, []*router.Route{
+				router.NewRoute("GET", "/device-rpc", deviceRpc.ServeHTTP),
+			}),
+		}
+		go deviceRpcHttp.ListenAndServe()
+		go func() {
+			<-ctx.Done()
+			deviceRpcHttp.Close()
+		}()
+		deviceRpcUrl = fmt.Sprintf("ws://127.0.0.1:%d", testDeviceRpcPort)
+	}
+
 	NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	wgCtx, wgCancel := context.WithCancel(ctx)
@@ -412,6 +450,13 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		providerNetworkId:  providerNetworkId,
 		providerClientId:   providerClientId,
 		proxyId:            proxyId,
+		pdUserId:           pdUserId,
+		pdDeviceId:         pdDeviceId,
+		pdInstanceId:       proxyDeviceConfig.InstanceId,
+		pdByClientJwt:      jwt.NewByJwt(pdNetworkId, pdUserId, pdNetworkName, false, false).Client(pdDeviceId, pdClientId).Sign(),
+		platformUrl:        platformUrl,
+		networkSpace:       networkSpace,
+		deviceRpcUrl:       deviceRpcUrl,
 	}
 }
 

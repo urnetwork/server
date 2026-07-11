@@ -45,6 +45,18 @@ type NetworkPeer struct {
 	DisconnectTime *time.Time `json:"disconnect_time,omitempty"`
 }
 
+// NetworkPeerCategory distinguishes ordinary clients from hosted proxy clients
+// in the peer registry. Both count toward a network's connected client total,
+// but only clients appear in the peer list and receive peer subscriptions: a
+// hosted proxy device is controlled remotely and does not participate as a
+// visible peer.
+type NetworkPeerCategory int
+
+const (
+	NetworkPeerCategoryClient NetworkPeerCategory = 0
+	NetworkPeerCategoryProxy  NetworkPeerCategory = 1
+)
+
 // use gob encoding for `networkPeerMeta` which is more compact than json
 type networkPeerMeta struct {
 	Peer *NetworkPeer
@@ -68,6 +80,14 @@ func networkPeerConnectedKey(networkId server.Id) string {
 // zset: client id bytes scored by disconnect unix milli
 func networkPeerDisconnectedKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}disconnected", networkId)
+}
+
+// zset: proxy client id bytes scored by expiry unix milli. Proxy clients count
+// toward a network's connected total but never appear in the peer list and get
+// no events/markers/subscription, so they live in a separate zset that the
+// client peer flow never reads.
+func networkPeerConnectedProxyKey(networkId server.Id) string {
+	return fmt.Sprintf("{np_%s}connected_proxy", networkId)
 }
 
 func networkPeerEventIdKey(networkId server.Id) string {
@@ -180,10 +200,11 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) (enabled bool
 	return
 }
 
-// GetNetworkPeerProfile loads the network, top-level status, and identity
-// metadata used to register a client in the peer registry.
-// `peer` is nil when the client does not exist or is not active.
-func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, peer *NetworkPeer) {
+// GetNetworkPeerProfile loads the network, top-level status, category, and
+// identity metadata used to register a client in the peer registry.
+// `peer` is nil when the client does not exist or is not active. `category` is
+// proxy when the client has a hosted proxy device (a proxy_device_config row).
+func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -193,7 +214,11 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					network_client.source_client_id,
 					network_client.principal,
 					device.device_name,
-					device.device_spec
+					device.device_spec,
+					EXISTS (
+						SELECT 1 FROM proxy_device_config
+						WHERE proxy_device_config.client_id = network_client.client_id
+					) AS is_proxy
 				FROM network_client
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
@@ -209,14 +234,19 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 				var principal *string
 				var deviceName *string
 				var deviceSpec *string
+				var isProxy bool
 				server.Raise(result.Scan(
 					&networkId,
 					&sourceClientId,
 					&principal,
 					&deviceName,
 					&deviceSpec,
+					&isProxy,
 				))
 				topLevel = sourceClientId == nil
+				if isProxy {
+					category = NetworkPeerCategoryProxy
+				}
 				peer = &NetworkPeer{
 					ClientId: clientId,
 				}
@@ -389,6 +419,86 @@ func RemoveNetworkPeer(
 			networkPeerDisconnectMarker(clientId, disconnectTime),
 		})
 	})
+}
+
+// AddNetworkProxyPeer registers a connected hosted proxy client. Proxy clients
+// count toward the network's connected total but never appear in the peer list
+// and emit no events; they live in a separate zset (see
+// networkPeerConnectedProxyKey). Refresh by calling again with a fresh ttl.
+func AddNetworkProxyPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	ttl time.Duration,
+) {
+	member := string(clientId.Bytes())
+	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		pipe.ZAdd(ctx, networkPeerConnectedProxyKey(networkId), redis.Z{
+			Score:  float64(expiryMs),
+			Member: member,
+		})
+		pipe.Expire(ctx, networkPeerConnectedProxyKey(networkId), networkPeerKeyTtl)
+		_, err := pipe.Exec(ctx)
+		if err != nil {
+			panic(err)
+		}
+		pruneNetworkProxyPeers(ctx, r, networkId)
+	})
+}
+
+// RemoveNetworkProxyPeer removes a connected hosted proxy client.
+func RemoveNetworkProxyPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+) {
+	member := string(clientId.Bytes())
+	server.Redis(ctx, func(r server.RedisClient) {
+		err := r.ZRem(ctx, networkPeerConnectedProxyKey(networkId), member).Err()
+		if err != nil {
+			panic(err)
+		}
+	})
+}
+
+// pruneNetworkProxyPeers ages out expired proxy entries. Piggybacks on proxy
+// peer activity, like pruneNetworkPeers for clients.
+func pruneNetworkProxyPeers(ctx context.Context, r server.RedisClient, networkId server.Id) {
+	nowMs := server.NowUtc().UnixMilli()
+	err := r.ZRemRangeByScore(
+		ctx,
+		networkPeerConnectedProxyKey(networkId),
+		"-inf",
+		strconv.FormatInt(nowMs, 10),
+	).Err()
+	if err != nil {
+		panic(err)
+	}
+}
+
+// GetNetworkConnectedCount returns the number of connected top-level clients of
+// a network, counting both ordinary clients and hosted proxy clients. This is
+// the combined connected total a client+proxy quota would enforce against; it
+// is exposed for accounting and not enforced here.
+func GetNetworkConnectedCount(ctx context.Context, networkId server.Id) (count int) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		nowMs := server.NowUtc().UnixMilli()
+		// count only entries whose expiry is still in the future
+		liveMin := strconv.FormatInt(nowMs+1, 10)
+
+		pipe := r.TxPipeline()
+		clientCmd := pipe.ZCount(ctx, networkPeerConnectedKey(networkId), liveMin, "+inf")
+		proxyCmd := pipe.ZCount(ctx, networkPeerConnectedProxyKey(networkId), liveMin, "+inf")
+		_, err := pipe.Exec(ctx)
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+		count = int(clientCmd.Val()) + int(proxyCmd.Val())
+	})
+	return
 }
 
 // UpdateNetworkPeerProvideModes updates the provide modes of a registered

@@ -293,6 +293,12 @@ type ProxyDevice struct {
 	tun         *connect.Tun
 	settings    *ProxyDeviceSettings
 
+	// rpcListener serves device-rpc websockets relayed from the resident to
+	// this hosted device (see PushDeviceRpc). deviceGeneration identifies this
+	// device instance so a DeviceRemote detects recreation across reconnects.
+	rpcListener      *sdk.HostedDeviceRpcListener
+	deviceGeneration server.Id
+
 	// liveness/activity are tracked with atomics, not stateLock, so the wg
 	// per-packet hot path (activateClient -> Active/UpdateActivity) takes no
 	// per-device lock and — crucially — is never serialized under the wg proxy's
@@ -386,20 +392,60 @@ func NewProxyDevice(
 		return nil, err
 	}
 
+	// the hosted rpc listener lets a DeviceRemote (e.g. a browser over the
+	// platform websocket) control this device. It is fed by the resident
+	// bridge via PushDeviceRpc; the device generation identifies this instance
+	// so the remote can detect a recreate.
+	deviceGeneration := server.NewId()
+	rpcListener := sdk.NewHostedDeviceRpcListener(cancelCtx)
+	deviceLocal.StartHostedRpc(rpcListener, deviceGeneration.String())
+
 	proxyDevice := &ProxyDevice{
 		ctx:               cancelCtx,
 		cancel:            cancel,
+		clientId:          proxyDeviceConfig.ClientId,
+		instanceId:        proxyDeviceConfig.InstanceId,
 		proxyDeviceConfig: proxyDeviceConfig,
 		deviceLocal:       deviceLocal,
 		tun:               tun,
 		settings:          settings,
 		receiveMonitor:    connect.NewMonitor(),
+		rpcListener:       rpcListener,
+		deviceGeneration:  deviceGeneration,
 	}
 	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
 	return proxyDevice, nil
+}
+
+// PushDeviceRpc serves a device-rpc websocket (relayed from the resident) to
+// this hosted device. An attached rpc session keeps the device alive: activity
+// is bumped for the session's duration so the idle reaper does not reap a
+// device a remote is actively controlling. Blocks until the session ends.
+func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
+	if !self.UpdateActivity() {
+		return fmt.Errorf("proxy device closed")
+	}
+
+	sessionCtx, sessionCancel := context.WithCancel(self.ctx)
+	defer sessionCancel()
+	// keep the device non-idle while the rpc session is attached
+	go server.HandleError(func() {
+		ticker := time.NewTicker(self.settings.ProxyDeviceIdleTimeout / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sessionCtx.Done():
+				return
+			case <-ticker.C:
+				self.UpdateActivity()
+			}
+		}
+	})
+
+	return self.rpcListener.ServeWs(ws)
 }
 
 // directly copy between tun and device
