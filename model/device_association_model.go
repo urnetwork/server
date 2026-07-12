@@ -847,44 +847,6 @@ func DeviceConfirmAdopt(
 			))
 		})
 
-		result, err = tx.Query(
-			clientSession.Ctx,
-			`
-                SELECT
-                    auth_session_id
-                FROM device_adopt_auth_session
-                WHERE
-                    device_association_id = $1
-            `,
-			deviceAssociationId,
-		)
-
-		authSessionIds := []server.Id{}
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var authSessionId server.Id
-				server.Raise(result.Scan(&authSessionId))
-				authSessionIds = append(authSessionIds, authSessionId)
-			}
-		})
-
-		authSessionId := server.NewId()
-		authSessionIds = append(authSessionIds, authSessionId)
-
-		server.RaisePgResult(tx.Exec(
-			clientSession.Ctx,
-			`
-                INSERT INTO auth_session (
-                    auth_session_id,
-                    network_id,
-                    user_id
-                ) VALUES ($1, $2, $3)
-            `,
-			authSessionId,
-			networkId,
-			userId,
-		))
-
 		deviceId := server.NewId()
 		clientId := server.NewId()
 
@@ -940,7 +902,6 @@ func DeviceConfirmAdopt(
 			networkName,
 			isGuestMode,
 			isPro,
-			authSessionIds...,
 		).Client(deviceId, clientId).Sign()
 
 		confirmAdoptResult = &DeviceConfirmAdoptResult{

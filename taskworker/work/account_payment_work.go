@@ -3,8 +3,11 @@ package work
 import (
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -113,5 +116,44 @@ func ProcessPendingPayoutsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	return nil
+}
+
+type CancelHungAccountPaymentsArgs struct {
+}
+
+type CancelHungAccountPaymentsResult struct {
+}
+
+func ScheduleCancelHungAccountPayments(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		CancelHungAccountPayments,
+		&CancelHungAccountPaymentsArgs{},
+		clientSession,
+		task.RunOnce("cancel_hung_account_payments"),
+		task.RunAt(server.NowUtc().Add(24*time.Hour)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+func CancelHungAccountPayments(
+	cancelHungAccountPayments *CancelHungAccountPaymentsArgs,
+	clientSession *session.ClientSession,
+) (*CancelHungAccountPaymentsResult, error) {
+	canceledCount := model.CancelHungAccountPayments(clientSession.Ctx, server.NowUtc())
+	if 0 < canceledCount {
+		glog.Infof("[payw]canceled %d hung payments for re-planning.\n", canceledCount)
+	}
+	return &CancelHungAccountPaymentsResult{}, nil
+}
+
+func CancelHungAccountPaymentsPost(
+	cancelHungAccountPayments *CancelHungAccountPaymentsArgs,
+	cancelHungAccountPaymentsResult *CancelHungAccountPaymentsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleCancelHungAccountPayments(clientSession, tx)
 	return nil
 }

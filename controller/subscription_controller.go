@@ -32,12 +32,14 @@ const InitialTransferBalance = 32 * model.Gib
 // 30 days
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
-const RefreshTransferBalanceDuration = 30 * time.Hour
-
-// const RefreshTransferBalanceTimeout = 24 * time.Hour
-
+// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
+// on three separate schedules -- see FreeGrantWindow / ProGrantWindow /
+// ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+//
+// RefreshSupporterTransferBalance is the legacy amount still used at subscription
+// ACTIVATION, where the balance spans the whole subscription period alongside the
+// revenue/subsidy accounting. It is not the recurring meter.
 const RefreshSupporterTransferBalance = 600 * model.Gib
-const RefreshFreeTransferBalance = 34 * model.Gib // ~ 1 TiB / month
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
@@ -147,19 +149,17 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 
 	netBalanceByteCount := model.ByteCount(0)
 	startBalanceByteCount := model.ByteCount(0)
-	isPro := false
+
+	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
+	// paid balance": a data code is paid but data-only, so that test would report
+	// a data-code buyer as Pro.
+	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
 
 	for _, transferBalance := range transferBalances {
 
 		if transferBalance.EndTime.After(server.NowUtc()) {
 			netBalanceByteCount += transferBalance.BalanceByteCount
 			startBalanceByteCount += transferBalance.StartBalanceByteCount
-
-			if !isPro && transferBalance.Paid {
-				// check if any of the transfer balances are from a pro subscription
-				isPro = true
-			}
-
 		}
 
 	}
@@ -265,11 +265,14 @@ func CoinbaseWebhook(
 			err = CreateBalanceCode(
 				clientSession.Ctx,
 				sku.BalanceByteCount(),
-				SubscriptionYearDuration,
+				model.Pro().DataCodeDuration,
 				netRevenue,
 				coinbaseWebhook.Event.Data.Id,
 				string(coinbaseDataJsonBytes),
 				purchaseEmail,
+				// no network: a Coinbase purchase is not tied to a signed-in session, so
+				// the emailed code IS the delivery mechanism
+				nil,
 			)
 			if err != nil {
 				return nil, err
@@ -284,6 +287,21 @@ func CoinbaseWebhook(
 	return &CoinbaseWebhookResult{}, nil
 }
 
+// CreateBalanceCode creates the data code for a purchase and emails it.
+//
+// When redeemNetworkId is set, the code is ALSO redeemed into that network immediately,
+// so the data simply lands. That is the case for a purchase made while SIGNED IN, where
+// the Stripe checkout session told us exactly whose network it is
+// (client_reference_id). The code is still emailed, as a record.
+//
+// Without this, a signed-in customer who buys data on the site is emailed a code they
+// have to go and find and paste back into the app -- and the confirmation page sits
+// there polling for a balance that never arrives, eventually telling them their purchase
+// is "taking longer than usual" when in fact it worked perfectly. We know who they are.
+// Make the data appear.
+//
+// redeemNetworkId is nil for purchases where we genuinely do not know the network (the
+// Coinbase flow), which is what data codes exist for in the first place.
 func CreateBalanceCode(
 	ctx context.Context,
 	balanceByteCount model.ByteCount,
@@ -292,29 +310,36 @@ func CreateBalanceCode(
 	purchaseEventId string,
 	purchaseRecord string,
 	purchaseEmail string,
+	redeemNetworkId *server.Id,
 ) error {
-	if balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, purchaseEventId); err == nil {
-		// the code was already created for the purchase event
-		// send a reminder email
+	// This is a PAID path -- by the time we are here the customer's money has already
+	// moved. So this one does NOT no-op like the grants do.
+	//
+	// A code with a zero duration expires the instant it is created: the customer pays,
+	// receives a code, redeems it, and gets nothing, with no error anywhere. Refuse
+	// instead. The caller is a webhook, so an error means the provider RETRIES and the
+	// failure is visible in their dashboard -- an unfulfilled payment we can see and fix
+	// beats a fulfilled one that is worthless.
+	if duration <= 0 {
+		glog.Errorf(
+			"[sub]refusing to create a balance code with a zero duration "+
+				"(purchase_event_id = %s). Is pro.yml present?\n",
+			purchaseEventId,
+		)
+		return fmt.Errorf("balance code duration is not configured (pro.yml)")
+	}
 
-		balanceCode, err := model.GetBalanceCode(ctx, balanceCodeId)
+	var balanceCode *model.BalanceCode
+
+	if balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, purchaseEventId); err == nil {
+		// the code was already created for this purchase event -- a webhook retry.
+		// Re-send it, and fall through so an earlier failed redeem is retried too.
+		balanceCode, err = model.GetBalanceCode(ctx, balanceCodeId)
 		if err != nil {
 			return err
 		}
-
-		awsMessageSender := GetAWSMessageSender()
-
-		return awsMessageSender.SendAccountMessageTemplate(
-			balanceCode.PurchaseEmail,
-			&SubscriptionTransferBalanceCodeTemplate{
-				Secret:           balanceCode.Secret,
-				BalanceByteCount: balanceCode.BalanceByteCount,
-			},
-		)
 	} else {
-		// new code
-
-		balanceCode, err := model.CreateBalanceCode(
+		balanceCode, err = model.CreateBalanceCode(
 			ctx,
 			balanceByteCount,
 			duration,
@@ -326,17 +351,44 @@ func CreateBalanceCode(
 		if err != nil {
 			return err
 		}
-
-		awsMessageSender := GetAWSMessageSender()
-
-		return awsMessageSender.SendAccountMessageTemplate(
-			balanceCode.PurchaseEmail,
-			&SubscriptionTransferBalanceCodeTemplate{
-				Secret:           balanceCode.Secret,
-				BalanceByteCount: balanceCode.BalanceByteCount,
-			},
-		)
 	}
+
+	if redeemNetworkId != nil {
+		_, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: *redeemNetworkId,
+		}, ctx)
+		if err != nil {
+			// Do NOT fail the webhook here. Stripe retries a failed webhook, and every
+			// retry would re-send the email -- so a transient redeem error would turn
+			// into a stream of duplicate emails. The most likely "error" is simply that
+			// the code is already redeemed (this IS the retry), in which case the data is
+			// already where it belongs.
+			//
+			// The customer is not stranded either way: they hold the emailed code and can
+			// redeem it by hand.
+			glog.Infof(
+				"[sub]balance code %s redeem into network %s: %s\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId, err,
+			)
+		} else {
+			glog.Infof(
+				"[sub]balance code %s redeemed into network %s (%s)\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId,
+				model.ByteCountHumanReadable(balanceCode.BalanceByteCount),
+			)
+		}
+	}
+
+	awsMessageSender := GetAWSMessageSender()
+
+	return awsMessageSender.SendAccountMessageTemplate(
+		balanceCode.PurchaseEmail,
+		&SubscriptionTransferBalanceCodeTemplate{
+			Secret:           balanceCode.Secret,
+			BalanceByteCount: balanceCode.BalanceByteCount,
+		},
+	)
 }
 
 type RedeemBalanceCodeArgs struct {
@@ -774,6 +826,7 @@ func PlaySubscriptionRenewal(
 						renewal,
 					)
 
+					// a supporter subscription -> carries the Pro entitlement
 					transferBalance := &model.TransferBalance{
 						NetworkId:             playSubscriptionRenewal.NetworkId,
 						StartTime:             startTime,
@@ -782,13 +835,16 @@ func PlaySubscriptionRenewal(
 						SubsidyNetRevenue:     netRevenue,
 						BalanceByteCount:      RefreshSupporterTransferBalance,
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+						Pro:                   true,
 					}
 					model.AddTransferBalance(
 						clientSession.Ctx,
 						transferBalance,
 					)
+					model.UpdateProNetwork(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 				} else {
+					// a data pack, NOT a subscription -> data only, never Pro
 					transferBalance := &model.TransferBalance{
 						NetworkId:             playSubscriptionRenewal.NetworkId,
 						StartTime:             startTime,
@@ -797,6 +853,7 @@ func PlaySubscriptionRenewal(
 						SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
 						BalanceByteCount:      sku.BalanceByteCount(),
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+						Pro:                   false,
 					}
 					model.AddTransferBalance(
 						clientSession.Ctx,
@@ -949,102 +1006,270 @@ func verifyPlayAuth(ctx context.Context, auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) error {
-	startTime := server.NowUtc()
-	endTime := startTime.Add(RefreshTransferBalanceDuration)
-	var transferBalance model.ByteCount
+// ----- grant windows -----
+//
+// The three grants run on three different schedules, and each balance's window
+// extends a little past the end of its period so consecutive grants overlap and a
+// client never sees a gap at the boundary.
 
-	active, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
+// FreeGrantGrace is how long past the end of the day a daily free balance stays
+// valid.
+const FreeGrantGrace = 1 * time.Hour
 
-	if active {
-		transferBalance = RefreshSupporterTransferBalance
-	} else {
-		transferBalance = RefreshFreeTransferBalance
-	}
-	return model.AddBasicTransferBalance(
-		ctx,
-		networkId,
-		transferBalance,
-		startTime,
-		endTime,
-	)
+// ProGrantGrace is how long past the end of the month a monthly Pro balance stays
+// valid. It is also the window in which a lapsed subscriber is still Pro, because
+// the Pro entitlement is exactly "has an in-window pro balance" (see pro_model.go).
+const ProGrantGrace = 24 * time.Hour
 
+// FreeGrantWindow is the window for the daily free grant covering `now`:
+// [start of day, start of next day + 1 hour).
+func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
+	year, month, day := now.UTC().Date()
+	startTime = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	endTime = startTime.AddDate(0, 0, 1).Add(FreeGrantGrace)
+	return
+}
+
+// ProGrantWindow is the window for the monthly Pro grant covering `now`:
+// [start of month, start of next month + 1 day).
+func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
+	year, month, _ := now.UTC().Date()
+	startTime = time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	endTime = startTime.AddDate(0, 1, 0).Add(ProGrantGrace)
+	return
+}
+
+// ReferralGrantWindow is the window for one referral grant period, from `now`.
+func ReferralGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
+	startTime = now.UTC()
+	endTime = startTime.Add(model.Pro().ReferralGrantPeriod()).Add(FreeGrantGrace)
+	return
+}
+
+// AddRefreshTransferBalance grants one network the data allowance for its CURRENT
+// tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
+// daily free amount. Used when a network is created and when a subscription changes,
+// so the network does not have to wait for the next scheduled grant.
+func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
+	})
+	return
 }
 
 func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) error {
-	startTime := server.NowUtc()
-	endTime := startTime.Add(RefreshTransferBalanceDuration)
-	var transferBalance model.ByteCount
+	pro, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
 
-	active, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
-
-	if active {
-		transferBalance = RefreshSupporterTransferBalance
-	} else {
-		transferBalance = RefreshFreeTransferBalance
+	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
+	// zero is not a no-op: it writes a real transfer_balance row with nothing in it.
+	// Keyed off the amount rather than a "was pro.yml loaded" flag, so a pro.yml that is
+	// present but says `data: 0` is handled the same way.
+	if model.Pro().DataAmount(pro) <= 0 {
+		glog.Errorf("[sub]no data amount configured for pro = %t; skipping the grant\n", pro)
+		return nil
 	}
-	err := model.AddBasicTransferBalanceInTx(
+
+	if pro {
+		// the Pro grant carries pro = true, which is what confers the entitlement
+		startTime, endTime := ProGrantWindow(server.NowUtc())
+		err := model.AddProTransferBalanceInTx(
+			tx,
+			ctx,
+			networkId,
+			model.Pro().DataAmount(true),
+			startTime,
+			endTime,
+		)
+		if err != nil {
+			return err
+		}
+		model.UpdateProNetwork(ctx, networkId)
+		return nil
+	}
+
+	startTime, endTime := FreeGrantWindow(server.NowUtc())
+	return model.AddBasicTransferBalanceInTx(
 		tx,
 		ctx,
 		networkId,
-		transferBalance,
+		model.Pro().DataAmount(false),
 		startTime,
 		endTime,
 	)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
-// Refresh transfer balances
+// ----- Free grant: runs every day -----
 
-type RefreshTransferBalancesArgs struct {
+type RefreshFreeTransferBalancesArgs struct {
 }
 
-type RefreshTransferBalancesResult struct {
+type RefreshFreeTransferBalancesResult struct {
 }
 
-func ScheduleRefreshTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// the start of the next day
 	year, month, day := server.NowUtc().Date()
 	runAt := time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
 	task.ScheduleTaskInTx(
 		tx,
-		RefreshTransferBalances,
-		&RefreshTransferBalancesArgs{},
+		RefreshFreeTransferBalances,
+		&RefreshFreeTransferBalancesArgs{},
 		clientSession,
-		task.RunOnce("refresh_transfer_balances"),
+		task.RunOnce("refresh_free_transfer_balances"),
 		task.RunAt(runAt),
 		task.MaxTime(1*time.Hour),
 	)
 }
 
-func RefreshTransferBalances(
-	refreshTransferBalances *RefreshTransferBalancesArgs,
+// RefreshFreeTransferBalances grants the daily free allowance (pro.yml free.data) to
+// every network without an active subscription.
+func RefreshFreeTransferBalances(
+	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
 	clientSession *session.ClientSession,
-) (*RefreshTransferBalancesResult, error) {
-	startTime := server.NowUtc()
-	endTime := startTime.Add(RefreshTransferBalanceDuration)
-	model.AddRefreshTransferBalanceToAllNetworks(
+) (*RefreshFreeTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().DataAmount(false) <= 0 {
+		glog.Errorf("[sub]RefreshFreeTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshFreeTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := FreeGrantWindow(server.NowUtc())
+	model.AddFreeTransferBalanceToAllNetworks(
 		clientSession.Ctx,
 		startTime,
 		endTime,
-		map[bool]model.ByteCount{
-			false: RefreshFreeTransferBalance,
-			true:  RefreshSupporterTransferBalance,
-		},
+		model.Pro().DataAmount(false),
 	)
-	return &RefreshTransferBalancesResult{}, nil
+	return &RefreshFreeTransferBalancesResult{}, nil
 }
 
-func RefreshTransferBalancesPost(
-	refreshTransferBalances *RefreshTransferBalancesArgs,
-	refreshTransferBalancesResult *RefreshTransferBalancesResult,
+func RefreshFreeTransferBalancesPost(
+	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
+	refreshFreeTransferBalancesResult *RefreshFreeTransferBalancesResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRefreshTransferBalances(clientSession, tx)
+	ScheduleRefreshFreeTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Pro grant: runs every month -----
+
+type RefreshProTransferBalancesArgs struct {
+}
+
+type RefreshProTransferBalancesResult struct {
+}
+
+func ScheduleRefreshProTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// the start of the next month (time.Date normalizes month 13 to January)
+	year, month, _ := server.NowUtc().Date()
+	runAt := time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshProTransferBalances,
+		&RefreshProTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_pro_transfer_balances"),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshProTransferBalances grants the FULL monthly Pro allowance (pro.yml pro.data)
+// to every network with an active subscription, at the start of the month. The
+// balance is not rationed per-day: a Pro network gets the whole 10 TiB up front and
+// can spend it however it likes over the month.
+func RefreshProTransferBalances(
+	refreshProTransferBalances *RefreshProTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshProTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().DataAmount(true) <= 0 {
+		glog.Errorf("[sub]RefreshProTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshProTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := ProGrantWindow(server.NowUtc())
+	model.AddProTransferBalanceToAllNetworks(
+		clientSession.Ctx,
+		startTime,
+		endTime,
+		model.Pro().DataAmount(true),
+	)
+	return &RefreshProTransferBalancesResult{}, nil
+}
+
+func RefreshProTransferBalancesPost(
+	refreshProTransferBalances *RefreshProTransferBalancesArgs,
+	refreshProTransferBalancesResult *RefreshProTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshProTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Referral grant: runs every referral period -----
+
+type RefreshReferralTransferBalancesArgs struct {
+}
+
+type RefreshReferralTransferBalancesResult struct {
+}
+
+func ScheduleRefreshReferralTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// ReferralGrantPeriod, never the raw ReferralPeriod: a zero period here schedules the
+	// task for NOW, and its Post hook reschedules it for now again -- a hot loop.
+	runAt := server.NowUtc().Add(model.Pro().ReferralGrantPeriod())
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshReferralTransferBalances,
+		&RefreshReferralTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_referral_transfer_balances"),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshReferralTransferBalances grants every referrer its referral bonus for one
+// period: bonus_per_referral x min(referrals, max_referrals), all from pro.yml.
+// Referrals pay out every period for life. The balance is unpaid and pro = false, so
+// referral data never confers Pro.
+func RefreshReferralTransferBalances(
+	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshReferralTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().ReferralBonus <= 0 {
+		glog.Errorf("[sub]RefreshReferralTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshReferralTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := ReferralGrantWindow(server.NowUtc())
+	model.AddReferralBonusesToAllNetworks(
+		clientSession.Ctx,
+		startTime,
+		endTime,
+		model.Pro().ReferralBonus,
+	)
+	return &RefreshReferralTransferBalancesResult{}, nil
+}
+
+func RefreshReferralTransferBalancesPost(
+	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
+	refreshReferralTransferBalancesResult *RefreshReferralTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshReferralTransferBalances(clientSession, tx)
 	return nil
 }
 
@@ -1161,6 +1386,7 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 
 		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
+		// a supporter subscription -> carries the Pro entitlement
 		transferBalance := &model.TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             startTime,
@@ -1168,11 +1394,13 @@ func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDe
 			StartBalanceByteCount: RefreshSupporterTransferBalance,
 			SubsidyNetRevenue:     netRevenue,
 			BalanceByteCount:      RefreshSupporterTransferBalance,
+			Pro:                   true,
 		}
 		model.AddTransferBalance(
 			ctx,
 			transferBalance,
 		)
+		model.UpdateProNetwork(ctx, networkId)
 
 	} else {
 		glog.Infof("[apple] Transaction Info: nil")
@@ -1474,6 +1702,13 @@ func HeliusWebhook(
 			}, nil
 		}
 
+		// Take the largest USDC transfer to one of our receiving addresses, WHATEVER its
+		// size. It used to require `>= 40` here -- a hardcoded stand-in for the yearly
+		// price -- which meant a customer who chose the $5 monthly plan on the site had
+		// their payment ignored entirely as "no matching USDC payment". They paid and got
+		// nothing.
+		//
+		// The amount is checked below, against what they were actually QUOTED.
 		paymentReceived := false
 		var tokenAmountReceived float64
 
@@ -1481,9 +1716,11 @@ func HeliusWebhook(
 
 			if tokenTransfer.Mint == solanaUsdcMint &&
 				slices.Contains(solanaReceiverAddresses, tokenTransfer.ToUserAccount) &&
-				tokenTransfer.TokenAmount >= 40 {
+				0 < tokenTransfer.TokenAmount {
 				paymentReceived = true
-				tokenAmountReceived = tokenTransfer.TokenAmount
+				if tokenAmountReceived < tokenTransfer.TokenAmount {
+					tokenAmountReceived = tokenTransfer.TokenAmount
+				}
 			}
 
 		}
@@ -1515,9 +1752,28 @@ func HeliusWebhook(
 			}, nil
 		}
 
-		// good to go, create transfer balance + year plan
+		// Verify the payment against what the customer was QUOTED. Underpaying must not
+		// buy a plan; overpaying is their choice and is honored.
+		//
+		// The tolerance absorbs float dust in the token amount (it arrives as a float64
+		// from the chain), not a real discount.
+		if solanaAmountTolerance < paymentSearchResult.ExpectedAmountUsd-tokenAmountReceived {
+			glog.Errorf(
+				"HeliusWebhook: underpaid %s: received %.2f USDC, quoted %.2f (reference %s)\n",
+				transaction.Signature,
+				tokenAmountReceived,
+				paymentSearchResult.ExpectedAmountUsd,
+				paymentSearchResult.PaymentReference,
+			)
+			return &HeliusWebhookResult{
+				Message: "Payment is less than the quoted price",
+			}, nil
+		}
+
+		// Grant the plan they actually bought. This used to be a YEAR every time, whatever
+		// they had chosen and whatever they had paid.
 		startTime := server.NowUtc()
-		endTime := startTime.Add(SubscriptionYearDuration + SubscriptionGracePeriod)
+		endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + SubscriptionGracePeriod)
 
 		netRevenue := model.UsdToNanoCents(tokenAmountReceived)
 
@@ -1543,6 +1799,7 @@ func HeliusWebhook(
 				return
 			}
 
+			// a supporter subscription -> carries the Pro entitlement
 			transferBalance := &model.TransferBalance{
 				NetworkId:             *paymentSearchResult.NetworkId,
 				StartTime:             startTime,
@@ -1550,6 +1807,7 @@ func HeliusWebhook(
 				StartBalanceByteCount: RefreshSupporterTransferBalance,
 				SubsidyNetRevenue:     netRevenue,
 				BalanceByteCount:      RefreshSupporterTransferBalance,
+				Pro:                   true,
 			}
 			model.AddTransferBalanceInTx(
 				clientSession.Ctx,
@@ -1575,6 +1833,10 @@ func HeliusWebhook(
 			return nil, insertErr
 		}
 
+		// the pro balance is committed -- refresh the entitlement so the upgrade is
+		// visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(clientSession.Ctx, *paymentSearchResult.NetworkId)
+
 		matched++
 	}
 
@@ -1590,22 +1852,93 @@ func HeliusWebhook(
  * We create a reference for each payment intent and map it to the network ID
  */
 
+// solanaAmountTolerance absorbs float dust in the chain-reported token amount. It is not
+// a discount: anything more than a cent short of the quoted price is an underpayment.
+const solanaAmountTolerance = 0.01
+
+// solanaPlanDuration is how long the plan the customer bought lasts. An empty plan means
+// an intent created before the plan was recorded, which was always treated as yearly --
+// so that is what those legacy intents still get.
+func solanaPlanDuration(subscriptionPlan string) time.Duration {
+	switch subscriptionPlan {
+	case model.SolanaPlanMonthly:
+		return 30 * 24 * time.Hour
+	default:
+		return SubscriptionYearDuration
+	}
+}
+
 type SolanaPaymentIntentArgs struct {
 	Reference string `json:"reference"`
+	// The plan the customer picked. The PRICE is never taken from the client -- the
+	// server derives it from pro.yml. A client-supplied amount would let anyone quote
+	// themselves a year for a cent.
+	Plan string `json:"plan"`
 }
 
 type SolanaPaymentIntentResult struct {
-	Error *SolanaPaymentIntentError `json:"error,omitempty"`
+	// the price the SERVER quoted -- the client must pay exactly this
+	AmountUsd float64                   `json:"amount_usd,omitempty"`
+	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
 }
 
 type SolanaPaymentIntentError struct {
 	Message string `json:"message"`
 }
 
+// solanaPlanPriceUsd is the quoted price for a plan, from pro.yml. Server-side, always.
+// solanaPlanPriceUsd is the price we QUOTE for a plan, and the price the webhook then
+// checks the payment against. ok = false means we will not sell the plan at all.
+//
+// A price of zero is never sellable. With no pro.yml (or a mis-specified price: 0) this
+// would otherwise quote UR Pro at $0.00 -- and the webhook's check is
+// `amount >= price - tolerance`, which at price 0 is `amount >= -0.01`: satisfied by
+// ANY payment, including none. We would hand out a year of Pro for nothing. Refuse.
+func solanaPlanPriceUsd(subscriptionPlan string) (float64, bool) {
+	var priceUsd float64
+	switch subscriptionPlan {
+	case model.SolanaPlanMonthly:
+		priceUsd = model.Pro().PriceMonthlyUsd()
+	case model.SolanaPlanYearly:
+		priceUsd = model.Pro().PriceYearlyUsd()
+	default:
+		return 0, false
+	}
+	if priceUsd <= 0 {
+		glog.Errorf(
+			"[sub]refusing to quote %s: no price is configured (is pro.yml present?)\n",
+			subscriptionPlan,
+		)
+		return 0, false
+	}
+	return priceUsd, true
+}
+
 func CreateSolanaPaymentIntent(
 	intent *SolanaPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*SolanaPaymentIntentResult, error) {
-	model.CreateSolanaPaymentIntent(intent.Reference, clientSession)
-	return &SolanaPaymentIntentResult{}, nil
+
+	// The price comes from pro.yml, keyed by the plan. It is NEVER taken from the client.
+	priceUsd, ok := solanaPlanPriceUsd(intent.Plan)
+	if !ok || priceUsd <= 0 {
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{Message: "Unknown plan."},
+		}, nil
+	}
+
+	// The error used to be discarded here, so a duplicate or failed intent looked exactly
+	// like a successful one -- and the customer was sent off to pay against an intent
+	// that did not exist.
+	err := model.CreateSolanaPaymentIntent(intent.Reference, priceUsd, intent.Plan, clientSession)
+	if err != nil {
+		glog.Errorf("[sub]could not create solana payment intent: %s\n", err)
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{Message: "Could not start the payment. Please try again."},
+		}, nil
+	}
+
+	// Hand the quoted price back so the payment url the client builds and the intent the
+	// webhook checks against cannot disagree.
+	return &SolanaPaymentIntentResult{AmountUsd: priceUsd}, nil
 }

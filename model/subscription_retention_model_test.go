@@ -309,3 +309,221 @@ func TestSweepOrphanContractData(t *testing.T) {
 		})
 	})
 }
+
+// A contract whose sweep is planned into a payment that never completes is a
+// straggler: it survives the normal 7-day cascade (which requires a completed
+// payment) but must be hard deleted with its whole group once it is older
+// than StragglerContractExpiration. The pending account_payment row itself is
+// never deleted.
+func TestRemoveStragglerContracts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		// fund the source network
+		netTransferByteCount := ByteCount(1024 * 1024)
+		netRevenue := UsdToNanoCents(10.00)
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			365*24*time.Hour,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
+
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "matic",
+			WalletAddress:    "",
+			DefaultTokenType: "usdc",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		// close and settle enough contracts to meet the payout threshold
+		usedTransferByteCount := ByteCount(1024)
+		paid := NanoCents(0)
+		contractIds := []server.Id{}
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			contractIds = append(contractIds, transferEscrow.ContractId)
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		// plan the payments but never complete them: the payments stay pending
+		plan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, len(plan.NetworkPayments), 0)
+
+		countPendingPayments := func() int {
+			c := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT COUNT(*) FROM account_payment
+					WHERE network_id = $1 AND NOT completed AND NOT canceled
+					`,
+					destinationNetworkId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&c))
+					}
+				})
+			})
+			return c
+		}
+		assert.NotEqual(t, countPendingPayments(), 0)
+
+		// the pending payment protects the group inside the straggler window
+		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
+		contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractIds[0])
+		assert.Equal(t, contractCount, 1)
+		assert.NotEqual(t, closeCount, 0)
+		assert.NotEqual(t, escrowCount, 0)
+		assert.Equal(t, sweepCount, 1)
+
+		// age the contracts past the straggler expiration
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE transfer_contract
+				SET create_time = $2
+				WHERE contract_id = ANY($1)
+				`,
+				contractIds,
+				server.NowUtc().Add(-StragglerContractExpiration-24*time.Hour),
+			))
+		})
+
+		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
+
+		// the whole group is gone, sweeps included
+		for _, contractId := range contractIds {
+			contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractId)
+			assert.Equal(t, contractCount, 0)
+			assert.Equal(t, closeCount, 0)
+			assert.Equal(t, escrowCount, 0)
+			assert.Equal(t, sweepCount, 0)
+		}
+
+		// the pending payment record itself is retained
+		assert.NotEqual(t, countPendingPayments(), 0)
+	})
+}
+
+// Payments stuck pending past HungPaymentExpiration are canceled, which
+// releases their sweeps back to the payout planner for a fresh payment.
+// Recent pending payments are untouched.
+func TestCancelHungAccountPayments(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+		destinationSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: destinationNetworkId,
+			ClientId:  &destinationId,
+		})
+
+		netTransferByteCount := ByteCount(1024 * 1024)
+		netRevenue := UsdToNanoCents(10.00)
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			netTransferByteCount,
+			365*24*time.Hour,
+			netRevenue,
+			"",
+			"",
+			"",
+		)
+		assert.Equal(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
+
+		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
+			NetworkId:        destinationNetworkId,
+			Blockchain:       "matic",
+			WalletAddress:    "",
+			DefaultTokenType: "usdc",
+		})
+		assert.NotEqual(t, walletId, nil)
+		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
+		assert.Equal(t, err, nil)
+
+		usedTransferByteCount := ByteCount(1024)
+		paid := NanoCents(0)
+		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			assert.Equal(t, err, nil)
+
+			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+			assert.Equal(t, err, nil)
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+		}
+
+		plan, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, len(plan.NetworkPayments), 0)
+
+		// a recent pending payment is not hung
+		assert.Equal(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
+
+		// age the payments past the hung expiration
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE account_payment SET create_time = $1 WHERE NOT completed AND NOT canceled`,
+				server.NowUtc().Add(-HungPaymentExpiration-24*time.Hour),
+			))
+		})
+
+		canceledCount := CancelHungAccountPayments(ctx, server.NowUtc())
+		assert.NotEqual(t, canceledCount, int64(0))
+
+		// the sweeps are re-planned into fresh pending payments
+		plan2, err := PlanPayments(ctx)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, len(plan2.NetworkPayments), 0)
+	})
+}

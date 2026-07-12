@@ -648,7 +648,7 @@ func TestProxyClientReapSurvival(t *testing.T) {
 		// the production worker arguments (see RemoveDisconnectedNetworkClients)
 		minConnectionTime := server.NowUtc().Add(-8 * time.Hour)
 		minClientTime := server.NowUtc().Add(-30 * 24 * time.Hour)
-		model.RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime)
+		model.RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, time.Time{})
 		fmt.Printf("[progress]reaper ran\n")
 
 		// the stale client is gone

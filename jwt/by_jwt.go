@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -155,15 +154,14 @@ var byPublicKeys = sync.OnceValue(func() []gojwt.VerificationKey {
 // Trust verification happens at the user level.
 // A client is always tied to a user.
 type ByJwt struct {
-	NetworkId      server.Id   `json:"network_id,omitempty"`
-	NetworkName    string      `json:"network_name,omitempty"`
-	UserId         server.Id   `json:"user_id,omitempty"`
-	CreateTime     time.Time   `json:"create_time,omitempty"`
-	AuthSessionIds []server.Id `json:"auth_session_ids,omitempty"`
-	DeviceId       *server.Id  `json:"device_id,omitempty"`
-	ClientId       *server.Id  `json:"client_id,omitempty"`
-	GuestMode      bool        `json:"guest_mode,omitempty"`
-	Pro            bool        `json:"pro,omitempty"`
+	NetworkId   server.Id  `json:"network_id,omitempty"`
+	NetworkName string     `json:"network_name,omitempty"`
+	UserId      server.Id  `json:"user_id,omitempty"`
+	CreateTime  time.Time  `json:"create_time,omitempty"`
+	DeviceId    *server.Id `json:"device_id,omitempty"`
+	ClientId    *server.Id `json:"client_id,omitempty"`
+	GuestMode   bool       `json:"guest_mode,omitempty"`
+	Pro         bool       `json:"pro,omitempty"`
 	// identity roles and principal, assigned at client or auth code creation.
 	// The values have no meaning to the network.
 	Roles     []string `json:"roles,omitempty"`
@@ -177,7 +175,6 @@ func NewByJwt(
 	networkName string,
 	guestMode bool,
 	pro bool,
-	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
 		panic(fmt.Errorf("network_id must be set"))
@@ -195,7 +192,6 @@ func NewByJwt(
 		server.NowUtc(),
 		guestMode,
 		pro,
-		authSessionIds...,
 	)
 }
 
@@ -206,7 +202,6 @@ func NewByJwtWithCreateTime(
 	createTime time.Time,
 	guestMode bool,
 	pro bool,
-	authSessionIds ...server.Id,
 ) *ByJwt {
 	if networkId == (server.Id{}) {
 		panic(fmt.Errorf("network_id must be set"))
@@ -222,8 +217,7 @@ func NewByJwtWithCreateTime(
 		GuestMode:   guestMode,
 		Pro:         pro,
 		// round here so that the string representation in the jwt does not lose information
-		CreateTime:     server.CodecTime(createTime),
-		AuthSessionIds: authSessionIds,
+		CreateTime: server.CodecTime(createTime),
 		RegisteredClaims: gojwt.RegisteredClaims{
 			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
@@ -312,17 +306,16 @@ func (self *ByJwt) Sign() string {
 // before signing
 func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 	return &ByJwt{
-		NetworkId:      self.NetworkId,
-		UserId:         self.UserId,
-		NetworkName:    self.NetworkName,
-		CreateTime:     self.CreateTime,
-		AuthSessionIds: self.AuthSessionIds,
-		GuestMode:      self.GuestMode,
-		Pro:            self.Pro,
-		Roles:          self.Roles,
-		Principal:      self.Principal,
-		DeviceId:       &deviceId,
-		ClientId:       &clientId,
+		NetworkId:   self.NetworkId,
+		UserId:      self.UserId,
+		NetworkName: self.NetworkName,
+		CreateTime:  self.CreateTime,
+		GuestMode:   self.GuestMode,
+		Pro:         self.Pro,
+		Roles:       self.Roles,
+		Principal:   self.Principal,
+		DeviceId:    &deviceId,
+		ClientId:    &clientId,
 		RegisteredClaims: gojwt.RegisteredClaims{
 			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
@@ -331,15 +324,14 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 
 func (self *ByJwt) User() *ByJwt {
 	return &ByJwt{
-		NetworkId:      self.NetworkId,
-		UserId:         self.UserId,
-		NetworkName:    self.NetworkName,
-		CreateTime:     self.CreateTime,
-		AuthSessionIds: self.AuthSessionIds,
-		GuestMode:      self.GuestMode,
-		Pro:            self.Pro,
-		Roles:          self.Roles,
-		Principal:      self.Principal,
+		NetworkId:   self.NetworkId,
+		UserId:      self.UserId,
+		NetworkName: self.NetworkName,
+		CreateTime:  self.CreateTime,
+		GuestMode:   self.GuestMode,
+		Pro:         self.Pro,
+		Roles:       self.Roles,
+		Principal:   self.Principal,
 		RegisteredClaims: gojwt.RegisteredClaims{
 			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
 		},
@@ -485,7 +477,14 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 			    network.admin_user_id,
 			    network.network_name,
 			    network_client.device_id,
-			    network_client.principal
+			    network_client.principal,
+			    EXISTS (
+			        SELECT 1 FROM transfer_balance
+			        WHERE transfer_balance.network_id = network.network_id
+			            AND transfer_balance.pro = true
+			            AND transfer_balance.start_time <= $2
+			            AND $2 < transfer_balance.end_time
+			    ) AS pro
 
 			FROM network_client
 
@@ -495,6 +494,7 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 			    network_client.client_id = $1
 		    `,
 			clientId,
+			server.NowUtc(),
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -503,17 +503,17 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 				var networkName string
 				var deviceId server.Id
 				var principal string
+				var pro bool
 				server.Raise(result.Scan(
 					&networkId,
 					&userId,
 					&networkName,
 					&deviceId,
 					&principal,
+					&pro,
 				))
 
 				guestMode := false
-				// FIXME
-				pro := false
 
 				byJwt = NewByJwt(
 					networkId,
@@ -550,77 +550,6 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 		})
 	})
 	return
-}
-
-func IsByJwtActive(ctx context.Context, byJwt *ByJwt) bool {
-	// test the create time and sessions
-	// - all sessions created before a certain time may be expired (`auth_session_expiration`)
-	// - individual sessions may be expired (`auth_session`)
-
-	// FIXME perf
-	if true {
-		return true
-	}
-
-	var hasInactiveSession bool
-
-	server.Db(ctx, func(conn server.PgConn) {
-		if len(byJwt.AuthSessionIds) == 0 {
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT false AS active
-					FROM auth_session_expiration
-					WHERE
-						network_id = $1 AND
-						$2 <= expire_time
-				`,
-				byJwt.NetworkId,
-				byJwt.CreateTime,
-			)
-			server.WithPgResult(result, err, func() {
-				hasInactiveSession = result.Next()
-			})
-		} else {
-			authSessionIdPlaceholders := []string{}
-			for i := 0; i < len(byJwt.AuthSessionIds); i += 1 {
-				// start at $3
-				authSessionIdPlaceholders = append(authSessionIdPlaceholders, fmt.Sprintf("$%d", 3+i))
-			}
-			args := []any{
-				byJwt.NetworkId,
-				byJwt.CreateTime,
-			}
-			for _, authSessionId := range byJwt.AuthSessionIds {
-				args = append(args, authSessionId)
-			}
-			result, err := conn.Query(
-				ctx,
-				`
-					SELECT false AS active
-					FROM auth_session_expiration
-					WHERE
-						network_id = $1 AND
-						$2 <= expire_time
-
-					UNION ALL
-
-					SELECT active
-					FROM auth_session
-					WHERE
-						auth_session_id IN (`+strings.Join(authSessionIdPlaceholders, ",")+`) AND
-						active = false
-					LIMIT 1
-				`,
-				args...,
-			)
-			server.WithPgResult(result, err, func() {
-				hasInactiveSession = result.Next()
-			})
-		}
-	})
-
-	return !hasInactiveSession
 }
 
 func sign(claims gojwt.Claims) string {

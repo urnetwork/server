@@ -10,13 +10,15 @@ import (
 
 // statsCacheTtl bounds how stale a per-network provider-stats response can be.
 // The underlying aggregates are cheap indexed reads, but dashboards poll these
-// endpoints, so a short per-caller cache absorbs repeated calls.
+// endpoints, so a short per-network cache absorbs repeated calls. The stats
+// depend only on (network_id, args), which is what makes the network-scoped
+// cache safe.
 const statsCacheTtl = 30 * time.Second
 
 // GET /stats/providers — all providers in the caller network, last 24h.
 func StatsProviders(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(
-		router.CacheWithAuth(
+		router.CacheWithNetworkAuth(
 			model.StatsProviders,
 			"api_stats_providers",
 			statsCacheTtl,
@@ -28,7 +30,7 @@ func StatsProviders(w http.ResponseWriter, r *http.Request) {
 // POST /stats/providers-last-n — all providers in the caller network, last_n hours.
 func StatsProvidersLastN(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(
-		router.CacheWithAuthInput(
+		router.CacheWithNetworkAuthInput(
 			model.StatsProvidersLastN,
 			"api_stats_providers_last_n",
 			statsCacheTtl,
@@ -40,7 +42,7 @@ func StatsProvidersLastN(w http.ResponseWriter, r *http.Request) {
 // POST /stats/provider-last-n — single provider drill-down, last_n hours.
 func StatsProvider(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(
-		router.CacheWithAuthInput(
+		router.CacheWithNetworkAuthInput(
 			model.StatsProvider,
 			"api_stats_provider_last_n",
 			statsCacheTtl,
@@ -52,7 +54,7 @@ func StatsProvider(w http.ResponseWriter, r *http.Request) {
 // POST /stats/providers-overview-last-n — network aggregate time series.
 func StatsProvidersOverview(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(
-		router.CacheWithAuthInput(
+		router.CacheWithNetworkAuthInput(
 			model.StatsProvidersOverview,
 			"api_stats_providers_overview_last_n",
 			statsCacheTtl,
@@ -66,7 +68,7 @@ func StatsProvidersOverview(w http.ResponseWriter, r *http.Request) {
 // GET /stats/providers-overview-last-90
 func StatsProvidersOverviewLast90(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(
-		router.CacheWithAuth(
+		router.CacheWithNetworkAuth(
 			model.StatsProvidersOverviewLast90,
 			"api_stats_providers_overview_last_90",
 			statsCacheTtl,
@@ -78,7 +80,7 @@ func StatsProvidersOverviewLast90(w http.ResponseWriter, r *http.Request) {
 // POST /stats/provider-last-90
 func StatsProviderLast90(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(
-		router.CacheWithAuthInput(
+		router.CacheWithNetworkAuthInput(
 			model.StatsProviderLast90,
 			"api_stats_provider_last_90",
 			statsCacheTtl,

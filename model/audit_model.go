@@ -110,7 +110,8 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		CreatedTime: server.NowUtc().UnixMilli(),
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		glog.Infof("[audit]ComputeStats90 computeStatsProvider\n")
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
@@ -1207,4 +1208,35 @@ func AddAuditAccountPaymentEvent(ctx context.Context, event *AuditAccountPayment
 		)
 		server.Raise(err)
 	})
+}
+
+// audit_network_event retention. The event feed is append-only and its widest
+// reader is the 90-day stats lookback (`ComputeStats90`), so events older
+// than `AuditNetworkEventExpiration` are unread and removed.
+const AuditNetworkEventExpiration = 180 * 24 * time.Hour
+
+func RemoveOldAuditNetworkEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	minTime := maxTime.Add(-AuditNetworkEventExpiration)
+
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_network_event
+			USING (
+			    SELECT event_id
+			    FROM audit_network_event
+			    WHERE event_time < $1
+			    ORDER BY event_time
+			    LIMIT $2
+			) t
+			WHERE audit_network_event.event_id = t.event_id
+			`,
+			minTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+	})
+	return
 }

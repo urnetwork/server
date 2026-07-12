@@ -518,3 +518,438 @@ func TestRankMode(t *testing.T) {
 // 		})
 // 	})
 // }
+
+// FindProviders2 gates providers on reliability minimums (0.99 independent
+// reliability weight on the hour lookback). The reliability sink is
+// asynchronous: the announce hot path buffers per-block counters in redis and
+// the rollup flushes them to pg on its own cadence, so at ranking time the
+// most recent blocks are always unflushed. Clients emitting perfect
+// reliability every block must still rank at a full 1.0 weight — if the
+// unflushed tail were counted as missing reliability, every provider would
+// fall below the threshold and the provider market would empty.
+//
+// This simulates the cadences with explicit block times: emit every block
+// (N), flush every 2 blocks (2N), rank every block (N).
+func TestFindProviders2ReliabilityFlushLag(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		locationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []server.Id{
+				city.CityLocationId,
+				city.RegionLocationId,
+				city.CountryLocationId,
+			},
+		}
+		CreateLocationGroup(ctx, locationGroup)
+
+		type testProvider struct {
+			networkId         server.Id
+			clientId          server.Id
+			clientAddressHash [32]byte
+		}
+
+		n := 4
+		providers := []*testProvider{}
+		var callerSession *session.ClientSession
+
+		for i := range n {
+			networkId := server.NewId()
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				jwt.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
+			)
+
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+			handlerId := CreateNetworkClientHandler(ctx)
+			connectionId, _, _, _, err := ConnectNetworkClient(
+				ctx,
+				clientId,
+				fmt.Sprintf("0.0.0.%d:0", i),
+				handlerId,
+			)
+			assert.Equal(t, err, nil)
+
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{
+				ProvideModePublic: make([]byte, 32),
+			})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			assert.Equal(t, err, nil)
+
+			// good latency and speed tests so the quality score gate passes
+			// and the reliability minimums are the deciding filter
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO network_client_latency (connection_id, latency_ms, sample_count)
+					VALUES ($1, $2, $3)
+					`,
+					connectionId,
+					30,
+					1,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count)
+					VALUES ($1, $2, $3)
+					`,
+					connectionId,
+					100*1024*1024,
+					1,
+				))
+			})
+
+			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+			assert.Equal(t, err, nil)
+
+			providers = append(providers, &testProvider{
+				networkId:         networkId,
+				clientId:          clientId,
+				clientAddressHash: clientAddressHash,
+			})
+			callerSession = clientSession
+		}
+
+		perfectStats := func() *ClientReliabilityStats {
+			return &ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			}
+		}
+
+		// the recorder refuses blocks older than the previous wall-clock
+		// block, so the simulation runs on future block times
+		base := server.NowUtc()
+		blockTime := func(step int) time.Time {
+			return base.Add(time.Duration(step) * ReliabilityBlockDuration)
+		}
+
+		// history: every provider has been perfectly reliable for the entire
+		// max lookback before the simulation starts (direct pg backfill)
+		maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
+		for _, p := range providers {
+			AddClientReliabilityStatsRange(
+				ctx,
+				p.networkId,
+				p.clientId,
+				p.clientAddressHash,
+				base.Add(-maxLookback-time.Hour),
+				base,
+				perfectStats(),
+			)
+		}
+
+		// the drain has been live before the simulation starts, so the score
+		// windows have a high-water mark to clamp to. (In production the
+		// rollup task runs continuously; the work layer additionally refuses
+		// to compute scores when the mark is stale, see
+		// ClientReliabilityRollupSynced.)
+		RollupClientReliabilityStats(ctx, base)
+
+		// live simulation: emit every block, flush every 2 blocks, rank every
+		// block. The correct implementation ranks a full 1.0 at every step
+		// even though the newest 1-4 blocks are always unflushed.
+		eps := 0.005
+		steps := 12
+		scoredSteps := 0
+		for step := 1; step <= steps; step += 1 {
+			now := blockTime(step)
+
+			for _, p := range providers {
+				RecordClientReliabilityStatsRange(
+					ctx,
+					p.networkId,
+					p.clientId,
+					p.clientAddressHash,
+					now,
+					now,
+					perfectStats(),
+				)
+			}
+
+			if step%2 == 0 {
+				RollupClientReliabilityStats(ctx, now)
+			}
+
+			UpdateClientReliabilityScores(ctx, now, true)
+
+			lookbackClientScores := GetAllClientReliabilityScores(ctx)
+			if len(lookbackClientScores) == 0 {
+				// the first drain has not run yet
+				continue
+			}
+			scoredSteps += 1
+			for lookbackIndex, clientScores := range lookbackClientScores {
+				for _, p := range providers {
+					score, ok := clientScores[p.clientId]
+					assert.Equal(t, ok, true)
+					if d := score.IndependentReliabilityWeight - 1.0; d < -eps || eps < d {
+						t.Errorf(
+							"step %d lookback %d client %s: independent reliability weight %f != 1.0 (unflushed tail counted as unreliability)",
+							step,
+							lookbackIndex,
+							p.clientId,
+							score.IndependentReliabilityWeight,
+						)
+					}
+				}
+			}
+		}
+		// the loop must actually have scored (no vacuous pass)
+		assert.Equal(t, true, 8 <= scoredSteps)
+
+		// end to end through the strict FindProviders2 gate (no ForceMinimum):
+		// every provider must pass the reliability minimums and be returned
+		err := UpdateClientScores(ctx, 5*time.Second, 1)
+		assert.Equal(t, err, nil)
+
+		res, err := FindProviders2(&FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					LocationGroupId: &locationGroup.LocationGroupId,
+				},
+			},
+			Count: 2 * n,
+		}, callerSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), n)
+	})
+}
+
+// A connect deploy rotates handlers: the providers on a restarted host cannot
+// announce for a block or two, and the block in which they reconnect is
+// invalid by the `connection_new_count = 0` rule. That is TWO lost blocks out
+// of a 60-block hour — far below the 0.99 threshold FindProviders2 gates on —
+// so without excusing platform-caused blocks, every provider on a rotated
+// handler drops out of the market for a full hour after every deploy.
+//
+// The blocks a deploy takes out show up as a synchronized collapse in the
+// per-block client count, which the drain records. Those blocks are excused
+// for everyone, so providers that were up the whole time keep a full 1.0
+// weight and stay in the market.
+func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		locationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []server.Id{
+				city.CityLocationId,
+				city.RegionLocationId,
+				city.CountryLocationId,
+			},
+		}
+		CreateLocationGroup(ctx, locationGroup)
+
+		type testProvider struct {
+			networkId         server.Id
+			clientId          server.Id
+			clientAddressHash [32]byte
+		}
+
+		// enough providers that the degraded-block median is meaningful
+		n := 40
+		providers := []*testProvider{}
+		var callerSession *session.ClientSession
+
+		for i := range n {
+			networkId := server.NewId()
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				jwt.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
+			)
+
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+			handlerId := CreateNetworkClientHandler(ctx)
+			connectionId, _, _, _, err := ConnectNetworkClient(
+				ctx,
+				clientId,
+				fmt.Sprintf("0.0.%d.%d:0", i/256, i%256),
+				handlerId,
+			)
+			assert.Equal(t, err, nil)
+
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{
+				ProvideModePublic: make([]byte, 32),
+			})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			assert.Equal(t, err, nil)
+
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_client_latency (connection_id, latency_ms, sample_count) VALUES ($1, $2, $3)`,
+					connectionId, 30, 1,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count) VALUES ($1, $2, $3)`,
+					connectionId, 100*1024*1024, 1,
+				))
+			})
+
+			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+			assert.Equal(t, err, nil)
+
+			providers = append(providers, &testProvider{
+				networkId:         networkId,
+				clientId:          clientId,
+				clientAddressHash: clientAddressHash,
+			})
+			callerSession = clientSession
+		}
+
+		perfectStats := func() *ClientReliabilityStats {
+			return &ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			}
+		}
+		// what a handler rotation looks like in the block the client comes
+		// back in: the announce path marks the first sync of the new
+		// connection with ConnectionNewCount, and the next sync (~half a
+		// block later) reports the re-established connection. One reconnect
+		// in a block is tolerated (`client_reliability_valid`), so this block
+		// stays valid — the client lost only the block it was away for.
+		reconnectStats := func() *ClientReliabilityStats {
+			return &ClientReliabilityStats{
+				ConnectionNewCount:         1,
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			}
+		}
+
+		base := server.NowUtc()
+		blockTime := func(step int) time.Time {
+			return base.Add(time.Duration(step) * ReliabilityBlockDuration)
+		}
+
+		// perfect history over the whole max lookback
+		maxLookback := ClientLookbacks[len(ClientLookbacks)-1]
+		for _, p := range providers {
+			AddClientReliabilityStatsRange(
+				ctx,
+				p.networkId,
+				p.clientId,
+				p.clientAddressHash,
+				base.Add(-maxLookback-time.Hour),
+				base,
+				perfectStats(),
+			)
+		}
+		RollupClientReliabilityStats(ctx, base)
+
+		// a rolling deploy at step 6: the first half of the providers are on
+		// the rotated handler. They go silent for that block and reconnect in
+		// the next one (an invalid block for them).
+		deployStep := 6
+		steps := 12
+		for step := 1; step <= steps; step += 1 {
+			now := blockTime(step)
+
+			for i, p := range providers {
+				rotated := i < n/2
+				stats := perfectStats()
+				if rotated && step == deployStep {
+					// silent: the handler is gone, nothing is announced
+					continue
+				}
+				if rotated && step == deployStep+1 {
+					stats = reconnectStats()
+				}
+				RecordClientReliabilityStatsRange(
+					ctx,
+					p.networkId,
+					p.clientId,
+					p.clientAddressHash,
+					now,
+					now,
+					stats,
+				)
+			}
+
+			RollupClientReliabilityStats(ctx, now)
+		}
+
+		scoreTime := blockTime(steps)
+		UpdateClientReliabilityScores(ctx, scoreTime, true)
+
+		// the deploy blocks are excused, so every provider — including the
+		// ones that were rotated — keeps a full reliability weight
+		eps := 0.005
+		lookbackClientScores := GetAllClientReliabilityScores(ctx)
+		checkedCount := 0
+		for lookbackIndex, clientScores := range lookbackClientScores {
+			for i, p := range providers {
+				score, ok := clientScores[p.clientId]
+				assert.Equal(t, ok, true)
+				checkedCount += 1
+				if d := score.IndependentReliabilityWeight - 1.0; d < -eps || eps < d {
+					t.Errorf(
+						"lookback %d client %d: independent reliability weight %f != 1.0 (a connect deploy was counted as client unreliability)",
+						lookbackIndex,
+						i,
+						score.IndependentReliabilityWeight,
+					)
+				}
+			}
+		}
+		// the weight assertions above must not pass vacuously: every provider
+		// is scored in every lookback
+		assert.Equal(t, checkedCount, len(ClientLookbacks)*n)
+
+		// and every provider still passes the strict FindProviders2 gate
+		err := UpdateClientScores(ctx, 5*time.Second, 1)
+		assert.Equal(t, err, nil)
+
+		res, err := FindProviders2(&FindProviders2Args{
+			Specs: []*ProviderSpec{
+				{
+					LocationGroupId: &locationGroup.LocationGroupId,
+				},
+			},
+			Count: 2 * n,
+		}, callerSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, len(res.Providers), n)
+	})
+}

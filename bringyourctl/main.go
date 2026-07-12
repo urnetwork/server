@@ -42,6 +42,7 @@ Usage:
     bringyourctl search --realm=<realm> --type=<type> clear
     bringyourctl stats compute
     bringyourctl stats export
+    bringyourctl stats providers-map
     bringyourctl stats import
     bringyourctl stats add
     bringyourctl locations add-default [-a]
@@ -84,6 +85,7 @@ Usage:
     bringyourctl proxy inspect <proxy_id>
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
+    bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
     bringyourctl st deposit [--alpha_rao=<alpha_rao>]
@@ -141,6 +143,8 @@ Options:
 			statsCompute(opts)
 		} else if export, _ := opts.Bool("export"); export {
 			statsExport(opts)
+		} else if providersMap, _ := opts.Bool("providers-map"); providersMap {
+			statsProvidersMap(opts)
 		} else if import_, _ := opts.Bool("import"); import_ {
 			statsImport(opts)
 		} else if add, _ := opts.Bool("add"); add {
@@ -266,6 +270,8 @@ Options:
 				modelMigrateProvideMode(opts)
 			} else if proxyDeviceConfig, _ := opts.Bool("proxy-device-config"); proxyDeviceConfig {
 				modelMigrateProxyDeviceConfig(opts)
+			} else if clientReliabilityPartition, _ := opts.Bool("client-reliability-partition"); clientReliabilityPartition {
+				modelMigrateClientReliabilityPartition(opts)
 			}
 		}
 	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
@@ -369,6 +375,20 @@ func statsExport(opts docopt.Opts) {
 	ctx := context.Background()
 	stats := model.ComputeStats(ctx, 90)
 	model.ExportStats(ctx, stats)
+}
+
+// statsProvidersMap seeds the /stats/providers-map blob once (the taskworker
+// refreshes it on a schedule). Useful so the endpoint has data before the first
+// task run.
+func statsProvidersMap(opts docopt.Opts) {
+	ctx := context.Background()
+	if err := model.ExportProvidersMap(ctx); err != nil {
+		panic(err)
+	}
+	if providersMapJson := model.GetExportedProvidersMapJson(ctx); providersMapJson != nil {
+		fmt.Printf("%s\n", *providersMapJson)
+	}
+	fmt.Println("exported stats.providers-map")
 }
 
 func statsImport(opts docopt.Opts) {
@@ -1398,8 +1418,17 @@ func refreshTransferBalances(opts docopt.Opts) {
 	ctx := context.Background()
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	controller.RefreshTransferBalances(
-		&controller.RefreshTransferBalancesArgs{},
+	// run all three grants (free daily, pro monthly, referral period)
+	controller.RefreshFreeTransferBalances(
+		&controller.RefreshFreeTransferBalancesArgs{},
+		clientSession,
+	)
+	controller.RefreshProTransferBalances(
+		&controller.RefreshProTransferBalancesArgs{},
+		clientSession,
+	)
+	controller.RefreshReferralTransferBalances(
+		&controller.RefreshReferralTransferBalancesArgs{},
 		clientSession,
 	)
 }
@@ -1414,6 +1443,27 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 	ctx := context.Background()
 	model.MigrateProxyDeviceConfig(ctx, 50000)
 	fmt.Println("Proxy device config migration completed successfully.")
+}
+
+// Converts client_reliability to daily block-range partitions, retaining only
+// the last 30 days (see xops/db/client_reliability_partition_plan.md). Safe to
+// rerun: resumes an interrupted copy, no-ops once converted. After validating,
+// rerun with --finalize to drop the old table and reclaim its disk.
+func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
+	ctx := context.Background()
+	logf := func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if finalize, _ := opts.Bool("--finalize"); finalize {
+		if err := model.FinalizeClientReliabilityPartitionMigration(ctx, logf); err != nil {
+			panic(err)
+		}
+		return
+	}
+	dryRun, _ := opts.Bool("--dry-run")
+	if err := model.MigrateClientReliabilityToPartitions(ctx, dryRun, logf); err != nil {
+		panic(err)
+	}
 }
 
 // st — manual ops fallback for the subtensor epoch pipeline (sn/PLAN.md §6,

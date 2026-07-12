@@ -78,12 +78,14 @@ func RemoveDisconnectedNetworkClients(
 	removeDisconnectedNetworkClients *RemoveDisconnectedNetworkClientsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveDisconnectedNetworkClientsResult, error) {
-	// connection rows are kept briefly for diagnostics; clients are reaped
-	// only after 30 days unseen (auth_time), since provisioned child clients
-	// (e.g. proxy devices) cannot recover from a reaped client_id
+	// connection rows are kept briefly for diagnostics; inactive clients are
+	// reaped 30 days after deactivation, since provisioned child clients
+	// (e.g. proxy devices) cannot recover from a reaped client_id; abandoned
+	// top-level clients are marked inactive after 90 days unseen (auth_time)
 	minConnectionTime := server.NowUtc().Add(-8 * time.Hour)
-	minClientTime := server.NowUtc().Add(-30 * 24 * time.Hour)
-	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minConnectionTime, minClientTime)
+	minClientTime := server.NowUtc().Add(-model.NetworkClientReapAfterDeactivate)
+	minTopLevelAuthTime := server.NowUtc().Add(-model.TopLevelClientIdleExpiration)
+	model.RemoveDisconnectedNetworkClients(clientSession.Ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
 	return &RemoveDisconnectedNetworkClientsResult{}, nil
 }
 

@@ -107,18 +107,12 @@ func (self *ClientSession) Auth(req *http.Request) error {
 
 			} else {
 				// handle JWT authentication
-				// to validate the jwt:
-				// 1. parse it which tests the signing key.
-				//    this will fail if the signature is invalid.
-				// 2. test the create time and sessions against
-				//    inactive sessions. For various security reasons sessions may be expired.
+				// to validate the jwt, parse it, which tests the signing key.
+				// this will fail if the signature is invalid.
 
 				byJwt, err := jwt.ParseByJwt(self.Ctx, authStr)
 				if err != nil {
 					return err
-				}
-				if !jwt.IsByJwtActive(self.Ctx, byJwt) {
-					return errors.New("JWT expired.")
 				}
 				glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
 				self.ByJwt = byJwt

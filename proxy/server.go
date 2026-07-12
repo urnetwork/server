@@ -27,8 +27,8 @@ const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
-		ProxyReadTimeout:         15 * time.Second,
-		ProxyWriteTimeout:        30 * time.Second,
+		ProxyReadTimeout:         30 * time.Second,
+		ProxyWriteTimeout:        15 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
 		ProxyConnectTimeout:      30 * time.Minute,
@@ -102,6 +102,18 @@ func (self *socks5Server) run() {
 			return false
 		}
 
+		// SOCKS is a Pro-only feature (pro.yml). Enforced at the CONNECTION, not just
+		// at credential issuance -- otherwise a client that already holds SOCKS
+		// credentials keeps using them after its plan stops including the feature.
+		//
+		// Free while enforce_features is dark, and served from in-process caches once
+		// it is on, so this costs nothing on the accept path. See
+		// model.ProxyFeatureAllowed.
+		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureSocksProxy) {
+			glog.Infof("[socks]refused %s: socks is not included in the plan\n", proxyId)
+			return false
+		}
+
 		if glog.V(1) {
 			glog.Infof("[socks]user valid %s (%s)\n", proxyId, addrPort)
 		}
@@ -132,11 +144,13 @@ func (self *socks5Server) run() {
 		return pd.DialContext(ctx, network, addr)
 	}
 
-	socksProxy := proxy.NewSocksProxy()
+	socksSettings := proxy.DefaultSocksProxySettings()
+	socksSettings.ProxyReadTimeout = self.settings.ProxyReadTimeout
+	socksSettings.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
+
+	socksProxy := proxy.NewSocksProxy(socksSettings)
 	socksProxy.ConnectDialWithRequest = connectDial
 	socksProxy.ValidUser = validUser
-	socksProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
-	socksProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
 
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalSocksPort)
 
@@ -238,6 +252,14 @@ func (self *httpServer) run() {
 			return nil, fmt.Errorf("Not authorized")
 		}
 
+		// the same per-connection plan check as SOCKS. Both tiers include the https
+		// proxy today, so this does not bite -- but the gate belongs on the path, not
+		// on an assumption about what the plan happens to contain.
+		if !model.ProxyFeatureAllowed(self.ctx, proxyId, model.FeatureHttpsProxy) {
+			glog.Infof("[http]refused %s: the https proxy is not included in the plan\n", proxyId)
+			return nil, fmt.Errorf("Not authorized")
+		}
+
 		pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
 		if err != nil {
 			return nil, err
@@ -246,15 +268,17 @@ func (self *httpServer) run() {
 		return pd.DialContext(r.Context(), network, addr)
 	}
 
-	httpProxy := proxy.NewHttpProxy()
+	httpSettings := proxy.DefaultHttpProxySettings()
+	httpSettings.ProxyReadTimeout = self.settings.ProxyReadTimeout
+	httpSettings.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
+	httpSettings.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
+	httpSettings.ProxyConnectTimeout = self.settings.ProxyConnectTimeout
+	httpSettings.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
+
+	httpProxy := proxy.NewHttpProxy(httpSettings)
 	// httpProxy.Logger = self
 	httpProxy.GetTlsConfigForClient = self.transportTls.GetTlsConfigForClient
 	httpProxy.ConnectDialWithRequest = connectDial
-	httpProxy.ProxyReadTimeout = self.settings.ProxyReadTimeout
-	httpProxy.ProxyWriteTimeout = self.settings.ProxyWriteTimeout
-	httpProxy.ProxyIdleTimeout = self.settings.ProxyIdleTimeout
-	httpProxy.ProxyConnectTimeout = self.settings.ProxyConnectTimeout
-	httpProxy.ProxyTlsHandshakeTimeout = self.settings.ProxyTlsHandshakeTimeout
 	// httpProxy.AllowHTTP2 = true
 	// httpProxy.Tr = &http.Transport{
 	// 	TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
@@ -414,6 +438,8 @@ type wgClientCounts struct {
 	noWgConfig        int
 	publicKeyMismatch int
 	invalidAuthToken  int
+	// dropped because the network's plan does not include WireGuard
+	notEntitled int
 }
 
 // validWgClients converts proxy clients to wg clients, dropping clients that
@@ -429,6 +455,18 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 	for _, proxyClient := range proxyClients {
 		if proxyClient.WgConfig == nil {
 			counts.noWgConfig += 1
+			continue
+		}
+		// WireGuard is a Pro-only feature (pro.yml). This is the connection-side
+		// enforcement: a client that already holds a wg config is dropped from the
+		// server's peer set once its plan stops including WireGuard, rather than
+		// continuing to route because it was issued a config in the past.
+		//
+		// No-op while enforce_features is dark. This runs on the client-sync path, not
+		// per packet, and the lookups are cached in-process anyway.
+		if !model.ProxyFeatureAllowed(self.ctx, proxyClient.ProxyId, model.FeatureWireguardProxy) {
+			glog.Infof("[wg][%s]dropped: wireguard is not included in the plan\n", proxyClient.ProxyId)
+			counts.notEntitled += 1
 			continue
 		}
 		if proxyClient.WgConfig.ProxyPublicKey != serverConfig.Wg.PublicKey {
@@ -477,7 +515,7 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 
 func (self *wgServer) logClientCounts(op string, applied int, removed int, counts *wgClientCounts) {
 	glog.Infof(
-		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token), peers %d/%d\n",
+		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), peers %d/%d\n",
 		op,
 		applied,
 		counts.total,
@@ -485,6 +523,10 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 		counts.noWgConfig,
 		counts.publicKeyMismatch,
 		counts.invalidAuthToken,
+		// dropped because the plan does not include WireGuard. Logged alongside the
+		// other drop reasons on purpose: a client silently vanishing from the peer set
+		// is exactly the kind of thing that turns into an unexplainable support ticket.
+		counts.notEntitled,
 		self.wgProxy.ClientCount(),
 		proxy.MaxClients,
 	)

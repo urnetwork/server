@@ -16,6 +16,8 @@ import (
 )
 
 func TestNetworkCreate(t *testing.T) {
+	skipWithoutProYml(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -75,7 +77,7 @@ func TestNetworkCreate(t *testing.T) {
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
 		assert.Equal(t, 1, len(transferBalances))
 		transferBalance := transferBalances[0]
-		assert.Equal(t, transferBalance.BalanceByteCount, RefreshFreeTransferBalance)
+		assert.Equal(t, transferBalance.BalanceByteCount, model.Pro().DataAmount(false))
 		assert.Equal(t, !transferBalance.StartTime.After(time.Now()), true)
 		assert.Equal(t, time.Now().Before(transferBalance.EndTime), true)
 	})
@@ -219,8 +221,24 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Error, nil)
 
+		// The balance code's data lands on the new network...
+		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
+		redeemed := model.ByteCount(0)
+		for _, transferBalance := range transferBalances {
+			redeemed += transferBalance.BalanceByteCount
+			// ...and NO balance it created carries the Pro entitlement.
+			assert.Equal(t, transferBalance.Pro, false)
+		}
+		// the code's data is there (alongside the free signup grant)
+		assert.Equal(t, netTransferByteCount <= redeemed, true)
+
+		// ...but redeeming a code does NOT make the network Pro. A data code is
+		// DATA ONLY. It is a `paid` balance (it carries revenue), which is exactly
+		// why Pro cannot be inferred from `paid` -- see model/pro_model.go. This
+		// assertion used to be `true`, back when IsPro meant "has any paid balance"
+		// and buying data silently upgraded you for free.
 		isPro := model.IsPro(ctx, &result.Network.NetworkId)
-		assert.Equal(t, isPro, true)
+		assert.Equal(t, isPro, false)
 
 	})
 }

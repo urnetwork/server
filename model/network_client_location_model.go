@@ -2508,9 +2508,17 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	minFilter := filter{
 		maxScore: 2 * scorePerTier,
 	}
+	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
+	// The hour threshold is the gate that decides whether a provider is in the
+	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
+	// left no slack for a reconnect that straddles a block boundary (the block
+	// carrying only the new-connection sync has no established sync, so it is
+	// invalid however tolerant the rule is). 0.95 allows three such blocks an
+	// hour. Repeated reconnects still fail it: they are real user impact, and
+	// `client_reliability_valid` only forgives ONE per block.
 	if NormalNetworkConditions() {
 		minFilter.minIndependentReliabilityWeights = map[int]float64{
-			1: float64(0.99),
+			1: float64(0.95),
 			2: float64(0.7),
 			3: float64(0.6),
 		}

@@ -3,18 +3,18 @@ package controller
 import (
 	"fmt"
 	"io"
-	"path"
-	"strings"
-	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	awsSession "github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
+
+// Log file storage is disabled: the upload body is drained and discarded, and
+// only per-upload metadata is kept (`model.CreateFeedbackLogUpload`). When
+// storage is re-enabled it should write to minio, not the db or aws s3, keyed
+// logs/network_<network_id>/feedback_<feedback_id>.zip
+const LogFileMaxByteCount = int64(100 * 1024 * 1024)
 
 type UploadLogFileArgs struct {
 	// OriginalFilename string
@@ -26,12 +26,13 @@ type UploadLogFileArgs struct {
 	Now         time.Time
 }
 
-type UploadLogFileResult struct{}
+type UploadLogFileError struct {
+	Message string `json:"message"`
+}
 
-var logBucket = sync.OnceValue(func() string {
-	c := server.Config.RequireSimpleResource("aws.yml").Parse()
-	return c["aws"].(map[string]any)["feedback_log_bucket"].(string)
-})
+type UploadLogFileResult struct {
+	Error *UploadLogFileError `json:"error,omitempty"`
+}
 
 func UploadLogFile(
 	session *session.ClientSession,
@@ -45,63 +46,46 @@ func UploadLogFile(
 	if err != nil {
 		return nil, err
 	}
+	if feedback == nil {
+		return nil, fmt.Errorf("%d Feedback not found.", 404)
+	}
 
 	if feedback.NetworkId != session.ByJwt.NetworkId {
 		return nil, fmt.Errorf("%d Feedback does not belong to your network.", 403)
 	}
 
-	bucket := strings.TrimSpace(logBucket())
-	if bucket == "" {
-		return nil, fmt.Errorf("%d Missing log file bucket configuration.", 500)
+	feedbackLogUploadId, allowed := model.CreateFeedbackLogUpload(
+		session.Ctx,
+		model.CreateFeedbackLogUploadArgs{
+			FeedbackId:  feedback.FeedbackId,
+			NetworkId:   session.ByJwt.NetworkId,
+			UserId:      session.ByJwt.UserId,
+			ClientId:    session.ByJwt.ClientId,
+			ContentType: uploadFile.ContentType,
+			Now:         uploadFile.Now,
+		},
+	)
+	if !allowed {
+		return &UploadLogFileResult{
+			Error: &UploadLogFileError{
+				Message: fmt.Sprintf("Rate limited. One log upload per network per %s.", model.FeedbackLogUploadRatePeriod),
+			},
+		}, nil
 	}
 
-	key := buildLogKey(uploadFile, session)
-
-	// pull this from config?
-	awsRegion := "us-west-1"
-
-	awsSess, err := awsSession.NewSession(&aws.Config{Region: aws.String(awsRegion)})
+	byteCount, err := io.Copy(io.Discard, io.LimitReader(body, LogFileMaxByteCount+1))
+	complete := err == nil && byteCount <= LogFileMaxByteCount
+	model.FinishFeedbackLogUpload(session.Ctx, feedbackLogUploadId, byteCount, complete)
 	if err != nil {
 		return nil, err
 	}
-
-	uploader := s3manager.NewUploader(awsSess)
-	cr := &countingReader{r: body}
-	_, err = uploader.UploadWithContext(session.Ctx, &s3manager.UploadInput{
-		Bucket:      aws.String(bucket),
-		Key:         aws.String(key),
-		Body:        cr,
-		ContentType: aws.String(uploadFile.ContentType),
-	})
-	if err != nil {
-		return nil, err
+	if !complete {
+		return &UploadLogFileResult{
+			Error: &UploadLogFileError{
+				Message: fmt.Sprintf("Log file exceeds the maximum upload size %dmb.", LogFileMaxByteCount/(1024*1024)),
+			},
+		}, nil
 	}
 
 	return &UploadLogFileResult{}, nil
-}
-
-/**
- * output will look like logs/<network_x>/<feedback_id>
- */
-func buildLogKey(uploadFile UploadLogFileArgs, sess *session.ClientSession) string {
-
-	parts := []string{
-		"logs",
-		"network_" + sess.ByJwt.NetworkId.String(),
-	}
-	if uploadFile.FeedbackId != nil {
-		parts = append(parts, "feedback_"+uploadFile.FeedbackId.String())
-	}
-	return path.Join(parts...) + ".zip"
-}
-
-type countingReader struct {
-	r io.Reader
-	n int64
-}
-
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
 }

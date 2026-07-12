@@ -18,7 +18,7 @@ import (
 type AccountErrorMessage string
 
 var (
-	ErrInvalidBlockchain    = errors.New("invalid blockchain, use SOL or MATIC")
+	ErrInvalidBlockchain    = errors.New("invalid blockchain, use SOL, MATIC, or TAO")
 	ErrInvalidWalletAddress = errors.New("invalid wallet address")
 )
 
@@ -60,8 +60,9 @@ func CreateAccountWalletExternal(
 	payoutWallet := model.GetPayoutWalletId(session.Ctx, session.ByJwt.NetworkId)
 
 	// if a payout wallet doesn't exist for the network
-	// set payout wallet
-	if payoutWallet == nil {
+	// set payout wallet. bittensor wallets are recorded for future use only
+	// and are never the payout wallet (payouts are USDC on Solana/Polygon)
+	if payoutWallet == nil && blockchain != model.TAO {
 		err := model.SetPayoutWallet(session.Ctx, session.ByJwt.NetworkId, *walletId)
 		if err != nil {
 			return nil, err

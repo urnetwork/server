@@ -16,7 +16,15 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
 		router.NewRoute("GET", "/status", router.WarpStatus),
+		// /stats/last-90 stays up: it serves a redis-exported blob and does not
+		// touch the db.
 		router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),
+		// /stats/providers-map likewise serves a redis-exported blob (provider
+		// counts by country/region + centroids), refreshed by ExportProvidersMap.
+		router.NewRoute("GET", "/stats/providers-map", handlers.StatsProvidersMap),
+		// The statistics apis below (plus /network/ranking and /transfer/stats
+		// further down) run live aggregates tagged with server.ReplicaDb, so
+		// they offload to a db replica when one is attached.
 		router.NewRoute("GET", "/stats/providers", handlers.StatsProviders),
 		router.NewRoute("POST", "/stats/providers-last-n", handlers.StatsProvidersLastN),
 		router.NewRoute("POST", "/stats/provider-last-n", handlers.StatsProvider),
@@ -71,6 +79,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
 		router.NewRoute("POST", "/stripe/customer-portal", handlers.StripeCreateCustomerPortal),
+		router.NewRoute("POST", "/stripe/create-checkout-session", handlers.StripeCreateCheckoutSession),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
@@ -79,6 +88,10 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
 		router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
 		router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
+		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
+		// not configured/enabled -- see vault/<env>/x402.yml.
+		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),
+		router.NewRoute("POST", "/x402/purchase", handlers.X402Purchase),
 		router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
 		router.NewRoute("POST", "/device/create-share-code", handlers.DeviceCreateShareCode),
 		router.NewRoute("GET", "/device/share-code/([^/]+)/qr.png", handlers.DeviceShareCodeQR),

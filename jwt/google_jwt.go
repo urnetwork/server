@@ -29,12 +29,21 @@ var googleJwkValidator = sync.OnceValue(func() *JwkValidator {
 // https://www.googleapis.com/oauth2/v3/certs
 
 func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
-	for _, key := range googleJwkValidator().Keys() {
-		// var err error
-		// var token gojwt.Token
-		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (any, error) {
-			return key, nil
-		})
+	return parseGoogleJwtWithKeys(jwtSigned, googleJwkValidator().Keys(), googleSsoClientIds())
+}
+
+func parseGoogleJwtWithKeys(jwtSigned string, keys []any, allowedClientIds []string) (*GoogleJwt, error) {
+	for _, key := range keys {
+		token, err := gojwt.Parse(
+			jwtSigned,
+			func(token *gojwt.Token) (any, error) {
+				return key, nil
+			},
+			// the google jwks signs id tokens with RS256; pinning the method
+			// prevents algorithm confusion against the rsa public keys
+			gojwt.WithValidMethods([]string{"RS256"}),
+			gojwt.WithExpirationRequired(),
+		)
 		if err == nil {
 			var userAuthString string
 			var userNameString string
@@ -64,10 +73,23 @@ func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
 				}
 			*/
 
-			// fixme
+			if err := validateSsoClaims(
+				claims,
+				// google issues with and without the scheme
+				[]string{"https://accounts.google.com", "accounts.google.com"},
+				allowedClientIds,
+			); err != nil {
+				return nil, err
+			}
+
 			userAuthString, ok = claims["email"].(string)
 			if !ok {
 				return nil, errors.New("Malformed jwt.")
+			}
+			// the email is the account identity: an unverified email on the
+			// provider account must not authenticate it here
+			if !ssoEmailVerified(claims) {
+				return nil, errors.New("Email not verified.")
 			}
 			userNameString, ok = claims["name"].(string)
 			if !ok {
@@ -85,6 +107,10 @@ func ParseGoogleJwt(jwtSigned string) (*GoogleJwt, error) {
 	return nil, errors.New("Could not verify signed token.")
 }
 
+// ParseGoogleJwtUnverified does not verify the signature or claims. It must
+// only be used to re-read an auth jwt that was verified with `ParseGoogleJwt`
+// when it was first presented (e.g. the stored network_user auth_jwt), never
+// on untrusted input.
 func ParseGoogleJwtUnverified(jwtStr string) (*GoogleJwt, error) {
 	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
 	if err != nil {

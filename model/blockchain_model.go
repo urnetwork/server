@@ -11,10 +11,13 @@ const (
 	SOL Blockchain = iota
 	MATIC
 	ETHEREUM
+	// TAO (bittensor) wallets are recorded for future use only: they cannot
+	// be the payout wallet (payouts are USDC on Solana/Polygon)
+	TAO
 )
 
 func (b Blockchain) String() string {
-	return [...]string{"SOL", "MATIC", "ETHEREUM"}[b]
+	return [...]string{"SOL", "MATIC", "ETHEREUM", "TAO"}[b]
 }
 
 func ParseBlockchain(s string) (Blockchain, error) {
@@ -34,6 +37,10 @@ func ParseBlockchain(s string) (Blockchain, error) {
 		return ETHEREUM, nil
 	case "ETHEREUM":
 		return ETHEREUM, nil
+	case "TAO":
+		return TAO, nil
+	case "BITTENSOR":
+		return TAO, nil
 	default:
 		return -1, fmt.Errorf("invalid Blockchain: %s", s)
 	}

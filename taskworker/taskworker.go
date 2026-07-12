@@ -21,9 +21,11 @@ func InitTasks(ctx context.Context) {
 		// **important** make sure the required functions are loaded in `InitTaskWorker`
 		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
+		work.ScheduleExportProvidersMap(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
+		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		for i := range work.DefaultCloseExpiredContractsBlockSize {
 			work.ScheduleCloseExpiredContracts(clientSession, tx, i, false)
@@ -35,7 +37,11 @@ func InitTasks(ctx context.Context) {
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
-		controller.ScheduleRefreshTransferBalances(clientSession, tx)
+		// the three data grants run on three different schedules:
+		// free daily, pro monthly, referral every referral period
+		controller.ScheduleRefreshFreeTransferBalances(clientSession, tx)
+		controller.ScheduleRefreshProTransferBalances(clientSession, tx)
+		controller.ScheduleRefreshReferralTransferBalances(clientSession, tx)
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
@@ -44,6 +50,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
+		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
@@ -86,6 +93,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			"bringyour.com/service/taskworker/work.ExportStats",
 		),
 		task.NewTaskTargetWithPost(
+			work.ExportProvidersMap,
+			work.ExportProvidersMapPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.RemoveExpiredAuthCodes,
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
@@ -99,6 +110,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,
 			"bringyour.com/service/taskworker/work.ProcessPendingPayouts",
+		),
+		task.NewTaskTargetWithPost(
+			work.CancelHungAccountPayments,
+			work.CancelHungAccountPaymentsPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,
@@ -146,9 +161,19 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			"github.com/urnetwork/server/model.IndexSearchLocations",
 		),
 		task.NewTaskTargetWithPost(
-			controller.RefreshTransferBalances,
-			controller.RefreshTransferBalancesPost,
-			"bringyour.com/bringyour/controller.RefreshTransferBalances",
+			controller.RefreshFreeTransferBalances,
+			controller.RefreshFreeTransferBalancesPost,
+			"bringyour.com/bringyour/controller.RefreshFreeTransferBalances",
+		),
+		task.NewTaskTargetWithPost(
+			controller.RefreshProTransferBalances,
+			controller.RefreshProTransferBalancesPost,
+			"bringyour.com/bringyour/controller.RefreshProTransferBalances",
+		),
+		task.NewTaskTargetWithPost(
+			controller.RefreshReferralTransferBalances,
+			controller.RefreshReferralTransferBalancesPost,
+			"bringyour.com/bringyour/controller.RefreshReferralTransferBalances",
 		),
 		task.NewTaskTargetWithPost(
 			controller.AdvancePayment,
@@ -187,6 +212,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 			work.RemoveExpiredWalletAuthChallenges,
 			work.RemoveExpiredWalletAuthChallengesPost,
 			"github.com/urnetwork/server/taskworker/work.RemoveExpiredWalletAuthChallenges",
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldAuditNetworkEvents,
+			work.RemoveOldAuditNetworkEventsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,

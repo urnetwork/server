@@ -93,6 +93,39 @@ func FindClientNetwork(
 	return
 }
 
+// FindActiveClientNetwork is `FindClientNetwork` restricted to active
+// clients. The jwt refresh path uses this so a removed (inactive) or deleted
+// client stops refreshing: the app sees the error and logs out instead of
+// running against a dead client until the client row is reaped.
+func FindActiveClientNetwork(
+	ctx context.Context,
+	clientId server.Id,
+) (networkId server.Id, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					network_id
+				FROM network_client
+				WHERE
+					client_id = $1 AND
+					active = true
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+			} else {
+				returnErr = fmt.Errorf("Client does not exist.")
+			}
+		})
+	})
+
+	return
+}
+
 // FIXME source client id. if source, tag the client as ancillary and just copy the device id from the source
 // FIXME get network clients to include the source network id
 type AuthNetworkClientArgs struct {
@@ -136,8 +169,13 @@ type AuthNetworkClientResult struct {
 
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
-	ClientLimitExceeded bool   `json:"client_limit_exceeded"`
-	Message             string `json:"message"`
+	ClientLimitExceeded bool `json:"client_limit_exceeded"`
+	// the network is at its plan's limit for concurrent connected top-level
+	// clients (pro.yml concurrent_clients). Unlike ClientLimitExceeded, this is
+	// a plan limit rather than a hard cap: the client should surface an upgrade
+	// prompt. Corresponds to HTTP 402 semantics for the caller.
+	UpgradeRequired bool   `json:"upgrade_required,omitempty"`
+	Message         string `json:"message"`
 }
 
 type ProxyConfigResult struct {
@@ -206,6 +244,26 @@ func AuthNetworkClient(
 			return
 		}
 
+		// Client-creation gate for the plan's concurrent connected-client limit:
+		// Do not provision a new top-level client while the network is already at its
+		// connected limit. Only top-level clients count and public providers are
+		// exempt; Pro is read live rather than from the jwt's stale claim; and while
+		// the rollout is dark this does no redis/db work at all. See
+		// NetworkConcurrentClientsExceeded. Checked before the tx so the lookup does
+		// not hold it open. Connection activation applies the same limit; see
+		// CanConnectNetworkPeer.
+		if authClient.SourceClientId == nil &&
+			NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId) {
+			authClientResult = &AuthNetworkClientResult{
+				Error: &AuthNetworkClientError{
+					ClientLimitExceeded: true,
+					UpgradeRequired:     true,
+					Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
+				},
+			}
+			return
+		}
+
 		var clientId server.Id
 
 		server.Tx(session.Ctx, func(tx server.PgTx) {
@@ -216,18 +274,24 @@ func AuthNetworkClient(
 
 			if authClient.SourceClientId == nil {
 				// only top-level clients get peer subscriptions,
-				// so the active count is hard limited (see peer_model.go)
+				// so the active count is hard limited (see peer_model.go).
+				// the scan is bounded at the limit since only the threshold matters
 				result, err := tx.Query(
 					session.Ctx,
 					`
 						SELECT COUNT(*) AS top_level_client_count
-						FROM network_client
-						WHERE
-							network_id = $1 AND
-							active = true AND
-							source_client_id IS NULL
+						FROM (
+							SELECT 1
+							FROM network_client
+							WHERE
+								network_id = $1 AND
+								active = true AND
+								source_client_id IS NULL
+							LIMIT $2
+						) t
 					`,
 					session.ByJwt.NetworkId,
+					LimitTopLevelClientIdsPerNetwork+1,
 				)
 				topLevelClientCount := 0
 				server.WithPgResult(result, err, func() {
@@ -407,9 +471,22 @@ func AuthNetworkClient(
 				err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
 				if err == nil {
 
+					// SOCKS and WireGuard are Pro-only (pro.yml features): a
+					// free-tier client is issued neither a SOCKS url nor a WireGuard
+					// config.
+					//
+					// NetworkFeatureAllowed resolves Pro LIVE (never from the jwt's
+					// claim, which is stale for a user who just upgraded -- handing a
+					// fresh subscriber a config with no SOCKS/WireGuard until they
+					// re-auth is exactly the broken upgrade we are avoiding), and it
+					// short-circuits while enforce_features is dark, so today this
+					// costs no lookup and every tier still gets them.
+					networkId := session.ByJwt.NetworkId
 					opts := CreateProxyClientOptions{
 						HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
-						EnableWg:         authClient.ProxyConfig.EnableWg,
+						EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
+						EnableWg: authClient.ProxyConfig.EnableWg &&
+							NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
 					}
 					proxyClient, err := CreateProxyClient(
 						session.Ctx,
@@ -596,13 +673,15 @@ func RemoveNetworkClient(
 			`
 				UPDATE network_client
 				SET
-					active = false
+					active = false,
+					deactivate_time = $3
 				WHERE
 					client_id = $1 AND
 					network_id = $2
 			`,
 			removeClient.ClientId,
 			session.ByJwt.NetworkId,
+			server.NowUtc(),
 		)
 		server.Raise(err)
 		if tag.RowsAffected() != 1 {
@@ -1690,9 +1769,22 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 // a client is reaped only if it has not authed or connected since
 // `minClientTime` (see the auth_time refresh in `ConnectNetworkClient`).
 // Keep the client window much larger than the connection window: provisioned
+// an inactive client is reaped this long after it was deactivated (user
+// removal or the idle top-level marker), giving a notice window before the
+// hard delete and its cascades
+const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
+
+// a top-level client (source_client_id IS NULL) that has not authed or
+// connected for this long is abandoned: it is marked inactive, which makes
+// the jwt refresh fail so the app logs the user out (see
+// FindActiveClientNetwork), and the reap hard deletes it
+// `NetworkClientReapAfterDeactivate` later. A returning user logs in again
+// with a fresh client id.
+const TopLevelClientIdleExpiration = 90 * 24 * time.Hour
+
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.
-func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time) {
+func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
 	// remove old disconnected connections in bounded batches, cascading
 	// network_client_location/latency/speed for the same connection ids in one
 	// statement. The per-connection tables are keyed by connection_id, so the
@@ -1740,6 +1832,48 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		}
 	}
 
+	// mark abandoned top-level clients inactive in bounded batches: no auth or
+	// connect since `minTopLevelAuthTime` (auth_time refreshes on both) and no
+	// live connection. Marking makes the jwt refresh fail so the app logs the
+	// user out; the reap below hard deletes the row
+	// `NetworkClientReapAfterDeactivate` after deactivate_time.
+	markTopLevelBatchCount := 10000
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE network_client
+				SET active = false, deactivate_time = $2
+				WHERE client_id IN (
+					SELECT network_client.client_id
+					FROM network_client
+					LEFT JOIN network_client_connection ON
+						network_client_connection.client_id = network_client.client_id AND
+						network_client_connection.connected = true
+					WHERE
+						network_client.active = true AND
+						network_client.source_client_id IS NULL AND
+						network_client.auth_time < $1 AND
+						network_client_connection.client_id IS NULL
+					LIMIT $3
+				)
+				`,
+				minTopLevelAuthTime.UTC(),
+				server.NowUtc(),
+				markTopLevelBatchCount,
+			))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		if 0 < batchCount {
+			glog.Infof("[ncm]marked %d abandoned top level clients inactive\n", batchCount)
+		}
+		if batchCount < int64(markTopLevelBatchCount) {
+			break
+		}
+	}
+
 	// Capture the deleted client_ids so we can sweep their identity keys from
 	// redis below, and target the dependent-table cascades (provide_key,
 	// proxy_device_config, client_tls_certificate, device) at exactly the
@@ -1762,12 +1896,15 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		})
 	}
 
+	// inactive clients reap `NetworkClientReapAfterDeactivate` after their
+	// deactivate_time; rows deactivated before that column existed (NULL)
+	// fall back to create_time, which was the previous behavior
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		rows, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM network_client
-			WHERE network_client.create_time < $1 AND active = false
+			WHERE COALESCE(network_client.deactivate_time, network_client.create_time) < $1 AND active = false
 			RETURNING client_id, device_id
 			`,
 			minClientTime.UTC(),

@@ -3,6 +3,8 @@ package work
 import (
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
@@ -33,8 +35,39 @@ func RemoveOldClientReliabilityStats(
 	removeOldClientReliabilityStats *RemoveOldClientReliabilityStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientReliabilityStatsResult, error) {
+	// Once client_reliability is partitioned by block range (the
+	// `bringyourctl model migrate client-reliability-partition` cutover),
+	// retention is partition maintenance: create day partitions ahead of the
+	// drain and drop expired ones — no row deletes, no vacuum debt. Before the
+	// cutover this falls back to the legacy batch-delete loop, so this build
+	// is safe to deploy on either side of the cutover.
+	if model.IsClientReliabilityPartitioned(clientSession.Ctx) {
+		created, dropped := model.MaintainClientReliabilityPartitions(clientSession.Ctx, server.NowUtc())
+		if 0 < len(created) || 0 < len(dropped) {
+			glog.Infof("[ncr]partitions created %v, dropped %v\n", created, dropped)
+		}
+		return &RemoveOldClientReliabilityStatsResult{}, nil
+	}
+
+	// client_reliability accumulates one row per connected client per block:
+	// a single limit-sized batch per run cannot drain a backlog faster than it
+	// grows. Keep deleting batches until the expired backlog is gone or the
+	// time budget for this run is spent (the task reschedules a minute after
+	// each run either way).
 	limit := 50000
-	model.RemoveOldClientReliabilityStats(clientSession.Ctx, server.NowUtc(), limit)
+	budget := 5 * time.Minute
+	endTime := server.NowUtc().Add(budget)
+	var totalRemovedCount int64
+	for {
+		removedCount := model.RemoveOldClientReliabilityStats(clientSession.Ctx, server.NowUtc(), limit)
+		totalRemovedCount += removedCount
+		if removedCount < int64(limit) || endTime.Before(server.NowUtc()) {
+			break
+		}
+	}
+	if 0 < totalRemovedCount {
+		glog.Infof("[ncr]removed %d expired client_reliability rows\n", totalRemovedCount)
+	}
 	return &RemoveOldClientReliabilityStatsResult{}, nil
 }
 
@@ -161,7 +194,20 @@ func UpdateReliabilities(
 		maxTime.Add(-1*time.Hour),
 		updateReliabilities.MinTime.Add(-5*time.Minute),
 	)
+
+	// the location reliabilities read the live connection tables, not the
+	// drained blocks, so they update regardless of the rollup state
 	model.UpdateClientLocationReliabilities(clientSession.Ctx, minTime, maxTime)
+
+	// the window and score computations read the drained blocks: wait for the
+	// redis->pg rollup to be live rather than recompute over windows that
+	// drift away from the present while the drain is down
+	if !model.ClientReliabilityRollupSynced(clientSession.Ctx, maxTime) {
+		glog.Infof("[ncr]reliability rollup is stale; waiting to update the reliability stats\n")
+		return &UpdateReliabilitiesResult{
+			MaxTime: updateReliabilities.MinTime,
+		}, nil
+	}
 
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 

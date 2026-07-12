@@ -269,7 +269,9 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		}, nil
 	}
 
-	clientNetworkId, err := model.FindClientNetwork(
+	// active only: a removed client must stop refreshing (the app logs out
+	// on this error), not keep its jwt alive until the row is reaped
+	clientNetworkId, err := model.FindActiveClientNetwork(
 		session.Ctx,
 		*session.ByJwt.ClientId,
 	)

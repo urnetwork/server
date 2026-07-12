@@ -526,18 +526,24 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 	})
 }
 
-// removed finished tasks older than `minTime` where the post was successfully run
-func RemoveFinishedTasks(ctx context.Context, minTime time.Time) (removeCount int64) {
+// removes finished tasks older than `minTime` where the post was successfully
+// run. Tasks whose post permanently errored are kept longer for debugging but
+// still removed after `postErrorMinTime`, so they cannot strand forever.
+func RemoveFinishedTasks(ctx context.Context, minTime time.Time, postErrorMinTime time.Time) (removeCount int64) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				DELETE FROM finished_task
 				WHERE
-					run_end_time < $1 AND 
-					(post_error IS NULL or post_completed)
+					(
+						run_end_time < $1 AND
+						(post_error IS NULL or post_completed)
+					) OR
+					run_end_time < $2
 			`,
 			minTime,
+			postErrorMinTime,
 		))
 
 		removeCount = tag.RowsAffected()
@@ -1427,7 +1433,8 @@ func TaskCleanup(
 	clientSession *session.ClientSession,
 ) (*TaskCleanupResult, error) {
 	minTime := time.Now().Add(-24 * time.Hour)
-	RemoveFinishedTasks(clientSession.Ctx, minTime)
+	postErrorMinTime := time.Now().Add(-7 * 24 * time.Hour)
+	RemoveFinishedTasks(clientSession.Ctx, minTime, postErrorMinTime)
 	return &TaskCleanupResult{}, nil
 }
 

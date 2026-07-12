@@ -1,0 +1,14 @@
+
+Receipt for {{.Description}}
+
+Paid: {{.Price}} {{.Asset}} on {{.Network}}
+{{if .Balance}}Data added: {{.Balance}}
+{{end}}{{if .Pro}}UR Pro is active on your network.
+{{end}}
+Transaction: {{.Transaction}}
+
+Paid automatically over x402. See your balance at https://app.bringyour.com/account
+
+Copyright {{.CopyrightYear}} BringYour, Inc.
+2261 Market Street #5245, San Francisco, CA 94114, United States
+https://bringyour.com

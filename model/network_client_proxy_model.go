@@ -599,7 +599,13 @@ type WgConfig struct {
 
 type CreateProxyClientOptions struct {
 	HttpsRequireAuth bool
-	EnableWg         bool
+	// EnableSocks / EnableWg gate the Pro-only proxy features (pro.yml features).
+	// When false the client is issued no SOCKS url / no WireGuard config, so it
+	// never receives credentials for a feature its plan does not include. Callers
+	// derive these from model.Pro().FeatureAllowed, which folds in the
+	// enforce_features rollout switch.
+	EnableSocks bool
+	EnableWg    bool
 }
 
 func CreateProxyClient(
@@ -636,7 +642,14 @@ func CreateProxyClient(
 		apiPort := servicePorts["api"]
 		wgPort := servicePorts["wg"]
 
-		socksProxyUrl := fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
+		// SOCKS is a Pro-only feature. A client whose plan does not include it is
+		// issued no SOCKS url, so it never gets SOCKS credentials.
+		socksProxyUrl := ""
+		if opts.EnableSocks {
+			socksProxyUrl = fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
+		} else {
+			socksProxyPort = 0
+		}
 
 		httpProxyUrl := fmt.Sprintf(
 			"http://%s:%d",

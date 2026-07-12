@@ -33,12 +33,21 @@ var appleJwkValidator = sync.OnceValue(func() *JwkValidator {
 // we do not do real time lookups against the api. new versions of the api will contain up to date keys
 
 func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
-	for _, key := range appleJwkValidator().Keys() {
-		// var err error
-		// var token gojwt.Token
-		token, err := gojwt.Parse(jwtSigned, func(token *gojwt.Token) (interface{}, error) {
-			return key, nil
-		})
+	return parseAppleJwtWithKeys(jwtSigned, appleJwkValidator().Keys(), appleSsoClientIds())
+}
+
+func parseAppleJwtWithKeys(jwtSigned string, keys []any, allowedClientIds []string) (*AppleJwt, error) {
+	for _, key := range keys {
+		token, err := gojwt.Parse(
+			jwtSigned,
+			func(token *gojwt.Token) (interface{}, error) {
+				return key, nil
+			},
+			// the apple jwks signs id tokens with RS256; pinning the method
+			// prevents algorithm confusion against the rsa public keys
+			gojwt.WithValidMethods([]string{"RS256"}),
+			gojwt.WithExpirationRequired(),
+		)
 		if err == nil {
 			var userAuthString string
 			var userNameString string
@@ -64,9 +73,22 @@ func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
 				}
 			*/
 
+			if err := validateSsoClaims(
+				claims,
+				[]string{"https://appleid.apple.com"},
+				allowedClientIds,
+			); err != nil {
+				return nil, err
+			}
+
 			userAuthString, ok = claims["email"].(string)
 			if !ok {
 				return nil, errors.New("Malformed jwt.")
+			}
+			// the email is the account identity: an unverified email on the
+			// provider account must not authenticate it here
+			if !ssoEmailVerified(claims) {
+				return nil, errors.New("Email not verified.")
 			}
 			userNameString = ""
 
@@ -81,6 +103,10 @@ func ParseAppleJwt(jwtSigned string) (*AppleJwt, error) {
 	return nil, errors.New("Could not verify signed token.")
 }
 
+// ParseAppleJwtUnverified does not verify the signature or claims. It must
+// only be used to re-read an auth jwt that was verified with `ParseAppleJwt`
+// when it was first presented (e.g. the stored network_user auth_jwt), never
+// on untrusted input.
 func ParseAppleJwtUnverified(jwtStr string) (*AppleJwt, error) {
 	token, _, err := gojwt.NewParser().ParseUnverified(jwtStr, &gojwt.MapClaims{})
 	if err != nil {

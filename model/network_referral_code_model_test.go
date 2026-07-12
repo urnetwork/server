@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/go-playground/assert/v2"
@@ -37,31 +38,36 @@ func TestNetworkReferralCode(t *testing.T) {
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
 		assert.Equal(t, validationResult.Valid, true)
 
-		// check capped status
-		networkIdA := server.NewId()
-		networkIdB := server.NewId()
-		networkIdC := server.NewId()
-		networkIdD := server.NewId()
-		networkIdE := server.NewId()
-		networkIdF := server.NewId()
+		// check capped status. The cap comes from pro.yml (referral.max_referrals);
+		// never hardcode it here, or this test rots the next time the cap changes.
+		maxReferrals := Pro().MaxReferrals
 
-		Testing_CreateNetwork(ctx, networkIdA, "a", networkIdA)
-		Testing_CreateNetwork(ctx, networkIdB, "b", networkIdB)
-		Testing_CreateNetwork(ctx, networkIdC, "c", networkIdC)
-		Testing_CreateNetwork(ctx, networkIdD, "d", networkIdD)
-		Testing_CreateNetwork(ctx, networkIdE, "e", networkIdE)
-		Testing_CreateNetwork(ctx, networkIdF, "f", networkIdF)
+		// The rest of this test asserts the CONFIGURED cap, so it needs pro.yml. In the
+		// stripped harness (WARP_CONFIG_HOME with no pro.yml) the cap is 0 -- correctly, an
+		// absent spec means UNCAPPED -- and the indexing below would run off the front of
+		// the slice. TestProAbsent owns the absent case.
+		if maxReferrals <= 0 {
+			t.Skip("pro.yml is not present in this environment; see TestProAbsent")
+		}
 
-		CreateNetworkReferral(ctx, networkIdA, createdReferralCode.ReferralCode)
-		CreateNetworkReferral(ctx, networkIdB, createdReferralCode.ReferralCode)
-		CreateNetworkReferral(ctx, networkIdC, createdReferralCode.ReferralCode)
-		CreateNetworkReferral(ctx, networkIdD, createdReferralCode.ReferralCode)
+		referredNetworkIds := []server.Id{}
+		for i := 0; i < maxReferrals; i += 1 {
+			referredNetworkId := server.NewId()
+			Testing_CreateNetwork(ctx, referredNetworkId, fmt.Sprintf("r%d", i), referredNetworkId)
+			referredNetworkIds = append(referredNetworkIds, referredNetworkId)
+		}
+
+		// one short of the cap -> not capped
+		for i := 0; i < maxReferrals-1; i += 1 {
+			CreateNetworkReferral(ctx, referredNetworkIds[i], createdReferralCode.ReferralCode)
+		}
 
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
 		assert.Equal(t, validationResult.Valid, true)
 		assert.Equal(t, validationResult.IsCapped, false)
 
-		CreateNetworkReferral(ctx, networkIdE, createdReferralCode.ReferralCode)
+		// the one that reaches the cap -> capped
+		CreateNetworkReferral(ctx, referredNetworkIds[maxReferrals-1], createdReferralCode.ReferralCode)
 
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
 		assert.Equal(t, validationResult.Valid, true)

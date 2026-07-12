@@ -18,6 +18,33 @@ type SetPayoutWalletResult struct{}
 // so that a payout can never be directed to another network's wallet
 func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// bittensor wallets are recorded for future use only; payouts run
+		// USDC on Solana/Polygon, so a TAO payout wallet would silently
+		// break payouts
+		var blockchain string
+		blockchainResult, err := tx.Query(
+			ctx,
+			`
+				SELECT blockchain
+				FROM account_wallet
+				WHERE
+						wallet_id = $2 AND
+						network_id = $1 AND
+						active = true
+			`,
+			networkId,
+			walletId,
+		)
+		server.WithPgResult(blockchainResult, err, func() {
+			if blockchainResult.Next() {
+				server.Raise(blockchainResult.Scan(&blockchain))
+			}
+		})
+		if parsedBlockchain, err := ParseBlockchain(blockchain); err == nil && parsedBlockchain == TAO {
+			returnErr = fmt.Errorf("Bittensor wallets cannot be the payout wallet.")
+			return
+		}
+
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`

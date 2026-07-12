@@ -24,8 +24,11 @@ import (
 var (
 	// strips /vXXXX version path segments from an impl's canonical name
 	implNameVersionRegex = regexp.MustCompile("/v\\d+")
-	// peels a leading "<code> " off an error message into an http status code
-	httpErrorCodeRegex = regexp.MustCompile("^(\\d+)\\s+(.*)$")
+	// peels a leading "<code> " off an error message into an http status code.
+	// The auth wrappers tag impl errors with one or more "[implName]" prefixes
+	// (see WrapRequireAuth), so the code may follow bracketed tags; without
+	// peeling them every tagged "%d message" error would surface as a 500.
+	httpErrorCodeRegex = regexp.MustCompile("^((?:\\[[^\\]]*\\])*)\\s*(\\d+)\\s+(.*)$")
 )
 
 // const BanMessage = "This client has been temporarily banned by bandit. support@ur.io"
@@ -435,11 +438,12 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 
-	// error messages that start with <number><space>
-	// have the number peeled off and converted to the status code
+	// error messages that start with <number><space>, optionally preceded by
+	// "[tag]" prefixes, have the number peeled off and converted to the
+	// status code. The tags are dropped from the client-facing message.
 	if groups := httpErrorCodeRegex.FindStringSubmatch(message); groups != nil {
-		statusCode, _ = strconv.Atoi(groups[1])
-		message = groups[2]
+		statusCode, _ = strconv.Atoi(groups[2])
+		message = groups[3]
 		statusError = true
 	}
 
