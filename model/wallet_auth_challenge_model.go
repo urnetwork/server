@@ -30,10 +30,10 @@ type WalletAuthChallengeArgs struct {
 }
 
 type WalletAuthChallengeResult struct {
-	Challenge       string `json:"challenge"`
-	Timestamp       int64  `json:"timestamp"`
-	ExpiresIn       int64  `json:"expires_in"`
-	MessageTemplate string `json:"message_template"`
+	Challenge       string                          `json:"challenge"`
+	Timestamp       int64                           `json:"timestamp"`
+	ExpiresIn       int64                           `json:"expires_in"`
+	MessageTemplate string                          `json:"message_template"`
 	Error           *WalletAuthChallengeResultError `json:"error,omitempty"`
 }
 
@@ -59,27 +59,38 @@ func CreateWalletAuthChallenge(
 	}
 	challengeValue := base64.URLEncoding.EncodeToString(challengeBytes)
 
-	blockchain := ""
+	blockchainStr := ""
 	if args.Blockchain != nil {
-		blockchain = strings.ToLower(strings.TrimSpace(*args.Blockchain))
+		blockchainStr = strings.TrimSpace(*args.Blockchain)
 	}
-	// Wallet authentication is Solana-only.
-	if blockchain == "" {
-		blockchain = SOL.String()
-	} else if blockchain != "sol" && blockchain != "solana" {
+	if blockchainStr == "" {
+		blockchainStr = SOL.String()
+	}
+	// Wallet authentication supports Solana and Bittensor (TAO); other
+	// chains are not yet supported for wallet auth challenges.
+	parsedBlockchain, err := ParseBlockchain(blockchainStr)
+	if err != nil || (parsedBlockchain != SOL && parsedBlockchain != TAO) {
 		return &WalletAuthChallengeResult{
 			Error: &WalletAuthChallengeResultError{
 				Message: "400 unsupported blockchain for wallet authentication",
 			},
 		}
 	}
-	blockchain = SOL.String()
+	blockchain := parsedBlockchain.String()
 
 	var walletAddress *string
 	if args.WalletAddress != nil {
 		w := strings.TrimSpace(*args.WalletAddress)
 		if w != "" {
-			if _, err := solana.PublicKeyFromBase58(w); err != nil {
+			validAddress := false
+			switch parsedBlockchain {
+			case SOL:
+				_, addrErr := solana.PublicKeyFromBase58(w)
+				validAddress = addrErr == nil
+			case TAO:
+				validAddress = IsValidBittensorAddress(w)
+			}
+			if !validAddress {
 				return &WalletAuthChallengeResult{
 					Error: &WalletAuthChallengeResultError{
 						Message: "400 invalid wallet address",
@@ -165,18 +176,28 @@ func UseWalletAuthChallenge(
 	args *UseWalletAuthChallengeArgs,
 	ctx context.Context,
 ) (*UseWalletAuthChallengeResult, error) {
-	blockchain := strings.ToLower(strings.TrimSpace(args.Blockchain))
-	if blockchain == "" {
-		blockchain = SOL.String()
-	} else if blockchain != "sol" && blockchain != "solana" {
+	blockchainStr := strings.TrimSpace(args.Blockchain)
+	if blockchainStr == "" {
+		blockchainStr = SOL.String()
+	}
+	parsedBlockchain, err := ParseBlockchain(blockchainStr)
+	if err != nil || (parsedBlockchain != SOL && parsedBlockchain != TAO) {
 		return &UseWalletAuthChallengeResult{
 			Valid: false,
 			Error: &WalletAuthChallengeResultError{Message: "400 unsupported blockchain for wallet authentication"},
 		}, nil
 	}
-	blockchain = SOL.String()
+	blockchain := parsedBlockchain.String()
 
-	if _, err := solana.PublicKeyFromBase58(args.PublicKey); err != nil {
+	validAddress := false
+	switch parsedBlockchain {
+	case SOL:
+		_, addrErr := solana.PublicKeyFromBase58(args.PublicKey)
+		validAddress = addrErr == nil
+	case TAO:
+		validAddress = IsValidBittensorAddress(args.PublicKey)
+	}
+	if !validAddress {
 		return &UseWalletAuthChallengeResult{
 			Valid: false,
 			Error: &WalletAuthChallengeResultError{Message: "400 invalid wallet address"},
