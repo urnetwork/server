@@ -10,6 +10,8 @@ import (
 	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
@@ -46,7 +48,7 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -86,7 +88,7 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 
 		time.Sleep(1 * time.Second)
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -124,7 +126,7 @@ func TestNetworkClientLifecycle(t *testing.T) {
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
 		assert.Equal(t, connected, false)
 
-		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now())
+		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
 		assert.NotEqual(t, err, nil)
@@ -577,7 +579,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 			))
 		})
 
-		RemoveDisconnectedNetworkClients(ctx, server.NowUtc().Add(time.Minute), server.NowUtc().Add(time.Minute))
+		RemoveDisconnectedNetworkClients(ctx, server.NowUtc().Add(time.Minute), server.NowUtc().Add(time.Minute), time.Time{})
 
 		// the connection and its location/latency/speed rows are gone
 		server.Db(ctx, func(conn server.PgConn) {
@@ -698,5 +700,172 @@ func TestMigrateProvideMode(t *testing.T) {
 			networkSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
 			assert.Equal(t, []byte(networkSk), networkKey)
 		})
+	})
+}
+
+// the jwt refresh path rejects removed (inactive) and deleted clients via
+// FindActiveClientNetwork, so the app logs out instead of refreshing a dead
+// client. FindClientNetwork keeps existence-only semantics for other callers.
+func TestFindActiveClientNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		foundNetworkId, err := FindActiveClientNetwork(ctx, clientId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, foundNetworkId, networkId)
+
+		// removed (inactive) client: existence-only lookup still resolves,
+		// the active lookup does not
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET active = false WHERE client_id = $1`,
+				clientId,
+			))
+		})
+		_, err = FindClientNetwork(ctx, clientId)
+		assert.Equal(t, err, nil)
+		_, err = FindActiveClientNetwork(ctx, clientId)
+		assert.NotEqual(t, err, nil)
+
+		// deleted client
+		_, err = FindActiveClientNetwork(ctx, server.NewId())
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// Abandoned top-level clients (no auth/connect for TopLevelClientIdleExpiration,
+// no live connection) are marked inactive — which makes the jwt refresh fail so
+// the app logs out — and hard deleted NetworkClientReapAfterDeactivate after
+// deactivation. Connected or recently seen clients, and child clients, are
+// never marked by this pass.
+func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+
+		newClient := func() server.Id {
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+			return clientId
+		}
+		setAuthTime := func(clientId server.Id, authTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`UPDATE network_client SET auth_time = $2 WHERE client_id = $1`,
+					clientId,
+					authTime,
+				))
+			})
+		}
+		clientState := func(clientId server.Id) (exists bool, active bool, deactivateTime *time.Time) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT active, deactivate_time FROM network_client WHERE client_id = $1`,
+					clientId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						exists = true
+						server.Raise(result.Scan(&active, &deactivateTime))
+					}
+				})
+			})
+			return
+		}
+
+		now := server.NowUtc()
+		idleAuthTime := now.Add(-TopLevelClientIdleExpiration - 24*time.Hour)
+
+		// abandoned: idle past the expiration, no connection
+		idleClientId := newClient()
+		setAuthTime(idleClientId, idleAuthTime)
+
+		// stale auth time but currently connected: must not be marked
+		connectedClientId := newClient()
+		_, _, _, _, err := ConnectNetworkClient(ctx, connectedClientId, "127.0.0.1:20000", server.NewId())
+		assert.Equal(t, err, nil)
+		setAuthTime(connectedClientId, idleAuthTime)
+
+		// recently seen
+		freshClientId := newClient()
+
+		// idle child client: handled by the child reap, not the marker
+		childClientId := newClient()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET source_client_id = $2 WHERE client_id = $1`,
+				childClientId,
+				freshClientId,
+			))
+		})
+		setAuthTime(childClientId, idleAuthTime)
+
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+
+		// only the abandoned top-level client is marked
+		exists, active, deactivateTime := clientState(idleClientId)
+		assert.Equal(t, exists, true)
+		assert.Equal(t, active, false)
+		assert.NotEqual(t, deactivateTime, nil)
+
+		// marking makes the refresh lookup fail (the app logs out on this)
+		_, err = FindActiveClientNetwork(ctx, idleClientId)
+		assert.NotEqual(t, err, nil)
+
+		_, active, _ = clientState(connectedClientId)
+		assert.Equal(t, active, true)
+		_, active, _ = clientState(freshClientId)
+		assert.Equal(t, active, true)
+
+		// the idle child client was reaped by the child pass (auth_time based),
+		// not marked inactive
+		exists, _, _ = clientState(childClientId)
+		assert.Equal(t, exists, false)
+
+		// within the grace window the marked client is retained
+		exists, _, _ = clientState(idleClientId)
+		assert.Equal(t, exists, true)
+
+		// after the grace window it is hard deleted
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET deactivate_time = $2 WHERE client_id = $1`,
+				idleClientId,
+				now.Add(-NetworkClientReapAfterDeactivate-24*time.Hour),
+			))
+		})
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		exists, _, _ = clientState(idleClientId)
+		assert.Equal(t, exists, false)
+
+		// user removal stamps deactivate_time, so removed clients also reap 30
+		// days after removal
+		removedClientId := newClient()
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &removedClientId,
+		})
+		removeResult, err := RemoveNetworkClient(&RemoveNetworkClientArgs{
+			ClientId: removedClientId,
+		}, userSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, removeResult.Error, nil)
+		exists, active, deactivateTime = clientState(removedClientId)
+		assert.Equal(t, exists, true)
+		assert.Equal(t, active, false)
+		assert.NotEqual(t, deactivateTime, nil)
 	})
 }

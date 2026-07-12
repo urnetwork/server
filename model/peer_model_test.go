@@ -284,7 +284,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		assert.Equal(t, authClientResult.Error, nil)
 		clientId = *authClientResult.ClientId
 
-		_, topLevel, _, profile := GetNetworkPeerProfile(ctx, clientId)
+		_, topLevel, _, profile, _ := GetNetworkPeerProfile(ctx, clientId)
 		assert.Equal(t, topLevel, true)
 		AddNetworkPeer(ctx, networkId, profile, residentId, 60*time.Second)
 
@@ -356,9 +356,11 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, authClientResult.Error, nil)
 		clientId := *authClientResult.ClientId
 
-		profileNetworkId, topLevel, category, profile := GetNetworkPeerProfile(ctx, clientId)
+		profileNetworkId, topLevel, category, profile, peersEnabled := GetNetworkPeerProfile(ctx, clientId)
 		assert.Equal(t, profileNetworkId, networkId)
 		assert.Equal(t, topLevel, true)
+		// a network under the top-level limit is enabled for peers
+		assert.Equal(t, peersEnabled, true)
 		// an ordinary client is the client category
 		assert.Equal(t, category, NetworkPeerCategoryClient)
 		assert.Equal(t, profile.ClientId, clientId)
@@ -388,9 +390,11 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, sourceClientResult.Error, nil)
 
-		_, topLevel, _, profile = GetNetworkPeerProfile(ctx, *sourceClientResult.ClientId)
+		_, topLevel, _, profile, peersEnabled = GetNetworkPeerProfile(ctx, *sourceClientResult.ClientId)
 		assert.Equal(t, topLevel, false)
 		assert.NotEqual(t, profile, nil)
+		// a derivative client never resolves peers enabled
+		assert.Equal(t, peersEnabled, false)
 
 		// a guest session cannot assign roles or principal
 		guestSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
@@ -443,7 +447,7 @@ func TestNetworkPeerProfile(t *testing.T) {
 		assert.Equal(t, err, nil)
 		assert.Equal(t, authClientResult.Error, nil)
 
-		_, _, _, profile = GetNetworkPeerProfile(ctx, *authClientResult.ClientId)
+		_, _, _, profile, _ = GetNetworkPeerProfile(ctx, *authClientResult.ClientId)
 		assert.Equal(t, profile.Roles, []string{"service-role"})
 		assert.Equal(t, profile.Principal, "svc-inherited")
 	})
@@ -488,11 +492,12 @@ func TestNetworkProxyPeer(t *testing.T) {
 		})
 
 		// the profile detects the proxy category
-		_, topLevel, category, profile := GetNetworkPeerProfile(ctx, proxyClientId)
+		_, topLevel, category, profile, peersEnabled := GetNetworkPeerProfile(ctx, proxyClientId)
 		assert.Equal(t, topLevel, true)
 		assert.Equal(t, category, NetworkPeerCategoryProxy)
 		assert.NotEqual(t, profile, nil)
-		_, _, clientCategory, _ := GetNetworkPeerProfile(ctx, clientId)
+		assert.Equal(t, peersEnabled, true)
+		_, _, clientCategory, _, _ := GetNetworkPeerProfile(ctx, clientId)
 		assert.Equal(t, clientCategory, NetworkPeerCategoryClient)
 
 		residentId := server.NewId()
@@ -910,8 +915,18 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 		// a network at the limit still gets peer subscriptions
 		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), true)
 
-		// a network over the limit (created before the limit) does not
+		// a network over the limit (created before the limit) does not.
+		// The decision is cached per network, so the cached value holds until
+		// the ttl (cleared here)
 		Testing_CreateDevice(ctx, networkId, server.NewId(), server.NewId(), "grandfathered", "grandfathered")
+		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), true)
+		Testing_ClearNetworkPeersEnabledCache()
 		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), false)
+
+		// the profile resolves the same decision
+		_, topLevel, _, profile, peersEnabled := GetNetworkPeerProfile(ctx, firstClientId)
+		assert.Equal(t, topLevel, true)
+		assert.NotEqual(t, profile, nil)
+		assert.Equal(t, peersEnabled, false)
 	})
 }

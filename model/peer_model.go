@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -171,23 +172,106 @@ func publishNetworkPeerEvent(
 	}
 }
 
+// how long a `NetworkPeersEnabled` decision is cached per network. The
+// decision is derived from the active top-level client count, which changes
+// only on client create and remove — and create cannot push a network over
+// the limit (`AuthNetworkClient` rejects at the limit) — so the only
+// transition a stale entry can delay is an over-limit network gaining peers
+// after shrinking under the limit.
+const networkPeersEnabledTtl = 5 * time.Minute
+
+type networkPeersEnabledEntry struct {
+	enabled    bool
+	expireTime time.Time
+}
+
+// a process-local ttl cache of the `NetworkPeersEnabled` decision per
+// network, so that resident creation does not count clients on every connect
+type peersEnabledCache struct {
+	lock          sync.Mutex
+	entries       map[server.Id]networkPeersEnabledEntry
+	nextSweepTime time.Time
+}
+
+func (self *peersEnabledCache) Get(networkId server.Id) (enabled bool, ok bool) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	entry, ok := self.entries[networkId]
+	if !ok {
+		return false, false
+	}
+	if entry.expireTime.Before(time.Now()) {
+		delete(self.entries, networkId)
+		return false, false
+	}
+	return entry.enabled, true
+}
+
+func (self *peersEnabledCache) Put(networkId server.Id, enabled bool) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	now := time.Now()
+	// sweep expired entries at most once per ttl so the map stays bounded by
+	// the networks seen in the last ttl
+	if self.nextSweepTime.Before(now) {
+		self.nextSweepTime = now.Add(networkPeersEnabledTtl)
+		for networkId, entry := range self.entries {
+			if entry.expireTime.Before(now) {
+				delete(self.entries, networkId)
+			}
+		}
+	}
+	self.entries[networkId] = networkPeersEnabledEntry{
+		enabled:    enabled,
+		expireTime: now.Add(networkPeersEnabledTtl),
+	}
+}
+
+func (self *peersEnabledCache) Clear() {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	clear(self.entries)
+}
+
+var networkPeersEnabledCache = &peersEnabledCache{
+	entries: map[server.Id]networkPeersEnabledEntry{},
+}
+
+// Testing_ClearNetworkPeersEnabledCache resets the process-local
+// `NetworkPeersEnabled` cache, so a test can observe a count transition
+// within the cache ttl
+func Testing_ClearNetworkPeersEnabledCache() {
+	networkPeersEnabledCache.Clear()
+}
+
 // NetworkPeersEnabled returns whether the network is within the top-level
 // client limit. Networks above the limit (created before the limit) do not
 // get peer registrations or subscriptions, since the peer replay and event
 // fan-out scale with the number of connected top-level clients.
-func NetworkPeersEnabled(ctx context.Context, networkId server.Id) (enabled bool) {
+// The decision is cached per network for `networkPeersEnabledTtl`, and the
+// count scan is bounded at the limit since only the threshold matters.
+func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
+	if enabled, ok := networkPeersEnabledCache.Get(networkId); ok {
+		return enabled
+	}
+	enabled := false
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT COUNT(*) AS top_level_client_count
-				FROM network_client
-				WHERE
-					network_id = $1 AND
-					active = true AND
-					source_client_id IS NULL
+				FROM (
+					SELECT 1
+					FROM network_client
+					WHERE
+						network_id = $1 AND
+						active = true AND
+						source_client_id IS NULL
+					LIMIT $2
+				) t
 			`,
 			networkId,
+			LimitTopLevelClientIdsPerNetwork+1,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -197,14 +281,18 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) (enabled bool
 			}
 		})
 	})
-	return
+	networkPeersEnabledCache.Put(networkId, enabled)
+	return enabled
 }
 
 // GetNetworkPeerProfile loads the network, top-level status, category, and
-// identity metadata used to register a client in the peer registry.
+// identity metadata used to register a client in the peer registry, plus
+// whether the network is enabled for peers (`NetworkPeersEnabled`, typically
+// resolved from the process-local cache so no additional query is made).
 // `peer` is nil when the client does not exist or is not active. `category` is
 // proxy when the client has a hosted proxy device (a proxy_device_config row).
-func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer) {
+// `peersEnabled` is false whenever the client is not an active top-level client.
+func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -289,6 +377,10 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 		if err == nil {
 			peer.ProvideModes = sortedProvideModesList(provideModes)
 		}
+	}
+
+	if topLevel && peer != nil {
+		peersEnabled = NetworkPeersEnabled(ctx, networkId)
 	}
 
 	return
@@ -499,6 +591,159 @@ func GetNetworkConnectedCount(ctx context.Context, networkId server.Id) (count i
 		count = int(clientCmd.Val()) + int(proxyCmd.Val())
 	})
 	return
+}
+
+// isPublicProvider reports whether a peer is running as a public provider, i.e.
+// it offers BOTH public and stream provide modes. Public providers contribute
+// capacity to the network rather than consuming it, so they are exempt from the
+// connected top-level client limit.
+func isPublicProvider(peer *NetworkPeer) bool {
+	if peer == nil {
+		return false
+	}
+	public := false
+	stream := false
+	for _, provideMode := range peer.ProvideModes {
+		switch provideMode {
+		case ProvideModePublic:
+			public = true
+		case ProvideModeStream:
+			stream = true
+		}
+	}
+	return public && stream
+}
+
+// GetNetworkEnforceableConnectedCount returns the number of connected top-level
+// clients that count toward a network's concurrent-client limit: the same set as
+// GetNetworkConnectedCount, minus any client running as a public provider
+// (public + stream provide mode), which is exempt.
+//
+// This is the count to compare against model.Pro().ConcurrentClientsExceeded.
+// Hosted proxy clients never register provide modes, so they can never be exempt
+// and always count.
+func GetNetworkEnforceableConnectedCount(ctx context.Context, networkId server.Id) (count int) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		nowMs := server.NowUtc().UnixMilli()
+		// count only entries whose expiry is still in the future
+		liveMin := strconv.FormatInt(nowMs+1, 10)
+
+		pipe := r.TxPipeline()
+		metaCmd := pipe.HGetAll(ctx, networkPeerMetaKey(networkId))
+		connectedCmd := pipe.ZRangeByScore(ctx, networkPeerConnectedKey(networkId), &redis.ZRangeBy{
+			Min: liveMin,
+			Max: "+inf",
+		})
+		proxyCmd := pipe.ZCount(ctx, networkPeerConnectedProxyKey(networkId), liveMin, "+inf")
+		_, err := pipe.Exec(ctx)
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+
+		metas, err := metaCmd.Result()
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+		connected, err := connectedCmd.Result()
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+
+		count = int(proxyCmd.Val())
+		for _, member := range connected {
+			meta, _ := loadNetworkPeerMeta([]byte(metas[member]))
+			if meta != nil && isPublicProvider(meta.Peer) {
+				// exempt: this client provides for the network
+				continue
+			}
+			count += 1
+		}
+	})
+	return
+}
+
+// isNetworkPeerConnected reports whether a client is currently registered as a
+// connected top-level client (ordinary or hosted proxy) whose entry has not yet
+// expired.
+func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId server.Id) (connected bool) {
+	member := string(clientId.Bytes())
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		nowMs := server.NowUtc().UnixMilli()
+
+		pipe := r.TxPipeline()
+		clientCmd := pipe.ZScore(ctx, networkPeerConnectedKey(networkId), member)
+		proxyCmd := pipe.ZScore(ctx, networkPeerConnectedProxyKey(networkId), member)
+		_, err := pipe.Exec(ctx)
+		if err != nil && err != server.RedisNil {
+			panic(err)
+		}
+
+		for _, cmd := range []*redis.FloatCmd{clientCmd, proxyCmd} {
+			if expiryMs, err := cmd.Result(); err == nil && nowMs < int64(expiryMs) {
+				connected = true
+				return
+			}
+		}
+	})
+	return
+}
+
+// NetworkConcurrentClientsExceeded reports whether a network already has its plan's
+// full complement of connected top-level clients, i.e. there is no room for another.
+//
+// While enforcement is dark this returns false IMMEDIATELY, with no redis and no db
+// lookup, so shipping the gate costs nothing on the auth hot path -- the cost only
+// arrives with the rollout. Public providers are exempt from the count, and Pro is
+// read live (never from the jwt's stale claim). This is the client-creation gate;
+// CanConnectNetworkPeer is the connection-activation gate.
+func NetworkConcurrentClientsExceeded(ctx context.Context, networkId server.Id) bool {
+	// dark, or no pro.yml at all -> no limit, and no i/o to find that out
+	if !Pro().EnforceConcurrentClients {
+		return false
+	}
+
+	pro := IsProNetwork(ctx, networkId)
+	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
+	return Pro().ConcurrentClientsExceeded(pro, connectedCount)
+}
+
+// CanConnectNetworkPeer reports whether `clientId` may become a connected
+// top-level client of its network without exceeding the network's plan limit on
+// concurrent connected clients (pro.yml concurrent_clients).
+//
+// It is always true when:
+//   - enforcement is dark (pro.yml enforce_concurrent_clients = false);
+//   - the client is not a top-level client — only top-level clients count;
+//   - the client runs as a public provider (public + stream provide mode), which
+//     adds capacity to the network rather than consuming it, and so is exempt;
+//   - the client is already registered as connected — a re-nomination (e.g.
+//     resident replacement) is not a new connection and is already counted.
+//
+// Otherwise the network's enforceable connected count is compared against its
+// tier limit. This is the connection-activation gate; AuthNetworkClient applies
+// the same limit at client creation. It fails open (allows) for an unknown
+// client.
+func CanConnectNetworkPeer(ctx context.Context, clientId server.Id) bool {
+	// dark, or no pro.yml at all -> allowed, and no i/o to find that out
+	if !Pro().EnforceConcurrentClients {
+		return true
+	}
+
+	networkId, topLevel, _, peer, _ := GetNetworkPeerProfile(ctx, clientId)
+	if !topLevel {
+		return true
+	}
+	if isPublicProvider(peer) {
+		return true
+	}
+	if isNetworkPeerConnected(ctx, networkId, clientId) {
+		return true
+	}
+
+	pro := IsPro(ctx, &networkId)
+	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
+	return !Pro().ConcurrentClientsExceeded(pro, connectedCount)
 }
 
 // UpdateNetworkPeerProvideModes updates the provide modes of a registered

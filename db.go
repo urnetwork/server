@@ -396,6 +396,28 @@ func Db(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
+// ReplicaDb runs a read-only query that tolerates replication delay, such as
+// stats and analytics reads. Queries tagged with this can be offloaded to a
+// read replica when one is attached; until then it uses the primary pool,
+// identical to `Db`. Do not tag reads that must observe the caller's own
+// writes (read-after-write within a request).
+func ReplicaDb(ctx context.Context, callback func(PgConn), options ...any) {
+	c := func() {
+		dbWithPool(ctx, safePool, callback, options...)
+	}
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[db] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()

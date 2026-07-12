@@ -200,7 +200,7 @@ func TestTask(t *testing.T) {
 			netTaskCount += runCount
 		}
 
-		removedCount := RemoveFinishedTasks(ctx, server.NowUtc())
+		removedCount := RemoveFinishedTasks(ctx, server.NowUtc(), server.NowUtc().Add(-7*24*time.Hour))
 		assert.Equal(t, int(removedCount), netTaskCount)
 		assert.Equal(t, 0, len(ListFinishedTasks(ctx)))
 	})

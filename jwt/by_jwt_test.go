@@ -36,9 +36,6 @@ func TestByJwtLegacy(t *testing.T) {
 		assert.Equal(t, byJwt.UserId, parsedByJwt.UserId)
 		assert.Equal(t, byJwt.NetworkName, parsedByJwt.NetworkName)
 		assert.Equal(t, byJwt.Pro, parsedByJwt.Pro)
-
-		assert.Equal(t, true, IsByJwtActive(ctx, byJwt))
-		assert.Equal(t, true, IsByJwtActive(ctx, parsedByJwt))
 	})
 }
 
@@ -189,13 +186,8 @@ func TestByJwtFull(t *testing.T) {
 		userId := server.NewId()
 		networkName := "test"
 		guestMode := false
-		sessionIds := []server.Id{
-			server.NewId(),
-			server.NewId(),
-			server.NewId(),
-		}
 		isPro := true
-		byJwt := NewByJwt(networkId, userId, networkName, guestMode, isPro, sessionIds...)
+		byJwt := NewByJwt(networkId, userId, networkName, guestMode, isPro)
 		jwtSigned := byJwt.Sign()
 
 		parsedByJwt, err := ParseByJwt(ctx, jwtSigned)
@@ -206,11 +198,7 @@ func TestByJwtFull(t *testing.T) {
 		assert.Equal(t, byJwt.UserId, parsedByJwt.UserId)
 		assert.Equal(t, byJwt.NetworkName, parsedByJwt.NetworkName)
 		assert.Equal(t, byJwt.CreateTime, parsedByJwt.CreateTime)
-		assert.Equal(t, byJwt.AuthSessionIds, parsedByJwt.AuthSessionIds)
 		assert.Equal(t, byJwt.Pro, parsedByJwt.Pro)
-
-		assert.Equal(t, true, IsByJwtActive(ctx, byJwt))
-		assert.Equal(t, true, IsByJwtActive(ctx, parsedByJwt))
 	})
 }
 
@@ -222,11 +210,6 @@ func TestByJwtFullWithClientId(t *testing.T) {
 		userId := server.NewId()
 		networkName := "test"
 		guestMode := false
-		sessionIds := []server.Id{
-			server.NewId(),
-			server.NewId(),
-			server.NewId(),
-		}
 		isPro := true
 		byJwt := NewByJwt(
 			networkId,
@@ -234,7 +217,6 @@ func TestByJwtFullWithClientId(t *testing.T) {
 			networkName,
 			guestMode,
 			isPro,
-			sessionIds...,
 		)
 
 		deviceId := server.NewId()
@@ -251,12 +233,8 @@ func TestByJwtFullWithClientId(t *testing.T) {
 		assert.Equal(t, byJwt.UserId, parsedByClientJwt.UserId)
 		assert.Equal(t, byJwt.NetworkName, parsedByClientJwt.NetworkName)
 		assert.Equal(t, byJwt.CreateTime, parsedByClientJwt.CreateTime)
-		assert.Equal(t, byJwt.AuthSessionIds, parsedByClientJwt.AuthSessionIds)
 		assert.Equal(t, byClientJwt.DeviceId, parsedByClientJwt.DeviceId)
 		assert.Equal(t, byClientJwt.ClientId, parsedByClientJwt.ClientId)
 		assert.Equal(t, byClientJwt.Pro, parsedByClientJwt.Pro)
-
-		assert.Equal(t, true, IsByJwtActive(ctx, byClientJwt))
-		assert.Equal(t, true, IsByJwtActive(ctx, parsedByClientJwt))
 	})
 }

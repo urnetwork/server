@@ -68,6 +68,16 @@ func CreateStripePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreatePaymentIntent, w, r)
 }
 
+// StripeCreateCheckoutSession starts a Stripe Checkout Session for the caller's network.
+//
+// ui_mode "hosted" (the default) returns Stripe's hosted checkout_url -- the client just
+// navigates there. ui_mode "embedded" instead returns a client_secret + publishable_key,
+// which Stripe.js mounts as Embedded Checkout on our own /checkout page (that is what the
+// desktop apps render in a webview). A session is one or the other, never both.
+func StripeCreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.StripeCreateCheckoutSession, w, r)
+}
+
 func StripeCreateCustomerPortal(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreateCustomerPortal, w, r)
 }

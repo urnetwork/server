@@ -662,6 +662,56 @@ func CompletePayment(
 	return
 }
 
+// a planned payment that is neither completed nor canceled after this long is
+// hung and will not complete on its own; see `CancelHungAccountPayments`
+const HungPaymentExpiration = 30 * 24 * time.Hour
+
+// CancelHungAccountPayments cancels payments stuck pending for longer than
+// `HungPaymentExpiration`, which releases their sweeps back to the payout
+// planner for a fresh payment (the planner re-selects sweeps whose payment is
+// canceled). This is the first layer of straggler recovery; contracts whose
+// payments keep hanging are hard deleted at `StragglerContractExpiration` as
+// the final backstop. A canceled payment can no longer be completed
+// (CompletePayment guards NOT canceled), so a payment whose external transfer
+// was already initiated (payment_record set) is logged loudly for audit: if
+// that transfer did land out of band, the re-planned sweeps would pay again.
+func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
+	minTime := maxTime.Add(-HungPaymentExpiration)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+			UPDATE account_payment
+			SET
+				canceled = true,
+				cancel_time = $2
+			WHERE
+				NOT completed AND
+				NOT canceled AND
+				create_time < $1
+			RETURNING payment_id, payment_record IS NOT NULL
+			`,
+			minTime,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var paymentId server.Id
+				var hasPaymentRecord bool
+				server.Raise(result.Scan(&paymentId, &hasPaymentRecord))
+				canceledCount += 1
+				if hasPaymentRecord {
+					glog.Infof("[pay]canceled hung payment %s WITH an initiated payment record; audit the external transfer for double payout\n", paymentId)
+				} else {
+					glog.Infof("[pay]canceled hung payment %s\n", paymentId)
+				}
+			}
+		})
+	})
+	return
+}
+
 func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
@@ -817,7 +867,8 @@ func GetTransferStats(
 
 	var transferStats *TransferStats
 
-	server.Db(ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`

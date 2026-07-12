@@ -25,11 +25,11 @@ func TestSolanaPaymentIntents(t *testing.T) {
 
 		reference := "test-reference-1"
 
-		err := CreateSolanaPaymentIntent(reference, userSession)
+		err := CreateSolanaPaymentIntent(reference, 10.00, "supporter", userSession)
 		assert.Equal(t, err, nil)
 
 		// adding the same reference twice should fail
-		err = CreateSolanaPaymentIntent(reference, userSession)
+		err = CreateSolanaPaymentIntent(reference, 10.00, "supporter", userSession)
 		assert.NotEqual(t, err, nil)
 
 		references := []string{"AAA", "BBB", "CCC", "DDD"}

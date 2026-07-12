@@ -115,7 +115,8 @@ func statsProviders(
 	networkId := clientSession.ByJwt.NetworkId
 	providers := []*ProviderStats{}
 
-	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
 		// enumerate the network's provider clients + representative provide mode
 		provideModes := map[server.Id]int{}
 		order := []server.Id{}
@@ -329,7 +330,8 @@ func StatsProvider(
 	clientDetails := []*ClientDetail{}
 
 	found := false
-	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
 		// ownership: the client must belong to the caller's network
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -557,7 +559,8 @@ func StatsProvidersOverview(
 	contracts := gapFilledIntDays(days)
 	clients := gapFilledIntDays(days)
 
-	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
 		// enumerate the network's provider clients
 		providerIds := []server.Id{}
 		result, err := conn.Query(

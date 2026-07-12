@@ -126,6 +126,42 @@ func (self *SubscriptionTransferBalanceCodeTemplate) Balance() string {
 	return model.ByteCountHumanReadable(self.BalanceByteCount)
 }
 
+// X402ReceiptTemplate is the receipt for a purchase an agent paid for inline over
+// x402. Sent only when the caller supplied an email -- see x402_controller.go.
+type X402ReceiptTemplate struct {
+	Description      string
+	PriceUsd         float64
+	Asset            string
+	Network          string
+	Transaction      string
+	Pro              bool
+	BalanceByteCount model.ByteCount
+	BaseTemplate
+}
+
+func (self *X402ReceiptTemplate) Name() string {
+	return "x402_receipt"
+}
+
+func (self *X402ReceiptTemplate) Funcs(funcs texttemplate.FuncMap) {
+	self.BaseTemplate.Funcs(funcs)
+	funcs["Price"] = self.Price
+	funcs["Balance"] = self.Balance
+}
+
+func (self *X402ReceiptTemplate) Price() string {
+	return fmt.Sprintf("$%.2f", self.PriceUsd)
+}
+
+// Balance is empty for a Pro-month purchase with no separate data line, so the
+// template can omit the row entirely.
+func (self *X402ReceiptTemplate) Balance() string {
+	if self.BalanceByteCount <= 0 {
+		return ""
+	}
+	return model.ByteCountHumanReadable(self.BalanceByteCount)
+}
+
 type SubscriptionTransferBalanceCompanyTemplate struct {
 	BalanceByteCount model.ByteCount
 	BaseTemplate

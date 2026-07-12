@@ -115,6 +115,9 @@ func RedeemBalanceCodeInTx(
 		redeemBalanceCode.NetworkId,
 	))
 
+	// pro = false: a data code is DATA ONLY. It carries revenue (so `paid` is
+	// true), but redeeming one must never grant the Pro entitlement -- see
+	// pro_model.go.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -125,9 +128,10 @@ func RedeemBalanceCodeInTx(
                     end_time,
                     start_balance_byte_count,
                     balance_byte_count,
-                    net_revenue_nano_cents
+                    net_revenue_nano_cents,
+                    pro
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $5, $6, false)
             `,
 		balanceId,
 		// note: we don't use session.Jwt.NetworkId here

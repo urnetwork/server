@@ -57,8 +57,10 @@ func CreateNetworkReferral(
 
 		// if count >= max allowed, abort
 
-		const maxReferralsPerNetwork = 5
-		if count >= maxReferralsPerNetwork {
+		// Ask ReferralsCapped, never MaxReferrals directly. With no pro.yml the raw number
+		// is 0, and `count >= 0` is always true -- every referral would be silently
+		// refused and the feature would just stop working. No spec means no cap.
+		if Pro().ReferralsCapped(count) {
 			return
 		}
 
@@ -201,6 +203,75 @@ func GetReferralsByReferralNetworkId(
 
 	return networkReferrals
 
+}
+
+// ReferralBonusCount is the number of referrals a referrer is paid for: the
+// referral count capped at the configured maximum (pro.yml referral.max_referrals).
+func ReferralBonusCount(referralCount int) int {
+	// no pro.yml -> MaxReferrals is 0 -> no bonus to pay
+	maxReferrals := Pro().MaxReferrals
+	if maxReferrals <= 0 {
+		return 0
+	}
+	if maxReferrals < referralCount {
+		return maxReferrals
+	}
+	if referralCount < 0 {
+		return 0
+	}
+	return referralCount
+}
+
+// AddReferralBonusesToAllNetworks grants every referrer its referral bonus for a
+// single grant window: bonusPerReferral × min(referrals, pro.yml max_referrals).
+// Referrals pay out every period for life, so this is called on the recurring
+// refresh cadence alongside the tier data grant.
+//
+// The balance is added with AddBasicTransferBalance, i.e. net revenue 0, so it is
+// an UNPAID balance: referral data can never by itself confer Pro (Pro keys off
+// subscription_renewal — see IsPro).
+//
+// Returns the byte count granted per referrer network.
+func AddReferralBonusesToAllNetworks(
+	ctx context.Context,
+	startTime time.Time,
+	endTime time.Time,
+	bonusPerReferral ByteCount,
+) (addedTransferBalances map[server.Id]ByteCount) {
+	addedTransferBalances = map[server.Id]ByteCount{}
+
+	if bonusPerReferral <= 0 {
+		return
+	}
+
+	// referralNetworkId -> the networks it referred
+	referrals := GetNetworkReferralsMap(ctx)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		for referralNetworkId, referredNetworkIds := range referrals {
+			bonusCount := ReferralBonusCount(len(referredNetworkIds))
+			if bonusCount <= 0 {
+				continue
+			}
+
+			balanceByteCount := bonusPerReferral * ByteCount(bonusCount)
+			err := AddBasicTransferBalanceInTx(
+				tx,
+				ctx,
+				referralNetworkId,
+				balanceByteCount,
+				startTime,
+				endTime,
+			)
+			if err != nil {
+				// do not fail the whole batch for one referrer
+				continue
+			}
+			addedTransferBalances[referralNetworkId] = balanceByteCount
+		}
+	})
+
+	return
 }
 
 // todo - testme

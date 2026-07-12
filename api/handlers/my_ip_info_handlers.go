@@ -2,30 +2,19 @@ package handlers
 
 import (
 	"encoding/json"
-	// "net"
 	"net/http"
-	"regexp"
-	"strings"
 
-	// "github.com/ipinfo/go/v2/ipinfo"
-	// "github.com/urnetwork/server"
-	"github.com/urnetwork/server/api/myipinfo/landmarks"
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
-	// "github.com/urnetwork/server/session"
+
 	"github.com/urnetwork/server"
 )
 
 type response struct {
-	Info               myinfo.MyInfo              `json:"info"`
-	ExpectedRTTs       []landmarks.LandmarkAndRTT `json:"landmarks"`
-	ConnectedToNetwork bool                       `json:"connected_to_network"`
+	Info               myinfo.MyInfo `json:"info"`
+	ConnectedToNetwork bool          `json:"connected_to_network"`
 }
-
-// matches the first group to the IPV6 address when the input is <ipv6>:<port>
-// example: 2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894
-var malformedIPV6WithPort = regexp.MustCompile(`^(.+):\d+$`)
 
 func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 
@@ -57,21 +46,8 @@ func MyIPInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isIPV6 := strings.Contains(clientIp, ":")
-
-	var landmarksAndRTTs []landmarks.LandmarkAndRTT
-
-	if myInfo.Location != nil && myInfo.Location.Coordinates != nil {
-		if isIPV6 {
-			landmarksAndRTTs = landmarks.CurrentLandmarks.V6.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
-		} else {
-			landmarksAndRTTs = landmarks.CurrentLandmarks.V4.ExpectedRTTSVerbose(*myInfo.Location.Coordinates, 5)
-		}
-	}
-
 	respStruct := response{
 		Info:               myInfo,
-		ExpectedRTTs:       landmarksAndRTTs,
 		ConnectedToNetwork: model.IsIpConnectedToNetwork(r.Context(), clientIp),
 	}
 

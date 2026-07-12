@@ -3166,4 +3166,198 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE auth_code ADD COLUMN principal varchar(256) NOT NULL DEFAULT ''
     `),
+
+	// the top-level client count checks (the `AuthNetworkClient` create limit
+	// and `NetworkPeersEnabled`, see model/peer_model.go) count only active
+	// top-level clients per network. The existing (network_id, active,
+	// client_id) index has an entry for every client ever created and forces a
+	// heap check of source_client_id per row; this partial index has entries
+	// for exactly the qualifying rows and serves the count index-only.
+	//
+	// network_client is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_network_id_top_level
+        ON network_client (network_id) WHERE (active = true AND source_client_id IS NULL)
+    `),
+
+	// feedback log upload metadata. The log file content itself is not stored
+	// (see controller.UploadLogFile) - one row per accepted upload attempt.
+	// UNIQUE (network_id, rate_bucket) is the rate limiter: at most one upload
+	// per network per bucket (`model.FeedbackLogUploadRatePeriod`).
+	newSqlMigration(`
+        CREATE TABLE feedback_log_upload (
+            feedback_log_upload_id uuid NOT NULL,
+            feedback_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            user_id uuid NOT NULL,
+            client_id uuid NULL,
+            upload_time timestamp NOT NULL DEFAULT now(),
+            rate_bucket bigint NOT NULL,
+            content_type varchar(256) NOT NULL DEFAULT '',
+            byte_count bigint NOT NULL DEFAULT 0,
+            complete bool NOT NULL DEFAULT false,
+
+            PRIMARY KEY (feedback_log_upload_id),
+            UNIQUE (network_id, rate_bucket)
+        )
+    `),
+
+	// drained-coverage ranges for the client_reliability redis rollup
+	// (`RollupClientReliabilityStats`): a block inside a range had its redis
+	// counters fully drained into `client_reliability`. Blocks after the first
+	// range that fall outside every range were lost before draining (redis
+	// restart/expiry, drain outage) and the reliability score denominators
+	// (`reliabilityCoveredBlockCount`) skip them instead of counting them as
+	// unreliable gaps. Blocks before the first range (pre-rollup history, and
+	// fixture/backfill environments where the table is empty) count as
+	// covered. max_block_number is inclusive.
+	newSqlMigration(`
+        CREATE TABLE client_reliability_sync (
+            min_block_number bigint NOT NULL,
+            max_block_number bigint NOT NULL,
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (min_block_number)
+        )
+    `),
+
+	// `pro` marks a transfer balance as carrying the Pro entitlement. A network is
+	// Pro iff it has any IN-WINDOW balance with pro = true. model/pro_model.go is
+	// the single place this is tracked; nothing else should infer Pro.
+	//
+	// Entitlement is time-based, not byte-based: a subscriber stays Pro for the
+	// period they paid for even after spending the whole balance. (Note the
+	// existing `active` column is GENERATED AS (0 < balance_byte_count) -- bytes
+	// remaining -- so it must NOT be used for the Pro check.)
+	//
+	// Defaults to true so every existing balance keeps conferring Pro through the
+	// migration and nobody is downgraded. The backfill below then clears it on the
+	// balances that never conferred Pro: the unpaid grants (free tier, referral
+	// bonuses) carry no revenue and were excluded by the old `paid` heuristic that
+	// IsPro used. Existing data-code balances DO carry revenue, so they stay
+	// pro = true and are grandfathered; going forward data codes insert pro = false,
+	// so buying data never grants Pro.
+	newSqlMigration(`
+        ALTER TABLE transfer_balance
+        ADD COLUMN pro bool NOT NULL DEFAULT true
+    `),
+	newSqlMigration(`
+        UPDATE transfer_balance
+        SET pro = false
+        WHERE
+            net_revenue_nano_cents <= 0 AND
+            subsidy_net_revenue_nano_cents <= 0
+    `),
+	// supports the Pro lookup in pro_model.go: in-window pro balances for a network
+	newSqlMigration(`
+        CREATE INDEX transfer_balance_pro ON transfer_balance (network_id, pro, start_time, end_time)
+    `),
+
+	// the auth session revocation deny-list was never enforced at runtime
+	// (the check was short-circuited for perf) and is removed rather than
+	// carried as dead logic: jwts are validated by signature and expiry only.
+	// auth_session grew without bound (one row per login, never read); the
+	// related propagation tables were part of the same removed machinery.
+	newSqlMigration(`
+        DROP TABLE IF EXISTS auth_session
+    `),
+	newSqlMigration(`
+        DROP TABLE IF EXISTS auth_session_expiration
+    `),
+	newSqlMigration(`
+        DROP TABLE IF EXISTS auth_code_session
+    `),
+	newSqlMigration(`
+        DROP TABLE IF EXISTS device_adopt_auth_session
+    `),
+
+	// one reconnect per block no longer invalidates the block. A reconnect is
+	// real user impact (it drops the provider's live clients), so it stays
+	// penalized when it repeats -- but a SINGLE reconnect used to make the
+	// whole block invalid, and at the 0.99 hour threshold one invalid block
+	// (59/60 = 0.983) takes a provider out of the market for an hour. Any
+	// handler rotation, mobile blip, or NAT rebind did that.
+	//
+	// `valid` is a STORED generated column: changing a generation expression
+	// rewrites the table, which is not an option at this size. DROP EXPRESSION
+	// turns it into a plain column with no rewrite (catalog only) and keeps
+	// the existing (valid, block_number, client_address_hash) index working;
+	// rows already written keep the values the strict rule gave them, and the
+	// writers below supply the value from here on. Requires pg 13+.
+	// the allowance is a bind parameter, not baked into the function, so
+	// `model.ReliabilityAllowDisconnectCountPerBlock` is the one definition
+	// and changing it needs no migration
+	newSqlMigration(`
+        CREATE OR REPLACE FUNCTION client_reliability_valid(
+            connection_new_count bigint,
+            connection_established_count bigint,
+            provide_enabled_count bigint,
+            provide_changed_count bigint,
+            receive_message_count bigint,
+            allow_disconnect_count bigint
+        ) RETURNS bool
+        LANGUAGE sql IMMUTABLE
+        AS '
+            SELECT
+                connection_new_count <= allow_disconnect_count AND
+                1 <= connection_established_count AND
+                1 <= provide_enabled_count AND
+                provide_changed_count = 0 AND
+                1 <= receive_message_count
+        '
+    `),
+	newSqlMigration(`
+        ALTER TABLE client_reliability ALTER COLUMN valid DROP EXPRESSION
+    `),
+
+	// per-block client counts, recorded by the reliability drain
+	// (`RollupClientReliabilityStats`). A block whose valid client count
+	// collapses relative to its neighbors was a platform event (a connect
+	// deploy rotating handlers, an outage) rather than a client event: the
+	// affected clients could not announce, and the ones that reconnected are
+	// marked invalid by the `connection_new_count = 0` rule. Such blocks are
+	// excused for everyone (see `reliabilityDegradedBlocks`) so a deploy does
+	// not drop every provider below the reliability threshold.
+	newSqlMigration(`
+        CREATE TABLE client_reliability_block (
+            block_number bigint NOT NULL,
+            client_count bigint NOT NULL,
+            valid_client_count bigint NOT NULL,
+
+            PRIMARY KEY (block_number)
+        )
+    `),
+
+	// when a client was deactivated (user removal, or the idle top-level
+	// client marker in RemoveDisconnectedNetworkClients). The reap deletes an
+	// inactive client `NetworkClientReapAfterDeactivate` after this time;
+	// pre-migration rows (NULL) fall back to create_time, matching the old
+	// reap behavior. Metadata-only ALTER (nullable, no default).
+	newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN deactivate_time timestamp NULL
+    `),
+
+	// What a Solana payment was FOR.
+	//
+	// The intent recorded only a reference, so the webhook had nothing to check an
+	// arriving payment against. It coped by hardcoding `TokenAmount >= 40` and always
+	// granting a YEAR. Two consequences, both bad:
+	//
+	//   - the $5 monthly option offered on the site took the customer's money and
+	//     delivered NOTHING (5 < 40, so the transfer was ignored as "no matching USDC
+	//     payment");
+	//   - any payment of 40 or more bought a full year, however large or small.
+	//
+	// Recording the quoted price and plan lets the webhook verify that what arrived is
+	// what was asked for, and grant the plan that was actually bought.
+	//
+	// The defaults preserve the old behavior for intents created before these columns
+	// existed: 0 accepts any amount, and an empty plan means yearly.
+	newSqlMigration(`
+        ALTER TABLE solana_payment_intent
+        ADD COLUMN expected_amount_usd double precision NOT NULL DEFAULT 0,
+        ADD COLUMN subscription_plan varchar(32) NOT NULL DEFAULT ''
+    `),
 }

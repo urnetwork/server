@@ -53,6 +53,20 @@ const NetworkWindowExpiration = 15 * 24 * time.Hour
 
 const ClientLocationExpiration = 30 * 24 * time.Hour
 
+// How many disconnects a client is forgiven within one block before the block
+// counts against it. A disconnect drops the provider's live clients, so it is
+// real user impact and repeated disconnects (flapping) must still fail -- but
+// at zero tolerance a SINGLE reconnect invalidated the whole block, and at the
+// hour threshold one invalid block takes a provider out of the market for an
+// hour, so every handler rotation, mobile blip, and NAT rebind disqualified an
+// otherwise perfect provider.
+//
+// Both writers pass this to the `client_reliability_valid` sql function, which
+// is the one place the block validity rule is written. It applies to blocks
+// written from here on; rows already in the table keep the value they were
+// written with.
+const ReliabilityAllowDisconnectCountPerBlock = 1
+
 const ReliabilityBlockDuration = 60 * time.Second
 const ReliabilityWindowBucketDuration = 15 * time.Minute
 
@@ -111,8 +125,12 @@ func AddClientReliabilityStatsRange(
 				        receive_message_count,
 				        receive_byte_count,
 				        send_message_count,
-				        send_byte_count
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				        send_byte_count,
+				        valid
+					) VALUES (
+						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+						client_reliability_valid($5, $6, $7, $8, $9, $13)
+					)
 					ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
 					SET
 						connection_new_count = client_reliability.connection_new_count + $5,
@@ -122,7 +140,15 @@ func AddClientReliabilityStatsRange(
 				        receive_message_count = client_reliability.receive_message_count + $9,
 				        receive_byte_count = client_reliability.receive_byte_count + $10,
 				        send_message_count = client_reliability.send_message_count + $11,
-				        send_byte_count = client_reliability.send_byte_count + $12
+				        send_byte_count = client_reliability.send_byte_count + $12,
+				        valid = client_reliability_valid(
+				        	client_reliability.connection_new_count + $5,
+				        	client_reliability.connection_established_count + $6,
+				        	client_reliability.provide_enabled_count + $7,
+				        	client_reliability.provide_changed_count + $8,
+				        	client_reliability.receive_message_count + $9,
+				        	$13
+				        )
 					`,
 					blockNumber,
 					clientAddressHash[:],
@@ -136,6 +162,7 @@ func AddClientReliabilityStatsRange(
 					stats.ReceiveByteCount,
 					stats.SendMessageCount,
 					stats.SendByteCount,
+					ReliabilityAllowDisconnectCountPerBlock,
 				)
 			}
 		})
@@ -330,6 +357,11 @@ func RollupClientReliabilityStats(ctx context.Context, now time.Time) {
 
 		upsertClientReliabilityStatsBlock(ctx, blockNumber, fields)
 
+		// record coverage before dropping the redis bucket, so a crash
+		// in between re-drains and re-covers the unchanged bucket
+		coverClientReliabilityBlock(ctx, blockNumber)
+		recordClientReliabilityBlockHealth(ctx, blockNumber)
+
 		// the block is fully in pg; drop the redis bucket.
 		// a crash between the upsert and here re-drains the unchanged bucket
 		// on the next run, which overwrites the same values.
@@ -462,7 +494,8 @@ func upsertClientReliabilityStatsBlock(
 					receive_message_count,
 					receive_byte_count,
 					send_message_count,
-					send_byte_count
+					send_byte_count,
+					valid
 				)
 				SELECT
 					$1,
@@ -476,7 +509,15 @@ func upsertClientReliabilityStatsBlock(
 					t.receive_message_count,
 					t.receive_byte_count,
 					t.send_message_count,
-					t.send_byte_count
+					t.send_byte_count,
+					client_reliability_valid(
+						t.connection_new_count,
+						t.connection_established_count,
+						t.provide_enabled_count,
+						t.provide_changed_count,
+						t.receive_message_count,
+						$13
+					)
 				FROM unnest(
 					$2::bytea[],
 					$3::uuid[],
@@ -512,7 +553,8 @@ func upsertClientReliabilityStatsBlock(
 					receive_message_count = EXCLUDED.receive_message_count,
 					receive_byte_count = EXCLUDED.receive_byte_count,
 					send_message_count = EXCLUDED.send_message_count,
-					send_byte_count = EXCLUDED.send_byte_count
+					send_byte_count = EXCLUDED.send_byte_count,
+					valid = EXCLUDED.valid
 				`,
 				blockNumber,
 				clientAddressHashes,
@@ -526,17 +568,18 @@ func upsertClientReliabilityStatsBlock(
 				counterColumns[reliabilityCounterReceiveByte],
 				counterColumns[reliabilityCounterSendMessage],
 				counterColumns[reliabilityCounterSendByte],
+				ReliabilityAllowDisconnectCountPerBlock,
 			))
 		})
 	}
 }
 
-func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) {
+func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
 	minTime := maxTime.Add(-ClientExpiration)
 	minBlockNumber := (minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) - 1
 
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		tag, err := tx.Exec(
 			ctx,
 			`
 			DELETE FROM client_reliability
@@ -559,8 +602,41 @@ func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, lim
 			`,
 			minBlockNumber,
 			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+
+		// trim expired block health rows alongside the stats they describe
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM client_reliability_block
+			WHERE block_number <= $1
+			`,
+			minBlockNumber,
+		))
+
+		// trim expired coverage ranges. The straddling range keeps its newer
+		// half so gap accounting stays exact inside the retained window.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM client_reliability_sync
+			WHERE max_block_number < $1
+			`,
+			minBlockNumber,
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE client_reliability_sync
+			SET min_block_number = $1
+			WHERE min_block_number < $1 AND $1 <= max_block_number
+			`,
+			minBlockNumber,
 		))
 	})
+	return
 }
 
 type ReliabilityScore struct {
@@ -608,6 +684,234 @@ func reliabilityRollupBlockShift(ctx context.Context, tx server.PgTx, maxBlockNu
 	return
 }
 
+// coverClientReliabilityBlock records that blockNumber's redis counters are
+// fully drained into `client_reliability`, extending the newest coverage
+// range in `client_reliability_sync` when contiguous and starting a new range
+// after a gap. Blocks left outside every range (redis loss, drain outage) are
+// skipped by the score denominators (`reliabilityCoveredBlockCount`) instead
+// of being counted as unreliable gaps.
+func coverClientReliabilityBlock(ctx context.Context, blockNumber int64) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		// the common case: extend the newest range by one block
+		tag, err := tx.Exec(
+			ctx,
+			`
+			UPDATE client_reliability_sync
+			SET max_block_number = $1, update_time = $2
+			WHERE min_block_number = (
+				SELECT MAX(min_block_number) FROM client_reliability_sync
+			) AND max_block_number = $1 - 1
+			`,
+			blockNumber,
+			server.NowUtc(),
+		)
+		server.Raise(err)
+		if tag.RowsAffected() == 1 {
+			return
+		}
+
+		// already covered (re-drain of an unchanged block after a crash)
+		covered := false
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT 1 FROM client_reliability_sync
+			WHERE min_block_number <= $1 AND $1 <= max_block_number
+			`,
+			blockNumber,
+		)
+		server.WithPgResult(result, err, func() {
+			covered = result.Next()
+		})
+		if covered {
+			return
+		}
+
+		// start a new range after a gap
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO client_reliability_sync (min_block_number, max_block_number, update_time)
+			VALUES ($1, $1, $2)
+			ON CONFLICT (min_block_number) DO UPDATE
+			SET
+				max_block_number = GREATEST(client_reliability_sync.max_block_number, $1),
+				update_time = $2
+			`,
+			blockNumber,
+			server.NowUtc(),
+		))
+	})
+}
+
+// recordClientReliabilityBlockHealth counts how many clients reported in a
+// drained block. The counts drive `reliabilityDegradedBlocks`: a block whose
+// valid client count collapses relative to its neighbors was a platform event,
+// not a client event. Counting from the drained pg rows (rather than the redis
+// fields) reuses the `valid` generated column, so the rule can never drift.
+func recordClientReliabilityBlockHealth(ctx context.Context, blockNumber int64) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO client_reliability_block (block_number, client_count, valid_client_count)
+			SELECT
+				$1,
+				COUNT(*),
+				COUNT(*) FILTER (WHERE valid)
+			FROM client_reliability
+			WHERE block_number = $1
+			ON CONFLICT (block_number) DO UPDATE
+			SET
+				client_count = EXCLUDED.client_count,
+				valid_client_count = EXCLUDED.valid_client_count
+			`,
+			blockNumber,
+		))
+	})
+}
+
+// a block whose valid client count falls below this fraction of the window
+// median is degraded: a platform event took a set of clients out at once. The
+// affected clients lose the block they could not announce in AND the block
+// they reconnected in (`connection_new_count = 0` invalidates a reconnect
+// block), so at a 0.99 threshold a single connect deploy would otherwise drop
+// every provider on a rotated handler out of the market for a full lookback.
+// Normal churn moves this count by well under a percent per block, so the
+// fraction only has to be under 1 to catch a synchronized drop while never
+// firing on churn.
+const ReliabilityBlockDegradedFraction = 0.95
+
+// the median needs enough blocks to be meaningful, and a network with only a
+// handful of providers has too much relative noise to judge -- both fall back
+// to "no blocks are degraded" (the pre-existing behavior)
+const reliabilityDegradedMinBlockCount = 10
+const reliabilityDegradedMinMedian = 20
+
+// block health is a property of the block, not of the window being scored, so
+// the median is taken over a fixed neighborhood rather than the score window:
+// the shortest lookback (`ClientLookbacks[0]`) is only a handful of blocks
+// wide and could never establish a median of its own
+const reliabilityDegradedMedianBlockCount = 60
+
+// reliabilityDegradedBlocks returns the blocks in [minBlockNumber,
+// maxBlockNumber) that a platform event took out. These are excused for every
+// client: they count toward neither the numerator nor the denominator of the
+// reliability weights, exactly like a block that never drained.
+func reliabilityDegradedBlocks(ctx context.Context, tx server.PgTx, minBlockNumber int64, maxBlockNumber int64) (degradedBlockNumbers []int64) {
+	// never nil: a nil slice binds as SQL NULL, and `block_number = ANY(NULL)`
+	// is NULL, so the score queries' `NOT (... = ANY($n))` would filter out
+	// every row and wipe every provider score -- the outage this excusal
+	// exists to prevent
+	degradedBlockNumbers = []int64{}
+
+	medianMinBlockNumber := min(minBlockNumber, maxBlockNumber-reliabilityDegradedMedianBlockCount)
+
+	result, err := tx.Query(
+		ctx,
+		`
+		WITH neighborhood AS (
+			SELECT block_number, valid_client_count
+			FROM client_reliability_block
+			WHERE $1 <= block_number AND block_number < $3
+		), stat AS (
+			SELECT
+				COUNT(*) AS block_count,
+				percentile_cont(0.5) WITHIN GROUP (ORDER BY valid_client_count) AS median_valid_client_count
+			FROM neighborhood
+		)
+		SELECT neighborhood.block_number
+		FROM neighborhood, stat
+		WHERE
+			$2 <= neighborhood.block_number AND
+			$4 <= stat.block_count AND
+			$5 <= stat.median_valid_client_count AND
+			neighborhood.valid_client_count < $6 * stat.median_valid_client_count
+		ORDER BY neighborhood.block_number
+		`,
+		medianMinBlockNumber,
+		minBlockNumber,
+		maxBlockNumber,
+		reliabilityDegradedMinBlockCount,
+		reliabilityDegradedMinMedian,
+		ReliabilityBlockDegradedFraction,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var blockNumber int64
+			server.Raise(result.Scan(&blockNumber))
+			degradedBlockNumbers = append(degradedBlockNumbers, blockNumber)
+		}
+	})
+	return
+}
+
+// reliabilityCoveredBlockCount returns how many blocks in
+// [minBlockNumber, maxBlockNumber) count toward reliability weight
+// denominators. A block counts unless it is after the first coverage range
+// and outside every range: those blocks were buffered in redis but never
+// drained (redis restart/expiry, drain outage), so treating them as window
+// time would register the loss as client unreliability. Blocks before the
+// first range (pre-rollup history, or fixture/backfill environments with no
+// coverage rows at all) count as covered, which preserves the plain window
+// width in those cases.
+func reliabilityCoveredBlockCount(ctx context.Context, tx server.PgTx, minBlockNumber int64, maxBlockNumber int64) int64 {
+	var uncoveredBlockCount int64
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT COUNT(*) FROM generate_series($1::bigint, $2::bigint - 1) AS gs(block_number)
+		WHERE
+			gs.block_number >= (SELECT MIN(min_block_number) FROM client_reliability_sync) AND
+			NOT EXISTS (
+				SELECT 1 FROM client_reliability_sync
+				WHERE min_block_number <= gs.block_number AND gs.block_number <= max_block_number
+			)
+		`,
+		minBlockNumber,
+		maxBlockNumber,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&uncoveredBlockCount))
+		}
+	})
+	// an entirely uncovered window returns 0: there is no synced data to
+	// judge, and callers keep their previous scores instead of recomputing
+	return (maxBlockNumber - minBlockNumber) - uncoveredBlockCount
+}
+
+// the drain must have advanced its high-water mark within this long of now
+// for the reliability stats to compute; see `ClientReliabilityRollupSynced`
+const ReliabilityRollupStaleAfter = 10 * time.Minute
+
+// ClientReliabilityRollupSynced returns false when the redis->pg drain
+// (`RollupClientReliabilityStats`) has not advanced the high-water mark
+// within `ReliabilityRollupStaleAfter` of now. The stats updates wait for the
+// drain rather than recompute over windows that drift away from the present.
+// Returns true when the rollup has never run (fixture/backfill environments
+// write pg directly and have no drain).
+func ClientReliabilityRollupSynced(ctx context.Context, now time.Time) (synced bool) {
+	synced = true
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT update_time FROM client_reliability_rollup
+			WHERE singleton_id = 1
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var updateTime time.Time
+				server.Raise(result.Scan(&updateTime))
+				synced = now.UTC().Sub(updateTime) < ReliabilityRollupStaleAfter
+			}
+		})
+	})
+	return
+}
+
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -627,6 +931,21 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 			minTime := maxTime.Add(-lookback)
 			minBlockNumber := minTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
 			maxBlockNumber := (maxTime.UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) + 1) - shift
+
+			// weights normalize by the covered (drained) blocks in the window,
+			// minus the blocks a platform event took out, so neither a lost
+			// drain nor a connect deploy registers as client unreliability.
+			// a window with nothing left to judge keeps the previous scores.
+			coveredBlockCount := reliabilityCoveredBlockCount(ctx, tx, minBlockNumber, maxBlockNumber)
+			degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, minBlockNumber, maxBlockNumber)
+			effectiveBlockCount := coveredBlockCount - int64(len(degradedBlockNumbers))
+			if effectiveBlockCount <= 0 {
+				glog.Infof("[ncr]no usable blocks in lookback %d window [%d, %d); keeping previous scores\n", lookbackIndex, minBlockNumber, maxBlockNumber)
+				continue
+			}
+			if 0 < len(degradedBlockNumbers) {
+				glog.Infof("[ncr]excusing %d degraded blocks in lookback %d window [%d, %d)\n", len(degradedBlockNumbers), lookbackIndex, minBlockNumber, maxBlockNumber)
+			}
 
 			// upsert the fresh scores, then remove rows not refreshed in this
 			// round (identified by a stale max_block_number). This replaces the
@@ -652,9 +971,9 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 				    client_reliability.client_id,
 				    $3,
 				    SUM(1.0) AS independent_reliability_score,
-				    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
+				    SUM(1.0) / $4::bigint AS independent_reliability_weight,
 				    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
-				    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+				    SUM(1.0/valid_counts.valid_client_count) / $4::bigint AS reliability_weight,
 				    $1 AS min_block_number,
 					$2 AS max_block_number,
 					network_client_location_reliability.city_location_id,
@@ -670,7 +989,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					WHERE
 						valid = true AND
 						$1 <= block_number AND
-						block_number < $2
+						block_number < $2 AND
+						NOT (block_number = ANY($5::bigint[]))
 					GROUP BY block_number, client_address_hash
 				) valid_counts ON
 					valid_counts.block_number = client_reliability.block_number AND
@@ -681,7 +1001,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 				WHERE
 					client_reliability.valid = true AND
 					$1 <= client_reliability.block_number AND
-					client_reliability.block_number < $2
+					client_reliability.block_number < $2 AND
+					NOT (client_reliability.block_number = ANY($5::bigint[]))
 				GROUP BY
 					client_reliability.client_id,
 					network_client_location_reliability.city_location_id,
@@ -702,6 +1023,8 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 				minBlockNumber,
 				maxBlockNumber,
 				lookbackIndex,
+				effectiveBlockCount,
+				degradedBlockNumbers,
 			))
 
 			server.RaisePgResult(tx.Exec(
@@ -780,6 +1103,18 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 	minBlockNumber -= shift
 	maxBlockNumber -= shift
 
+	// weights normalize by the covered (drained) blocks in the window, minus
+	// the blocks a platform event took out, so neither a lost drain nor a
+	// connect deploy registers as client unreliability. a window with nothing
+	// left to judge keeps the previous scores.
+	coveredBlockCount := reliabilityCoveredBlockCount(ctx, tx, minBlockNumber, maxBlockNumber)
+	degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, minBlockNumber, maxBlockNumber)
+	effectiveBlockCount := coveredBlockCount - int64(len(degradedBlockNumbers))
+	if effectiveBlockCount <= 0 {
+		glog.Infof("[ncr]no usable blocks in network score window [%d, %d); keeping previous scores\n", minBlockNumber, maxBlockNumber)
+		return
+	}
+
 	// upsert the fresh scores, then remove rows not refreshed in this round
 	// (identified by a stale max_block_number). This replaces the previous
 	// delete-all-and-reinsert, which rewrote the entire table every round and
@@ -801,9 +1136,9 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		    client_reliability.network_id,
 		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
-		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
+		    SUM(1.0) / $3::bigint AS independent_reliability_weight,
 		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
-		    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    SUM(1.0/valid_counts.valid_client_count) / $3::bigint AS reliability_weight,
 		    $1 AS min_block_number,
 			$2 AS max_block_number
 		FROM client_reliability
@@ -816,7 +1151,8 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			WHERE
 				valid = true AND
 				$1 <= block_number AND
-				block_number < $2
+				block_number < $2 AND
+				NOT (block_number = ANY($4::bigint[]))
 			GROUP BY block_number, client_address_hash
 		) valid_counts ON
 			valid_counts.block_number = client_reliability.block_number AND
@@ -827,7 +1163,8 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		WHERE
 			client_reliability.valid = true AND
 			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2
+			client_reliability.block_number < $2 AND
+			NOT (client_reliability.block_number = ANY($4::bigint[]))
 		GROUP BY
 			client_reliability.network_id,
 			network_client_location_reliability.country_location_id
@@ -842,6 +1179,8 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 		`,
 		minBlockNumber,
 		maxBlockNumber,
+		effectiveBlockCount,
+		degradedBlockNumbers,
 	))
 
 	server.RaisePgResult(tx.Exec(
@@ -1005,7 +1344,8 @@ func getNetworkReliabilityWindow(
 	networkId server.Id,
 	clientIp *netip.Addr,
 ) (reliabilityWindow *ReliabilityWindow) {
-	server.Db(ctx, func(conn server.PgConn) {
+	// stats read of precomputed window rows: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -1215,6 +1555,14 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			return
 		}
 
+		degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, minBlockNumber, maxBlockNumber)
+
+		// each bucket's weight normalizes by the usable (drained, not
+		// platform-degraded) blocks in the bucket rather than the full bucket
+		// width, so neither a lost drain nor a connect deploy registers as
+		// unreliability. Blocks before the first coverage range count as
+		// covered (pre-rollup history and fixture/backfill environments); a
+		// bucket with no usable blocks falls back to the full width.
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1228,7 +1576,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			SELECT
 			    client_reliability.network_id,
 			    client_reliability.block_number / $3 AS bucket_number,
-			    SUM(CASE WHEN client_reliability.valid = true THEN 1.0/valid_counts.valid_client_count ELSE 0 END) / $3 AS reliability_weight,
+			    SUM(CASE WHEN client_reliability.valid = true THEN 1.0/valid_counts.valid_client_count ELSE 0 END) / COALESCE(NULLIF(MAX(covered.covered_block_count), 0), $3) AS reliability_weight,
 			    COUNT(DISTINCT client_reliability.client_id) FILTER (WHERE client_reliability.valid = true) AS client_count,
 			    COUNT(DISTINCT client_reliability.client_id) AS total_client_count
 			FROM client_reliability
@@ -1241,15 +1589,34 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 				WHERE
 					valid = true AND
 					$1 <= block_number AND
-					block_number < $2
+					block_number < $2 AND
+					NOT (block_number = ANY($4::bigint[]))
 				GROUP BY block_number, client_address_hash
 			) valid_counts ON
 				valid_counts.block_number = client_reliability.block_number AND
 				valid_counts.client_address_hash = client_reliability.client_address_hash
+			LEFT JOIN (
+				SELECT
+					gs.block_number / $3 AS bucket_number,
+					COUNT(*) AS covered_block_count
+				FROM generate_series($1::bigint, $2::bigint - 1) AS gs(block_number)
+				WHERE
+					(
+						gs.block_number < (SELECT MIN(min_block_number) FROM client_reliability_sync) OR
+						EXISTS (
+							SELECT 1 FROM client_reliability_sync
+							WHERE min_block_number <= gs.block_number AND gs.block_number <= max_block_number
+						)
+					) AND
+					NOT (gs.block_number = ANY($4::bigint[]))
+				GROUP BY gs.block_number / $3
+			) covered ON
+				covered.bucket_number = client_reliability.block_number / $3
 			WHERE
 				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2
-			GROUP BY client_reliability.network_id, bucket_number
+				client_reliability.block_number < $2 AND
+				NOT (client_reliability.block_number = ANY($4::bigint[]))
+			GROUP BY client_reliability.network_id, client_reliability.block_number / $3
 			ON CONFLICT (network_id, bucket_number) DO UPDATE
 			SET
 				reliability_weight = EXCLUDED.reliability_weight,
@@ -1259,6 +1626,7 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 			minBlockNumber,
 			maxBlockNumber,
 			blockCountPerBucket,
+			degradedBlockNumbers,
 		))
 	}, server.TxReadCommitted)
 }
@@ -1313,6 +1681,18 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 	minBlockNumber -= shift
 	maxBlockNumber -= shift
 
+	// weights normalize by the covered (drained) blocks in the window, minus
+	// the blocks a platform event took out, so neither a lost drain nor a
+	// connect deploy registers as client unreliability. a window with nothing
+	// left to judge keeps the previous scores.
+	coveredBlockCount := reliabilityCoveredBlockCount(ctx, tx, minBlockNumber, maxBlockNumber)
+	degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, minBlockNumber, maxBlockNumber)
+	effectiveBlockCount := coveredBlockCount - int64(len(degradedBlockNumbers))
+	if effectiveBlockCount <= 0 {
+		glog.Infof("[ncr]no usable blocks in window score window [%d, %d); keeping previous scores\n", minBlockNumber, maxBlockNumber)
+		return
+	}
+
 	// upsert the fresh scores, then remove rows not refreshed in this round
 	// (identified by a stale max_block_number). This replaces the previous
 	// delete-all-and-reinsert, which rewrote the entire table every round and
@@ -1334,9 +1714,9 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		    client_reliability.network_id,
 		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
-		    SUM(1.0) / ($2::bigint - $1::bigint) AS independent_reliability_weight,
+		    SUM(1.0) / $3::bigint AS independent_reliability_weight,
 		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
-		    SUM(1.0/valid_counts.valid_client_count) / ($2::bigint - $1::bigint) AS reliability_weight,
+		    SUM(1.0/valid_counts.valid_client_count) / $3::bigint AS reliability_weight,
 		    $1 AS min_block_number,
 			$2 AS max_block_number
 		FROM client_reliability
@@ -1349,7 +1729,8 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 			WHERE
 				valid = true AND
 				$1 <= block_number AND
-				block_number < $2
+				block_number < $2 AND
+				NOT (block_number = ANY($4::bigint[]))
 			GROUP BY block_number, client_address_hash
 		) valid_counts ON
 			valid_counts.block_number = client_reliability.block_number AND
@@ -1360,7 +1741,8 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		WHERE
 			client_reliability.valid = true AND
 			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2
+			client_reliability.block_number < $2 AND
+			NOT (client_reliability.block_number = ANY($4::bigint[]))
 		GROUP BY
 			client_reliability.network_id,
 			network_client_location_reliability.country_location_id
@@ -1375,6 +1757,8 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		`,
 		minBlockNumber,
 		maxBlockNumber,
+		effectiveBlockCount,
+		degradedBlockNumbers,
 	))
 
 	server.RaisePgResult(tx.Exec(

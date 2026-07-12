@@ -42,6 +42,7 @@ Usage:
     bringyourctl search --realm=<realm> --type=<type> clear
     bringyourctl stats compute
     bringyourctl stats export
+    bringyourctl stats providers-map
     bringyourctl stats import
     bringyourctl stats add
     bringyourctl locations add-default [-a]
@@ -141,6 +142,8 @@ Options:
 			statsCompute(opts)
 		} else if export, _ := opts.Bool("export"); export {
 			statsExport(opts)
+		} else if providersMap, _ := opts.Bool("providers-map"); providersMap {
+			statsProvidersMap(opts)
 		} else if import_, _ := opts.Bool("import"); import_ {
 			statsImport(opts)
 		} else if add, _ := opts.Bool("add"); add {
@@ -369,6 +372,20 @@ func statsExport(opts docopt.Opts) {
 	ctx := context.Background()
 	stats := model.ComputeStats(ctx, 90)
 	model.ExportStats(ctx, stats)
+}
+
+// statsProvidersMap seeds the /stats/providers-map blob once (the taskworker
+// refreshes it on a schedule). Useful so the endpoint has data before the first
+// task run.
+func statsProvidersMap(opts docopt.Opts) {
+	ctx := context.Background()
+	if err := model.ExportProvidersMap(ctx); err != nil {
+		panic(err)
+	}
+	if providersMapJson := model.GetExportedProvidersMapJson(ctx); providersMapJson != nil {
+		fmt.Printf("%s\n", *providersMapJson)
+	}
+	fmt.Println("exported stats.providers-map")
 }
 
 func statsImport(opts docopt.Opts) {
@@ -1398,8 +1415,17 @@ func refreshTransferBalances(opts docopt.Opts) {
 	ctx := context.Background()
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	controller.RefreshTransferBalances(
-		&controller.RefreshTransferBalancesArgs{},
+	// run all three grants (free daily, pro monthly, referral period)
+	controller.RefreshFreeTransferBalances(
+		&controller.RefreshFreeTransferBalancesArgs{},
+		clientSession,
+	)
+	controller.RefreshProTransferBalances(
+		&controller.RefreshProTransferBalancesArgs{},
+		clientSession,
+	)
+	controller.RefreshReferralTransferBalances(
+		&controller.RefreshReferralTransferBalancesArgs{},
 		clientSession,
 	)
 }

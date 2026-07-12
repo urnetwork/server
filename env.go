@@ -529,10 +529,6 @@ func (self *Resolver) RequireBytes(relPath string) []byte {
 
 // list indexes are not in the res path; instead, each element is expanded out into the value array
 func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
-	path, err := self.ResourcePath(relPath)
-	if err != nil {
-		return nil, err
-	}
 	override := func() []byte {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -548,6 +544,16 @@ func (self *Resolver) SimpleResource(relPath string) (*SimpleResource, error) {
 		}
 		return nil
 	}()
+	path, err := self.ResourcePath(relPath)
+	if err != nil {
+		// an override does not need a backing file
+		// (`PushSimpleResource` can stand in for a resource that does not
+		// exist in the environment)
+		if override == nil {
+			return nil, err
+		}
+		path = relPath
+	}
 	return &SimpleResource{
 		path:     path,
 		override: override,

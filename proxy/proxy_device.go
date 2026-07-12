@@ -55,6 +55,25 @@ type ProxyDeviceManager struct {
 	// serializing on one global mutex.
 	stateLock    sync.RWMutex
 	proxyDevices map[server.Id]*proxyDeviceState
+
+	// The ip lock, memoized. ValidCaller runs on EVERY accepted connection, so reading
+	// the device config from redis each time would put a round-trip on the accept path.
+	// The ttl bounds how long a stale lock is enforced after the config changes.
+	lockCacheLock sync.Mutex
+	lockCache     map[server.Id]proxyLockEntry
+}
+
+// proxyLockCacheTtl bounds how long a stale ip lock can be enforced after the proxy
+// device config changes.
+const proxyLockCacheTtl = 30 * time.Second
+
+type proxyLockEntry struct {
+	// found is false when the proxy id has no config at all -- it was deleted, expired,
+	// or never existed. That is cached too: an unknown proxy id being hammered must not
+	// hit the db on every attempt.
+	found       bool
+	lockSubnets []netip.Prefix
+	expiry      time.Time
 }
 
 func NewProxyDeviceManagerWithDefaults(ctx context.Context) *ProxyDeviceManager {
@@ -70,6 +89,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		settings: settings,
 		// networkSpace: networkSpace,
 		proxyDevices: map[server.Id]*proxyDeviceState{},
+		lockCache:    map[server.Id]proxyLockEntry{},
 	}
 }
 
@@ -232,9 +252,102 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	return pd, nil
 }
 
+// ValidCaller reports whether a caller at `addr` is authorized to use `proxyId`.
+//
+// This enforces the ip lock the CUSTOMER asked for. `proxy_config.lock_caller_ip` pins a
+// proxy to the ip that created it; `proxy_config.lock_ip_list` pins it to an explicit set
+// of addresses or CIDRs. Both are recorded as LockSubnets on the proxy device config.
+//
+// It used to be `// FIXME` returning true, so the lock was never applied AT ALL. A
+// customer who explicitly asked that their proxy be usable only from their own ip got no
+// restriction whatsoever — anyone holding the signed proxy id could use it from anywhere.
+// The feature existed, was requested, was stored, and was then ignored.
+//
+// A proxy id with no config is DENIED: it was deleted, expired, or never existed, and an
+// unknown proxy is not an authorized one. (A redis or db outage panics rather than
+// returning nil, so nil genuinely means "not found" — an outage cannot quietly turn this
+// into a deny-all.)
 func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) bool {
-	// FIXME
-	return true
+	entry := self.proxyLock(proxyId)
+
+	if !entry.found {
+		glog.Infof("[proxy]caller %s refused: proxy %s has no config\n", addr, proxyId)
+		return false
+	}
+
+	if len(entry.lockSubnets) == 0 {
+		// the customer did not ask for an ip lock
+		return true
+	}
+
+	for _, lockSubnet := range entry.lockSubnets {
+		if subnetContains(lockSubnet, addr) {
+			return true
+		}
+	}
+
+	glog.Infof(
+		"[proxy]caller %s refused: outside the ip lock for proxy %s (%v)\n",
+		addr, proxyId, entry.lockSubnets,
+	)
+	return false
+}
+
+// proxyLock returns the ip lock for a proxy id, memoized.
+func (self *ProxyDeviceManager) proxyLock(proxyId server.Id) proxyLockEntry {
+	now := time.Now()
+
+	self.lockCacheLock.Lock()
+	entry, ok := self.lockCache[proxyId]
+	self.lockCacheLock.Unlock()
+	if ok && now.Before(entry.expiry) {
+		return entry
+	}
+
+	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
+
+	entry = proxyLockEntry{
+		found:  proxyDeviceConfig != nil,
+		expiry: now.Add(proxyLockCacheTtl),
+	}
+	if proxyDeviceConfig != nil {
+		entry.lockSubnets = proxyDeviceConfig.LockSubnets
+	}
+
+	self.lockCacheLock.Lock()
+	self.lockCache[proxyId] = entry
+	self.lockCacheLock.Unlock()
+
+	return entry
+}
+
+// subnetContains reports whether addr falls inside subnet, normalizing v4-mapped-v6.
+//
+// A dual-stack listener reports an ipv4 peer as ::ffff:a.b.c.d, and netip.Prefix.Contains
+// is false across address families. Without this normalization an ipv4 lock would never
+// match an ipv4 caller — and the customer would be locked out of their own proxy by the
+// very feature meant to protect it.
+func subnetContains(subnet netip.Prefix, addr netip.Addr) bool {
+	if subnet.Contains(addr) {
+		return true
+	}
+
+	unmappedAddr := addr.Unmap()
+	if unmappedAddr != addr && subnet.Contains(unmappedAddr) {
+		return true
+	}
+
+	if subnet.Addr().Is4In6() {
+		if bits := subnet.Bits() - 96; 0 <= bits {
+			if unmappedSubnet, err := subnet.Addr().Unmap().Prefix(bits); err == nil {
+				if unmappedSubnet.Contains(unmappedAddr) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func (self *ProxyDeviceManager) Close() {
@@ -379,6 +492,31 @@ func NewProxyDevice(
 	// settings (up to 1MB per connection).
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
+
+	// gVisor buffer sizes are LIMITS on what may be queued, not preallocations, so
+	// they cost nothing while a connection is idle and everything while it is
+	// backlogged. There is one stack PER CLIENT here and one endpoint per
+	// connection/flow, so a buffer is multiplied by clients x endpoints.
+	//
+	// TCP keeps the full default (1MiB max per direction). tcp throughput is bounded
+	// by window/RTT, so capping the window directly caps a single connection's
+	// speed: at 128kib it would be ~10 Mbps on a 100ms path, ~21 Mbps on 50ms. That
+	// is a user-visible performance cost, and it is not worth the memory. A
+	// backlogged tcp endpoint costs ~184 KiB (measured, connect's
+	// TestTunEndpointCapacityTcp).
+	//
+	// UDP does NOT have that trade-off, so it does not keep the default. The socks
+	// associate relay caps datagrams at 2kib and drains every flow with a dedicated
+	// reader, so it cannot use a deep queue at all: the 1MiB default is ~500
+	// datagrams of headroom a prompt reader never fills. Measured cost of a
+	// BACKLOGGED flow (connect's TestTunEndpointCapacityUdpSmallBuffers):
+	//
+	//	1MiB   -> 576 KiB/flow        128KiB -> 277 KiB/flow
+	//	64KiB  -> 142 KiB/flow         32KiB ->  76 KiB/flow
+	//
+	// 128kib is still ~90 MTU-sized datagrams of burst headroom.
+	tunSettings.UdpReceiveBufferByteCount = 128 * 1024
+	tunSettings.UdpSendBufferByteCount = 128 * 1024
 
 	tun, err := connect.CreateTunWithResolver(
 		cancelCtx,

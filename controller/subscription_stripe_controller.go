@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/stripe/stripe-go/v82/ephemeralkey"
 
 	stripesession "github.com/stripe/stripe-go/v82/billingportal/session"
+	stripecheckout "github.com/stripe/stripe-go/v82/checkout/session"
 	"github.com/stripe/stripe-go/v82/subscription"
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
 )
@@ -50,9 +52,47 @@ type StripeSubscriptionPrices struct {
 	Monthly string `yaml:"monthly"`
 }
 
+// The Stripe price ids for the Pro plan. These live in config/<env>/stripe.yml, NOT
+// the vault -- a price id is not a secret.
+//
+// This used to read from the Vault (where `subscription_prices` does not exist) and
+// then type-assert a map[string]any straight to this struct, which would have panicked
+// the moment it was called. It never was called, so the bug sat here unnoticed.
 var stripeSubscriptionPrices = sync.OnceValue(func() StripeSubscriptionPrices {
-	c := server.Vault.RequireSimpleResource("stripe.yml").Parse()
-	return c["subscription_prices"].(StripeSubscriptionPrices)
+	var c struct {
+		SubscriptionPrices StripeSubscriptionPrices `yaml:"subscription_prices"`
+	}
+	// optional: an env with no config stripe.yml (local, test) simply has no prices,
+	// and checkout refuses rather than the process failing to boot
+	if resource, err := server.Config.SimpleResource("stripe.yml"); err == nil {
+		resource.UnmarshalYaml(&c)
+	}
+	return c.SubscriptionPrices
+})
+
+// Where Stripe returns the customer after checkout. Configured SERVER-side on purpose:
+// if the client could supply success_url, anyone could point our checkout at their own
+// domain and harvest the redirect.
+//
+// success_url/cancel_url are the HOSTED pair. return_url is the EMBEDDED one: Stripe
+// rejects success_url/cancel_url when ui_mode is embedded, and takes a single return_url
+// instead (it substitutes {CHECKOUT_SESSION_ID} into it).
+type StripeCheckoutUrls struct {
+	SuccessUrl string `yaml:"success_url"`
+	CancelUrl  string `yaml:"cancel_url"`
+	ReturnUrl  string `yaml:"return_url"`
+}
+
+var stripeCheckoutUrls = sync.OnceValue(func() StripeCheckoutUrls {
+	var c struct {
+		Checkout StripeCheckoutUrls `yaml:"checkout"`
+	}
+	// optional, as above. StripeCreateCheckoutSession refuses to send a customer to
+	// Stripe when these are unset, rather than sending them somewhere with no way back.
+	if resource, err := server.Config.SimpleResource("stripe.yml"); err == nil {
+		resource.UnmarshalYaml(&c)
+	}
+	return c.Checkout
 })
 
 type StripeWebhookArgs struct {
@@ -232,7 +272,30 @@ func stripeHandleCheckoutSessionCompleted(
 		return nil, err
 	}
 
-	purchaseEmail := checkoutComplete.CustomerDetails.Email
+	// The checkout session we created carries client_reference_id = the network of the
+	// signed-in customer. Use it: we know exactly whose balance this is, so the data can
+	// land directly instead of being emailed as a code for them to redeem by hand.
+	//
+	// It is absent for any checkout not started from a signed-in session, in which case
+	// the emailed code is the delivery mechanism -- which is what data codes are for.
+	var redeemNetworkId *server.Id
+	if checkoutComplete.ClientReferenceId != "" {
+		if networkId, err := server.ParseId(checkoutComplete.ClientReferenceId); err == nil {
+			redeemNetworkId = &networkId
+		} else {
+			glog.Errorf(
+				"[sub]checkout %s has an unparseable client_reference_id %q: %s\n",
+				checkoutComplete.Id, checkoutComplete.ClientReferenceId, err,
+			)
+		}
+	}
+
+	// customer_details is absent on some completed sessions, so guard the
+	// deref: a nil here would panic the webhook handler rather than return
+	purchaseEmail := ""
+	if checkoutComplete.CustomerDetails != nil {
+		purchaseEmail = checkoutComplete.CustomerDetails.Email
+	}
 	if purchaseEmail == "" {
 		glog.Infof("missing purchase email")
 		return nil, errors.New("missing purchase email to send balance code")
@@ -269,11 +332,12 @@ func stripeHandleCheckoutSessionCompleted(
 					err = CreateBalanceCode(
 						clientSession.Ctx,
 						sku.BalanceByteCount(),
-						SubscriptionYearDuration,
+						model.Pro().DataCodeDuration,
 						netRevenue,
 						stripeSessionId,
 						string(stripeItemJsonBytes),
 						purchaseEmail,
+						redeemNetworkId,
 					)
 					if err != nil {
 						return nil, err
@@ -504,6 +568,7 @@ func stripeHandleInvoicePaid(
 			return
 		}
 
+		// a supporter subscription -> carries the Pro entitlement
 		transferBalance := &model.TransferBalance{
 			NetworkId:             *networkId,
 			StartTime:             startTime,
@@ -511,6 +576,7 @@ func stripeHandleInvoicePaid(
 			StartBalanceByteCount: RefreshSupporterTransferBalance,
 			SubsidyNetRevenue:     netRevenue,
 			BalanceByteCount:      RefreshSupporterTransferBalance,
+			Pro:                   true,
 		}
 
 		model.AddTransferBalanceInTx(
@@ -525,6 +591,10 @@ func stripeHandleInvoicePaid(
 		glog.Infof("Error processing invoice paid: %v", insertErr)
 		return nil, insertErr
 	}
+
+	// the pro balance is committed -- refresh the entitlement cache so the upgrade
+	// is visible immediately rather than after ProCacheTtl
+	model.UpdateProNetwork(clientSession.Ctx, *networkId)
 
 	return &StripeWebhookResult{}, nil
 
@@ -915,4 +985,291 @@ func UnsubscribeStripe(session *session.ClientSession) error {
 	})
 
 	return nil
+}
+
+// ----- Checkout Session -----
+//
+// This is what the web upgrade/buy-data flows were missing entirely. The only payment
+// primitive the API offered was /subscription/create-payment-id, which mints a
+// correlation token -- NOT a Stripe session -- so the web client had nowhere to send
+// the user and its "Subscribe with Stripe" button could only ever throw.
+
+// The things a customer can buy on the web.
+//
+// Pro maps to the Stripe subscription PRICES (config stripe.yml subscription_prices).
+// The data packs map to Stripe PRODUCTS (config stripe.yml skus) with the amount
+// attached from pro.yml -- so price lives in one place (pro.yml) and the webhook can
+// still match the product back to a sku to know how much data to grant.
+const (
+	StripeItemProMonthly = "pro_monthly"
+	StripeItemProYearly  = "pro_yearly"
+	StripeItemData1Tib   = "data_1tib"
+	StripeItemData10Tib  = "data_10tib"
+)
+
+// How the customer will be shown Checkout.
+//
+// These are Stripe's own `ui_mode` values, and they are MUTUALLY EXCLUSIVE on a single
+// session -- this is a Stripe constraint, not ours:
+//
+//   - hosted   -> the session has a `url` and NO client_secret. success_url/cancel_url
+//     apply. The client navigates away to checkout.stripe.com.
+//   - embedded -> the session has a `client_secret` and NO `url`. success_url/cancel_url
+//     are REJECTED by the API; return_url applies instead. Stripe.js mounts
+//     Checkout in an iframe on our own page.
+//
+// So one session cannot hand back both a url and a client secret, and the caller has to
+// say which one it wants. Desktop (Windows/Linux) asks for embedded and renders it in a
+// webview; anything that can only open a browser asks for hosted.
+const (
+	StripeUiModeHosted   = "hosted"
+	StripeUiModeEmbedded = "embedded"
+)
+
+type StripeCreateCheckoutSessionArgs struct {
+	ItemId string `json:"item_id"`
+	// "hosted" (default) or "embedded". Defaults to hosted so existing callers, which
+	// only ever read checkout_url, keep working unchanged.
+	UiMode string `json:"ui_mode,omitempty"`
+}
+
+type StripeCreateCheckoutSessionError struct {
+	Message string `json:"message"`
+}
+
+type StripeCreateCheckoutSessionResult struct {
+	// Which of the two shapes below is populated.
+	UiMode string `json:"ui_mode,omitempty"`
+
+	// HOSTED: Stripe's hosted checkout url. The client simply navigates here -- no
+	// Stripe.js and no publishable key needed.
+	CheckoutUrl string `json:"checkout_url,omitempty"`
+
+	// EMBEDDED: the client secret Stripe.js needs to mount Embedded Checkout, plus the
+	// publishable key to initialize Stripe.js with. The publishable key is not a secret
+	// (StripeCreatePaymentIntent already hands it to mobile the same way).
+	ClientSecret   string `json:"client_secret,omitempty"`
+	PublishableKey string `json:"publishable_key,omitempty"`
+
+	// Both modes. The caller can use this to reconcile the purchase afterwards.
+	SessionId string `json:"session_id,omitempty"`
+
+	Error *StripeCreateCheckoutSessionError `json:"error,omitempty"`
+}
+
+func stripeCheckoutError(message string) *StripeCreateCheckoutSessionResult {
+	return &StripeCreateCheckoutSessionResult{
+		Error: &StripeCreateCheckoutSessionError{Message: message},
+	}
+}
+
+// stripeDataPackByteCount maps a data item id to the amount it grants, from pro.yml.
+func stripeDataPackByteCount(itemId string) (model.ByteCount, bool) {
+	switch itemId {
+	case StripeItemData1Tib:
+		return 1 * model.Tib, true
+	case StripeItemData10Tib:
+		return 10 * model.Tib, true
+	}
+	return 0, false
+}
+
+// stripeProductForByteCount finds the Stripe product configured for a data amount, so
+// the fulfilment webhook (which looks a sku up by product id) can tell how much data
+// was bought. Company and supporter skus are not data packs.
+func stripeProductForByteCount(byteCount model.ByteCount) (string, bool) {
+	for productId, sku := range stripeSkus() {
+		if sku.Supporter || sku.Special != "" {
+			continue
+		}
+		if sku.BalanceByteCount() == byteCount {
+			return productId, true
+		}
+	}
+	return "", false
+}
+
+// stripeDataPackPriceUsd is the price of a data amount, from pro.yml -- the same source
+// the site and the x402 skus quote from, so a customer is never shown two prices.
+func stripeDataPackPriceUsd(byteCount model.ByteCount) (float64, bool) {
+	for _, sku := range model.Pro().DataCodeSkus {
+		if sku.Data == byteCount {
+			return sku.PriceUsd, true
+		}
+	}
+	return 0, false
+}
+
+// stripeCheckoutUiMode normalizes the requested ui mode. Empty means hosted, so callers
+// written before embedded existed keep getting exactly what they got before.
+func stripeCheckoutUiMode(uiMode string) (string, bool) {
+	switch uiMode {
+	case "":
+		return StripeUiModeHosted, true
+	case StripeUiModeHosted, StripeUiModeEmbedded:
+		return uiMode, true
+	}
+	return "", false
+}
+
+// stripeCheckoutApplyUiMode sets the ui-mode-specific params, and reports whether this
+// env is configured for that mode at all.
+//
+// The two shapes MUST NOT be mixed: Stripe rejects a session that carries
+// success_url/cancel_url with ui_mode embedded, and an embedded session with no
+// return_url has nowhere to send the customer when they finish. Keeping this in one
+// place (rather than inline) is what makes it testable without a Stripe key.
+func stripeCheckoutApplyUiMode(
+	params *stripe.CheckoutSessionParams,
+	uiMode string,
+	urls StripeCheckoutUrls,
+) bool {
+	switch uiMode {
+	case StripeUiModeEmbedded:
+		if urls.ReturnUrl == "" {
+			return false
+		}
+		params.UIMode = stripe.String(string(stripe.CheckoutSessionUIModeEmbedded))
+		params.ReturnURL = stripe.String(urls.ReturnUrl)
+		return true
+
+	case StripeUiModeHosted:
+		if urls.SuccessUrl == "" || urls.CancelUrl == "" {
+			return false
+		}
+		params.SuccessURL = stripe.String(urls.SuccessUrl)
+		params.CancelURL = stripe.String(urls.CancelUrl)
+		return true
+	}
+	return false
+}
+
+// StripeCreateCheckoutSession creates a real Stripe Checkout Session, either hosted
+// (returns Stripe's url) or embedded (returns a client secret for Stripe.js). See the
+// StripeUiMode* consts: Stripe gives a session ONE of the two, never both.
+//
+// The session carries client_reference_id = networkId. That is how BOTH webhooks find
+// the network to fulfil (stripeHandleInvoicePaid for Pro, and the checkout-complete
+// handler for data packs). Removing it would take the money and deliver nothing.
+func StripeCreateCheckoutSession(
+	args *StripeCreateCheckoutSessionArgs,
+	clientSession *session.ClientSession,
+) (*StripeCreateCheckoutSessionResult, error) {
+
+	uiMode, ok := stripeCheckoutUiMode(args.UiMode)
+	if !ok {
+		return stripeCheckoutError("Unknown ui mode."), nil
+	}
+
+	networkId := clientSession.ByJwt.NetworkId
+
+	params := &stripe.CheckoutSessionParams{
+		// the fulfilment webhooks resolve the network from this
+		ClientReferenceID: stripe.String(networkId.String()),
+	}
+
+	// Where the customer lands when they are done. Note this runs BEFORE any vault access
+	// below, so an env with no stripe config refuses cleanly instead of panicking on a
+	// missing secret.
+	if !stripeCheckoutApplyUiMode(params, uiMode, stripeCheckoutUrls()) {
+		// refuse rather than hand a customer to Stripe with no way back
+		glog.Errorf("[stripe]checkout urls are not configured for ui mode %s\n", uiMode)
+		return stripeCheckoutError("Checkout is not configured."), nil
+	}
+
+	stripe.Key = stripeApiToken()
+
+	switch args.ItemId {
+
+	case StripeItemProMonthly, StripeItemProYearly:
+		prices := stripeSubscriptionPrices()
+		priceId := prices.Monthly
+		if args.ItemId == StripeItemProYearly {
+			priceId = prices.Yearly
+		}
+		if priceId == "" {
+			glog.Errorf("[stripe]no subscription price configured for %s\n", args.ItemId)
+			return stripeCheckoutError("That plan is not available."), nil
+		}
+
+		params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
+		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
+			{
+				Price:    stripe.String(priceId),
+				Quantity: stripe.Int64(1),
+			},
+		}
+		// Stamp the network onto the SUBSCRIPTION itself, not just the session.
+		// stripeHandleInvoicePaid resolves the network in this order:
+		//   1. subscription metadata network_id  <- this
+		//   2. the Stripe customer's email -> FindNetworkIdByEmail
+		//   3. the checkout session's client_reference_id
+		// Without (1) a customer who pays with a different email than their account
+		// falls through to (2), which can resolve to the WRONG network or none at all.
+		// Renewal invoices also carry the subscription but no checkout session, so (3)
+		// is not a reliable long-term anchor either.
+		params.SubscriptionData = &stripe.CheckoutSessionSubscriptionDataParams{
+			Metadata: map[string]string{
+				"network_id": networkId.String(),
+			},
+		}
+
+	case StripeItemData1Tib, StripeItemData10Tib:
+		byteCount, _ := stripeDataPackByteCount(args.ItemId)
+
+		productId, ok := stripeProductForByteCount(byteCount)
+		if !ok {
+			glog.Errorf("[stripe]no product configured for data pack %s\n", args.ItemId)
+			return stripeCheckoutError("That data pack is not available."), nil
+		}
+		priceUsd, ok := stripeDataPackPriceUsd(byteCount)
+		if !ok || priceUsd <= 0 {
+			glog.Errorf("[stripe]no price in pro.yml for data pack %s\n", args.ItemId)
+			return stripeCheckoutError("That data pack is not available."), nil
+		}
+
+		// a one-time payment, priced from pro.yml and attached to the EXISTING Stripe
+		// product -- so checkout.session.completed can still look the sku up by product
+		// id and know how much data to grant
+		params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
+		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
+			{
+				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+					Currency:   stripe.String(string(stripe.CurrencyUSD)),
+					Product:    stripe.String(productId),
+					UnitAmount: stripe.Int64(int64(math.Round(priceUsd * 100))),
+				},
+				Quantity: stripe.Int64(1),
+			},
+		}
+
+	default:
+		return stripeCheckoutError("Unknown item."), nil
+	}
+
+	checkoutSession, err := stripecheckout.New(params)
+	if err != nil {
+		glog.Errorf("[stripe]could not create checkout session for %s: %s\n", args.ItemId, err)
+		return stripeCheckoutError("Could not start checkout. Please try again."), nil
+	}
+
+	glog.Infof(
+		"[stripe]checkout session %s created for network %s item %s (%s)\n",
+		checkoutSession.ID, networkId, args.ItemId, uiMode,
+	)
+
+	result := &StripeCreateCheckoutSessionResult{
+		UiMode:    uiMode,
+		SessionId: checkoutSession.ID,
+	}
+	switch uiMode {
+	case StripeUiModeEmbedded:
+		// Stripe.js needs BOTH of these to mount Embedded Checkout. There is no url on
+		// an embedded session -- see the StripeUiMode* comment.
+		result.ClientSecret = checkoutSession.ClientSecret
+		result.PublishableKey = stripePublishableKey()
+	case StripeUiModeHosted:
+		result.CheckoutUrl = checkoutSession.URL
+	}
+	return result, nil
 }

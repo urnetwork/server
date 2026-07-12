@@ -600,6 +600,10 @@ func VerifySignature(blockchain string, publicKey string, message string, signat
 		return VerifyEthereumSignature(publicKey, message, signature)
 	}
 
+	if strings.EqualFold(blockchain, "tao") || strings.EqualFold(blockchain, "bittensor") {
+		return VerifyBittensorSignature(publicKey, message, signature)
+	}
+
 	return false, fmt.Errorf("unsupported blockchain: %s", blockchain)
 
 }
@@ -1394,24 +1398,6 @@ func AuthCodeCreate(
 			})
 		}
 
-		// propagate the auth sessions
-		if 0 < len(session.ByJwt.AuthSessionIds) {
-			server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
-				for _, authSessionId := range session.ByJwt.AuthSessionIds {
-					batch.Queue(
-						`
-						INSERT INTO auth_code_session (
-							auth_code_id,
-							auth_session_id
-						) VALUES ($1, $2)
-						`,
-						authCodeId,
-						authSessionId,
-					)
-				}
-			})
-		}
-
 		codeCreateResult = &AuthCodeCreateResult{
 			AuthCode:        authCode,
 			DurationMinutes: float64(duration) / float64(time.Minute),
@@ -1458,15 +1444,6 @@ func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCou
 			DELETE FROM auth_code
 			USING temp_auth_code_id
 			WHERE auth_code.auth_code_id = temp_auth_code_id.auth_code_id
-			`,
-		)
-
-		tx.Exec(
-			ctx,
-			`
-			DELETE FROM auth_code_session
-			USING temp_auth_code_id
-			WHERE auth_code_session.auth_code_id = temp_auth_code_id.auth_code_id
 			`,
 		)
 
@@ -1597,43 +1574,6 @@ func AuthCodeLogin(
 			}
 		})
 
-		result, err = tx.Query(
-			session.Ctx,
-			`
-				SELECT auth_session_id
-				FROM auth_code_session
-				WHERE auth_code_id = $1
-			`,
-			authCodeId,
-		)
-
-		authSessionIds := []server.Id{}
-
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var authSessionId server.Id
-				result.Scan(&authSessionId)
-				authSessionIds = append(authSessionIds, authSessionId)
-			}
-		})
-
-		authSessionId := server.NewId()
-		authSessionIds = append(authSessionIds, authSessionId)
-
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-                INSERT INTO auth_session (
-                    auth_session_id,
-                    network_id,
-                    user_id
-                ) VALUES ($1, $2, $3)
-            `,
-			authSessionId,
-			networkId,
-			userId,
-		))
-
 		if 1 < remainingUses {
 			server.RaisePgResult(tx.Exec(
 				session.Ctx,
@@ -1652,15 +1592,6 @@ func AuthCodeLogin(
 				session.Ctx,
 				`
 					DELETE FROM auth_code
-					WHERE auth_code_id = $1
-				`,
-				authCodeId,
-			))
-
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-					DELETE FROM auth_code_session
 					WHERE auth_code_id = $1
 				`,
 				authCodeId,
@@ -1690,7 +1621,6 @@ func AuthCodeLogin(
 			createTime,
 			isGuestMode,
 			isPro,
-			authSessionIds...,
 		)
 		byJwt.Roles = roles
 		byJwt.Principal = principal
@@ -1701,27 +1631,6 @@ func AuthCodeLogin(
 	})
 
 	return
-}
-
-func ExpireAllAuth(ctx context.Context, networkId server.Id) {
-	// sessions and auth codes
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO auth_session_expiration (
-					network_id,
-					expire_time
-				) VALUES ($1, $2)
-				ON CONFLICT (network_id) DO UPDATE
-				SET
-					expire_time = $2
-			`,
-			networkId,
-			server.NowUtc(),
-		))
-	})
 }
 
 func GetUserAuth(ctx context.Context, networkId server.Id) (userAuth string, returnErr error) {

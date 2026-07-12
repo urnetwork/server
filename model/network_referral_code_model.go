@@ -142,8 +142,6 @@ func ValidateReferralCode(
 	referralCode string,
 ) ValidateReferralCodeResult {
 
-	maxReferrals := 5
-
 	validateResult := ValidateReferralCodeResult{
 		Valid:    false,
 		IsCapped: false,
@@ -198,7 +196,10 @@ func ValidateReferralCode(
 					server.Raise(result.Scan(&count))
 				}
 
-				if count >= maxReferrals {
+				// Ask ReferralsCapped, never MaxReferrals directly: with no pro.yml the
+				// raw cap is 0 and `count >= 0` is always true, so EVERY code would come
+				// back capped. No spec means no cap.
+				if Pro().ReferralsCapped(count) {
 					validateResult.IsCapped = true
 				}
 

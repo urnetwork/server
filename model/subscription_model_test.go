@@ -1158,7 +1158,7 @@ func TestClosePartialContractNoEscrow(t *testing.T) {
 	})
 }
 
-func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
+func TestAddTierTransferBalancesToAllNetworks(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -1190,34 +1190,40 @@ func TestAddRefreshTransferBalanceToAllNetworks(t *testing.T) {
 
 		startTime := server.NowUtc()
 		endTime := startTime.Add(24 * time.Hour)
-		supporterTransferBalances := map[bool]ByteCount{
-			false: 1 * Mib,
-			true:  4 * Mib,
-		}
-		addedTransferBalances := AddRefreshTransferBalanceToAllNetworks(
-			ctx,
-			startTime,
-			endTime,
-			supporterTransferBalances,
-		)
 
-		assert.Equal(t, len(addedTransferBalances), 2)
-		assert.Equal(t, addedTransferBalances[networkIdA], 1*Mib)
-		assert.Equal(t, addedTransferBalances[networkIdB], 4*Mib)
+		// the free grant goes to networks WITHOUT an active subscription, and
+		// carries pro = false -- it must never confer Pro
+		addedFree := AddFreeTransferBalanceToAllNetworks(ctx, startTime, endTime, 1*Mib)
+		assert.Equal(t, addedFree[networkIdA], 1*Mib)
+		_, freeHasSupporter := addedFree[networkIdB]
+		assert.Equal(t, freeHasSupporter, false)
+
+		// the pro grant goes to networks WITH an active subscription, and carries
+		// pro = true -- this grant is what confers Pro
+		addedPro := AddProTransferBalanceToAllNetworks(ctx, startTime, endTime, 4*Mib)
+		assert.Equal(t, addedPro[networkIdB], 4*Mib)
+		_, proHasFree := addedPro[networkIdA]
+		assert.Equal(t, proHasFree, false)
 
 		transferBalancesA := GetActiveTransferBalances(ctx, networkIdA)
 		assert.Equal(t, 1, len(transferBalancesA))
 		transferBalanceA := transferBalancesA[0]
-		assert.Equal(t, addedTransferBalances[networkIdA], transferBalanceA.BalanceByteCount)
+		assert.Equal(t, addedFree[networkIdA], transferBalanceA.BalanceByteCount)
 		assert.Equal(t, startTime, transferBalanceA.StartTime)
 		assert.Equal(t, endTime, transferBalanceA.EndTime)
+		assert.Equal(t, transferBalanceA.Pro, false)
 
 		transferBalancesB := GetActiveTransferBalances(ctx, networkIdB)
 		assert.Equal(t, 1, len(transferBalancesB))
 		transferBalanceB := transferBalancesB[0]
-		assert.Equal(t, addedTransferBalances[networkIdB], transferBalanceB.BalanceByteCount)
+		assert.Equal(t, addedPro[networkIdB], transferBalanceB.BalanceByteCount)
 		assert.Equal(t, startTime, transferBalanceB.StartTime)
 		assert.Equal(t, endTime, transferBalanceB.EndTime)
+		assert.Equal(t, transferBalanceB.Pro, true)
+
+		// the entitlement follows the pro balance, through pro_model
+		assert.Equal(t, IsProNetwork(ctx, networkIdA), false)
+		assert.Equal(t, IsProNetwork(ctx, networkIdB), true)
 	})
 }
 
@@ -1309,14 +1315,19 @@ func TestAccountIsPro(t *testing.T) {
 		isPro := IsPro(ctx, &networkId)
 		assert.Equal(t, isPro, false)
 
-		/**
-		 * add paid transfer balance
-		 */
 		startTime := server.NowUtc()
 		endTime := startTime.Add(30 * 24 * time.Hour)
-
 		balanceByteCount := ByteCount(10 * 1024 * 1024 * 1024)
-		transferBalance := &TransferBalance{
+
+		/**
+		 * a PAID balance that is not a Pro balance -- e.g. buying data. It carries
+		 * revenue, but it is data only.
+		 *
+		 * This assertion used to be `true`: IsPro meant "has any paid balance", so
+		 * buying data silently upgraded you to Pro for free. Pro is now carried by
+		 * the balance itself (the `pro` column) -- see pro_model.go.
+		 */
+		AddTransferBalance(ctx, &TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             startTime,
 			EndTime:               endTime,
@@ -1324,9 +1335,24 @@ func TestAccountIsPro(t *testing.T) {
 			SubsidyNetRevenue:     UsdToNanoCents(40),
 			BalanceByteCount:      balanceByteCount,
 			PurchaseToken:         "paid_test_token",
-		}
+		})
 
-		AddTransferBalance(ctx, transferBalance)
+		isPro = IsPro(ctx, &networkId)
+		assert.Equal(t, isPro, false)
+
+		/**
+		 * a PRO balance -- a subscription. This is what confers the entitlement.
+		 */
+		AddTransferBalance(ctx, &TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: balanceByteCount,
+			SubsidyNetRevenue:     UsdToNanoCents(40),
+			BalanceByteCount:      balanceByteCount,
+			PurchaseToken:         "pro_test_token",
+			Pro:                   true,
+		})
 
 		isPro = IsPro(ctx, &networkId)
 		assert.Equal(t, isPro, true)

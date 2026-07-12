@@ -377,6 +377,20 @@ func (self *Exchange) NominateLocalResident(
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
 ) bool {
+	// Connection-activation gate for the plan's concurrent connected-client limit.
+	// Refuse to nominate a resident for a client that would push the network past
+	// its limit, which keeps the client from becoming active. Public providers are
+	// exempt and a re-nomination of an already-connected client is not a new
+	// connection (see model.CanConnectNetworkPeer). This is a no-op while
+	// enforce_concurrent_clients is false in pro.yml.
+	if !model.CanConnectNetworkPeer(self.ctx, clientId) {
+		glog.Infof(
+			"[exchange]nominate refused: client %s is over the network concurrent client limit\n",
+			clientId,
+		)
+		return false
+	}
+
 	residentId := server.NewId()
 
 	nomination := &model.NetworkClientResident{
@@ -527,7 +541,9 @@ func (self *Exchange) NominateLocalResident(
 						// the registration was lost (e.g. expired while the
 						// client was disconnected, or pruned at an expiry
 						// race); re-add with a fresh profile
-						if _, topLevel, _, peerProfile := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
+						// peersEnabled is not re-checked: peerNetworkId set means
+						// the network was enabled when the resident was created
+						if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
 							model.AddNetworkPeer(self.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 						}
 					}
@@ -1982,14 +1998,12 @@ func NewResident(
 
 	// only top-level clients are network peers and get peer subscriptions.
 	// Networks over the top-level client limit (created before the limit)
-	// are excluded: their peer replay and event fan-out would scale with
-	// the connected top-level client count.
-	if networkId, topLevel, category, peerProfile := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peerProfile != nil {
-		if model.NetworkPeersEnabled(cancelCtx, networkId) {
-			resident.peerNetworkId = &networkId
-			resident.peerProfile = peerProfile
-			resident.peerCategory = category
-		}
+	// are excluded (`peersEnabled`): their peer replay and event fan-out
+	// would scale with the connected top-level client count.
+	if networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peersEnabled && peerProfile != nil {
+		resident.peerNetworkId = &networkId
+		resident.peerProfile = peerProfile
+		resident.peerCategory = category
 	}
 
 	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)

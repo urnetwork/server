@@ -118,6 +118,14 @@ func WalletValidateAddress(
 	session *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
 
+	// bittensor addresses are ss58, validated locally (recorded for future
+	// use only; not a payout destination)
+	if strings.EqualFold(walletValidateAddress.Chain, "TAO") || strings.EqualFold(walletValidateAddress.Chain, "BITTENSOR") {
+		return &WalletValidateAddressResult{
+			Valid: model.IsValidBittensorAddress(walletValidateAddress.Address),
+		}, nil
+	}
+
 	if walletValidateAddress.Address == solanaUSDCAddress() {
 		return &WalletValidateAddressResult{
 			Valid: false,

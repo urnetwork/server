@@ -29,7 +29,8 @@ type TopEarnersError struct {
  */
 func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 
-	server.Db(ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
@@ -102,7 +103,8 @@ type NetworkRanking struct {
  * Gets the ranking for the session network
  */
 func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
-	server.Db(session.Ctx, func(conn server.PgConn) {
+	// stats read: tolerates replica delay
+	server.ReplicaDb(session.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			session.Ctx,
 			`

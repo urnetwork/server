@@ -61,6 +61,151 @@ func TestCache(t *testing.T) {
 	})
 }
 
+func TestCacheWithNetworkAuth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type TestCacheResult struct {
+			Message string `json:"message"`
+		}
+
+		var callCount atomic.Uint64
+		impl := func(clientSession *session.ClientSession) (*TestCacheResult, error) {
+			callCount.Add(1)
+			return &TestCacheResult{
+				Message: fmt.Sprintf("hello %s!", clientSession.ByJwt.NetworkId),
+			}, nil
+		}
+		f := CacheWithNetworkAuth(impl, "cache_test_with_network_auth", 6000*time.Second)
+
+		newSession := func(networkId server.Id, i int) *session.ClientSession {
+			byJwt := jwt.NewByJwt(
+				networkId,
+				server.NewId(),
+				fmt.Sprintf("test%d", i),
+				false, // guest
+				false, // pro
+			)
+			byJwt = byJwt.Client(
+				server.NewId(),
+				server.NewId(),
+			)
+			return session.Testing_CreateClientSession(ctx, byJwt)
+		}
+
+		networkId := server.NewId()
+		clientSessions := []*session.ClientSession{}
+		for i := range 32 {
+			clientSessions = append(clientSessions, newSession(networkId, i))
+		}
+
+		// warm once for the whole network
+		_, err := f(clientSessions[0])
+		assert.Equal(t, err, nil)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		// every client in the network shares the one cached entry
+		for range 64 {
+			mathrand.Shuffle(len(clientSessions), func(i int, j int) {
+				clientSessions[i], clientSessions[j] = clientSessions[j], clientSessions[i]
+			})
+			for _, clientSession := range clientSessions {
+				r, err := f(clientSession)
+				assert.Equal(t, err, nil)
+				assert.Equal(t, r.Message, fmt.Sprintf("hello %s!", networkId))
+			}
+		}
+		assert.Equal(t, int(callCount.Load()), 1)
+
+		// a different network computes and caches its own entry
+		otherNetworkId := server.NewId()
+		otherSession := newSession(otherNetworkId, 999)
+		r, err := f(otherSession)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, r.Message, fmt.Sprintf("hello %s!", otherNetworkId))
+		assert.Equal(t, int(callCount.Load()), 2)
+	})
+}
+
+func TestCacheWithNetworkAuthInput(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type TestCacheInput struct {
+			LastN int `json:"last_n"`
+		}
+		type TestCacheResult struct {
+			Message string `json:"message"`
+		}
+
+		var callCount atomic.Uint64
+		impl := func(input *TestCacheInput, clientSession *session.ClientSession) (*TestCacheResult, error) {
+			callCount.Add(1)
+			return &TestCacheResult{
+				Message: fmt.Sprintf("%s n=%d", clientSession.ByJwt.NetworkId, input.LastN),
+			}, nil
+		}
+		f := CacheWithNetworkAuthInput(impl, "cache_test_with_network_auth_input", 6000*time.Second)
+
+		networkId := server.NewId()
+		newSession := func(i int) *session.ClientSession {
+			byJwt := jwt.NewByJwt(
+				networkId,
+				server.NewId(),
+				fmt.Sprintf("test%d", i),
+				false, // guest
+				false, // pro
+			)
+			byJwt = byJwt.Client(
+				server.NewId(),
+				server.NewId(),
+			)
+			return session.Testing_CreateClientSession(ctx, byJwt)
+		}
+
+		clientSessions := []*session.ClientSession{}
+		for i := range 8 {
+			clientSessions = append(clientSessions, newSession(i))
+		}
+
+		inputs := []*TestCacheInput{
+			{LastN: 24},
+			{LastN: 90},
+		}
+
+		// warm each input once for the whole network
+		for _, input := range inputs {
+			_, err := f(input, clientSessions[0])
+			assert.Equal(t, err, nil)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		// every client in the network shares one cached entry per input
+		for range 64 {
+			for _, clientSession := range clientSessions {
+				for _, input := range inputs {
+					r, err := f(input, clientSession)
+					assert.Equal(t, err, nil)
+					assert.Equal(t, r.Message, fmt.Sprintf("%s n=%d", networkId, input.LastN))
+				}
+			}
+		}
+		assert.Equal(t, int(callCount.Load()), len(inputs))
+	})
+}
+
 func TestCacheWithAuth(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
