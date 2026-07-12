@@ -3,12 +3,14 @@ package model
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/ChainSafe/go-schnorrkel"
 	"github.com/gagliardetto/solana-go"
+	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 )
 
@@ -251,5 +253,115 @@ func TestWalletAuthChallengeCreateInvalidAddress(t *testing.T) {
 		}, ctx)
 		assert.Equal(t, result.Error != nil, true)
 		assert.Equal(t, strings.HasPrefix(result.Error.Message, "400 "), true)
+	})
+}
+
+func TestWalletAuthChallengeBittensorCreateAndUse(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		secretKey, publicKey, err := schnorrkel.GenerateKeypair()
+		assert.Equal(t, err, nil)
+		address := testingSS58Encode(42, publicKey.Encode())
+
+		blockchain := "bittensor"
+		result := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			Blockchain: &blockchain,
+		}, ctx)
+		assert.Equal(t, result.Error, nil)
+		assert.Equal(t, strings.Contains(result.MessageTemplate, result.Challenge), true)
+
+		wrapped := "<Bytes>" + result.MessageTemplate + "</Bytes>"
+		transcript := schnorrkel.NewSigningContext([]byte("substrate"), []byte(wrapped))
+		signature, err := secretKey.Sign(transcript)
+		assert.Equal(t, err, nil)
+		signatureBytes := signature.Encode()
+		signatureHex := hex.EncodeToString(signatureBytes[:])
+
+		useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "bittensor",
+			PublicKey:  address,
+			Message:    result.MessageTemplate,
+			Signature:  signatureHex,
+		}, ctx)
+		assert.Equal(t, err, nil)
+		if useResult.Error != nil {
+			t.Logf("UseWalletAuthChallenge error: %s", useResult.Error.Message)
+		}
+		assert.Equal(t, useResult.Valid, true)
+
+		// replay must fail
+		useResult2, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "bittensor",
+			PublicKey:  address,
+			Message:    result.MessageTemplate,
+			Signature:  signatureHex,
+		}, ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, useResult2.Valid, false)
+		assert.Equal(t, useResult2.Error != nil, true)
+		assert.Equal(t, strings.HasPrefix(useResult2.Error.Message, "403 "), true)
+	})
+}
+
+func TestWalletAuthChallengeBittensorInvalidAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		blockchain := "bittensor"
+		result := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			Blockchain: &blockchain,
+		}, ctx)
+		assert.Equal(t, result.Error, nil)
+
+		secretKey, _, err := schnorrkel.GenerateKeypair()
+		assert.Equal(t, err, nil)
+		wrapped := "<Bytes>" + result.MessageTemplate + "</Bytes>"
+		transcript := schnorrkel.NewSigningContext([]byte("substrate"), []byte(wrapped))
+		signature, err := secretKey.Sign(transcript)
+		assert.Equal(t, err, nil)
+		signatureBytes := signature.Encode()
+		signatureHex := hex.EncodeToString(signatureBytes[:])
+
+		useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "bittensor",
+			PublicKey:  "not-a-valid-ss58-address",
+			Message:    result.MessageTemplate,
+			Signature:  signatureHex,
+		}, ctx)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, useResult.Valid, false)
+		assert.Equal(t, useResult.Error != nil, true)
+		assert.Equal(t, strings.HasPrefix(useResult.Error.Message, "400 "), true)
+	})
+}
+
+func TestWalletAuthChallengeCreateBittensorInvalidAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		blockchain := "bittensor"
+		address := "not-a-valid-ss58-address"
+		result := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			Blockchain:    &blockchain,
+			WalletAddress: &address,
+		}, ctx)
+		assert.Equal(t, result.Error != nil, true)
+		assert.Equal(t, strings.HasPrefix(result.Error.Message, "400 "), true)
+	})
+}
+
+func TestWalletAuthChallengeCreateBittensorValidAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, publicKey, err := schnorrkel.GenerateKeypair()
+		assert.Equal(t, err, nil)
+		address := testingSS58Encode(42, publicKey.Encode())
+
+		blockchain := "tao"
+		result := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			Blockchain:    &blockchain,
+			WalletAddress: &address,
+		}, ctx)
+		assert.Equal(t, result.Error, nil)
 	})
 }
