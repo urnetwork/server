@@ -60,9 +60,13 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		"network_client_location_reliability": true,
 		"network_client_connection":           true,
 	}
+	// daily partitions of client_reliability are dropped whole at retention,
+	// so their indexes never live long enough to bloat — reindexing them is
+	// wasted work that contends with the maintenance task's create/drop locks
+	skipReindexTablePattern := regexp.MustCompile(`^client_reliability_p[0-9]{8}$`)
 
 	reindex := func(conn PgConn, tableName string) {
-		if !skipReindexTables[tableName] {
+		if !skipReindexTables[tableName] && !skipReindexTablePattern.MatchString(tableName) {
 			// note "reindex concurrently" can in some rare cases cause a deadlock with autovacuum
 			// use a timeout to recover from these cases
 			// any reindex taking longer than the timeout should generally be added to `skipReindexTables`

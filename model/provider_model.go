@@ -80,7 +80,6 @@ type ProviderStats struct {
 	SearchInterestLast24h  int               `json:"search_interest_last_24h"`
 	ContractsLast24h       int               `json:"contracts_last_24h"`
 	ClientsLast24h         int               `json:"clients_last_24h"`
-	ProvideMode            int               `json:"provide_mode"`
 }
 
 type ConnectedEvent struct {
@@ -117,13 +116,12 @@ func statsProviders(
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
-		// enumerate the network's provider clients + representative provide mode
-		provideModes := map[server.Id]int{}
+		// enumerate the network's active provider clients
 		order := []server.Id{}
 		result, err := conn.Query(
 			clientSession.Ctx,
 			`
-			SELECT network_client.client_id, MAX(provide_key.provide_mode)
+			SELECT network_client.client_id
 			FROM network_client
 			INNER JOIN provide_key ON provide_key.client_id = network_client.client_id
 			WHERE network_client.network_id = $1 AND network_client.active = true
@@ -134,9 +132,7 @@ func statsProviders(
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var clientId server.Id
-				var provideMode int
-				server.Raise(result.Scan(&clientId, &provideMode))
-				provideModes[clientId] = provideMode
+				server.Raise(result.Scan(&clientId))
 				order = append(order, clientId)
 			}
 		})
@@ -254,7 +250,6 @@ func statsProviders(
 				SearchInterestLast24h:  searchInterest[clientId],
 				ContractsLast24h:       contracts[clientId],
 				ClientsLast24h:         clients[clientId],
-				ProvideMode:            provideModes[clientId],
 			})
 		}
 	})

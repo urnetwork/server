@@ -94,26 +94,50 @@ func buildProvidersMap(rows []regionProviderCount) map[string]map[string]*Region
 	return out
 }
 
-// GetProvidersMap aggregates active providers by country -> region, attaching a
-// representative centroid to each region. Provider counts come from the existing
-// client-location aggregation (loadInitialClientLocations / ClientLocation).
+// GetProvidersMap aggregates connected, valid, scored providers by
+// country -> region, attaching a representative centroid to each region.
+//
+// This queries the reliability tables directly — the same population
+// UpdateClientLocations counts — NOT the InitialClientLocations snapshot. That
+// snapshot only ever contains COUNTRY entries (it seeds the connect app's
+// initial location list; see the LocationTypeCountry filter where it is built),
+// so reading it and filtering for region rows matched nothing and the exported
+// map was permanently `{}` in every environment.
 func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProviders, error) {
-	initialClientLocations, err := loadInitialClientLocations(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	rows := []regionProviderCount{}
-	for _, clientLocation := range initialClientLocations.Locations {
-		if clientLocation.LocationType != LocationTypeRegion {
-			continue
-		}
-		rows = append(rows, regionProviderCount{
-			CountryCode: clientLocation.CountryCode,
-			Region:      clientLocation.Name,
-			Count:       clientLocation.ClientCount,
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					location.country_code,
+					location.location_name,
+					COUNT(DISTINCT network_client_location_reliability.client_id) AS provider_count
+
+				FROM network_client_location_reliability
+
+				INNER JOIN client_connection_reliability_score ON
+					client_connection_reliability_score.client_id = network_client_location_reliability.client_id AND
+					client_connection_reliability_score.lookback_index = 0
+
+				INNER JOIN location ON
+					location.location_id = network_client_location_reliability.region_location_id
+
+				WHERE
+					network_client_location_reliability.connected = true AND
+					network_client_location_reliability.valid = true
+
+				GROUP BY location.country_code, location.location_name
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var row regionProviderCount
+				server.Raise(result.Scan(&row.CountryCode, &row.Region, &row.Count))
+				rows = append(rows, row)
+			}
 		})
-	}
+	})
 
 	return buildProvidersMap(rows), nil
 }

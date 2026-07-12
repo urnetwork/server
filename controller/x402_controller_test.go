@@ -58,6 +58,8 @@ func TestUsdToAtomic(t *testing.T) {
 // TestX402PaymentRequiredQuotesEveryNetwork pins chain-neutrality: we quote one term
 // per configured network, all to the same merchant and amount, and the agent picks.
 func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
+	skipWithoutProYml(t)
+
 	c := &X402Config{
 		Enabled:       true,
 		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
@@ -92,6 +94,8 @@ func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 // agent and a human are always quoted the same number for the same thing; there is no
 // second price to forget to update.
 func TestX402RefusesToQuoteBadSku(t *testing.T) {
+	skipWithoutProYml(t)
+
 	c := &X402Config{
 		Enabled:       true,
 		Facilitator:   x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
@@ -128,6 +132,8 @@ func TestX402RefusesToQuoteBadSku(t *testing.T) {
 // TestX402PricesComeFromProYml pins the single source of truth: an agent must never be
 // quoted a different price than a human buying the same thing.
 func TestX402PricesComeFromProYml(t *testing.T) {
+	skipWithoutProYml(t)
+
 	c := &X402Config{
 		Enabled:     true,
 		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},

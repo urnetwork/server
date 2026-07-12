@@ -35,6 +35,20 @@ func RemoveOldClientReliabilityStats(
 	removeOldClientReliabilityStats *RemoveOldClientReliabilityStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientReliabilityStatsResult, error) {
+	// Once client_reliability is partitioned by block range (the
+	// `bringyourctl model migrate client-reliability-partition` cutover),
+	// retention is partition maintenance: create day partitions ahead of the
+	// drain and drop expired ones — no row deletes, no vacuum debt. Before the
+	// cutover this falls back to the legacy batch-delete loop, so this build
+	// is safe to deploy on either side of the cutover.
+	if model.IsClientReliabilityPartitioned(clientSession.Ctx) {
+		created, dropped := model.MaintainClientReliabilityPartitions(clientSession.Ctx, server.NowUtc())
+		if 0 < len(created) || 0 < len(dropped) {
+			glog.Infof("[ncr]partitions created %v, dropped %v\n", created, dropped)
+		}
+		return &RemoveOldClientReliabilityStatsResult{}, nil
+	}
+
 	// client_reliability accumulates one row per connected client per block:
 	// a single limit-sized batch per run cannot drain a backlog faster than it
 	// grows. Keep deleting batches until the expired backlog is gone or the

@@ -103,3 +103,14 @@ func TestProAbsent(t *testing.T) {
 	//    the task worker.
 	assert.Equal(t, true, 0 < c.ReferralGrantPeriod())
 }
+
+// skipWithoutProYml skips a test that asserts the CONFIGURED product spec (caps,
+// amounts, prices from pro.yml) when this environment has no pro.yml -- the stripped
+// harness described in TestProAbsent, which owns the absent contract. Without this,
+// running the suite in that harness reads as a wall of defects when the runtime is
+// doing exactly what it should: noop grants, refused purchases, uncapped referrals.
+func skipWithoutProYml(t testing.TB) {
+	if Pro().MaxConcurrentClients(true) == 0 {
+		t.Skip("pro.yml is not present in this environment; see TestProAbsent")
+	}
+}

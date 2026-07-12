@@ -13,6 +13,8 @@ import (
 // pro.yml, never taken from the client. A client-supplied amount would let anyone quote
 // themselves a year for a cent.
 func TestSolanaPlanPriceComesFromTheServer(t *testing.T) {
+	skipWithoutProYml(t)
+
 	monthly, ok := solanaPlanPriceUsd(model.SolanaPlanMonthly)
 	assert.Equal(t, ok, true)
 	assert.Equal(t, monthly, float64(5))
@@ -75,6 +77,8 @@ func TestSolanaUnderpaymentIsRefused(t *testing.T) {
 // discarded as "no matching USDC payment". The customer paid five dollars and received
 // nothing at all, with no error anywhere.
 func TestSolanaMonthlyPaymentIsNoLongerIgnored(t *testing.T) {
+	skipWithoutProYml(t)
+
 	monthlyPrice, ok := solanaPlanPriceUsd(model.SolanaPlanMonthly)
 	assert.Equal(t, ok, true)
 

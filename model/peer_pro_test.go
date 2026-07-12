@@ -48,6 +48,8 @@ func TestIsPublicProvider(t *testing.T) {
 // TestReferralBonusCount pins the referral payout cap: a referrer is paid for at
 // most pro.yml referral.max_referrals referrals (10), no matter how many it has.
 func TestReferralBonusCount(t *testing.T) {
+	skipWithoutProYml(t)
+
 	maxReferrals := Pro().MaxReferrals
 	assert.Equal(t, maxReferrals, 10)
 

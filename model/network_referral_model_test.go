@@ -10,6 +10,8 @@ import (
 )
 
 func TestNetworkReferral(t *testing.T) {
+	skipWithoutProYml(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()

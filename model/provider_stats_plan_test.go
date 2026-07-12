@@ -70,7 +70,7 @@ func TestStatsQueryPlans(t *testing.T) {
 			statsPlanSeed(ctx, conn, networkId, sourceNetworkId, all)
 
 			assertStatsIndexPlan(t, ctx, conn, "01_enumerate_providers", `
-				SELECT network_client.client_id, MAX(provide_key.provide_mode)
+				SELECT network_client.client_id
 				FROM network_client INNER JOIN provide_key ON provide_key.client_id = network_client.client_id
 				WHERE network_client.network_id = $1 AND network_client.active = true
 				GROUP BY network_client.client_id`, networkId)

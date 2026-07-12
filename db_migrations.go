@@ -3360,4 +3360,119 @@ var migrations = []any{
         ADD COLUMN expected_amount_usd double precision NOT NULL DEFAULT 0,
         ADD COLUMN subscription_plan varchar(32) NOT NULL DEFAULT ''
     `),
+
+	// Per-table autovacuum for the big churn tables. Measured 2026-07-12
+	// (xops/db/STORAGE1-REVIEW.md): every large table showed
+	// last_autovacuum = NULL while small tables vacuumed fine the same day.
+	// At the defaults a vacuum pass on these tables cannot finish: the 2ms
+	// cost delay caps it at a few MB/s, and each pass re-scans the full
+	// (bloated, multi-hundred-GB) indexes once per autovacuum_work_mem batch
+	// of dead tuples — so passes take days and any restart loses them. Dead
+	// space is never reclaimed and the planner runs blind (last_autoanalyze
+	// was NULL too).
+	//
+	// The policy for the contract chain: no cost delay, and FIXED thresholds
+	// instead of scale factors — a fixed threshold keeps the per-pass work
+	// small enough to complete regardless of table size, and keeps triggering
+	// correct even when a stats reset zeroes n_live_tup (which the
+	// measurement showed). At ~20M contracts/day, vacuum lands ~4x/day and
+	// an unthrottled pass over these indexes completes in minutes-to-tens of
+	// minutes. The insert threshold keeps visibility-map/freeze work steady
+	// on the append-heavy tables (index-only scans + wraparound headroom).
+	//
+	// These reloptions only take a SHARE UPDATE EXCLUSIVE lock (no
+	// read/write blocking), so the migration is safe on hot tables.
+	//
+	// Deliberately NOT set here:
+	//   - client_reliability: terminal — the partition cutover
+	//     (`bringyourctl model migrate client-reliability-partition`) drops
+	//     it; its daily leaf partitions are small enough for the defaults,
+	//     and a reindexed pass over its 1.5TB+ index would compete with the
+	//     cutover copy for I/O in the exact window both exist.
+	//   - pending_task: already tuned above.
+	// The existing bloat is not fixed by this (autovacuum only reclaims going
+	// forward): each of these tables needs a one-time manual
+	// VACUUM (VERBOSE, ANALYZE), and pg_repack to shrink the files.
+	newSqlMigration(`
+        ALTER TABLE contract_close SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_contract SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+
+	// The client-lifecycle tables are an order of magnitude smaller but churn
+	// constantly (connect/disconnect updates, the idle-client reap deletes),
+	// and the measurement showed the same never-vacuumed state. The
+	// pending_task-style small scale factors are right here: live-set-
+	// proportional passes over tens of GB complete quickly unthrottled.
+	newSqlMigration(`
+        ALTER TABLE network_client SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE provide_key SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE device SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
 }

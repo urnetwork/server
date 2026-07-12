@@ -34,6 +34,8 @@ func TestStripeDataPackByteCount(t *testing.T) {
 // pro.yml -- which is also what the site and the x402 skus quote. A customer must never
 // be shown two different prices for the same thing.
 func TestStripeDataPackPriceUsd(t *testing.T) {
+	skipWithoutProYml(t)
+
 	priceUsd, ok := stripeDataPackPriceUsd(1 * model.Tib)
 	assert.Equal(t, ok, true)
 	assert.Equal(t, priceUsd, float64(5))
@@ -178,6 +180,8 @@ func TestStripeCheckoutRefusesUnconfiguredUiMode(t *testing.T) {
 //
 // We know whose network it is. The data lands.
 func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
+	skipWithoutProYml(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
@@ -212,6 +216,8 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 // the network twice — that would be giving away data for free, forever, to anyone whose
 // webhook happened to be retried.
 func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
+	skipWithoutProYml(t)
+
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()

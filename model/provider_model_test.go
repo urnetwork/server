@@ -77,7 +77,6 @@ func TestStatsProviders(t *testing.T) {
 		assert.Equal(t, a.PayoutLast24h, 3.0)
 		assert.Equal(t, a.SearchInterestLast24h, 7)
 		assert.Equal(t, a.Connected, true)
-		assert.Equal(t, a.ProvideMode, ProvideModePublic)
 		if a.UptimeLast24h < 2.9 || 3.2 < a.UptimeLast24h {
 			t.Fatalf("providerA uptime expected ~3h, got %f", a.UptimeLast24h)
 		}

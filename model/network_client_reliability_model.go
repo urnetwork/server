@@ -606,37 +606,45 @@ func RemoveOldClientReliabilityStats(ctx context.Context, maxTime time.Time, lim
 		server.Raise(err)
 		removedCount = tag.RowsAffected()
 
-		// trim expired block health rows alongside the stats they describe
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM client_reliability_block
-			WHERE block_number <= $1
-			`,
-			minBlockNumber,
-		))
-
-		// trim expired coverage ranges. The straddling range keeps its newer
-		// half so gap accounting stays exact inside the retained window.
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM client_reliability_sync
-			WHERE max_block_number < $1
-			`,
-			minBlockNumber,
-		))
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			UPDATE client_reliability_sync
-			SET min_block_number = $1
-			WHERE min_block_number < $1 AND $1 <= max_block_number
-			`,
-			minBlockNumber,
-		))
+		removeExpiredClientReliabilityCompanions(ctx, tx, minBlockNumber)
 	})
 	return
+}
+
+// removeExpiredClientReliabilityCompanions trims the small per-block companion
+// tables to the same horizon as the stats. Shared by the legacy row-delete
+// retention above and the partition-drop retention
+// (MaintainClientReliabilityPartitions).
+func removeExpiredClientReliabilityCompanions(ctx context.Context, tx server.PgTx, minBlockNumber int64) {
+	// trim expired block health rows alongside the stats they describe
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM client_reliability_block
+		WHERE block_number <= $1
+		`,
+		minBlockNumber,
+	))
+
+	// trim expired coverage ranges. The straddling range keeps its newer
+	// half so gap accounting stays exact inside the retained window.
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM client_reliability_sync
+		WHERE max_block_number < $1
+		`,
+		minBlockNumber,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		UPDATE client_reliability_sync
+		SET min_block_number = $1
+		WHERE min_block_number < $1 AND $1 <= max_block_number
+		`,
+		minBlockNumber,
+	))
 }
 
 type ReliabilityScore struct {
