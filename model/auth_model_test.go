@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -299,11 +300,36 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		}
 		sigHex := hex.EncodeToString(signature)
 
+		// --- hex-encoded signature, checksummed address (baseline) ---
 		isValid, err := VerifyEthereumSignature(address.String(), messageStr, sigHex)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, isValid, true)
 
-		// Test with an invalid signature (modified signature)
+		// --- hex-encoded signature, all-lowercase address ---
+		// Catches: case-sensitive address comparison bug.
+		// address.String() returns EIP-55 checksummed (mixed-case); real clients
+		// often send all-lowercase. The old code used == which would fail here.
+		lowercaseAddr := strings.ToLower(address.String())
+		isValid, err = VerifyEthereumSignature(lowercaseAddr, messageStr, sigHex)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, isValid, true)
+
+		// --- base64url (no padding) encoded signature, checksummed address ---
+		// Catches: mobile clients (e.g. DGEN1) that encode the signature with
+		// base64.RawURLEncoding instead of hex. The old code used common.FromHex
+		// which silently returns ~0 bytes for base64url input.
+		sigBase64url := base64.RawURLEncoding.EncodeToString(signature)
+		isValid, err = VerifyEthereumSignature(address.String(), messageStr, sigBase64url)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, isValid, true)
+
+		// --- standard base64 (with padding) encoded signature ---
+		sigBase64 := base64.StdEncoding.EncodeToString(signature)
+		isValid, err = VerifyEthereumSignature(address.String(), messageStr, sigBase64)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, isValid, true)
+
+		// --- invalid signature (modified bits) ---
 		invalidSigBytes, _ := hex.DecodeString(sigHex)
 		invalidSigBytes[10] ^= 0xFF // Flip some bits in the R or S part
 		invalidSigHex := hex.EncodeToString(invalidSigBytes)
@@ -311,7 +337,7 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, invalidSigHex)
 		assert.Equal(t, isValid, false)
 
-		// Malformed signature (wrong length)
+		// --- malformed signature (wrong length) ---
 		malformedSig := "wrongsig"
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, malformedSig)
 		assert.NotEqual(t, err, nil) // Error expected

@@ -618,10 +618,12 @@ func VerifyEthereumSignature(publicKey string, message string, signature string)
 	msg := []byte(prefix + message)
 	msgHash := crypto.Keccak256Hash(msg)
 
-	// Decode signature
-	sig := common.FromHex(signature)
+	// Decode signature – accept hex (with or without 0x) and base64/base64url
+	// (some mobile clients such as DGEN1 encode the signature with
+	// base64.RawURLEncoding rather than hex)
+	sig := decodeSignatureBytes(signature)
 	if len(sig) != 65 {
-		return false, fmt.Errorf("signature must be 65 bytes")
+		return false, fmt.Errorf("signature must be 65 bytes, got %d (hex/base64 decode of %q)", len(sig), signature)
 	}
 	// Ethereum uses v = 27 or 28, Go expects 0 or 1
 	if sig[64] >= 27 {
@@ -633,7 +635,29 @@ func VerifyEthereumSignature(publicKey string, message string, signature string)
 		return false, err
 	}
 	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	return recoveredAddr.Hex() == publicKey, nil
+	// Use case-insensitive comparison: crypto.PubkeyToAddress returns an EIP-55
+	// checksummed (mixed-case) address, but some clients send all-lowercase.
+	return strings.EqualFold(recoveredAddr.Hex(), publicKey), nil
+}
+
+// decodeSignatureBytes tries to decode a signature string first as hex
+// (with or without 0x prefix), then as standard base64, then as raw
+// base64url (no padding). The first encoding that produces a non-empty
+// result whose length matches a plausible signature length wins.
+func decodeSignatureBytes(s string) []byte {
+	// 1. Try hex (handles "0x" prefix automatically)
+	if b := common.FromHex(s); len(b) > 0 {
+		return b
+	}
+	// 2. Try standard base64 (with padding)
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) > 0 {
+		return b
+	}
+	// 3. Try raw base64url (no padding) – used by some mobile Go clients
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil && len(b) > 0 {
+		return b
+	}
+	return nil
 }
 
 /**
