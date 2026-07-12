@@ -356,8 +356,10 @@ func NetworkCreate(
 				},
 			}, nil
 		}
-		// Wallet authentication is Solana-only.
-		if parsedBlockchain != SOL {
+		// Wallet authentication supports Solana and Bittensor (TAO) for
+		// network creation. Note this does NOT make Bittensor eligible for
+		// a payout wallet below - payouts remain Solana/Polygon (USDC) only.
+		if parsedBlockchain != SOL && parsedBlockchain != TAO {
 			return &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
 					Message: "400 unsupported blockchain for wallet authentication",
