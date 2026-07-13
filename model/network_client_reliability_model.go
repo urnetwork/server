@@ -134,21 +134,21 @@ func AddClientReliabilityStatsRange(
 					ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
 					SET
 						connection_new_count = client_reliability.connection_new_count + $5,
-				        connection_established_count = client_reliability.connection_established_count + $6,
-				        provide_enabled_count = client_reliability.provide_enabled_count + $7,
-				        provide_changed_count = client_reliability.provide_changed_count + $8,
-				        receive_message_count = client_reliability.receive_message_count + $9,
-				        receive_byte_count = client_reliability.receive_byte_count + $10,
-				        send_message_count = client_reliability.send_message_count + $11,
-				        send_byte_count = client_reliability.send_byte_count + $12,
-				        valid = client_reliability_valid(
-				        	client_reliability.connection_new_count + $5,
-				        	client_reliability.connection_established_count + $6,
-				        	client_reliability.provide_enabled_count + $7,
-				        	client_reliability.provide_changed_count + $8,
-				        	client_reliability.receive_message_count + $9,
-				        	$13
-				        )
+						connection_established_count = client_reliability.connection_established_count + $6,
+						provide_enabled_count = client_reliability.provide_enabled_count + $7,
+						provide_changed_count = client_reliability.provide_changed_count + $8,
+						receive_message_count = client_reliability.receive_message_count + $9,
+						receive_byte_count = client_reliability.receive_byte_count + $10,
+						send_message_count = client_reliability.send_message_count + $11,
+						send_byte_count = client_reliability.send_byte_count + $12,
+						valid = client_reliability_valid(
+							client_reliability.connection_new_count + $5,
+							client_reliability.connection_established_count + $6,
+							client_reliability.provide_enabled_count + $7,
+							client_reliability.provide_changed_count + $8,
+							client_reliability.receive_message_count + $9,
+							$13
+						)
 					`,
 					blockNumber,
 					clientAddressHash[:],

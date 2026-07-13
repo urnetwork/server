@@ -274,3 +274,13 @@ with `WARP_ENV=local` and the `BRINGYOUR_*_HOSTNAME` env vars exported. `test.sh
 unattended full-suite debugging, prefer a finite per-package `-timeout` and
 continue-past-failure so every package's result is captured. Each test dir needs a
 `profile/` subdir to exist.
+
+## 10. Wallet authentication: no backward compatibility for the legacy sign-in message
+
+Wallet authentication now uses a server-issued challenge: `CreateWalletAuthChallenge`
+generates a unique message and the client must sign that exact message in
+`UseWalletAuthChallenge`. The old flow where the client supplied its own static
+`"Welcome to URnetwork"` message is intentionally not supported. The server rejects
+any `WalletAuthArgs.Message` that does not match a stored challenge row and binds the
+signed timestamp to the stored `create_time`. Backward compatibility is not supported
+for security reasons; callers must upgrade to the challenge flow.

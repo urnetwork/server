@@ -352,31 +352,42 @@ func NetworkCreate(
 		if err != nil {
 			return &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "unsupported blockchain for wallet authentication",
+					Message: "400 unsupported blockchain for wallet authentication",
 				},
 			}, nil
 		}
-
+		// Wallet authentication supports Solana and Bittensor (TAO) for
+		// network creation. Note this does NOT make Bittensor eligible for
+		// a payout wallet below - payouts remain Solana/Polygon (USDC) only.
+		if parsedBlockchain != SOL && parsedBlockchain != TAO {
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "400 unsupported blockchain for wallet authentication",
+				},
+			}, nil
+		}
 		networkCreate.WalletAuth.Blockchain = parsedBlockchain.String()
 
 		/**
-		 * verify the wallet signature
+		 * validate the wallet challenge
 		 */
-		isValid, err := VerifySignature(
-			networkCreate.WalletAuth.Blockchain,
-			networkCreate.WalletAuth.PublicKey,
-			networkCreate.WalletAuth.Message,
-			networkCreate.WalletAuth.Signature,
-		)
-
+		useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: networkCreate.WalletAuth.Blockchain,
+			PublicKey:  networkCreate.WalletAuth.PublicKey,
+			Message:    networkCreate.WalletAuth.Message,
+			Signature:  networkCreate.WalletAuth.Signature,
+		}, session.Ctx)
 		if err != nil {
 			return nil, err
 		}
-
-		if !isValid {
+		if !useResult.Valid {
+			msg := "400 invalid wallet challenge"
+			if useResult.Error != nil {
+				msg = useResult.Error.Message
+			}
 			return &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "invalid wallet signature",
+					Message: msg,
 				},
 			}, nil
 		}

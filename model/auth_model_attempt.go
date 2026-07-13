@@ -207,5 +207,6 @@ func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
 			`,
 			minTime.UTC(),
 		))
+		// wallet_auth_challenge_attempt cleanup is handled by RemoveExpiredWalletAuthChallenges
 	})
 }

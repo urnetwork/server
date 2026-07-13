@@ -106,7 +106,6 @@ func AuthLogin(
 	login AuthLoginArgs,
 	session *session.ClientSession,
 ) (*AuthLoginResult, error) {
-
 	userAuth, _ := NormalUserAuthV1(login.UserAuth)
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
@@ -455,47 +454,27 @@ func handleLoginWallet(
 	ctx context.Context,
 ) (result *AuthLoginResult, returnErr error) {
 	/**
-	 * Handle wallet login
+	 * Handle wallet login by validating the server-issued challenge.
+	 * UseWalletAuthChallenge verifies the signature, checks the timestamp,
+	 * and marks the challenge as used atomically.
 	 */
-
-	// Transition-safe replay protection: if the client supplies a server-issued
-	// nonce (see AuthWalletNonceCreate), it must be bound into the signed message so
-	// the signature commits to it. Clients that do not yet send a nonce still work;
-	// once all wallet-login clients send one, presence should become mandatory.
-	if walletAuth.Nonce != "" && !strings.Contains(walletAuth.Message, walletAuth.Nonce) {
-		returnErr = errors.New("invalid signature")
-		return
-	}
-
-	isValid, err := VerifySignature(
-		walletAuth.Blockchain,
-		walletAuth.PublicKey,
-		walletAuth.Message,
-		walletAuth.Signature,
-	)
-
+	useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+		Blockchain: walletAuth.Blockchain,
+		PublicKey:  walletAuth.PublicKey,
+		Message:    walletAuth.Message,
+		Signature:  walletAuth.Signature,
+	}, ctx)
 	if err != nil {
 		returnErr = err
 		return
 	}
-
-	if !isValid {
-		returnErr = errors.New("invalid signature")
-		return
-	}
-
-	// Consume the nonce single-use, only after the signature is verified. A replayed
-	// (message, signature, nonce) triple then fails here because the nonce is already
-	// used or expired.
-	if walletAuth.Nonce != "" {
-		consumed := false
-		server.Tx(ctx, func(tx server.PgTx) {
-			consumed = consumeWalletAuthNonce(ctx, tx, walletAuth.Nonce)
-		})
-		if !consumed {
-			returnErr = errors.New("invalid or expired wallet nonce")
-			return
+	if !useResult.Valid {
+		msg := "401 invalid wallet challenge"
+		if useResult.Error != nil {
+			msg = useResult.Error.Message
 		}
+		returnErr = errors.New(msg)
+		return
 	}
 
 	walletAuths, err := getWalletAuthsByAddress(
@@ -528,14 +507,10 @@ func handleLoginWallet(
 	/**
 	 * Check if the user exists associated with this public key
 	 */
-
-	// var userId *server.Id
-	// var authType string
 	found := false
 	var networkId server.Id
 	var networkName string
 	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
 		result, err := conn.Query(
 			ctx,
 			`

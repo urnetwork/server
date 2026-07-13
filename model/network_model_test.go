@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -162,18 +163,25 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		networkName := "abcdef"
-		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
-		message := "Welcome to URnetwork"
-		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
+
+		privateKey, err := solana.NewRandomPrivateKey()
+		assert.Equal(t, err, nil)
+		publicKey := privateKey.PublicKey().String()
+
+		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		assert.Equal(t, challenge.Error, nil)
+		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
+		assert.Equal(t, err, nil)
+		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		Testing_CreateNetworkByWallet(
 			ctx,
 			networkId,
 			networkName,
 			userId,
-			pk,
-			signature,
-			message,
+			publicKey,
+			signatureB64,
+			challenge.MessageTemplate,
 		)
 
 		guestNetworkId := server.NewId()
@@ -199,11 +207,18 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		assert.NotEqual(t, network, nil)
 		assert.Equal(t, network.GuestUpgradeNetworkId, nil)
 
+		// login with a fresh challenge
+		challenge = CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		assert.Equal(t, challenge.Error, nil)
+		signature, err = privateKey.Sign([]byte(challenge.MessageTemplate))
+		assert.Equal(t, err, nil)
+		signatureB64 = base64.StdEncoding.EncodeToString(signature[:])
+
 		args := UpgradeGuestExistingArgs{
 			WalletAuth: &WalletAuthArgs{
-				PublicKey:  pk,
-				Signature:  signature,
-				Message:    message,
+				PublicKey:  publicKey,
+				Signature:  signatureB64,
+				Message:    challenge.MessageTemplate,
 				Blockchain: AuthTypeSolana,
 			},
 		}
@@ -227,13 +242,6 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
-		// networkId := server.NewId()
-		// userId := server.NewId()
-		// clientId := server.NewId()
-		// networkName := "abcdef"
-
-		// model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
-
 		networkId := server.NewId()
 		userId := server.NewId()
 
@@ -251,15 +259,23 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 			userId,
 		)
 
-		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
+		privateKey, err := solana.NewRandomPrivateKey()
+		assert.Equal(t, err, nil)
+		publicKey := privateKey.PublicKey().String()
 		networkName := "abcdef"
+
+		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		assert.Equal(t, challenge.Error, nil)
+		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
+		assert.Equal(t, err, nil)
+		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		args := UpgradeGuestArgs{
 			NetworkName: networkName,
 			WalletAuth: &WalletAuthArgs{
-				PublicKey:  pk,
-				Signature:  "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw==",
-				Message:    "Welcome to URnetwork",
+				PublicKey:  publicKey,
+				Signature:  signatureB64,
+				Message:    challenge.MessageTemplate,
 				Blockchain: "solana",
 			},
 		}
@@ -278,7 +294,7 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 
 		user := GetNetworkUser(ctx, *network.AdminUserId)
 		assert.Equal(t, user.AuthType, "solana")
-		assert.Equal(t, user.WalletAddress, pk)
+		assert.Equal(t, user.WalletAddress, publicKey)
 
 	})
 }

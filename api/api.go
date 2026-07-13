@@ -37,6 +37,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/auth/wallet-nonce", handlers.AuthWalletNonce),
 		router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
 		router.NewRoute("POST", "/auth/verify", handlers.AuthVerify),
+		router.NewRoute("POST", "/auth/wallet-challenge", handlers.AuthWalletChallenge),
 		router.NewRoute("GET", "/auth/refresh", handlers.AuthRefreshToken),
 		router.NewRoute("POST", "/auth/verify-send", handlers.AuthVerifySend),
 		router.NewRoute("POST", "/auth/password-reset", handlers.AuthPasswordReset),

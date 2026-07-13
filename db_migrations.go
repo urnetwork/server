@@ -2804,6 +2804,40 @@ var migrations = []any{
         ON transfer_contract (dispute, outcome, create_time)
     `),
 
+	newSqlMigration(`
+		CREATE TABLE wallet_auth_challenge (
+			challenge_id uuid NOT NULL,
+			challenge_value varchar(128) NOT NULL,
+			wallet_address text NULL,
+			blockchain varchar(32) NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			expire_time timestamp NOT NULL,
+			used bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (challenge_id),
+			UNIQUE (challenge_value)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX wallet_auth_challenge_expire_time_used
+		ON wallet_auth_challenge (expire_time, used)
+	`),
+	newSqlMigration(`
+		CREATE TABLE wallet_auth_challenge_attempt (
+			wallet_auth_challenge_attempt_id uuid NOT NULL,
+			client_address_hash bytea NOT NULL,
+			client_address_port int NOT NULL,
+			attempt_time timestamp NOT NULL DEFAULT now(),
+			success bool NOT NULL DEFAULT false,
+
+			PRIMARY KEY (wallet_auth_challenge_attempt_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_port_attempt_time
+		ON wallet_auth_challenge_attempt (client_address_hash, client_address_port, attempt_time)
+	`),
+
 	// `/verify` published proofs (sn/VALIDATOR.md §6.2): one row per
 	// completed (status=1) or expired (status=2) trail. `hops_json` is
 	// `[{"client_id", "time_ms"}, ...]`; sigs are null when expired. Poison

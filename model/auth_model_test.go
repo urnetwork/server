@@ -393,31 +393,44 @@ func TestLoginWithWallet(t *testing.T) {
 		userId := server.NewId()
 		networkName := "test"
 
-		pk := "6UJtwDRMv2CCfVCKm6hgMDAGrFzv7z8WKEHut2u8dV8s"
-		signature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw=="
-		message := "Welcome to URnetwork"
+		privateKey, err := solana.NewRandomPrivateKey()
+		assert.Equal(t, err, nil)
+		publicKey := privateKey.PublicKey().String()
+
+		// create a server-issued challenge and sign it
+		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		assert.Equal(t, challenge.Error, nil)
+		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
+		assert.Equal(t, err, nil)
+		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		Testing_CreateNetworkByWallet(
 			ctx,
 			networkId,
 			networkName,
 			userId,
-			pk,
-			signature,
-			message,
+			publicKey,
+			signatureB64,
+			challenge.MessageTemplate,
 		)
 
+		// login again with a fresh challenge
+		challenge = CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		assert.Equal(t, challenge.Error, nil)
+		signature, err = privateKey.Sign([]byte(challenge.MessageTemplate))
+		assert.Equal(t, err, nil)
+		signatureB64 = base64.StdEncoding.EncodeToString(signature[:])
+
 		result, err := handleLoginWallet(&WalletAuthArgs{
-			PublicKey:  pk,
-			Signature:  signature,
-			Message:    message,
+			PublicKey:  publicKey,
+			Signature:  signatureB64,
+			Message:    challenge.MessageTemplate,
 			Blockchain: AuthTypeSolana,
 		}, ctx)
 
 		assert.Equal(t, err, nil)
 		assert.NotEqual(t, result, nil)
 		assert.NotEqual(t, result.Network.ByJwt, nil)
-
 	})
 }
 

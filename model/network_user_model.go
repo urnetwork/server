@@ -634,6 +634,9 @@ func addWalletAuth(
 
 	walletAuth := addWalletAuth.WalletAuth
 
+	if walletAuth.Signature == "" || walletAuth.Message == "" {
+		return errors.New("wallet signature and message are required")
+	}
 	isValid, err := VerifySolanaSignature(
 		walletAuth.PublicKey,
 		walletAuth.Message,
@@ -645,6 +648,18 @@ func addWalletAuth(
 	if !isValid {
 		return errors.New("invalid signature")
 	}
+
+	if walletAuth.Blockchain == "" {
+		walletAuth.Blockchain = SOL.String()
+	}
+	parsedBlockchain, err := ParseBlockchain(walletAuth.Blockchain)
+	if err != nil {
+		return err
+	}
+	if parsedBlockchain != SOL {
+		return errors.New("wallet auth only supports solana")
+	}
+	walletAuth.Blockchain = parsedBlockchain.String()
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
@@ -796,7 +811,38 @@ func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.
 	})
 
 	return
+}
 
+func FindNetworkIdByWalletAddress(ctx context.Context, walletAddress string) (networkId *server.Id, err error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, execErr := tx.Query(
+			ctx,
+			`
+			SELECT network.network_id
+			FROM network
+			WHERE EXISTS (
+			  SELECT 1 FROM network_user_auth_wallet
+			  WHERE network_user_auth_wallet.user_id = network.admin_user_id AND network_user_auth_wallet.wallet_address = $1
+			)
+			`,
+			walletAddress,
+		)
+		if execErr != nil {
+			err = execErr
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				server.Raise(result.Scan(
+					&networkId,
+				))
+			}
+		})
+	})
+
+	return
 }
 
 /**
