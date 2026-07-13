@@ -271,10 +271,15 @@ func UseWalletAuthChallenge(
 			return
 		}
 
-		if messageTime.Before(createTime.Add(-WalletAuthChallengeSkewPast)) ||
-			messageTime.After(createTime.Add(WalletAuthChallengeSkewFuture)) ||
-			messageTime.Unix() != createTime.Unix() {
+		// The message must be the exact one issued for this challenge.
+		if messageTime.Unix() != createTime.Unix() {
 			err = errors.New("challenge timestamp mismatch")
+			return
+		}
+		// Then allow small clock skew relative to challenge creation time.
+		if messageTime.Before(createTime.Add(-WalletAuthChallengeSkewPast)) ||
+			messageTime.After(createTime.Add(WalletAuthChallengeSkewFuture)) {
+			err = errors.New("challenge timestamp outside allowed skew")
 			return
 		}
 
@@ -308,7 +313,7 @@ func UseWalletAuthChallenge(
 		switch err.Error() {
 		case "challenge already used", "challenge expired":
 			code = "403"
-		case "challenge timestamp mismatch":
+		case "challenge timestamp mismatch", "challenge timestamp outside allowed skew":
 			code = "400"
 		}
 		return &UseWalletAuthChallengeResult{
