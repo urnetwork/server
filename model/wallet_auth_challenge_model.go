@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	WalletAuthChallengeSkewPast = WalletAuthChallengeLifetime
+	WalletAuthChallengeLifetime  = 5 * time.Minute
+	WalletAuthChallengeSkewPast  = 1 * time.Minute
 	// Allow a small future skew for legitimate clock drift, but not enough
 	// to hoard a challenge beyond its own expiry.
 	WalletAuthChallengeSkewFuture = 1 * time.Minute
