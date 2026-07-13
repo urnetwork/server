@@ -35,7 +35,8 @@ func main() {
 Usage:
     bringyourctl db version
     bringyourctl db migrate
-    bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze]
+    bringyourctl db vacuum [--exclude=<table>...]
+    bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -85,7 +86,7 @@ Usage:
     bringyourctl proxy inspect <proxy_id>
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
-    bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize]
+    bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
     bringyourctl st deposit [--alpha_rao=<alpha_rao>]
@@ -125,6 +126,8 @@ Options:
 			dbVersion(opts)
 		} else if migrate, _ := opts.Bool("migrate"); migrate {
 			dbMigrate(opts)
+		} else if vacuum, _ := opts.Bool("vacuum"); vacuum {
+			dbVacuum(opts)
 		} else if maintenance, _ := opts.Bool("maintenance"); maintenance {
 			dbMaintenance(opts)
 		}
@@ -308,12 +311,29 @@ func dbMigrate(opts docopt.Opts) {
 }
 
 func dbMaintenance(opts docopt.Opts) {
-	epoch, _ := opts.Int("<epoch>")
-
 	reindex, _ := opts.Bool("--reindex")
 	cleanup, _ := opts.Bool("--cleanup")
 	analyze, _ := opts.Bool("--analyze")
 
+	// `all` runs a full reindex cycle. Reindexing is spread across
+	// DbReindexEpochs epochs (each table is hash-assigned to exactly one epoch
+	// within a cycle), so running epochs 0..DbReindexEpochs-1 maintains every
+	// table once. ANALYZE is a whole-db operation, so run it once at the end of
+	// the cycle rather than on every epoch.
+	if all, _ := opts.Bool("all"); all {
+		fmt.Printf("Running DB maintenance for a full cycle (%d epochs) ...\n", server.DbReindexEpochs)
+		for epoch := uint64(0); epoch < server.DbReindexEpochs; epoch += 1 {
+			fmt.Printf(">>> maintenance epoch %d/%d\n", epoch, server.DbReindexEpochs-1)
+			server.DbMaintenance(context.Background(), epoch, &server.DbMaintenanceOptions{
+				Reindex: reindex,
+				Cleanup: cleanup,
+				Analyze: analyze && epoch == server.DbReindexEpochs-1,
+			})
+		}
+		return
+	}
+
+	epoch, _ := opts.Int("<epoch>")
 	dbMaintenanceOpts := &server.DbMaintenanceOptions{
 		Reindex: reindex,
 		Cleanup: cleanup,
@@ -323,6 +343,20 @@ func dbMaintenance(opts docopt.Opts) {
 	fmt.Printf("Running DB maintenance ...\n")
 	// server.DbMigrationVerbose = true
 	server.DbMaintenance(context.Background(), uint64(epoch), dbMaintenanceOpts)
+}
+
+// VACUUM (FULL, ANALYZE) every public table except the excluded ones (and their
+// underscore-namespaced children). VACUUM FULL rewrites each table+indexes
+// compactly, reclaiming bloat to the OS — run only with the system offline, and
+// with transient free disk ~= the largest table being vacuumed. Uses the
+// maintenance connection; skips tables it cannot lock (e.g. one held by the
+// client_reliability copy) and continues past per-table errors.
+func dbVacuum(opts docopt.Opts) {
+	excludes, _ := opts["--exclude"].([]string)
+	fmt.Printf("VACUUM (FULL, ANALYZE) all public tables, excluding %v (and their _ children)\n", excludes)
+	server.VacuumFullAllTables(context.Background(), excludes, func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
 }
 
 func searchAdd(opts docopt.Opts) {
@@ -1449,6 +1483,14 @@ func modelMigrateProxyDeviceConfig(opts docopt.Opts) {
 // the last 30 days (see xops/db/client_reliability_partition_plan.md). Safe to
 // rerun: resumes an interrupted copy, no-ops once converted. After validating,
 // rerun with --finalize to drop the old table and reclaim its disk.
+//
+// --parallel=<n> runs the bulk copy with n concurrent workers on the
+// maintenance pool; keep n <= the maintenance pool max_connections
+// (db_maintenance.yml). Defaults to 1 (serial).
+//
+// --oneshot finishes the copy with a single sequential-scan INSERT that needs
+// no index on the source — the path to use after dropping client_reliability's
+// primary key to reclaim disk. Run with the drain offline.
 func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
 	ctx := context.Background()
 	logf := func(format string, args ...any) {
@@ -1461,7 +1503,12 @@ func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
 		return
 	}
 	dryRun, _ := opts.Bool("--dry-run")
-	if err := model.MigrateClientReliabilityToPartitions(ctx, dryRun, logf); err != nil {
+	oneshot, _ := opts.Bool("--oneshot")
+	parallelism := 1
+	if p, err := opts.Int("--parallel"); err == nil && 0 < p {
+		parallelism = p
+	}
+	if err := model.MigrateClientReliabilityToPartitions(ctx, parallelism, oneshot, dryRun, logf); err != nil {
 		panic(err)
 	}
 }

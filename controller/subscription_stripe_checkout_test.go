@@ -123,7 +123,7 @@ func TestStripeCheckoutUiModeParamsDoNotMix(t *testing.T) {
 	}
 
 	embedded := &stripe.CheckoutSessionParams{}
-	assert.Equal(t, stripeCheckoutApplyUiMode(embedded, StripeUiModeEmbedded, urls), true)
+	assert.Equal(t, stripeCheckoutApplyUiMode(embedded, StripeUiModeEmbedded, false, urls), true)
 	assert.Equal(t, *embedded.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
 	assert.Equal(t, *embedded.ReturnURL, urls.ReturnUrl)
 	// the pair Stripe rejects in this mode must be absent
@@ -131,7 +131,7 @@ func TestStripeCheckoutUiModeParamsDoNotMix(t *testing.T) {
 	assert.Equal(t, embedded.CancelURL, nil)
 
 	hosted := &stripe.CheckoutSessionParams{}
-	assert.Equal(t, stripeCheckoutApplyUiMode(hosted, StripeUiModeHosted, urls), true)
+	assert.Equal(t, stripeCheckoutApplyUiMode(hosted, StripeUiModeHosted, false, urls), true)
 	assert.Equal(t, *hosted.SuccessURL, urls.SuccessUrl)
 	assert.Equal(t, *hosted.CancelURL, urls.CancelUrl)
 	// hosted is Stripe's default; sending ui_mode/return_url would only confuse it
@@ -148,25 +148,26 @@ func TestStripeCheckoutRefusesUnconfiguredUiMode(t *testing.T) {
 		SuccessUrl: "https://ur.io/checkout/success",
 		CancelUrl:  "https://ur.io/checkout/cancel",
 	}
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, hostedOnly), true)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, hostedOnly), false)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, hostedOnly), true)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, hostedOnly), false)
 
 	embeddedOnly := StripeCheckoutUrls{
 		ReturnUrl: "https://ur.io/checkout/complete",
 	}
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, embeddedOnly), true)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, embeddedOnly), false)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, embeddedOnly), true)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, embeddedOnly), false)
 
 	// a half-configured hosted pair is not usable either
 	assert.Equal(t, stripeCheckoutApplyUiMode(
 		&stripe.CheckoutSessionParams{},
 		StripeUiModeHosted,
+		false,
 		StripeCheckoutUrls{SuccessUrl: "https://ur.io/checkout/success"},
 	), false)
 
 	// nothing configured at all
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, StripeCheckoutUrls{}), false)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, StripeCheckoutUrls{}), false)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, StripeCheckoutUrls{}), false)
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, StripeCheckoutUrls{}), false)
 }
 
 // TestSignedInDataPurchaseLandsTheData pins the whole point of a signed-in purchase: the
@@ -243,4 +244,39 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 		assert.Equal(t, len(balances), 1)
 		assert.Equal(t, balances[0].BalanceByteCount, 1*model.Tib)
 	})
+}
+
+// TestStripeCheckoutInlineNeverRedirect pins the fully-inline embedded flow the account
+// panel uses: redirect_on_completion "never" means Stripe fires the client's onComplete
+// callback and never navigates. Stripe rejects a session carrying BOTH "never" and a
+// return_url, so the params must omit the url — which also makes the mode usable in an
+// env with no checkout.return_url configured at all.
+func TestStripeCheckoutInlineNeverRedirect(t *testing.T) {
+	// validation: "never" is embedded-only
+	never, ok := stripeCheckoutRedirectNever(StripeUiModeEmbedded, "never")
+	assert.Equal(t, ok, true)
+	assert.Equal(t, never, true)
+
+	_, ok = stripeCheckoutRedirectNever(StripeUiModeHosted, "never")
+	assert.Equal(t, ok, false)
+
+	never, ok = stripeCheckoutRedirectNever(StripeUiModeHosted, "")
+	assert.Equal(t, ok, true)
+	assert.Equal(t, never, false)
+
+	_, ok = stripeCheckoutRedirectNever(StripeUiModeEmbedded, "sometimes")
+	assert.Equal(t, ok, false)
+
+	// params: never -> RedirectOnCompletion set, NO return_url, and no urls required
+	noUrls := StripeCheckoutUrls{}
+	params := &stripe.CheckoutSessionParams{}
+	assert.Equal(t, stripeCheckoutApplyUiMode(params, StripeUiModeEmbedded, true, noUrls), true)
+	assert.Equal(t, *params.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
+	assert.Equal(t, *params.RedirectOnCompletion, "never")
+	assert.Equal(t, params.ReturnURL, nil)
+	assert.Equal(t, params.SuccessURL, nil)
+	assert.Equal(t, params.CancelURL, nil)
+
+	// without never, embedded still demands its return_url
+	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, noUrls), false)
 }

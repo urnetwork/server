@@ -1031,6 +1031,12 @@ type StripeCreateCheckoutSessionArgs struct {
 	// "hosted" (default) or "embedded". Defaults to hosted so existing callers, which
 	// only ever read checkout_url, keep working unchanged.
 	UiMode string `json:"ui_mode,omitempty"`
+	// "never" keeps an EMBEDDED checkout fully inline: Stripe fires the client's
+	// onComplete callback instead of redirecting anywhere, so the page the customer is
+	// on (e.g. the account panel) never navigates. Only valid with ui_mode "embedded".
+	// Empty means the embedded flow redirects to the configured return_url, and hosted
+	// behaves as always.
+	RedirectOnCompletion string `json:"redirect_on_completion,omitempty"`
 }
 
 type StripeCreateCheckoutSessionError struct {
@@ -1112,6 +1118,19 @@ func stripeCheckoutUiMode(uiMode string) (string, bool) {
 	return "", false
 }
 
+// stripeCheckoutRedirectNever validates redirect_on_completion against the ui mode.
+// "never" is an EMBEDDED-only concept: hosted checkout lives on stripe.com and MUST
+// come back somewhere.
+func stripeCheckoutRedirectNever(uiMode string, redirectOnCompletion string) (bool, bool) {
+	switch redirectOnCompletion {
+	case "":
+		return false, true
+	case "never":
+		return uiMode == StripeUiModeEmbedded, uiMode == StripeUiModeEmbedded
+	}
+	return false, false
+}
+
 // stripeCheckoutApplyUiMode sets the ui-mode-specific params, and reports whether this
 // env is configured for that mode at all.
 //
@@ -1122,14 +1141,23 @@ func stripeCheckoutUiMode(uiMode string) (string, bool) {
 func stripeCheckoutApplyUiMode(
 	params *stripe.CheckoutSessionParams,
 	uiMode string,
+	redirectNever bool,
 	urls StripeCheckoutUrls,
 ) bool {
 	switch uiMode {
 	case StripeUiModeEmbedded:
+		params.UIMode = stripe.String(string(stripe.CheckoutSessionUIModeEmbedded))
+		if redirectNever {
+			// fully inline: Stripe fires onComplete in the client and never navigates.
+			// Stripe rejects a session carrying BOTH return_url and "never", so the
+			// return url is omitted -- which also means this works in an env that has
+			// no checkout.return_url configured.
+			params.RedirectOnCompletion = stripe.String("never")
+			return true
+		}
 		if urls.ReturnUrl == "" {
 			return false
 		}
-		params.UIMode = stripe.String(string(stripe.CheckoutSessionUIModeEmbedded))
 		params.ReturnURL = stripe.String(urls.ReturnUrl)
 		return true
 
@@ -1161,6 +1189,15 @@ func StripeCreateCheckoutSession(
 		return stripeCheckoutError("Unknown ui mode."), nil
 	}
 
+	redirectNever, redirectOk := stripeCheckoutRedirectNever(uiMode, args.RedirectOnCompletion)
+	if !redirectOk {
+		return &StripeCreateCheckoutSessionResult{
+			Error: &StripeCreateCheckoutSessionError{
+				Message: "redirect_on_completion \"never\" requires ui_mode \"embedded\".",
+			},
+		}, nil
+	}
+
 	networkId := clientSession.ByJwt.NetworkId
 
 	params := &stripe.CheckoutSessionParams{
@@ -1171,7 +1208,7 @@ func StripeCreateCheckoutSession(
 	// Where the customer lands when they are done. Note this runs BEFORE any vault access
 	// below, so an env with no stripe config refuses cleanly instead of panicking on a
 	// missing secret.
-	if !stripeCheckoutApplyUiMode(params, uiMode, stripeCheckoutUrls()) {
+	if !stripeCheckoutApplyUiMode(params, uiMode, redirectNever, stripeCheckoutUrls()) {
 		// refuse rather than hand a customer to Stripe with no way back
 		glog.Errorf("[stripe]checkout urls are not configured for ui mode %s\n", uiMode)
 		return stripeCheckoutError("Checkout is not configured."), nil

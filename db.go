@@ -97,14 +97,39 @@ type safePgPool struct {
 	pool               *pgxpool.Pool
 }
 
+// resolveResources returns the connection (vault) and pool-sizing (config)
+// resources for this pool. It honors the pool's OWN resource names — so the
+// maintenance pool uses pg_maintenance.yml (direct Postgres, bypassing
+// PgBouncer) and db_maintenance.yml (its own max_connections) — and falls back
+// to the defaults (pg.yml / db.yml) when the pool-specific resource is absent
+// or does not define the size. That fallback keeps tests working (they only
+// redirect pg.yml) and tolerates an empty db_maintenance.yml. The main pool's
+// names ARE the defaults, so its resolution is unchanged.
+func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
+	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
+	if self.vaultResourceName != DefaultPgVaultResourceName {
+		if r, err := Vault.SimpleResource(self.vaultResourceName); err == nil {
+			vaultKeys = r
+		}
+	}
+	configKeys = Config.RequireSimpleResource(DefaultPgConfigResourceName)
+	if self.configResourceName != DefaultPgConfigResourceName {
+		// use the pool-specific config only if it actually defines the size, so
+		// an empty/partial db_maintenance.yml falls back to db.yml
+		if r, err := Config.SimpleResource(self.configResourceName); err == nil && 0 < len(r.Int("max_connections")) {
+			configKeys = r
+		}
+	}
+	return
+}
+
 func (self *safePgPool) open() *pgxpool.Pool {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	if self.pool == nil {
 		// Logger().Printf("Db init\n")
 
-		dbKeys := Vault.RequireSimpleResource("pg.yml")
-		dbConfigKeys := Config.RequireSimpleResource("db.yml")
+		dbKeys, dbConfigKeys := self.resolveResources()
 
 		minConnections := dbConfigKeys.RequireInt("min_connections")
 		maxConnections := dbConfigKeys.RequireInt("max_connections")

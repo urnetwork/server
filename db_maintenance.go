@@ -251,3 +251,100 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		})
 	}
 }
+
+// VacuumFullAllTables runs VACUUM (FULL, ANALYZE) on every ordinary public
+// table (including partition leaves) except those matched by excludes. An
+// exclude matches a table by exact name OR as an underscore-namespaced parent,
+// so `client_reliability` also skips client_reliability_new, its partitions,
+// and client_reliability_copy_progress.
+//
+// VACUUM FULL takes an ACCESS EXCLUSIVE lock and rewrites the table + all its
+// indexes into fresh compact files, returning reclaimed bloat to the OS (a
+// plain VACUUM does not). It therefore (a) must be run with the system offline
+// — it blocks all access to each table for the duration — and (b) needs
+// transient free disk of roughly the table's current size while the rewrite is
+// in flight. Tables are processed one at a time, smallest first, so peak
+// transient use is bounded by the largest single table rather than their sum.
+//
+// Runs on the maintenance connection in autocommit (VACUUM cannot run inside a
+// transaction). A table that cannot be locked within lock_timeout, or that
+// errors mid-rewrite (e.g. out of disk — VACUUM FULL rolls back cleanly,
+// leaving the table intact), is logged and skipped; the run continues.
+func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(string, ...any)) {
+	skip := func(t string) bool {
+		for _, e := range excludes {
+			if t == e || strings.HasPrefix(t, e+"_") {
+				return true
+			}
+		}
+		return false
+	}
+
+	type tableInfo struct {
+		name   string
+		size   int64
+		pretty string
+	}
+
+	all := []tableInfo{}
+	MaintenanceDb(ctx, func(conn PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT c.relname, pg_total_relation_size(c.oid), pg_size_pretty(pg_total_relation_size(c.oid))
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = 'public' AND c.relkind = 'r'
+			ORDER BY pg_total_relation_size(c.oid) ASC
+			`,
+		)
+		WithPgResult(result, err, func() {
+			for result.Next() {
+				var ti tableInfo
+				Raise(result.Scan(&ti.name, &ti.size, &ti.pretty))
+				all = append(all, ti)
+			}
+		})
+	}, OptReadWrite())
+
+	todo := []tableInfo{}
+	for _, ti := range all {
+		if skip(ti.name) {
+			logf("skip %s (%s) — excluded", ti.name, ti.pretty)
+		} else {
+			todo = append(todo, ti)
+		}
+	}
+	logf("VACUUM FULL plan: %d tables to vacuum, %d skipped", len(todo), len(all)-len(todo))
+
+	MaintenanceDb(ctx, func(conn PgConn) {
+		RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
+		// so a table held by another session (e.g. the client_reliability copy)
+		// is skipped rather than blocking the whole run
+		RaisePgResult(conn.Exec(ctx, `SET lock_timeout = '60s'`))
+
+		for i, ti := range todo {
+			startTime := time.Now()
+			logf("[%d/%d] VACUUM FULL %s (%s) ...", i+1, len(todo), ti.name, ti.pretty)
+
+			// table name comes from the catalog (not user input); interpolate
+			// like the REINDEX path above. VACUUM cannot take bind parameters.
+			_, err := conn.Exec(ctx, `VACUUM (FULL, ANALYZE) `+ti.name)
+			if err != nil {
+				logf("[%d/%d] %s SKIPPED/ERROR after %.1fs: %v", i+1, len(todo), ti.name, time.Since(startTime).Seconds(), err)
+				continue
+			}
+
+			after := ti.pretty
+			r2, e2 := conn.Query(ctx, `SELECT pg_size_pretty(pg_total_relation_size(to_regclass($1)))`, "public."+ti.name)
+			WithPgResult(r2, e2, func() {
+				if r2.Next() {
+					Raise(r2.Scan(&after))
+				}
+			})
+			logf("[%d/%d] %s done: %s -> %s in %.1fs", i+1, len(todo), ti.name, ti.pretty, after, time.Since(startTime).Seconds())
+		}
+	}, OptReadWrite(), OptNoRetry())
+
+	logf("VACUUM FULL complete")
+}

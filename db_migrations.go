@@ -3418,11 +3418,15 @@ var migrations = []any{
 	// read/write blocking), so the migration is safe on hot tables.
 	//
 	// Deliberately NOT set here:
-	//   - client_reliability: terminal — the partition cutover
-	//     (`bringyourctl model migrate client-reliability-partition`) drops
-	//     it; its daily leaf partitions are small enough for the defaults,
-	//     and a reindexed pass over its 1.5TB+ index would compete with the
-	//     cutover copy for I/O in the exact window both exist.
+	//   - client_reliability: now range-partitioned. Its daily leaf partitions
+	//     are created at runtime by the maintenance task
+	//     (`ensureClientReliabilityPartition`), NOT by a migration, so their
+	//     autovacuum cannot be set here (and reloptions on the empty parent do
+	//     not drive partition autovacuum). Nor do they need tuning: each
+	//     partition is ~1 day, mostly insert-only, and dropped at 30 days, so
+	//     the defaults vacuum it fine — unlike the old 4TB table, whose vacuum
+	//     never completed. If ever needed, tune via a WITH(...) on the partition
+	//     CREATE, measure-first (see STORAGE.md §3).
 	//   - pending_task: already tuned above.
 	// The existing bloat is not fixed by this (autovacuum only reclaims going
 	// forward): each of these tables needs a one-time manual
