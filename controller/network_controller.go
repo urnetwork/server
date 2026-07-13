@@ -20,7 +20,7 @@ func NetworkCreate(
 		return nil, err
 	}
 	if result.Error != nil {
-		return result, nil
+		return nil, fmt.Errorf("%s", result.Error.Message)
 	}
 
 	/**
