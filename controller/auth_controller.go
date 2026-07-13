@@ -43,7 +43,7 @@ func AuthWalletChallenge(
 	model.SetWalletAuthChallengeAttemptSuccess(session.Ctx, walletAuthChallengeAttemptId, success)
 
 	if !success {
-		return nil, fmt.Errorf(result.Error.Message)
+		return nil, fmt.Errorf("%s", result.Error.Message)
 	}
 
 	return result, nil
