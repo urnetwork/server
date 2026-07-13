@@ -82,6 +82,7 @@ func CreateWalletAuthChallenge(
 	if args.WalletAddress != nil {
 		w := strings.TrimSpace(*args.WalletAddress)
 		if w != "" {
+			// Validate early for clear 400; duplicated inside VerifySignature chain verifiers.
 			validAddress := false
 			switch parsedBlockchain {
 			case SOL:
@@ -189,6 +190,7 @@ func UseWalletAuthChallenge(
 	}
 	blockchain := parsedBlockchain.String()
 
+	// Validate early for clear 400; duplicated inside VerifySignature chain verifiers.
 	validAddress := false
 	switch parsedBlockchain {
 	case SOL:
