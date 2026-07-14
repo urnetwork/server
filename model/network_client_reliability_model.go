@@ -976,43 +976,33 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					country_location_id
 				)
 				SELECT
-				    client_reliability.client_id,
+				    valid_counts.client_id,
 				    $3,
 				    SUM(1.0) AS independent_reliability_score,
 				    SUM(1.0) / $4::bigint AS independent_reliability_weight,
 				    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
 				    SUM(1.0/valid_counts.valid_client_count) / $4::bigint AS reliability_weight,
 				    $1 AS min_block_number,
-					$2 AS max_block_number,
+				    $2 AS max_block_number,
 					network_client_location_reliability.city_location_id,
 					network_client_location_reliability.region_location_id,
 					network_client_location_reliability.country_location_id
-				FROM client_reliability
-				INNER JOIN (
+				FROM (
 					SELECT
-						block_number,
-						client_address_hash,
-						COUNT(*) AS valid_client_count
+						client_id,
+						COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
 					FROM client_reliability
 					WHERE
 						valid = true AND
 						$1 <= block_number AND
 						block_number < $2 AND
 						NOT (block_number = ANY($5::bigint[]))
-					GROUP BY block_number, client_address_hash
-				) valid_counts ON
-					valid_counts.block_number = client_reliability.block_number AND
-					valid_counts.client_address_hash = client_reliability.client_address_hash
+				) valid_counts
 				INNER JOIN network_client_location_reliability ON
-					network_client_location_reliability.client_id = client_reliability.client_id AND
+					network_client_location_reliability.client_id = valid_counts.client_id AND
 					network_client_location_reliability.valid = true
-				WHERE
-					client_reliability.valid = true AND
-					$1 <= client_reliability.block_number AND
-					client_reliability.block_number < $2 AND
-					NOT (client_reliability.block_number = ANY($5::bigint[]))
 				GROUP BY
-					client_reliability.client_id,
+					valid_counts.client_id,
 					network_client_location_reliability.city_location_id,
 					network_client_location_reliability.region_location_id,
 					network_client_location_reliability.country_location_id
@@ -1141,40 +1131,31 @@ func UpdateNetworkReliabilityScoresInTx(tx server.PgTx, ctx context.Context, min
 			max_block_number
 		)
 		SELECT
-		    client_reliability.network_id,
+		    valid_counts.network_id,
 		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0) / $3::bigint AS independent_reliability_weight,
 		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
 		    SUM(1.0/valid_counts.valid_client_count) / $3::bigint AS reliability_weight,
 		    $1 AS min_block_number,
-			$2 AS max_block_number
-		FROM client_reliability
-		INNER JOIN (
+		    $2 AS max_block_number
+		FROM (
 			SELECT
-				block_number,
-				client_address_hash,
-				COUNT(*) AS valid_client_count
+				network_id,
+				client_id,
+				COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
 			FROM client_reliability
 			WHERE
 				valid = true AND
 				$1 <= block_number AND
 				block_number < $2 AND
 				NOT (block_number = ANY($4::bigint[]))
-			GROUP BY block_number, client_address_hash
-		) valid_counts ON
-			valid_counts.block_number = client_reliability.block_number AND
-			valid_counts.client_address_hash = client_reliability.client_address_hash
+		) valid_counts
 		INNER JOIN network_client_location_reliability ON
-			network_client_location_reliability.client_id = client_reliability.client_id AND
+			network_client_location_reliability.client_id = valid_counts.client_id AND
 			network_client_location_reliability.valid = true
-		WHERE
-			client_reliability.valid = true AND
-			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2 AND
-			NOT (client_reliability.block_number = ANY($4::bigint[]))
 		GROUP BY
-			client_reliability.network_id,
+			valid_counts.network_id,
 			network_client_location_reliability.country_location_id
 		ON CONFLICT (network_id, country_location_id) DO UPDATE
 		SET
@@ -1719,40 +1700,31 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 			max_block_number
 		)
 		SELECT
-		    client_reliability.network_id,
+		    valid_counts.network_id,
 		    network_client_location_reliability.country_location_id,
 		    SUM(1.0) AS independent_reliability_score,
 		    SUM(1.0) / $3::bigint AS independent_reliability_weight,
 		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
 		    SUM(1.0/valid_counts.valid_client_count) / $3::bigint AS reliability_weight,
 		    $1 AS min_block_number,
-			$2 AS max_block_number
-		FROM client_reliability
-		INNER JOIN (
+		    $2 AS max_block_number
+		FROM (
 			SELECT
-				block_number,
-				client_address_hash,
-				COUNT(*) AS valid_client_count
+				network_id,
+				client_id,
+				COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
 			FROM client_reliability
 			WHERE
 				valid = true AND
 				$1 <= block_number AND
 				block_number < $2 AND
 				NOT (block_number = ANY($4::bigint[]))
-			GROUP BY block_number, client_address_hash
-		) valid_counts ON
-			valid_counts.block_number = client_reliability.block_number AND
-			valid_counts.client_address_hash = client_reliability.client_address_hash
+		) valid_counts
 		INNER JOIN network_client_location_reliability ON
-			network_client_location_reliability.client_id = client_reliability.client_id AND
+			network_client_location_reliability.client_id = valid_counts.client_id AND
 			network_client_location_reliability.valid = true
-		WHERE
-			client_reliability.valid = true AND
-			$1 <= client_reliability.block_number AND
-			client_reliability.block_number < $2 AND
-			NOT (client_reliability.block_number = ANY($4::bigint[]))
 		GROUP BY
-			client_reliability.network_id,
+			valid_counts.network_id,
 			network_client_location_reliability.country_location_id
 		ON CONFLICT (network_id, country_location_id) DO UPDATE
 		SET

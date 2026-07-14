@@ -179,7 +179,13 @@ func ScheduleUpdateReliabilities(clientSession *session.ClientSession, tx server
 		},
 		clientSession,
 		task.RunOnce("update_reliabilities"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		// every 5 minutes: UpdateReliabilities re-aggregates the full lookback each
+		// run (7-day window score, client scores), so a lower cadence cuts that
+		// repeated work ~5x on top of the single-pass query rewrite. The scores are
+		// long-window (24h/7d) aggregates ending at now, so 5-minute staleness is
+		// immaterial, and the window buckets still fully cover the trailing hour
+		// (minTime is clamped to now-1h and buckets are upserted whole).
+		task.RunAt(server.NowUtc().Add(5*time.Minute)),
 		task.MaxTime(120*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)

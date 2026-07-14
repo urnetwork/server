@@ -41,6 +41,10 @@ const TrustedPriority = 200
 // this long will not be paid; `RemoveCompletedContracts` hard deletes them
 const StragglerContractExpiration = 90 * 24 * time.Hour
 
+// completed contracts are reaped this long after their payment completes
+// (reap_time = complete_time + CompletedContractExpiration, set in CompletePayment)
+const CompletedContractExpiration = 7 * 24 * time.Hour
+
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
 		s := fmt.Sprintf("%."+strconv.Itoa(precision)+"f", value)
@@ -1854,12 +1858,14 @@ func settleEscrowInTx(
 	}
 
 	var payoutNetworkId *server.Id
+	var destinationId server.Id
 	result, err = tx.Query(
 		ctx,
 		`
             SELECT
                 source_network_id,
                 destination_network_id,
+                destination_id,
                 payer_network_id,
                 companion_contract_id
             FROM transfer_contract
@@ -1877,6 +1883,7 @@ func settleEscrowInTx(
 			server.Raise(result.Scan(
 				&sourceNetworkId,
 				&destinationNetworkId,
+				&destinationId,
 				&payerNetworkId,
 				&companionContractId,
 			))
@@ -1950,19 +1957,22 @@ func settleEscrowInTx(
 						                balance_id,
 						                network_id,
 						                payout_byte_count,
-						                payout_net_revenue_nano_cents
+						                payout_net_revenue_nano_cents,
+						                destination_id
 						            )
-						            VALUES ($1, $2, $3, $4, $5)
+						            VALUES ($1, $2, $3, $4, $5, $6)
 						            ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
 						            SET
 						            	payout_byte_count = $4,
-						            	payout_net_revenue_nano_cents = $5
+						            	payout_net_revenue_nano_cents = $5,
+						            	destination_id = $6
 						        `,
 								contractId,
 								balanceId,
 								payoutNetworkId,
 								sweepPayout.payoutByteCount,
 								sweepPayout.payout,
+								destinationId,
 							)
 
 						}
@@ -3355,31 +3365,51 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		})
 	})
 
-	// each removal below deletes a bounded batch of candidate contracts and
-	// cascades contract_close/transfer_escrow/transfer_escrow_sweep for those
-	// same contract ids in one statement, so dependent rows never linger as
-	// orphans. The candidate subqueries deliberately have no DISTINCT and no
-	// ORDER BY: any batch will do for retention, duplicate candidate rows are
-	// harmless in DELETE ... USING (a row deletes once), and without a sort the
-	// scan stops as soon as LIMIT candidates are found instead of materializing
-	// every eligible contract. SweepOrphanContractData is the low-cadence
-	// safety net for orphans from any other path (e.g. crashes mid-statement
-	// from older releases).
+	// The reaper is driven entirely by the indexed reap_time column, never an
+	// anti-join or full scan. reap_time is the instant a contract becomes due for
+	// hard deletion:
+	//   - CompletePayment sets it to complete_time + CompletedContractExpiration
+	//     for the payment's contracts (the completed-payout retention window),
+	//   - the assign pass below stamps now() on aged closed-but-never-completed
+	//     contracts (stragglers and sweep-less quarantine rows) so they too become
+	//     due.
+	// The delete pass then removes every contract whose reap_time has passed,
+	// cascading contract_close/transfer_escrow/transfer_escrow_sweep for those same
+	// contract ids in one statement so dependents never linger as orphans. Both
+	// passes are bounded by a partial index and batched (one maintenance tx each,
+	// no long lock), so a single run drains the eligible set regardless of cadence.
+	//
+	// This replaces three prior reaper blocks: the sweep-driven completed reaper,
+	// the sweep-less reaper, and the straggler reaper. The last two ran a
+	// non-selective, un-indexable anti-join over ~the whole old-closed contract
+	// table (open = false is nearly every old contract; the sweep / completed-
+	// payment anti-join can't be indexed on transfer_contract) with a LIMIT that
+	// never early-terminates -- so every run walked the world and tanked the DB
+	// (prod incident 2026-07-14). SweepOrphanContractData is the low-cadence safety
+	// net for orphans left by any other path (e.g. crashes mid-statement in older
+	// releases).
 
-	// remove completed transfer contracts.
-	// driven from transfer_escrow_sweep (not account_payment) because sweeps
-	// are deleted here as they are processed, so the scan is bounded by the
-	// live sweep set; completed payments accumulate forever
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	// assign pass: give aged closed-but-never-completed contracts a reap_time so
+	// the delete pass removes them. Bounded by the
+	// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
+	// AND close_time IS NOT NULL, ordered by create_time), so this is an index
+	// range-scan, not the anti-join it replaces.
+	assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), maxRowCount)
+
+	// delete pass: hard delete every contract whose reap_time is due, cascading
+	// its dependent rows. Bounded by the transfer_contract_reap_time partial index.
+	// This reaps both completed contracts (reap_time = complete_time +
+	// CompletedContractExpiration, set at CompletePayment) and the stragglers just
+	// assigned above. Candidate contract_ids are distinct (from the
+	// transfer_contract primary key), so a batch deletes exactly its candidates;
+	// removeContractBatches drains until an empty batch.
+	removeContractBatches(
+		ctx,
+		`
 			WITH candidate AS (
-				SELECT transfer_escrow_sweep.contract_id
-				FROM transfer_escrow_sweep
-				INNER JOIN account_payment ON
-				    account_payment.payment_id = transfer_escrow_sweep.payment_id
-				WHERE account_payment.completed AND account_payment.complete_time <= $1
+				SELECT transfer_contract.contract_id
+				FROM transfer_contract
+				WHERE transfer_contract.reap_time IS NOT NULL AND transfer_contract.reap_time < $1
 				LIMIT $2
 			), deleted_close AS (
 				DELETE FROM contract_close
@@ -3398,100 +3428,82 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			USING candidate
 			WHERE transfer_contract.contract_id = candidate.contract_id
 			`,
-			minTime.UTC(),
-			maxRowCount,
-		))
+		server.NowUtc(),
+		maxRowCount,
+	)
+}
 
-	}, server.TxReadCommitted)
+// removeContractBatches repeatedly runs a bounded contract-delete cascade (one
+// batch per maintenance tx, so no long lock is held) until a batch deletes no
+// contracts, meaning the eligible set is drained. This decouples retention
+// throughput from the task cadence: a single run fully catches up regardless of
+// how many contracts became eligible since the last, so the task can run on a
+// low cadence instead of every minute.
+//
+// Termination is on an empty batch, not a short one: a candidate row is a
+// contract_id that may repeat (a contract can have several sweeps), so the
+// final DELETE FROM transfer_contract can affect fewer rows than the LIMIT even
+// when more work remains. Each non-empty batch deletes its candidates (and
+// their sweeps), so the eligible set strictly shrinks and the loop terminates.
+func removeContractBatches(ctx context.Context, sql string, minTime time.Time, maxRowCount int) {
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(ctx, sql, minTime.UTC(), maxRowCount))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		if batchCount == 0 {
+			return
+		}
+	}
+}
 
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-
-		// remove closed transfer contracts that do not have a corresponding sweep
-		// these are the result of some db corruption and we cannot recover them
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			WITH candidate AS (
-				SELECT transfer_contract.contract_id
-				FROM transfer_contract
-				WHERE
-					transfer_contract.create_time < $1 AND
-					transfer_contract.open = false AND
-					NOT EXISTS (
-						SELECT 1 FROM transfer_escrow_sweep
-						WHERE transfer_escrow_sweep.contract_id = transfer_contract.contract_id
-					)
-				LIMIT $2
-			), deleted_close AS (
-				DELETE FROM contract_close
-				USING candidate
-				WHERE contract_close.contract_id = candidate.contract_id
-			), deleted_escrow AS (
-				DELETE FROM transfer_escrow
-				USING candidate
-				WHERE transfer_escrow.contract_id = candidate.contract_id
-			)
-			DELETE FROM transfer_contract
-			USING candidate
-			WHERE transfer_contract.contract_id = candidate.contract_id
-			`,
-			minTime.UTC(),
-			maxRowCount,
-		))
-
-	}, server.TxReadCommitted)
-
-	// remove straggler contracts that never made it into a completed payout.
-	// The normal path removes a contract group ~7 days after its payment
-	// completes; a contract still here after `StragglerContractExpiration` has
-	// a sweep whose payment is stuck (planned but never completed, or planned
-	// and canceled without a completed re-plan) and will not be paid. Deleting
-	// the sweep here is safe for a payment that later completes anyway:
-	// CompletePayment reads only account_payment (amounts are fixed at plan
-	// time), which is never deleted.
-	stragglerMinTime := server.NowUtc().Add(-StragglerContractExpiration)
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			WITH candidate AS (
-				SELECT transfer_contract.contract_id
-				FROM transfer_contract
-				WHERE
-					transfer_contract.create_time < $1 AND
-					transfer_contract.open = false AND
-					NOT EXISTS (
-						SELECT 1
-						FROM transfer_escrow_sweep
-						INNER JOIN account_payment ON
-							account_payment.payment_id = transfer_escrow_sweep.payment_id
-						WHERE
-							transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
-							account_payment.completed
-					)
-				LIMIT $2
-			), deleted_close AS (
-				DELETE FROM contract_close
-				USING candidate
-				WHERE contract_close.contract_id = candidate.contract_id
-			), deleted_escrow AS (
-				DELETE FROM transfer_escrow
-				USING candidate
-				WHERE transfer_escrow.contract_id = candidate.contract_id
-			), deleted_sweep AS (
-				DELETE FROM transfer_escrow_sweep
-				USING candidate
-				WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
-			)
-			DELETE FROM transfer_contract
-			USING candidate
-			WHERE transfer_contract.contract_id = candidate.contract_id
-			`,
-			stragglerMinTime.UTC(),
-			maxRowCount,
-		))
-
-	}, server.TxReadCommitted)
+// assignStragglerReapTimeBatches stamps reap_time = now() on closed contracts
+// that were never reaped (reap_time IS NULL) and are older than minCreateTime, so
+// the reaper's delete pass removes them. This is the straggler + sweep-less
+// cleanup: a closed contract whose payment never completed (or that was never
+// swept at all) is never assigned a reap_time by CompletePayment, so it would
+// otherwise live forever. Bounded by the transfer_contract_reap_pending_create_time
+// partial index (reap_time IS NULL AND close_time IS NOT NULL), this is an index
+// range-scan, not the anti-join full scan it replaces.
+//
+// Runs one bounded batch per maintenance tx (no long lock) until a batch marks
+// fewer than maxRowCount rows. Each candidate is a distinct transfer_contract row
+// (from the primary key) that gets reap_time set and so leaves the partial index,
+// so the eligible set strictly shrinks and a short batch means drained.
+func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time, maxRowCount int) (assignedCount int64) {
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			// UPDATE ... LIMIT is not valid Postgres; bound the batch with a CTE
+			// that picks the contract ids first, then update exactly those rows.
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				WITH batch AS (
+					SELECT transfer_contract.contract_id
+					FROM transfer_contract
+					WHERE
+						transfer_contract.reap_time IS NULL AND
+						transfer_contract.close_time IS NOT NULL AND
+						transfer_contract.create_time < $1
+					LIMIT $2
+				)
+				UPDATE transfer_contract
+				SET reap_time = now()
+				FROM batch
+				WHERE transfer_contract.contract_id = batch.contract_id
+				`,
+				minCreateTime.UTC(),
+				maxRowCount,
+			))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		assignedCount += batchCount
+		if batchCount < int64(maxRowCount) {
+			return
+		}
+	}
 }
 
 // SweepOrphanContractData removes contract_close/transfer_escrow/
@@ -3581,6 +3593,116 @@ func sweepOrphanBatches(ctx context.Context, sql string, limit int) (removedCoun
 			return
 		}
 	}
+}
+
+// AddSweepDestinationIdColumn adds transfer_escrow_sweep.destination_id if it is
+// not already present (idempotent). The column must exist before the sweep
+// writer (settleEscrowInTx) is deployed, since the writer inserts it.
+func AddSweepDestinationIdColumn(ctx context.Context) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`ALTER TABLE transfer_escrow_sweep ADD COLUMN IF NOT EXISTS destination_id uuid NULL`,
+		))
+	}, server.TxReadCommitted)
+}
+
+// BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto
+// transfer_escrow_sweep for rows created before the column existed, in bounded
+// batches (one maintenance tx each) until a batch comes up short. New sweeps are
+// stamped by settleEscrowInTx, so this only touches the pre-existing set. Orphan
+// sweeps whose contract no longer exists are left NULL (no destination to copy)
+// and are reaped by SweepOrphanContractData; the stats filters exclude NULL.
+//
+// The `destination_id IS NULL` scan rides
+// transfer_escrow_sweep_destination_id_sweep_time (btree indexes NULLs), so each
+// batch is index-driven rather than a full table scan. It is safe to re-run.
+func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCount int64) {
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				WITH batch AS (
+					SELECT s.contract_id, s.balance_id, s.network_id, tc.destination_id
+					FROM transfer_escrow_sweep s
+					INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
+					WHERE s.destination_id IS NULL
+					LIMIT $1
+				)
+				UPDATE transfer_escrow_sweep s
+				SET destination_id = batch.destination_id
+				FROM batch
+				WHERE
+					s.contract_id = batch.contract_id AND
+					s.balance_id = batch.balance_id AND
+					s.network_id = batch.network_id
+				`,
+				limit,
+			))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		backfilledCount += batchCount
+		if batchCount < int64(limit) {
+			return
+		}
+	}
+}
+
+// BackfillCompletedContractReapTime seeds reap_time on existing contracts whose
+// payment already completed, so the indexed reaper can retire them on the normal
+// completed-payout window. New completions are stamped inline by CompletePayment;
+// this only touches the pre-existing set (reap_time IS NULL). It is the one-time
+// companion to the reap_time deploy and is safe to re-run.
+//
+// The scan is driven from the sweep -> completed-payment side and bounded by
+// LIMIT, so it never walks the whole contract table. A contract can have several
+// sweeps (duplicate candidate contract_ids within a batch), and setting reap_time
+// removes the contract from the candidate set, so this drains on an EMPTY batch,
+// not a short one: a full LIMIT of sweep rows can map to fewer contract updates
+// while more contracts still remain (the same reasoning as removeContractBatches).
+func BackfillCompletedContractReapTime(ctx context.Context, limit int) (backfilledCount int64) {
+	for {
+		var batchCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				WITH batch AS (
+					SELECT transfer_escrow_sweep.contract_id, account_payment.complete_time
+					FROM transfer_escrow_sweep
+					INNER JOIN account_payment ON
+						account_payment.payment_id = transfer_escrow_sweep.payment_id
+					INNER JOIN transfer_contract ON
+						transfer_contract.contract_id = transfer_escrow_sweep.contract_id
+					WHERE account_payment.completed AND transfer_contract.reap_time IS NULL
+					LIMIT $1
+				)
+				UPDATE transfer_contract
+				SET reap_time = LEAST(COALESCE(transfer_contract.reap_time, 'infinity'::timestamp), batch.complete_time + interval '7 days')
+				FROM batch
+				WHERE transfer_contract.contract_id = batch.contract_id
+				`,
+				limit,
+			))
+			batchCount = tag.RowsAffected()
+		}, server.TxReadCommitted)
+		backfilledCount += batchCount
+		if batchCount == 0 {
+			return
+		}
+	}
+}
+
+// BackfillStragglerContractReapTime seeds reap_time = now() on existing aged
+// closed-but-never-completed contracts (reap_time IS NULL, closed, older than
+// StragglerContractExpiration) so the indexed reaper can remove them. This is the
+// same work the reaper's assign pass performs each run; it exists as an explicit
+// one-time backfill for the deploy that introduces reap_time. Batched until
+// drained (see assignStragglerReapTimeBatches); safe to re-run.
+func BackfillStragglerContractReapTime(ctx context.Context, limit int) (backfilledCount int64) {
+	return assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), limit)
 }
 
 func GetOpenTransferByteCount(

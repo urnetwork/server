@@ -145,7 +145,11 @@ func ScheduleRemoveCompletedContracts(clientSession *session.ClientSession, tx s
 		&RemoveCompletedContractsArgs{},
 		clientSession,
 		task.RunOnce("remove_completed_contracts"),
-		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		// every 30 minutes: RemoveCompletedContracts drains each eligible set in
+		// bounded batches per run (see removeContractBatches), so retention keeps
+		// up without a high cadence -- the batched anti-join reapers no longer
+		// re-scan the whole old-closed contract set every minute.
+		task.RunAt(server.NowUtc().Add(30*time.Minute)),
 		task.MaxTime(30*time.Minute),
 	)
 }
@@ -200,11 +204,16 @@ func SweepOrphanContractData(
 	sweepOrphanContractData *SweepOrphanContractDataArgs,
 	clientSession *session.ClientSession,
 ) (*SweepOrphanContractDataResult, error) {
-	limit := 50000
-	removedCount := model.SweepOrphanContractData(clientSession.Ctx, limit)
-	return &SweepOrphanContractDataResult{
-		RemovedCount: removedCount,
-	}, nil
+	// TEMPORARILY DISABLED 2026-07-14 (prod incident): the three orphan-sweep
+	// deletes full-scan contract_close / transfer_escrow / transfer_escrow_sweep
+	// via NOT EXISTS(transfer_contract) and were pegging the DB. Safe to disable:
+	// the reap_time contract reaper now cascades these dependents together with
+	// the contract delete, so orphans no longer accumulate. Re-enable (uncomment)
+	// once the reap redesign is deployed and verified. Model fn + its test are
+	// left intact.
+	// limit := 50000
+	// removedCount := model.SweepOrphanContractData(clientSession.Ctx, limit)
+	return &SweepOrphanContractDataResult{}, nil
 }
 
 func SweepOrphanContractDataPost(

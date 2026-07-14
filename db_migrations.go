@@ -78,8 +78,26 @@ func DbVersion(ctx context.Context) int {
 	return endVersionNumber
 }
 
+// MigrationCount is the number of migrations defined locally. The version a DB
+// reaches after applying all of them is this count (versions are 1-indexed by
+// end_version_number, which equals the migration's slice index + 1).
+func MigrationCount() int {
+	return len(migrations)
+}
+
 func ApplyDbMigrations(ctx context.Context) {
-	for i := DbVersion(ctx); i < len(migrations); i += 1 {
+	ApplyDbMigrationsUpTo(ctx, len(migrations))
+}
+
+// ApplyDbMigrationsUpTo applies migrations until the DB reaches version upTo
+// (i.e. it applies the migrations at slice indices [DbVersion, upTo)). Passing
+// len(migrations) is equivalent to ApplyDbMigrations. Used by the schema audit
+// to reconstruct the schema a given recorded version is supposed to produce.
+func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
+	if upTo > len(migrations) {
+		upTo = len(migrations)
+	}
+	for i := DbVersion(ctx); i < upTo; i += 1 {
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(
 				ctx,
@@ -3900,5 +3918,146 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS proxy_client_client_ipv4
         ON proxy_client (client_id, client_ipv4) WHERE client_ipv4 IS NOT NULL
+    `),
+
+	// Back out the per-table autovacuum reloptions set earlier (v420 pending_task,
+	// v447-v454 the contract-chain and client-lifecycle tables) and return every
+	// table to the database-default autovacuum behavior. RESET reverts each named
+	// storage parameter to its cluster default; it is a no-op for a parameter that
+	// is not currently set, so these are safe regardless of which of the SET
+	// migrations a given database actually applied.
+	newSqlMigration(`
+        ALTER TABLE pending_task RESET (
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_cost_delay,
+            autovacuum_analyze_scale_factor
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE contract_close RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_threshold,
+            autovacuum_vacuum_insert_scale_factor,
+            autovacuum_vacuum_insert_threshold,
+            autovacuum_analyze_scale_factor,
+            autovacuum_analyze_threshold
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_contract RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_threshold,
+            autovacuum_vacuum_insert_scale_factor,
+            autovacuum_vacuum_insert_threshold,
+            autovacuum_analyze_scale_factor,
+            autovacuum_analyze_threshold
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_threshold,
+            autovacuum_vacuum_insert_scale_factor,
+            autovacuum_vacuum_insert_threshold,
+            autovacuum_analyze_scale_factor,
+            autovacuum_analyze_threshold
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_threshold,
+            autovacuum_vacuum_insert_scale_factor,
+            autovacuum_vacuum_insert_threshold,
+            autovacuum_analyze_scale_factor,
+            autovacuum_analyze_threshold
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_vacuum_threshold,
+            autovacuum_vacuum_insert_scale_factor,
+            autovacuum_vacuum_insert_threshold,
+            autovacuum_analyze_scale_factor,
+            autovacuum_analyze_threshold
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_analyze_scale_factor
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE provide_key RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_analyze_scale_factor
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE device RESET (
+            autovacuum_vacuum_cost_delay,
+            autovacuum_vacuum_scale_factor,
+            autovacuum_analyze_scale_factor
+        )
+    `),
+
+	// Denormalize transfer_contract.destination_id onto transfer_escrow_sweep so
+	// the provider-payout stats (model/provider_model.go StatsProviders et al.)
+	// filter and group by destination_id AND sweep_time on ONE table, instead of
+	// range-scanning every sweep in the window and PK-joining transfer_contract
+	// just to recover destination_id. settleEscrowInTx stamps it on new sweeps;
+	// existing rows are backfilled by `bringyourctl backfill sweep-destination-id`.
+	// Nullable (no default), so the ADD COLUMN is a fast metadata-only change;
+	// old/orphan sweeps stay NULL and are excluded by the stats filter until
+	// backfilled or reaped.
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep ADD COLUMN destination_id uuid NULL
+    `),
+	// Covering index for the per-destination payout window scan: leads with
+	// (destination_id, sweep_time) for the filter and carries the summed payout,
+	// so the scan is index-only. transfer_escrow_sweep is large: pre-create this
+	// manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT EXISTS gate
+	// makes this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_destination_id_sweep_time
+        ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents)
+    `),
+
+	// Indexed reap-eligibility for the transfer_contract retention reaper. reap_time
+	// is the instant a contract becomes due for hard deletion: it is set to
+	// complete_time + CompletedContractExpiration when the contract's payment
+	// completes (CompletePayment), and to now() when an aged closed-but-never-
+	// completed straggler is marked by the retention task. The reaper then deletes
+	// by an index range-scan over reap_time instead of the old un-indexable
+	// anti-join full scan over the whole old-closed table that caused a prod
+	// incident. Nullable (no default), so the ADD COLUMN is a fast metadata-only
+	// change; existing rows are seeded by `bringyourctl db backfill-contract-reap-time`.
+	newSqlMigration(`
+        ALTER TABLE transfer_contract ADD COLUMN reap_time timestamp NULL
+    `),
+	// Partial index driving the reaper's delete pass (reap_time IS NOT NULL AND
+	// reap_time < now): only due/pending contracts are indexed, so the scan is a
+	// bounded range. transfer_contract is a large table: pre-create this manually
+	// with CREATE INDEX CONCURRENTLY out of band; the IF NOT EXISTS gate makes this
+	// migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_reap_time
+        ON transfer_contract (reap_time) WHERE reap_time IS NOT NULL
+    `),
+	// Partial index driving the reaper's assign pass (closed contracts not yet
+	// reaped, ordered by create_time), so the straggler scan is a bounded range
+	// instead of an anti-join. Same pre-create-CONCURRENTLY note as above.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_reap_pending_create_time
+        ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL
     `),
 }

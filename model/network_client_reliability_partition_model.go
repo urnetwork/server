@@ -497,8 +497,12 @@ func buildClientReliabilitySecondaryIndex(ctx context.Context, logf func(string,
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
 		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL maintenance_work_mem = '2GB'`))
+		// INCLUDE (network_id, client_id) makes the window-score scans index-only:
+		// UpdateClientReliabilityScores / UpdateNetworkReliability(Window)Scores now
+		// read client_reliability in a single pass (COUNT(*) OVER the valid rows) and
+		// need network_id + client_id as payload, which are otherwise heap fetches.
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-			`CREATE INDEX IF NOT EXISTS %s ON %s (valid, block_number, client_address_hash)`,
+			`CREATE INDEX IF NOT EXISTS %s ON %s (valid, block_number, client_address_hash) INCLUDE (network_id, client_id)`,
 			indexName,
 			clientReliabilityStagingTable,
 		)))

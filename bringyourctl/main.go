@@ -37,6 +37,9 @@ Usage:
     bringyourctl db migrate
     bringyourctl db vacuum [--exclude=<table>...]
     bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
+    bringyourctl db audit [--fix [--force-drop-indexes]]
+    bringyourctl db backfill-sweep-destination-id [--batch=<n>]
+    bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -130,6 +133,12 @@ Options:
 			dbVacuum(opts)
 		} else if maintenance, _ := opts.Bool("maintenance"); maintenance {
 			dbMaintenance(opts)
+		} else if audit, _ := opts.Bool("audit"); audit {
+			dbAudit(opts)
+		} else if backfill, _ := opts.Bool("backfill-sweep-destination-id"); backfill {
+			dbBackfillSweepDestinationId(opts)
+		} else if backfillReap, _ := opts.Bool("backfill-contract-reap-time"); backfillReap {
+			dbBackfillContractReapTime(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -308,6 +317,135 @@ func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
+}
+
+// dbAudit compares the live DB schema against the schema the full local
+// db_migrations head should produce.
+//
+//	db audit                      report the drift, then print the reconciling
+//	                              SQL as a dry run (summary at top, SQL at bottom)
+//	db audit --fix                APPLY the additive changes (CREATE TABLE / ADD
+//	                              COLUMN / CREATE INDEX), then print the drops that
+//	                              were not applied for manual review
+//	db audit --fix --force-drop-indexes
+//	                              also drop/recreate indexes (safe to recreate);
+//	                              table/column drops are still never applied
+func dbAudit(opts docopt.Opts) {
+	fix, _ := opts.Bool("--fix")
+	forceDropIndexes, _ := opts.Bool("--force-drop-indexes")
+	ctx := context.Background()
+
+	// docopt does not enforce the [--fix [--force-drop-indexes]] nesting, so guard
+	// it here before touching the DB
+	if forceDropIndexes && !fix {
+		fmt.Println("--force-drop-indexes requires --fix")
+		return
+	}
+
+	// the expected schema is always the full local db_migrations head
+	result := server.AuditSchema(ctx)
+	fmt.Printf("DB recorded version: %d   local db_migrations head: %d\n", result.DbVersion, result.LocalVersion)
+
+	if !fix {
+		// plain audit is the dry run: summary first, then the SQL --fix would run
+		fmt.Print(result.Diff.Report())
+		if result.Diff.HasDifferences() {
+			fmt.Print("\n")
+			fmt.Print(result.Diff.FixSql())
+		}
+		fmt.Printf("\n%d migration(s) need to be applied.\n", result.LocalVersion-result.DbVersion)
+		return
+	}
+
+	// --fix: apply the additive changes (plus index drops with
+	// --force-drop-indexes), then print whatever was not applied for review
+	statementCount := len(result.Diff.FixStatements())
+	if forceDropIndexes {
+		statementCount += len(result.Diff.IndexDropStatements())
+	}
+
+	if statementCount == 0 {
+		fmt.Println("\nNothing to apply.")
+	} else {
+		note := ""
+		if forceDropIndexes && 0 < result.Diff.IndexDropCount() {
+			note = fmt.Sprintf(" (with %d index drop/recreate)", result.Diff.IndexDropCount())
+		}
+		fmt.Printf(
+			"\nApplying %d statement(s)%s. Indexes build non-concurrently (write lock during the build).\n",
+			statementCount, note,
+		)
+		server.ApplySchemaFix(ctx, result.Diff, forceDropIndexes, func(index, total int, statement string) {
+			fmt.Printf("\n[%d/%d]\n%s\n", index+1, total, statement)
+		})
+		fmt.Printf("\nApplied %d statement(s).\n", statementCount)
+	}
+
+	if notApplied := result.Diff.NotAppliedSql(forceDropIndexes); notApplied != "" {
+		fmt.Print("\n")
+		fmt.Print(notApplied)
+	}
+}
+
+// dbBackfillSweepDestinationId performs the transfer_escrow_sweep.destination_id
+// denormalization on a diverged prod DB, out of band (not via db migrate):
+// ensure the column, remind about the covering index, then backfill existing
+// rows in batches. Recommended rollout: (1) run this to add the column, (2)
+// deploy the new writer (api + connect) so new sweeps carry destination_id, (3)
+// pre-create the covering index CONCURRENTLY, (4) re-run this to backfill, (5)
+// deploy the new reader (taskworker). It is idempotent and safe to re-run.
+func dbBackfillSweepDestinationId(opts docopt.Opts) {
+	ctx := context.Background()
+
+	batch := 50000
+	if n, err := opts.Int("--batch"); err == nil && 0 < n {
+		batch = n
+	}
+
+	fmt.Println("Ensuring transfer_escrow_sweep.destination_id exists ...")
+	model.AddSweepDestinationIdColumn(ctx)
+
+	fmt.Println("Ensure the covering index exists before the reader deploy (run out of band --")
+	fmt.Println("a plain build on this large table would lock writes):")
+	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_sweep_destination_id_sweep_time")
+	fmt.Println("    ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents);")
+
+	fmt.Printf("Backfilling destination_id in batches of %d ...\n", batch)
+	backfilled := model.BackfillSweepDestinationIds(ctx, batch)
+	fmt.Printf("Backfilled %d sweep(s).\n", backfilled)
+}
+
+// dbBackfillContractReapTime seeds transfer_contract.reap_time for the indexed
+// retention reaper on a diverged prod DB, out of band (not via db migrate).
+// reap_time replaced the anti-join full-scan reaper that caused a prod incident.
+// It seeds two sets: contracts whose payment already completed (reaped on the
+// completed-payout window) and aged closed-but-never-completed stragglers (reaped
+// once past StragglerContractExpiration). Recommended rollout: (1) add the column
+// (db migrate), (2) deploy the writer (CompletePayment stamps new completions),
+// (3) pre-create the two partial indexes CONCURRENTLY, (4) run this backfill, (5)
+// deploy the new reaper. It is idempotent and safe to re-run.
+func dbBackfillContractReapTime(opts docopt.Opts) {
+	ctx := context.Background()
+
+	batch := 50000
+	if n, err := opts.Int("--batch"); err == nil && 0 < n {
+		batch = n
+	}
+
+	fmt.Println("Pre-create the reap_time partial indexes before the reaper deploy (run out")
+	fmt.Println("of band -- a plain build on this large table would lock writes):")
+	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_reap_time")
+	fmt.Println("    ON transfer_contract (reap_time) WHERE reap_time IS NOT NULL;")
+	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_reap_pending_create_time")
+	fmt.Println("    ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL;")
+
+	fmt.Printf("Backfilling completed-contract reap_time in batches of %d ...\n", batch)
+	completed := model.BackfillCompletedContractReapTime(ctx, batch)
+	fmt.Printf("Backfilled %d completed contract(s).\n", completed)
+
+	fmt.Printf("Backfilling straggler reap_time in batches of %d ...\n", batch)
+	straggler := model.BackfillStragglerContractReapTime(ctx, batch)
+	fmt.Printf("Backfilled %d straggler contract(s).\n", straggler)
 }
 
 func dbMaintenance(opts docopt.Opts) {
