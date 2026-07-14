@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -34,7 +34,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			ipv4 := make([]byte, 4)
 			mathrand.Read(ipv4)
 			ip, ok := netip.AddrFromSlice(ipv4)
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 			ips = append(ips, ip)
 		}
 
@@ -67,7 +67,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				clientAddress := "127.0.0.1:20000"
 				handlerId := server.NewId()
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 				location := &Location{
 					LocationType: "",
 					City:         fmt.Sprintf("foo%d", j),
@@ -158,20 +158,20 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		UpdateClientReliabilityScores(ctx, endTime, true)
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
-		orderedLookbackIndexes := maps.Keys(lookbackClientScores)
+		orderedLookbackIndexes := slices.Collect(maps.Keys(lookbackClientScores))
 		slices.Sort(orderedLookbackIndexes)
 		// use the max lookback
 		clientScores := lookbackClientScores[orderedLookbackIndexes[len(orderedLookbackIndexes)-1]]
 		for clientId, reliabilityScore := range netReliabilityScores {
 			d := reliabilityScore - clientScores[clientId].ReliabilityScore
 			if d < -eps || eps < d {
-				assert.Equal(t, reliabilityScore, clientScores[clientId].ReliabilityScore)
+				connect.AssertEqual(t, reliabilityScore, clientScores[clientId].ReliabilityScore)
 			}
 		}
 		for clientId, indepententReliabilityScore := range netIndependentReliabilityScores {
 			d := indepententReliabilityScore - clientScores[clientId].IndependentReliabilityScore
 			if d < -eps || eps < d {
-				assert.Equal(t, indepententReliabilityScore, clientScores[clientId].IndependentReliabilityScore)
+				connect.AssertEqual(t, indepententReliabilityScore, clientScores[clientId].IndependentReliabilityScore)
 			}
 		}
 
@@ -193,11 +193,11 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				}
 				d := netReliabilityScore - networkScores[networkId].ReliabilityScore
 				if d < -eps || eps < d {
-					assert.Equal(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
+					connect.AssertEqual(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
 				}
 				d = netIndepententReliabilityScore - networkScores[networkId].IndependentReliabilityScore
 				if d < -eps || eps < d {
-					assert.Equal(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
+					connect.AssertEqual(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
 				}
 
 				isPro := false
@@ -216,16 +216,16 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				clientSession.ClientAddress = "1.1.1.1:90000"
 
 				reliabilityWindow, err := GetNetworkReliabilityWindow(clientSession)
-				assert.Equal(t, err, nil)
-				assert.Equal(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
 				for _, totalClientCount := range reliabilityWindow.TotalClientCounts {
-					assert.Equal(t, totalClientCount, len(clientIds))
+					connect.AssertEqual(t, totalClientCount, len(clientIds))
 				}
 				// reconstruct the total score from the weight
 				windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
 				d = windowReliabilityScore - networkScores[networkId].ReliabilityScore
 				if d < -eps || eps < d {
-					assert.Equal(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)
+					connect.AssertEqual(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)
 				}
 			}
 		}
@@ -351,45 +351,45 @@ func TestRecordClientReliabilityStatsRollup(t *testing.T) {
 		// the block is not final yet: a rollup now must not drain it
 		RollupClientReliabilityStats(ctx, now)
 		_, _, ok := testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, clientId)
-		assert.Equal(t, ok, false)
+		connect.AssertEqual(t, ok, false)
 
 		// after two more blocks both written blocks are final
 		later := now.Add(3 * ReliabilityBlockDuration)
 		RollupClientReliabilityStats(ctx, later)
 
 		counters, valid, ok := testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, clientId)
-		assert.Equal(t, ok, true)
-		assert.Equal(t, counters["connection_established_count"], int64(3))
-		assert.Equal(t, counters["provide_enabled_count"], int64(3))
-		assert.Equal(t, counters["receive_message_count"], int64(9))
-		assert.Equal(t, counters["receive_byte_count"], int64(3072))
-		assert.Equal(t, counters["send_message_count"], int64(6))
-		assert.Equal(t, counters["send_byte_count"], int64(1536))
-		assert.Equal(t, counters["connection_new_count"], int64(0))
-		assert.Equal(t, valid, true)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, counters["connection_established_count"], int64(3))
+		connect.AssertEqual(t, counters["provide_enabled_count"], int64(3))
+		connect.AssertEqual(t, counters["receive_message_count"], int64(9))
+		connect.AssertEqual(t, counters["receive_byte_count"], int64(3072))
+		connect.AssertEqual(t, counters["send_message_count"], int64(6))
+		connect.AssertEqual(t, counters["send_byte_count"], int64(1536))
+		connect.AssertEqual(t, counters["connection_new_count"], int64(0))
+		connect.AssertEqual(t, valid, true)
 
 		nextCounters, _, ok := testingGetClientReliabilityRow(ctx, blockNumber+1, clientAddressHash, clientId)
-		assert.Equal(t, ok, true)
-		assert.Equal(t, nextCounters["receive_message_count"], int64(3))
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, nextCounters["receive_message_count"], int64(3))
 
 		// the drained buckets are removed from redis
 		server.Redis(ctx, func(r server.RedisClient) {
 			members, _ := r.SMembers(ctx, clientReliabilityBlocksKey).Result()
-			assert.Equal(t, len(members), 0)
+			connect.AssertEqual(t, len(members), 0)
 			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(blockNumber)).Result()
-			assert.Equal(t, len(fields), 0)
+			connect.AssertEqual(t, len(fields), 0)
 		})
 
 		// re-drain is idempotent (absolute counts)
 		RollupClientReliabilityStats(ctx, later)
 		counters, _, ok = testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, clientId)
-		assert.Equal(t, ok, true)
-		assert.Equal(t, counters["receive_message_count"], int64(9))
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, counters["receive_message_count"], int64(9))
 
 		// the high-water mark tracks the newest final block, even when idle
 		maxDrainedBlock, ok := testingGetMaxDrainedBlock(ctx)
-		assert.Equal(t, ok, true)
-		assert.Equal(t, maxDrainedBlock, reliabilityBlockNumber(later)-2)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, maxDrainedBlock, reliabilityBlockNumber(later)-2)
 
 		// a record for a block older than the previous block is dropped, so a
 		// stalled recorder can never write to an already-drained block
@@ -397,7 +397,7 @@ func TestRecordClientReliabilityStatsRollup(t *testing.T) {
 		RecordClientReliabilityStatsRange(ctx, networkId, clientId, clientAddressHash, staleTime, staleTime, stats)
 		server.Redis(ctx, func(r server.RedisClient) {
 			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(reliabilityBlockNumber(staleTime))).Result()
-			assert.Equal(t, len(fields), 0)
+			connect.AssertEqual(t, len(fields), 0)
 		})
 	})
 }
@@ -418,7 +418,7 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		clientAddress := "127.0.0.1:20000"
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			City:        "foo",
 			Region:      "bar",
@@ -427,7 +427,7 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -451,12 +451,12 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		for _, clientScores := range lookbackClientScores {
 			if score, ok := clientScores[clientId]; ok {
 				// one valid block, sole client on the ip
-				assert.Equal(t, score.IndependentReliabilityScore, 1.0)
-				assert.Equal(t, score.ReliabilityScore, 1.0)
+				connect.AssertEqual(t, score.IndependentReliabilityScore, 1.0)
+				connect.AssertEqual(t, score.ReliabilityScore, 1.0)
 				found = true
 			}
 		}
-		assert.Equal(t, found, true)
+		connect.AssertEqual(t, found, true)
 	})
 }
 
@@ -481,23 +481,23 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 		}
 		CreateLocation(ctx, location)
 
-		connect := func(clientId server.Id, clientAddress string) [32]byte {
+		connectHash := func(clientId server.Id, clientAddress string) [32]byte {
 			connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return clientAddressHash
 		}
 
 		Testing_CreateDevice(ctx, networkId, server.NewId(), validClientId, "", "")
 		Testing_CreateDevice(ctx, networkId, server.NewId(), invalidClientId, "", "")
 
-		sharedAddressHash := connect(validClientId, "10.1.2.3:20000")
+		sharedAddressHash := connectHash(validClientId, "10.1.2.3:20000")
 		// the invalid client is connected from two different ips, so its
 		// client_address_hash_count is 2 and its location reliability is
 		// invalid
-		connect(invalidClientId, "10.1.2.3:20001")
-		connect(invalidClientId, "10.99.2.3:20002")
+		connectHash(invalidClientId, "10.1.2.3:20001")
+		connectHash(invalidClientId, "10.99.2.3:20002")
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -521,31 +521,31 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 		UpdateClientReliabilityScores(ctx, endTime, true)
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
-		orderedLookbackIndexes := maps.Keys(lookbackClientScores)
+		orderedLookbackIndexes := slices.Collect(maps.Keys(lookbackClientScores))
 		slices.Sort(orderedLookbackIndexes)
 		clientScores := lookbackClientScores[orderedLookbackIndexes[len(orderedLookbackIndexes)-1]]
 
 		// the location-invalid client earns no score
 		_, ok := clientScores[invalidClientId]
-		assert.Equal(t, ok, false)
+		connect.AssertEqual(t, ok, false)
 
 		// the valid client's per-block contribution is diluted by the
 		// stats-valid co-client on the same ip: 1/2 per block
 		eps := 0.001
 		score := clientScores[validClientId]
-		assert.Equal(t, score.IndependentReliabilityScore, float64(n))
+		connect.AssertEqual(t, score.IndependentReliabilityScore, float64(n))
 		if d := score.ReliabilityScore - float64(n)/2; d < -eps || eps < d {
-			assert.Equal(t, score.ReliabilityScore, float64(n)/2)
+			connect.AssertEqual(t, score.ReliabilityScore, float64(n)/2)
 		}
 
 		// the network score and window score aggregate the same dilution
 		UpdateNetworkReliabilityScores(ctx, startTime, endTime, false)
 		networkScores := GetAllNetworkReliabilityScores(ctx)
 		networkScore, ok := networkScores[networkId]
-		assert.Equal(t, ok, true)
-		assert.Equal(t, networkScore.IndependentReliabilityScore, float64(n))
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, networkScore.IndependentReliabilityScore, float64(n))
 		if d := networkScore.ReliabilityScore - float64(n)/2; d < -eps || eps < d {
-			assert.Equal(t, networkScore.ReliabilityScore, float64(n)/2)
+			connect.AssertEqual(t, networkScore.ReliabilityScore, float64(n)/2)
 		}
 
 		UpdateNetworkReliabilityWindowScores(ctx, endTime, false)
@@ -562,13 +562,13 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 				networkId,
 			)
 			server.WithPgResult(result, err, func() {
-				assert.Equal(t, result.Next(), true)
+				connect.AssertEqual(t, result.Next(), true)
 				var independentReliabilityScore float64
 				var reliabilityScore float64
 				server.Raise(result.Scan(&independentReliabilityScore, &reliabilityScore))
-				assert.Equal(t, independentReliabilityScore, float64(n))
+				connect.AssertEqual(t, independentReliabilityScore, float64(n))
 				if d := reliabilityScore - float64(n)/2; d < -eps || eps < d {
-					assert.Equal(t, reliabilityScore, float64(n)/2)
+					connect.AssertEqual(t, reliabilityScore, float64(n)/2)
 				}
 			})
 		})
@@ -588,7 +588,7 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "10.5.6.7:20000", server.NewId())
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			City:        "foo",
 			Region:      "bar",
@@ -597,7 +597,7 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -617,10 +617,10 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 		UpdateNetworkReliabilityWindowScores(ctx, endTime, false)
 
 		clientScores := GetAllClientReliabilityScores(ctx)
-		assert.NotEqual(t, len(clientScores), 0)
+		connect.AssertNotEqual(t, len(clientScores), 0)
 		networkScores := GetAllNetworkReliabilityScores(ctx)
 		_, ok := networkScores[networkId]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// refresh far in the future: every window is past the data, so all
 		// rows must be removed as stale
@@ -631,10 +631,10 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
 		for _, clientScores := range lookbackClientScores {
-			assert.Equal(t, len(clientScores), 0)
+			connect.AssertEqual(t, len(clientScores), 0)
 		}
 		networkScores = GetAllNetworkReliabilityScores(ctx)
-		assert.Equal(t, len(networkScores), 0)
+		connect.AssertEqual(t, len(networkScores), 0)
 
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
@@ -642,10 +642,10 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 				`SELECT COUNT(*) FROM network_connection_reliability_window_score`,
 			)
 			server.WithPgResult(result, err, func() {
-				assert.Equal(t, result.Next(), true)
+				connect.AssertEqual(t, result.Next(), true)
 				var count int
 				server.Raise(result.Scan(&count))
-				assert.Equal(t, count, 0)
+				connect.AssertEqual(t, count, 0)
 			})
 		})
 	})
@@ -692,7 +692,7 @@ func TestReliabilityCoveredBlockCount(t *testing.T) {
 		b := int64(1000000)
 
 		// no coverage rows at all: the full window width counts
-		assert.Equal(t, covered(b, b+10), int64(10))
+		connect.AssertEqual(t, covered(b, b+10), int64(10))
 
 		coverClientReliabilityBlock(ctx, b)
 		// contiguous: extends the newest range
@@ -702,22 +702,22 @@ func TestReliabilityCoveredBlockCount(t *testing.T) {
 		// after a gap (blocks b+2..b+4 lost): starts a new range
 		coverClientReliabilityBlock(ctx, b+5)
 
-		assert.Equal(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b, b + 1}, {b + 5, b + 5}})
+		connect.AssertEqual(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b, b + 1}, {b + 5, b + 5}})
 
 		// blocks before the first range count as covered
-		assert.Equal(t, covered(b-10, b), int64(10))
+		connect.AssertEqual(t, covered(b-10, b), int64(10))
 		// the lost blocks are uncovered
-		assert.Equal(t, covered(b, b+6), int64(3))
-		assert.Equal(t, covered(b, b+7), int64(3))
+		connect.AssertEqual(t, covered(b, b+6), int64(3))
+		connect.AssertEqual(t, covered(b, b+7), int64(3))
 		// an entirely uncovered window returns 0
-		assert.Equal(t, covered(b+2, b+5), int64(0))
+		connect.AssertEqual(t, covered(b+2, b+5), int64(0))
 
 		// expiration deletes fully expired ranges and clamps the straddler
 		blockTime := func(blockNumber int64) time.Time {
 			return time.UnixMilli(blockNumber * int64(ReliabilityBlockDuration/time.Millisecond)).UTC()
 		}
 		RemoveOldClientReliabilityStats(ctx, blockTime(b+2).Add(ClientExpiration), 1000)
-		assert.Equal(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b + 1, b + 1}, {b + 5, b + 5}})
+		connect.AssertEqual(t, testingGetReliabilitySyncRanges(ctx), [][2]int64{{b + 1, b + 1}, {b + 5, b + 5}})
 	})
 }
 
@@ -737,7 +737,7 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		// network_client_location_reliability marks it valid
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "127.0.0.1:20000", server.NewId())
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			City:        "foo",
 			Region:      "bar",
@@ -746,7 +746,7 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		stats := &ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
@@ -778,14 +778,14 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		// (without coverage the gap would register as 1 present / 6 blocks)
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
 		score, ok := lookbackClientScores[0][clientId]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 		eps := 0.001
-		assert.Equal(t, score.IndependentReliabilityScore, 1.0)
+		connect.AssertEqual(t, score.IndependentReliabilityScore, 1.0)
 		if d := score.IndependentReliabilityWeight - 1.0; d < -eps || eps < d {
-			assert.Equal(t, score.IndependentReliabilityWeight, 1.0)
+			connect.AssertEqual(t, score.IndependentReliabilityWeight, 1.0)
 		}
 		if d := score.ReliabilityWeight - 1.0; d < -eps || eps < d {
-			assert.Equal(t, score.ReliabilityWeight, 1.0)
+			connect.AssertEqual(t, score.ReliabilityWeight, 1.0)
 		}
 	})
 }
@@ -801,11 +801,11 @@ func TestClientReliabilityRollupSynced(t *testing.T) {
 		now := server.NowUtc()
 
 		// no rollup record yet
-		assert.Equal(t, ClientReliabilityRollupSynced(ctx, now), true)
+		connect.AssertEqual(t, ClientReliabilityRollupSynced(ctx, now), true)
 
 		RollupClientReliabilityStats(ctx, now)
-		assert.Equal(t, ClientReliabilityRollupSynced(ctx, now), true)
-		assert.Equal(t, ClientReliabilityRollupSynced(ctx, now.Add(ReliabilityRollupStaleAfter+time.Minute)), false)
+		connect.AssertEqual(t, ClientReliabilityRollupSynced(ctx, now), true)
+		connect.AssertEqual(t, ClientReliabilityRollupSynced(ctx, now.Add(ReliabilityRollupStaleAfter+time.Minute)), false)
 	})
 }
 
@@ -836,19 +836,19 @@ func TestClientReliabilityReconnectTolerated(t *testing.T) {
 				clientAddressHash,
 				clientId,
 			)
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 			return valid
 		}
 
 		// steady state: established, providing, passing traffic
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
 			ReceiveMessageCount:        1,
 		}), true)
 
 		// one reconnect, then re-established in the same block: tolerated
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionNewCount:         1,
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
@@ -856,7 +856,7 @@ func TestClientReliabilityReconnectTolerated(t *testing.T) {
 		}), true)
 
 		// flapping: two reconnects in one block is still unreliable
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionNewCount:         2,
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
@@ -866,20 +866,20 @@ func TestClientReliabilityReconnectTolerated(t *testing.T) {
 		// a reconnect with no re-established sync in the block (the connection
 		// came back across the block boundary) is still invalid — the hour
 		// threshold carries the slack for this
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionNewCount:  1,
 			ProvideEnabledCount: 1,
 			ReceiveMessageCount: 1,
 		}), false)
 
 		// the other invalidating conditions are unchanged
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
 			ProvideChangedCount:        1,
 			ReceiveMessageCount:        1,
 		}), false)
-		assert.Equal(t, validFor(&ClientReliabilityStats{
+		connect.AssertEqual(t, validFor(&ClientReliabilityStats{
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
 		}), false)

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -68,7 +68,7 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceSession.ByJwt.NetworkId,
@@ -81,9 +81,9 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		})
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// close and settle enough contracts to meet the payout threshold
 		usedTransferByteCount := ByteCount(1024)
@@ -91,19 +91,19 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		paidContractIds := []server.Id{}
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paidContractIds = append(paidContractIds, transferEscrow.ContractId)
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
 		// pay out the plan
 		plan, err := PlanPayments(ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		for _, payment := range plan.NetworkPayments {
 			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
 			CompletePayment(ctx, payment.PaymentId, "", "0xtest")
@@ -111,7 +111,7 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 
 		// a closed contract that was never swept (quarantine/corruption path)
 		unsweptEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -127,34 +127,34 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 
 		// an open contract that must survive retention
 		liveEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// sanity: the paid contracts have sweeps before retention
 		_, _, _, sweepCount := testingCountContractRows(ctx, paidContractIds[0])
-		assert.NotEqual(t, sweepCount, 0)
+		connect.AssertNotEqual(t, sweepCount, 0)
 
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
 
 		// the paid contracts and every dependent row are gone in the same pass
 		for _, contractId := range paidContractIds {
 			contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractId)
-			assert.Equal(t, contractCount, 0)
-			assert.Equal(t, closeCount, 0)
-			assert.Equal(t, escrowCount, 0)
-			assert.Equal(t, sweepCount, 0)
+			connect.AssertEqual(t, contractCount, 0)
+			connect.AssertEqual(t, closeCount, 0)
+			connect.AssertEqual(t, escrowCount, 0)
+			connect.AssertEqual(t, sweepCount, 0)
 		}
 
 		// the unswept closed contract and its escrow are gone
 		contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, unsweptEscrow.ContractId)
-		assert.Equal(t, contractCount, 0)
-		assert.Equal(t, closeCount, 0)
-		assert.Equal(t, escrowCount, 0)
-		assert.Equal(t, sweepCount, 0)
+		connect.AssertEqual(t, contractCount, 0)
+		connect.AssertEqual(t, closeCount, 0)
+		connect.AssertEqual(t, escrowCount, 0)
+		connect.AssertEqual(t, sweepCount, 0)
 
 		// the open contract survives with its escrow
 		contractCount, _, escrowCount, _ = testingCountContractRows(ctx, liveEscrow.ContractId)
-		assert.Equal(t, contractCount, 1)
-		assert.NotEqual(t, escrowCount, 0)
+		connect.AssertEqual(t, contractCount, 1)
+		connect.AssertNotEqual(t, escrowCount, 0)
 
 		// balances are removed once their end time passes retention
 		countBalances := func() int {
@@ -173,9 +173,9 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			})
 			return c
 		}
-		assert.NotEqual(t, countBalances(), 0)
+		connect.AssertNotEqual(t, countBalances(), 0)
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
-		assert.Equal(t, countBalances(), 0)
+		connect.AssertEqual(t, countBalances(), 0)
 	})
 }
 
@@ -207,7 +207,7 @@ func TestSweepOrphanContractData(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceSession.ByJwt.NetworkId,
@@ -216,9 +216,9 @@ func TestSweepOrphanContractData(t *testing.T) {
 		// a live contract with a close row that must survive the sweep
 		usedTransferByteCount := ByteCount(1024)
 		liveEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		err = CloseContract(ctx, liveEscrow.ContractId, sourceId, usedTransferByteCount, false)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// orphan rows: dependents of contract ids that do not exist
 		orphanCount := 3
@@ -262,13 +262,13 @@ func TestSweepOrphanContractData(t *testing.T) {
 
 		// limit=1 forces one delete per batch, exercising the batch loop
 		removedCount := SweepOrphanContractData(ctx, 1)
-		assert.Equal(t, removedCount, int64(3*orphanCount))
+		connect.AssertEqual(t, removedCount, int64(3*orphanCount))
 
 		// the live contract's rows survive
 		contractCount, closeCount, escrowCount, _ := testingCountContractRows(ctx, liveEscrow.ContractId)
-		assert.Equal(t, contractCount, 1)
-		assert.Equal(t, closeCount, 1)
-		assert.NotEqual(t, escrowCount, 0)
+		connect.AssertEqual(t, contractCount, 1)
+		connect.AssertEqual(t, closeCount, 1)
+		connect.AssertNotEqual(t, escrowCount, 0)
 
 		// all orphans are gone
 		server.Db(ctx, func(conn server.PgConn) {
@@ -289,7 +289,7 @@ func TestSweepOrphanContractData(t *testing.T) {
 					WHERE transfer_contract.contract_id = contract_close.contract_id
 				)
 			`)
-			assert.Equal(t, orphanCloseCount, 0)
+			connect.AssertEqual(t, orphanCloseCount, 0)
 			orphanEscrowCount := count(`
 				SELECT COUNT(*) FROM transfer_escrow
 				WHERE NOT EXISTS (
@@ -297,7 +297,7 @@ func TestSweepOrphanContractData(t *testing.T) {
 					WHERE transfer_contract.contract_id = transfer_escrow.contract_id
 				)
 			`)
-			assert.Equal(t, orphanEscrowCount, 0)
+			connect.AssertEqual(t, orphanEscrowCount, 0)
 			orphanSweepCount := count(`
 				SELECT COUNT(*) FROM transfer_escrow_sweep
 				WHERE NOT EXISTS (
@@ -305,7 +305,7 @@ func TestSweepOrphanContractData(t *testing.T) {
 					WHERE transfer_contract.contract_id = transfer_escrow_sweep.contract_id
 				)
 			`)
-			assert.Equal(t, orphanSweepCount, 0)
+			connect.AssertEqual(t, orphanSweepCount, 0)
 		})
 	})
 }
@@ -345,7 +345,7 @@ func TestRemoveStragglerContracts(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceSession.ByJwt.NetworkId,
@@ -357,9 +357,9 @@ func TestRemoveStragglerContracts(t *testing.T) {
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		})
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// close and settle enough contracts to meet the payout threshold
 		usedTransferByteCount := ByteCount(1024)
@@ -367,20 +367,20 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		contractIds := []server.Id{}
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			contractIds = append(contractIds, transferEscrow.ContractId)
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
 		// plan the payments but never complete them: the payments stay pending
 		plan, err := PlanPayments(ctx)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, len(plan.NetworkPayments), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, len(plan.NetworkPayments), 0)
 
 		countPendingPayments := func() int {
 			c := 0
@@ -401,15 +401,15 @@ func TestRemoveStragglerContracts(t *testing.T) {
 			})
 			return c
 		}
-		assert.NotEqual(t, countPendingPayments(), 0)
+		connect.AssertNotEqual(t, countPendingPayments(), 0)
 
 		// the pending payment protects the group inside the straggler window
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
 		contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractIds[0])
-		assert.Equal(t, contractCount, 1)
-		assert.NotEqual(t, closeCount, 0)
-		assert.NotEqual(t, escrowCount, 0)
-		assert.Equal(t, sweepCount, 1)
+		connect.AssertEqual(t, contractCount, 1)
+		connect.AssertNotEqual(t, closeCount, 0)
+		connect.AssertNotEqual(t, escrowCount, 0)
+		connect.AssertEqual(t, sweepCount, 1)
 
 		// age the contracts past the straggler expiration
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -430,14 +430,14 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		// the whole group is gone, sweeps included
 		for _, contractId := range contractIds {
 			contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractId)
-			assert.Equal(t, contractCount, 0)
-			assert.Equal(t, closeCount, 0)
-			assert.Equal(t, escrowCount, 0)
-			assert.Equal(t, sweepCount, 0)
+			connect.AssertEqual(t, contractCount, 0)
+			connect.AssertEqual(t, closeCount, 0)
+			connect.AssertEqual(t, escrowCount, 0)
+			connect.AssertEqual(t, sweepCount, 0)
 		}
 
 		// the pending payment record itself is retained
-		assert.NotEqual(t, countPendingPayments(), 0)
+		connect.AssertNotEqual(t, countPendingPayments(), 0)
 	})
 }
 
@@ -473,7 +473,7 @@ func TestCancelHungAccountPayments(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceSession.ByJwt.NetworkId,
@@ -485,29 +485,29 @@ func TestCancelHungAccountPayments(t *testing.T) {
 			WalletAddress:    "",
 			DefaultTokenType: "usdc",
 		})
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		usedTransferByteCount := ByteCount(1024)
 		paid := NanoCents(0)
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
 		plan, err := PlanPayments(ctx)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, len(plan.NetworkPayments), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, len(plan.NetworkPayments), 0)
 
 		// a recent pending payment is not hung
-		assert.Equal(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
+		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
 
 		// age the payments past the hung expiration
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -519,11 +519,11 @@ func TestCancelHungAccountPayments(t *testing.T) {
 		})
 
 		canceledCount := CancelHungAccountPayments(ctx, server.NowUtc())
-		assert.NotEqual(t, canceledCount, int64(0))
+		connect.AssertNotEqual(t, canceledCount, int64(0))
 
 		// the sweeps are re-planned into fresh pending payments
 		plan2, err := PlanPayments(ctx)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, len(plan2.NetworkPayments), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, len(plan2.NetworkPayments), 0)
 	})
 }

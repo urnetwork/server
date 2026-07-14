@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -17,7 +17,7 @@ func TestRemoveExpiredWalletAuthChallenges(t *testing.T) {
 		ctx := context.Background()
 
 		result := model.CreateWalletAuthChallenge(model.WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		// backdate the row so the cleanup task will remove it
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -37,7 +37,7 @@ func TestRemoveExpiredWalletAuthChallenges(t *testing.T) {
 		defer clientSession.Cancel()
 
 		_, err := RemoveExpiredWalletAuthChallenges(&RemoveExpiredWalletAuthChallengesArgs{}, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var count int
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -52,6 +52,6 @@ func TestRemoveExpiredWalletAuthChallenges(t *testing.T) {
 			)
 			server.Raise(row.Scan(&count))
 		})
-		assert.Equal(t, count, 0)
+		connect.AssertEqual(t, count, 0)
 	})
 }

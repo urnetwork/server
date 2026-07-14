@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
 
@@ -37,7 +37,7 @@ func TestRemoveNetwork(t *testing.T) {
 			AuthJwtType:   SsoAuthTypeGoogle,
 			UserId:        userId,
 		}, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		/**
 		 * Add Wallet Auth
@@ -61,27 +61,27 @@ func TestRemoveNetwork(t *testing.T) {
 		)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
-		assert.Equal(t, len(networkUser.WalletAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
+		connect.AssertEqual(t, len(networkUser.WalletAuths), 1)
 
 		RemoveNetwork(ctx, networkId, &userId)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser, nil)
+		connect.AssertEqual(t, networkUser, nil)
 
 		userAuths, err := getUserAuths(userId, ctx)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(userAuths), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(userAuths), 0)
 
 		ssoAuths, err := getSsoAuths(ctx, userId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(ssoAuths), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(ssoAuths), 0)
 
 		walletAuths, err := getWalletAuths(ctx, userId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletAuths), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletAuths), 0)
 
 	})
 }

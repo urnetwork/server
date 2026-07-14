@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/jwt"
 	// "github.com/urnetwork/server/model"
@@ -27,54 +27,54 @@ func TestBrevo(t *testing.T) {
 
 		for _, userEmail := range userEmails {
 			err := BrevoAddContact(ctx, userEmail)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		// adding duplicate should be ok
 		for _, userEmail := range userEmails {
 			err := BrevoAddContact(ctx, userEmail)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		for _, userEmail := range userEmails {
 			err := BrevoAddToList(ctx, userEmail, newNetworksListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = BrevoAddToList(ctx, userEmail, productUpdatesListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		// adding duplicate should be ok
 		for _, userEmail := range userEmails {
 			err := BrevoAddToList(ctx, userEmail, newNetworksListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = BrevoAddToList(ctx, userEmail, productUpdatesListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		for _, userEmail := range userEmails {
 			err := BrevoRemoveFromList(ctx, userEmail, newNetworksListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = BrevoRemoveFromList(ctx, userEmail, productUpdatesListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		// removing duplicate should be ok
 		for _, userEmail := range userEmails {
 			err := BrevoRemoveFromList(ctx, userEmail, newNetworksListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = BrevoRemoveFromList(ctx, userEmail, productUpdatesListId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		for _, userEmail := range userEmails {
 			err := BrevoRemoveContact(ctx, userEmail)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		// removing duplicate should be ok
 		for _, userEmail := range userEmails {
 			err := BrevoRemoveContact(ctx, userEmail)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 	})

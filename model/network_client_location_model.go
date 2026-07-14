@@ -19,7 +19,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/redis/go-redis/v9"
 
@@ -1126,7 +1126,7 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 			`
                 UPDATE location_group
                 SET
-                    location_name = $2,
+                    location_group_name = $2,
                     promoted = $3
                 WHERE
                     location_group_id = $1
@@ -1147,6 +1147,7 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
                 DELETE FROM location_group_member
                 WHERE location_group_id = $1
             `,
+			locationGroup.LocationGroupId,
 		)
 		server.Raise(err)
 
@@ -1496,7 +1497,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			ctx,
 			tx,
 			"temp_location_ids(location_id uuid)",
-			maps.Keys(locationClientCounts)...,
+			slices.Collect(maps.Keys(locationClientCounts))...,
 		)
 
 		result, err = tx.Query(
@@ -1556,7 +1557,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			}
 		}
 		filterTop := func(locationIdCounts map[server.Id]int, n int) map[server.Id]int {
-			locationIds := maps.Keys(locationIdCounts)
+			locationIds := slices.Collect(maps.Keys(locationIdCounts))
 			slices.SortFunc(locationIds, func(a server.Id, b server.Id) int {
 				d := locationIdCounts[b] - locationIdCounts[a]
 				if d != 0 {
@@ -1916,7 +1917,7 @@ func FindProviderLocations(
 		// in that case, all locations will be considered unstable
 		locationStables, _ := loadLocationStables(
 			session.Ctx,
-			maps.Keys(clientLocations),
+			slices.Collect(maps.Keys(clientLocations)),
 			rankMode,
 			clientLocationId,
 		)
@@ -2537,7 +2538,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
-		lookbackIndexes := maps.Keys(clientScore.LookbackClientScores)
+		lookbackIndexes := slices.Collect(maps.Keys(clientScore.LookbackClientScores))
 		slices.Sort(lookbackIndexes)
 		minLookbackIndex := lookbackIndexes[0]
 
@@ -2555,7 +2556,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.ScaledWeights = map[string]float32{}
 		clientScore.PassesMinimums = map[string]bool{}
 
-		for _, rankMode := range maps.Keys(clientScore.Scores) {
+		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
 			passesMinimum := true
 			// all lookback thresholds must pass
 			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
@@ -2700,7 +2701,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		// no client location match
 		server.Id{},
 	}
-	clientLocationIds = append(clientLocationIds, maps.Values(countryCodeLocationIds())...)
+	clientLocationIds = append(clientLocationIds, slices.Collect(maps.Values(countryCodeLocationIds()))...)
 
 	m := (len(clientLocationIds) + parallel - 1) / parallel
 	allBlockClientLocationIds := [][]server.Id{}
@@ -2855,7 +2856,7 @@ func loadClientScores(
 			}
 		}
 
-		keys := maps.Keys(sampleKeyCounts)
+		keys := slices.Collect(maps.Keys(sampleKeyCounts))
 		mathrand.Shuffle(len(keys), func(i int, j int) {
 			keys[i], keys[j] = keys[j], keys[i]
 		})
@@ -3016,7 +3017,7 @@ func FindProviders2(
 			}
 		}
 
-		clientIds := maps.Keys(clientScores)
+		clientIds := slices.Collect(maps.Keys(clientScores))
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
 			clientIds[i], clientIds[j] = clientIds[j], clientIds[i]
 		})

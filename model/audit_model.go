@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -807,7 +808,7 @@ func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn server
 
 func summary(data map[string]int) int {
 	k := 3
-	days := maps.Keys(data)
+	days := slices.Collect(maps.Keys(data))
 	sort.Strings(days)
 	summaryDays := days[max(0, len(days)-k):]
 	maxValue := 0
@@ -1231,6 +1232,102 @@ func RemoveOldAuditNetworkEvents(ctx context.Context, maxTime time.Time, limit i
 			    LIMIT $2
 			) t
 			WHERE audit_network_event.event_id = t.event_id
+			`,
+			minTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+	})
+	return
+}
+
+// retention for the other append-only audit feeds, same rationale as
+// AuditNetworkEventExpiration: the widest reader is the 90-day stats lookback,
+// so anything older is unread. Unlike audit_network_event these had no reaper,
+// so the pre-window "carry-in" stats scans grew without bound (see index audit).
+// Each delete is an event_time-ordered batch, served by the table's
+// event_time-leading stats index / PK.
+const AuditEventExpiration = 180 * 24 * time.Hour
+
+func RemoveOldAuditProviderEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	minTime := maxTime.Add(-AuditEventExpiration)
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_provider_event
+			USING (
+			    SELECT event_id FROM audit_provider_event WHERE event_time < $1 ORDER BY event_time LIMIT $2
+			) t
+			WHERE audit_provider_event.event_id = t.event_id
+			`,
+			minTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+	})
+	return
+}
+
+func RemoveOldAuditExtenderEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	minTime := maxTime.Add(-AuditEventExpiration)
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_extender_event
+			USING (
+			    SELECT event_id FROM audit_extender_event WHERE event_time < $1 ORDER BY event_time LIMIT $2
+			) t
+			WHERE audit_extender_event.event_id = t.event_id
+			`,
+			minTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+	})
+	return
+}
+
+func RemoveOldAuditContractEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	minTime := maxTime.Add(-AuditEventExpiration)
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_contract_event
+			USING (
+			    SELECT event_id FROM audit_contract_event WHERE event_time < $1 ORDER BY event_time LIMIT $2
+			) t
+			WHERE audit_contract_event.event_id = t.event_id
+			`,
+			minTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
+	})
+	return
+}
+
+// audit_device_event's PK is (event_time, device_id, event_id), so event_id is
+// not unique alone -- match the full PK.
+func RemoveOldAuditDeviceEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	minTime := maxTime.Add(-AuditEventExpiration)
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			DELETE FROM audit_device_event
+			USING (
+			    SELECT event_time, device_id, event_id FROM audit_device_event WHERE event_time < $1 ORDER BY event_time LIMIT $2
+			) t
+			WHERE audit_device_event.event_time = t.event_time
+			    AND audit_device_event.device_id = t.device_id
+			    AND audit_device_event.event_id = t.event_id
 			`,
 			minTime,
 			limit,

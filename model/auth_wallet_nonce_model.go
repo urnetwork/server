@@ -64,17 +64,28 @@ func consumeWalletAuthNonce(ctx context.Context, tx server.PgTx, nonce string) b
 	return tag.RowsAffected() == 1
 }
 
-// RemoveExpiredWalletNonces deletes used or expired nonces. Safe to run
-// periodically as a cleanup task.
-func RemoveExpiredWalletNonces(ctx context.Context) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+// RemoveExpiredWalletNonces deletes expired nonces in bounded batches, driven by
+// the auth_wallet_nonce_expire_time index. Used-but-unexpired nonces are left to
+// age out at their (short) expiry, so the delete is one indexable predicate
+// rather than the old unindexable `used = true OR expire_time <= $1`. Wired to
+// the RemoveExpiredWalletNonces task -- previously unwired, so this live-written
+// table grew without bound.
+func RemoveExpiredWalletNonces(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
 			ctx,
 			`
                 DELETE FROM auth_wallet_nonce
-                WHERE used = true OR expire_time <= $1
+                USING (
+                    SELECT nonce FROM auth_wallet_nonce WHERE expire_time <= $1 ORDER BY expire_time LIMIT $2
+                ) t
+                WHERE auth_wallet_nonce.nonce = t.nonce
             `,
-			server.NowUtc(),
-		))
+			maxTime,
+			limit,
+		)
+		server.Raise(err)
+		removedCount = tag.RowsAffected()
 	})
+	return
 }

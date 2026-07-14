@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -62,34 +62,34 @@ func TestX402BlankConfigNoops(t *testing.T) {
 	c := X402()
 
 	// the loader must have refused to enable a half-configured x402, and said so
-	assert.Equal(t, false, c.Enabled)
-	assert.Equal(t, false, X402Enabled())
-	assert.Equal(t, "", c.Facilitator.Url)
-	assert.Equal(t, "", c.PayTo)
+	connect.AssertEqual(t, false, c.Enabled)
+	connect.AssertEqual(t, false, X402Enabled())
+	connect.AssertEqual(t, "", c.Facilitator.Url)
+	connect.AssertEqual(t, "", c.PayTo)
 
 	ctx := context.Background()
 
 	// 1. GET /x402/skus -> 404. Nothing is advertised.
 	rec := httptest.NewRecorder()
 	X402SkusHandler(rec, httptest.NewRequest("GET", "/x402/skus", nil))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	connect.AssertEqual(t, http.StatusNotFound, rec.Code)
 
 	// 2. POST /x402/purchase -> 404. No terms quoted, so no agent ever pays.
 	rec = httptest.NewRecorder()
 	X402PurchaseHandler(rec, httptest.NewRequest(
 		"POST", "/x402/purchase", strings.NewReader(`{"sku_id":"pro_1month"}`),
 	))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	connect.AssertEqual(t, http.StatusNotFound, rec.Code)
 
 	// 3. the inline-upgrade settle path declines to handle the request at all
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/network/auth-client", strings.NewReader(`{}`))
 	req.Header.Set(X402PaymentHeader, "a-signed-payment")
-	assert.Equal(t, false, X402SettleInlineUpgrade(rec, req))
+	connect.AssertEqual(t, false, X402SettleInlineUpgrade(rec, req))
 
 	// 4. no terms are quoted for anything
 	_, err := X402PaymentRequiredFor("/network/auth-client", X402SkuProMonth, "limit")
-	assert.NotEqual(t, nil, err)
+	connect.AssertNotEqual(t, nil, err)
 
 	// 5. THE MONEY PATH. Even called directly -- bypassing every gate above -- verify and
 	//    settle refuse before any http leaves the process. A blank facilitator url would
@@ -97,12 +97,12 @@ func TestX402BlankConfigNoops(t *testing.T) {
 	//    "unsupported protocol scheme", which is a terrible way to find out that a payment
 	//    was accepted but never actually settled.
 	_, err = X402Verify(ctx, "a-signed-payment", X402Accept{})
-	assert.NotEqual(t, nil, err)
-	assert.Equal(t, true, strings.Contains(err.Error(), "facilitator is not configured"))
+	connect.AssertNotEqual(t, nil, err)
+	connect.AssertEqual(t, true, strings.Contains(err.Error(), "facilitator is not configured"))
 
 	_, err = X402Settle(ctx, "a-signed-payment", X402Accept{})
-	assert.NotEqual(t, nil, err)
-	assert.Equal(t, true, strings.Contains(err.Error(), "facilitator is not configured"))
+	connect.AssertNotEqual(t, nil, err)
+	connect.AssertEqual(t, true, strings.Contains(err.Error(), "facilitator is not configured"))
 }
 
 // TestX402ConfigUsable is the deterministic half of the above.
@@ -125,7 +125,7 @@ func TestX402ConfigUsable(t *testing.T) {
 	}
 
 	// the fully-filled config is the only one that may take money
-	assert.Equal(t, true, x402ConfigUsable(full()))
+	connect.AssertEqual(t, true, x402ConfigUsable(full()))
 
 	// ...and every way of being half-filled turns it off
 	for name, breakIt := range map[string]func(*X402Config){
@@ -145,7 +145,7 @@ func TestX402ConfigUsable(t *testing.T) {
 	// not enabled is not usable, however complete the rest of it is
 	c := full()
 	c.Enabled = false
-	assert.Equal(t, false, x402ConfigUsable(c))
+	connect.AssertEqual(t, false, x402ConfigUsable(c))
 }
 
 // TestX402SkuCatalogRefusesFreeProducts pins the rule that nothing is ever offered for
@@ -166,7 +166,7 @@ func TestX402SkuCatalogRefusesFreeProducts(t *testing.T) {
 
 	for _, sku := range x402SkusForConfig(c) {
 		// whatever survives into the catalog must carry a real price and real goods
-		assert.Equal(t, true, 0 < sku.PriceUsd)
-		assert.Equal(t, true, 0 < sku.ByteCount)
+		connect.AssertEqual(t, true, 0 < sku.PriceUsd)
+		connect.AssertEqual(t, true, 0 < sku.ByteCount)
 	}
 }

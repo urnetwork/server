@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -14,35 +14,35 @@ import (
 // two is not a public provider and still counts.
 func TestIsPublicProvider(t *testing.T) {
 	// exempt: public + stream
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModePublic, ProvideModeStream},
 	}), true)
 	// order does not matter
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModeStream, ProvideModePublic},
 	}), true)
 	// extra modes alongside both are still exempt
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModeNetwork, ProvideModePublic, ProvideModeStream},
 	}), true)
 
 	// not exempt: only one of the pair
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModePublic},
 	}), false)
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModeStream},
 	}), false)
 
 	// not exempt: neither
-	assert.Equal(t, isPublicProvider(&NetworkPeer{
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
 		ProvideModes: []ProvideMode{ProvideModeNetwork, ProvideModeFriendsAndFamily},
 	}), false)
-	assert.Equal(t, isPublicProvider(&NetworkPeer{ProvideModes: []ProvideMode{}}), false)
-	assert.Equal(t, isPublicProvider(&NetworkPeer{}), false)
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{ProvideModes: []ProvideMode{}}), false)
+	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{}), false)
 
 	// defensive: no peer
-	assert.Equal(t, isPublicProvider(nil), false)
+	connect.AssertEqual(t, isPublicProvider(nil), false)
 }
 
 // TestReferralBonusCount pins the referral payout cap: a referrer is paid for at
@@ -51,19 +51,19 @@ func TestReferralBonusCount(t *testing.T) {
 	skipWithoutProYml(t)
 
 	maxReferrals := Pro().MaxReferrals
-	assert.Equal(t, maxReferrals, 10)
+	connect.AssertEqual(t, maxReferrals, 20)
 
-	assert.Equal(t, ReferralBonusCount(0), 0)
-	assert.Equal(t, ReferralBonusCount(1), 1)
-	assert.Equal(t, ReferralBonusCount(9), 9)
-	assert.Equal(t, ReferralBonusCount(10), 10)
+	connect.AssertEqual(t, ReferralBonusCount(0), 0)
+	connect.AssertEqual(t, ReferralBonusCount(1), 1)
+	connect.AssertEqual(t, ReferralBonusCount(19), 19)
+	connect.AssertEqual(t, ReferralBonusCount(20), 20)
 
 	// capped
-	assert.Equal(t, ReferralBonusCount(11), 10)
-	assert.Equal(t, ReferralBonusCount(1000), 10)
+	connect.AssertEqual(t, ReferralBonusCount(21), 20)
+	connect.AssertEqual(t, ReferralBonusCount(1000), 20)
 
 	// defensive
-	assert.Equal(t, ReferralBonusCount(-1), 0)
+	connect.AssertEqual(t, ReferralBonusCount(-1), 0)
 }
 
 // TestConcurrentGateIsFreeWhileDark pins that the concurrent-client gate does NO work
@@ -75,20 +75,20 @@ func TestReferralBonusCount(t *testing.T) {
 // The proof is that it returns false with NO server context at all: a nil ctx would
 // panic the moment either lookup ran.
 func TestConcurrentGateIsFreeWhileDark(t *testing.T) {
-	assert.Equal(t, Pro().EnforceConcurrentClients, false)
+	connect.AssertEqual(t, Pro().EnforceConcurrentClients, false)
 
 	// no ctx, no network -- if this touched redis or the db it would panic
-	assert.Equal(t, NetworkConcurrentClientsExceeded(nil, server.NewId()), false)
+	connect.AssertEqual(t, NetworkConcurrentClientsExceeded(nil, server.NewId()), false)
 }
 
 // TestFeatureGateIsFreeWhileDark is the same property for the proxy feature gate:
 // while enforce_features is dark it must not resolve Pro at all, and every tier is
 // allowed. Same nil-ctx proof.
 func TestFeatureGateIsFreeWhileDark(t *testing.T) {
-	assert.Equal(t, Pro().EnforceFeatures, false)
+	connect.AssertEqual(t, Pro().EnforceFeatures, false)
 
-	assert.Equal(t, NetworkFeatureAllowed(nil, server.NewId(), FeatureSocksProxy), true)
-	assert.Equal(t, NetworkFeatureAllowed(nil, server.NewId(), FeatureWireguardProxy), true)
+	connect.AssertEqual(t, NetworkFeatureAllowed(nil, server.NewId(), FeatureSocksProxy), true)
+	connect.AssertEqual(t, NetworkFeatureAllowed(nil, server.NewId(), FeatureWireguardProxy), true)
 }
 
 // TestProxyGateIsFreeWhileDark pins the per-connection proxy gate's cost. It runs on
@@ -98,9 +98,9 @@ func TestFeatureGateIsFreeWhileDark(t *testing.T) {
 //
 // The proof is a nil ctx: either lookup would panic the moment it ran.
 func TestProxyGateIsFreeWhileDark(t *testing.T) {
-	assert.Equal(t, Pro().EnforceFeatures, false)
+	connect.AssertEqual(t, Pro().EnforceFeatures, false)
 
-	assert.Equal(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureSocksProxy), true)
-	assert.Equal(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureWireguardProxy), true)
-	assert.Equal(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureHttpsProxy), true)
+	connect.AssertEqual(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureSocksProxy), true)
+	connect.AssertEqual(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureWireguardProxy), true)
+	connect.AssertEqual(t, ProxyFeatureAllowed(nil, server.NewId(), FeatureHttpsProxy), true)
 }

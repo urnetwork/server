@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
 	"github.com/gorilla/websocket"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -65,15 +65,15 @@ func TestDeviceRpcHandlerAuth(t *testing.T) {
 		unknownSigned := model.SignProxyId(server.NewId())
 
 		// missing signed proxy id -> 401 (before any device work)
-		assert.Equal(t, dial("", nil), http.StatusUnauthorized)
+		connect.AssertEqual(t, dial("", nil), http.StatusUnauthorized)
 		// malformed query token -> 401
-		assert.Equal(t, dial("proxy=not-a-signed-id", nil), http.StatusUnauthorized)
+		connect.AssertEqual(t, dial("proxy=not-a-signed-id", nil), http.StatusUnauthorized)
 		// malformed Authorization Bearer -> 401
-		assert.Equal(t, dial("", bearer("not-a-signed-id")), http.StatusUnauthorized)
+		connect.AssertEqual(t, dial("", bearer("not-a-signed-id")), http.StatusUnauthorized)
 		// well-formed token, no such device (query form) -> 503
-		assert.Equal(t, dial("proxy="+url.QueryEscape(unknownSigned), nil), http.StatusServiceUnavailable)
+		connect.AssertEqual(t, dial("proxy="+url.QueryEscape(unknownSigned), nil), http.StatusServiceUnavailable)
 		// well-formed token, no such device (Authorization Bearer form) -> 503,
 		// proving the header path reaches device resolution
-		assert.Equal(t, dial("", bearer(unknownSigned)), http.StatusServiceUnavailable)
+		connect.AssertEqual(t, dial("", bearer(unknownSigned)), http.StatusServiceUnavailable)
 	})
 }

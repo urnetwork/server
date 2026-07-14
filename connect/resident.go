@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"math"
+	"slices"
 	// "io"
 	"math/rand"
 	"net"
@@ -22,7 +23,7 @@ import (
 
 	// "runtime/debug"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
@@ -400,7 +401,7 @@ func (self *Exchange) NominateLocalResident(
 		ResidentHost:          self.host,
 		ResidentService:       self.service,
 		ResidentBlock:         self.block,
-		ResidentInternalPorts: maps.Keys(self.hostToServicePorts),
+		ResidentInternalPorts: slices.Collect(maps.Keys(self.hostToServicePorts)),
 	}
 	nominated := model.NominateResident(
 		self.ctx,
@@ -1006,7 +1007,7 @@ func (self *Exchange) Drain() {
 			// active connections with potential residents
 			for clientId, handleCancels := range self.connections {
 				resident := self.residents[clientId]
-				return resident, maps.Values(handleCancels), n - 1, true
+				return resident, slices.Collect(maps.Values(handleCancels)), n - 1, true
 			}
 			// residents without active connections
 			for _, resident := range self.residents {
@@ -2599,7 +2600,7 @@ func (self *Resident) Close() {
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		forwards = maps.Values(self.forwards)
+		forwards = slices.Collect(maps.Values(self.forwards))
 		clear(self.forwards)
 	}()
 	for _, forward := range forwards {

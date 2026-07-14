@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/redis/go-redis/v9"
 
@@ -435,7 +435,7 @@ func upsertClientReliabilityStatsBlock(
 		counters[counterIndex] += count
 	}
 
-	orderedKeys := maps.Keys(rows)
+	orderedKeys := slices.Collect(maps.Keys(rows))
 	slices.SortFunc(orderedKeys, func(a rowKey, b rowKey) int {
 		if c := strings.Compare(a.clientAddressHashHex, b.clientAddressHashHex); c != 0 {
 			return c
@@ -1521,7 +1521,7 @@ func getNetworkReliabilityWindow(
 			ReliabilityWeights:    reliabilityWeightsSlice,
 			ClientCounts:          clientCountsSlice,
 			TotalClientCounts:     totalClientCountsSlice,
-			CountryMultipliers:    maps.Values(countryMultipliers),
+			CountryMultipliers:    slices.Collect(maps.Values(countryMultipliers)),
 		}
 	})
 	return
@@ -1656,7 +1656,7 @@ func RemoveOldNetworkReliabilityWindow(ctx context.Context, maxTime time.Time, l
 			        bucket_number
 			    FROM network_connection_reliability_window
 			    WHERE bucket_number <= $1
-			    ORDER BY network_id, bucket_number
+			    ORDER BY bucket_number
 			    LIMIT $2
 			) t
 			WHERE
@@ -1817,7 +1817,7 @@ func (self *clientLocationReliability) Values() []any {
 	values[0] = self.networkId
 
 	if 1 == len(self.locations) {
-		location := maps.Keys(self.locations)[0]
+		location := slices.Collect(maps.Keys(self.locations))[0]
 		values[1] = &location.cityLocationId
 		values[2] = &location.regionLocationId
 		values[3] = &location.countryLocationId

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -23,10 +23,10 @@ func TestProxyFeatureAllowedFailsOpen(t *testing.T) {
 		// enforcement is dark in config, so force the path we actually want to test by
 		// checking the layer underneath: an unresolvable proxy yields no network.
 		_, ok := networkIdForProxy(ctx, server.NewId())
-		assert.Equal(t, ok, false)
+		connect.AssertEqual(t, ok, false)
 
 		// and the gate lets it through rather than denying
-		assert.Equal(t, ProxyFeatureAllowed(ctx, server.NewId(), FeatureSocksProxy), true)
+		connect.AssertEqual(t, ProxyFeatureAllowed(ctx, server.NewId(), FeatureSocksProxy), true)
 	})
 }
 
@@ -38,18 +38,18 @@ func TestProLocalCacheServesAndExpires(t *testing.T) {
 
 	// nothing cached yet
 	_, ok := getProNetworkLocal(networkId)
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 
 	setProNetworkLocal(networkId, true)
 
 	pro, ok := getProNetworkLocal(networkId)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, pro, true)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, pro, true)
 
 	// an upgrade clears this process's entry so the next read reloads
 	clearProNetworkLocal(networkId)
 	_, ok = getProNetworkLocal(networkId)
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 }
 
 // TestProLocalCacheIsBounded pins that the in-process cache cannot grow without limit.
@@ -64,7 +64,7 @@ func TestProLocalCacheIsBounded(t *testing.T) {
 	size := len(proLocalCache)
 	proLocalCacheMutex.Unlock()
 
-	assert.Equal(t, size <= proLocalCacheMaxSize, true)
+	connect.AssertEqual(t, size <= proLocalCacheMaxSize, true)
 }
 
 // TestProLocalCacheTtlIsShorterThanRedis pins the relationship between the two ttls.
@@ -74,6 +74,6 @@ func TestProLocalCacheIsBounded(t *testing.T) {
 // between a customer paying and, say, SOCKS working on some other proxy instance -- so
 // it must stay well under the shared redis window.
 func TestProLocalCacheTtlIsShorterThanRedis(t *testing.T) {
-	assert.Equal(t, ProLocalCacheTtl < ProCacheTtl, true)
-	assert.Equal(t, ProLocalCacheTtl <= 5*time.Second, true)
+	connect.AssertEqual(t, ProLocalCacheTtl < ProCacheTtl, true)
+	connect.AssertEqual(t, ProLocalCacheTtl <= 5*time.Second, true)
 }

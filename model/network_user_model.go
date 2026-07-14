@@ -785,14 +785,14 @@ func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.
 		result, execErr := tx.Query(
 			ctx,
 			`
+			-- drive from the indexed user_auth side; an OR of correlated EXISTS
+			-- cannot become semi-joins and seq-scans network (see index audit)
 			SELECT network.network_id
 			FROM network
-			WHERE EXISTS (
-			  SELECT 1 FROM network_user_auth_password
-			  WHERE network_user_auth_password.user_id = network.admin_user_id AND network_user_auth_password.user_auth = $1
-			) OR EXISTS (
-			  SELECT 1 FROM network_user_auth_sso
-			  WHERE network_user_auth_sso.user_id = network.admin_user_id AND network_user_auth_sso.user_auth = $1
+			WHERE network.admin_user_id IN (
+			  SELECT user_id FROM network_user_auth_password WHERE user_auth = $1
+			  UNION
+			  SELECT user_id FROM network_user_auth_sso WHERE user_auth = $1
 			)
 			`,
 			email,

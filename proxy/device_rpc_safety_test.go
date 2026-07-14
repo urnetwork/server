@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
@@ -48,7 +48,7 @@ func TestProxyDeviceRpcHostedIncompatibleNoop(t *testing.T) {
 		defer h.cancel()
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		hosted := pd.deviceLocal
 
 		instanceId := sdk.RequireIdFromBytes(h.pdInstanceId.Bytes())
@@ -59,7 +59,7 @@ func TestProxyDeviceRpcHostedIncompatibleNoop(t *testing.T) {
 			h.signedProxyId,
 			instanceId,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		defer remote.Close()
 
 		waitFor(t, 60*time.Second, "remote connected", remote.GetRemoteConnected)

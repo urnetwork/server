@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -55,9 +55,9 @@ func TestLeaderboard(t *testing.T) {
 		 * Set public leaderboards
 		 */
 		err := SetNetworkLeaderboardPublic(true, clientSessionA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		SetNetworkLeaderboardPublic(true, clientSessionB)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		/**
 		 * Create balance for network C
@@ -73,7 +73,7 @@ func TestLeaderboard(t *testing.T) {
 			"",
 		)
 
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: clientSessionC.ByJwt.NetworkId,
@@ -84,12 +84,12 @@ func TestLeaderboard(t *testing.T) {
 
 		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdA, userIdA, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = CloseContract(ctx, transferEscrow.ContractId, userIdA, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
@@ -97,12 +97,12 @@ func TestLeaderboard(t *testing.T) {
 
 		for paid < 2*UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdB, userIdB, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = CloseContract(ctx, transferEscrow.ContractId, userIdB, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
@@ -110,57 +110,57 @@ func TestLeaderboard(t *testing.T) {
 		 * Plan payments
 		 */
 		_, err = PlanPayments(ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		/**
 		 * check leaderboard stats
 		 */
 		leaderboardStats, err := GetLeaderboard(ctx)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(leaderboardStats), 2)
-		assert.Equal(t, leaderboardStats[0].NetworkId, networkIdB.String())
-		assert.Equal(t, leaderboardStats[1].NetworkId, networkIdA.String())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(leaderboardStats), 2)
+		connect.AssertEqual(t, leaderboardStats[0].NetworkId, networkIdB.String())
+		connect.AssertEqual(t, leaderboardStats[1].NetworkId, networkIdA.String())
 
 		// profanity check
 		// network B does not contain profanity
-		assert.Equal(t, leaderboardStats[0].ContainsProfanity, false)
+		connect.AssertEqual(t, leaderboardStats[0].ContainsProfanity, false)
 
 		// FIXME - need to safely use goaway lib - network A contains profanity
-		// assert.Equal(t, leaderboardStats[1].ContainsProfanity, true)
+		// connect.AssertEqual(t, leaderboardStats[1].ContainsProfanity, true)
 
 		/**
 		 * Get individual network ranking
 		 */
 		networkRanking, err := GetNetworkLeaderboardRanking(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkRanking.LeaderboardRank, 1)
-		assert.Equal(t, networkRanking.LeaderboardPublic, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkRanking.LeaderboardRank, 1)
+		connect.AssertEqual(t, networkRanking.LeaderboardPublic, true)
 
 		networkRanking, err = GetNetworkLeaderboardRanking(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkRanking.LeaderboardRank, 2)
-		assert.Equal(t, networkRanking.LeaderboardPublic, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkRanking.LeaderboardRank, 2)
+		connect.AssertEqual(t, networkRanking.LeaderboardPublic, true)
 
 		/**
 		 * Set network A leaderboard to private
 		 */
 		err = SetNetworkLeaderboardPublic(false, clientSessionA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		leaderboardStats, err = GetLeaderboard(ctx)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(leaderboardStats), 2)
-		assert.Equal(t, leaderboardStats[1].NetworkId, "")
-		assert.Equal(t, leaderboardStats[1].NetworkId, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(leaderboardStats), 2)
+		connect.AssertEqual(t, leaderboardStats[1].NetworkId, "")
+		connect.AssertEqual(t, leaderboardStats[1].NetworkId, "")
 
 		/**
 		* LeaderboardPublic should be set to false
 		 */
 		networkRanking, err = GetNetworkLeaderboardRanking(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkRanking.LeaderboardRank, 2)
-		assert.Equal(t, networkRanking.LeaderboardPublic, false)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkRanking.LeaderboardRank, 2)
+		connect.AssertEqual(t, networkRanking.LeaderboardPublic, false)
 
 	})
 }

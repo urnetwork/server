@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -39,11 +39,11 @@ func TestGetNetworkUser(t *testing.T) {
 
 		// it should fetch the network_user associated with the session userId
 		networkUserResult, err := GetNetworkUser(userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		networkUser := networkUserResult.NetworkUser
-		assert.Equal(t, networkUser.UserId, userId)
-		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
-		assert.Equal(t, networkUser.Verified, true)
-		assert.Equal(t, networkUser.AuthType, model.AuthTypePassword)
+		connect.AssertEqual(t, networkUser.UserId, userId)
+		connect.AssertEqual(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
+		connect.AssertEqual(t, networkUser.Verified, true)
+		connect.AssertEqual(t, networkUser.AuthType, model.AuthTypePassword)
 	})
 }

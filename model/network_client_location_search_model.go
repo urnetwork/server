@@ -2,10 +2,11 @@ package model
 
 import (
 	"context"
+	"slices"
 	"sync"
 	// "time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -108,7 +109,7 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 			locations[location.LocationId] = &location
 		}
 	})
-	locationIds := maps.Keys(locations)
+	locationIds := slices.Collect(maps.Keys(locations))
 	for i, locationId := range locationIds {
 		location := locations[locationId]
 		locationSearch().RemoveInTx(ctx, locationId, tx)
@@ -161,7 +162,7 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 			locationGroups[locationGroup.LocationGroupId] = &locationGroup
 		}
 	})
-	locationGroupIds := maps.Keys(locationGroups)
+	locationGroupIds := slices.Collect(maps.Keys(locationGroups))
 	for i, locationGroupId := range locationGroupIds {
 		locationGroup := locationGroups[locationGroupId]
 		locationGroupSearch().RemoveInTx(ctx, locationGroupId, tx)

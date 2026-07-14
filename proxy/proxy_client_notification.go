@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
@@ -115,7 +116,7 @@ func (self *proxyClientNotification) reconcile(hosts []string, block string) {
 			continue
 		}
 		glog.Infof("[proxy]reconcile %d proxy clients\n", len(allProxyClients))
-		self.fullSyncProxyClients(maps.Values(allProxyClients), syncStartTime)
+		self.fullSyncProxyClients(slices.Collect(maps.Values(allProxyClients)), syncStartTime)
 	}
 }
 
@@ -181,7 +182,7 @@ func (self *proxyClientNotification) watch(host string, block string) {
 			glog.Infof("[proxy]err=%s\n", err)
 		} else if 0 < len(proxyClients) {
 			glog.Infof("[proxy]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
-			if err := self.proxyClients(maps.Values(proxyClients)); err == nil {
+			if err := self.proxyClients(slices.Collect(maps.Values(proxyClients))); err == nil {
 				nextChangeId = maxChangeId + 1
 			} else {
 				// do not advance past a failed delivery;

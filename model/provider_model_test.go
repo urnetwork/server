@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -61,8 +61,8 @@ func TestStatsProviders(t *testing.T) {
 
 		// ---- StatsProviders (last 24h) ----
 		result, err := StatsProviders(clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(result.Providers), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(result.Providers), 2)
 
 		byId := map[server.Id]*ProviderStats{}
 		for _, p := range result.Providers {
@@ -70,47 +70,47 @@ func TestStatsProviders(t *testing.T) {
 		}
 
 		a := byId[providerA]
-		assert.NotEqual(t, a, nil)
-		assert.Equal(t, a.TransferDataLast24h, float64(2)) // 2 GiB (old 5 GiB excluded)
-		assert.Equal(t, a.ContractsLast24h, 1)
-		assert.Equal(t, a.ClientsLast24h, 1)
-		assert.Equal(t, a.PayoutLast24h, 3.0)
-		assert.Equal(t, a.SearchInterestLast24h, 7)
-		assert.Equal(t, a.Connected, true)
+		connect.AssertNotEqual(t, a, nil)
+		connect.AssertEqual(t, a.TransferDataLast24h, float64(2)) // 2 GiB (old 5 GiB excluded)
+		connect.AssertEqual(t, a.ContractsLast24h, 1)
+		connect.AssertEqual(t, a.ClientsLast24h, 1)
+		connect.AssertEqual(t, a.PayoutLast24h, 3.0)
+		connect.AssertEqual(t, a.SearchInterestLast24h, 7)
+		connect.AssertEqual(t, a.Connected, true)
 		if a.UptimeLast24h < 2.9 || 3.2 < a.UptimeLast24h {
 			t.Fatalf("providerA uptime expected ~3h, got %f", a.UptimeLast24h)
 		}
 
 		b := byId[providerB]
-		assert.NotEqual(t, b, nil)
-		assert.Equal(t, b.TransferDataLast24h, float64(0))
-		assert.Equal(t, b.ContractsLast24h, 0)
-		assert.Equal(t, b.Connected, false)
+		connect.AssertNotEqual(t, b, nil)
+		connect.AssertEqual(t, b.TransferDataLast24h, float64(0))
+		connect.AssertEqual(t, b.ContractsLast24h, 0)
+		connect.AssertEqual(t, b.Connected, false)
 		// arrays must serialize as [], never null
-		assert.NotEqual(t, b.ConnectedEventsLast24h, nil)
+		connect.AssertNotEqual(t, b.ConnectedEventsLast24h, nil)
 
 		// ---- StatsProvidersLastN (last 72h) includes the old contract ----
 		wide, err := StatsProvidersLastN(&StatsProvidersArgs{LastN: 72}, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		wideById := map[server.Id]*ProviderStats{}
 		for _, p := range wide.Providers {
 			wideById[p.ClientId] = p
 		}
-		assert.Equal(t, wideById[providerA].TransferDataLast24h, float64(7)) // 2 + 5 GiB
-		assert.Equal(t, wideById[providerA].ContractsLast24h, 2)
+		connect.AssertEqual(t, wideById[providerA].TransferDataLast24h, float64(7)) // 2 + 5 GiB
+		connect.AssertEqual(t, wideById[providerA].ContractsLast24h, 2)
 
 		// ---- StatsProvider (single provider, last 72h) ----
 		single, err := StatsProvider(&StatsProviderArgs{ClientId: providerA, LastN: 72}, clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, statsSumFloat(single.TransferData), float64(7))
-		assert.Equal(t, statsSumInt(single.Contracts), 2)
-		assert.Equal(t, statsSumInt(single.Clients), 2) // one contract per day, distinct-per-day
-		assert.Equal(t, statsSumFloat(single.Payout), 3.0)
-		assert.Equal(t, statsSumInt(single.SearchInterest), 7)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, statsSumFloat(single.TransferData), float64(7))
+		connect.AssertEqual(t, statsSumInt(single.Contracts), 2)
+		connect.AssertEqual(t, statsSumInt(single.Clients), 2) // one contract per day, distinct-per-day
+		connect.AssertEqual(t, statsSumFloat(single.Payout), 3.0)
+		connect.AssertEqual(t, statsSumInt(single.SearchInterest), 7)
 		// per-served-client breakdown: the single customer
-		assert.Equal(t, len(single.ClientDetails), 1)
-		assert.Equal(t, single.ClientDetails[0].ClientId, customerA)
-		assert.Equal(t, statsSumFloat(single.ClientDetails[0].TransferData), float64(7))
+		connect.AssertEqual(t, len(single.ClientDetails), 1)
+		connect.AssertEqual(t, single.ClientDetails[0].ClientId, customerA)
+		connect.AssertEqual(t, statsSumFloat(single.ClientDetails[0].TransferData), float64(7))
 		// uptime is bucketed hourly in minutes; ~3h total
 		uptimeMinutes := statsSumFloat(single.Uptime)
 		if uptimeMinutes < 175 || 190 < uptimeMinutes {
@@ -120,21 +120,21 @@ func TestStatsProviders(t *testing.T) {
 		// ---- ownership: a client outside the caller network is rejected with 403 ----
 		foreign := server.NewId()
 		_, err = StatsProvider(&StatsProviderArgs{ClientId: foreign, LastN: 72}, clientSession)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, strings.HasPrefix(err.Error(), "403 "), true)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, strings.HasPrefix(err.Error(), "403 "), true)
 
 		// ---- overview: network aggregate ----
 		overview, err := StatsProvidersOverview(&StatsProvidersOverviewArgs{LastN: 72}, clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, statsSumFloat(overview.TransferData), float64(7))
-		assert.Equal(t, statsSumInt(overview.Contracts), 2)
-		assert.Equal(t, statsSumFloat(overview.Payout), 3.0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, statsSumFloat(overview.TransferData), float64(7))
+		connect.AssertEqual(t, statsSumInt(overview.Contracts), 2)
+		connect.AssertEqual(t, statsSumFloat(overview.Payout), 3.0)
 
 		// ---- legacy default-90 entry points still work ----
 		_, err = StatsProviderLast90(&StatsProviderArgs{ClientId: providerA}, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, err = StatsProvidersOverviewLast90(clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 	})
 }
 
@@ -153,16 +153,16 @@ func TestSearchProviderStatsRollup(t *testing.T) {
 		RecordProviderSearchMatches(ctx, []server.Id{clientId}, priorHour)
 
 		// before rollup: nothing in pg yet
-		assert.Equal(t, statsGetSearchMatchCount(ctx, clientId), int64(0))
+		connect.AssertEqual(t, statsGetSearchMatchCount(ctx, clientId), int64(0))
 
 		RollupSearchProviderStats(ctx, now)
 
 		// after rollup: 3 matches persisted, and the elapsed redis bucket is drained
-		assert.Equal(t, statsGetSearchMatchCount(ctx, clientId), int64(3))
+		connect.AssertEqual(t, statsGetSearchMatchCount(ctx, clientId), int64(3))
 
 		// idempotent: a second rollup does not double-count
 		RollupSearchProviderStats(ctx, now)
-		assert.Equal(t, statsGetSearchMatchCount(ctx, clientId), int64(3))
+		connect.AssertEqual(t, statsGetSearchMatchCount(ctx, clientId), int64(3))
 	})
 }
 
@@ -177,13 +177,58 @@ func TestRemoveOldSearchProviderStats(t *testing.T) {
 		// one recent row (within retention) and one old row (past 30 days)
 		statsInsertSearchStat(ctx, clientId, now.Add(-1*time.Hour).Truncate(time.Hour), 5)
 		statsInsertSearchStat(ctx, clientId, now.Add(-40*24*time.Hour).Truncate(time.Hour), 9)
-		assert.Equal(t, statsGetSearchMatchCount(ctx, clientId), int64(14))
+		connect.AssertEqual(t, statsGetSearchMatchCount(ctx, clientId), int64(14))
 
 		RemoveOldSearchProviderStats(ctx, now, 50000)
 
 		// only the recent row survives
-		assert.Equal(t, statsGetSearchMatchCount(ctx, clientId), int64(5))
+		connect.AssertEqual(t, statsGetSearchMatchCount(ctx, clientId), int64(5))
 	})
+}
+
+func TestRemoveOldVerifyProviderStats(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		clientId := server.NewId()
+
+		// one recent row (within retention) and one old row (past 30 days)
+		statsInsertVerifyStat(ctx, clientId, now.Add(-1*time.Hour).Truncate(time.Hour))
+		statsInsertVerifyStat(ctx, clientId, now.Add(-40*24*time.Hour).Truncate(time.Hour))
+		connect.AssertEqual(t, statsGetVerifyRowCount(ctx, clientId), 2)
+
+		RemoveOldVerifyProviderStats(ctx, now, 50000)
+
+		// only the recent row survives
+		connect.AssertEqual(t, statsGetVerifyRowCount(ctx, clientId), 1)
+	})
+}
+
+func statsInsertVerifyStat(ctx context.Context, clientId server.Id, periodStart time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`INSERT INTO verify_provider_stats (period_start, period_end, client_id, assignments, confirmations) VALUES ($1, $2, $3, $4, $5)`,
+			periodStart, periodStart.Add(time.Hour), clientId, int64(10), int64(8),
+		))
+	})
+}
+
+func statsGetVerifyRowCount(ctx context.Context, clientId server.Id) int {
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM verify_provider_stats WHERE client_id = $1`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
 }
 
 // ---- test seeding helpers (direct inserts for deterministic timestamps) ----
@@ -329,4 +374,65 @@ func statsSumInt(m map[string]int) int {
 		total += v
 	}
 	return total
+}
+
+// Exercises the provider-enumeration query in StatsProviders (network_client
+// semi-join provide_key). Guards the JOIN + GROUP BY -> EXISTS rewrite: a
+// client with multiple provide_keys must appear exactly once, an active client
+// with no provide_key must be excluded, and an inactive client that has one
+// must be excluded.
+func TestStatsProvidersProviderEnumeration(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "enum-net", userId)
+		clientSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkId, userId, "enum-net", false, false),
+		)
+
+		// active provider with two provide_keys: must appear exactly once
+		p1 := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, p1)
+		statsInsertProvideKey(ctx, p1, ProvideModePublic)
+		statsInsertProvideKey(ctx, p1, ProvideModeNetwork)
+
+		// active provider with one provide_key: appears
+		p2 := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, p2)
+		statsInsertProvideKey(ctx, p2, ProvideModePublic)
+
+		// active client with no provide_key: excluded (not a provider)
+		p3 := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, p3)
+
+		// inactive client with a provide_key: excluded (active = false)
+		p4 := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, false)`,
+				p4, networkId,
+			))
+		})
+		statsInsertProvideKey(ctx, p4, ProvideModePublic)
+
+		result, err := StatsProviders(clientSession)
+		connect.AssertEqual(t, err, nil)
+
+		seen := map[server.Id]int{}
+		for _, p := range result.Providers {
+			seen[p.ClientId] += 1
+		}
+
+		// exactly the two active providers, each once (p1's second provide_key
+		// must not duplicate it)
+		connect.AssertEqual(t, len(result.Providers), 2)
+		connect.AssertEqual(t, seen[p1], 1)
+		connect.AssertEqual(t, seen[p2], 1)
+		connect.AssertEqual(t, seen[p3], 0)
+		connect.AssertEqual(t, seen[p4], 0)
+	})
 }

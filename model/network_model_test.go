@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -31,12 +31,12 @@ func TestNetworkCreateGuestMode(t *testing.T) {
 
 		// Compile the regex
 		regex, err := regexp.Compile(pattern)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		result, err := NetworkCreate(networkCreate, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
-		assert.Equal(t, regex.MatchString(result.Network.NetworkName), true)
+		connect.AssertEqual(t, regex.MatchString(result.Network.NetworkName), true)
 
 	})
 }
@@ -65,11 +65,11 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 		// fetch the network user and make sure it's a guest
 
 		network := GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
+		connect.AssertNotEqual(t, network, nil)
 
 		networkUser := GetNetworkUser(ctx, *network.AdminUserId)
 
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
+		connect.AssertEqual(t, networkUser.AuthType, AuthTypeGuest)
 
 		// upgrade to non-guest
 
@@ -87,17 +87,17 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
 			upgradeGuestArgs,
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, upgradeGuestResult.Error, nil)
-		assert.Equal(t, upgradeGuestResult.VerificationRequired.UserAuth, userAuth)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, upgradeGuestResult.Error, nil)
+		connect.AssertEqual(t, upgradeGuestResult.VerificationRequired.UserAuth, userAuth)
 
 		// fetch the network user and make sure it's no longer a guest
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		connect.AssertEqual(t, networkUser.AuthType, AuthTypePassword)
 
 		// ensure network name has been updated
 		network = GetNetwork(clientSession)
-		assert.Equal(t, network.NetworkName, upgradedNetworkName)
+		connect.AssertEqual(t, network.NetworkName, upgradedNetworkName)
 
 	})
 }
@@ -132,8 +132,8 @@ func TestUpgradeGuestExistingUser(t *testing.T) {
 		// fetch the network
 		// it should have no guest upgrade network id
 		network := GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.GuestUpgradeNetworkId, nil)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.GuestUpgradeNetworkId, nil)
 
 		userAuth := fmt.Sprintf("%s@bringyour.com", networkId) // pulled from Testing_CreateNetwork
 		password := "password"                                 // pulled from Testing_CreateNetwork
@@ -143,16 +143,16 @@ func TestUpgradeGuestExistingUser(t *testing.T) {
 		}
 
 		result, err := UpgradeFromGuestExisting(args, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		// fmt.Println("error UpgradeFromGuestExisting: ", result.Error.Message)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		// fetch the network
 		// it should have the guest upgrade network id
 		network = GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
+		connect.AssertNotEqual(t, network, nil)
 
-		assert.Equal(t, network.GuestUpgradeNetworkId, networkId)
+		connect.AssertEqual(t, network.GuestUpgradeNetworkId, networkId)
 
 	})
 }
@@ -165,13 +165,13 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		networkName := "abcdef"
 
 		privateKey, err := solana.NewRandomPrivateKey()
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		publicKey := privateKey.PublicKey().String()
 
 		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, challenge.Error, nil)
+		connect.AssertEqual(t, challenge.Error, nil)
 		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		Testing_CreateNetworkByWallet(
@@ -204,14 +204,14 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 		// fetch the network
 		// it should have no guest upgrade network id
 		network := GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.GuestUpgradeNetworkId, nil)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.GuestUpgradeNetworkId, nil)
 
 		// login with a fresh challenge
 		challenge = CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, challenge.Error, nil)
+		connect.AssertEqual(t, challenge.Error, nil)
 		signature, err = privateKey.Sign([]byte(challenge.MessageTemplate))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		signatureB64 = base64.StdEncoding.EncodeToString(signature[:])
 
 		args := UpgradeGuestExistingArgs{
@@ -225,15 +225,15 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
 
 		result, err := UpgradeFromGuestExisting(args, clientSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		// fetch the network
 		// it should have the guest upgrade network id
 		network = GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
+		connect.AssertNotEqual(t, network, nil)
 
-		assert.Equal(t, network.GuestUpgradeNetworkId, networkId)
+		connect.AssertEqual(t, network.GuestUpgradeNetworkId, networkId)
 
 	})
 }
@@ -260,14 +260,14 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 		)
 
 		privateKey, err := solana.NewRandomPrivateKey()
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		publicKey := privateKey.PublicKey().String()
 		networkName := "abcdef"
 
 		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, challenge.Error, nil)
+		connect.AssertEqual(t, challenge.Error, nil)
 		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		args := UpgradeGuestArgs{
@@ -281,20 +281,20 @@ func TestUpgradeGuestByWallet(t *testing.T) {
 		}
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
-		assert.Equal(t, networkUser.WalletAddress, nil)
+		connect.AssertEqual(t, networkUser.AuthType, AuthTypeGuest)
+		connect.AssertEqual(t, networkUser.WalletAddress, nil)
 
 		result, err := UpgradeGuest(args, clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		network := GetNetwork(clientSession)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.NetworkName, networkName)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.NetworkName, networkName)
 
 		user := GetNetworkUser(ctx, *network.AdminUserId)
-		assert.Equal(t, user.AuthType, "solana")
-		assert.Equal(t, user.WalletAddress, publicKey)
+		connect.AssertEqual(t, user.AuthType, "solana")
+		connect.AssertEqual(t, user.WalletAddress, publicKey)
 
 	})
 }
@@ -333,8 +333,8 @@ func TestUpgradeGuestByWalletInvalidSignatureRejected(t *testing.T) {
 		invalidSignature := base64.StdEncoding.EncodeToString(make([]byte, 64))
 
 		before := GetNetworkUser(ctx, userId)
-		assert.Equal(t, before.AuthType, AuthTypeGuest)
-		assert.Equal(t, before.WalletAddress, nil)
+		connect.AssertEqual(t, before.AuthType, AuthTypeGuest)
+		connect.AssertEqual(t, before.WalletAddress, nil)
 
 		args := UpgradeGuestArgs{
 			NetworkName: "abcdef",
@@ -372,8 +372,8 @@ func TestNetworkCreateTermsFail(t *testing.T) {
 		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
 
 		result, err := NetworkCreate(networkCreate, clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error.Message, AgreeToTerms)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error.Message, AgreeToTerms)
 	})
 }
 
@@ -400,8 +400,8 @@ func TestNetworkUpdate(t *testing.T) {
 			NetworkName: networkName,
 		}
 		result, err := NetworkUpdate(networkUpdateArgs, sourceSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 
 		// fail
 		// network name should be at least 6 characters
@@ -409,8 +409,8 @@ func TestNetworkUpdate(t *testing.T) {
 			NetworkName: "a",
 		}
 		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 
 		// success
 		newName := "uvwxyz"
@@ -418,11 +418,11 @@ func TestNetworkUpdate(t *testing.T) {
 			NetworkName: newName,
 		}
 		result, err = NetworkUpdate(networkUpdateArgs, sourceSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		network := GetNetwork(sourceSession)
-		assert.Equal(t, network.NetworkName, newName)
+		connect.AssertEqual(t, network.NetworkName, newName)
 
 	})
 }
@@ -433,38 +433,38 @@ func TestNetworkNameValidation(t *testing.T) {
 		// too short
 		networkName := ""
 		_, err := validateNetworkName(networkName)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// too long
 		networkName = "a123456789012345678901234567890123456789012345678901"
 		_, err = validateNetworkName(networkName)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		/**
 		 * testing special characters
 		 */
 		networkName = "abcde$"
 		_, err = validateNetworkName(networkName)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		networkName = "abcdeé"
 		_, err = validateNetworkName(networkName)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		networkName = "東京タワー"
 		_, err = validateNetworkName(networkName)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// test spaces
 		networkName = "abc def"
 		expected := "abc-def"
 		validated, err := validateNetworkName(networkName)
-		assert.Equal(t, validated, expected)
+		connect.AssertEqual(t, validated, expected)
 
 		// valid name should pass
 		networkName = "abcdef"
 		_, err = validateNetworkName(networkName)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 	})
 }

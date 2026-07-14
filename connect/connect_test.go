@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,9 +15,7 @@ import (
 	mathrand "math/rand"
 	"runtime"
 
-	"golang.org/x/exp/maps"
-
-	"github.com/go-playground/assert/v2"
+	"maps"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -1385,7 +1384,7 @@ func testConnect(
 	}
 
 	randServer := func() (string, int) {
-		ports := maps.Values(hostPorts)
+		ports := slices.Collect(maps.Values(hostPorts))
 		port := ports[mathrand.Intn(len(ports))]
 		return fmt.Sprintf("ws://127.0.0.1:%d", port), port
 	}
@@ -1651,7 +1650,7 @@ func testConnect(
 		"",
 		"",
 	)
-	assert.Equal(t, nil, err)
+	connect.AssertEqual(t, nil, err)
 
 	result, err := model.RedeemBalanceCode(
 		&model.RedeemBalanceCodeArgs{
@@ -1660,8 +1659,8 @@ func testConnect(
 		},
 		ctx,
 	)
-	assert.Equal(t, nil, err)
-	assert.Equal(t, nil, result.Error)
+	connect.AssertEqual(t, nil, err)
+	connect.AssertEqual(t, nil, result.Error)
 
 	balanceCodeB, err := model.CreateBalanceCode(
 		ctx,
@@ -1672,7 +1671,7 @@ func testConnect(
 		"",
 		"",
 	)
-	assert.Equal(t, nil, err)
+	connect.AssertEqual(t, nil, err)
 
 	result, err = model.RedeemBalanceCode(
 		&model.RedeemBalanceCodeArgs{
@@ -1681,8 +1680,8 @@ func testConnect(
 		},
 		ctx,
 	)
-	assert.Equal(t, nil, err)
-	assert.Equal(t, nil, result.Error)
+	connect.AssertEqual(t, nil, err)
+	connect.AssertEqual(t, nil, result.Error)
 
 	// set up provide
 	switch contractTest {
@@ -1780,7 +1779,7 @@ func testConnect(
 		messageContentBytes := make([]byte, messageContentSize/2)
 		mathrand.Read(messageContentBytes)
 		messageContent := hex.EncodeToString(messageContentBytes)
-		assert.Equal(t, int(messageContentSize), len(messageContent))
+		connect.AssertEqual(t, int(messageContentSize), len(messageContent))
 
 		ackA := make(chan error, 1024+burstM*2)
 		ackB := make(chan error, 1024+burstM*2)
@@ -1919,8 +1918,8 @@ func testConnect(
 							switch v := m.(type) {
 							case *protocol.SimpleMessage:
 								if 0 < v.MessageCount {
-									assert.Equal(t, uint32(burstSize), v.MessageCount)
-									assert.Equal(t, uint32(i), v.MessageIndex)
+									connect.AssertEqual(t, uint32(burstSize), v.MessageCount)
+									connect.AssertEqual(t, uint32(i), v.MessageIndex)
 									i += 1
 								} else {
 									nackBCount += 1
@@ -1967,7 +1966,7 @@ func testConnect(
 				for i := 0; i < burstSize; i += 1 {
 					select {
 					case err := <-ackA:
-						assert.Equal(t, err, nil)
+						connect.AssertEqual(t, err, nil)
 					case <-time.After(receiveTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
@@ -1982,7 +1981,7 @@ func testConnect(
 				// for i, message := range messagesToB {
 				// 	for _, frame := range message.frames {
 				// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-				// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+				// 		connect.AssertEqual(t, uint32(i), simpleMessage.MessageIndex)
 				// 	}
 				// }
 
@@ -2125,8 +2124,8 @@ func testConnect(
 							switch v := m.(type) {
 							case *protocol.SimpleMessage:
 								if 0 < v.MessageCount {
-									assert.Equal(t, uint32(burstSize), v.MessageCount)
-									assert.Equal(t, uint32(i), v.MessageIndex)
+									connect.AssertEqual(t, uint32(burstSize), v.MessageCount)
+									connect.AssertEqual(t, uint32(i), v.MessageIndex)
 									i += 1
 								} else {
 									nackACount += 1
@@ -2173,7 +2172,7 @@ func testConnect(
 				for i := 0; i < burstSize; i += 1 {
 					select {
 					case err := <-ackB:
-						assert.Equal(t, err, nil)
+						connect.AssertEqual(t, err, nil)
 					case <-time.After(receiveTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
@@ -2188,7 +2187,7 @@ func testConnect(
 				// for i, message := range messagesToA {
 				// 	for _, frame := range message.frames {
 				// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
-				// 		assert.Equal(t, uint32(i), simpleMessage.MessageIndex)
+				// 		connect.AssertEqual(t, uint32(i), simpleMessage.MessageIndex)
 				// 	}
 				// }
 
@@ -2225,24 +2224,24 @@ func testConnect(
 				}
 
 				resendItemCountA, resendItemByteCountA, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
-				assert.Equal(t, resendMessageTypesA, nil)
-				assert.Equal(t, resendItemCountA, 0)
-				assert.Equal(t, resendItemByteCountA, ByteCount(0))
+				connect.AssertEqual(t, resendMessageTypesA, nil)
+				connect.AssertEqual(t, resendItemCountA, 0)
+				connect.AssertEqual(t, resendItemByteCountA, ByteCount(0))
 
 				resendItemCountB, resentItemByteCountB, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
-				assert.Equal(t, resendMessageTypesB, nil)
-				assert.Equal(t, resendItemCountB, 0)
-				assert.Equal(t, resentItemByteCountB, ByteCount(0))
+				connect.AssertEqual(t, resendMessageTypesB, nil)
+				connect.AssertEqual(t, resendItemCountB, 0)
+				connect.AssertEqual(t, resentItemByteCountB, ByteCount(0))
 
 				receiveItemCountA, receiveItemByteCountA, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
-				assert.Equal(t, receiveMessageTypesA, nil)
-				assert.Equal(t, receiveItemCountA, 0)
-				assert.Equal(t, receiveItemByteCountA, ByteCount(0))
+				connect.AssertEqual(t, receiveMessageTypesA, nil)
+				connect.AssertEqual(t, receiveItemCountA, 0)
+				connect.AssertEqual(t, receiveItemByteCountA, ByteCount(0))
 
 				receiveItemCountB, receiveItemByteCountB, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
-				assert.Equal(t, receiveMessageTypesB, nil)
-				assert.Equal(t, receiveItemCountB, 0)
-				assert.Equal(t, receiveItemByteCountB, ByteCount(0))
+				connect.AssertEqual(t, receiveMessageTypesB, nil)
+				connect.AssertEqual(t, receiveItemCountB, 0)
+				connect.AssertEqual(t, receiveItemByteCountB, ByteCount(0))
 			}
 		}
 	}
@@ -2289,12 +2288,12 @@ func testConnect(
 	case <-time.After(1 * time.Second):
 	}
 
-	assert.Equal(
+	connect.AssertEqual(
 		t,
 		ByteCount(0),
 		clientA.ContractManager().LocalStats().ContractOpenByteCount(),
 	)
-	assert.Equal(
+	connect.AssertEqual(
 		t,
 		ByteCount(0),
 		clientB.ContractManager().LocalStats().ContractOpenByteCount(),
@@ -2323,15 +2322,15 @@ func testConnect(
 		}
 	}
 
-	assert.Equal(t, len(contractIdPartialClosePartiesAToB), 0)
-	assert.Equal(t, len(contractIdPartialClosePartiesBToA), 0)
+	connect.AssertEqual(t, len(contractIdPartialClosePartiesAToB), 0)
+	connect.AssertEqual(t, len(contractIdPartialClosePartiesBToA), 0)
 
 	// FIXME what are these other contracts?
 	// for _, party := range contractIdPartialClosePartiesAToB {
-	// 	assert.Equal(t, model.ContractPartySource, party)
+	// 	connect.AssertEqual(t, model.ContractPartySource, party)
 	// }
 	// for _, party := range contractIdPartialClosePartiesBToA {
-	// 	assert.Equal(t, model.ContractPartySource, party)
+	// 	connect.AssertEqual(t, model.ContractPartySource, party)
 	// }
 
 	flushedContractIdsA := []server.Id{}
@@ -2345,24 +2344,24 @@ func testConnect(
 
 	// SendSequence now flushes pending contracts when closed
 	// it's normal to have one pending contract per sequence due the predictive queueing of contracts
-	assert.Equal(t, len(flushedContractIdsA), 0)
-	assert.Equal(t, len(flushedContractIdsB), 0)
+	connect.AssertEqual(t, len(flushedContractIdsA), 0)
+	connect.AssertEqual(t, len(flushedContractIdsB), 0)
 
 	// if e := len(contractIdPartialClosePartiesAToB) - len(flushedContractIdsA); 1 < e {
-	// 	assert.Equal(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
+	// 	connect.AssertEqual(t, len(flushedContractIdsA), len(contractIdPartialClosePartiesAToB))
 	// }
 	// for _, contractId := range flushedContractIdsA {
 	// 	party, ok := contractIdPartialClosePartiesAToB[contractId]
-	// 	assert.Equal(t, true, ok)
-	// 	assert.Equal(t, model.ContractPartySource, party)
+	// 	connect.AssertEqual(t, true, ok)
+	// 	connect.AssertEqual(t, model.ContractPartySource, party)
 	// }
 	// if e := len(contractIdPartialClosePartiesBToA) - len(flushedContractIdsB); 1 < e {
-	// 	assert.Equal(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
+	// 	connect.AssertEqual(t, len(flushedContractIdsB), len(contractIdPartialClosePartiesBToA))
 	// }
 	// for _, contractId := range flushedContractIdsB {
 	// 	party, ok := contractIdPartialClosePartiesBToA[contractId]
-	// 	assert.Equal(t, true, ok)
-	// 	assert.Equal(t, model.ContractPartySource, party)
+	// 	connect.AssertEqual(t, true, ok)
+	// 	connect.AssertEqual(t, model.ContractPartySource, party)
 	// }
 
 	localStatsA := clientA.ContractManager().LocalStats()
@@ -2378,7 +2377,7 @@ func testConnect(
 		threshold := 64*model.Mib + nackDroppedByteCount
 		e := a - b
 		if e < -threshold || threshold < e {
-			assert.Equal(t, a, b)
+			connect.AssertEqual(t, a, b)
 		}
 	}
 

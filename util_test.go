@@ -8,20 +8,20 @@ import (
 
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestPorts(t *testing.T) {
 
-	assert.Equal(t, CollapsePorts([]int{}), "")
-	assert.Equal(t, RequireExpandPorts(""), []int{})
+	connect.AssertEqual(t, CollapsePorts([]int{}), "")
+	connect.AssertEqual(t, RequireExpandPorts(""), []int{})
 
-	assert.Equal(t, CollapsePorts([]int{1, 2, 3, 5, 7, 8, 10}), "1-3,5,7-8,10")
-	assert.Equal(t, RequireExpandPorts("1-3,5,7-8,10"), []int{1, 2, 3, 5, 7, 8, 10})
+	connect.AssertEqual(t, CollapsePorts([]int{1, 2, 3, 5, 7, 8, 10}), "1-3,5,7-8,10")
+	connect.AssertEqual(t, RequireExpandPorts("1-3,5,7-8,10"), []int{1, 2, 3, 5, 7, 8, 10})
 
-	assert.Equal(t, CollapsePorts([]int{1, 1, 1, 2}), "1-2")
+	connect.AssertEqual(t, CollapsePorts([]int{1, 1, 1, 2}), "1-2")
 
-	assert.Equal(t, RequireExpandPorts("1+2,5,7+1,10"), []int{1, 2, 3, 5, 7, 8, 10})
+	connect.AssertEqual(t, RequireExpandPorts("1+2,5,7+1,10"), []int{1, 2, 3, 5, 7, 8, 10})
 
 	for range 1024 {
 		n := mathrand.Intn(128)
@@ -39,7 +39,7 @@ func TestPorts(t *testing.T) {
 		for _, port := range ports2 {
 			uniquePorts2[port] = true
 		}
-		assert.Equal(t, uniquePorts, uniquePorts2)
+		connect.AssertEqual(t, uniquePorts, uniquePorts2)
 	}
 }
 
@@ -132,5 +132,5 @@ func TestRunPosts(t *testing.T) {
 	// f(4) -> f(3) + f(2) + f(1) + f(0) = 2 * f(3) = 2^3
 
 	RunPosts(ctx, f(5))
-	assert.Equal(t, int(count.Load()), 16)
+	connect.AssertEqual(t, int(count.Load()), 16)
 }

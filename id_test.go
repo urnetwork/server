@@ -5,7 +5,7 @@ import (
 
 	"encoding/json"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestJsonCodec(t *testing.T) {
@@ -20,26 +20,26 @@ func TestJsonCodec(t *testing.T) {
 	test1.B = &b_
 
 	test1Json, err := json.Marshal(test1)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	test2 := &Test{}
 	err = json.Unmarshal(test1Json, test2)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
-	assert.Equal(t, test1.A, test2.A)
-	assert.Equal(t, test1.B, test2.B)
+	connect.AssertEqual(t, test1.A, test2.A)
+	connect.AssertEqual(t, test1.B, test2.B)
 
 	test3 := &Test{}
 	test3.A = NewId()
 
 	test3Json, err := json.Marshal(test3)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	test4 := &Test{}
 	err = json.Unmarshal(test3Json, test4)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
-	assert.Equal(t, test3.A, test4.A)
-	assert.Equal(t, test3.B, nil)
-	assert.Equal(t, test3.B, test4.B)
+	connect.AssertEqual(t, test3.A, test4.A)
+	connect.AssertEqual(t, test3.B, nil)
+	connect.AssertEqual(t, test3.B, test4.B)
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -22,7 +22,7 @@ func TestDataCodeIsNotPro(t *testing.T) {
 		networkId := server.NewId()
 
 		// no balances at all -> not pro
-		assert.Equal(t, IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
 
 		balanceCode, err := CreateBalanceCode(
 			ctx,
@@ -33,27 +33,27 @@ func TestDataCodeIsNotPro(t *testing.T) {
 			"test-purchase-pro-1-receipt",
 			"test@bringyour.com",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = RedeemBalanceCode(&RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: networkId,
 		}, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// the data landed...
 		transferBalances := GetActiveTransferBalances(ctx, networkId)
-		assert.Equal(t, len(transferBalances), 1)
+		connect.AssertEqual(t, len(transferBalances), 1)
 		transferBalance := transferBalances[0]
-		assert.Equal(t, transferBalance.BalanceByteCount, ByteCount(1024*1024*1024))
+		connect.AssertEqual(t, transferBalance.BalanceByteCount, ByteCount(1024*1024*1024))
 		// ...and it IS a paid balance (it carries revenue)...
-		assert.Equal(t, transferBalance.Paid, true)
+		connect.AssertEqual(t, transferBalance.Paid, true)
 		// ...but it does NOT carry the Pro entitlement
-		assert.Equal(t, transferBalance.Pro, false)
+		connect.AssertEqual(t, transferBalance.Pro, false)
 
 		// the network is still free. This is the whole point.
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), false)
-		assert.Equal(t, IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
 	})
 }
 
@@ -66,7 +66,7 @@ func TestProEntitlementFollowsProBalance(t *testing.T) {
 		networkId := server.NewId()
 
 		// prime the cache with the "not pro" answer, the way a hot path would
-		assert.Equal(t, IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
 
 		now := server.NowUtc()
 
@@ -75,25 +75,25 @@ func TestProEntitlementFollowsProBalance(t *testing.T) {
 			err := AddBasicTransferBalanceInTx(
 				tx, ctx, networkId, ByteCount(30*1024*1024*1024), now, now.Add(24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		})
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), false)
 
 		// a pro balance does
 		server.Tx(ctx, func(tx server.PgTx) {
 			err := AddProTransferBalanceInTx(
 				tx, ctx, networkId, ByteCount(10*1024*1024*1024*1024), now, now.Add(30*24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		})
 
 		// the writer refreshes the cache, so the upgrade is visible immediately
 		// rather than after ProCacheTtl
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), true)
-		assert.Equal(t, IsProNetwork(ctx, networkId), true)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), true)
+		connect.AssertEqual(t, IsProNetwork(ctx, networkId), true)
 
 		// IsPro (the *server.Id wrapper the rest of the code uses) agrees
-		assert.Equal(t, IsPro(ctx, &networkId), true)
+		connect.AssertEqual(t, IsPro(ctx, &networkId), true)
 	})
 }
 
@@ -112,9 +112,9 @@ func TestProEntitlementIsTimeBasedNotByteBased(t *testing.T) {
 			err := AddProTransferBalanceInTx(
 				tx, ctx, networkId, ByteCount(1024), now, now.Add(30*24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		})
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), true)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), true)
 
 		// drain the balance to zero -- `active` (0 < balance_byte_count) goes false
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -126,9 +126,9 @@ func TestProEntitlementIsTimeBasedNotByteBased(t *testing.T) {
 		})
 
 		// no data left...
-		assert.Equal(t, len(GetActiveTransferBalances(ctx, networkId)), 0)
+		connect.AssertEqual(t, len(GetActiveTransferBalances(ctx, networkId)), 0)
 		// ...but still Pro, because the period they paid for has not ended
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), true)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), true)
 	})
 }
 
@@ -149,11 +149,11 @@ func TestProEntitlementExpires(t *testing.T) {
 				now.Add(-48*time.Hour),
 				now.Add(-24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		})
 
-		assert.Equal(t, UpdateProNetwork(ctx, networkId), false)
-		assert.Equal(t, IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
 	})
 }
 
@@ -182,10 +182,10 @@ func TestAddTransferBalanceProIsExplicit(t *testing.T) {
 			// Pro not set
 		})
 		balances := GetActiveTransferBalances(ctx, dataNetworkId)
-		assert.Equal(t, len(balances), 1)
-		assert.Equal(t, balances[0].Paid, true) // it IS paid
-		assert.Equal(t, balances[0].Pro, false) // but NOT pro
-		assert.Equal(t, UpdateProNetwork(ctx, dataNetworkId), false)
+		connect.AssertEqual(t, len(balances), 1)
+		connect.AssertEqual(t, balances[0].Paid, true) // it IS paid
+		connect.AssertEqual(t, balances[0].Pro, false) // but NOT pro
+		connect.AssertEqual(t, UpdateProNetwork(ctx, dataNetworkId), false)
 
 		// a subscription activation: says Pro: true -> is Pro
 		proNetworkId := server.NewId()
@@ -199,8 +199,8 @@ func TestAddTransferBalanceProIsExplicit(t *testing.T) {
 			Pro:                   true,
 		})
 		balances = GetActiveTransferBalances(ctx, proNetworkId)
-		assert.Equal(t, len(balances), 1)
-		assert.Equal(t, balances[0].Pro, true)
-		assert.Equal(t, UpdateProNetwork(ctx, proNetworkId), true)
+		connect.AssertEqual(t, len(balances), 1)
+		connect.AssertEqual(t, balances[0].Pro, true)
+		connect.AssertEqual(t, UpdateProNetwork(ctx, proNetworkId), true)
 	})
 }

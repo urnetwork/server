@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 // TestProConfig loads config/all/pro.yml through Pro() and asserts the product
@@ -23,33 +23,37 @@ func TestProConfig(t *testing.T) {
 	}
 
 	// free (Community)
-	assert.Equal(t, c.MaxConcurrentClients(false), 2)
-	assert.Equal(t, c.DataAmount(false), ByteCount(30)*gib)
-	assert.Equal(t, c.DataPeriod(false), 24*time.Hour)
-	assert.Equal(t, c.FeatureEnabled(false, FeatureHttpProxy), true)
-	assert.Equal(t, c.FeatureEnabled(false, FeatureHttpsProxy), true)
-	assert.Equal(t, c.FeatureEnabled(false, FeatureSocksProxy), false)     // Pro-only
-	assert.Equal(t, c.FeatureEnabled(false, FeatureWireguardProxy), false) // Pro-only
+	connect.AssertEqual(t, c.MaxConcurrentClients(false), 2)
+	connect.AssertEqual(t, c.DataAmount(false), ByteCount(30)*gib)
+	connect.AssertEqual(t, c.DataPeriod(false), 24*time.Hour)
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureHttpProxy), true)
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureHttpsProxy), true)
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureSocksProxy), false)     // Pro-only
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureWireguardProxy), false) // Pro-only
 
 	// pro (UR Pro)
-	assert.Equal(t, c.MaxConcurrentClients(true), 1000)
-	assert.Equal(t, c.DataAmount(true), ByteCount(10)*tib)
-	assert.Equal(t, c.DataPeriod(true), 720*time.Hour)
-	assert.Equal(t, c.FeatureEnabled(true, FeatureHttpProxy), true)
-	assert.Equal(t, c.FeatureEnabled(true, FeatureSocksProxy), true)
-	assert.Equal(t, c.FeatureEnabled(true, FeatureWireguardProxy), true)
+	connect.AssertEqual(t, c.MaxConcurrentClients(true), 1000)
+	connect.AssertEqual(t, c.DataAmount(true), ByteCount(10)*tib)
+	connect.AssertEqual(t, c.DataPeriod(true), 720*time.Hour)
+	connect.AssertEqual(t, c.FeatureEnabled(true, FeatureHttpProxy), true)
+	connect.AssertEqual(t, c.FeatureEnabled(true, FeatureSocksProxy), true)
+	connect.AssertEqual(t, c.FeatureEnabled(true, FeatureWireguardProxy), true)
 
 	// referrals
-	assert.Equal(t, c.ReferralBonus, ByteCount(3)*gib)
-	assert.Equal(t, c.ReferralPeriod, 24*time.Hour)
-	assert.Equal(t, c.MaxReferrals, 10)
+	connect.AssertEqual(t, c.ReferralBonus, ByteCount(3)*gib)
+	connect.AssertEqual(t, c.ReferredBonus, ByteCount(3)*gib)
+	connect.AssertEqual(t, c.ReferralPeriod, 24*time.Hour)
+	connect.AssertEqual(t, c.MaxReferrals, 20)
+
+	// seeker
+	connect.AssertEqual(t, c.SeekerDataMultiplier(), 2.0)
 
 	// data codes
-	assert.Equal(t, c.DataCodeDuration, 8760*time.Hour)
-	assert.Equal(t, len(c.DataCodeSkus), 2)
+	connect.AssertEqual(t, c.DataCodeDuration, 8760*time.Hour)
+	connect.AssertEqual(t, len(c.DataCodeSkus), 2)
 
 	// unknown feature -> false
-	assert.Equal(t, c.FeatureEnabled(true, "unknown_feature"), false)
+	connect.AssertEqual(t, c.FeatureEnabled(true, "unknown_feature"), false)
 
 }
 
@@ -59,11 +63,11 @@ func TestProConfig(t *testing.T) {
 func TestConcurrentClientsEnforcementIsDark(t *testing.T) {
 	c := Pro()
 
-	assert.Equal(t, c.EnforceConcurrentClients, false)
+	connect.AssertEqual(t, c.EnforceConcurrentClients, false)
 
 	// way over the free limit of 2, but enforcement is off -> no rejection
-	assert.Equal(t, c.ConcurrentClientsExceeded(false, 999), false)
-	assert.Equal(t, c.ConcurrentClientsExceeded(true, 999999), false)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(false, 999), false)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(true, 999999), false)
 }
 
 // TestFeatureEnforcementIsDark pins the other staged rollout: SOCKS/WireGuard are
@@ -73,14 +77,14 @@ func TestConcurrentClientsEnforcementIsDark(t *testing.T) {
 func TestFeatureEnforcementIsDark(t *testing.T) {
 	c := Pro()
 
-	assert.Equal(t, c.EnforceFeatures, false)
+	connect.AssertEqual(t, c.EnforceFeatures, false)
 
 	// the plan says free does not include SOCKS/WireGuard...
-	assert.Equal(t, c.FeatureEnabled(false, FeatureSocksProxy), false)
-	assert.Equal(t, c.FeatureEnabled(false, FeatureWireguardProxy), false)
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureSocksProxy), false)
+	connect.AssertEqual(t, c.FeatureEnabled(false, FeatureWireguardProxy), false)
 	// ...but while enforcement is dark, free is still allowed to use them
-	assert.Equal(t, c.FeatureAllowed(false, FeatureSocksProxy), true)
-	assert.Equal(t, c.FeatureAllowed(false, FeatureWireguardProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureSocksProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureWireguardProxy), true)
 }
 
 // TestFeatureAllowed covers the feature logic itself with enforcement turned on.
@@ -92,17 +96,17 @@ func TestFeatureAllowed(t *testing.T) {
 	}
 
 	// free: http/https only
-	assert.Equal(t, c.FeatureAllowed(false, FeatureHttpProxy), true)
-	assert.Equal(t, c.FeatureAllowed(false, FeatureHttpsProxy), true)
-	assert.Equal(t, c.FeatureAllowed(false, FeatureSocksProxy), false)
-	assert.Equal(t, c.FeatureAllowed(false, FeatureWireguardProxy), false)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureHttpProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureHttpsProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureSocksProxy), false)
+	connect.AssertEqual(t, c.FeatureAllowed(false, FeatureWireguardProxy), false)
 
 	// pro: everything
-	assert.Equal(t, c.FeatureAllowed(true, FeatureSocksProxy), true)
-	assert.Equal(t, c.FeatureAllowed(true, FeatureWireguardProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(true, FeatureSocksProxy), true)
+	connect.AssertEqual(t, c.FeatureAllowed(true, FeatureWireguardProxy), true)
 
 	// unknown feature is never allowed
-	assert.Equal(t, c.FeatureAllowed(true, "unknown_feature"), false)
+	connect.AssertEqual(t, c.FeatureAllowed(true, "unknown_feature"), false)
 }
 
 // TestConcurrentClientsExceeded covers the limit logic itself, independent of
@@ -115,16 +119,16 @@ func TestConcurrentClientsExceeded(t *testing.T) {
 	}
 
 	// free: room for 2 connected clients
-	assert.Equal(t, c.ConcurrentClientsExceeded(false, 0), false)
-	assert.Equal(t, c.ConcurrentClientsExceeded(false, 1), false)
-	assert.Equal(t, c.ConcurrentClientsExceeded(false, 2), true) // at limit -> no room
-	assert.Equal(t, c.ConcurrentClientsExceeded(false, 3), true)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(false, 0), false)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(false, 1), false)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(false, 2), true) // at limit -> no room
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(false, 3), true)
 
 	// pro: much higher ceiling
-	assert.Equal(t, c.ConcurrentClientsExceeded(true, 999), false)
-	assert.Equal(t, c.ConcurrentClientsExceeded(true, 1000), true)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(true, 999), false)
+	connect.AssertEqual(t, c.ConcurrentClientsExceeded(true, 1000), true)
 
 	// limit <= 0 means unlimited
 	unlimited := &ProConfig{EnforceConcurrentClients: true, Free: ProTier{ConcurrentClients: 0}}
-	assert.Equal(t, unlimited.ConcurrentClientsExceeded(false, 100000), false)
+	connect.AssertEqual(t, unlimited.ConcurrentClientsExceeded(false, 100000), false)
 }

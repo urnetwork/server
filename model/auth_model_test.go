@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gagliardetto/solana-go"
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -32,8 +32,8 @@ func TestGetUserAuth(t *testing.T) {
 		testingUserAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		userAuth, err := GetUserAuth(ctx, networkId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, userAuth, testingUserAuth)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, userAuth, testingUserAuth)
 	})
 }
 
@@ -76,8 +76,8 @@ func TestResetPassword(t *testing.T) {
 		)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 2)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 2)
 
 		passwordResetCreateCodeResult, err := AuthPasswordResetCreateCode(
 			AuthPasswordResetCreateCodeArgs{
@@ -85,7 +85,7 @@ func TestResetPassword(t *testing.T) {
 			},
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		newPassword := "testagain"
 
@@ -96,16 +96,16 @@ func TestResetPassword(t *testing.T) {
 			},
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.NetworkId, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.NetworkId, nil)
 
 		userAuths, err := getUserAuths(userId, ctx)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(userAuths), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(userAuths), 2)
 
 		for _, userAuth := range userAuths {
 			loginPasswordHash := computePasswordHashV1([]byte(newPassword), userAuth.PasswordSalt)
-			assert.Equal(t, bytes.Equal(userAuth.PasswordHash, loginPasswordHash), true)
+			connect.AssertEqual(t, bytes.Equal(userAuth.PasswordHash, loginPasswordHash), true)
 		}
 
 	})
@@ -135,9 +135,9 @@ func TestAuthCode(t *testing.T) {
 		authCodeCreate := &AuthCodeCreateArgs{}
 
 		authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
-		assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
+		connect.AssertNotEqual(t, authCodeCreateResult.AuthCode, "")
 
 		// now try to redeem the code
 
@@ -146,9 +146,9 @@ func TestAuthCode(t *testing.T) {
 		}
 
 		authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
-		assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
+		connect.AssertNotEqual(t, authCodeLoginResult.ByJwt, "")
 
 		// the second redeem should fail
 
@@ -157,10 +157,10 @@ func TestAuthCode(t *testing.T) {
 		}
 
 		authCodeLoginResult2, err := AuthCodeLogin(authCodeLogin2, clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
-		assert.Equal(t, authCodeLoginResult2.ByJwt, "")
-		assert.NotEqual(t, authCodeLoginResult2.Error, nil)
+		connect.AssertEqual(t, authCodeLoginResult2.ByJwt, "")
+		connect.AssertNotEqual(t, authCodeLoginResult2.Error, nil)
 
 		RemoveExpiredAuthCodes(ctx, server.NowUtc())
 	})
@@ -194,9 +194,9 @@ func TestAuthCodeIdentity(t *testing.T) {
 		}
 
 		authCodeCreateResult, err := AuthCodeCreate(authCodeCreate, clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authCodeCreateResult.Error, nil)
-		assert.NotEqual(t, authCodeCreateResult.AuthCode, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authCodeCreateResult.Error, nil)
+		connect.AssertNotEqual(t, authCodeCreateResult.AuthCode, "")
 
 		// the login mints the roles and principal into the jwt
 		authCodeLogin := &AuthCodeLoginArgs{
@@ -204,13 +204,13 @@ func TestAuthCodeIdentity(t *testing.T) {
 		}
 
 		authCodeLoginResult, err := AuthCodeLogin(authCodeLogin, clientSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, authCodeLoginResult.ByJwt, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, authCodeLoginResult.ByJwt, "")
 
 		loginByJwt, err := jwt.ParseByJwt(ctx, authCodeLoginResult.ByJwt)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, loginByJwt.Roles, []string{"role1", "role2"})
-		assert.Equal(t, loginByJwt.Principal, "svc-a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, loginByJwt.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, loginByJwt.Principal, "svc-a")
 
 		// a client created by the service session inherits the identity
 		// into the client jwt
@@ -221,20 +221,20 @@ func TestAuthCodeIdentity(t *testing.T) {
 			},
 			serviceSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 
 		clientByJwt, err := jwt.ParseByJwt(ctx, *authClientResult.ByClientJwt)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, clientByJwt.ClientId, nil)
-		assert.Equal(t, clientByJwt.Roles, []string{"role1", "role2"})
-		assert.Equal(t, clientByJwt.Principal, "svc-a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, clientByJwt.ClientId, nil)
+		connect.AssertEqual(t, clientByJwt.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, clientByJwt.Principal, "svc-a")
 
 		// LoadByJwtFromClientId rebuilds the identity from the db
 		loadedByJwt, err := jwt.LoadByJwtFromClientId(ctx, *clientByJwt.ClientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, loadedByJwt.Roles, []string{"role1", "role2"})
-		assert.Equal(t, loadedByJwt.Principal, "svc-a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, loadedByJwt.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, loadedByJwt.Principal, "svc-a")
 
 		// a guest session cannot create an auth code with roles or principal
 		guestSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
@@ -250,8 +250,8 @@ func TestAuthCodeIdentity(t *testing.T) {
 			},
 			guestSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, authCodeCreateResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, authCodeCreateResult.Error, nil)
 	})
 }
 
@@ -263,15 +263,15 @@ func TestVerifySolanaSignature(t *testing.T) {
 		message := "Welcome to URnetwork"
 
 		isValid, err := VerifySolanaSignature(pk, message, signature)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, isValid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, true)
 
 		// now test with an invalid signature
 		invalidSignature := "KEpagxVwv1FmPt3KIMdVZz4YsDxgD7J23+f6aafejwdnBy3WJgkE4qteYMwucNoH+9RaPU70YV2Bf+xI+Nd7Cw"
 
 		isValid, err = VerifySolanaSignature(pk, message, invalidSignature)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, isValid, false)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, false)
 
 	})
 }
@@ -300,8 +300,8 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		sigHex := hex.EncodeToString(signature)
 
 		isValid, err := VerifyEthereumSignature(address.String(), messageStr, sigHex)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, isValid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, true)
 
 		// Test with an invalid signature (modified signature)
 		invalidSigBytes, _ := hex.DecodeString(sigHex)
@@ -309,13 +309,13 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		invalidSigHex := hex.EncodeToString(invalidSigBytes)
 
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, invalidSigHex)
-		assert.Equal(t, isValid, false)
+		connect.AssertEqual(t, isValid, false)
 
 		// Malformed signature (wrong length)
 		malformedSig := "wrongsig"
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, malformedSig)
-		assert.NotEqual(t, err, nil) // Error expected
-		assert.Equal(t, isValid, false)
+		connect.AssertNotEqual(t, err, nil) // Error expected
+		connect.AssertEqual(t, isValid, false)
 	})
 }
 
@@ -332,26 +332,26 @@ func TestUserAuthLogin(t *testing.T) {
 		userAuth := fmt.Sprintf("%s@bringyour.com", networkId)
 
 		result, err := loginUserAuth(&userAuth, ctx)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result, nil)
-		assert.Equal(t, result.UserAuth, userAuth)
-		assert.NotEqual(t, result.AuthAllowed, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		connect.AssertEqual(t, result.UserAuth, userAuth)
+		connect.AssertNotEqual(t, result.AuthAllowed, nil)
 
 		for _, authAllowed := range *result.AuthAllowed {
-			assert.NotEqual(t, authAllowed, "")
+			connect.AssertNotEqual(t, authAllowed, "")
 			glog.Infof("Auth allowed: %s", authAllowed)
 		}
 
-		assert.Equal(t, len(*result.AuthAllowed), 2)
+		connect.AssertEqual(t, len(*result.AuthAllowed), 2)
 		authAllowed := (*result.AuthAllowed)[0]
-		assert.Equal(t, UserAuthType(authAllowed), UserAuthTypeEmail)
+		connect.AssertEqual(t, UserAuthType(authAllowed), UserAuthTypeEmail)
 		authAllowed = (*result.AuthAllowed)[1]
-		assert.Equal(t, authAllowed, "password")
+		connect.AssertEqual(t, authAllowed, "password")
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 0)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 0)
 
 		/**
 		 * Login with SSO with same userAuth should work
@@ -372,15 +372,15 @@ func TestUserAuthLogin(t *testing.T) {
 			},
 			ctx,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result, nil)
-		assert.NotEqual(t, result.Network.ByJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		connect.AssertNotEqual(t, result.Network.ByJwt, nil)
 
 		// the login should have created a SSO auth
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
 
 	})
 }
@@ -394,14 +394,14 @@ func TestLoginWithWallet(t *testing.T) {
 		networkName := "test"
 
 		privateKey, err := solana.NewRandomPrivateKey()
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		publicKey := privateKey.PublicKey().String()
 
 		// create a server-issued challenge and sign it
 		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, challenge.Error, nil)
+		connect.AssertEqual(t, challenge.Error, nil)
 		signature, err := privateKey.Sign([]byte(challenge.MessageTemplate))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		signatureB64 := base64.StdEncoding.EncodeToString(signature[:])
 
 		Testing_CreateNetworkByWallet(
@@ -416,9 +416,9 @@ func TestLoginWithWallet(t *testing.T) {
 
 		// login again with a fresh challenge
 		challenge = CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
-		assert.Equal(t, challenge.Error, nil)
+		connect.AssertEqual(t, challenge.Error, nil)
 		signature, err = privateKey.Sign([]byte(challenge.MessageTemplate))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		signatureB64 = base64.StdEncoding.EncodeToString(signature[:])
 
 		result, err := handleLoginWallet(&WalletAuthArgs{
@@ -428,9 +428,9 @@ func TestLoginWithWallet(t *testing.T) {
 			Blockchain: AuthTypeSolana,
 		}, ctx)
 
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result, nil)
-		assert.NotEqual(t, result.Network.ByJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		connect.AssertNotEqual(t, result.Network.ByJwt, nil)
 	})
 }
 
@@ -445,13 +445,13 @@ func TestWalletLoginNonceSingleUse(t *testing.T) {
 		wallet := solana.NewWallet()
 
 		nonceResult, err := AuthWalletNonceCreate(clientSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, nonceResult.Nonce, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, nonceResult.Nonce, "")
 
 		// the client signs a message that embeds the server-issued nonce
 		message := "Welcome to URnetwork " + nonceResult.Nonce
 		sig, err := wallet.PrivateKey.Sign([]byte(message))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		walletAuth := &WalletAuthArgs{
 			PublicKey:  wallet.PublicKey().String(),
@@ -463,11 +463,11 @@ func TestWalletLoginNonceSingleUse(t *testing.T) {
 
 		// first use: valid signature + valid nonce -> accepted (nonce consumed)
 		_, err = handleLoginWallet(walletAuth, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// replay the identical triple: the nonce is already consumed -> rejected
 		_, err = handleLoginWallet(walletAuth, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -482,12 +482,12 @@ func TestWalletLoginNonceMustBindMessage(t *testing.T) {
 		wallet := solana.NewWallet()
 
 		nonceResult, err := AuthWalletNonceCreate(clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// the signed message does NOT contain the nonce
 		message := "Welcome to URnetwork"
 		sig, err := wallet.PrivateKey.Sign([]byte(message))
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = handleLoginWallet(&WalletAuthArgs{
 			PublicKey:  wallet.PublicKey().String(),
@@ -496,7 +496,7 @@ func TestWalletLoginNonceMustBindMessage(t *testing.T) {
 			Blockchain: AuthTypeSolana,
 			Nonce:      nonceResult.Nonce,
 		}, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -526,9 +526,9 @@ func TestSocialLogin(t *testing.T) {
 		)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 0)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 0)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
 
 		// login
 		result, err := handleLoginParsedAuthJwt(
@@ -540,14 +540,14 @@ func TestSocialLogin(t *testing.T) {
 			ctx,
 		)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.Network.ByJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.Network.ByJwt, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 0)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 0)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
 
 		// logging in with an Apple SSO auth should work too
 		parsedAuthJwt = AuthJwt{
@@ -563,16 +563,16 @@ func TestSocialLogin(t *testing.T) {
 			},
 			ctx,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
 
 		/**
 		 * Should now have 2 SSO auths
 		 */
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 0)
-		assert.Equal(t, len(networkUser.SsoAuths), 2)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 0)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 2)
 
 	})
 }
@@ -612,19 +612,19 @@ func TestAddingSsoToDifferentNetworksShouldFail(t *testing.T) {
 			AuthJwtType:   SsoAuthTypeGoogle,
 			UserId:        walletNetworkUserId,
 		}, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 0)
-		assert.Equal(t, len(networkUser.WalletAuths), 0)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 0)
+		connect.AssertEqual(t, len(networkUser.WalletAuths), 0)
 
 		walletNetworkUser := GetNetworkUser(ctx, walletNetworkUserId)
-		assert.NotEqual(t, walletNetworkUser, nil)
-		assert.Equal(t, len(walletNetworkUser.UserAuths), 0)
-		assert.Equal(t, len(walletNetworkUser.SsoAuths), 0)
-		assert.Equal(t, len(walletNetworkUser.WalletAuths), 1)
+		connect.AssertNotEqual(t, walletNetworkUser, nil)
+		connect.AssertEqual(t, len(walletNetworkUser.UserAuths), 0)
+		connect.AssertEqual(t, len(walletNetworkUser.SsoAuths), 0)
+		connect.AssertEqual(t, len(walletNetworkUser.WalletAuths), 1)
 
 		/**
 		 * add a SSO to the email network should work
@@ -635,13 +635,13 @@ func TestAddingSsoToDifferentNetworksShouldFail(t *testing.T) {
 			AuthJwtType:   SsoAuthTypeGoogle,
 			UserId:        userId,
 		}, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
-		assert.Equal(t, len(networkUser.WalletAuths), 0)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
+		connect.AssertEqual(t, len(networkUser.WalletAuths), 0)
 
 	})
 }
@@ -672,22 +672,22 @@ func TestAddingSameSsoToNetworkShouldFail(t *testing.T) {
 		}
 
 		err := addSsoAuth(addSsoAuthArgs, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
-		assert.Equal(t, len(networkUser.WalletAuths), 0)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
+		connect.AssertEqual(t, len(networkUser.WalletAuths), 0)
 
 		/**
 		 * Trying to add the same SSO auth again should fail
 		 */
 		err = addSsoAuth(addSsoAuthArgs, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.Equal(t, len(networkUser.SsoAuths), 1)
+		connect.AssertEqual(t, len(networkUser.SsoAuths), 1)
 
 	})
 }
@@ -708,8 +708,8 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
 
 		/**
 		 * Trying to add the same user auth again should fail
@@ -723,11 +723,11 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 		}
 
 		err := addUserAuth(args, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 1)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
 
 		/**
 		 * But adding a phone user auth should work
@@ -742,11 +742,11 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 		}
 
 		err = addUserAuth(args, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, len(networkUser.UserAuths), 2)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, len(networkUser.UserAuths), 2)
 
 		/**
 		 * Adding an existing user auth to a different network should fail
@@ -761,7 +761,7 @@ func TestAddingSameUserAuthToNetworkShouldFail(t *testing.T) {
 		}
 
 		err = addUserAuth(args, ctx)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 	})
 }
@@ -790,9 +790,9 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 				},
 				clientSession,
 			)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, result.Error, nil)
-			assert.NotEqual(t, result.VerifyCode, nil)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error, nil)
+			connect.AssertNotEqual(t, result.VerifyCode, nil)
 			return *result.VerifyCode
 		}
 
@@ -800,7 +800,7 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 		// auth attempt budget
 		code1 := createCode()
 		code2 := createCode()
-		assert.NotEqual(t, code1, code2)
+		connect.AssertNotEqual(t, code1, code2)
 
 		// only the latest code is live
 		countUnused := func() int {
@@ -822,7 +822,7 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 			})
 			return c
 		}
-		assert.Equal(t, countUnused(), 1)
+		connect.AssertEqual(t, countUnused(), 1)
 
 		// an invalidated code does not verify
 		verifyResult, err := AuthVerify(
@@ -832,8 +832,8 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 			},
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, verifyResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, verifyResult.Error, nil)
 
 		// the latest code verifies
 		verifyResult, err = AuthVerify(
@@ -843,9 +843,9 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 			},
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, verifyResult.Error, nil)
-		assert.Equal(t, countUnused(), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, verifyResult.Error, nil)
+		connect.AssertEqual(t, countUnused(), 0)
 
 		// age out the rows and reap them
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -868,10 +868,10 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 				userId,
 			)
 			server.WithPgResult(result, err, func() {
-				assert.Equal(t, result.Next(), true)
+				connect.AssertEqual(t, result.Next(), true)
 				var c int
 				server.Raise(result.Scan(&c))
-				assert.Equal(t, c, 0)
+				connect.AssertEqual(t, c, 0)
 			})
 		})
 	})

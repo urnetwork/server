@@ -2,10 +2,9 @@ package connect
 
 import (
 	"context"
+	"github.com/urnetwork/connect"
 	"testing"
 	"time"
-
-	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -54,7 +53,7 @@ func TestExchangeProxyPeerHidden(t *testing.T) {
 			ProxyDeviceConnection: model.ProxyDeviceConnection{ClientId: clientIdProxy},
 			ProxyDeviceMode:       model.ProxyDeviceModeDevice,
 		})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// connect both to the exchange
 		clientReg := env.newClient(clientIdReg)
@@ -86,17 +85,17 @@ func TestExchangeProxyPeerHidden(t *testing.T) {
 				}
 			}
 		}
-		assert.Equal(t, waitForConnectedCount(2), true)
+		connect.AssertEqual(t, waitForConnectedCount(2), true)
 
 		// the proxy client is counted (above) but never a visible peer: the
 		// network session sees only the regular client
 		peersResult, err := model.GetNetworkPeersForSession(env.userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, peersResult.Error, nil)
-		assert.Equal(t, len(peersResult.Peers), 1)
-		assert.Equal(t, peersResult.Peers[0].ClientId, clientIdReg)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, peersResult.Error, nil)
+		connect.AssertEqual(t, len(peersResult.Peers), 1)
+		connect.AssertEqual(t, peersResult.Peers[0].ClientId, clientIdReg)
 		for _, peer := range peersResult.Peers {
-			assert.NotEqual(t, peer.ClientId, clientIdProxy)
+			connect.AssertNotEqual(t, peer.ClientId, clientIdProxy)
 		}
 	})
 }

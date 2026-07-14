@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestIdPgCodec(t *testing.T) {
@@ -82,9 +82,9 @@ func TestIdPgCodec(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, id2_, id2)
-		assert.Equal(t, id2, *id3)
-		assert.Equal(t, id4, nil)
+		connect.AssertEqual(t, id2_, id2)
+		connect.AssertEqual(t, id2, *id3)
+		connect.AssertEqual(t, id4, nil)
 	})
 }
 
@@ -135,7 +135,7 @@ func TestBatch(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, k)
+		connect.AssertEqual(t, n, k)
 	})
 }
 
@@ -167,10 +167,10 @@ func TestTempTable(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, len(tempIds))
+		connect.AssertEqual(t, n, len(tempIds))
 		for _, id := range ids {
 			_, ok := tempIds[id]
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 		}
 
 		idJoins := map[Id]Id{}
@@ -197,11 +197,11 @@ func TestTempTable(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, len(tempIdJoins))
+		connect.AssertEqual(t, n, len(tempIdJoins))
 		for a, b := range idJoins {
 			b_, ok := tempIdJoins[a]
-			assert.Equal(t, ok, true)
-			assert.Equal(t, b_, b)
+			connect.AssertEqual(t, ok, true)
+			connect.AssertEqual(t, b_, b)
 		}
 
 		idCJoins := map[Id]C{}
@@ -232,11 +232,11 @@ func TestTempTable(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, len(tempIdJoins))
+		connect.AssertEqual(t, n, len(tempIdJoins))
 		for a, c := range idCJoins {
 			c_, ok := tempIdCJoins[a]
-			assert.Equal(t, ok, true)
-			assert.Equal(t, c_, c)
+			connect.AssertEqual(t, ok, true)
+			connect.AssertEqual(t, c_, c)
 		}
 	})
 }
@@ -304,10 +304,10 @@ func TestRetry(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, len(testIds))
+		connect.AssertEqual(t, n, len(testIds))
 		for _, id := range ids {
 			_, ok := testIds[id]
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 		}
 	})
 }
@@ -366,10 +366,10 @@ func TestRetryInnerError(t *testing.T) {
 			})
 		})
 
-		assert.Equal(t, n, len(testIds))
+		connect.AssertEqual(t, n, len(testIds))
 		for _, id := range ids {
 			_, ok := testIds[id]
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 		}
 	})
 }
@@ -427,7 +427,7 @@ func TestSerializableTx(t *testing.T) {
 						var b int
 						WithPgResult(result, err, func() {
 							ok := result.Next()
-							assert.Equal(t, true, ok)
+							connect.AssertEqual(t, true, ok)
 							Raise(result.Scan(&b))
 						})
 
@@ -448,7 +448,7 @@ func TestSerializableTx(t *testing.T) {
 							id,
 							b,
 						))
-						assert.Equal(t, 1, int(tag.RowsAffected()))
+						connect.AssertEqual(t, 1, int(tag.RowsAffected()))
 					}, TxSerializable)
 
 					end <- nil
@@ -459,7 +459,7 @@ func TestSerializableTx(t *testing.T) {
 		for i := 0; i < k*len(ids); i += 1 {
 			select {
 			case err := <-end:
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 			case <-time.After(60 * time.Second):
 				t.FailNow()
 			}
@@ -481,9 +481,9 @@ func TestSerializableTx(t *testing.T) {
 					out[a] = b
 				}
 			})
-			assert.Equal(t, n, len(out))
+			connect.AssertEqual(t, n, len(out))
 			for _, b := range out {
-				assert.Equal(t, b, k)
+				connect.AssertEqual(t, b, k)
 			}
 		})
 	})
@@ -542,7 +542,7 @@ func TestUpdateTx(t *testing.T) {
 						var b int
 						WithPgResult(result, err, func() {
 							ok := result.Next()
-							assert.Equal(t, true, ok)
+							connect.AssertEqual(t, true, ok)
 							Raise(result.Scan(&b))
 						})
 
@@ -563,7 +563,7 @@ func TestUpdateTx(t *testing.T) {
 							id,
 							b,
 						))
-						assert.Equal(t, 1, int(tag.RowsAffected()))
+						connect.AssertEqual(t, 1, int(tag.RowsAffected()))
 					}, TxReadCommitted)
 
 					end <- nil
@@ -574,7 +574,7 @@ func TestUpdateTx(t *testing.T) {
 		for i := 0; i < k*len(ids); i += 1 {
 			select {
 			case err := <-end:
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 			case <-time.After(60 * time.Second):
 				t.FailNow()
 			}
@@ -596,9 +596,9 @@ func TestUpdateTx(t *testing.T) {
 					out[a] = b
 				}
 			})
-			assert.Equal(t, n, len(out))
+			connect.AssertEqual(t, n, len(out))
 			for _, b := range out {
-				assert.Equal(t, b, k)
+				connect.AssertEqual(t, b, k)
 			}
 		})
 	})

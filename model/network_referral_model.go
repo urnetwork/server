@@ -222,52 +222,70 @@ func ReferralBonusCount(referralCount int) int {
 	return referralCount
 }
 
-// AddReferralBonusesToAllNetworks grants every referrer its referral bonus for a
-// single grant window: bonusPerReferral × min(referrals, pro.yml max_referrals).
-// Referrals pay out every period for life, so this is called on the recurring
-// refresh cadence alongside the tier data grant.
+// AddReferralBonusesToAllNetworks grants the referral bonus to BOTH sides for a single
+// grant window, re-granted every period for life:
+//   - the REFERRER earns bonusPerReferral × min(referrals, pro.yml max_referrals);
+//   - each REFERRED (referee) network earns a flat referredBonus.
 //
-// The balance is added with AddBasicTransferBalance, i.e. net revenue 0, so it is
-// an UNPAID balance: referral data can never by itself confer Pro (Pro keys off
+// Called on the recurring refresh cadence alongside the tier data grant. Both sides are
+// granted in ONE transaction so a run is atomic.
+//
+// Balances are added with AddBasicTransferBalance, i.e. net revenue 0, so they are
+// UNPAID: referral data can never by itself confer Pro (Pro keys off
 // subscription_renewal — see IsPro).
 //
-// Returns the byte count granted per referrer network.
+// Returns the total byte count granted per network (a network that is both a referrer
+// and a referee accumulates both grants).
 func AddReferralBonusesToAllNetworks(
 	ctx context.Context,
 	startTime time.Time,
 	endTime time.Time,
 	bonusPerReferral ByteCount,
+	referredBonus ByteCount,
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
 
-	if bonusPerReferral <= 0 {
+	if bonusPerReferral <= 0 && referredBonus <= 0 {
 		return
 	}
 
 	// referralNetworkId -> the networks it referred
 	referrals := GetNetworkReferralsMap(ctx)
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		for referralNetworkId, referredNetworkIds := range referrals {
-			bonusCount := ReferralBonusCount(len(referredNetworkIds))
-			if bonusCount <= 0 {
-				continue
-			}
+	// Seeker/Saga holders get their referral data scaled (pro.yml seeker.data_multiplier).
+	seekers := GetAllSeekerHolders(ctx)
+	seekerMultiplier := Pro().SeekerDataMultiplier()
 
-			balanceByteCount := bonusPerReferral * ByteCount(bonusCount)
-			err := AddBasicTransferBalanceInTx(
-				tx,
-				ctx,
-				referralNetworkId,
-				balanceByteCount,
-				startTime,
-				endTime,
-			)
-			if err != nil {
-				// do not fail the whole batch for one referrer
-				continue
+	server.Tx(ctx, func(tx server.PgTx) {
+		grant := func(networkId server.Id, byteCount ByteCount) {
+			if seekerMultiplier != 1.0 && seekers[networkId] {
+				byteCount = ByteCount(float64(byteCount) * seekerMultiplier)
 			}
-			addedTransferBalances[referralNetworkId] = balanceByteCount
+			if byteCount <= 0 {
+				return
+			}
+			if err := AddBasicTransferBalanceInTx(tx, ctx, networkId, byteCount, startTime, endTime); err != nil {
+				// do not fail the whole batch for one network
+				return
+			}
+			addedTransferBalances[networkId] += byteCount
+		}
+
+		for referralNetworkId, referredNetworkIds := range referrals {
+			// referrer: paid for up to max_referrals of its referrals
+			if 0 < bonusPerReferral {
+				if bonusCount := ReferralBonusCount(len(referredNetworkIds)); 0 < bonusCount {
+					grant(referralNetworkId, bonusPerReferral*ByteCount(bonusCount))
+				}
+			}
+			// referees: each referred network earns a flat bonus. Each referee has exactly
+			// one referrer (network_referral PK is network_id), so it is granted once per
+			// run; the link cap bounds the size of this list.
+			if 0 < referredBonus {
+				for _, referredNetworkId := range referredNetworkIds {
+					grant(referredNetworkId, referredBonus)
+				}
+			}
 		}
 	})
 

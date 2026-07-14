@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"gopkg.in/yaml.v3"
 
@@ -238,7 +238,7 @@ func MigrateProxyDeviceConfig(ctx context.Context, blockSize int) {
 			})
 		})
 
-		proxyIds := maps.Keys(proxyDeviceConfigJsons)
+		proxyIds := slices.Collect(maps.Keys(proxyDeviceConfigJsons))
 
 		if len(proxyIds) == 0 {
 			break
@@ -622,7 +622,7 @@ func CreateProxyClient(
 	signedProxyId := SignProxyId(proxyId)
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		hosts := maps.Keys(proxyConfig.Hosts)
+		hosts := slices.Collect(maps.Keys(proxyConfig.Hosts))
 		if len(hosts) == 0 {
 			returnErr = fmt.Errorf("No proxy hosts available")
 			return
@@ -631,7 +631,7 @@ func CreateProxyClient(
 
 		blockServicePorts := proxyConfig.Hosts[proxyHost]
 
-		blocks := maps.Keys(blockServicePorts)
+		blocks := slices.Collect(maps.Keys(blockServicePorts))
 		block := blocks[mathrand.Intn(len(blocks))]
 
 		servicePorts := blockServicePorts[block]

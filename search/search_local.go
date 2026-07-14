@@ -2,10 +2,11 @@ package search
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 	// "golang.org/x/sync/semaphore"
 
 	"github.com/urnetwork/glog"
@@ -212,7 +213,7 @@ func (self *SearchLocal) AroundRaw(ctx context.Context, query string, distance i
 	select {
 	case <-self.initialSync.Done():
 		results := self.aroundIdsRawN(ctx, query, distance, 0, options...)
-		return maps.Values(results)
+		return slices.Collect(maps.Values(results))
 	default:
 		return self.impl.AroundRaw(ctx, query, distance, options...)
 	}
@@ -319,7 +320,7 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 			}
 		} else {
 			partitions = [][]map[int]*localProjection{
-				maps.Values(self.valueIdVariantProjections),
+				slices.Collect(maps.Values(self.valueIdVariantProjections)),
 			}
 		}
 	}()

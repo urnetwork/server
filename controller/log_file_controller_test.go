@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -25,7 +25,7 @@ func testFeedback(t testing.TB, userSession *session.ClientSession) server.Id {
 		Needs:     model.FeedbackSendNeeds{},
 	}
 	sendResult, err := model.FeedbackSend(feedback, userSession)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	return sendResult.FeedbackId
 }
 
@@ -70,7 +70,7 @@ func TestLogFileShouldFail(t *testing.T) {
 			testBody(),
 			uploadArgs,
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 	})
 }
@@ -102,35 +102,35 @@ func TestLogFileUpload(t *testing.T) {
 		}
 
 		result, err := UploadLogFile(userSession, testBody(), uploadArgs)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		// the upload metadata is retained without the file content
 		uploads := model.GetFeedbackLogUploads(ctx, networkId)
-		assert.Equal(t, len(uploads), 1)
-		assert.Equal(t, uploads[0].FeedbackId, feedbackId)
-		assert.Equal(t, uploads[0].NetworkId, networkId)
-		assert.Equal(t, *uploads[0].ClientId, clientId)
-		assert.Equal(t, uploads[0].ContentType, "text/plain")
-		assert.Equal(t, uploads[0].ByteCount, int64(27))
-		assert.Equal(t, uploads[0].Complete, true)
+		connect.AssertEqual(t, len(uploads), 1)
+		connect.AssertEqual(t, uploads[0].FeedbackId, feedbackId)
+		connect.AssertEqual(t, uploads[0].NetworkId, networkId)
+		connect.AssertEqual(t, *uploads[0].ClientId, clientId)
+		connect.AssertEqual(t, uploads[0].ContentType, "text/plain")
+		connect.AssertEqual(t, uploads[0].ByteCount, int64(27))
+		connect.AssertEqual(t, uploads[0].Complete, true)
 
 		// a second upload in the same rate bucket is rejected
 		result, err = UploadLogFile(userSession, testBody(), uploadArgs)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 
 		uploads = model.GetFeedbackLogUploads(ctx, networkId)
-		assert.Equal(t, len(uploads), 1)
+		connect.AssertEqual(t, len(uploads), 1)
 
 		// after the rate period the upload is allowed again
 		uploadArgs.Now = now.Add(model.FeedbackLogUploadRatePeriod)
 		result, err = UploadLogFile(userSession, testBody(), uploadArgs)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		uploads = model.GetFeedbackLogUploads(ctx, networkId)
-		assert.Equal(t, len(uploads), 2)
+		connect.AssertEqual(t, len(uploads), 2)
 
 		// another network is rate limited independently
 		networkIdB := server.NewId()
@@ -153,8 +153,8 @@ func TestLogFileUpload(t *testing.T) {
 		}
 
 		result, err = UploadLogFile(userSessionB, testBody(), uploadArgsB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 	})
 }
@@ -186,18 +186,18 @@ func TestLogFileUploadMaxSize(t *testing.T) {
 		oversizeBody := io.NopCloser(io.LimitReader(discardableReader{}, LogFileMaxByteCount+1))
 
 		result, err := UploadLogFile(userSession, oversizeBody, uploadArgs)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 
 		uploads := model.GetFeedbackLogUploads(ctx, networkId)
-		assert.Equal(t, len(uploads), 1)
-		assert.Equal(t, uploads[0].ByteCount, LogFileMaxByteCount+1)
-		assert.Equal(t, uploads[0].Complete, false)
+		connect.AssertEqual(t, len(uploads), 1)
+		connect.AssertEqual(t, uploads[0].ByteCount, LogFileMaxByteCount+1)
+		connect.AssertEqual(t, uploads[0].Complete, false)
 
 		// the rate bucket was consumed by the oversize attempt
 		result, err = UploadLogFile(userSession, testBody(), uploadArgs)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 
 	})
 }

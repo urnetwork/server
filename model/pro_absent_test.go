@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 // TestProAbsent pins the contract for an environment with NO pro.yml.
@@ -42,12 +42,13 @@ func TestProAbsent(t *testing.T) {
 
 	if 0 < c.MaxConcurrentClients(true) {
 		t.Log("pro.yml IS present; asserting the configured contract")
-		assert.Equal(t, true, 0 < c.DataAmount(false))
-		assert.Equal(t, true, 0 < c.DataAmount(true))
-		assert.Equal(t, true, 0 < c.DataCodeDuration)
-		assert.Equal(t, true, 0 < c.ReferralGrantPeriod())
-		assert.Equal(t, true, 0 < c.PriceMonthlyUsd())
-		assert.Equal(t, true, 0 < c.MaxReferrals)
+		connect.AssertEqual(t, true, 0 < c.DataAmount(false))
+		connect.AssertEqual(t, true, 0 < c.DataAmount(true))
+		connect.AssertEqual(t, true, 0 < c.DataCodeDuration)
+		connect.AssertEqual(t, true, 0 < c.ReferralGrantPeriod())
+		connect.AssertEqual(t, true, 0 < c.PriceMonthlyUsd())
+		connect.AssertEqual(t, true, 0 < c.MaxReferrals)
+		connect.AssertEqual(t, true, 1.0 <= c.SeekerDataMultiplier())
 		return
 	}
 
@@ -58,7 +59,7 @@ func TestProAbsent(t *testing.T) {
 	//    A zero limit would otherwise mean `0 <= n` for all n: everyone locked out.
 	for _, pro := range []bool{false, true} {
 		for _, connectedCount := range []int{0, 1, 2, 3, 100, 1_000_000} {
-			assert.Equal(t, false, c.ConcurrentClientsExceeded(pro, connectedCount))
+			connect.AssertEqual(t, false, c.ConcurrentClientsExceeded(pro, connectedCount))
 		}
 	}
 
@@ -72,36 +73,40 @@ func TestProAbsent(t *testing.T) {
 			FeatureWireguardProxy,
 			"a-feature-that-does-not-exist",
 		} {
-			assert.Equal(t, true, c.FeatureAllowed(pro, feature))
+			connect.AssertEqual(t, true, c.FeatureAllowed(pro, feature))
 		}
 	}
 
 	// 3. referrals are UNCAPPED, not capped at zero.
 	for _, referralCount := range []int{0, 1, 9, 10, 11, 1000} {
-		assert.Equal(t, false, c.ReferralsCapped(referralCount))
-		assert.Equal(t, 0, ReferralBonusCount(referralCount))
+		connect.AssertEqual(t, false, c.ReferralsCapped(referralCount))
+		connect.AssertEqual(t, 0, ReferralBonusCount(referralCount))
 	}
 
 	// 4. the amounts are zero -- which is why the grant tasks check the AMOUNT and noop,
 	//    rather than granting what they read here.
-	assert.Equal(t, ByteCount(0), c.DataAmount(false))
-	assert.Equal(t, ByteCount(0), c.DataAmount(true))
-	assert.Equal(t, ByteCount(0), c.ReferralBonus)
+	connect.AssertEqual(t, ByteCount(0), c.DataAmount(false))
+	connect.AssertEqual(t, ByteCount(0), c.DataAmount(true))
+	connect.AssertEqual(t, ByteCount(0), c.ReferralBonus)
+
+	// the seeker data multiplier defaults to 1 (no boost), NEVER 0 -- a zero would scale
+	// every seeker holder's free/referral grant down to nothing.
+	connect.AssertEqual(t, 1.0, c.SeekerDataMultiplier())
 
 	// 5. no price and no duration -- which is why every purchase path refuses. A zero
 	//    duration would sell a code that expires on arrival; a zero price would let the
 	//    webhook's `amount >= price - tolerance` check pass for ANY payment, including
 	//    none.
-	assert.Equal(t, float64(0), c.PriceMonthlyUsd())
-	assert.Equal(t, float64(0), c.PriceYearlyUsd())
-	assert.Equal(t, true, c.DataCodeDuration <= 0)
-	assert.Equal(t, 0, len(c.DataCodeSkus))
+	connect.AssertEqual(t, float64(0), c.PriceMonthlyUsd())
+	connect.AssertEqual(t, float64(0), c.PriceYearlyUsd())
+	connect.AssertEqual(t, true, c.DataCodeDuration <= 0)
+	connect.AssertEqual(t, 0, len(c.DataCodeSkus))
 
 	// 6. the referral grant period is NEVER zero, even here. The referral task reschedules
 	//    itself at now+period, so a zero period is not "no delay" -- it is a HOT LOOP:
 	//    fire, schedule for now, fire again, forever. A missing config file must not spin
 	//    the task worker.
-	assert.Equal(t, true, 0 < c.ReferralGrantPeriod())
+	connect.AssertEqual(t, true, 0 < c.ReferralGrantPeriod())
 }
 
 // skipWithoutProYml skips a test that asserts the CONFIGURED product spec (caps,

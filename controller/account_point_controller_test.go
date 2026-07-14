@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/jwt"
@@ -31,8 +31,8 @@ func TestAccountPoints(t *testing.T) {
 
 		// assert no network points
 		result, err := controller.GetAccountPoints(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(result.AccountPoints), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(result.AccountPoints), 0)
 
 		applyAccountPointsArgs := model.ApplyAccountPointsArgs{
 			NetworkId:  networkId,
@@ -45,14 +45,14 @@ func TestAccountPoints(t *testing.T) {
 
 		// assert network points
 		result, err = controller.GetAccountPoints(userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.AccountPoints, nil)
-		assert.Equal(t, len(result.AccountPoints), 1)
-		assert.Equal(t, result.AccountPoints[0].NetworkId, networkId)
-		assert.Equal(t, result.AccountPoints[0].Event, string(model.AccountPointEventPayoutLinkedAccount))
-		assert.NotEqual(t, result.AccountPoints[0].PointValue, model.NanoPoints(0))
-		assert.Equal(t, result.AccountPoints[0].CreateTime.IsZero(), false)
-		assert.Equal(t, result.AccountPoints[0].PointValue, model.NanoPoints(10))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.AccountPoints, nil)
+		connect.AssertEqual(t, len(result.AccountPoints), 1)
+		connect.AssertEqual(t, result.AccountPoints[0].NetworkId, networkId)
+		connect.AssertEqual(t, result.AccountPoints[0].Event, string(model.AccountPointEventPayoutLinkedAccount))
+		connect.AssertNotEqual(t, result.AccountPoints[0].PointValue, model.NanoPoints(0))
+		connect.AssertEqual(t, result.AccountPoints[0].CreateTime.IsZero(), false)
+		connect.AssertEqual(t, result.AccountPoints[0].PointValue, model.NanoPoints(10))
 
 		applyAccountPointsArgs = model.ApplyAccountPointsArgs{
 			NetworkId:  networkId,
@@ -64,9 +64,9 @@ func TestAccountPoints(t *testing.T) {
 		model.ApplyAccountPoints(ctx, applyAccountPointsArgs)
 
 		result, err = controller.GetAccountPoints(userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.AccountPoints, nil)
-		assert.Equal(t, len(result.AccountPoints), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.AccountPoints, nil)
+		connect.AssertEqual(t, len(result.AccountPoints), 2)
 
 	})
 }

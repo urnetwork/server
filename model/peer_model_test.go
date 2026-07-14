@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -111,7 +111,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c.Connected()), 0)
+		connect.AssertEqual(t, len(c.Connected()), 0)
 
 		peer1 := &NetworkPeer{
 			ClientId:     clientId1,
@@ -130,61 +130,61 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		AddNetworkPeer(ctx, networkId, peer2, residentId2, ttl)
 
 		eventId, peers := GetNetworkPeers(ctx, networkId)
-		assert.Equal(t, eventId, GetNetworkPeerEventId(ctx, networkId))
+		connect.AssertEqual(t, eventId, GetNetworkPeerEventId(ctx, networkId))
 		connected, markers := splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 2)
-		assert.Equal(t, len(markers), 0)
-		assert.Equal(t, connected[clientId1].Principal, "svc-a")
-		assert.Equal(t, connected[clientId1].Roles, []string{"role1", "role2"})
-		assert.Equal(t, connected[clientId1].ProvideModes, []ProvideMode{ProvideModeNetwork, ProvideModeStream})
-		assert.Equal(t, connected[clientId1].DeviceName, "device a")
-		assert.Equal(t, connected[clientId1].DeviceSpec, "spec a")
-		assert.Equal(t, connected[clientId2].Principal, "")
-		assert.Equal(t, len(connected[clientId2].Roles), 0)
+		connect.AssertEqual(t, len(connected), 2)
+		connect.AssertEqual(t, len(markers), 0)
+		connect.AssertEqual(t, connected[clientId1].Principal, "svc-a")
+		connect.AssertEqual(t, connected[clientId1].Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, connected[clientId1].ProvideModes, []ProvideMode{ProvideModeNetwork, ProvideModeStream})
+		connect.AssertEqual(t, connected[clientId1].DeviceName, "device a")
+		connect.AssertEqual(t, connected[clientId1].DeviceSpec, "spec a")
+		connect.AssertEqual(t, connected[clientId2].Principal, "")
+		connect.AssertEqual(t, len(connected[clientId2].Roles), 0)
 
 		// the listener accumulates to the same state
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c.Connected(), connected)
-		assert.Equal(t, len(c.Markers()), 0)
+		connect.AssertEqual(t, c.Connected(), connected)
+		connect.AssertEqual(t, len(c.Markers()), 0)
 
 		// refresh is resident-guarded
-		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId1, ttl), true)
-		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId2, ttl), false)
-		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, server.NewId(), residentId1, ttl), false)
+		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId1, ttl), true)
+		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId2, ttl), false)
+		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, server.NewId(), residentId1, ttl), false)
 
 		// remove is resident-guarded
 		RemoveNetworkPeer(ctx, networkId, clientId1, residentId2)
 		_, peers = GetNetworkPeers(ctx, networkId)
 		connected, _ = splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 2)
+		connect.AssertEqual(t, len(connected), 2)
 
 		RemoveNetworkPeer(ctx, networkId, clientId1, residentId1)
 		_, peers = GetNetworkPeers(ctx, networkId)
 		connected, markers = splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 1)
-		assert.Equal(t, len(markers), 1)
-		assert.NotEqual(t, markers[clientId1].DisconnectTime, nil)
+		connect.AssertEqual(t, len(connected), 1)
+		connect.AssertEqual(t, len(markers), 1)
+		connect.AssertNotEqual(t, markers[clientId1].DisconnectTime, nil)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c.Connected()), 1)
-		assert.Equal(t, len(c.Markers()), 1)
+		connect.AssertEqual(t, len(c.Connected()), 1)
+		connect.AssertEqual(t, len(c.Markers()), 1)
 
 		// a reconnect clears the marker
 		AddNetworkPeer(ctx, networkId, peer1, residentId1, ttl)
 		_, peers = GetNetworkPeers(ctx, networkId)
 		connected, markers = splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 2)
-		assert.Equal(t, len(markers), 0)
+		connect.AssertEqual(t, len(connected), 2)
+		connect.AssertEqual(t, len(markers), 0)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c.Connected(), connected)
-		assert.Equal(t, len(c.Markers()), 0)
+		connect.AssertEqual(t, c.Connected(), connected)
+		connect.AssertEqual(t, len(c.Markers()), 0)
 
 		// event ids are monotonic with no gaps, so the listener never resets
 		// after the initial subscribe
@@ -192,8 +192,8 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		for _, event := range c.events {
 			eventTypes = append(eventTypes, event.NetworkPeerEventType)
 		}
-		assert.Equal(t, eventTypes[0], NetworkPeerEventTypeReset)
-		assert.Equal(t, slices.Contains(eventTypes[1:], NetworkPeerEventTypeReset), false)
+		connect.AssertEqual(t, eventTypes[0], NetworkPeerEventTypeReset)
+		connect.AssertEqual(t, slices.Contains(eventTypes[1:], NetworkPeerEventTypeReset), false)
 
 		// a new listener syncs to the head state with a reset
 		c2 := newTestNetworkPeerAccumulator()
@@ -203,7 +203,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c2.Connected(), connected)
+		connect.AssertEqual(t, c2.Connected(), connected)
 	})
 }
 
@@ -235,9 +235,9 @@ func TestNetworkPeerExpiry(t *testing.T) {
 		// expired but not yet pruned entries read as disconnect markers
 		_, peers := GetNetworkPeers(ctx, networkId)
 		connected, markers := splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 0)
-		assert.Equal(t, len(markers), 1)
-		assert.NotEqual(t, markers[clientId1].DisconnectTime, nil)
+		connect.AssertEqual(t, len(connected), 0)
+		connect.AssertEqual(t, len(markers), 1)
+		connect.AssertNotEqual(t, markers[clientId1].DisconnectTime, nil)
 
 		// another peer's activity prunes the expired entry and publishes
 		// the disconnect marker
@@ -250,11 +250,11 @@ func TestNetworkPeerExpiry(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c.Connected()), 1)
-		assert.Equal(t, len(c.Markers()), 1)
+		connect.AssertEqual(t, len(c.Connected()), 1)
+		connect.AssertEqual(t, len(c.Markers()), 1)
 
 		// the pruned registration is gone, so refresh reports not registered
-		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId1, 60*time.Second), false)
+		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, clientId1, residentId1, 60*time.Second), false)
 	})
 }
 
@@ -280,12 +280,12 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 		clientId = *authClientResult.ClientId
 
 		_, topLevel, _, profile, _ := GetNetworkPeerProfile(ctx, clientId)
-		assert.Equal(t, topLevel, true)
+		connect.AssertEqual(t, topLevel, true)
 		AddNetworkPeer(ctx, networkId, profile, residentId, 60*time.Second)
 
 		c := newTestNetworkPeerAccumulator()
@@ -302,8 +302,8 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 		connected := c.Connected()
-		assert.Equal(t, len(connected), 1)
-		assert.Equal(t, connected[clientId].ProvideModes, []ProvideMode{ProvideModeNetwork, ProvideModeStream})
+		connect.AssertEqual(t, len(connected), 1)
+		connect.AssertEqual(t, connected[clientId].ProvideModes, []ProvideMode{ProvideModeNetwork, ProvideModeStream})
 
 		// no change publishes no event
 		eventCount := c.EventCount()
@@ -314,7 +314,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c.EventCount(), eventCount)
+		connect.AssertEqual(t, c.EventCount(), eventCount)
 
 		// removing provide keys publishes the reduced modes
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
@@ -324,7 +324,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 		connected = c.Connected()
-		assert.Equal(t, connected[clientId].ProvideModes, []ProvideMode{ProvideModeStream})
+		connect.AssertEqual(t, connected[clientId].ProvideModes, []ProvideMode{ProvideModeStream})
 	})
 }
 
@@ -352,32 +352,32 @@ func TestNetworkPeerProfile(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 		clientId := *authClientResult.ClientId
 
 		profileNetworkId, topLevel, category, profile, peersEnabled := GetNetworkPeerProfile(ctx, clientId)
-		assert.Equal(t, profileNetworkId, networkId)
-		assert.Equal(t, topLevel, true)
+		connect.AssertEqual(t, profileNetworkId, networkId)
+		connect.AssertEqual(t, topLevel, true)
 		// a network under the top-level limit is enabled for peers
-		assert.Equal(t, peersEnabled, true)
+		connect.AssertEqual(t, peersEnabled, true)
 		// an ordinary client is the client category
-		assert.Equal(t, category, NetworkPeerCategoryClient)
-		assert.Equal(t, profile.ClientId, clientId)
+		connect.AssertEqual(t, category, NetworkPeerCategoryClient)
+		connect.AssertEqual(t, profile.ClientId, clientId)
 		// roles are deduped and sorted
-		assert.Equal(t, profile.Roles, []string{"role1", "role2"})
-		assert.Equal(t, profile.Principal, "svc-a")
-		assert.Equal(t, profile.DeviceName, "test device")
-		assert.Equal(t, profile.DeviceSpec, "test spec")
+		connect.AssertEqual(t, profile.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, profile.Principal, "svc-a")
+		connect.AssertEqual(t, profile.DeviceName, "test device")
+		connect.AssertEqual(t, profile.DeviceSpec, "test spec")
 
 		// the identity read-through matches
 		identity := GetClientIdentity(ctx, clientId)
-		assert.Equal(t, identity.Roles, []string{"role1", "role2"})
-		assert.Equal(t, identity.Principal, "svc-a")
+		connect.AssertEqual(t, identity.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, identity.Principal, "svc-a")
 		// and again from the cache
 		identity = GetClientIdentity(ctx, clientId)
-		assert.Equal(t, identity.Roles, []string{"role1", "role2"})
-		assert.Equal(t, identity.Principal, "svc-a")
+		connect.AssertEqual(t, identity.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, identity.Principal, "svc-a")
 
 		// a derivative client is not top-level
 		sourceClientResult, err := AuthNetworkClient(
@@ -387,14 +387,14 @@ func TestNetworkPeerProfile(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, sourceClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, sourceClientResult.Error, nil)
 
 		_, topLevel, _, profile, peersEnabled = GetNetworkPeerProfile(ctx, *sourceClientResult.ClientId)
-		assert.Equal(t, topLevel, false)
-		assert.NotEqual(t, profile, nil)
+		connect.AssertEqual(t, topLevel, false)
+		connect.AssertNotEqual(t, profile, nil)
 		// a derivative client never resolves peers enabled
-		assert.Equal(t, peersEnabled, false)
+		connect.AssertEqual(t, peersEnabled, false)
 
 		// a guest session cannot assign roles or principal
 		guestSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
@@ -409,8 +409,8 @@ func TestNetworkPeerProfile(t *testing.T) {
 			},
 			guestSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, authClientResult.Error, nil)
 
 		// a client session cannot assign roles or principal
 		deviceId := server.NewId()
@@ -427,8 +427,8 @@ func TestNetworkPeerProfile(t *testing.T) {
 			},
 			clientSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, authClientResult.Error, nil)
 
 		// a session with roles and principal (e.g. from an auth code) passes
 		// them to clients it creates
@@ -444,12 +444,12 @@ func TestNetworkPeerProfile(t *testing.T) {
 			},
 			serviceSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 
 		_, _, _, profile, _ = GetNetworkPeerProfile(ctx, *authClientResult.ClientId)
-		assert.Equal(t, profile.Roles, []string{"service-role"})
-		assert.Equal(t, profile.Principal, "svc-inherited")
+		connect.AssertEqual(t, profile.Roles, []string{"service-role"})
+		connect.AssertEqual(t, profile.Principal, "svc-inherited")
 	})
 }
 
@@ -470,12 +470,12 @@ func TestNetworkProxyPeer(t *testing.T) {
 
 		// an ordinary client
 		clientResult, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "client"}, userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		clientId := *clientResult.ClientId
 
 		// a proxy client: a top-level client with a proxy_device_config row
 		proxyResult, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "proxy"}, userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		proxyClientId := *proxyResult.ClientId
 		proxyInstanceId := server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -493,12 +493,12 @@ func TestNetworkProxyPeer(t *testing.T) {
 
 		// the profile detects the proxy category
 		_, topLevel, category, profile, peersEnabled := GetNetworkPeerProfile(ctx, proxyClientId)
-		assert.Equal(t, topLevel, true)
-		assert.Equal(t, category, NetworkPeerCategoryProxy)
-		assert.NotEqual(t, profile, nil)
-		assert.Equal(t, peersEnabled, true)
+		connect.AssertEqual(t, topLevel, true)
+		connect.AssertEqual(t, category, NetworkPeerCategoryProxy)
+		connect.AssertNotEqual(t, profile, nil)
+		connect.AssertEqual(t, peersEnabled, true)
 		_, _, clientCategory, _, _ := GetNetworkPeerProfile(ctx, clientId)
-		assert.Equal(t, clientCategory, NetworkPeerCategoryClient)
+		connect.AssertEqual(t, clientCategory, NetworkPeerCategoryClient)
 
 		residentId := server.NewId()
 		ttl := 60 * time.Second
@@ -518,28 +518,28 @@ func TestNetworkProxyPeer(t *testing.T) {
 		// the peer list contains only the client
 		_, peers := GetNetworkPeers(ctx, networkId)
 		connected, _ := splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 1)
-		assert.NotEqual(t, connected[clientId], nil)
-		assert.Equal(t, connected[proxyClientId], nil)
+		connect.AssertEqual(t, len(connected), 1)
+		connect.AssertNotEqual(t, connected[clientId], nil)
+		connect.AssertEqual(t, connected[proxyClientId], nil)
 
 		// the listener only saw the client peer
 		listenerConnected := c.Connected()
-		assert.Equal(t, len(listenerConnected), 1)
-		assert.NotEqual(t, listenerConnected[clientId], nil)
-		assert.Equal(t, listenerConnected[proxyClientId], nil)
+		connect.AssertEqual(t, len(listenerConnected), 1)
+		connect.AssertNotEqual(t, listenerConnected[clientId], nil)
+		connect.AssertEqual(t, listenerConnected[proxyClientId], nil)
 
 		// the combined count includes both
-		assert.Equal(t, GetNetworkConnectedCount(ctx, networkId), 2)
+		connect.AssertEqual(t, GetNetworkConnectedCount(ctx, networkId), 2)
 
 		// removing the proxy peer drops the count but emits no marker/event
 		eventCount := c.EventCount()
 		RemoveNetworkProxyPeer(ctx, networkId, proxyClientId)
-		assert.Equal(t, GetNetworkConnectedCount(ctx, networkId), 1)
+		connect.AssertEqual(t, GetNetworkConnectedCount(ctx, networkId), 1)
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c.EventCount(), eventCount)
-		assert.Equal(t, len(c.Markers()), 0)
+		connect.AssertEqual(t, c.EventCount(), eventCount)
+		connect.AssertEqual(t, len(c.Markers()), 0)
 	})
 }
 
@@ -563,13 +563,13 @@ func TestNetworkPeerEventGapReset(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c.Connected()), 1)
+		connect.AssertEqual(t, len(c.Connected()), 1)
 
 		// create a delivery gap: advance the event counter without publishing
 		server.Redis(ctx, func(r server.RedisClient) {
 			for range 2 {
 				_, err := r.Incr(ctx, networkPeerEventIdKey(networkId)).Result()
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 			}
 		})
 
@@ -581,9 +581,9 @@ func TestNetworkPeerEventGapReset(t *testing.T) {
 		case <-time.After(2 * time.Second):
 		}
 		connected := c.Connected()
-		assert.Equal(t, len(connected), 2)
-		assert.NotEqual(t, connected[clientId1], nil)
-		assert.NotEqual(t, connected[clientId2], nil)
+		connect.AssertEqual(t, len(connected), 2)
+		connect.AssertNotEqual(t, connected[clientId1], nil)
+		connect.AssertNotEqual(t, connected[clientId2], nil)
 
 		// the reset event was used to recover
 		resetCount := 0
@@ -597,7 +597,7 @@ func TestNetworkPeerEventGapReset(t *testing.T) {
 			}
 		}()
 		// initial subscribe reset plus the gap recovery reset
-		assert.Equal(t, 2 <= resetCount, true)
+		connect.AssertEqual(t, 2 <= resetCount, true)
 	})
 }
 
@@ -625,7 +625,7 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c.Connected()), 1)
+		connect.AssertEqual(t, len(c.Connected()), 1)
 
 		// flush the registry (e.g. a redis loss). The event counter restarts,
 		// so subsequent event ids move backward.
@@ -637,19 +637,19 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 				networkPeerDisconnectedKey(networkId),
 				networkPeerEventIdKey(networkId),
 			).Err()
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		})
 
 		// the registration is lost: the heartbeat refresh reports not
 		// registered, and the caller re-adds (the resident recovery branch)
-		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, clientId, residentId, ttl), false)
+		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, clientId, residentId, ttl), false)
 		AddNetworkPeer(ctx, networkId, peer, residentId, ttl)
 
 		// the registry recovered
 		_, peers := GetNetworkPeers(ctx, networkId)
 		connected, _ := splitNetworkPeers(peers)
-		assert.Equal(t, len(connected), 1)
-		assert.Equal(t, connected[clientId].Principal, "svc-a")
+		connect.AssertEqual(t, len(connected), 1)
+		connect.AssertEqual(t, connected[clientId].Principal, "svc-a")
 
 		// the already-subscribed listener resyncs on the backward event id
 		// (or its poll), rather than staying quiet forever
@@ -657,8 +657,8 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 		connectedAccumulated := c.Connected()
-		assert.Equal(t, len(connectedAccumulated), 1)
-		assert.NotEqual(t, connectedAccumulated[clientId], nil)
+		connect.AssertEqual(t, len(connectedAccumulated), 1)
+		connect.AssertNotEqual(t, connectedAccumulated[clientId], nil)
 
 		// a fresh listener converges too
 		c2 := newTestNetworkPeerAccumulator()
@@ -668,7 +668,7 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, len(c2.Connected()), 1)
+		connect.AssertEqual(t, len(c2.Connected()), 1)
 	})
 }
 
@@ -756,20 +756,20 @@ func TestNetworkPeerChurn(t *testing.T) {
 		registryConnected, registryMarkers := splitNetworkPeers(peers)
 
 		// the registry truth matches the intended end state
-		assert.Equal(t, len(registryConnected), peerCount/2)
-		assert.Equal(t, len(registryMarkers), peerCount-peerCount/2)
+		connect.AssertEqual(t, len(registryConnected), peerCount/2)
+		connect.AssertEqual(t, len(registryMarkers), peerCount-peerCount/2)
 		for clientId, endConnected := range expectedConnected {
 			if endConnected {
-				assert.NotEqual(t, registryConnected[clientId], nil)
+				connect.AssertNotEqual(t, registryConnected[clientId], nil)
 			} else {
-				assert.NotEqual(t, registryMarkers[clientId], nil)
+				connect.AssertNotEqual(t, registryMarkers[clientId], nil)
 			}
 		}
 
 		// the accumulated listener state converges to the registry truth
-		assert.Equal(t, c.Connected(), registryConnected)
+		connect.AssertEqual(t, c.Connected(), registryConnected)
 		for clientId := range registryMarkers {
-			assert.NotEqual(t, c.Markers()[clientId], nil)
+			connect.AssertNotEqual(t, c.Markers()[clientId], nil)
 		}
 
 		// a fresh listener converges to the same state
@@ -780,7 +780,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 		select {
 		case <-time.After(1 * time.Second):
 		}
-		assert.Equal(t, c2.Connected(), registryConnected)
+		connect.AssertEqual(t, c2.Connected(), registryConnected)
 	})
 }
 
@@ -806,8 +806,8 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 		clientId := *authClientResult.ClientId
 
 		// re-auth mints the client's stored identity into the client jwt
@@ -818,12 +818,12 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, reauthResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, reauthResult.Error, nil)
 		reauthByJwt, err := jwt.ParseByJwt(ctx, *reauthResult.ByClientJwt)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, reauthByJwt.Roles, []string{"role1", "role2"})
-		assert.Equal(t, reauthByJwt.Principal, "svc-a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, reauthByJwt.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, reauthByJwt.Principal, "svc-a")
 
 		// a session with its own identity claims does not override the
 		// client's stored identity on re-auth
@@ -840,12 +840,12 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 			},
 			serviceSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, reauthResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, reauthResult.Error, nil)
 		reauthByJwt, err = jwt.ParseByJwt(ctx, *reauthResult.ByClientJwt)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, reauthByJwt.Roles, []string{"role1", "role2"})
-		assert.Equal(t, reauthByJwt.Principal, "svc-a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, reauthByJwt.Roles, []string{"role1", "role2"})
+		connect.AssertEqual(t, reauthByJwt.Principal, "svc-a")
 
 		// roles and principal are immutable post-create
 		reauthResult, err = AuthNetworkClient(
@@ -856,8 +856,8 @@ func TestNetworkClientReauthIdentity(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, reauthResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, reauthResult.Error, nil)
 	})
 }
 
@@ -875,6 +875,13 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 			UserId:    userId,
 		})
 
+		// the top-level client cap is gated by enforce_concurrent_clients (dark by
+		// default; see pro.yml). Enable it so this test exercises the cap. No
+		// client is connected here, so the plan concurrent-connected limit stays
+		// at zero and never interferes.
+		defer Testing_SetEnforceConcurrentClients(true)()
+		Testing_ClearNetworkPeersEnabledCache()
+
 		var firstClientId server.Id
 		for i := range LimitTopLevelClientIdsPerNetwork {
 			authClientResult, err := AuthNetworkClient(
@@ -883,8 +890,8 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 				},
 				userSession,
 			)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, authClientResult.Error, nil)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, authClientResult.Error, nil)
 			if i == 0 {
 				firstClientId = *authClientResult.ClientId
 			}
@@ -897,9 +904,9 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, authClientResult.Error, nil)
-		assert.Equal(t, authClientResult.Error.ClientLimitExceeded, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, authClientResult.Error.ClientLimitExceeded, true)
 
 		// derivative clients are not limited by the top-level limit
 		authClientResult, err = AuthNetworkClient(
@@ -909,24 +916,24 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 			},
 			userSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, authClientResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
 
 		// a network at the limit still gets peer subscriptions
-		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), true)
+		connect.AssertEqual(t, NetworkPeersEnabled(ctx, networkId), true)
 
 		// a network over the limit (created before the limit) does not.
 		// The decision is cached per network, so the cached value holds until
 		// the ttl (cleared here)
 		Testing_CreateDevice(ctx, networkId, server.NewId(), server.NewId(), "grandfathered", "grandfathered")
-		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), true)
+		connect.AssertEqual(t, NetworkPeersEnabled(ctx, networkId), true)
 		Testing_ClearNetworkPeersEnabledCache()
-		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), false)
+		connect.AssertEqual(t, NetworkPeersEnabled(ctx, networkId), false)
 
 		// the profile resolves the same decision
 		_, topLevel, _, profile, peersEnabled := GetNetworkPeerProfile(ctx, firstClientId)
-		assert.Equal(t, topLevel, true)
-		assert.NotEqual(t, profile, nil)
-		assert.Equal(t, peersEnabled, false)
+		connect.AssertEqual(t, topLevel, true)
+		connect.AssertNotEqual(t, profile, nil)
+		connect.AssertEqual(t, peersEnabled, false)
 	})
 }

@@ -1237,10 +1237,11 @@ func ScheduleRefreshReferralTransferBalances(clientSession *session.ClientSessio
 	)
 }
 
-// RefreshReferralTransferBalances grants every referrer its referral bonus for one
-// period: bonus_per_referral x min(referrals, max_referrals), all from pro.yml.
-// Referrals pay out every period for life. The balance is unpaid and pro = false, so
-// referral data never confers Pro.
+// RefreshReferralTransferBalances grants the referral bonus to both sides for one
+// period, all from pro.yml: the referrer earns bonus_per_referral x min(referrals,
+// max_referrals), and each referred network earns referred_bonus. Referrals pay out
+// every period for life. The balances are unpaid and pro = false, so referral data
+// never confers Pro.
 func RefreshReferralTransferBalances(
 	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
 	clientSession *session.ClientSession,
@@ -1248,7 +1249,7 @@ func RefreshReferralTransferBalances(
 	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
 	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
 	// the process restarts) the grants resume on their normal cadence by themselves.
-	if model.Pro().ReferralBonus <= 0 {
+	if model.Pro().ReferralBonus <= 0 && model.Pro().ReferredBonus <= 0 {
 		glog.Errorf("[sub]RefreshReferralTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
 		return &RefreshReferralTransferBalancesResult{}, nil
 	}
@@ -1259,6 +1260,7 @@ func RefreshReferralTransferBalances(
 		startTime,
 		endTime,
 		model.Pro().ReferralBonus,
+		model.Pro().ReferredBonus,
 	)
 	return &RefreshReferralTransferBalancesResult{}, nil
 }

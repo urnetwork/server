@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"github.com/urnetwork/connect"
 	"net"
 
 	// "net/netip"
@@ -15,8 +16,6 @@ import (
 	"time"
 
 	"testing"
-
-	"github.com/go-playground/assert/v2"
 )
 
 // FIXME add counting quic stream through nginx
@@ -28,7 +27,7 @@ func DISABLE_TestPpNginxUdp(t *testing.T) {
 	defer cancel()
 
 	testDir, err := os.MkdirTemp("", "")
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	nginxConfig := `
 worker_processes auto;
@@ -62,7 +61,7 @@ stream {
 	nginxCmd := exec.Command("nginx", "-c", configPath)
 	nginxCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	err = nginxCmd.Start()
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	// defer nginxCmd.Process.Kill()
 	defer syscall.Kill(-nginxCmd.Process.Pid, syscall.SIGKILL)
 
@@ -92,7 +91,7 @@ stream {
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: 5555,
 	})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	defer conn.Close()
 	realAddr := conn.LocalAddr().(*net.UDPAddr)
 
@@ -100,7 +99,7 @@ stream {
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: 5556,
 	})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	listener := NewPpPacketConn(listener_, DefaultWarpPpSettings())
 	defer listener.Close()
@@ -110,13 +109,13 @@ stream {
 		buffer := make([]byte, packetSize)
 
 		n, addr, err := listener.ReadFrom(buffer)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, n, packetSize)
-		assert.Equal(t, buffer[0:n], sendPattern[0:n])
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, n, packetSize)
+		connect.AssertEqual(t, buffer[0:n], sendPattern[0:n])
 
 		addrPort := addr.(*net.UDPAddr).AddrPort()
 		if addrPort.Addr().Is4() {
-			assert.Equal(t,
+			connect.AssertEqual(t,
 				addrPort,
 				(&net.UDPAddr{
 					IP:   realAddr.IP.To4(),
@@ -125,7 +124,7 @@ stream {
 				}).AddrPort(),
 			)
 		} else {
-			assert.Equal(t,
+			connect.AssertEqual(t,
 				addrPort,
 				(&net.UDPAddr{
 					IP:   realAddr.IP.To16(),
@@ -146,7 +145,7 @@ stream {
 					return
 				default:
 				}
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 			}
 		}()
 
@@ -157,10 +156,10 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
-			assert.Equal(t, readAddr.(*net.UDPAddr).AddrPort(), addr.(*net.UDPAddr).AddrPort())
-			assert.Equal(t, n, packetSize)
-			assert.Equal(t, buffer[0:n], sendPattern[0:n])
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, readAddr.(*net.UDPAddr).AddrPort(), addr.(*net.UDPAddr).AddrPort())
+			connect.AssertEqual(t, n, packetSize)
+			connect.AssertEqual(t, buffer[0:n], sendPattern[0:n])
 			serverReadCount.Add(1)
 		}
 	}()
@@ -176,9 +175,9 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
-			assert.Equal(t, n, packetSize)
-			assert.Equal(t, buffer[0:n], sendPattern[0:n])
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, n, packetSize)
+			connect.AssertEqual(t, buffer[0:n], sendPattern[0:n])
 			clientReadCount.Add(1)
 		}
 	}()
@@ -194,7 +193,7 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 	}()
 
@@ -233,7 +232,7 @@ func TestPpNginxTcp(t *testing.T) {
 	defer cancel()
 
 	testDir, err := os.MkdirTemp("", "")
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	nginxConfig := `
 worker_processes auto;
@@ -267,7 +266,7 @@ stream {
 	nginxCmd := exec.Command("nginx", "-c", configPath)
 	nginxCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	err = nginxCmd.Start()
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	// defer nginxCmd.Process.Kill()
 	defer syscall.Kill(-nginxCmd.Process.Pid, syscall.SIGKILL)
 
@@ -297,7 +296,7 @@ stream {
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: 5555,
 	})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	defer conn.Close()
 	realAddr := conn.LocalAddr().(*net.TCPAddr)
 
@@ -305,7 +304,7 @@ stream {
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: 5556,
 	})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	listener := NewPpServerConn(listener_, DefaultWarpPpSettings())
 	defer listener.Close()
@@ -315,14 +314,14 @@ stream {
 		buffer := make([]byte, packetSize)
 
 		conn, err := listener.Accept()
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		defer conn.Close()
 
 		addr := conn.RemoteAddr()
 
 		addrPort := addr.(*net.TCPAddr).AddrPort()
 		if addrPort.Addr().Is4() {
-			assert.Equal(t,
+			connect.AssertEqual(t,
 				addrPort,
 				(&net.TCPAddr{
 					IP:   realAddr.IP.To4(),
@@ -331,7 +330,7 @@ stream {
 				}).AddrPort(),
 			)
 		} else {
-			assert.Equal(t,
+			connect.AssertEqual(t,
 				addrPort,
 				(&net.TCPAddr{
 					IP:   realAddr.IP.To16(),
@@ -352,7 +351,7 @@ stream {
 					return
 				default:
 				}
-				assert.Equal(t, err, nil)
+				connect.AssertEqual(t, err, nil)
 			}
 		}()
 
@@ -363,9 +362,9 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
-			assert.Equal(t, n, packetSize)
-			assert.Equal(t, buffer[0:n], sendPattern[0:n])
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, n, packetSize)
+			connect.AssertEqual(t, buffer[0:n], sendPattern[0:n])
 			serverReadCount.Add(1)
 		}
 	}()
@@ -381,9 +380,9 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
-			assert.Equal(t, n, packetSize)
-			assert.Equal(t, buffer[0:n], sendPattern[0:n])
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, n, packetSize)
+			connect.AssertEqual(t, buffer[0:n], sendPattern[0:n])
 			clientReadCount.Add(1)
 		}
 	}()
@@ -399,7 +398,7 @@ stream {
 				return
 			default:
 			}
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 	}()
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -26,29 +26,29 @@ func TestSolanaPaymentIntents(t *testing.T) {
 		reference := "test-reference-1"
 
 		err := CreateSolanaPaymentIntent(reference, 10.00, "supporter", userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// adding the same reference twice should fail
 		err = CreateSolanaPaymentIntent(reference, 10.00, "supporter", userSession)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		references := []string{"AAA", "BBB", "CCC", "DDD"}
 
 		// test not found
 		paymentSearchResult, err := SearchPaymentIntents(references, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, paymentSearchResult, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, paymentSearchResult, nil)
 
 		// test found
 		references = append(references, reference)
 		paymentSearchResult, err = SearchPaymentIntents(references, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *paymentSearchResult.NetworkId, networkId)
-		assert.Equal(t, *&paymentSearchResult.PaymentReference, reference)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *paymentSearchResult.NetworkId, networkId)
+		connect.AssertEqual(t, *&paymentSearchResult.PaymentReference, reference)
 
 		// mark completed
 		err = MarkPaymentIntentCompleted(reference, "tx-signature-1", userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 	})
 }

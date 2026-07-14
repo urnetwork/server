@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/jwt"
@@ -95,16 +95,16 @@ func TestLocationsSearch(t *testing.T) {
 			IndexSearchLocationsInTx(ctx, tx)
 
 			r1 := locationSearch().AroundIds(ctx, "san fra", 0)
-			assert.Equal(t, len(r1), 3)
-			assert.Equal(t, 0, r1[locationSanFrancisco.LocationId].ValueDistance)
+			connect.AssertEqual(t, len(r1), 3)
+			connect.AssertEqual(t, 0, r1[locationSanFrancisco.LocationId].ValueDistance)
 
 			r2 := locationSearch().AroundIds(ctx, "san frn", 1)
-			assert.Equal(t, len(r2), 3)
-			assert.Equal(t, 1, r2[locationSanFrancisco.LocationId].ValueDistance)
+			connect.AssertEqual(t, len(r2), 3)
+			connect.AssertEqual(t, 1, r2[locationSanFrancisco.LocationId].ValueDistance)
 
 			r3 := locationGroupSearch().AroundIds(ctx, "who's the", 0)
-			assert.Equal(t, len(r3), 2)
-			assert.Equal(t, 0, r3[locationGroupWhosTheBest.LocationGroupId].ValueDistance)
+			connect.AssertEqual(t, len(r3), 2)
+			connect.AssertEqual(t, 0, r3[locationGroupWhosTheBest.LocationGroupId].ValueDistance)
 
 		})
 

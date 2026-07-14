@@ -6,12 +6,12 @@ import (
 
 	"github.com/urnetwork/server/api/myipinfo/myinfo"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestParseCoordinates(t *testing.T) {
 	c, err := myinfo.ParseCoordinates("45.8399,-119.7006")
-	assert.Equal(t, nil, err)
+	connect.AssertEqual(t, nil, err)
 
 	if d := math.Abs(45.8399 - c.Latitude); 1e-8 < d {
 		t.Fatalf("%f<>%f", 45.8399, c.Latitude)

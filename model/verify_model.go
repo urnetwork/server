@@ -1638,3 +1638,38 @@ func GetVerifyProviderStats(
 	})
 	return
 }
+
+// VerifyStatsRetention is how long rolled-up verify_provider_stats rows are
+// kept. RemoveOldVerifyProviderStats deletes anything older. Mirrors
+// SearchStatsRetention -- verify_provider_stats grows per period x provider and
+// is read only for recent windows (GetStEpochClientReliability, the /stats
+// APIs), so old rows are pure storage.
+const VerifyStatsRetention = 30 * 24 * time.Hour
+
+// RemoveOldVerifyProviderStats deletes rolled-up rows older than
+// VerifyStatsRetention, in bounded batches so it never holds a long lock.
+// Driven by the RemoveOldVerifyProviderStats task. Mirrors
+// RemoveOldSearchProviderStats.
+func RemoveOldVerifyProviderStats(ctx context.Context, maxTime time.Time, limit int) {
+	minTime := maxTime.Add(-VerifyStatsRetention)
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			DELETE FROM verify_provider_stats
+			USING (
+			    SELECT period_start, client_id
+			    FROM verify_provider_stats
+			    WHERE period_start < $1
+			    ORDER BY period_start
+			    LIMIT $2
+			) t
+			WHERE
+			    verify_provider_stats.period_start = t.period_start AND
+			    verify_provider_stats.client_id = t.client_id
+			`,
+			minTime.UTC(),
+			limit,
+		))
+	})
+}

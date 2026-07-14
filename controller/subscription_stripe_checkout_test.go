@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/stripe/stripe-go/v82"
 
@@ -16,18 +16,18 @@ import (
 // charges for one thing and delivers another.
 func TestStripeDataPackByteCount(t *testing.T) {
 	byteCount, ok := stripeDataPackByteCount(StripeItemData1Tib)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, byteCount, 1*model.Tib)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, byteCount, 1*model.Tib)
 
 	byteCount, ok = stripeDataPackByteCount(StripeItemData10Tib)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, byteCount, 10*model.Tib)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, byteCount, 10*model.Tib)
 
 	// the Pro items are subscriptions, not data packs
 	_, ok = stripeDataPackByteCount(StripeItemProMonthly)
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 	_, ok = stripeDataPackByteCount("nonsense")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 }
 
 // TestStripeDataPackPriceUsd pins that the web checkout quotes the SAME price as
@@ -37,16 +37,16 @@ func TestStripeDataPackPriceUsd(t *testing.T) {
 	skipWithoutProYml(t)
 
 	priceUsd, ok := stripeDataPackPriceUsd(1 * model.Tib)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, priceUsd, float64(5))
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, priceUsd, float64(5))
 
 	priceUsd, ok = stripeDataPackPriceUsd(10 * model.Tib)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, priceUsd, float64(30))
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, priceUsd, float64(30))
 
 	// an amount we do not sell has no price -- checkout must refuse, not guess
 	_, ok = stripeDataPackPriceUsd(7 * model.Tib)
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 }
 
 // TestStripeCheckoutAmountsAreWholeCents pins the USD -> cents conversion Stripe wants.
@@ -57,11 +57,11 @@ func TestStripeCheckoutAmountsAreWholeCents(t *testing.T) {
 		return int64(round(priceUsd * 100))
 	}
 
-	assert.Equal(t, cents(5), int64(500))
-	assert.Equal(t, cents(30), int64(3000))
-	assert.Equal(t, cents(12.34), int64(1234))
+	connect.AssertEqual(t, cents(5), int64(500))
+	connect.AssertEqual(t, cents(30), int64(3000))
+	connect.AssertEqual(t, cents(12.34), int64(1234))
 	// float noise must not shave a cent off
-	assert.Equal(t, cents(0.1+0.2), int64(30))
+	connect.AssertEqual(t, cents(0.1+0.2), int64(30))
 }
 
 func round(f float64) float64 {
@@ -81,8 +81,8 @@ func TestStripeCheckoutRefusesWithoutReturnUrls(t *testing.T) {
 	// be refused. (In main they are set -- see config/main/stripe.yml.)
 	if urls.SuccessUrl == "" || urls.CancelUrl == "" {
 		result := stripeCheckoutError("Checkout is not configured.")
-		assert.NotEqual(t, result.Error, nil)
-		assert.Equal(t, result.CheckoutUrl, "")
+		connect.AssertNotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, result.CheckoutUrl, "")
 	}
 }
 
@@ -92,23 +92,23 @@ func TestStripeCheckoutRefusesWithoutReturnUrls(t *testing.T) {
 // upgrade button would silently do nothing.
 func TestStripeCheckoutUiMode(t *testing.T) {
 	uiMode, ok := stripeCheckoutUiMode("")
-	assert.Equal(t, ok, true)
-	assert.Equal(t, uiMode, StripeUiModeHosted)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, uiMode, StripeUiModeHosted)
 
 	uiMode, ok = stripeCheckoutUiMode(StripeUiModeEmbedded)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, uiMode, StripeUiModeEmbedded)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, uiMode, StripeUiModeEmbedded)
 
 	uiMode, ok = stripeCheckoutUiMode(StripeUiModeHosted)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, uiMode, StripeUiModeHosted)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, uiMode, StripeUiModeHosted)
 
 	// Stripe also has a "custom" ui mode, but we do not build for it -- refuse rather
 	// than pass an unsupported mode through to the API
 	_, ok = stripeCheckoutUiMode("custom")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 	_, ok = stripeCheckoutUiMode("nonsense")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 }
 
 // TestStripeCheckoutUiModeParamsDoNotMix pins the one thing Stripe will reject outright:
@@ -123,20 +123,20 @@ func TestStripeCheckoutUiModeParamsDoNotMix(t *testing.T) {
 	}
 
 	embedded := &stripe.CheckoutSessionParams{}
-	assert.Equal(t, stripeCheckoutApplyUiMode(embedded, StripeUiModeEmbedded, false, urls), true)
-	assert.Equal(t, *embedded.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
-	assert.Equal(t, *embedded.ReturnURL, urls.ReturnUrl)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(embedded, StripeUiModeEmbedded, false, urls), true)
+	connect.AssertEqual(t, *embedded.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
+	connect.AssertEqual(t, *embedded.ReturnURL, urls.ReturnUrl)
 	// the pair Stripe rejects in this mode must be absent
-	assert.Equal(t, embedded.SuccessURL, nil)
-	assert.Equal(t, embedded.CancelURL, nil)
+	connect.AssertEqual(t, embedded.SuccessURL, nil)
+	connect.AssertEqual(t, embedded.CancelURL, nil)
 
 	hosted := &stripe.CheckoutSessionParams{}
-	assert.Equal(t, stripeCheckoutApplyUiMode(hosted, StripeUiModeHosted, false, urls), true)
-	assert.Equal(t, *hosted.SuccessURL, urls.SuccessUrl)
-	assert.Equal(t, *hosted.CancelURL, urls.CancelUrl)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(hosted, StripeUiModeHosted, false, urls), true)
+	connect.AssertEqual(t, *hosted.SuccessURL, urls.SuccessUrl)
+	connect.AssertEqual(t, *hosted.CancelURL, urls.CancelUrl)
 	// hosted is Stripe's default; sending ui_mode/return_url would only confuse it
-	assert.Equal(t, hosted.UIMode, nil)
-	assert.Equal(t, hosted.ReturnURL, nil)
+	connect.AssertEqual(t, hosted.UIMode, nil)
+	connect.AssertEqual(t, hosted.ReturnURL, nil)
 }
 
 // TestStripeCheckoutRefusesUnconfiguredUiMode pins that each mode refuses on ITS OWN
@@ -148,17 +148,17 @@ func TestStripeCheckoutRefusesUnconfiguredUiMode(t *testing.T) {
 		SuccessUrl: "https://ur.io/checkout/success",
 		CancelUrl:  "https://ur.io/checkout/cancel",
 	}
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, hostedOnly), true)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, hostedOnly), false)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, hostedOnly), true)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, hostedOnly), false)
 
 	embeddedOnly := StripeCheckoutUrls{
 		ReturnUrl: "https://ur.io/checkout/complete",
 	}
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, embeddedOnly), true)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, embeddedOnly), false)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, embeddedOnly), true)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, embeddedOnly), false)
 
 	// a half-configured hosted pair is not usable either
-	assert.Equal(t, stripeCheckoutApplyUiMode(
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(
 		&stripe.CheckoutSessionParams{},
 		StripeUiModeHosted,
 		false,
@@ -166,8 +166,8 @@ func TestStripeCheckoutRefusesUnconfiguredUiMode(t *testing.T) {
 	), false)
 
 	// nothing configured at all
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, StripeCheckoutUrls{}), false)
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, StripeCheckoutUrls{}), false)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeHosted, false, StripeCheckoutUrls{}), false)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, StripeCheckoutUrls{}), false)
 }
 
 // TestSignedInDataPurchaseLandsTheData pins the whole point of a signed-in purchase: the
@@ -188,7 +188,7 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 		networkId := server.NewId()
 
 		before := model.GetActiveTransferBalances(ctx, networkId)
-		assert.Equal(t, len(before), 0)
+		connect.AssertEqual(t, len(before), 0)
 
 		err := CreateBalanceCode(
 			ctx,
@@ -200,15 +200,15 @@ func TestSignedInDataPurchaseLandsTheData(t *testing.T) {
 			"buyer@bringyour.com",
 			&networkId, // signed in: we know the network
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// the data is simply THERE -- no code to redeem by hand
 		after := model.GetActiveTransferBalances(ctx, networkId)
-		assert.Equal(t, len(after), 1)
-		assert.Equal(t, after[0].BalanceByteCount, 1*model.Tib)
+		connect.AssertEqual(t, len(after), 1)
+		connect.AssertEqual(t, after[0].BalanceByteCount, 1*model.Tib)
 		// ...and a data purchase never grants Pro, however it was bought
-		assert.Equal(t, after[0].Pro, false)
-		assert.Equal(t, model.IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, after[0].Pro, false)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), false)
 	})
 }
 
@@ -236,13 +236,13 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 				"buyer@bringyour.com",
 				&networkId,
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		// exactly one credit, not three
 		balances := model.GetActiveTransferBalances(ctx, networkId)
-		assert.Equal(t, len(balances), 1)
-		assert.Equal(t, balances[0].BalanceByteCount, 1*model.Tib)
+		connect.AssertEqual(t, len(balances), 1)
+		connect.AssertEqual(t, balances[0].BalanceByteCount, 1*model.Tib)
 	})
 }
 
@@ -254,29 +254,29 @@ func TestWebhookRetryDoesNotDoubleCredit(t *testing.T) {
 func TestStripeCheckoutInlineNeverRedirect(t *testing.T) {
 	// validation: "never" is embedded-only
 	never, ok := stripeCheckoutRedirectNever(StripeUiModeEmbedded, "never")
-	assert.Equal(t, ok, true)
-	assert.Equal(t, never, true)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, never, true)
 
 	_, ok = stripeCheckoutRedirectNever(StripeUiModeHosted, "never")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 
 	never, ok = stripeCheckoutRedirectNever(StripeUiModeHosted, "")
-	assert.Equal(t, ok, true)
-	assert.Equal(t, never, false)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, never, false)
 
 	_, ok = stripeCheckoutRedirectNever(StripeUiModeEmbedded, "sometimes")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 
 	// params: never -> RedirectOnCompletion set, NO return_url, and no urls required
 	noUrls := StripeCheckoutUrls{}
 	params := &stripe.CheckoutSessionParams{}
-	assert.Equal(t, stripeCheckoutApplyUiMode(params, StripeUiModeEmbedded, true, noUrls), true)
-	assert.Equal(t, *params.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
-	assert.Equal(t, *params.RedirectOnCompletion, "never")
-	assert.Equal(t, params.ReturnURL, nil)
-	assert.Equal(t, params.SuccessURL, nil)
-	assert.Equal(t, params.CancelURL, nil)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(params, StripeUiModeEmbedded, true, noUrls), true)
+	connect.AssertEqual(t, *params.UIMode, string(stripe.CheckoutSessionUIModeEmbedded))
+	connect.AssertEqual(t, *params.RedirectOnCompletion, "never")
+	connect.AssertEqual(t, params.ReturnURL, nil)
+	connect.AssertEqual(t, params.SuccessURL, nil)
+	connect.AssertEqual(t, params.CancelURL, nil)
 
 	// without never, embedded still demands its return_url
-	assert.Equal(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, noUrls), false)
+	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, noUrls), false)
 }

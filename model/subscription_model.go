@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	// "golang.org/x/exp/maps"
+	// "maps"
 
 	"github.com/redis/go-redis/v9"
 
@@ -1189,28 +1189,43 @@ func CreateCompanionTransferEscrow(
 		result, err := tx.Query(
 			ctx,
 			`
-                SELECT
-                    contract_id
-                FROM transfer_contract
-                WHERE
+                SELECT contract_id
+                FROM (
                     (
-                        open = true AND
-                        source_id = $1 AND
-                        destination_id = $2 AND
-                        companion_contract_id IS NULL
+                        SELECT contract_id, create_time
+                        FROM transfer_contract
+                        WHERE
+                            open = true AND
+                            source_id = $1 AND
+                            destination_id = $2 AND
+                            companion_contract_id IS NULL
+                        ORDER BY create_time ASC
+                        LIMIT 1
                     )
 
-                    OR
+                    UNION ALL
 
                     (
-                        open = false AND
-                        $3 <= close_time AND
-                        source_id = $1 AND
-                        destination_id = $2 AND
-                        companion_contract_id IS NULL
+                        SELECT contract_id, create_time
+                        FROM transfer_contract
+                        WHERE
+                            open = false AND
+                            $3 <= close_time AND
+                            source_id = $1 AND
+                            destination_id = $2 AND
+                            companion_contract_id IS NULL
+                        ORDER BY create_time ASC
+                        LIMIT 1
                     )
-                ORDER BY create_time ASC
-                LIMIT 1
+
+                    -- the two branches are disjoint on open, so the global
+                    -- earliest is the earlier of each branch's earliest; each
+                    -- inner query is a bounded index range (see
+                    -- transfer_contract_open_source_id_companion_contract_id),
+                    -- which keeps the planner off the create_time full scan
+                    ORDER BY create_time ASC
+                    LIMIT 1
+                ) AS earliest_origin
             `,
 			// note the origin direction is reversed
 			destinationId,
@@ -3232,6 +3247,10 @@ func AddFreeTransferBalanceToAllNetworks(
 ) (addedTransferBalances map[server.Id]ByteCount) {
 	addedTransferBalances = map[server.Id]ByteCount{}
 
+	// Seeker/Saga holders get their free daily data scaled (pro.yml seeker.data_multiplier).
+	seekers := GetAllSeekerHolders(ctx)
+	seekerMultiplier := Pro().SeekerDataMultiplier()
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		networkIds := []server.Id{}
 
@@ -3263,6 +3282,10 @@ func AddFreeTransferBalanceToAllNetworks(
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, networkId := range networkIds {
+				byteCount := balanceByteCount
+				if seekerMultiplier != 1.0 && seekers[networkId] {
+					byteCount = ByteCount(float64(balanceByteCount) * seekerMultiplier)
+				}
 				batch.Queue(
 					`
 		                INSERT INTO transfer_balance (
@@ -3282,11 +3305,11 @@ func AddFreeTransferBalanceToAllNetworks(
 					networkId,
 					startTime,
 					endTime,
-					balanceByteCount,
+					byteCount,
 					NanoCents(0),
 					NanoCents(0),
 				)
-				addedTransferBalances[networkId] = balanceByteCount
+				addedTransferBalances[networkId] = byteCount
 			}
 		})
 	})

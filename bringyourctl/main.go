@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/docopt/docopt-go"
 
@@ -823,7 +823,7 @@ func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
 	}
 
 	// largest payout first, so the plan reads consistently across runs
-	payments := maps.Values(plan.NetworkPayments)
+	payments := slices.Collect(maps.Values(plan.NetworkPayments))
 	slices.SortFunc(payments, func(a, b *model.AccountPayment) int {
 		return cmp.Compare(b.Payout, a.Payout)
 	})
@@ -1158,7 +1158,7 @@ func reconcileNetEscrow(opts docopt.Opts) {
 	driftByNetworkId, balanceCount := model.ReconcileNetEscrow(ctx, apply)
 
 	// largest absolute drift first
-	networkIds := maps.Keys(driftByNetworkId)
+	networkIds := slices.Collect(maps.Keys(driftByNetworkId))
 	absDrift := func(networkId server.Id) int64 {
 		d := driftByNetworkId[networkId]
 		if d < 0 {
@@ -1219,7 +1219,7 @@ func taskLs(opts docopt.Opts) {
 	taskIds := task.ListPendingTasks(ctx)
 	tasks := task.GetTasks(ctx, taskIds...)
 
-	orderedTaskIds := maps.Keys(tasks)
+	orderedTaskIds := slices.Collect(maps.Keys(tasks))
 	slices.SortFunc(orderedTaskIds, func(a server.Id, b server.Id) int {
 		taskA := tasks[a]
 		taskB := tasks[b]
@@ -1334,7 +1334,7 @@ func reliabilitySetMultipliers(opts docopt.Opts) {
 		countryCodes[m.CountryCode] = m.CountryLocationId
 	}
 
-	orderedCountryCodes := maps.Keys(countryCodes)
+	orderedCountryCodes := slices.Collect(maps.Keys(countryCodes))
 	slices.Sort(orderedCountryCodes)
 	for _, countryCode := range orderedCountryCodes {
 		countryLocationId := countryCodes[countryCode]

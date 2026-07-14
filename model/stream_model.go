@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base32"
+	"slices"
 	// "encoding/json"
 	"bytes"
 	"encoding/gob"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -563,7 +564,7 @@ func (self *StreamHopListener) run() {
 			resetEvent := &StreamHopEvent{
 				StreamHopEventType: StreamHopEventTypeReset,
 				EventId:            resetEventId,
-				StreamHops:         maps.Keys(resetStreamHops),
+				StreamHops:         slices.Collect(maps.Keys(resetStreamHops)),
 			}
 			self.callback(resetEvent)
 		}

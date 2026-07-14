@@ -3,9 +3,10 @@ package model
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	// "github.com/urnetwork/glog"
 
@@ -159,7 +160,7 @@ func RemoveNetwork(
 			}
 		})
 
-		server.CreateTempTableInTx(ctx, tx, "temp_user_id(user_id uuid)", maps.Keys(userIds)...)
+		server.CreateTempTableInTx(ctx, tx, "temp_user_id(user_id uuid)", slices.Collect(maps.Keys(userIds))...)
 
 		result, err = tx.Query(
 			ctx,

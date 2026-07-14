@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -1044,7 +1044,7 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 			}
 		})
 
-		taskIds = maps.Keys(taskIdPriorities)
+		taskIds = slices.Collect(maps.Keys(taskIdPriorities))
 		mathrand.Shuffle(len(taskIds), func(i int, j int) {
 			taskIds[i], taskIds[j] = taskIds[j], taskIds[i]
 		})

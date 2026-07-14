@@ -9,43 +9,43 @@ import (
 
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestIpInfo(t *testing.T) {
 	ip1 := net.ParseIP("65.19.157.62")
 	ipInfo1, err := GetIpInfoFromIp(ip1)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, ipInfo1, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, ipInfo1, nil)
 
-	assert.Equal(t, ipInfo1.CountryCode, "us")
-	assert.Equal(t, ipInfo1.Country, "United States")
-	assert.Equal(t, ipInfo1.Region, "California")
-	assert.Equal(t, ipInfo1.UserType, UserTypeHosting)
-	assert.NotEqual(t, ipInfo1.Longitude, float64(0.0))
-	assert.NotEqual(t, ipInfo1.Latitude, float64(0.0))
+	connect.AssertEqual(t, ipInfo1.CountryCode, "us")
+	connect.AssertEqual(t, ipInfo1.Country, "United States")
+	connect.AssertEqual(t, ipInfo1.Region, "California")
+	connect.AssertEqual(t, ipInfo1.UserType, UserTypeHosting)
+	connect.AssertNotEqual(t, ipInfo1.Longitude, float64(0.0))
+	connect.AssertNotEqual(t, ipInfo1.Latitude, float64(0.0))
 
 	ip2 := net.ParseIP("2001:470:173::52")
 	ipInfo2, err := GetIpInfoFromIp(ip2)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, ipInfo2, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, ipInfo2, nil)
 
-	assert.Equal(t, ipInfo2.CountryCode, "us")
-	assert.Equal(t, ipInfo2.Country, "United States")
-	assert.Equal(t, ipInfo2.Region, "California")
-	assert.Equal(t, ipInfo2.UserType, UserTypeHosting)
-	assert.NotEqual(t, ipInfo2.Longitude, float64(0.0))
-	assert.NotEqual(t, ipInfo2.Latitude, float64(0.0))
+	connect.AssertEqual(t, ipInfo2.CountryCode, "us")
+	connect.AssertEqual(t, ipInfo2.Country, "United States")
+	connect.AssertEqual(t, ipInfo2.Region, "California")
+	connect.AssertEqual(t, ipInfo2.UserType, UserTypeHosting)
+	connect.AssertNotEqual(t, ipInfo2.Longitude, float64(0.0))
+	connect.AssertNotEqual(t, ipInfo2.Latitude, float64(0.0))
 
 	ip3 := net.ParseIP("1.1.1.1")
 	ipInfo3, err := GetIpInfoFromIp(ip3)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, ipInfo3, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, ipInfo3, nil)
 
-	assert.Equal(t, ipInfo3.UserType, UserTypeHosting)
-	assert.Equal(t, ipInfo3.Hosting, true)
-	assert.NotEqual(t, ipInfo3.Longitude, float64(0.0))
-	assert.NotEqual(t, ipInfo3.Latitude, float64(0.0))
+	connect.AssertEqual(t, ipInfo3.UserType, UserTypeHosting)
+	connect.AssertEqual(t, ipInfo3.Hosting, true)
+	connect.AssertNotEqual(t, ipInfo3.Longitude, float64(0.0))
+	connect.AssertNotEqual(t, ipInfo3.Latitude, float64(0.0))
 
 }
 
@@ -60,20 +60,20 @@ func TestIpInfoPerf(t *testing.T) {
 			cryptorand.Read(ipv6Bytes)
 			ipv6 := net.IP(ipv6Bytes)
 			_, err := GetIpInfoFromIp(ipv6)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		} else {
 			ipv4Bytes := make([]byte, 4)
 			cryptorand.Read(ipv4Bytes)
 			ipv4 := net.IP(ipv4Bytes)
 			_, err := GetIpInfoFromIp(ipv4)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 	}
 	endTime := time.Now()
 
 	duration := endTime.Sub(startTime)
 	fmt.Printf("[ip]%d lookups per second (%s total)\n", int((time.Duration(n)*duration)/time.Second), duration)
-	assert.Equal(t, duration <= 20*time.Second, true)
+	connect.AssertEqual(t, duration <= 20*time.Second, true)
 }
 
 func TestDistance(t *testing.T) {
@@ -135,47 +135,47 @@ func TestDistance(t *testing.T) {
 
 		eps := 0.1
 		if d := km - test.km; d < -eps || eps < d {
-			assert.Equal(t, test.km, km)
+			connect.AssertEqual(t, test.km, km)
 		}
 		if d := millis - test.millis; d < -eps || eps < d {
-			assert.Equal(t, test.millis, millis)
+			connect.AssertEqual(t, test.millis, millis)
 		}
 	}
 }
 
 func TestParseClientAddress(t *testing.T) {
 	addrPort, err := ParseClientAddress("[2001:470:99:57:e643:4bff:fe23:a343]:443")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, addrPort.Addr().String(), "2001:470:99:57:e643:4bff:fe23:a343")
-	assert.Equal(t, int(addrPort.Port()), 443)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, addrPort.Addr().String(), "2001:470:99:57:e643:4bff:fe23:a343")
+	connect.AssertEqual(t, int(addrPort.Port()), 443)
 
 	addrPort, err = ParseClientAddress("127.0.0.1:443")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, addrPort.Addr().String(), "127.0.0.1")
-	assert.Equal(t, int(addrPort.Port()), 443)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, addrPort.Addr().String(), "127.0.0.1")
+	connect.AssertEqual(t, int(addrPort.Port()), 443)
 
 	addrPort, err = ParseClientAddress("fd00:6a4f:a007:15da::1:40704")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, addrPort.Addr().String(), "fd00:6a4f:a007:15da::1")
-	assert.Equal(t, int(addrPort.Port()), 40704)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, addrPort.Addr().String(), "fd00:6a4f:a007:15da::1")
+	connect.AssertEqual(t, int(addrPort.Port()), 40704)
 
 	addrPort, err = ParseClientAddress(":443")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 }
 
 func TestArinInfo(t *testing.T) {
 	ip1 := net.ParseIP("65.19.157.62")
 	arinInfo1, err := GetArinInfoFromIp(ip1)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, arinInfo1, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, arinInfo1, nil)
 
-	assert.Equal(t, arinInfo1.OrgCountryCodes[0], "us")
+	connect.AssertEqual(t, arinInfo1.OrgCountryCodes[0], "us")
 
 	ip2 := net.ParseIP("2001:4200::1")
 	arinInfo2, err := GetArinInfoFromIp(ip2)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, arinInfo2, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, arinInfo2, nil)
 
-	assert.Equal(t, arinInfo2.OrgCountryCodes[0], "mu")
+	connect.AssertEqual(t, arinInfo2.OrgCountryCodes[0], "mu")
 
 }

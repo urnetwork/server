@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -32,8 +32,8 @@ func TestBalanceCode(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, checkResult0.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, checkResult0.Error, nil)
 
 		subscriptionYearDuration := 365 * 24 * time.Hour
 
@@ -46,18 +46,18 @@ func TestBalanceCode(t *testing.T) {
 			"rest-purchase-1-receipt",
 			"test@bringyour.com",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		balanceCodeId2, err := GetBalanceCodeIdForPurchaseEventId(ctx, balanceCode.PurchaseEventId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, balanceCode.BalanceCodeId, balanceCodeId2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, balanceCode.BalanceCodeId, balanceCodeId2)
 
 		_, err = GetBalanceCodeIdForPurchaseEventId(ctx, "test-purchase-nothing")
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		balanceCode2, err := GetBalanceCode(ctx, balanceCode.BalanceCodeId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *balanceCode, *balanceCode2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *balanceCode, *balanceCode2)
 
 		checkResult1, err := CheckBalanceCode(
 			&CheckBalanceCodeArgs{
@@ -65,9 +65,9 @@ func TestBalanceCode(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, checkResult1.Error, nil)
-		assert.Equal(t, checkResult1.Balance.BalanceByteCount, ByteCount(1024))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, checkResult1.Error, nil)
+		connect.AssertEqual(t, checkResult1.Balance.BalanceByteCount, ByteCount(1024))
 
 		redeemResult0, err := RedeemBalanceCode(
 			&RedeemBalanceCodeArgs{
@@ -76,9 +76,9 @@ func TestBalanceCode(t *testing.T) {
 			},
 			ctx,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, redeemResult0.Error, nil)
-		assert.Equal(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, redeemResult0.Error, nil)
+		connect.AssertEqual(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
 	})
 }
 
@@ -98,8 +98,8 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 		)
 
 		redeemed, err := FetchNetworkRedeemedBalanceCodes(clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(redeemed), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(redeemed), 0)
 
 		subscriptionYearDuration := 365 * 24 * time.Hour
 
@@ -112,7 +112,7 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		args := &RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
@@ -120,17 +120,17 @@ func TestFetchNetworkRedeemedBalanceCodes(t *testing.T) {
 		}
 
 		redeemResult, err := RedeemBalanceCode(args, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		// redeem reports failures via result.Error with a nil Go error; checking
 		// only err would let a silent "Unknown balance code." pass and resurface
 		// as a 0-vs-1 mismatch on the fetch below.
-		assert.Equal(t, redeemResult.Error, nil)
+		connect.AssertEqual(t, redeemResult.Error, nil)
 
 		redeemed, err = FetchNetworkRedeemedBalanceCodes(clientSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(redeemed), 1)
-		assert.Equal(t, redeemed[0].BalanceCodeId, balanceCode.BalanceCodeId)
-		assert.Equal(t, redeemed[0].Secret, balanceCode.Secret)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(redeemed), 1)
+		connect.AssertEqual(t, redeemed[0].BalanceCodeId, balanceCode.BalanceCodeId)
+		connect.AssertEqual(t, redeemed[0].Secret, balanceCode.Secret)
 
 	})
 }

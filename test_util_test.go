@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 // These tests exercise the real TestEnv.Run (including per-attempt environment
@@ -37,7 +37,7 @@ func TestRunRetriesUntilPass(t *testing.T) {
 		case 2:
 			tb.Fail()
 		case 3:
-			assert.Equal(tb, 1, 2)
+			connect.AssertEqual(tb, 1, 2)
 		}
 		// the fourth attempt falls through and passes
 	})

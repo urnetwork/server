@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -85,7 +85,7 @@ func TestProvidersList(t *testing.T) {
 
 		// ensure providerLocations is an available tool
 		toolsResult, err := session.ListTools(ctx, nil)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		found := false
 		for _, tool := range toolsResult.Tools {
@@ -94,7 +94,7 @@ func TestProvidersList(t *testing.T) {
 				break
 			}
 		}
-		assert.Equal(t, found, true)
+		connect.AssertEqual(t, found, true)
 
 		/**
 		 * No provider locations found
@@ -109,13 +109,13 @@ func TestProvidersList(t *testing.T) {
 				"query": "",
 			},
 		})
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(result.Content), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(result.Content), 1)
 
 		textContent, ok := result.Content[0].(*mcp.TextContent)
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
-		assert.Equal(t, strings.Contains(textContent.Text, MsgNoProviderLocations), true)
+		connect.AssertEqual(t, strings.Contains(textContent.Text, MsgNoProviderLocations), true)
 
 		/**
 		 * Setup location group
@@ -137,7 +137,7 @@ func TestProvidersList(t *testing.T) {
 		}
 		model.CreateLocation(ctx, city)
 
-		assert.Equal(t, city.CountryLocationId, country.LocationId)
+		connect.AssertEqual(t, city.CountryLocationId, country.LocationId)
 
 		createLocationGroup := &model.LocationGroup{
 			Name:     model.StrongPrivacyLaws,
@@ -196,7 +196,7 @@ func TestProvidersList(t *testing.T) {
 				fmt.Sprintf("0.0.0.%d:0", i),
 				handlerId,
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			secretKeys := map[model.ProvideMode][]byte{
 				model.ProvideModePublic: make([]byte, 32),
@@ -230,7 +230,7 @@ func TestProvidersList(t *testing.T) {
 			})
 
 			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			stats := &model.ClientReliabilityStats{
 				ConnectionEstablishedCount: 1,
 				ProvideEnabledCount:        1,
@@ -262,16 +262,16 @@ func TestProvidersList(t *testing.T) {
 				"query": "",
 			},
 		})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
-		assert.Equal(t, len(result.Content), 1)
+		connect.AssertEqual(t, len(result.Content), 1)
 
 		textContent, ok = result.Content[0].(*mcp.TextContent)
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		expectedCount := 1
 		expectedMsg := fmt.Sprintf(MsgFoundProviderLocations, expectedCount)
-		assert.Equal(t, strings.Contains(textContent.Text, expectedMsg), true)
+		connect.AssertEqual(t, strings.Contains(textContent.Text, expectedMsg), true)
 
 	})
 }

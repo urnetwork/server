@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 // TestFreeGrantWindow pins the daily free grant: it covers the day and stays valid
@@ -16,18 +16,18 @@ func TestFreeGrantWindow(t *testing.T) {
 	startTime, endTime := FreeGrantWindow(now)
 
 	// starts at the top of the day
-	assert.Equal(t, startTime, time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, startTime, time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC))
 	// ends 1 hour after the end of the day
-	assert.Equal(t, endTime, time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, endTime, time.Date(2026, 7, 12, 1, 0, 0, 0, time.UTC))
 
 	// the window covers the whole day it was granted for
-	assert.Equal(t, startTime.Before(now), true)
-	assert.Equal(t, now.Before(endTime), true)
+	connect.AssertEqual(t, startTime.Before(now), true)
+	connect.AssertEqual(t, now.Before(endTime), true)
 
 	// month boundary rolls over correctly
 	startTime, endTime = FreeGrantWindow(time.Date(2026, 7, 31, 23, 59, 0, 0, time.UTC))
-	assert.Equal(t, startTime, time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
-	assert.Equal(t, endTime, time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, startTime, time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, endTime, time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC))
 }
 
 // TestProGrantWindow pins the monthly Pro grant: the full allowance lands at the
@@ -40,22 +40,22 @@ func TestProGrantWindow(t *testing.T) {
 	startTime, endTime := ProGrantWindow(now)
 
 	// starts at the top of the month
-	assert.Equal(t, startTime, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, startTime, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
 	// ends 1 day after the end of the month (Aug 1 + 1 day)
-	assert.Equal(t, endTime, time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, endTime, time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC))
 
-	assert.Equal(t, startTime.Before(now), true)
-	assert.Equal(t, now.Before(endTime), true)
+	connect.AssertEqual(t, startTime.Before(now), true)
+	connect.AssertEqual(t, now.Before(endTime), true)
 
 	// december rolls into the next year
 	startTime, endTime = ProGrantWindow(time.Date(2026, 12, 25, 0, 0, 0, 0, time.UTC))
-	assert.Equal(t, startTime, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC))
-	assert.Equal(t, endTime, time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, startTime, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, endTime, time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC))
 
 	// february (28 days) -- AddDate handles the short month
 	startTime, endTime = ProGrantWindow(time.Date(2026, 2, 14, 0, 0, 0, 0, time.UTC))
-	assert.Equal(t, startTime, time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC))
-	assert.Equal(t, endTime, time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, startTime, time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, endTime, time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC))
 }
 
 // TestGrantWindowsOverlap is the property that matters operationally: each grant is
@@ -65,10 +65,10 @@ func TestGrantWindowsOverlap(t *testing.T) {
 	_, endToday := FreeGrantWindow(day)
 	startTomorrow, _ := FreeGrantWindow(day.AddDate(0, 0, 1))
 	// tomorrow's grant starts before today's expires
-	assert.Equal(t, startTomorrow.Before(endToday), true)
+	connect.AssertEqual(t, startTomorrow.Before(endToday), true)
 
 	month := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	_, endThisMonth := ProGrantWindow(month)
 	startNextMonth, _ := ProGrantWindow(month.AddDate(0, 1, 0))
-	assert.Equal(t, startNextMonth.Before(endThisMonth), true)
+	connect.AssertEqual(t, startNextMonth.Before(endThisMonth), true)
 }

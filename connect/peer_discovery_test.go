@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
-
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
@@ -87,7 +85,7 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 		server.NowUtc(),
 		server.NowUtc().Add(365*24*time.Hour),
 	)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 		NetworkId: networkId,
 		UserId:    userId,
@@ -112,8 +110,8 @@ func (self *peerDiscoveryEnv) Close() {
 
 func (self *peerDiscoveryEnv) authClient(args *model.AuthNetworkClientArgs) (server.Id, string) {
 	result, err := model.AuthNetworkClient(args, self.userSession)
-	assert.Equal(self.t, err, nil)
-	assert.Equal(self.t, result.Error, nil)
+	connect.AssertEqual(self.t, err, nil)
+	connect.AssertEqual(self.t, result.Error, nil)
 	return *result.ClientId, *result.ByClientJwt
 }
 
@@ -166,7 +164,7 @@ func (self *peerDiscoveryEnv) setProvideModes(client *connect.Client, provideMod
 	)
 	select {
 	case err := <-provideAck:
-		assert.Equal(self.t, err, nil)
+		connect.AssertEqual(self.t, err, nil)
 	case <-time.After(60 * time.Second):
 		self.t.Fatal("timeout waiting for provide ack")
 	}
@@ -223,9 +221,9 @@ func recordPeerReceives(client *connect.Client, sourceClientId server.Id) chan c
 
 func sendSimpleMessage(t testing.TB, from *connect.Client, toClientId server.Id, opts ...any) {
 	frame, err := connect.ToFrame(&protocol.SimpleMessage{Content: "hello"}, connect.DefaultProtocolVersion)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	sent := from.SendWithTimeout(frame, connect.DestinationId(connect.Id(toClientId)), func(err error) {}, 60*time.Second, opts...)
-	assert.Equal(t, sent, true)
+	connect.AssertEqual(t, sent, true)
 }
 
 // TestExchangePeerDiscovery drives two top-level clients of the same network
@@ -291,59 +289,59 @@ func TestExchangePeerDiscovery(t *testing.T) {
 			peerB := findPeer(connected, clientIdB)
 			return peerB != nil && peerB.ProvideEnabled
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 		connectedA, disconnectedCountA := clientA.NetworkPeers()
-		assert.Equal(t, disconnectedCountA, 0)
+		connect.AssertEqual(t, disconnectedCountA, 0)
 		peerB := findPeer(connectedA, clientIdB)
-		assert.Equal(t, findPeer(connectedA, clientIdA), nil)
-		assert.Equal(t, peerB.DeviceName, "device b")
-		assert.Equal(t, peerB.DeviceSpec, "spec b")
-		assert.Equal(t, peerB.Principal, "")
-		assert.Equal(t, len(peerB.Roles), 0)
-		assert.Equal(t, slices.Contains(peerB.ProvideModes, protocol.ProvideMode_Network), true)
+		connect.AssertEqual(t, findPeer(connectedA, clientIdA), nil)
+		connect.AssertEqual(t, peerB.DeviceName, "device b")
+		connect.AssertEqual(t, peerB.DeviceSpec, "spec b")
+		connect.AssertEqual(t, peerB.Principal, "")
+		connect.AssertEqual(t, len(peerB.Roles), 0)
+		connect.AssertEqual(t, slices.Contains(peerB.ProvideModes, protocol.ProvideMode_Network), true)
 
 		// b sees a connected with its roles and principal
 		ok = waitForPeers(ctx, clientB, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			peerA := findPeer(connected, clientIdA)
 			return peerA != nil && peerA.ProvideEnabled
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 		connectedB, _ := clientB.NetworkPeers()
 		peerA := findPeer(connectedB, clientIdA)
-		assert.Equal(t, findPeer(connectedB, clientIdB), nil)
-		assert.Equal(t, peerA.DeviceName, "device a")
-		assert.Equal(t, peerA.DeviceSpec, "spec a")
-		assert.Equal(t, peerA.Principal, "principal-a")
-		assert.Equal(t, peerA.Roles, []string{"role-a1", "role-a2"})
+		connect.AssertEqual(t, findPeer(connectedB, clientIdB), nil)
+		connect.AssertEqual(t, peerA.DeviceName, "device a")
+		connect.AssertEqual(t, peerA.DeviceSpec, "spec a")
+		connect.AssertEqual(t, peerA.Principal, "principal-a")
+		connect.AssertEqual(t, peerA.Roles, []string{"role-a1", "role-a2"})
 
 		// messages between network peers settle at ProvideMode_Network and
 		// carry the source's roles and principal from the signed contract
 		sendSimpleMessage(t, clientA, clientIdB)
 		select {
 		case peer := <-receiveB:
-			assert.Equal(t, peer.ProvideMode, protocol.ProvideMode_Network)
-			assert.Equal(t, peer.Roles, []string{"role-a1", "role-a2"})
-			assert.Equal(t, peer.Principal, "principal-a")
+			connect.AssertEqual(t, peer.ProvideMode, protocol.ProvideMode_Network)
+			connect.AssertEqual(t, peer.Roles, []string{"role-a1", "role-a2"})
+			connect.AssertEqual(t, peer.Principal, "principal-a")
 		case <-time.After(60 * time.Second):
 			t.Fatal("timeout waiting for message from a to b")
 		}
 
 		// the fast peer discovery api: a network session sees both peers
 		peersResult, err := model.GetNetworkPeersForSession(env.userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, peersResult.Error, nil)
-		assert.Equal(t, len(peersResult.Peers), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, peersResult.Error, nil)
+		connect.AssertEqual(t, len(peersResult.Peers), 2)
 
 		// a top-level client session sees the other peer, excluding itself
 		byJwtA, err := jwt.ParseByJwt(ctx, byClientJwtA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		clientSessionA := session.Testing_CreateClientSession(ctx, byJwtA)
 		peersResult, err = model.GetNetworkPeersForSession(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, peersResult.Error, nil)
-		assert.Equal(t, len(peersResult.Peers), 1)
-		assert.Equal(t, peersResult.Peers[0].ClientId, clientIdB)
-		assert.Equal(t, peersResult.DisconnectedCount, 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, peersResult.Error, nil)
+		connect.AssertEqual(t, len(peersResult.Peers), 1)
+		connect.AssertEqual(t, peersResult.Peers[0].ClientId, clientIdB)
+		connect.AssertEqual(t, peersResult.DisconnectedCount, 0)
 
 		// disconnect b; a sees b move to a disconnect marker
 		clientB.Cancel()
@@ -364,7 +362,7 @@ func TestExchangePeerDiscovery(t *testing.T) {
 			}
 			t.Logf("client a sees disconnectedCount=%d", disconnectedCountA)
 		}
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 	})
 }
 
@@ -427,7 +425,7 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 			peerB := findPeer(connected, clientIdB)
 			return peerB != nil && peerB.ProvideEnabled && hasMode(peerB, protocol.ProvideMode_Public)
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// pause stops public but keeps network: a sees the public mode drop
 		// while provide stays enabled
@@ -437,16 +435,16 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 			peerB := findPeer(connected, clientIdB)
 			return peerB != nil && peerB.ProvideEnabled && !hasMode(peerB, protocol.ProvideMode_Public)
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// traffic to the paused peer stays on the network mode and carries
 		// the source's identity
 		sendSimpleMessage(t, clientA, clientIdB)
 		select {
 		case peer := <-receiveB:
-			assert.Equal(t, peer.ProvideMode, protocol.ProvideMode_Network)
-			assert.Equal(t, peer.Roles, []string{"role-a"})
-			assert.Equal(t, peer.Principal, "principal-a")
+			connect.AssertEqual(t, peer.ProvideMode, protocol.ProvideMode_Network)
+			connect.AssertEqual(t, peer.Roles, []string{"role-a"})
+			connect.AssertEqual(t, peer.Principal, "principal-a")
 		case <-time.After(60 * time.Second):
 			t.Fatal("timeout waiting for message to paused b")
 		}
@@ -457,7 +455,7 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 			peerB := findPeer(connected, clientIdB)
 			return peerB != nil && hasMode(peerB, protocol.ProvideMode_Public)
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// provide-off removes the provide keys (stream only remains for
 		// return traffic): a sees b with provide disabled
@@ -466,16 +464,16 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 			peerB := findPeer(connected, clientIdB)
 			return peerB != nil && !peerB.ProvideEnabled
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// the provide-off peer can still send: a receives b's traffic under
 		// the network mode with b's identity
 		sendSimpleMessage(t, clientB, clientIdA)
 		select {
 		case peer := <-receiveA:
-			assert.Equal(t, peer.ProvideMode, protocol.ProvideMode_Network)
-			assert.Equal(t, peer.Roles, []string{"role-b"})
-			assert.Equal(t, peer.Principal, "principal-b")
+			connect.AssertEqual(t, peer.ProvideMode, protocol.ProvideMode_Network)
+			connect.AssertEqual(t, peer.Roles, []string{"role-b"})
+			connect.AssertEqual(t, peer.Principal, "principal-b")
 		case <-time.After(60 * time.Second):
 			t.Fatal("timeout waiting for message from provide-off b")
 		}
@@ -487,9 +485,9 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 		sendSimpleMessage(t, clientA, clientIdB, connect.CompanionContract())
 		select {
 		case peer := <-receiveB:
-			assert.Equal(t, peer.ProvideMode, protocol.ProvideMode_Stream)
-			assert.Equal(t, len(peer.Roles), 0)
-			assert.Equal(t, peer.Principal, "")
+			connect.AssertEqual(t, peer.ProvideMode, protocol.ProvideMode_Stream)
+			connect.AssertEqual(t, len(peer.Roles), 0)
+			connect.AssertEqual(t, peer.Principal, "")
 		case <-time.After(60 * time.Second):
 			t.Fatal("timeout waiting for message to provide-off b")
 		}
@@ -540,13 +538,13 @@ func TestExchangePeerDiscoveryResidentReplacement(t *testing.T) {
 		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return findPeer(connected, clientIdB) != nil
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// replace b's resident in place
 		residentB := model.GetResidentForClient(ctx, clientIdB, 0)
-		assert.NotEqual(t, residentB, nil)
+		connect.AssertNotEqual(t, residentB, nil)
 		nominated := env.exchange.NominateLocalResident(clientIdB, instanceIdB, &residentB.ResidentId)
-		assert.Equal(t, nominated, true)
+		connect.AssertEqual(t, nominated, true)
 
 		// let the replacement settle: the old resident's cleanup runs its
 		// guarded remove, which must not remove the replacement registration
@@ -561,13 +559,13 @@ func TestExchangePeerDiscoveryResidentReplacement(t *testing.T) {
 				foundConnectedB = true
 			}
 		}
-		assert.Equal(t, foundConnectedB, true)
+		connect.AssertEqual(t, foundConnectedB, true)
 
 		// a still sees b connected with no disconnect marker
 		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return findPeer(connected, clientIdB) != nil && disconnectedCount == 0
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// the peer flow keeps working through the replacement resident:
 		// b (now on the new resident) sees a disconnect
@@ -577,7 +575,7 @@ func TestExchangePeerDiscoveryResidentReplacement(t *testing.T) {
 		ok = waitForPeers(ctx, clientB, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return findPeer(connected, clientIdA) == nil && 1 <= disconnectedCount
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 	})
 }
 
@@ -630,21 +628,21 @@ func TestExchangePeerDiscoveryDerivativeClient(t *testing.T) {
 		// announcements
 		_, peers := model.GetNetworkPeers(ctx, env.networkId)
 		for _, peer := range peers {
-			assert.NotEqual(t, peer.ClientId, clientIdD)
+			connect.AssertNotEqual(t, peer.ClientId, clientIdD)
 		}
 		connectedA, _ := clientA.NetworkPeers()
-		assert.Equal(t, findPeer(connectedA, clientIdD), nil)
+		connect.AssertEqual(t, findPeer(connectedA, clientIdD), nil)
 		connectedD, disconnectedCountD := clientD.NetworkPeers()
-		assert.Equal(t, len(connectedD), 0)
-		assert.Equal(t, disconnectedCountD, 0)
+		connect.AssertEqual(t, len(connectedD), 0)
+		connect.AssertEqual(t, disconnectedCountD, 0)
 
 		// the fast peer discovery api rejects a derivative client session
 		byJwtD, err := jwt.ParseByJwt(ctx, byClientJwtD)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		clientSessionD := session.Testing_CreateClientSession(ctx, byJwtD)
 		peersResult, err := model.GetNetworkPeersForSession(clientSessionD)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, peersResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, peersResult.Error, nil)
 	})
 }
 
@@ -696,10 +694,10 @@ func TestExchangePeerDiscoveryLargeNetwork(t *testing.T) {
 		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return len(connected) == initialPeerCount
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 		connectedA, _ := clientA.NetworkPeers()
 		for _, peer := range connectedA {
-			assert.Equal(t, peerClientIds[server.Id(peer.ClientId)], true)
+			connect.AssertEqual(t, peerClientIds[server.Id(peer.ClientId)], true)
 		}
 
 		// diffs after the reset converge too
@@ -710,6 +708,6 @@ func TestExchangePeerDiscoveryLargeNetwork(t *testing.T) {
 		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return len(connected) == initialPeerCount+diffPeerCount
 		})
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 	})
 }

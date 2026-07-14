@@ -7,7 +7,7 @@ import (
 
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestLimitExcludePrefixes(t *testing.T) {
@@ -17,15 +17,15 @@ func TestLimitExcludePrefixes(t *testing.T) {
 	os.Setenv("WARP_LIMIT_EXCLUDE_SUBNETS", "10.0.0.0/8;172.16.0.0/12;192.168.0.0/16")
 
 	prefixes := limitExcludePrefixes()
-	assert.Equal(t, len(prefixes), 3)
-	assert.Equal(t, slices.Contains(prefixes, netip.MustParsePrefix("10.0.0.0/8")), true)
-	assert.Equal(t, slices.Contains(prefixes, netip.MustParsePrefix("172.16.0.0/12")), true)
-	assert.Equal(t, slices.Contains(prefixes, netip.MustParsePrefix("192.168.0.0/16")), true)
+	connect.AssertEqual(t, len(prefixes), 3)
+	connect.AssertEqual(t, slices.Contains(prefixes, netip.MustParsePrefix("10.0.0.0/8")), true)
+	connect.AssertEqual(t, slices.Contains(prefixes, netip.MustParsePrefix("172.16.0.0/12")), true)
+	connect.AssertEqual(t, slices.Contains(prefixes, netip.MustParsePrefix("192.168.0.0/16")), true)
 
-	assert.Equal(t, IsLimitExcludeAddr(netip.MustParseAddr("1.1.1.1")), false)
-	assert.Equal(t, IsLimitExcludeAddr(netip.MustParseAddr("192.168.1.1")), true)
-	assert.Equal(t, IsLimitExcludeAddr(netip.MustParseAddr("10.1.1.1")), true)
-	assert.Equal(t, IsLimitExcludeAddr(netip.MustParseAddr("172.16.1.1")), true)
+	connect.AssertEqual(t, IsLimitExcludeAddr(netip.MustParseAddr("1.1.1.1")), false)
+	connect.AssertEqual(t, IsLimitExcludeAddr(netip.MustParseAddr("192.168.1.1")), true)
+	connect.AssertEqual(t, IsLimitExcludeAddr(netip.MustParseAddr("10.1.1.1")), true)
+	connect.AssertEqual(t, IsLimitExcludeAddr(netip.MustParseAddr("172.16.1.1")), true)
 
 	os.Setenv("WARP_LIMIT_EXCLUDE_SUBNETS", "")
 	prefixes = limitExcludePrefixes()

@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
@@ -75,7 +75,7 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 			h.signedProxyId,
 			instanceId,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		defer device.Close()
 
 		// the rpc syncs and connects
@@ -97,7 +97,7 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 		select {
 		case <-time.After(2 * time.Second):
 		}
-		assert.Equal(t, device.GetRouteLocal(), routeLocalBefore)
+		connect.AssertEqual(t, device.GetRouteLocal(), routeLocalBefore)
 
 		// an allowed setter (SetOffline) applies and fires the reverse-channel
 		// listener. Toggle relative to the current state so it is a real change
@@ -146,13 +146,13 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 			UserId:    h.pdUserId,
 		})
 		peersResult, err := model.GetNetworkPeersForSession(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, peersResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, peersResult.Error, nil)
 		// the proxy client never appears as a visible peer. (The proxy
 		// device has no resident here, so the connected-count registration —
 		// unit-tested in model.TestNetworkProxyPeer — is not exercised.)
 		for _, peer := range peersResult.Peers {
-			assert.NotEqual(t, peer.ClientId, h.pdClientId)
+			connect.AssertNotEqual(t, peer.ClientId, h.pdClientId)
 		}
 
 		// device recreate: kill the hosted device; the DeviceRemote reconnects,
@@ -163,7 +163,7 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 		defer recreatedSub.Close()
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		pd.Cancel()
 
 		select {

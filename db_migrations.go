@@ -3513,4 +3513,392 @@ var migrations = []any{
             autovacuum_analyze_scale_factor = 0.02
         )
     `),
+
+	// the net-escrow reconcile task (model/subscription_model.go
+	// `openEscrowReservedByBalance`, rescheduled every 5 minutes) sums open
+	// escrow per balance by joining the full transfer_escrow and
+	// transfer_contract tables filtered on `outcome IS NULL`. That predicate is
+	// deliberate: a disputed-but-unsettled contract has the generated `open`
+	// column false yet still holds its reservation, so `open` -- and every index
+	// led by it -- cannot be used. With nothing indexing `outcome`, the join
+	// falls back to a seq scan of the two largest tables on every run.
+	//
+	// This partial index carries only the live set (open + disputed-unsettled,
+	// i.e. exactly `outcome IS NULL`) -- small and roughly steady-state
+	// regardless of table growth -- and keys on contract_id so the scan
+	// enumerates it index-only and nested-loops into transfer_escrow's
+	// (contract_id, balance_id) PK.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_outcome_null
+        ON transfer_contract (contract_id) WHERE outcome IS NULL
+    `),
+
+	// restores the index dropped by the consolidation above (`DROP INDEX IF
+	// EXISTS transfer_contract_open_source_id_companion_contract_id`). The
+	// companion-pairing lookup in model/subscription_model.go
+	// `CreateTransferEscrow` -- run on EVERY contract creation -- finds the
+	// earliest source->dest contract with a null companion, matching either an
+	// open contract OR a recently-closed one (`open = false AND close_time >=
+	// $3`) and taking the earliest by create_time (LIMIT 1). Without this index
+	// the closed branch degrades to scanning the pair's full closed-contract
+	// history (or, via transfer_contract_create_time, an unbounded ordered scan
+	// when the pair has no match) on that hot path. The composite makes both
+	// branches a tight range: (open, source_id, destination_id,
+	// companion_contract_id) equality plus the close_time range, with
+	// create_time/contract_id trailing for the ORDER BY ... LIMIT 1 and an
+	// index-only result.
+	//
+	// transfer_contract is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_source_id_companion_contract_id
+        ON transfer_contract (open, source_id, destination_id, companion_contract_id, close_time, create_time, contract_id)
+    `),
+
+	// restores the covering index dropped by the consolidation
+	// (`DROP INDEX IF EXISTS network_client_network_id_active_client_id`, which
+	// swapped it for `network_client_active_network_id_create_time (active,
+	// network_id, create_time)` -- that serves the filter but does not cover
+	// client_id). The StatsProviders active-provider enumeration
+	// (model/provider_model.go: `SELECT client_id FROM network_client JOIN
+	// provide_key ... WHERE network_id = $1 AND active = true GROUP BY
+	// client_id`) then heap-fetches client_id per active client before the
+	// semi-join; for large provider networks that dominates. With (network_id,
+	// active, client_id) the network_client side is index-only and feeds
+	// client_id straight into the provide_key PK (client_id, provide_mode)
+	// semi-join.
+	//
+	// network_client is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_network_id_active_client_id
+        ON network_client (network_id, active, client_id)
+    `),
+
+	// covering index for the provider-payout stats scan (model/provider_model.go
+	// StatsProviders: `SUM(payout_net_revenue_nano_cents) FROM
+	// transfer_escrow_sweep ... WHERE sweep_time >= $2`, joined to
+	// transfer_contract for destination_id). The plain (sweep_time) index below
+	// made that a range scan plus a heap fetch per row; this carries contract_id
+	// and the summed payout in the index, so the sweep side is index-only and
+	// only the transfer_contract PK join touches a heap. It leads with
+	// sweep_time, so it strictly supersedes transfer_escrow_sweep_sweep_time
+	// (dropped next) -- every (sweep_time) lookup is a prefix of this one.
+	//
+	// Created before the drop so the sweep_time scan never loses coverage.
+	// transfer_escrow_sweep is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_sweep_time_covering
+        ON transfer_escrow_sweep (sweep_time, contract_id, payout_net_revenue_nano_cents)
+    `),
+	newSqlMigration(`
+        DROP INDEX IF EXISTS transfer_escrow_sweep_sweep_time
+    `),
+
+	// candidate scan for the idle top-level client reap
+	// (model/network_client_model.go `RemoveDisconnectedNetworkClients`, run
+	// every 5 minutes). Each batch marks active top-level clients unseen for
+	// TopLevelClientIdleExpiration inactive: `active = true AND source_client_id
+	// IS NULL AND auth_time < $1`, LIMIT, inside the UPDATE ... SET active =
+	// false transaction. No existing index serves that predicate globally -- the
+	// network_client_network_id_top_level partial has the right WHERE but is
+	// keyed on network_id, and the reap does not filter by network -- so the
+	// subquery scanned the entire active top-level population and heap-fetched
+	// auth_time per row, holding ROW EXCLUSIVE on network_client for the scan's
+	// duration (colliding with DDL on the table and pinning the xmin horizon so
+	// autovacuum could not keep up). This partial is keyed on auth_time over
+	// exactly the reap's (active, top-level) set, so a batch is a bounded ordered
+	// range scan (oldest auth_time first) that stops at LIMIT. It is tiny and
+	// self-maintaining: a row leaves it the moment the reap flips active = false.
+	// Pair with `ORDER BY auth_time` in the reap subquery so the plan is the
+	// ordered range scan.
+	//
+	// network_client is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_idle_top_level_auth_time
+        ON network_client (auth_time) WHERE (active = true AND source_client_id IS NULL)
+    `),
+
+	// hard-reap of inactive clients (model/network_client_model.go
+	// `RemoveDisconnectedNetworkClients`, every 5 minutes): DELETE ... WHERE
+	// COALESCE(deactivate_time, create_time) < $1 AND active = false. No index
+	// served it -- `active = false` seeks only via (active, network_id,
+	// create_time) whose reap key is create_time, not the COALESCE expression --
+	// so it scanned the entire active = false band (now fed by the mark step
+	// above), evaluating COALESCE per row, unbatched, holding locks on the hot
+	// table. This functional partial index over exactly the inactive set makes
+	// the (now batched) delete an ordered range scan, oldest deactivation first.
+	//
+	// network_client is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_inactive_reap_time
+        ON network_client (COALESCE(deactivate_time, create_time)) WHERE (active = false)
+    `),
+
+	// targeted cascades delete the proxy change-log by proxy_id
+	// (model/network_client_proxy_model.go RemoveProxyDeviceConfig,
+	// model/network_client_model.go removeProxyClientData): `DELETE FROM
+	// proxy_client_change WHERE proxy_id = $1 / = ANY($1)`. The table had only
+	// its PK (proxy_host, block, change_id), so proxy_id was unindexed and every
+	// proxy-config removal / client reap seq-scanned the whole change log. (The
+	// reads use the PK prefix and are unaffected.)
+	//
+	// proxy_client_change is large: pre-create this manually with CREATE INDEX
+	// CONCURRENTLY out of band (see FIXME above); the IF NOT EXISTS gate makes
+	// this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS proxy_client_change_proxy_id
+        ON proxy_client_change (proxy_id)
+    `),
+
+	// st_event is the on-chain subnet event log (PK (block_number, log_index)),
+	// growing unboundedly with the chain. model/st_model.go SumStDepositedRao
+	// (`WHERE kind = 'Deposited'`, per deposit-idempotency check) and
+	// GetHeadBoundCkeysInEpoch (`WHERE kind IN (...) AND block_number <= $1
+	// ORDER BY block_number, log_index`, every epoch close) both scanned the
+	// whole log because `kind` was unindexed. Leading with kind bounds both to
+	// the matching events, with block_number/log_index giving the range bound
+	// and the ordering. Pre-create CONCURRENTLY out of band if the log is large.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS st_event_kind_block
+        ON st_event (kind, block_number, log_index)
+    `),
+
+	// GetStEpochClientReliability (model/st_model.go) selects the epoch's rollup
+	// rows by interval overlap: `WHERE $1 < period_end AND period_start < $2`.
+	// The only indexed side was `period_start < $2` (PK leads with period_start),
+	// an unbounded-below range that at epoch close scans almost the whole table;
+	// the selective bound `period_end > $1` led no index. This indexes period_end
+	// so the recent-tail bound drives the scan. NOTE: verify_provider_stats has
+	// no retention task and grows per period x provider -- a reap (mirroring
+	// RemoveOldSearchProviderStats) is still recommended.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS verify_provider_stats_period_end
+        ON verify_provider_stats (period_end)
+    `),
+
+	// CancelHungAccountPayments (model/account_payment_model.go, daily): `UPDATE
+	// account_payment SET canceled = true ... WHERE NOT completed AND NOT
+	// canceled AND create_time < $1`. No index served it; it scanned the whole
+	// non-completed band, which grows monotonically (canceled rows stay
+	// completed = false and account_payment is never deleted). This partial
+	// indexes exactly the truly-pending set, ordered by create_time so the scan
+	// is a tight range that stops early.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_payment_pending_create_time
+        ON account_payment (create_time) WHERE (NOT completed AND NOT canceled)
+    `),
+
+	// UpdateClientReliabilityScores (model/network_client_reliability_model.go)
+	// prunes superseded rows: `DELETE FROM client_connection_reliability_score
+	// WHERE lookback_index = $1 AND max_block_number != $2`, once per lookback
+	// each pass. The PK leads with client_id, so lookback_index was unindexed and
+	// the delete seq-scanned the whole score table. This lets it seek
+	// lookback_index = $1 and skip the current max_block_number. (The
+	// network_connection_reliability_score / _window_score siblings delete on
+	// `max_block_number != $1` with no equality anchor -- an index cannot serve a
+	// bare !=, and they are small, so they are left as-is.)
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS client_connection_reliability_score_lookback_max_block
+        ON client_connection_reliability_score (lookback_index, max_block_number)
+    `),
+
+	// the child-client reap (model/network_client_model.go
+	// RemoveDisconnectedNetworkClients) deletes clients with a parent unseen
+	// since minClientTime: `auth_time < $1 AND source_client_id IS NOT NULL AND
+	// no live connection`. The inactive-reap partial added above is the OPPOSITE
+	// predicate (source_client_id IS NULL), so this branch had no index and
+	// seq-scanned the whole table every 5 minutes. This partial covers exactly
+	// the child set; pair with the batched DELETE in the reap.
+	//
+	// network_client is large: pre-create CONCURRENTLY out of band; IF NOT
+	// EXISTS makes this a no-op once pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_child_reap_auth_time
+        ON network_client (auth_time) WHERE (source_client_id IS NOT NULL)
+    `),
+
+	// GetOverlappingTransferBalance (model/subscription_model.go, Google Play
+	// renewal) looks up a paid balance by purchase_token overlapping an expiry.
+	// The exact-fit index was dropped as "unused" (migration line 1882) but the
+	// path is live; without it every renewal seq-scans transfer_balance (one of
+	// the largest tables). Restored as a partial -- only paid balances carry a
+	// token.
+	//
+	// transfer_balance is large: pre-create CONCURRENTLY out of band.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_balance_purchase_token
+        ON transfer_balance (purchase_token, end_time, start_time, balance_id) WHERE purchase_token IS NOT NULL
+    `),
+
+	// GetAccountWalletByCircleId (model/account_wallet_model.go, Circle webhook)
+	// filters account_wallet by circle_wallet_id, which was added without an
+	// index -> seq scan per call. Partial since most wallets have no circle id.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_wallet_circle_wallet_id
+        ON account_wallet (circle_wallet_id) WHERE circle_wallet_id IS NOT NULL
+    `),
+
+	// GetAllSeekerHolders (model/account_wallet_model.go, payout planning + the
+	// daily free-grant path) filters `has_seeker_token = true`, unindexed ->
+	// seq scan. Seeker holders are a small subset, so this partial is tiny.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_wallet_seeker_network
+        ON account_wallet (network_id) WHERE has_seeker_token
+    `),
+
+	// referral cap-checks (model/network_referral_model.go CreateNetworkReferral,
+	// model/network_referral_code_model.go ValidateReferralCode) filter
+	// `referral_network_id = $1`. That column lost all coverage when the
+	// composite PK was reduced to (network_id) (migration line 1749), so these
+	// hot referral paths seq-scan network_referral.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_referral_referral_network_id
+        ON network_referral (referral_network_id)
+    `),
+
+	// GetCircleUCByCircleUCUserId (model/circle_wallet_model.go, Circle webhook)
+	// filters circle_uc by circle_uc_user_id; PK is (network_id), so it is
+	// unindexed -> seq scan.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS circle_uc_circle_uc_user_id
+        ON circle_uc (circle_uc_user_id)
+    `),
+
+	// the by-address auth-attempt lookback (model/auth_model_attempt.go) filters
+	// `client_address_hash = $1 AND attempt_time >= X ORDER BY attempt_time
+	// DESC`. The existing (client_address_hash, client_address_port,
+	// attempt_time) index has the unconstrained port column between the hash and
+	// the time, so it can seek the hash but cannot bound attempt_time or serve
+	// the order -- it reads all history for the hash and sorts. This drops the
+	// port so the range/order is index-served.
+	//
+	// user_auth_attempt is large: pre-create CONCURRENTLY out of band.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_attempt_client_address_hash_attempt_time
+        ON user_auth_attempt (client_address_hash, attempt_time)
+    `),
+
+	// reaper seq-scans: each of these deletes an old tail by a time column that
+	// is not the leading (or any) index column, so the maintenance task scans
+	// the whole growing table each run. A plain index on the time column makes
+	// each an ordered range delete.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS wallet_auth_challenge_attempt_attempt_time
+        ON wallet_auth_challenge_attempt (attempt_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS user_auth_verify_verify_time
+        ON user_auth_verify (verify_time)
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provide_key_change_change_time
+        ON provide_key_change (change_time)
+    `),
+	// the expired-intent cleanup filters `expires_at < $1 AND tx_signature IS
+	// NULL`; the existing partial leads with payment_reference, so it scans every
+	// unpaid intent. This partial leads with expires_at over the same unpaid set.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS solana_payment_intent_expires_at
+        ON solana_payment_intent (expires_at) WHERE tx_signature IS NULL
+    `),
+
+	// audit stats (ComputeStats90) aggregations filter `event_type IN (...)`, but
+	// event_type was in none of the _stats_ indexes, so each windowed scan heap-
+	// fetched every row just to test event_type -- defeating an index-only scan
+	// even though the other selected columns are already in-key. INCLUDE
+	// event_type so the aggregations are index-only. This also makes the
+	// audit_device_event stats index distinct from its identical PK (it was a
+	// pure duplicate before). Each is dropped and recreated with the same name.
+	//
+	// deferred value: the /stats routes are gated, and index-only scans also
+	// need the visibility map that only VACUUM sets on these never-vacuumed
+	// tables -- so this pays off once stats re-enable and the audit tables are
+	// vacuumed. These tables (esp. audit_contract_event) are large: DROP then
+	// CREATE CONCURRENTLY out of band; the IF EXISTS/IF NOT EXISTS gates make the
+	// migrations no-ops once done.
+	newSqlMigration(`DROP INDEX IF EXISTS audit_provider_event_stats_device_id`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_provider_event_stats_device_id
+        ON audit_provider_event (event_time, device_id, event_id) INCLUDE (event_type)
+    `),
+	newSqlMigration(`DROP INDEX IF EXISTS audit_extender_event_stats_extender_id`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_extender_event_stats_extender_id
+        ON audit_extender_event (event_time, extender_id, event_id) INCLUDE (event_type)
+    `),
+	newSqlMigration(`DROP INDEX IF EXISTS audit_network_event_stats_network_id`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_network_event_stats_network_id
+        ON audit_network_event (event_time, network_id, event_id) INCLUDE (event_type)
+    `),
+	newSqlMigration(`DROP INDEX IF EXISTS audit_device_event_stats_device_id`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_device_event_stats_device_id
+        ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)
+    `),
+	newSqlMigration(`DROP INDEX IF EXISTS audit_contract_event_stats`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_contract_event_stats
+        ON audit_contract_event (event_time, transfer_byte_count, transfer_packets) INCLUDE (event_type)
+    `),
+	newSqlMigration(`DROP INDEX IF EXISTS audit_contract_event_stats_extender_id`),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS audit_contract_event_stats_extender_id
+        ON audit_contract_event (event_time, extender_id, transfer_byte_count, transfer_packets) INCLUDE (event_type)
+    `),
+
+	// RemoveExpiredWalletNonces (model/auth_wallet_nonce_model.go) reaps by
+	// expire_time; auth_wallet_nonce had only its PK (nonce), so the reaper
+	// seq-scanned. The table is live-written by the no-auth AuthWalletNonceCreate
+	// route and had no reaper task wired at all, so it grew unboundedly -- now
+	// batched + scheduled, driven by this index.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS auth_wallet_nonce_expire_time
+        ON auth_wallet_nonce (expire_time)
+    `),
+
+	// RemoveOldNetworkReliabilityWindow reaps network_connection_reliability_window
+	// by bucket_number, which is the SECOND PK column (PK is (network_id,
+	// bucket_number)) with no other index -> full PK scan. This indexes
+	// bucket_number so the reap is an ordered range scan (paired with ORDER BY
+	// bucket_number in the query).
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_connection_reliability_window_bucket_number
+        ON network_connection_reliability_window (bucket_number)
+    `),
+
+	// AddProTransferBalanceToAllNetworks (model/subscription_model.go) finds the
+	// active supporters: `subscription_type = 'supporter' AND start_time <= now
+	// AND now < end_time`, across all networks. The composite
+	// subscription_renewal index leads with network_id, so it can't seek this
+	// network-less filter -> full scan. This partial indexes the supporter subset
+	// by end_time (the selective in-window bound), start_time trailing for the
+	// filter.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS subscription_renewal_supporter_window
+        ON subscription_renewal (end_time, start_time) WHERE subscription_type = 'supporter'
+    `),
+
+	// RefreshVerifyProxyEgress (model/verify_model.go) reads `SELECT client_id,
+	// client_ipv4 FROM proxy_client WHERE client_ipv4 IS NOT NULL` each refresh;
+	// client_ipv4 leads no index -> full scan. This partial (covering both
+	// selected columns) makes it an index-only scan of just the assigned-ipv4
+	// rows.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS proxy_client_client_ipv4
+        ON proxy_client (client_id, client_ipv4) WHERE client_ipv4 IS NOT NULL
+    `),
 }

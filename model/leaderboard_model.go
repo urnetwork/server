@@ -99,57 +99,65 @@ type NetworkRanking struct {
 	LeaderboardPublic bool    `json:"leaderboard_public"`
 }
 
-/**
- * Gets the ranking for the session network
- */
-func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
+// GetNetworkLeaderboardRankings computes the full network_id -> ranking map: the
+// row_number() ordering over every network's payout. This is O(all networks)
+// (Postgres evaluates the window over all networks regardless of any per-network
+// filter), so the controller caches it -- see GetNetworkLeaderboardRanking in
+// controller/leaderboard_controller.go. This function itself is always fresh.
+func GetNetworkLeaderboardRankings(ctx context.Context) (map[server.Id]NetworkRanking, error) {
+	rankings := map[server.Id]NetworkRanking{}
+	var queryErr error
 	// stats read: tolerates replica delay
-	server.ReplicaDb(session.Ctx, func(conn server.PgConn) {
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
-			session.Ctx,
+			ctx,
 			`
-			SELECT
-					t.net_mib_count,
-					t.leaderboard_rank,
-					network.leaderboard_public
+			SELECT t.network_id, t.net_mib_count, t.leaderboard_rank, network.leaderboard_public
 			FROM (
-					SELECT account_payment.network_id,
-											sum(account_payment.payout_byte_count) / (1024 * 1024)                   AS net_mib_count,
-											row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
-								FROM account_payment
-
-								INNER JOIN (SELECT *
-														FROM subsidy_payment
-														ORDER BY end_time DESC
-														LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
-								GROUP BY account_payment.network_id
+				SELECT account_payment.network_id,
+					sum(account_payment.payout_byte_count) / (1024 * 1024) AS net_mib_count,
+					row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
+				FROM account_payment
+				INNER JOIN (SELECT * FROM subsidy_payment ORDER BY end_time DESC LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
+				GROUP BY account_payment.network_id
 			) t
 			INNER JOIN network ON network.network_id = t.network_id
-			WHERE t.network_id = $1;
-		`,
-			session.ByJwt.NetworkId,
+			`,
 		)
-
 		server.WithPgResult(result, err, func() {
-
 			if err != nil {
 				queryErr = err
 				return
 			}
-
-			if result.Next() {
-
+			for result.Next() {
+				var networkId server.Id
+				var ranking NetworkRanking
 				server.Raise(result.Scan(
-					&networkRanking.NetMiBCount,
-					&networkRanking.LeaderboardRank,
-					&networkRanking.LeaderboardPublic,
+					&networkId,
+					&ranking.NetMiBCount,
+					&ranking.LeaderboardRank,
+					&ranking.LeaderboardPublic,
 				))
+				rankings[networkId] = ranking
 			}
 		})
-
 	})
+	if queryErr != nil {
+		return nil, queryErr
+	}
+	return rankings, nil
+}
 
-	return networkRanking, queryErr
+/**
+ * Gets the ranking for the session network
+ */
+func GetNetworkLeaderboardRanking(session *session.ClientSession) (networkRanking NetworkRanking, queryErr error) {
+	rankings, err := GetNetworkLeaderboardRankings(session.Ctx)
+	if err != nil {
+		return NetworkRanking{}, err
+	}
+	// a network with no payouts is simply absent -> zero ranking
+	return rankings[session.ByJwt.NetworkId], nil
 }
 
 /**

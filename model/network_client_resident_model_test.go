@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	mathrand "math/rand"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -52,7 +53,7 @@ func TestNominateResident(t *testing.T) {
 				go func() {
 					defer wg.Done()
 
-					internalPorts_ := maps.Keys(internalPorts)
+					internalPorts_ := slices.Collect(maps.Keys(internalPorts))
 					// note gob uses nil to encode empty slices
 					if len(internalPorts_) == 0 {
 						internalPorts_ = nil
@@ -93,14 +94,14 @@ func TestNominateResident(t *testing.T) {
 			}
 			wg.Wait()
 
-			residents := maps.Values(nominationResidents)
+			residents := slices.Collect(maps.Values(nominationResidents))
 			for i := 1; i < len(residents); i += 1 {
-				assert.Equal(t, *residents[i-1], *residents[i])
+				connect.AssertEqual(t, *residents[i-1], *residents[i])
 			}
 
 			residentId := residents[0].ResidentId
 			if residentIdToReplace != nil {
-				assert.NotEqual(t, *residentIdToReplace, residentId)
+				connect.AssertNotEqual(t, *residentIdToReplace, residentId)
 			}
 			residentIdToReplace = &residentId
 		}
@@ -140,7 +141,7 @@ func TestResidentTtl(t *testing.T) {
 				ResidentHost:          host,
 				ResidentService:       service,
 				ResidentBlock:         block,
-				ResidentInternalPorts: maps.Keys(internalPorts),
+				ResidentInternalPorts: slices.Collect(maps.Keys(internalPorts)),
 			}
 			nominated := NominateResident(
 				ctx,
@@ -148,14 +149,14 @@ func TestResidentTtl(t *testing.T) {
 				nomination,
 				1*time.Second,
 			)
-			assert.Equal(t, nominated, true)
+			connect.AssertEqual(t, nominated, true)
 
 			select {
 			case <-time.After(4 * time.Second):
 			}
 
 			resident := GetResidentForClient(ctx, clientId, ttl)
-			assert.Equal(t, resident, nil)
+			connect.AssertEqual(t, resident, nil)
 
 			nomination = &NetworkClientResident{
 				ClientId:              clientId,
@@ -164,7 +165,7 @@ func TestResidentTtl(t *testing.T) {
 				ResidentHost:          host,
 				ResidentService:       service,
 				ResidentBlock:         block,
-				ResidentInternalPorts: maps.Keys(internalPorts),
+				ResidentInternalPorts: slices.Collect(maps.Keys(internalPorts)),
 			}
 			nominated = NominateResident(
 				ctx,
@@ -172,7 +173,7 @@ func TestResidentTtl(t *testing.T) {
 				nomination,
 				ttl,
 			)
-			assert.Equal(t, nominated, true)
+			connect.AssertEqual(t, nominated, true)
 
 			// the get should keep the key alive
 			for range 16 {
@@ -181,13 +182,13 @@ func TestResidentTtl(t *testing.T) {
 				}
 
 				resident = GetResidentForClient(ctx, clientId, ttl)
-				assert.NotEqual(t, resident, nil)
+				connect.AssertNotEqual(t, resident, nil)
 			}
 
 			RemoveResidentForClient(ctx, clientId, resident.ResidentId)
 
 			resident = GetResidentForClient(ctx, clientId, ttl)
-			assert.Equal(t, resident, nil)
+			connect.AssertEqual(t, resident, nil)
 		}
 	})
 }

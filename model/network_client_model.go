@@ -19,7 +19,7 @@ import (
 	"time"
 
 	// "github.com/twmb/murmur3"
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/redis/go-redis/v9"
 
@@ -223,7 +223,7 @@ func validateClientIdentityArgs(
 		}
 		rolesSet[role] = true
 	}
-	resolvedRoles = maps.Keys(rolesSet)
+	resolvedRoles = slices.Collect(maps.Keys(rolesSet))
 	slices.Sort(resolvedRoles)
 	resolvedPrincipal = principal
 	return
@@ -273,40 +273,45 @@ func AuthNetworkClient(
 			var deviceId server.Id
 
 			if authClient.SourceClientId == nil {
-				// only top-level clients get peer subscriptions,
-				// so the active count is hard limited (see peer_model.go).
-				// the scan is bounded at the limit since only the threshold matters
-				result, err := tx.Query(
-					session.Ctx,
-					`
-						SELECT COUNT(*) AS top_level_client_count
-						FROM (
-							SELECT 1
-							FROM network_client
-							WHERE
-								network_id = $1 AND
-								active = true AND
-								source_client_id IS NULL
-							LIMIT $2
-						) t
-					`,
-					session.ByJwt.NetworkId,
-					LimitTopLevelClientIdsPerNetwork+1,
-				)
-				topLevelClientCount := 0
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						server.Raise(result.Scan(&topLevelClientCount))
+				// only top-level clients get peer subscriptions, so the active
+				// count is hard limited (see peer_model.go). Gated by
+				// enforce_concurrent_clients: while the concurrent-client rollout
+				// is dark, this cap is not enforced and no count runs at all (see
+				// pro.yml). Provisioning must never be refused while dark.
+				if Pro().EnforceConcurrentClients {
+					// the scan is bounded at the limit since only the threshold matters
+					result, err := tx.Query(
+						session.Ctx,
+						`
+							SELECT COUNT(*) AS top_level_client_count
+							FROM (
+								SELECT 1
+								FROM network_client
+								WHERE
+									network_id = $1 AND
+									active = true AND
+									source_client_id IS NULL
+								LIMIT $2
+							) t
+						`,
+						session.ByJwt.NetworkId,
+						LimitTopLevelClientIdsPerNetwork+1,
+					)
+					topLevelClientCount := 0
+					server.WithPgResult(result, err, func() {
+						if result.Next() {
+							server.Raise(result.Scan(&topLevelClientCount))
+						}
+					})
+					if LimitTopLevelClientIdsPerNetwork <= topLevelClientCount {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								ClientLimitExceeded: true,
+								Message:             "Client limit exceeded.",
+							},
+						}
+						return
 					}
-				})
-				if LimitTopLevelClientIdsPerNetwork <= topLevelClientCount {
-					authClientResult = &AuthNetworkClientResult{
-						Error: &AuthNetworkClientError{
-							ClientLimitExceeded: true,
-							Message:             "Client limit exceeded.",
-						},
-					}
-					return
 				}
 
 				deviceId = server.NewId()
@@ -877,7 +882,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 		})
 
 		clientsResult = &NetworkClientsResult{
-			Clients: maps.Values(clientInfos),
+			Clients: slices.Collect(maps.Values(clientInfos)),
 		}
 	})
 
@@ -1250,7 +1255,7 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 			})
 		})
 
-		clientIds := maps.Keys(clientSecretKeys)
+		clientIds := slices.Collect(maps.Keys(clientSecretKeys))
 
 		if len(clientIds) == 0 {
 			break
@@ -1274,7 +1279,7 @@ func MigrateProvideMode(ctx context.Context, blockSize int) {
 					// all keys share the {pm_<clientId>} hash tag
 					pipe := r.TxPipeline()
 
-					provideModesList := maps.Keys(secretKeys)
+					provideModesList := slices.Collect(maps.Keys(secretKeys))
 					provideModesListJson, _ := json.Marshal(provideModesList)
 					// no ttl
 					pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, server.NoTtl)
@@ -1532,7 +1537,7 @@ func SetProvide(
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
 
-		provideModesList := maps.Keys(secretKeys)
+		provideModesList := slices.Collect(maps.Keys(secretKeys))
 		provideModesListJson, _ := json.Marshal(provideModesList)
 		// no ttl
 		pipe.Set(ctx, provideModesKey(clientId), provideModesListJson, server.NoTtl)
@@ -1857,6 +1862,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 						network_client.source_client_id IS NULL AND
 						network_client.auth_time < $1 AND
 						network_client_connection.client_id IS NULL
+					ORDER BY network_client.auth_time ASC
 					LIMIT $3
 				)
 				`,
@@ -1899,19 +1905,35 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// inactive clients reap `NetworkClientReapAfterDeactivate` after their
 	// deactivate_time; rows deactivated before that column existed (NULL)
 	// fall back to create_time, which was the previous behavior
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		rows, err := tx.Query(
-			ctx,
-			`
-			DELETE FROM network_client
-			WHERE COALESCE(network_client.deactivate_time, network_client.create_time) < $1 AND active = false
-			RETURNING client_id, device_id
-			`,
-			minClientTime.UTC(),
-		)
-		collectReaped(rows, err)
-
-	}, server.TxReadCommitted)
+	// bounded batches so no single tx holds locks for long, and driven by the
+	// network_client_inactive_reap_time partial index (oldest deactivation
+	// first) instead of a full scan of the active = false band
+	reapInactiveBatchCount := 10000
+	for {
+		before := len(reapedClientIds)
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			rows, err := tx.Query(
+				ctx,
+				`
+				DELETE FROM network_client
+				WHERE client_id IN (
+					SELECT client_id
+					FROM network_client
+					WHERE COALESCE(network_client.deactivate_time, network_client.create_time) < $1 AND active = false
+					ORDER BY COALESCE(network_client.deactivate_time, network_client.create_time) ASC
+					LIMIT $2
+				)
+				RETURNING client_id, device_id
+				`,
+				minClientTime.UTC(),
+				reapInactiveBatchCount,
+			)
+			collectReaped(rows, err)
+		}, server.TxReadCommitted)
+		if len(reapedClientIds)-before < reapInactiveBatchCount {
+			break
+		}
+	}
 
 	// remove network clients with a parent, not seen since `minClientTime`,
 	// and without a connection. auth_time (not create_time) is the reap key:
@@ -1919,27 +1941,39 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// use is never reaped no matter how old it is.
 	// important: to delete clients without a source id (top level clients),
 	//            the app will need to create a new client id for these clients when it notices the existing jwt fails
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		rows, err := tx.Query(
-			ctx,
-			`
-			DELETE FROM network_client
-			USING (
-				SELECT network_client.client_id
-				FROM network_client
-			    	LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
-				WHERE
-					network_client.auth_time < $1
-					AND network_client.source_client_id IS NOT NULL
-					AND network_client_connection.client_id IS NULL
-			) t
-			WHERE network_client.client_id = t.client_id
-			RETURNING network_client.client_id, network_client.device_id
-			`,
-			minClientTime.UTC(),
-		)
-		collectReaped(rows, err)
-	})
+	// bounded batches (see the inactive reap above); driven by the
+	// network_client_child_reap_auth_time partial index, oldest auth_time first
+	reapChildBatchCount := 10000
+	for {
+		before := len(reapedClientIds)
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			rows, err := tx.Query(
+				ctx,
+				`
+				DELETE FROM network_client
+				USING (
+					SELECT network_client.client_id
+					FROM network_client
+						LEFT JOIN network_client_connection ON network_client_connection.client_id = network_client.client_id
+					WHERE
+						network_client.auth_time < $1
+						AND network_client.source_client_id IS NOT NULL
+						AND network_client_connection.client_id IS NULL
+					ORDER BY network_client.auth_time ASC
+					LIMIT $2
+				) t
+				WHERE network_client.client_id = t.client_id
+				RETURNING network_client.client_id, network_client.device_id
+				`,
+				minClientTime.UTC(),
+				reapChildBatchCount,
+			)
+			collectReaped(rows, err)
+		}, server.TxReadCommitted)
+		if len(reapedClientIds)-before < reapChildBatchCount {
+			break
+		}
+	}
 
 	// Sweep per-client redis state for each reaped client_id. Outside the DB tx
 	// since redis isn't transactional with Postgres; a failure just leaves keys

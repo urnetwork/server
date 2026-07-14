@@ -12,7 +12,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -300,7 +300,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 		defer wg.Done()
 
 		userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
-		userEmails := maps.Keys(userEmailNetworkIds)
+		userEmails := slices.Collect(maps.Keys(userEmailNetworkIds))
 
 		var subWg sync.WaitGroup
 
@@ -338,7 +338,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 		defer wg.Done()
 
 		userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
-		userEmails := maps.Keys(userEmailUserIds)
+		userEmails := slices.Collect(maps.Keys(userEmailUserIds))
 
 		var subWg sync.WaitGroup
 

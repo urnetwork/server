@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -56,7 +56,7 @@ func TestRemoveOldAuditNetworkEvents(t *testing.T) {
 				break
 			}
 		}
-		assert.Equal(t, totalRemoved, int64(2))
-		assert.Equal(t, countEvents(), 2)
+		connect.AssertEqual(t, totalRemoved, int64(2))
+		connect.AssertEqual(t, countEvents(), 2)
 	})
 }

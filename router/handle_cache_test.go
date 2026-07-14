@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -36,7 +36,7 @@ func TestCache(t *testing.T) {
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		// warm
 		_, err := f(clientSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		select {
 		case <-ctx.Done():
@@ -46,8 +46,8 @@ func TestCache(t *testing.T) {
 
 		for range 1024 {
 			r, err := f(clientSession)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, r.Message, "hello!")
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, r.Message, "hello!")
 
 			timeout := time.Duration(16+mathrand.Intn(64)) * time.Millisecond
 			select {
@@ -57,7 +57,7 @@ func TestCache(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, int(callCount.Load()), 1)
+		connect.AssertEqual(t, int(callCount.Load()), 1)
 	})
 }
 
@@ -102,7 +102,7 @@ func TestCacheWithNetworkAuth(t *testing.T) {
 
 		// warm once for the whole network
 		_, err := f(clientSessions[0])
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		select {
 		case <-ctx.Done():
@@ -117,19 +117,19 @@ func TestCacheWithNetworkAuth(t *testing.T) {
 			})
 			for _, clientSession := range clientSessions {
 				r, err := f(clientSession)
-				assert.Equal(t, err, nil)
-				assert.Equal(t, r.Message, fmt.Sprintf("hello %s!", networkId))
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, r.Message, fmt.Sprintf("hello %s!", networkId))
 			}
 		}
-		assert.Equal(t, int(callCount.Load()), 1)
+		connect.AssertEqual(t, int(callCount.Load()), 1)
 
 		// a different network computes and caches its own entry
 		otherNetworkId := server.NewId()
 		otherSession := newSession(otherNetworkId, 999)
 		r, err := f(otherSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, r.Message, fmt.Sprintf("hello %s!", otherNetworkId))
-		assert.Equal(t, int(callCount.Load()), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, r.Message, fmt.Sprintf("hello %s!", otherNetworkId))
+		connect.AssertEqual(t, int(callCount.Load()), 2)
 	})
 }
 
@@ -183,7 +183,7 @@ func TestCacheWithNetworkAuthInput(t *testing.T) {
 		// warm each input once for the whole network
 		for _, input := range inputs {
 			_, err := f(input, clientSessions[0])
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		select {
@@ -197,12 +197,12 @@ func TestCacheWithNetworkAuthInput(t *testing.T) {
 			for _, clientSession := range clientSessions {
 				for _, input := range inputs {
 					r, err := f(input, clientSession)
-					assert.Equal(t, err, nil)
-					assert.Equal(t, r.Message, fmt.Sprintf("%s n=%d", networkId, input.LastN))
+					connect.AssertEqual(t, err, nil)
+					connect.AssertEqual(t, r.Message, fmt.Sprintf("%s n=%d", networkId, input.LastN))
 				}
 			}
 		}
-		assert.Equal(t, int(callCount.Load()), len(inputs))
+		connect.AssertEqual(t, int(callCount.Load()), len(inputs))
 	})
 }
 
@@ -242,7 +242,7 @@ func TestCacheWithAuth(t *testing.T) {
 
 			// warm
 			_, err := f(clientSession)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 		}
 
 		select {
@@ -257,8 +257,8 @@ func TestCacheWithAuth(t *testing.T) {
 			})
 			for _, clientSession := range clientSessions {
 				r, err := f(clientSession)
-				assert.Equal(t, err, nil)
-				assert.Equal(t, r.Message, fmt.Sprintf("hello u%s c%s!", clientSession.ByJwt.UserId, *clientSession.ByJwt.ClientId))
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, r.Message, fmt.Sprintf("hello u%s c%s!", clientSession.ByJwt.UserId, *clientSession.ByJwt.ClientId))
 			}
 			timeout := time.Duration(16+mathrand.Intn(64)) * time.Millisecond
 			select {
@@ -268,6 +268,6 @@ func TestCacheWithAuth(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, int(callCount.Load()), len(clientSessions))
+		connect.AssertEqual(t, int(callCount.Load()), len(clientSessions))
 	})
 }

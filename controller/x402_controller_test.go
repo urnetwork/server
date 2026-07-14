@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server/model"
 )
@@ -13,11 +13,11 @@ import (
 // is INERT. The stub in vault/<env>/x402.yml ships with enabled: false and empty
 // credentials, so nothing may quote terms or accept payments until it is filled in.
 func TestX402OffByDefault(t *testing.T) {
-	assert.Equal(t, X402Enabled(), false)
+	connect.AssertEqual(t, X402Enabled(), false)
 
 	// with x402 off, terms cannot be quoted at all
 	_, err := X402PaymentRequiredFor("/x402/purchase", X402SkuProMonth, "")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 }
 
 // TestX402RefusesHalfConfigured pins the guard that a filled-in `enabled: true` with
@@ -32,11 +32,11 @@ func TestX402RefusesHalfConfigured(t *testing.T) {
 		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f"}, PayTo: "0xmerchant", Networks: []string{"base"}},
 		{Enabled: true, Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"}, PayTo: "0xmerchant"},
 	} {
-		assert.Equal(t, x402ConfigUsable(c), false)
+		connect.AssertEqual(t, x402ConfigUsable(c), false)
 	}
 
 	// fully configured -> usable
-	assert.Equal(t, x402ConfigUsable(&X402Config{
+	connect.AssertEqual(t, x402ConfigUsable(&X402Config{
 		Enabled:     true,
 		Facilitator: x402FacilitatorConfig{Url: "https://f", ApiKey: "sk"},
 		PayTo:       "0xmerchant",
@@ -47,12 +47,12 @@ func TestX402RefusesHalfConfigured(t *testing.T) {
 // TestUsdToAtomic pins the price conversion. Terms quote INTEGER atomic units, so a
 // rounding slip here charges the wrong amount -- $5.00 USDC is 5000000, not 5.
 func TestUsdToAtomic(t *testing.T) {
-	assert.Equal(t, usdToAtomic(5.00), "5000000")
-	assert.Equal(t, usdToAtomic(30.00), "30000000")
-	assert.Equal(t, usdToAtomic(0.01), "10000")
-	assert.Equal(t, usdToAtomic(12.34), "12340000")
+	connect.AssertEqual(t, usdToAtomic(5.00), "5000000")
+	connect.AssertEqual(t, usdToAtomic(30.00), "30000000")
+	connect.AssertEqual(t, usdToAtomic(0.01), "10000")
+	connect.AssertEqual(t, usdToAtomic(12.34), "12340000")
 	// float noise must not leak into the amount
-	assert.Equal(t, usdToAtomic(0.1+0.2), "300000")
+	connect.AssertEqual(t, usdToAtomic(0.1+0.2), "300000")
 }
 
 // TestX402PaymentRequiredQuotesEveryNetwork pins chain-neutrality: we quote one term
@@ -71,20 +71,20 @@ func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 	}
 
 	paymentRequired, err := x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuData1Tib, "")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, paymentRequired.X402Version, X402Version)
-	assert.Equal(t, len(paymentRequired.Accepts), 3)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, paymentRequired.X402Version, X402Version)
+	connect.AssertEqual(t, len(paymentRequired.Accepts), 3)
 
 	for _, accept := range paymentRequired.Accepts {
-		assert.Equal(t, accept.Scheme, "exact")
-		assert.Equal(t, accept.PayTo, "0xmerchant")
-		assert.Equal(t, accept.Asset, "usdc")
-		assert.Equal(t, accept.MaxAmountRequired, "5000000")
-		assert.Equal(t, accept.Resource, "/x402/purchase")
+		connect.AssertEqual(t, accept.Scheme, "exact")
+		connect.AssertEqual(t, accept.PayTo, "0xmerchant")
+		connect.AssertEqual(t, accept.Asset, "usdc")
+		connect.AssertEqual(t, accept.MaxAmountRequired, "5000000")
+		connect.AssertEqual(t, accept.Resource, "/x402/purchase")
 	}
-	assert.Equal(t, paymentRequired.Accepts[0].Network, "base")
-	assert.Equal(t, paymentRequired.Accepts[1].Network, "solana")
-	assert.Equal(t, paymentRequired.Accepts[2].Network, "tempo")
+	connect.AssertEqual(t, paymentRequired.Accepts[0].Network, "base")
+	connect.AssertEqual(t, paymentRequired.Accepts[1].Network, "solana")
+	connect.AssertEqual(t, paymentRequired.Accepts[2].Network, "tempo")
 }
 
 // TestX402RefusesToQuoteBadSku pins the guards around quoting: we would rather refuse
@@ -113,20 +113,20 @@ func TestX402RefusesToQuoteBadSku(t *testing.T) {
 
 	// a sku that is not in the catalog is not offered
 	_, err := x402PaymentRequiredForConfig(c, "/x402/purchase", "nonsense", "")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// pro_1month is not in this catalog, so it is not quoted either
 	_, err = x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuProMonth, "")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// over the ceiling -> refuse rather than quote it
 	_, err = x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuData10Tib, "")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// in the catalog and in bounds -> quoted, at pro.yml's price
 	paymentRequired, err := x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuData1Tib, "")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, paymentRequired.Accepts[0].MaxAmountRequired, "5000000") // $5, from pro.yml
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, paymentRequired.Accepts[0].MaxAmountRequired, "5000000") // $5, from pro.yml
 }
 
 // TestX402PricesComeFromProYml pins the single source of truth: an agent must never be
@@ -154,10 +154,10 @@ func TestX402PricesComeFromProYml(t *testing.T) {
 	}
 
 	// exactly the numbers in pro.yml -- the same ones the site shows and Stripe charges
-	assert.Equal(t, prices[X402SkuProMonth], model.Pro().PriceMonthlyUsd())
-	assert.Equal(t, prices[X402SkuProMonth], float64(5))
-	assert.Equal(t, prices[X402SkuData1Tib], float64(5))
-	assert.Equal(t, prices[X402SkuData10Tib], float64(30))
+	connect.AssertEqual(t, prices[X402SkuProMonth], model.Pro().PriceMonthlyUsd())
+	connect.AssertEqual(t, prices[X402SkuProMonth], float64(5))
+	connect.AssertEqual(t, prices[X402SkuData1Tib], float64(5))
+	connect.AssertEqual(t, prices[X402SkuData10Tib], float64(30))
 }
 
 // TestX402RequirementsForNetwork pins that a payment is always checked against the
@@ -172,23 +172,23 @@ func TestX402RequirementsForNetwork(t *testing.T) {
 	}
 
 	requirements, err := x402RequirementsForNetwork(paymentRequired, "solana")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, requirements.Network, "solana")
-	assert.Equal(t, requirements.PayTo, "0xmerchant")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, requirements.Network, "solana")
+	connect.AssertEqual(t, requirements.PayTo, "0xmerchant")
 
 	// a network we never quoted is refused
 	_, err = x402RequirementsForNetwork(paymentRequired, "ethereum")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// ambiguous when several are quoted and none is named
 	_, err = x402RequirementsForNetwork(paymentRequired, "")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// unambiguous when only one is quoted
 	single := &X402PaymentRequired{Accepts: []X402Accept{{Network: "base"}}}
 	requirements, err = x402RequirementsForNetwork(single, "")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, requirements.Network, "base")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, requirements.Network, "base")
 }
 
 // TestX402ReceiptTemplateRenders pins that the receipt actually renders through the
@@ -205,15 +205,15 @@ func TestX402ReceiptTemplateRenders(t *testing.T) {
 		Pro:              false,
 		BalanceByteCount: 1 * model.Tib,
 	})
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, subject, "")
-	assert.Equal(t, strings.Contains(bodyText, "$5.00"), true)
-	assert.Equal(t, strings.Contains(bodyText, "base"), true)
-	assert.Equal(t, strings.Contains(bodyText, "0xdeadbeef"), true)
-	assert.Equal(t, strings.Contains(bodyText, "1TiB"), true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, subject, "")
+	connect.AssertEqual(t, strings.Contains(bodyText, "$5.00"), true)
+	connect.AssertEqual(t, strings.Contains(bodyText, "base"), true)
+	connect.AssertEqual(t, strings.Contains(bodyText, "0xdeadbeef"), true)
+	connect.AssertEqual(t, strings.Contains(bodyText, "1TiB"), true)
 	// not a Pro purchase -> no Pro line
-	assert.Equal(t, strings.Contains(bodyText, "UR Pro is active"), false)
-	assert.Equal(t, strings.Contains(bodyHtml, "$5.00"), true)
+	connect.AssertEqual(t, strings.Contains(bodyText, "UR Pro is active"), false)
+	connect.AssertEqual(t, strings.Contains(bodyHtml, "$5.00"), true)
 
 	// a Pro purchase: shows the Pro line
 	_, _, bodyText, err = RenderEmailTemplate(&X402ReceiptTemplate{
@@ -225,7 +225,7 @@ func TestX402ReceiptTemplateRenders(t *testing.T) {
 		Pro:              true,
 		BalanceByteCount: 10 * model.Tib,
 	})
-	assert.Equal(t, err, nil)
-	assert.Equal(t, strings.Contains(bodyText, "$12.34"), true)
-	assert.Equal(t, strings.Contains(bodyText, "UR Pro is active"), true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, strings.Contains(bodyText, "$12.34"), true)
+	connect.AssertEqual(t, strings.Contains(bodyText, "UR Pro is active"), true)
 }

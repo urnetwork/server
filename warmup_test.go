@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestWarmup(t *testing.T) {
@@ -23,14 +23,14 @@ func TestWarmup(t *testing.T) {
 		}
 
 		OnWarmup(a)
-		assert.Equal(t, aRun, false)
+		connect.AssertEqual(t, aRun, false)
 		OnWarmup(b)
-		assert.Equal(t, bRun, false)
+		connect.AssertEqual(t, bRun, false)
 		Warmup()
-		assert.Equal(t, aRun, true)
-		assert.Equal(t, bRun, true)
-		assert.Equal(t, cRun, false)
+		connect.AssertEqual(t, aRun, true)
+		connect.AssertEqual(t, bRun, true)
+		connect.AssertEqual(t, cRun, false)
 		OnWarmup(c)
-		assert.Equal(t, cRun, true)
+		connect.AssertEqual(t, cRun, true)
 	})
 }

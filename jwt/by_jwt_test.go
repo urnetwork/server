@@ -11,7 +11,7 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -29,13 +29,13 @@ func TestByJwtLegacy(t *testing.T) {
 		jwtSigned := byJwt.Sign()
 
 		parsedByJwt, err := ParseByJwt(ctx, jwtSigned)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsedByJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsedByJwt, nil)
 
-		assert.Equal(t, byJwt.NetworkId, parsedByJwt.NetworkId)
-		assert.Equal(t, byJwt.UserId, parsedByJwt.UserId)
-		assert.Equal(t, byJwt.NetworkName, parsedByJwt.NetworkName)
-		assert.Equal(t, byJwt.Pro, parsedByJwt.Pro)
+		connect.AssertEqual(t, byJwt.NetworkId, parsedByJwt.NetworkId)
+		connect.AssertEqual(t, byJwt.UserId, parsedByJwt.UserId)
+		connect.AssertEqual(t, byJwt.NetworkName, parsedByJwt.NetworkName)
+		connect.AssertEqual(t, byJwt.Pro, parsedByJwt.Pro)
 	})
 }
 
@@ -59,7 +59,7 @@ func TestByJwtKid(t *testing.T) {
 		} else {
 			signingKey = byRsaSigningKey()
 		}
-		assert.NotEqual(t, signingKey, nil)
+		connect.AssertNotEqual(t, signingKey, nil)
 
 		// signWithoutKid mirrors sign()'s method selection but omits the kid header
 		signWithoutKid := func(claims gojwt.Claims, key crypto.PrivateKey) string {
@@ -79,7 +79,7 @@ func TestByJwtKid(t *testing.T) {
 			}
 			token := gojwt.NewWithClaims(method, claims)
 			signed, err := token.SignedString(key)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return signed
 		}
 
@@ -87,41 +87,41 @@ func TestByJwtKid(t *testing.T) {
 		// kid resolves to a loaded key, and parsing succeeds
 		signed := newClaims().Sign()
 		unverified, _, err := gojwt.NewParser().ParseUnverified(signed, gojwt.MapClaims{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		kid, _ := unverified.Header["kid"].(string)
-		assert.NotEqual(t, kid, "")
+		connect.AssertNotEqual(t, kid, "")
 		expectedKid, err := jwtKid(publicKey(signingKey))
-		assert.Equal(t, err, nil)
-		assert.Equal(t, kid, expectedKid)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, kid, expectedKid)
 		_, ok := byPublicKeysByKid()[kid]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		parsed, err := ParseByJwt(ctx, signed)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsed, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsed, nil)
 
 		// fallback: a token with no kid still verifies against the full key set
 		noKid := signWithoutKid(newClaims(), signingKey)
 		parsedNoKid, err := ParseByJwt(ctx, noKid)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsedNoKid, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsedNoKid, nil)
 
 		// security: a token signed by a foreign key is rejected, both with no kid
 		// (falls back to our keys, none match) and with a spoofed real kid (the
 		// signature does not match that key)
 		foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		forgedNoKid := signWithoutKid(newClaims(), foreignKey)
 		_, err = ParseByJwt(ctx, forgedNoKid)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		forgedToken := gojwt.NewWithClaims(gojwt.SigningMethodES256, newClaims())
 		forgedToken.Header["kid"] = kid // a real, known kid, but signed by foreignKey
 		forgedSpoofedKid, err := forgedToken.SignedString(foreignKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, err = ParseByJwt(ctx, forgedSpoofedKid)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -142,10 +142,10 @@ func TestByJwtKidUnawareParser(t *testing.T) {
 		// precondition: the token actually carries a kid header, so the test is
 		// meaningful
 		unverified, _, err := gojwt.NewParser().ParseUnverified(signed, gojwt.MapClaims{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		kid, ok := unverified.Header["kid"].(string)
-		assert.Equal(t, ok, true)
-		assert.NotEqual(t, kid, "")
+		connect.AssertEqual(t, ok, true)
+		connect.AssertNotEqual(t, kid, "")
 
 		// the key sign() used, supplied to the parser out-of-band
 		var signingKey crypto.PrivateKey
@@ -166,15 +166,15 @@ func TestByJwtKidUnawareParser(t *testing.T) {
 				return signingPublicKey, nil
 			},
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, claims["network_name"], networkName)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims["network_name"], networkName)
 
 		// the codebase's own kid-agnostic parser also handles the kid-tagged token
 		parsedUnverified, err := ParseByJwtUnverified(ctx, signed)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsedUnverified, nil)
-		assert.Equal(t, parsedUnverified.NetworkName, networkName)
-		assert.Equal(t, parsedUnverified.UserId, userId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsedUnverified, nil)
+		connect.AssertEqual(t, parsedUnverified.NetworkName, networkName)
+		connect.AssertEqual(t, parsedUnverified.UserId, userId)
 	})
 }
 
@@ -191,14 +191,14 @@ func TestByJwtFull(t *testing.T) {
 		jwtSigned := byJwt.Sign()
 
 		parsedByJwt, err := ParseByJwt(ctx, jwtSigned)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsedByJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsedByJwt, nil)
 
-		assert.Equal(t, byJwt.NetworkId, parsedByJwt.NetworkId)
-		assert.Equal(t, byJwt.UserId, parsedByJwt.UserId)
-		assert.Equal(t, byJwt.NetworkName, parsedByJwt.NetworkName)
-		assert.Equal(t, byJwt.CreateTime, parsedByJwt.CreateTime)
-		assert.Equal(t, byJwt.Pro, parsedByJwt.Pro)
+		connect.AssertEqual(t, byJwt.NetworkId, parsedByJwt.NetworkId)
+		connect.AssertEqual(t, byJwt.UserId, parsedByJwt.UserId)
+		connect.AssertEqual(t, byJwt.NetworkName, parsedByJwt.NetworkName)
+		connect.AssertEqual(t, byJwt.CreateTime, parsedByJwt.CreateTime)
+		connect.AssertEqual(t, byJwt.Pro, parsedByJwt.Pro)
 	})
 }
 
@@ -226,15 +226,15 @@ func TestByJwtFullWithClientId(t *testing.T) {
 		clientJwtSigned := byClientJwt.Sign()
 
 		parsedByClientJwt, err := ParseByJwt(ctx, clientJwtSigned)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, parsedByClientJwt, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsedByClientJwt, nil)
 
-		assert.Equal(t, byJwt.NetworkId, parsedByClientJwt.NetworkId)
-		assert.Equal(t, byJwt.UserId, parsedByClientJwt.UserId)
-		assert.Equal(t, byJwt.NetworkName, parsedByClientJwt.NetworkName)
-		assert.Equal(t, byJwt.CreateTime, parsedByClientJwt.CreateTime)
-		assert.Equal(t, byClientJwt.DeviceId, parsedByClientJwt.DeviceId)
-		assert.Equal(t, byClientJwt.ClientId, parsedByClientJwt.ClientId)
-		assert.Equal(t, byClientJwt.Pro, parsedByClientJwt.Pro)
+		connect.AssertEqual(t, byJwt.NetworkId, parsedByClientJwt.NetworkId)
+		connect.AssertEqual(t, byJwt.UserId, parsedByClientJwt.UserId)
+		connect.AssertEqual(t, byJwt.NetworkName, parsedByClientJwt.NetworkName)
+		connect.AssertEqual(t, byJwt.CreateTime, parsedByClientJwt.CreateTime)
+		connect.AssertEqual(t, byClientJwt.DeviceId, parsedByClientJwt.DeviceId)
+		connect.AssertEqual(t, byClientJwt.ClientId, parsedByClientJwt.ClientId)
+		connect.AssertEqual(t, byClientJwt.Pro, parsedByClientJwt.Pro)
 	})
 }

@@ -250,7 +250,16 @@ func Testing_ClearNetworkPeersEnabledCache() {
 // fan-out scale with the number of connected top-level clients.
 // The decision is cached per network for `networkPeersEnabledTtl`, and the
 // count scan is bounded at the limit since only the threshold matters.
+//
+// Gated by enforce_concurrent_clients: while the concurrent-client rollout is
+// dark this always returns true (every network gets peer registrations,
+// regardless of size) with no db lookup -- the cap is not enforced (see
+// pro.yml). Pro() is parsed once, so the gate cannot change under the cache
+// within a process.
 func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
+	if !Pro().EnforceConcurrentClients {
+		return true
+	}
 	if enabled, ok := networkPeersEnabledCache.Get(networkId); ok {
 		return enabled
 	}

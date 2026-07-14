@@ -11,9 +11,9 @@ import (
 	// "fmt"
 	// "slices"
 
-	// "golang.org/x/exp/maps"
+	// "maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -21,13 +21,13 @@ import (
 func TestEditDistance(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 
-		assert.Equal(t, EditDistance("hi", "hi"), 0)
-		assert.Equal(t, EditDistance("hi", "ho"), 1)
-		assert.Equal(t, EditDistance("hi", "bi"), 1)
-		assert.Equal(t, EditDistance("hi", "b"), 2)
-		assert.Equal(t, EditDistance("hi", ""), 2)
-		assert.Equal(t, EditDistance("eenwoo", "greenwood"), 3)
-		assert.Equal(t, EditDistance("a", "abcdefghijklmnop"), 15)
+		connect.AssertEqual(t, EditDistance("hi", "hi"), 0)
+		connect.AssertEqual(t, EditDistance("hi", "ho"), 1)
+		connect.AssertEqual(t, EditDistance("hi", "bi"), 1)
+		connect.AssertEqual(t, EditDistance("hi", "b"), 2)
+		connect.AssertEqual(t, EditDistance("hi", ""), 2)
+		connect.AssertEqual(t, EditDistance("eenwoo", "greenwood"), 3)
+		connect.AssertEqual(t, EditDistance("a", "abcdefghijklmnop"), 15)
 
 	})
 }

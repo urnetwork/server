@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	// "github.com/urnetwork/glog"
 
@@ -19,6 +19,6 @@ func TestGoogleJwk(t *testing.T) {
 		appleJwkValidator := NewGoogleJwkValidator(ctx)
 
 		keys := appleJwkValidator.Keys()
-		assert.NotEqual(t, 0, len(keys))
+		connect.AssertNotEqual(t, 0, len(keys))
 	})
 }

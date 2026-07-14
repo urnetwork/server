@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 // TestRedisGetSetPipeline exercises the basic command path through the `Redis`
@@ -25,11 +25,11 @@ func TestRedisGetSetPipeline(t *testing.T) {
 
 			got, err := r.Get(ctx, key).Result()
 			Raise(err)
-			assert.Equal(t, got, "value1")
+			connect.AssertEqual(t, got, "value1")
 
 			// GET on a key that was never set returns RedisNil
 			_, err = r.Get(ctx, missingKey).Result()
-			assert.Equal(t, err, RedisNil)
+			connect.AssertEqual(t, err, RedisNil)
 
 			// Pipeline SET + GET on the same key in one round trip. Same key
 			// keeps both on one slot, so this also works against a cluster.
@@ -42,7 +42,7 @@ func TestRedisGetSetPipeline(t *testing.T) {
 
 			pipelined, err := getCmd.Result()
 			Raise(err)
-			assert.Equal(t, pipelined, "value2")
+			connect.AssertEqual(t, pipelined, "value2")
 
 			r.Del(ctx, key, pipelineKey)
 		})
@@ -99,7 +99,7 @@ func TestRedisPublishSubscribe(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, received.Channel, channel)
-		assert.Equal(t, received.Payload, message)
+		connect.AssertEqual(t, received.Channel, channel)
+		connect.AssertEqual(t, received.Payload, message)
 	})
 }

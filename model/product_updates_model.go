@@ -2,8 +2,9 @@ package model
 
 import (
 	"context"
+	"slices"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/server"
 	// "github.com/urnetwork/server/session"
@@ -71,7 +72,7 @@ func GetProductUpdateUserEmailsForUser(ctx context.Context, userId server.Id) (p
 			}
 		})
 
-		userEmails = maps.Keys(uniqueUserEmails)
+		userEmails = slices.Collect(maps.Keys(uniqueUserEmails))
 	})
 
 	return

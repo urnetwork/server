@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -172,7 +172,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -180,7 +180,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -188,7 +188,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -196,7 +196,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// users in guest mode should be restricted to authenticated level routes
 		_, err = server.HttpGet(
@@ -205,7 +205,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -213,7 +213,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -221,7 +221,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// authenticated users should be able to access guest level routes
 		_, err = server.HttpGet(
@@ -230,7 +230,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -238,7 +238,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -246,7 +246,7 @@ func TestRouterBasic(t *testing.T) {
 			authClient,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpGet(
 			ctx,
@@ -254,7 +254,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -263,7 +263,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -272,7 +272,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -281,7 +281,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// should allow guest requests
 		_, err = server.HttpPost(
@@ -291,7 +291,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -300,7 +300,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -309,7 +309,7 @@ func TestRouterBasic(t *testing.T) {
 			authGuestMode,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// should deny guest requests
 		_, err = server.HttpPost(
@@ -319,7 +319,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -328,7 +328,7 @@ func TestRouterBasic(t *testing.T) {
 			server.NoCustomHeaders,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -337,7 +337,7 @@ func TestRouterBasic(t *testing.T) {
 			authClient,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = server.HttpPost(
 			ctx,
@@ -346,7 +346,7 @@ func TestRouterBasic(t *testing.T) {
 			auth,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// for API key auth testing
 		apiNetworkId := server.NewId()
@@ -360,7 +360,7 @@ func TestRouterBasic(t *testing.T) {
 		})
 
 		key, err := model.CreateApiKey(&model.CreateApiKeyArgs{Name: "testkey"}, apiSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		authApiKey := func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", key.ApiKey))
@@ -373,7 +373,7 @@ func TestRouterBasic(t *testing.T) {
 			authApiKey,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// API keys are non-guest, so /noguest should also succeed
 		_, err = server.HttpGet(
@@ -382,7 +382,7 @@ func TestRouterBasic(t *testing.T) {
 			authApiKey,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// API keys have no ClientId, so /client should fail
 		_, err = server.HttpGet(
@@ -391,7 +391,7 @@ func TestRouterBasic(t *testing.T) {
 			authApiKey,
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// invalid API key should fail
 		invalidKey := "invalidKey"
@@ -403,7 +403,7 @@ func TestRouterBasic(t *testing.T) {
 			},
 			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
 		)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 	})
 }

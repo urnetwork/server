@@ -39,8 +39,13 @@ type proTierYaml struct {
 
 type proReferralYaml struct {
 	BonusPerReferral string `yaml:"bonus_per_referral"`
+	ReferredBonus    string `yaml:"referred_bonus"`
 	Period           string `yaml:"period"`
 	MaxReferrals     int    `yaml:"max_referrals"`
+}
+
+type proSeekerYaml struct {
+	DataMultiplier float64 `yaml:"data_multiplier"`
 }
 
 type proDataCodeSkuYaml struct {
@@ -59,6 +64,7 @@ type proConfigYaml struct {
 	Free                     proTierYaml     `yaml:"free"`
 	Pro                      proTierYaml     `yaml:"pro"`
 	Referral                 proReferralYaml `yaml:"referral"`
+	Seeker                   proSeekerYaml   `yaml:"seeker"`
 	DataCode                 proDataCodeYaml `yaml:"data_code"`
 }
 
@@ -114,8 +120,13 @@ type ProConfig struct {
 	Pro  ProTier
 
 	ReferralBonus  ByteCount
+	ReferredBonus  ByteCount
 	ReferralPeriod time.Duration
 	MaxReferrals   int
+
+	// seekerDataMultiplier scales a Seeker/Saga holder's free + referral data grants;
+	// read it via SeekerDataMultiplier(), which defaults a missing/zero value to 1.
+	seekerDataMultiplier float64
 
 	DataCodeDuration time.Duration
 	DataCodeSkus     []ProDataCodeSku
@@ -127,6 +138,16 @@ func mustParseByteCount(s string) ByteCount {
 		panic(fmt.Errorf("pro.yml: invalid byte count %q: %w", s, err))
 	}
 	return b
+}
+
+// parseByteCountOrZero is mustParseByteCount for an OPTIONAL key: an empty/unset value
+// is zero ("not configured"), not a panic, so a pro.yml that predates the key still
+// boots and the corresponding grant simply no-ops (see the ProConfig doc).
+func parseByteCountOrZero(s string) ByteCount {
+	if s == "" {
+		return 0
+	}
+	return mustParseByteCount(s)
 }
 
 func mustParseDuration(s string) time.Duration {
@@ -181,8 +202,10 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		Free:                     parseProTier(y.Free),
 		Pro:                      parseProTier(y.Pro),
 		ReferralBonus:            mustParseByteCount(y.Referral.BonusPerReferral),
+		ReferredBonus:            parseByteCountOrZero(y.Referral.ReferredBonus),
 		ReferralPeriod:           mustParseDuration(y.Referral.Period),
 		MaxReferrals:             y.Referral.MaxReferrals,
+		seekerDataMultiplier:     y.Seeker.DataMultiplier,
 		DataCodeDuration:         mustParseDuration(y.DataCode.Duration),
 		DataCodeSkus:             skus,
 	}
@@ -191,6 +214,19 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 // Pro returns the parsed product spec (cached; parsed once from pro.yml).
 func Pro() *ProConfig {
 	return proConfig()
+}
+
+// Testing_SetEnforceConcurrentClients overrides the concurrent-client
+// enforcement flag on the process's parsed config, returning a function that
+// restores the previous value. Pro() caches one config for the process, so this
+// mutates that shared value -- callers must restore it (defer the return) and
+// must not run in parallel with code that reads the flag. For tests that need to
+// exercise the (dark-by-default) concurrent-client / top-level client limits.
+func Testing_SetEnforceConcurrentClients(enforce bool) func() {
+	c := Pro()
+	prev := c.EnforceConcurrentClients
+	c.EnforceConcurrentClients = enforce
+	return func() { c.EnforceConcurrentClients = prev }
 }
 
 // Tier returns the free or pro tier limits/features.
@@ -275,6 +311,17 @@ func (c *ProConfig) ReferralsCapped(referralCount int) bool {
 		return false
 	}
 	return c.MaxReferrals <= referralCount
+}
+
+// SeekerDataMultiplier scales a Seeker/Saga holder's free + referral data grants (pro.yml
+// seeker.data_multiplier). It NEVER returns <= 0: an unset or non-positive value -- including
+// the absent-pro.yml ProConfig{} zero value -- defaults to 1 (no boost), so a missing key can
+// never zero out a seeker's grant. Callers multiply a grant's byte count by this.
+func (c *ProConfig) SeekerDataMultiplier() float64 {
+	if c.seekerDataMultiplier <= 0 {
+		return 1.0
+	}
+	return c.seekerDataMultiplier
 }
 
 // Feature names for FeatureEnabled.

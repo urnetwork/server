@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -26,11 +26,11 @@ func TestStripeCustomer(t *testing.T) {
 		stripeCustomerId := "cus_abc123xyz"
 
 		err := CreateStripeCustomer(stripeCustomerId, userSession)
-		assert.Equal(t, nil, err)
+		connect.AssertEqual(t, nil, err)
 
 		cust, err := GetStripeCustomer(userSession)
-		assert.Equal(t, nil, err)
-		assert.Equal(t, stripeCustomerId, cust)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, stripeCustomerId, cust)
 
 		/**
 		 * Test not found
@@ -44,6 +44,6 @@ func TestStripeCustomer(t *testing.T) {
 		})
 
 		cust, err = GetStripeCustomer(userSession)
-		assert.Equal(t, cust, nil)
+		connect.AssertEqual(t, cust, nil)
 	})
 }

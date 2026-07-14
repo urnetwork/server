@@ -3,12 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -70,14 +71,14 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceSession.ByJwt.NetworkId,
 		}, ctx)
 
 		transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024*1024)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		usedTransferByteCount := model.ByteCount(1024)
 		paidByteCount := usedTransferByteCount
@@ -96,17 +97,17 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			DefaultTokenType: "USDC",
 		}
 		walletId := model.CreateAccountWalletExternal(destinationSession, args)
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 
 		wallet := model.GetAccountWallet(ctx, *walletId)
 
 		err = model.SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		paymentPlan, err := model.PlanPayments(ctx)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(paymentPlan.NetworkPayments), 0)
-		assert.Equal(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
+		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
 
 		usedTransferByteCount = model.ByteCount(1024 * 1024 * 1024)
 
@@ -119,22 +120,22 @@ func TestSubscriptionSendPayment(t *testing.T) {
 				destinationId,
 				usedTransferByteCount,
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = model.CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = model.CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paidByteCount += usedTransferByteCount
 			paid += model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
 		contractIds := model.GetOpenContractIds(ctx, sourceId, destinationId)
-		assert.Equal(t, len(contractIds), 0)
+		connect.AssertEqual(t, len(contractIds), 0)
 
 		paymentPlan, err = model.PlanPayments(ctx)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, maps.Keys(paymentPlan.NetworkPayments), []server.Id{destinationNetworkId})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 
 		// these should hit -> default
 		// payment.PaymentRecord should all be empty
@@ -143,16 +144,16 @@ func TestSubscriptionSendPayment(t *testing.T) {
 
 			// initiate payment
 			complete, canceled, err := advancePayment(payment, destinationSession)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, complete, false)
-			assert.Equal(t, canceled, false)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, complete, false)
+			connect.AssertEqual(t, canceled, false)
 
 			// fetch the payment record which should have some updated fields
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			// check the wallet address is correctly joined
-			assert.Equal(t, paymentRecord.WalletAddress, destinationWalletAddress)
+			connect.AssertEqual(t, paymentRecord.WalletAddress, destinationWalletAddress)
 
 			// estimate fee
 			// estimatedFees, err := mockCircleClient.EstimateTransferFee(
@@ -161,26 +162,26 @@ func TestSubscriptionSendPayment(t *testing.T) {
 			// 	wallet.WalletAddress,
 			// 	"MATIC",
 			// )
-			// assert.Equal(t, err, nil)
+			// connect.AssertEqual(t, err, nil)
 
 			// // deduct fee from payment amount
 			// fee, err := CalculateFee(
 			// 	*estimatedFees.Medium,
 			// 	"MATIC",
 			// )
-			// assert.Equal(t, err, nil)
+			// connect.AssertEqual(t, err, nil)
 
 			// // convert fee to usdc
 			// feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", *fee)
 			feeInUSDC := 0.01 // this is now hardcoded due to Circle API errors
 
-			assert.Equal(t, err, nil)
-			assert.Equal(t, paymentRecord.PaymentId, payment.PaymentId)
-			assert.Equal(t, paymentRecord.Blockchain, "MATIC")
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, paymentRecord.PaymentId, payment.PaymentId)
+			connect.AssertEqual(t, paymentRecord.Blockchain, "MATIC")
 
 			// payoutAmount (in USD) - fee (in USD) = token amount
-			assert.Equal(t, model.NanoCentsToUsd(paymentRecord.Payout)-feeInUSDC, float64(*paymentRecord.TokenAmount))
-			assert.Equal(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
+			connect.AssertEqual(t, model.NanoCentsToUsd(paymentRecord.Payout)-feeInUSDC, float64(*paymentRecord.TokenAmount))
+			connect.AssertEqual(t, paymentRecord.PaymentRecord, sendPaymentTransactionId)
 		}
 
 		pendingPayments := model.GetPendingPaymentsInPlan(ctx, paymentPlan.PaymentPlanId)
@@ -189,13 +190,13 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		// should return that payment is incomplete
 		for _, payment := range pendingPayments {
 			complete, canceled, err := advancePayment(payment, destinationSession)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, complete, false)
-			assert.Equal(t, canceled, false)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, complete, false)
+			connect.AssertEqual(t, canceled, false)
 
 			// account balance should not yet be updated
 			accountBalance := model.GetAccountBalance(destinationSession)
-			assert.Equal(t, int64(0), accountBalance.Balance.PaidByteCount)
+			connect.AssertEqual(t, int64(0), accountBalance.Balance.PaidByteCount)
 		}
 
 		mockTxHash := "0x1234567890abcdef"
@@ -231,29 +232,29 @@ func TestSubscriptionSendPayment(t *testing.T) {
 		for _, payment := range pendingPayments {
 
 			complete, canceled, err := advancePayment(payment, destinationSession)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, complete, true)
-			assert.Equal(t, canceled, false)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, complete, true)
+			connect.AssertEqual(t, canceled, false)
 
 			paymentRecord, err := model.GetPayment(ctx, payment.PaymentId)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, paymentRecord.Completed, true)
-			assert.Equal(t, paymentRecord.TxHash, mockTxHash)
-			assert.Equal(t, paymentRecord.Blockchain, "MATIC")
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, paymentRecord.Completed, true)
+			connect.AssertEqual(t, paymentRecord.TxHash, mockTxHash)
+			connect.AssertEqual(t, paymentRecord.Blockchain, "MATIC")
 
 			// check that the account balance has been updated
 			accountBalance := model.GetAccountBalance(destinationSession)
-			assert.Equal(t, accountBalance.Balance.PaidByteCount, paidByteCount)
+			connect.AssertEqual(t, accountBalance.Balance.PaidByteCount, paidByteCount)
 		}
 
 		networkPayments, err := GetNetworkAccountPayments(destinationSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(networkPayments.AccountPayments), len(pendingPayments))
-		assert.Equal(t, networkPayments.AccountPayments[0].NetworkId, destinationSession.ByJwt.NetworkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(networkPayments.AccountPayments), len(pendingPayments))
+		connect.AssertEqual(t, networkPayments.AccountPayments[0].NetworkId, destinationSession.ByJwt.NetworkId)
 
 		sourcePayments, err := GetNetworkAccountPayments(sourceSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(sourcePayments.AccountPayments), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(sourcePayments.AccountPayments), 0)
 	})
 }
 
@@ -322,7 +323,7 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: sourceNetworkId,
@@ -335,29 +336,29 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			WalletAddress:    wallet1Address,
 			DefaultTokenType: "USDC",
 		})
-		assert.NotEqual(t, wallet1Id, nil)
+		connect.AssertNotEqual(t, wallet1Id, nil)
 		err = model.SetPayoutWallet(ctx, destinationNetworkId, *wallet1Id)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// provide enough traffic to exceed the min payout
 		usedTransferByteCount := model.ByteCount(1024 * 1024 * 1024)
 		paid := model.NanoCents(0)
 		for paid < model.UsdToNanoCents(model.EnvSubsidyConfig().MinWalletPayoutUsd) {
 			transferEscrow, err := model.CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			err = model.CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = model.CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			paid += model.UsdToNanoCents(model.ProviderRevenueShare * model.NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
 		paymentPlan, err := model.PlanPayments(ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		payment, ok := paymentPlan.NetworkPayments[destinationNetworkId]
-		assert.Equal(t, ok, true)
-		assert.Equal(t, *payment.WalletId, *wallet1Id)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, *payment.WalletId, *wallet1Id)
 
 		advanceArgs := &AdvancePaymentArgs{
 			PaymentId: payment.PaymentId,
@@ -366,21 +367,21 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		// the network removes its payout wallet before the payment is sent.
 		// funds must not be sent to the deactivated wallet.
 		removeResult := model.RemoveWallet(*wallet1Id, destinationSession)
-		assert.Equal(t, removeResult.Success, true)
+		connect.AssertEqual(t, removeResult.Success, true)
 
 		result, err := AdvancePayment(advanceArgs, destinationSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Complete, false)
-		assert.Equal(t, result.Canceled, true)
-		assert.Equal(t, len(sends), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Complete, false)
+		connect.AssertEqual(t, result.Canceled, true)
+		connect.AssertEqual(t, len(sends), 0)
 
 		// the payment is held, not canceled, so it can pay out
 		// after the network sets a valid wallet
 		heldPayment, err := model.GetPayment(ctx, payment.PaymentId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, heldPayment.Canceled, false)
-		assert.Equal(t, heldPayment.Completed, false)
-		assert.Equal(t, heldPayment.PaymentRecord, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, heldPayment.Canceled, false)
+		connect.AssertEqual(t, heldPayment.Completed, false)
+		connect.AssertEqual(t, heldPayment.PaymentRecord, nil)
 
 		// the network sets a new payout wallet
 		wallet2Address := "0x2222"
@@ -390,33 +391,33 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			WalletAddress:    wallet2Address,
 			DefaultTokenType: "USDC",
 		})
-		assert.NotEqual(t, wallet2Id, nil)
+		connect.AssertNotEqual(t, wallet2Id, nil)
 		err = model.SetPayoutWallet(ctx, destinationNetworkId, *wallet2Id)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// the first submit fails after the processor call.
 		// the same idempotency key must be reused on the retry,
 		// so the processor cannot double-send the funds.
 		sendErr = fmt.Errorf("simulated processor error")
 		result, err = AdvancePayment(advanceArgs, destinationSession)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, len(sends), 1)
-		assert.Equal(t, sends[0].address, wallet2Address)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, len(sends), 1)
+		connect.AssertEqual(t, sends[0].address, wallet2Address)
 
 		sendErr = nil
 		result, err = AdvancePayment(advanceArgs, destinationSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Complete, false)
-		assert.Equal(t, result.Canceled, false)
-		assert.Equal(t, len(sends), 2)
-		assert.Equal(t, sends[1].idempotencyKey, sends[0].idempotencyKey)
-		assert.Equal(t, sends[1].address, wallet2Address)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Complete, false)
+		connect.AssertEqual(t, result.Canceled, false)
+		connect.AssertEqual(t, len(sends), 2)
+		connect.AssertEqual(t, sends[1].idempotencyKey, sends[0].idempotencyKey)
+		connect.AssertEqual(t, sends[1].address, wallet2Address)
 
 		sentPayment, err := model.GetPayment(ctx, payment.PaymentId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *sentPayment.WalletId, *wallet2Id)
-		assert.Equal(t, *sentPayment.WalletAddress, wallet2Address)
-		assert.Equal(t, *sentPayment.PaymentRecord, sendPaymentTransactionId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *sentPayment.WalletId, *wallet2Id)
+		connect.AssertEqual(t, *sentPayment.WalletAddress, wallet2Address)
+		connect.AssertEqual(t, *sentPayment.PaymentRecord, sendPaymentTransactionId)
 
 		// a failed transaction resets the record and gets a fresh
 		// idempotency key, so a new transaction can be created
@@ -431,14 +432,14 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			}, nil
 		}
 		result, err = AdvancePayment(advanceArgs, destinationSession)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		mockCircleClient.GetTransactionFunc = defaultGetTransactionDataHandler
 		result, err = AdvancePayment(advanceArgs, destinationSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(sends), 3)
-		assert.NotEqual(t, sends[2].idempotencyKey, sends[0].idempotencyKey)
-		assert.Equal(t, sends[2].address, wallet2Address)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(sends), 3)
+		connect.AssertNotEqual(t, sends[2].idempotencyKey, sends[0].idempotencyKey)
+		connect.AssertEqual(t, sends[2].address, wallet2Address)
 
 		// complete the payment
 		mockTxHash := "0xabcdef"
@@ -454,14 +455,14 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 			}, nil
 		}
 		result, err = AdvancePayment(advanceArgs, destinationSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Complete, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Complete, true)
 
 		completedPayment, err := model.GetPayment(ctx, payment.PaymentId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, completedPayment.Completed, true)
-		assert.Equal(t, *completedPayment.WalletId, *wallet2Id)
-		assert.Equal(t, *completedPayment.WalletAddress, wallet2Address)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, completedPayment.Completed, true)
+		connect.AssertEqual(t, *completedPayment.WalletId, *wallet2Id)
+		connect.AssertEqual(t, *completedPayment.WalletAddress, wallet2Address)
 
 	})
 }
@@ -488,8 +489,8 @@ func TestFeeToUsd(t *testing.T) {
 		fee := 1.0
 
 		feeInUSDC, err := ConvertFeeToUSDC(ctx, "MATIC", fee)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, feeInUSDC, 0.50)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, feeInUSDC, 0.50)
 	})
 }
 

@@ -29,8 +29,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
-
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 )
@@ -107,12 +105,12 @@ func TestEncryptionHandshakeResetOnResume(t *testing.T) {
 	// 1) Establish: send a burst; all must arrive (handshake done, cipher
 	//    established, data wrapped).
 	for i := 0; i < 8; i += 1 {
-		assert.Equal(t, true, pair.send(fmt.Sprintf("pre-%d", i)))
+		connect.AssertEqual(t, true, pair.send(fmt.Sprintf("pre-%d", i)))
 	}
 	for i := 0; i < 8; i += 1 {
 		got, ok := pair.recvB(30 * time.Second)
-		assert.Equal(t, true, ok)
-		assert.Equal(t, fmt.Sprintf("pre-%d", i), got)
+		connect.AssertEqual(t, true, ok)
+		connect.AssertEqual(t, fmt.Sprintf("pre-%d", i), got)
 	}
 
 	// 2) Pause past the send idle timeout but under the receive idle timeout:
@@ -124,12 +122,12 @@ func TestEncryptionHandshakeResetOnResume(t *testing.T) {
 	//    ClientHello; b's live ReceiveSequence resets its handshake and
 	//    re-handshakes. The resumed messages must still arrive.
 	for i := 0; i < 8; i += 1 {
-		assert.Equal(t, true, pair.send(fmt.Sprintf("post-%d", i)))
+		connect.AssertEqual(t, true, pair.send(fmt.Sprintf("post-%d", i)))
 	}
 	for i := 0; i < 8; i += 1 {
 		got, ok := pair.recvB(30 * time.Second)
-		assert.Equal(t, true, ok)
-		assert.Equal(t, fmt.Sprintf("post-%d", i), got)
+		connect.AssertEqual(t, true, ok)
+		connect.AssertEqual(t, fmt.Sprintf("post-%d", i), got)
 	}
 }
 
@@ -157,12 +155,12 @@ func TestEncryptionReceiveTimeoutRejectsData(t *testing.T) {
 
 	// 1) Establish.
 	for i := 0; i < 8; i += 1 {
-		assert.Equal(t, true, pair.send(fmt.Sprintf("pre-%d", i)))
+		connect.AssertEqual(t, true, pair.send(fmt.Sprintf("pre-%d", i)))
 	}
 	for i := 0; i < 8; i += 1 {
 		got, ok := pair.recvB(30 * time.Second)
-		assert.Equal(t, true, ok)
-		assert.Equal(t, fmt.Sprintf("pre-%d", i), got)
+		connect.AssertEqual(t, true, ok)
+		connect.AssertEqual(t, fmt.Sprintf("pre-%d", i), got)
 	}
 
 	// 2) Pause past the receive idle timeout but under the send idle timeout:

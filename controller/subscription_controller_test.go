@@ -6,7 +6,7 @@ package controller
 //     "fmt"
 //     "encoding/json"
 
-//     "github.com/go-playground/assert/v2"
+//     "github.com/urnetwork/connect"
 
 //     "github.com/urnetwork/server"
 // )
@@ -18,14 +18,14 @@ func TestGooglePlayPubSub(t *testing.T) { (&server.TestEnv{ApplyDbMigrations: fa
 	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
 
 	bodyBytes, err := server.HttpGetRawRequireStatusOk(url, server.NoCustomHeaders)
-	assert.Equal(t, err, nil)
-	assert.NotEqual(t, bodyBytes, nil)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, bodyBytes, nil)
 
 	// parse the body as a claim map
 	var claims map[string]any
 	err = json.Unmarshal(bodyBytes, &claims)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
-	assert.Equal(t, claims["email"], "338638865390-compute@developer.gserviceaccount.com")
+	connect.AssertEqual(t, claims["email"], "338638865390-compute@developer.gserviceaccount.com")
 })}
 */

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
 
@@ -17,26 +17,26 @@ func TestNetworkReferralCode(t *testing.T) {
 
 		// create a network referral code
 		createdReferralCode := CreateNetworkReferralCode(ctx, networkId)
-		assert.Equal(t, createdReferralCode.NetworkId, networkId)
+		connect.AssertEqual(t, createdReferralCode.NetworkId, networkId)
 
-		assert.Equal(t, len(createdReferralCode.ReferralCode), 6)
+		connect.AssertEqual(t, len(createdReferralCode.ReferralCode), 6)
 
 		// get the network referral code
 		networkReferralCode := GetNetworkReferralCode(ctx, networkId)
-		assert.Equal(t, networkReferralCode.NetworkId, networkId)
-		assert.Equal(t, networkReferralCode.ReferralCode, createdReferralCode.ReferralCode)
+		connect.AssertEqual(t, networkReferralCode.NetworkId, networkId)
+		connect.AssertEqual(t, networkReferralCode.ReferralCode, createdReferralCode.ReferralCode)
 
 		// get the network id by referral code
 		referralNetworkId := GetNetworkIdByReferralCode(createdReferralCode.ReferralCode)
-		assert.Equal(t, referralNetworkId, networkId)
+		connect.AssertEqual(t, referralNetworkId, networkId)
 
 		// validity checks
 		invalidReferralCode := "invalid_referral_code"
 		validationResult := ValidateReferralCode(ctx, invalidReferralCode)
-		assert.Equal(t, validationResult.Valid, false)
+		connect.AssertEqual(t, validationResult.Valid, false)
 
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
-		assert.Equal(t, validationResult.Valid, true)
+		connect.AssertEqual(t, validationResult.Valid, true)
 
 		// check capped status. The cap comes from pro.yml (referral.max_referrals);
 		// never hardcode it here, or this test rots the next time the cap changes.
@@ -63,15 +63,15 @@ func TestNetworkReferralCode(t *testing.T) {
 		}
 
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
-		assert.Equal(t, validationResult.Valid, true)
-		assert.Equal(t, validationResult.IsCapped, false)
+		connect.AssertEqual(t, validationResult.Valid, true)
+		connect.AssertEqual(t, validationResult.IsCapped, false)
 
 		// the one that reaches the cap -> capped
 		CreateNetworkReferral(ctx, referredNetworkIds[maxReferrals-1], createdReferralCode.ReferralCode)
 
 		validationResult = ValidateReferralCode(ctx, createdReferralCode.ReferralCode)
-		assert.Equal(t, validationResult.Valid, true)
-		assert.Equal(t, validationResult.IsCapped, true)
+		connect.AssertEqual(t, validationResult.Valid, true)
+		connect.AssertEqual(t, validationResult.IsCapped, true)
 
 	})
 }

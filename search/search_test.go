@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"slices"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -45,35 +45,35 @@ func searchSubstring(t testing.TB, ctx context.Context, testSearch Search) {
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id1})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id1})
 
 	results = testSearch.AroundRaw(ctx, "united", 0)
 	resultValueIds = []server.Id{}
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id1})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id1})
 
 	results = testSearch.AroundRaw(ctx, "redwood city", 0)
 	resultValueIds = []server.Id{}
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id1})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id1})
 
 	results = testSearch.AroundRaw(ctx, "united", 0)
 	resultValueIds = []server.Id{}
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id1})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id1})
 
 	results = testSearch.AroundRaw(ctx, "london", 0)
 	resultValueIds = []server.Id{}
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id2})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id2})
 
 	// test with some misspelling threshold
 	results = testSearch.AroundRaw(ctx, "redwd cit", 3)
@@ -81,14 +81,14 @@ func searchSubstring(t testing.TB, ctx context.Context, testSearch Search) {
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id1})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id1})
 
 	results = testSearch.AroundRaw(ctx, "lomdom", 3)
 	resultValueIds = []server.Id{}
 	for _, result := range results {
 		resultValueIds = append(resultValueIds, result.ValueId)
 	}
-	assert.Equal(t, resultValueIds, []server.Id{id2})
+	connect.AssertEqual(t, resultValueIds, []server.Id{id2})
 }
 
 func TestSearchSubstringRandom(t *testing.T) {
@@ -125,14 +125,14 @@ func searchSubstringRandom(t testing.TB, ctx context.Context, testSearch Search,
 		values[valueId] = value
 	}
 
-	for i, valueId := range maps.Keys(values) {
+	for i, valueId := range slices.Collect(maps.Keys(values)) {
 		value := values[valueId]
 		fmt.Printf("[%d/%d] Adding search string\n", i+1, n)
 		testSearch.AddRaw(ctx, value, valueId, 0)
 	}
 
 	for i := 0; i < k; i += 1 {
-		valueIds := maps.Keys(values)
+		valueIds := slices.Collect(maps.Keys(values))
 		valueId := valueIds[mathrand.Intn(len(valueIds))]
 		value := values[valueId]
 		start := mathrand.Intn(len(value) / 2)
@@ -167,14 +167,14 @@ func searchSubstringRandom(t testing.TB, ctx context.Context, testSearch Search,
 			}
 		}
 
-		assert.Equal(t, len(resultValueIds), len(scanValueIds))
+		connect.AssertEqual(t, len(resultValueIds), len(scanValueIds))
 		slices.SortFunc(resultValueIds, func(a server.Id, b server.Id) int {
 			return a.Cmp(b)
 		})
 		slices.SortFunc(scanValueIds, func(a server.Id, b server.Id) int {
 			return a.Cmp(b)
 		})
-		assert.Equal(t, resultValueIds, scanValueIds)
+		connect.AssertEqual(t, resultValueIds, scanValueIds)
 
 		// this is a low estimate, since the scan is not finding the best match, just any match
 		speedup := float64(scanCandidateCount) / float64(stats.CandidateCount)

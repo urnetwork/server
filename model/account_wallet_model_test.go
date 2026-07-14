@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -32,23 +32,23 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		walletId := CreateAccountWalletExternal(session, args)
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 
 		fetchWallet := GetAccountWallet(ctx, *walletId)
 
-		assert.Equal(t, walletId, fetchWallet.WalletId)
-		assert.Equal(t, networkId, fetchWallet.NetworkId)
-		assert.Equal(t, WalletTypeExternal, fetchWallet.WalletType)
-		assert.Equal(t, args.Blockchain, fetchWallet.Blockchain)
-		assert.Equal(t, args.WalletAddress, fetchWallet.WalletAddress)
-		assert.Equal(t, args.DefaultTokenType, fetchWallet.DefaultTokenType)
-		assert.Equal(t, fetchWallet.CircleWalletId, nil)
-		assert.Equal(t, fetchWallet.HasSeekerToken, false)
+		connect.AssertEqual(t, walletId, fetchWallet.WalletId)
+		connect.AssertEqual(t, networkId, fetchWallet.NetworkId)
+		connect.AssertEqual(t, WalletTypeExternal, fetchWallet.WalletType)
+		connect.AssertEqual(t, args.Blockchain, fetchWallet.Blockchain)
+		connect.AssertEqual(t, args.WalletAddress, fetchWallet.WalletAddress)
+		connect.AssertEqual(t, args.DefaultTokenType, fetchWallet.DefaultTokenType)
+		connect.AssertEqual(t, fetchWallet.CircleWalletId, nil)
+		connect.AssertEqual(t, fetchWallet.HasSeekerToken, false)
 
 		// mark wallet as having a seeker token
 		MarkWalletSeekerHolder(fetchWallet.WalletAddress, session)
 		fetchWallet = GetAccountWallet(ctx, *walletId)
-		assert.Equal(t, fetchWallet.HasSeekerToken, true)
+		connect.AssertEqual(t, fetchWallet.HasSeekerToken, true)
 
 		/**
 		 * Try and insert the same wallet address with network id
@@ -56,32 +56,32 @@ func TestAccountWallet(t *testing.T) {
 		 */
 
 		walletId2 := CreateAccountWalletExternal(session, args)
-		assert.Equal(t, walletId, walletId2)
+		connect.AssertEqual(t, walletId, walletId2)
 
 		// remove wallet (set account wallet as active = false)
 		// we also clear the payout wallet if it matches
 		SetPayoutWallet(ctx, networkId, *walletId)
 
 		result := RemoveWallet(*walletId, session)
-		assert.Equal(t, result.Success, true)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, result.Success, true)
+		connect.AssertEqual(t, result.Error, nil)
 
 		payoutWalletId := GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, payoutWalletId, nil)
+		connect.AssertEqual(t, payoutWalletId, nil)
 
 		// try and fetch the wallet again
 		// should be marked as inactive
 		fetchWallet = GetAccountWallet(ctx, *walletId)
-		assert.Equal(t, fetchWallet.Active, false)
+		connect.AssertEqual(t, fetchWallet.Active, false)
 
 		// Create a new wallet with the same address and network id
 		walletId2 = CreateAccountWalletExternal(session, args)
-		assert.Equal(t, walletId, walletId2)
+		connect.AssertEqual(t, walletId, walletId2)
 
 		// fetch the wallet again
 		// active should be reset to true
 		fetchWallet = GetAccountWallet(ctx, *walletId)
-		assert.Equal(t, fetchWallet.Active, true)
+		connect.AssertEqual(t, fetchWallet.Active, true)
 
 		/**
 		 * Associate a wallet with a seeker token that is not yet in the db
@@ -90,21 +90,21 @@ func TestAccountWallet(t *testing.T) {
 		 */
 		seekerHolderAddress := "0x1"
 		err := MarkWalletSeekerHolder(seekerHolderAddress, session)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		accountWallets := GetActiveAccountWallets(session)
-		assert.Equal(t, len(accountWallets.Wallets), 2)
-		assert.Equal(t, accountWallets.Wallets[1].WalletAddress, seekerHolderAddress)
-		assert.Equal(t, accountWallets.Wallets[1].NetworkId, networkId)
-		assert.Equal(t, accountWallets.Wallets[1].HasSeekerToken, true)
-		assert.Equal(t, accountWallets.Wallets[1].WalletType, WalletTypeExternal)
-		assert.Equal(t, accountWallets.Wallets[1].CircleWalletId, nil)
-		assert.Equal(t, accountWallets.Wallets[1].Active, true)
-		assert.Equal(t, accountWallets.Wallets[1].Blockchain, SOL.String())
+		connect.AssertEqual(t, len(accountWallets.Wallets), 2)
+		connect.AssertEqual(t, accountWallets.Wallets[1].WalletAddress, seekerHolderAddress)
+		connect.AssertEqual(t, accountWallets.Wallets[1].NetworkId, networkId)
+		connect.AssertEqual(t, accountWallets.Wallets[1].HasSeekerToken, true)
+		connect.AssertEqual(t, accountWallets.Wallets[1].WalletType, WalletTypeExternal)
+		connect.AssertEqual(t, accountWallets.Wallets[1].CircleWalletId, nil)
+		connect.AssertEqual(t, accountWallets.Wallets[1].Active, true)
+		connect.AssertEqual(t, accountWallets.Wallets[1].Blockchain, SOL.String())
 
 		// get all seeker holders
 		seekerHolders := GetAllSeekerHolders(ctx)
-		assert.Equal(t, len(seekerHolders), 1)
-		assert.Equal(t, seekerHolders[networkId], true)
+		connect.AssertEqual(t, len(seekerHolders), 1)
+		connect.AssertEqual(t, seekerHolders[networkId], true)
 
 		// test with setting a CircleWalletId
 		circleWalletId := server.NewId().String()
@@ -119,20 +119,20 @@ func TestAccountWallet(t *testing.T) {
 		walletId = CreateAccountWalletCircle(ctx, circleArgs)
 
 		fetchWallet = GetAccountWalletByCircleId(ctx, circleWalletId)
-		assert.NotEqual(t, fetchWallet, nil)
-		assert.Equal(t, fetchWallet.WalletId, walletId)
-		assert.Equal(t, networkId, fetchWallet.NetworkId)
-		assert.Equal(t, WalletTypeCircleUserControlled, fetchWallet.WalletType)
-		assert.Equal(t, circleArgs.Blockchain, fetchWallet.Blockchain)
-		assert.Equal(t, circleArgs.WalletAddress, fetchWallet.WalletAddress)
-		assert.Equal(t, circleArgs.DefaultTokenType, fetchWallet.DefaultTokenType)
-		assert.Equal(t, fetchWallet.CircleWalletId, circleWalletId)
-		assert.Equal(t, fetchWallet.HasSeekerToken, false)
+		connect.AssertNotEqual(t, fetchWallet, nil)
+		connect.AssertEqual(t, fetchWallet.WalletId, walletId)
+		connect.AssertEqual(t, networkId, fetchWallet.NetworkId)
+		connect.AssertEqual(t, WalletTypeCircleUserControlled, fetchWallet.WalletType)
+		connect.AssertEqual(t, circleArgs.Blockchain, fetchWallet.Blockchain)
+		connect.AssertEqual(t, circleArgs.WalletAddress, fetchWallet.WalletAddress)
+		connect.AssertEqual(t, circleArgs.DefaultTokenType, fetchWallet.DefaultTokenType)
+		connect.AssertEqual(t, fetchWallet.CircleWalletId, circleWalletId)
+		connect.AssertEqual(t, fetchWallet.HasSeekerToken, false)
 
 		// try and fetch incorrect id
 		fakeId := server.NewId()
 		fetchWallet = GetAccountWallet(ctx, fakeId)
-		assert.Equal(t, fetchWallet, nil)
+		connect.AssertEqual(t, fetchWallet, nil)
 
 	})
 }
@@ -163,6 +163,6 @@ func TestCreateEthereumWallet(t *testing.T) {
 		}
 
 		walletId := CreateAccountWalletExternal(session, args)
-		assert.NotEqual(t, walletId, nil)
+		connect.AssertNotEqual(t, walletId, nil)
 	})
 }

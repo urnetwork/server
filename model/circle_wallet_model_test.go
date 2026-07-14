@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -31,11 +31,11 @@ func TestCircleUC(t *testing.T) {
 
 		// fetch circle_uc row by circle_uc_user_id
 		circleUC := GetCircleUCByCircleUCUserId(ctx, circleUserIdWithWallet)
-		assert.Equal(t, circleUC.CircleUCUserId, circleUserIdWithWallet)
+		connect.AssertEqual(t, circleUC.CircleUCUserId, circleUserIdWithWallet)
 
 		// attempt to fetch with incorrect circle_uc_user_id
 		failId := server.NewId()
 		circleUC = GetCircleUCByCircleUCUserId(ctx, failId)
-		assert.Equal(t, circleUC, nil)
+		connect.AssertEqual(t, circleUC, nil)
 	})
 }

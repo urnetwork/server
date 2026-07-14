@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -31,12 +31,12 @@ func TestFeedback(t *testing.T) {
 
 		// save feedback
 		sendResult, err := FeedbackSend(feedback, userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// get feedback
 		getResult, err := GetFeedbackById(&sendResult.FeedbackId, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, getResult.NetworkId, networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, getResult.NetworkId, networkId)
 
 	})
 }

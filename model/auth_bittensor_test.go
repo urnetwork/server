@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/ChainSafe/go-schnorrkel"
-	"github.com/go-playground/assert/v2"
 	"github.com/mr-tron/base58"
+	"github.com/urnetwork/connect"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -24,39 +24,39 @@ func testingSS58Encode(prefix byte, publicKey [32]byte) string {
 // generic substrate prefix (42, used by bittensor) and the polkadot prefix (0)
 func TestDecodeSS58Address(t *testing.T) {
 	alicePublicKey, err := hex.DecodeString("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// alice, substrate generic prefix 42
 	publicKey, err := DecodeSS58Address("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, publicKey[:], alicePublicKey)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, publicKey[:], alicePublicKey)
 
 	// alice, polkadot prefix 0 (prefix-agnostic decode)
 	publicKey, err = DecodeSS58Address("15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, publicKey[:], alicePublicKey)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, publicKey[:], alicePublicKey)
 
 	// corrupt the checksum
 	_, err = DecodeSS58Address("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQZ")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// malformed inputs
 	_, err = DecodeSS58Address("")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 	_, err = DecodeSS58Address("not-an-address")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 	_, err = DecodeSS58Address("0x00")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
-	assert.Equal(t, IsValidBittensorAddress("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"), true)
-	assert.Equal(t, IsValidBittensorAddress("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQZ"), false)
+	connect.AssertEqual(t, IsValidBittensorAddress("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"), true)
+	connect.AssertEqual(t, IsValidBittensorAddress("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQZ"), false)
 }
 
 func TestVerifyBittensorSignature(t *testing.T) {
 	message := "Welcome to URnetwork"
 
 	secretKey, publicKey, err := schnorrkel.GenerateKeypair()
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	publicKeyBytes := publicKey.Encode()
 	address := testingSS58Encode(42, publicKeyBytes)
 
@@ -64,62 +64,62 @@ func TestVerifyBittensorSignature(t *testing.T) {
 	wrapped := "<Bytes>" + message + "</Bytes>"
 	transcript := schnorrkel.NewSigningContext([]byte("substrate"), []byte(wrapped))
 	signature, err := secretKey.Sign(transcript)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	signatureBytes := signature.Encode()
 	signatureHex := hex.EncodeToString(signatureBytes[:])
 
 	valid, err := VerifyBittensorSignature(address, message, signatureHex)
-	assert.Equal(t, err, nil)
-	assert.Equal(t, valid, true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
 
 	// 0x prefixed signatures also verify (the walletconnect return format)
 	valid, err = VerifyBittensorSignature(address, message, "0x"+signatureHex)
-	assert.Equal(t, err, nil)
-	assert.Equal(t, valid, true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
 
 	// signers that do not wrap the payload also verify
 	rawTranscript := schnorrkel.NewSigningContext([]byte("substrate"), []byte(message))
 	rawSignature, err := secretKey.Sign(rawTranscript)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	rawSignatureBytes := rawSignature.Encode()
 	valid, err = VerifyBittensorSignature(address, message, hex.EncodeToString(rawSignatureBytes[:]))
-	assert.Equal(t, err, nil)
-	assert.Equal(t, valid, true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
 
 	// a different message does not verify
 	valid, _ = VerifyBittensorSignature(address, "another message", signatureHex)
-	assert.Equal(t, valid, false)
+	connect.AssertEqual(t, valid, false)
 
 	// a different key does not verify
 	_, otherPublicKey, err := schnorrkel.GenerateKeypair()
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	otherPublicKeyBytes := otherPublicKey.Encode()
 	otherAddress := testingSS58Encode(42, otherPublicKeyBytes)
 	valid, _ = VerifyBittensorSignature(otherAddress, message, signatureHex)
-	assert.Equal(t, valid, false)
+	connect.AssertEqual(t, valid, false)
 
 	// malformed signature encodings error
 	_, err = VerifyBittensorSignature(address, message, "zz")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 	_, err = VerifyBittensorSignature(address, message, "abcd")
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// dispatch through VerifySignature for both blockchain spellings
 	valid, err = VerifySignature("TAO", address, message, signatureHex)
-	assert.Equal(t, err, nil)
-	assert.Equal(t, valid, true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
 	valid, err = VerifySignature("bittensor", address, message, signatureHex)
-	assert.Equal(t, err, nil)
-	assert.Equal(t, valid, true)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
 }
 
 func TestParseBlockchainTao(t *testing.T) {
 	blockchain, err := ParseBlockchain("tao")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, blockchain, TAO)
-	assert.Equal(t, blockchain.String(), "TAO")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, blockchain, TAO)
+	connect.AssertEqual(t, blockchain.String(), "TAO")
 
 	blockchain, err = ParseBlockchain("BITTENSOR")
-	assert.Equal(t, err, nil)
-	assert.Equal(t, blockchain, TAO)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, blockchain, TAO)
 }

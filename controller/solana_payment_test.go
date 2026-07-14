@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server/model"
 )
@@ -16,18 +16,18 @@ func TestSolanaPlanPriceComesFromTheServer(t *testing.T) {
 	skipWithoutProYml(t)
 
 	monthly, ok := solanaPlanPriceUsd(model.SolanaPlanMonthly)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, monthly, float64(5))
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, monthly, float64(5))
 
 	yearly, ok := solanaPlanPriceUsd(model.SolanaPlanYearly)
-	assert.Equal(t, ok, true)
-	assert.Equal(t, yearly, float64(40))
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, yearly, float64(40))
 
 	// an unknown plan has no price -- the intent is refused rather than priced at zero
 	_, ok = solanaPlanPriceUsd("free_forever_please")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 	_, ok = solanaPlanPriceUsd("")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 }
 
 // TestSolanaPlanDuration pins that the customer gets the plan they BOUGHT.
@@ -35,12 +35,12 @@ func TestSolanaPlanPriceComesFromTheServer(t *testing.T) {
 // The webhook used to grant a full YEAR for every accepted payment, whatever had been
 // chosen and whatever had been paid.
 func TestSolanaPlanDuration(t *testing.T) {
-	assert.Equal(t, solanaPlanDuration(model.SolanaPlanMonthly), 30*24*time.Hour)
-	assert.Equal(t, solanaPlanDuration(model.SolanaPlanYearly), SubscriptionYearDuration)
+	connect.AssertEqual(t, solanaPlanDuration(model.SolanaPlanMonthly), 30*24*time.Hour)
+	connect.AssertEqual(t, solanaPlanDuration(model.SolanaPlanYearly), SubscriptionYearDuration)
 
 	// an intent created before the plan was recorded was always treated as yearly, so
 	// those legacy intents keep getting exactly that
-	assert.Equal(t, solanaPlanDuration(""), SubscriptionYearDuration)
+	connect.AssertEqual(t, solanaPlanDuration(""), SubscriptionYearDuration)
 }
 
 // TestSolanaUnderpaymentIsRefused pins the amount check, which is the whole reason the
@@ -53,21 +53,21 @@ func TestSolanaUnderpaymentIsRefused(t *testing.T) {
 	}
 
 	// the exact price is fine
-	assert.Equal(t, underpaid(40, 40), false)
-	assert.Equal(t, underpaid(5, 5), false)
+	connect.AssertEqual(t, underpaid(40, 40), false)
+	connect.AssertEqual(t, underpaid(5, 5), false)
 
 	// overpaying is the customer's choice, and is honored
-	assert.Equal(t, underpaid(5, 40), false)
-	assert.Equal(t, underpaid(40, 100), false)
+	connect.AssertEqual(t, underpaid(5, 40), false)
+	connect.AssertEqual(t, underpaid(40, 100), false)
 
 	// float dust is absorbed, not treated as a shortfall
-	assert.Equal(t, underpaid(40, 39.999), false)
+	connect.AssertEqual(t, underpaid(40, 39.999), false)
 
 	// a real shortfall is refused. THIS is the case that used to buy a year:
 	// the old code accepted anything >= 40 and granted a year regardless.
-	assert.Equal(t, underpaid(40, 5), true)
-	assert.Equal(t, underpaid(40, 39.5), true)
-	assert.Equal(t, underpaid(5, 0.01), true)
+	connect.AssertEqual(t, underpaid(40, 5), true)
+	connect.AssertEqual(t, underpaid(40, 39.5), true)
+	connect.AssertEqual(t, underpaid(5, 0.01), true)
 }
 
 // TestSolanaMonthlyPaymentIsNoLongerIgnored is the bug in one line.
@@ -80,13 +80,13 @@ func TestSolanaMonthlyPaymentIsNoLongerIgnored(t *testing.T) {
 	skipWithoutProYml(t)
 
 	monthlyPrice, ok := solanaPlanPriceUsd(model.SolanaPlanMonthly)
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 
 	// what the old code required before it would accept a transfer at all
 	const oldHardcodedMinimum = 40.0
-	assert.Equal(t, monthlyPrice < oldHardcodedMinimum, true) // ...so $5 was dropped
+	connect.AssertEqual(t, monthlyPrice < oldHardcodedMinimum, true) // ...so $5 was dropped
 
 	// now: a $5 payment against a $5 quote is accepted, and buys a MONTH
-	assert.Equal(t, solanaAmountTolerance < monthlyPrice-monthlyPrice, false)
-	assert.Equal(t, solanaPlanDuration(model.SolanaPlanMonthly), 30*24*time.Hour)
+	connect.AssertEqual(t, solanaAmountTolerance < monthlyPrice-monthlyPrice, false)
+	connect.AssertEqual(t, solanaPlanDuration(model.SolanaPlanMonthly), 30*24*time.Hour)
 }

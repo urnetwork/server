@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	// "github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server"
@@ -190,7 +190,7 @@ func TestTask(t *testing.T) {
 		for _, runCount := range runCounts {
 			netRunCount += runCount
 		}
-		assert.Equal(t, netRunCount, targetRunCount)
+		connect.AssertEqual(t, netRunCount, targetRunCount)
 
 		netTaskCount := 0
 		for _, runCount := range runCounts {
@@ -201,7 +201,7 @@ func TestTask(t *testing.T) {
 		}
 
 		removedCount := RemoveFinishedTasks(ctx, server.NowUtc(), server.NowUtc().Add(-7*24*time.Hour))
-		assert.Equal(t, int(removedCount), netTaskCount)
-		assert.Equal(t, 0, len(ListFinishedTasks(ctx)))
+		connect.AssertEqual(t, int(removedCount), netTaskCount)
+		connect.AssertEqual(t, 0, len(ListFinishedTasks(ctx)))
 	})
 }

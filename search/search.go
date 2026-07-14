@@ -8,7 +8,7 @@ import (
 
 	// "unicode"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -146,12 +146,12 @@ func (self *SearchDb) AnyAround(ctx context.Context, query string, distance int)
 
 func (self *SearchDb) Around(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
 	results := self.AroundIds(ctx, query, distance, options...)
-	return maps.Values(results)
+	return slices.Collect(maps.Values(results))
 }
 
 func (self *SearchDb) AroundRaw(ctx context.Context, query string, distance int, options ...any) []*SearchResult {
 	results := self.AroundIdsRaw(ctx, query, distance, options...)
-	return maps.Values(results)
+	return slices.Collect(maps.Values(results))
 }
 
 func (self *SearchDb) AroundIds(ctx context.Context, query string, distance int, options ...any) map[server.Id]*SearchResult {
@@ -666,7 +666,7 @@ func mostLikely(query string, results map[server.Id]*SearchResult, n int) map[se
 		return i
 	}
 
-	orderedResults := maps.Values(results)
+	orderedResults := slices.Collect(maps.Values(results))
 	slices.SortFunc(orderedResults, func(a *SearchResult, b *SearchResult) int {
 		if d := a.ValueDistance - b.ValueDistance; d != 0 {
 			return d

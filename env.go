@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -767,7 +767,7 @@ func versionLookup(root string, path []string) (returnPaths []string, returnErr 
 			}
 		}
 	}
-	versions := maps.Keys(versionNames)
+	versions := slices.Collect(maps.Keys(versionNames))
 	semverSortWithBuild(versions)
 	for i := len(versions) - 1; 0 <= i; i -= 1 {
 		versionedRoot := filepath.Join(root, versionNames[versions[i]])

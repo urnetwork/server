@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 )
 
 func TestIncompleteIndexName(t *testing.T) {
@@ -418,9 +418,9 @@ func TestIncompleteIndexName(t *testing.T) {
 	}
 
 	for _, indexName := range incompleteIndexNames {
-		assert.Equal(t, isIncompleteIndexName(indexName), true)
+		connect.AssertEqual(t, isIncompleteIndexName(indexName), true)
 	}
 	for _, indexName := range completeIndexNames {
-		assert.Equal(t, isIncompleteIndexName(indexName), false)
+		connect.AssertEqual(t, isIncompleteIndexName(indexName), false)
 	}
 }

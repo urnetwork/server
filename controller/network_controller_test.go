@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	// "golang.org/x/exp/maps"
+	// "maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -26,14 +26,14 @@ func TestNetworkCreate(t *testing.T) {
 		referralNetworkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, referralNetworkId, "referralNetwork", server.NewId())
 		referralCode := model.CreateNetworkReferralCode(ctx, referralNetworkId)
-		assert.NotEqual(t, referralCode, nil)
+		connect.AssertNotEqual(t, referralCode, nil)
 
 		userAuth := "foo@ur.io"
 		password := "bar123456789Foo!"
 
 		// check referral network has no points
 		networkPoints := model.FetchAccountPoints(ctx, referralNetworkId)
-		assert.Equal(t, len(networkPoints), 0)
+		connect.AssertEqual(t, len(networkPoints), 0)
 
 		networkCreate := model.NetworkCreateArgs{
 			UserName:     "",
@@ -45,9 +45,9 @@ func TestNetworkCreate(t *testing.T) {
 			ReferralCode: &referralCode.ReferralCode,
 		}
 		result, err := NetworkCreate(networkCreate, session)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.Network, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.Network, nil)
 
 		// session.ByJwt.NetworkId = result.Network.NetworkId
 		session.ByJwt = &jwt.ByJwt{
@@ -56,30 +56,30 @@ func TestNetworkCreate(t *testing.T) {
 
 		// ensure referral code has been created for this network
 		networkReferralCode := model.GetNetworkReferralCode(session.Ctx, result.Network.NetworkId)
-		assert.NotEqual(t, networkReferralCode, nil)
+		connect.AssertNotEqual(t, networkReferralCode, nil)
 
 		// check referral network has points applied
 		// networkPoints = model.FetchNetworkPoints(ctx, referralNetworkId)
-		// assert.Equal(t, len(networkPoints), 1)
-		// assert.Equal(t, networkPoints[0].NetworkId, referralNetworkId)
-		// assert.Equal(t, networkPoints[0].Event, "referral")
-		// assert.NotEqual(t, networkPoints[0].PointValue, 0)
+		// connect.AssertEqual(t, len(networkPoints), 1)
+		// connect.AssertEqual(t, networkPoints[0].NetworkId, referralNetworkId)
+		// connect.AssertEqual(t, networkPoints[0].Event, "referral")
+		// connect.AssertNotEqual(t, networkPoints[0].PointValue, 0)
 		//
 		// network name should not contain profanity
 		network := model.GetNetwork(session)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.ContainsProfanity, false)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.ContainsProfanity, false)
 
 		// check network referral
 		networkReferral := model.GetReferralNetworkByChildNetworkId(ctx, result.Network.NetworkId)
-		assert.Equal(t, networkReferral.Id, referralNetworkId)
+		connect.AssertEqual(t, networkReferral.Id, referralNetworkId)
 
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
-		assert.Equal(t, 1, len(transferBalances))
+		connect.AssertEqual(t, 1, len(transferBalances))
 		transferBalance := transferBalances[0]
-		assert.Equal(t, transferBalance.BalanceByteCount, model.Pro().DataAmount(false))
-		assert.Equal(t, !transferBalance.StartTime.After(time.Now()), true)
-		assert.Equal(t, time.Now().Before(transferBalance.EndTime), true)
+		connect.AssertEqual(t, transferBalance.BalanceByteCount, model.Pro().DataAmount(false))
+		connect.AssertEqual(t, !transferBalance.StartTime.After(time.Now()), true)
+		connect.AssertEqual(t, time.Now().Before(transferBalance.EndTime), true)
 	})
 }
 
@@ -106,9 +106,9 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 			ReferralCode: &referralCode,
 		}
 		result, err := NetworkCreate(networkCreate, session)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.Network, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.Network, nil)
 
 		session.ByJwt = &jwt.ByJwt{
 			NetworkId: result.Network.NetworkId,
@@ -116,8 +116,8 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 
 		// check network contains profanity
 		network := model.GetNetwork(session)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.ContainsProfanity, true)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.ContainsProfanity, true)
 	})
 }
 
@@ -149,24 +149,24 @@ func TestNetworkNameUpdate(t *testing.T) {
 			NetworkName: "",
 		}
 		updateNetworkUserResult, err := UpdateNetworkName(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, updateNetworkUserResult.Error, nil)
 
 		networkResult := model.GetNetwork(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkResult.NetworkName, networkName)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkResult.NetworkName, networkName)
 
 		// should fail because network name unavailable
 		updateArgs = &UpdateNetworkNameArgs{
 			NetworkName: networkNameB,
 		}
 		updateNetworkUserResult, err = UpdateNetworkName(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, updateNetworkUserResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, updateNetworkUserResult.Error, nil)
 
 		networkResult = model.GetNetwork(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkResult.NetworkName, networkName)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkResult.NetworkName, networkName)
 
 		// should update the network name
 		updatedNetworkName := "uvwxyz"
@@ -174,12 +174,12 @@ func TestNetworkNameUpdate(t *testing.T) {
 			NetworkName: updatedNetworkName,
 		}
 		updateNetworkUserResult, err = UpdateNetworkName(updateArgs, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, updateNetworkUserResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, updateNetworkUserResult.Error, nil)
 
 		networkResult = model.GetNetwork(userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, networkResult.NetworkName, updatedNetworkName)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, networkResult.NetworkName, updatedNetworkName)
 	})
 }
 
@@ -205,7 +205,7 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 			"",
 			"",
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		networkCreate := model.NetworkCreateArgs{
 			UserName:    "",
@@ -218,8 +218,8 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		}
 
 		result, err := NetworkCreate(networkCreate, session)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 
 		// The balance code's data lands on the new network...
 		transferBalances := model.GetActiveTransferBalances(ctx, result.Network.NetworkId)
@@ -227,10 +227,10 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		for _, transferBalance := range transferBalances {
 			redeemed += transferBalance.BalanceByteCount
 			// ...and NO balance it created carries the Pro entitlement.
-			assert.Equal(t, transferBalance.Pro, false)
+			connect.AssertEqual(t, transferBalance.Pro, false)
 		}
 		// the code's data is there (alongside the free signup grant)
-		assert.Equal(t, netTransferByteCount <= redeemed, true)
+		connect.AssertEqual(t, netTransferByteCount <= redeemed, true)
 
 		// ...but redeeming a code does NOT make the network Pro. A data code is
 		// DATA ONLY. It is a `paid` balance (it carries revenue), which is exactly
@@ -238,7 +238,7 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 		// assertion used to be `true`, back when IsPro meant "has any paid balance"
 		// and buying data silently upgraded you for free.
 		isPro := model.IsPro(ctx, &result.Network.NetworkId)
-		assert.Equal(t, isPro, false)
+		connect.AssertEqual(t, isPro, false)
 
 	})
 }

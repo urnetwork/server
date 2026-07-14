@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -13,26 +13,26 @@ import (
 func TestCentroidFor(t *testing.T) {
 	// region match (California)
 	lat, lon, ok := centroidFor("US", "California")
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 	if lat < 30 || lat > 43 || lon > -110 || lon < -125 {
 		t.Fatalf("California centroid out of range: %f,%f", lat, lon)
 	}
 
 	// native-name match: Bavaria is also stored as Bayern
 	_, _, ok = centroidFor("DE", "Bavaria")
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 
 	// unknown region falls back to the country centroid
 	_, _, ok = centroidFor("US", "Nonexistent Region ZZ")
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 
 	// unknown country -> not ok
 	_, _, ok = centroidFor("ZZ", "Nowhere")
-	assert.Equal(t, ok, false)
+	connect.AssertEqual(t, ok, false)
 
 	// case- and space-insensitive lookup
 	_, _, ok = centroidFor("us", "  california ")
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 }
 
 func TestBuildProvidersMap(t *testing.T) {
@@ -49,20 +49,20 @@ func TestBuildProvidersMap(t *testing.T) {
 	m := buildProvidersMap(rows)
 
 	us, ok := m["US"]
-	assert.Equal(t, ok, true)
+	connect.AssertEqual(t, ok, true)
 	if us["California"] == nil || us["New York"] == nil || us["Ghostland"] == nil {
 		t.Fatal("expected US California, New York, Ghostland entries")
 	}
-	assert.Equal(t, us["California"].ProviderCount, 1300) // 1200 + 100
-	assert.Equal(t, us["New York"].ProviderCount, 820)    // -1 duplicate skipped
-	assert.Equal(t, us["Ghostland"].ProviderCount, 7)     // country fallback
+	connect.AssertEqual(t, us["California"].ProviderCount, 1300) // 1200 + 100
+	connect.AssertEqual(t, us["New York"].ProviderCount, 820)    // -1 duplicate skipped
+	connect.AssertEqual(t, us["Ghostland"].ProviderCount, 7)     // country fallback
 	if us["California"].Lat == 0 && us["California"].Lon == 0 {
 		t.Fatal("California coordinates missing")
 	}
 
 	de, ok := m["DE"]
-	assert.Equal(t, ok, true)
-	assert.Equal(t, de["Bavaria"].ProviderCount, 540)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, de["Bavaria"].ProviderCount, 540)
 
 	// empty region and unknown country produce no entries
 	if _, present := us[""]; present {
@@ -165,22 +165,22 @@ func TestGetProvidersMapAggregatesRegions(t *testing.T) {
 
 		// the full chain the taskworker runs: aggregate -> export -> serve
 		err := ExportProvidersMap(ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		exportedJson := GetExportedProvidersMapJson(ctx)
-		assert.NotEqual(t, exportedJson, nil)
+		connect.AssertNotEqual(t, exportedJson, nil)
 
 		var exported map[string]map[string]*RegionProviders
-		assert.Equal(t, json.Unmarshal([]byte(*exportedJson), &exported), nil)
+		connect.AssertEqual(t, json.Unmarshal([]byte(*exportedJson), &exported), nil)
 
 		au := exported["au"]
-		assert.NotEqual(t, au, nil)
-		assert.Equal(t, au["New South Wales"].ProviderCount, 2)
-		assert.Equal(t, au["Victoria"].ProviderCount, 1)
+		connect.AssertNotEqual(t, au, nil)
+		connect.AssertEqual(t, au["New South Wales"].ProviderCount, 2)
+		connect.AssertEqual(t, au["Victoria"].ProviderCount, 1)
 
 		// centroids attached from the embedded dataset — this is what places
 		// the dots on the globe
-		assert.Equal(t, true, au["New South Wales"].Lat < -28 && au["New South Wales"].Lat > -38)
-		assert.Equal(t, true, au["New South Wales"].Lon > 140)
+		connect.AssertEqual(t, true, au["New South Wales"].Lat < -28 && au["New South Wales"].Lat > -38)
+		connect.AssertEqual(t, true, au["New South Wales"].Lon > 140)
 	})
 }

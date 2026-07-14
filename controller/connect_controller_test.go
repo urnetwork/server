@@ -7,7 +7,6 @@ import (
 
 	"fmt"
 
-	"github.com/go-playground/assert/v2"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
@@ -30,9 +29,9 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 		model.ProvideModeNetwork,
 		map[model.ProvideMode]bool{model.ProvideModeStream: true},
 	)
-	assert.Equal(t, allowed, true)
-	assert.Equal(t, companion, true)
-	assert.Equal(t, provideMode, model.ProvideModeStream)
+	connect.AssertEqual(t, allowed, true)
+	connect.AssertEqual(t, companion, true)
+	connect.AssertEqual(t, provideMode, model.ProvideModeStream)
 
 	// Friends-and-family relationship, destination advertising only Stream: same
 	// companion Stream fallback as the Network case (both are free NoEscrow modes
@@ -41,9 +40,9 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 		model.ProvideModeFriendsAndFamily,
 		map[model.ProvideMode]bool{model.ProvideModeStream: true},
 	)
-	assert.Equal(t, allowed, true)
-	assert.Equal(t, companion, true)
-	assert.Equal(t, provideMode, model.ProvideModeStream)
+	connect.AssertEqual(t, allowed, true)
+	connect.AssertEqual(t, companion, true)
+	connect.AssertEqual(t, provideMode, model.ProvideModeStream)
 
 	// Destination advertises the ideal (Network) mode: use it directly, no
 	// companion, no fallback.
@@ -51,18 +50,18 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 		model.ProvideModeNetwork,
 		map[model.ProvideMode]bool{model.ProvideModeNetwork: true, model.ProvideModeStream: true},
 	)
-	assert.Equal(t, allowed, true)
-	assert.Equal(t, companion, false)
-	assert.Equal(t, provideMode, model.ProvideModeNetwork)
+	connect.AssertEqual(t, allowed, true)
+	connect.AssertEqual(t, companion, false)
+	connect.AssertEqual(t, provideMode, model.ProvideModeNetwork)
 
 	// Public relationship, destination advertises Public: use it directly.
 	provideMode, companion, allowed = resolveNonCompanionProvideMode(
 		model.ProvideModePublic,
 		map[model.ProvideMode]bool{model.ProvideModePublic: true},
 	)
-	assert.Equal(t, allowed, true)
-	assert.Equal(t, companion, false)
-	assert.Equal(t, provideMode, model.ProvideModePublic)
+	connect.AssertEqual(t, allowed, true)
+	connect.AssertEqual(t, companion, false)
+	connect.AssertEqual(t, provideMode, model.ProvideModePublic)
 
 	// Destination advertises both the relationship mode and Stream: the
 	// relationship mode wins (no unnecessary companion fallback).
@@ -70,9 +69,9 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 		model.ProvideModePublic,
 		map[model.ProvideMode]bool{model.ProvideModePublic: true, model.ProvideModeStream: true},
 	)
-	assert.Equal(t, allowed, true)
-	assert.Equal(t, companion, false)
-	assert.Equal(t, provideMode, model.ProvideModePublic)
+	connect.AssertEqual(t, allowed, true)
+	connect.AssertEqual(t, companion, false)
+	connect.AssertEqual(t, provideMode, model.ProvideModePublic)
 
 	// Destination advertises neither the relationship mode nor Stream: not
 	// allowed (caller rejects with NoPermission). The fallback must not
@@ -81,14 +80,14 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 		model.ProvideModeNetwork,
 		map[model.ProvideMode]bool{model.ProvideModePublic: true},
 	)
-	assert.Equal(t, allowed, false)
+	connect.AssertEqual(t, allowed, false)
 
 	// Destination advertises nothing: not allowed.
 	_, _, allowed = resolveNonCompanionProvideMode(
 		model.ProvideModeNetwork,
 		map[model.ProvideMode]bool{},
 	)
-	assert.Equal(t, allowed, false)
+	connect.AssertEqual(t, allowed, false)
 }
 
 // TestCreateContractCompanionFallback exercises controller.CreateContract
@@ -130,12 +129,12 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 				model.UsdToNanoCents(10.00),
 				server.NewId().String(), "", "",
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			_, err = model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 				Secret:    balanceCode.Secret,
 				NetworkId: networkId,
 			}, ctx)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return networkId
 		}
 
@@ -147,12 +146,12 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 				DestinationId:     consumer.Bytes(),
 				TransferByteCount: uint64(1024 * 1024),
 			}, connect.DefaultContractManagerSettings())
-			assert.Equal(t, err, nil)
-			assert.Equal(t, len(frames), 1)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(frames), 1)
 			message, err := connect.FromFrame(frames[0])
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			result, ok := message.(*protocol.CreateContractResult)
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 			return result
 		}
 
@@ -174,15 +173,15 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 
 			// forward origin (consumer -> provider) for the companion to ride
 			_, err := model.CreateContractNoEscrow(ctx, networkId, consumer, networkId, provider, model.ByteCount(1024*1024))
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			result := createReturnContract(provider, consumer)
 
 			// must NOT be rejected, and must settle as a companion Stream contract
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			if result.Contract != nil {
-				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+				connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
 			}
 		}
 
@@ -202,10 +201,10 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 
 			result := createReturnContract(provider, consumer)
 
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			if result.Contract != nil {
-				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Network)
+				connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Network)
 			}
 		}
 
@@ -224,10 +223,10 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 
 			result := createReturnContract(provider, consumer)
 
-			assert.Equal(t, result.Contract == nil, true)
-			assert.Equal(t, result.Error != nil, true)
+			connect.AssertEqual(t, result.Contract == nil, true)
+			connect.AssertEqual(t, result.Error != nil, true)
 			if result.Error != nil {
-				assert.Equal(t, *result.Error, protocol.ContractError_NoPermission)
+				connect.AssertEqual(t, *result.Error, protocol.ContractError_NoPermission)
 			}
 		}
 	})
@@ -266,7 +265,7 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 				server.NowUtc(),
 				server.NowUtc().Add(365*24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return networkId
 		}
 
@@ -276,12 +275,12 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 				TransferByteCount: uint64(1024 * 1024),
 				Companion:         true,
 			}, connect.DefaultContractManagerSettings())
-			assert.Equal(t, err, nil)
-			assert.Equal(t, len(frames), 1)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(frames), 1)
 			message, err := connect.FromFrame(frames[0])
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			result, ok := message.(*protocol.CreateContractResult)
-			assert.Equal(t, ok, true)
+			connect.AssertEqual(t, ok, true)
 			return result
 		}
 
@@ -303,23 +302,23 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 
 			result := createCompanionContract(source, destination)
 
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			if result.Contract != nil {
-				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Network)
+				connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Network)
 
 				storedContract := &protocol.StoredContract{}
 				err := proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
-				assert.Equal(t, err, nil)
-				assert.Equal(t, storedContract.Priority != nil, true)
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, storedContract.Priority != nil, true)
 				if storedContract.Priority != nil {
-					assert.Equal(t, int(*storedContract.Priority), int(model.TrustedPriority))
+					connect.AssertEqual(t, int(*storedContract.Priority), int(model.TrustedPriority))
 				}
 			}
 
 			// the normalized contract is no-escrow: the payer network's open
 			// escrow bytes are unchanged
-			assert.Equal(t, model.GetOpenTransferByteCount(ctx, networkId), openByteCount)
+			connect.AssertEqual(t, model.GetOpenTransferByteCount(ctx, networkId), openByteCount)
 		}
 
 		// Scenario 2: no normalization for a same-network destination that
@@ -336,14 +335,14 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 
 			// forward origin (destination -> source) for the companion to ride
 			_, err := model.CreateContractNoEscrow(ctx, networkId, destination, networkId, source, model.ByteCount(1024*1024))
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			result := createCompanionContract(source, destination)
 
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			if result.Contract != nil {
-				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+				connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
 			}
 		}
 
@@ -365,14 +364,14 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 
 			// forward origin (destination -> source) for the companion to ride
 			_, err := model.CreateContractNoEscrow(ctx, destinationNetworkId, destination, sourceNetworkId, source, model.ByteCount(1024*1024))
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			result := createCompanionContract(source, destination)
 
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			if result.Contract != nil {
-				assert.Equal(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+				connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
 			}
 		}
 	})
@@ -432,7 +431,7 @@ func TestCreateContractIdentityStamping(t *testing.T) {
 				server.NowUtc(),
 				server.NowUtc().Add(365*24*time.Hour),
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return networkId
 		}
 
@@ -442,17 +441,17 @@ func TestCreateContractIdentityStamping(t *testing.T) {
 				TransferByteCount: uint64(1024 * 1024),
 				Companion:         companion,
 			}, connect.DefaultContractManagerSettings())
-			assert.Equal(t, err, nil)
-			assert.Equal(t, len(frames), 1)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(frames), 1)
 			message, err := connect.FromFrame(frames[0])
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			result, ok := message.(*protocol.CreateContractResult)
-			assert.Equal(t, ok, true)
-			assert.Equal(t, result.Error == nil, true)
-			assert.Equal(t, result.Contract != nil, true)
+			connect.AssertEqual(t, ok, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
 			storedContract := &protocol.StoredContract{}
 			err = proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return storedContract
 		}
 
@@ -473,8 +472,8 @@ func TestCreateContractIdentityStamping(t *testing.T) {
 
 			for range 2 {
 				storedContract := createContract(source, destination, false)
-				assert.Equal(t, storedContract.Roles, roles)
-				assert.Equal(t, storedContract.Principal, principal)
+				connect.AssertEqual(t, storedContract.Roles, roles)
+				connect.AssertEqual(t, storedContract.Principal, principal)
 			}
 		}
 
@@ -492,8 +491,8 @@ func TestCreateContractIdentityStamping(t *testing.T) {
 			})
 
 			storedContract := createContract(source, destination, false)
-			assert.Equal(t, len(storedContract.Roles), 0)
-			assert.Equal(t, storedContract.Principal, "")
+			connect.AssertEqual(t, len(storedContract.Roles), 0)
+			connect.AssertEqual(t, storedContract.Principal, "")
 		}
 
 		// Scenario 3: the same-network companion Stream fallback (destination
@@ -509,11 +508,11 @@ func TestCreateContractIdentityStamping(t *testing.T) {
 
 			// forward origin (destination -> source) for the companion to ride
 			_, err := model.CreateContractNoEscrow(ctx, networkId, destination, networkId, source, model.ByteCount(1024*1024))
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 
 			storedContract := createContract(source, destination, false)
-			assert.Equal(t, len(storedContract.Roles), 0)
-			assert.Equal(t, storedContract.Principal, "")
+			connect.AssertEqual(t, len(storedContract.Roles), 0)
+			connect.AssertEqual(t, storedContract.Principal, "")
 		}
 	})
 }

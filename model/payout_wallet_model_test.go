@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -39,28 +39,28 @@ func TestPayoutWallet(t *testing.T) {
 
 		walletId1 := CreateAccountWalletExternal(session, wallet1)
 		walletId2 := CreateAccountWalletExternal(session, wallet2)
-		assert.NotEqual(t, walletId1, nil)
-		assert.NotEqual(t, walletId2, nil)
+		connect.AssertNotEqual(t, walletId1, nil)
+		connect.AssertNotEqual(t, walletId2, nil)
 
 		err := SetPayoutWallet(ctx, networkId, *walletId1)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		payoutWalletId := GetPayoutWalletId(ctx, networkId)
 		payoutAccountWallet := GetAccountWallet(ctx, *payoutWalletId)
 
-		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
+		connect.AssertEqual(t, payoutAccountWallet.WalletAddress, wallet1.WalletAddress)
 
 		err = SetPayoutWallet(ctx, networkId, *walletId2)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		payoutWalletId = GetPayoutWalletId(ctx, networkId)
 		payoutAccountWallet = GetAccountWallet(ctx, *payoutWalletId)
 
-		assert.Equal(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
+		connect.AssertEqual(t, payoutAccountWallet.WalletAddress, wallet2.WalletAddress)
 
 		deletePayoutWallet(*payoutWalletId, session)
 		payoutWalletId = GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, payoutWalletId, nil)
+		connect.AssertEqual(t, payoutWalletId, nil)
 
 	})
 }
@@ -90,7 +90,7 @@ func TestSetPayoutWalletValidatesOwnership(t *testing.T) {
 			WalletAddress:    "0xaaaa",
 			DefaultTokenType: "usdc",
 		})
-		assert.NotEqual(t, walletAId, nil)
+		connect.AssertNotEqual(t, walletAId, nil)
 
 		walletBId := CreateAccountWalletExternal(sessionB, &CreateAccountWalletExternalArgs{
 			NetworkId:        networkBId,
@@ -98,36 +98,36 @@ func TestSetPayoutWalletValidatesOwnership(t *testing.T) {
 			WalletAddress:    "0xbbbb",
 			DefaultTokenType: "usdc",
 		})
-		assert.NotEqual(t, walletBId, nil)
+		connect.AssertNotEqual(t, walletBId, nil)
 
 		// a network cannot set another network's wallet as its payout wallet
 		err := SetPayoutWallet(ctx, networkBId, *walletAId)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, GetPayoutWalletId(ctx, networkBId), nil)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
 
 		// a network cannot set a wallet that does not exist
 		err = SetPayoutWallet(ctx, networkBId, server.NewId())
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, GetPayoutWalletId(ctx, networkBId), nil)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
 
 		// a network can set its own wallet
 		err = SetPayoutWallet(ctx, networkBId, *walletBId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *GetPayoutWalletId(ctx, networkBId), *walletBId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkBId), *walletBId)
 
 		// a failed set does not overwrite the existing payout wallet
 		err = SetPayoutWallet(ctx, networkBId, *walletAId)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, *GetPayoutWalletId(ctx, networkBId), *walletBId)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkBId), *walletBId)
 
 		// a network cannot set a deactivated wallet
 		removeResult := RemoveWallet(*walletBId, sessionB)
-		assert.Equal(t, removeResult.Success, true)
+		connect.AssertEqual(t, removeResult.Success, true)
 		// removing the payout wallet clears the payout wallet selection
-		assert.Equal(t, GetPayoutWalletId(ctx, networkBId), nil)
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
 		err = SetPayoutWallet(ctx, networkBId, *walletBId)
-		assert.NotEqual(t, err, nil)
-		assert.Equal(t, GetPayoutWalletId(ctx, networkBId), nil)
+		connect.AssertNotEqual(t, err, nil)
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
 
 	})
 }

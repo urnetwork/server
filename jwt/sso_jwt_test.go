@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -15,13 +15,13 @@ import (
 
 func testingSsoKey(t testing.TB) *rsa.PrivateKey {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	return key
 }
 
 func testingSsoSignJwt(t testing.TB, method gojwt.SigningMethod, key any, claims gojwt.MapClaims) string {
 	jwtSigned, err := gojwt.NewWithClaims(method, claims).SignedString(key)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 	return jwtSigned
 }
 
@@ -63,68 +63,68 @@ func TestParseGoogleJwt(t *testing.T) {
 
 	// valid token with the configured audience
 	googleJwt, err := parseGoogleJwtWithKeys(sign(testingGoogleClaims()), keys, []string{clientId})
-	assert.Equal(t, err, nil)
-	assert.Equal(t, googleJwt.UserAuth, "xcolwell@gmail.com")
-	assert.Equal(t, googleJwt.UserName, "Brien Colwell")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, googleJwt.UserAuth, "xcolwell@gmail.com")
+	connect.AssertEqual(t, googleJwt.UserName, "Brien Colwell")
 
 	// alternate issuer form
 	claims := testingGoogleClaims()
 	claims["iss"] = "accounts.google.com"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// a valid token minted for another app must be rejected (token substitution)
 	claims = testingGoogleClaims()
 	claims["aud"] = "attacker-app.apps.googleusercontent.com"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// audience list form: allowed if any audience matches
 	claims = testingGoogleClaims()
 	claims["aud"] = []any{"other", clientId}
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// multiple configured client ids (ios/android/web)
 	claims = testingGoogleClaims()
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{"other-client", clientId})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// no configured client id: audience check is skipped
 	claims = testingGoogleClaims()
 	claims["aud"] = "attacker-app.apps.googleusercontent.com"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, nil)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// wrong issuer
 	claims = testingGoogleClaims()
 	claims["iss"] = "https://accounts.evil.example"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// expired
 	claims = testingGoogleClaims()
 	claims["exp"] = time.Now().Add(-time.Hour).Unix()
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// missing exp
 	claims = testingGoogleClaims()
 	delete(claims, "exp")
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// unverified email
 	claims = testingGoogleClaims()
 	claims["email_verified"] = false
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// missing email_verified
 	claims = testingGoogleClaims()
 	delete(claims, "email_verified")
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// signed by a different key
 	otherKey := testingSsoKey(t)
@@ -133,7 +133,7 @@ func TestParseGoogleJwt(t *testing.T) {
 		keys,
 		[]string{clientId},
 	)
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// algorithm confusion: an hmac token must never validate against the
 	// rsa public keys
@@ -142,7 +142,7 @@ func TestParseGoogleJwt(t *testing.T) {
 		keys,
 		[]string{clientId},
 	)
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 }
 
 func TestParseAppleJwt(t *testing.T) {
@@ -157,44 +157,44 @@ func TestParseAppleJwt(t *testing.T) {
 	// valid token with the configured audience.
 	// apple emits email_verified as the string "true"
 	appleJwt, err := parseAppleJwtWithKeys(sign(testingAppleClaims()), keys, []string{clientId})
-	assert.Equal(t, err, nil)
-	assert.Equal(t, appleJwt.UserAuth, "xcolwell@gmail.com")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, appleJwt.UserAuth, "xcolwell@gmail.com")
 
 	// bool email_verified also accepted
 	claims := testingAppleClaims()
 	claims["email_verified"] = true
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// a valid token minted for another app must be rejected (token substitution)
 	claims = testingAppleClaims()
 	claims["aud"] = "com.attacker.app"
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// no configured client id: audience check is skipped
 	claims = testingAppleClaims()
 	claims["aud"] = "com.attacker.app"
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, nil)
-	assert.Equal(t, err, nil)
+	connect.AssertEqual(t, err, nil)
 
 	// wrong issuer
 	claims = testingAppleClaims()
 	claims["iss"] = "https://appleid.evil.example"
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// expired
 	claims = testingAppleClaims()
 	claims["exp"] = time.Now().Add(-time.Hour).Unix()
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// unverified email (apple string form)
 	claims = testingAppleClaims()
 	claims["email_verified"] = "false"
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 
 	// algorithm confusion: an hmac token must never validate against the
 	// rsa public keys
@@ -203,7 +203,7 @@ func TestParseAppleJwt(t *testing.T) {
 		keys,
 		[]string{clientId},
 	)
-	assert.NotEqual(t, err, nil)
+	connect.AssertNotEqual(t, err, nil)
 }
 
 // the vault `client_id` field accepts a single value or a list, and a missing
@@ -211,21 +211,21 @@ func TestParseAppleJwt(t *testing.T) {
 func TestSsoAllowedClientIds(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		// missing resource
-		assert.Equal(t, len(ssoAllowedClientIds("does_not_exist.yml")), 0)
+		connect.AssertEqual(t, len(ssoAllowedClientIds("does_not_exist.yml")), 0)
 
 		pop := server.Vault.PushSimpleResource("test_sso.yml", []byte(`client_id: "a.example"`))
-		assert.Equal(t, ssoAllowedClientIds("test_sso.yml"), []string{"a.example"})
+		connect.AssertEqual(t, ssoAllowedClientIds("test_sso.yml"), []string{"a.example"})
 		pop()
 
 		pop = server.Vault.PushSimpleResource("test_sso.yml", []byte(`client_id:
   - "a.example"
   - "b.example"
 `))
-		assert.Equal(t, ssoAllowedClientIds("test_sso.yml"), []string{"a.example", "b.example"})
+		connect.AssertEqual(t, ssoAllowedClientIds("test_sso.yml"), []string{"a.example", "b.example"})
 		pop()
 
 		pop = server.Vault.PushSimpleResource("test_sso.yml", []byte(`client_id: ""`))
-		assert.Equal(t, len(ssoAllowedClientIds("test_sso.yml")), 0)
+		connect.AssertEqual(t, len(ssoAllowedClientIds("test_sso.yml")), 0)
 		pop()
 	})
 }

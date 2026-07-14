@@ -123,9 +123,11 @@ func statsProviders(
 			`
 			SELECT network_client.client_id
 			FROM network_client
-			INNER JOIN provide_key ON provide_key.client_id = network_client.client_id
 			WHERE network_client.network_id = $1 AND network_client.active = true
-			GROUP BY network_client.client_id
+				AND EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE provide_key.client_id = network_client.client_id
+				)
 			`,
 			networkId,
 		)
@@ -563,9 +565,11 @@ func StatsProvidersOverview(
 			`
 			SELECT network_client.client_id
 			FROM network_client
-			INNER JOIN provide_key ON provide_key.client_id = network_client.client_id
 			WHERE network_client.network_id = $1 AND network_client.active = true
-			GROUP BY network_client.client_id
+				AND EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE provide_key.client_id = network_client.client_id
+				)
 			`,
 			networkId,
 		)

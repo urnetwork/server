@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -18,7 +18,7 @@ func TestWalletAuthChallengeAttemptSuccessfulDoNotCount(t *testing.T) {
 		threshold := WalletAuthChallengeAttemptFailedCountThreshold
 		for i := 0; i < threshold; i += 1 {
 			attemptId, allow := WalletAuthChallengeAttempt(clientSession)
-			assert.Equal(t, allow, true)
+			connect.AssertEqual(t, allow, true)
 			SetWalletAuthChallengeAttemptSuccess(
 				clientSession.Ctx,
 				attemptId,
@@ -28,7 +28,7 @@ func TestWalletAuthChallengeAttemptSuccessfulDoNotCount(t *testing.T) {
 
 		// all prior attempts succeeded, so another attempt is allowed
 		_, allow := WalletAuthChallengeAttempt(clientSession)
-		assert.Equal(t, allow, true)
+		connect.AssertEqual(t, allow, true)
 	})
 }
 
@@ -42,7 +42,7 @@ func TestWalletAuthChallengeAttemptFailedRateLimit(t *testing.T) {
 		threshold := WalletAuthChallengeAttemptFailedCountThreshold
 		for i := 0; i < threshold-1; i += 1 {
 			attemptId, allow := WalletAuthChallengeAttempt(clientSession)
-			assert.Equal(t, allow, true)
+			connect.AssertEqual(t, allow, true)
 			SetWalletAuthChallengeAttemptSuccess(
 				clientSession.Ctx,
 				attemptId,
@@ -51,11 +51,11 @@ func TestWalletAuthChallengeAttemptFailedRateLimit(t *testing.T) {
 		}
 
 		_, allow := WalletAuthChallengeAttempt(clientSession)
-		assert.Equal(t, allow, false)
+		connect.AssertEqual(t, allow, false)
 	})
 }
 
 func TestWalletAuthChallengeAttemptsErrorFormat(t *testing.T) {
 	err := MaxWalletAuthChallengeAttemptsError()
-	assert.Equal(t, strings.HasPrefix(err.Error(), "429 "), true)
+	connect.AssertEqual(t, strings.HasPrefix(err.Error(), "429 "), true)
 }

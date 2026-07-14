@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
@@ -60,25 +60,25 @@ func TestWgServerSyncProxyClients(t *testing.T) {
 		proxyClientB := newTestProxyClient(t, netip.MustParseAddr("10.10.0.2"))
 
 		err := wg.AddProxyClients(proxyClientA, proxyClientB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, wg.wgProxy.ClientCount(), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, wg.wgProxy.ClientCount(), 2)
 
 		// a client that fails validation (auth token signed for a different
 		// proxy id) is skipped, not an error
 		badProxyClient := newTestProxyClient(t, netip.MustParseAddr("10.10.0.3"))
 		badProxyClient.AuthToken = model.SignProxyId(server.NewId())
 		err = wg.AddProxyClients(badProxyClient)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, wg.wgProxy.ClientCount(), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, wg.wgProxy.ClientCount(), 2)
 
 		// sync with only A in the full set: B was applied before the sync
 		// start time and must be removed
 		err = wg.SyncProxyClients([]*model.ProxyClient{proxyClientA}, server.NowUtc())
-		assert.Equal(t, err, nil)
-		assert.Equal(t, wg.wgProxy.ClientCount(), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, wg.wgProxy.ClientCount(), 1)
 		clients := wg.wgProxy.Clients()
 		_, ok := clients[proxyClientA.WgConfig.ClientIpv4]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// grace: a peer applied after the sync start time is kept even when it
 		// is not in the (older) full set
@@ -86,21 +86,21 @@ func TestWgServerSyncProxyClients(t *testing.T) {
 		syncStartTime := server.NowUtc()
 		time.Sleep(10 * time.Millisecond)
 		err = wg.AddProxyClients(proxyClientC)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, wg.wgProxy.ClientCount(), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, wg.wgProxy.ClientCount(), 2)
 
 		err = wg.SyncProxyClients([]*model.ProxyClient{proxyClientA}, syncStartTime)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		clients = wg.wgProxy.Clients()
 		_, ok = clients[proxyClientA.WgConfig.ClientIpv4]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 		_, ok = clients[proxyClientC.WgConfig.ClientIpv4]
-		assert.Equal(t, ok, true)
+		connect.AssertEqual(t, ok, true)
 
 		// the graced peer is removed by a later sync that still does not
 		// include it
 		err = wg.SyncProxyClients([]*model.ProxyClient{proxyClientA}, server.NowUtc())
-		assert.Equal(t, err, nil)
-		assert.Equal(t, wg.wgProxy.ClientCount(), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, wg.wgProxy.ClientCount(), 1)
 	})
 }

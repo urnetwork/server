@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -27,22 +27,22 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 			"0.0.0.0:0",
 			handlerId,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
 
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, true)
+		connect.AssertEqual(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, false)
+		connect.AssertEqual(t, connected, false)
 
 		select {
 		case <-time.After(1 * time.Second):
@@ -51,10 +51,10 @@ func TestNetworkClientHandlerLifecycle(t *testing.T) {
 		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -71,30 +71,30 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 			"2001:5a8:4683:4e00:3a76:dcec:7cb:f180:40894",
 			handlerId,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		time.Sleep(1 * time.Second)
 
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, true)
+		connect.AssertEqual(t, connected, true)
 
 		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc())
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, false)
+		connect.AssertEqual(t, connected, false)
 
 		time.Sleep(1 * time.Second)
 
 		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		err = HeartbeatNetworkClientHandler(ctx, handlerId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -111,25 +111,25 @@ func TestNetworkClientLifecycle(t *testing.T) {
 			"0.0.0.0:0",
 			handlerId,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		select {
 		case <-time.After(1 * time.Second):
 		}
 
 		connected := GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, true)
+		connect.AssertEqual(t, connected, true)
 
 		err = DisconnectNetworkClient(ctx, connectionId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		connected = GetNetworkClientConnectionStatus(ctx, connectionId).Connected
-		assert.Equal(t, connected, false)
+		connect.AssertEqual(t, connected, false)
 
 		RemoveDisconnectedNetworkClients(ctx, time.Now(), time.Now(), time.Time{})
 
 		err = DisconnectNetworkClient(ctx, connectionId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -155,25 +155,25 @@ func TestSetProvide(t *testing.T) {
 		startTime := server.NowUtc()
 
 		changeCount, provideModes := GetProvideKeyChanges(ctx, clientId, startTime)
-		assert.Equal(t, changeCount, 0)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{})
+		connect.AssertEqual(t, changeCount, 0)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{})
 
 		for provideMode, _ := range secretKeys {
 			_, err := GetProvideSecretKey(ctx, clientId, provideMode)
-			assert.NotEqual(t, err, nil)
+			connect.AssertNotEqual(t, err, nil)
 		}
 
 		SetProvide(ctx, clientId, secretKeys)
 
 		for provideMode, secretKey := range secretKeys {
 			k, err := GetProvideSecretKey(ctx, clientId, provideMode)
-			assert.Equal(t, err, nil)
-			assert.Equal(t, k, secretKey)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, k, secretKey)
 		}
 
 		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-		assert.Equal(t, changeCount, 1)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, changeCount, 1)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic: true,
 		})
 
@@ -184,16 +184,16 @@ func TestSetProvide(t *testing.T) {
 		}
 
 		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-		assert.Equal(t, changeCount, n+1)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, changeCount, n+1)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic: true,
 		})
 
 		RemoveOldProvideKeyChanges(ctx, server.NowUtc())
 
 		changeCount, provideModes = GetProvideKeyChanges(ctx, clientId, startTime)
-		assert.Equal(t, changeCount, 0)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, changeCount, 0)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic: true,
 		})
 
@@ -224,14 +224,14 @@ func TestGetProvideFallsBackToDb(t *testing.T) {
 		})
 
 		provideModes, err := GetProvideModes(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic: true,
 		})
 
 		k, err := GetProvideSecretKey(ctx, clientId, ProvideModePublic)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, k, secretKey)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, k, secretKey)
 	})
 }
 
@@ -243,12 +243,12 @@ func TestGetProvideModesNotSet(t *testing.T) {
 
 		// a client that never provided returns an empty set and no error
 		provideModes, err := GetProvideModes(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{})
 
 		// the secret key for a never-provided client is an error
 		_, err = GetProvideSecretKey(ctx, clientId, ProvideModePublic)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -273,8 +273,8 @@ func TestSetProvideRemovesStaleModes(t *testing.T) {
 		})
 
 		provideModes, err := GetProvideModes(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic:  true,
 			ProvideModeNetwork: true,
 		})
@@ -285,22 +285,22 @@ func TestSetProvideRemovesStaleModes(t *testing.T) {
 		})
 
 		provideModes, err = GetProvideModes(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, provideModes, map[ProvideMode]bool{
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 			ProvideModePublic: true,
 		})
 
 		// the dropped mode is gone from the api and from redis
 		_, err = GetProvideSecretKey(ctx, clientId, ProvideModeNetwork)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 		server.Redis(ctx, func(r server.RedisClient) {
 			v, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
-			assert.Equal(t, v, "")
+			connect.AssertEqual(t, v, "")
 		})
 
 		k, err := GetProvideSecretKey(ctx, clientId, ProvideModePublic)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, k, publicKey)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, k, publicKey)
 	})
 }
 
@@ -322,9 +322,9 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 		// a connection with location/latency/speed rows
 		newConnectionData := func(clientId server.Id, clientAddress string) server.Id {
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
 					ctx,
@@ -405,8 +405,8 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 				"network_client_latency",
 				"network_client_speed",
 			} {
-				assert.Equal(t, countByConnection(table, orphanConnectionId), 0)
-				assert.Equal(t, countByConnection(table, liveConnectionId), 1)
+				connect.AssertEqual(t, countByConnection(table, orphanConnectionId), 0)
+				connect.AssertEqual(t, countByConnection(table, liveConnectionId), 1)
 			}
 
 			deviceCount := func(deviceId server.Id) int {
@@ -423,16 +423,16 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 				})
 				return c
 			}
-			assert.Equal(t, deviceCount(orphanDeviceId), 0)
-			assert.Equal(t, deviceCount(liveDeviceId), 1)
+			connect.AssertEqual(t, deviceCount(orphanDeviceId), 0)
+			connect.AssertEqual(t, deviceCount(liveDeviceId), 1)
 		})
 
 		orphanPem, _, err := GetClientTlsCertificateAndSignature(ctx, orphanClientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(orphanPem), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(orphanPem), 0)
 		livePem, _, err := GetClientTlsCertificateAndSignature(ctx, liveClientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, string(livePem), "live-pem")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, string(livePem), "live-pem")
 	})
 }
 
@@ -452,16 +452,16 @@ func TestSweepOrphanClearsProvideRedis(t *testing.T) {
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			v, _ := r.Get(ctx, provideModesKey(clientId)).Result()
-			assert.NotEqual(t, v, "")
+			connect.AssertNotEqual(t, v, "")
 		})
 
 		SweepOrphanNetworkClientData(ctx, 1000)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()
-			assert.Equal(t, pm, "")
+			connect.AssertEqual(t, pm, "")
 			sk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
-			assert.Equal(t, sk, "")
+			connect.AssertEqual(t, sk, "")
 		})
 	})
 }
@@ -519,7 +519,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 		proxyDeviceConfig := &ProxyDeviceConfig{}
 		proxyDeviceConfig.ClientId = clientId
 		err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		proxyClient, err := CreateProxyClient(
 			ctx,
 			proxyDeviceConfig.ProxyId,
@@ -527,12 +527,12 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 			proxyDeviceConfig.InstanceId,
 			CreateProxyClientOptions{},
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// a disconnected connection with location/latency/speed rows, which
 		// must be cascaded with the connection delete
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.7.8.9:20000", server.NewId())
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			City:        "foo",
 			Region:      "bar",
@@ -541,7 +541,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -563,7 +563,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 			))
 		})
 		err = DisconnectNetworkClient(ctx, connectionId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// make clientId and sharedClientId reapable: created in the past and
 		// inactive. liveClientId stays active.
@@ -595,34 +595,34 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 					connectionId,
 				)
 				server.WithPgResult(result, err, func() {
-					assert.Equal(t, result.Next(), true)
+					connect.AssertEqual(t, result.Next(), true)
 					var c int
 					server.Raise(result.Scan(&c))
-					assert.Equal(t, c, 0)
+					connect.AssertEqual(t, c, 0)
 				})
 			}
 		})
 
 		// the reaped client's tls certificate is gone
 		tlsCertificatePem, _, err := GetClientTlsCertificateAndSignature(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(tlsCertificatePem), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(tlsCertificatePem), 0)
 
 		// the reaped client's provide keys and redis mirrors are gone
 		provideModes, err := GetProvideModes(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(provideModes), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(provideModes), 0)
 		server.Redis(ctx, func(r server.RedisClient) {
 			pm, _ := r.Get(ctx, provideModesKey(clientId)).Result()
-			assert.Equal(t, pm, "")
+			connect.AssertEqual(t, pm, "")
 		})
 
 		// the proxy config chain is gone
-		assert.Equal(t, GetProxyDeviceConfig(ctx, proxyDeviceConfig.ProxyId) == nil, true)
+		connect.AssertEqual(t, GetProxyDeviceConfig(ctx, proxyDeviceConfig.ProxyId) == nil, true)
 		proxyClients, _, err := GetProxyClientsSince(ctx, proxyClient.ProxyHost, proxyClient.Block, 0)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, ok := proxyClients[proxyClient.ProxyId]
-		assert.Equal(t, ok, false)
+		connect.AssertEqual(t, ok, false)
 
 		// the reaped client's own device is gone; the shared device survives
 		// because the live client still references it
@@ -643,8 +643,8 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 					remainingDeviceIds[remainingDeviceId] = true
 				}
 			})
-			assert.Equal(t, remainingDeviceIds[deviceId], false)
-			assert.Equal(t, remainingDeviceIds[sharedDeviceId], true)
+			connect.AssertEqual(t, remainingDeviceIds[deviceId], false)
+			connect.AssertEqual(t, remainingDeviceIds[sharedDeviceId], true)
 		})
 	})
 }
@@ -682,23 +682,23 @@ func TestMigrateProvideMode(t *testing.T) {
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			provideModesListJson, err := r.Get(ctx, provideModesKey(clientId)).Result()
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			var provideModesList []ProvideMode
 			err = json.Unmarshal([]byte(provideModesListJson), &provideModesList)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			provideModes := map[ProvideMode]bool{}
 			for _, provideMode := range provideModesList {
 				provideModes[provideMode] = true
 			}
-			assert.Equal(t, provideModes, map[ProvideMode]bool{
+			connect.AssertEqual(t, provideModes, map[ProvideMode]bool{
 				ProvideModePublic:  true,
 				ProvideModeNetwork: true,
 			})
 
 			publicSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModePublic)).Result()
-			assert.Equal(t, []byte(publicSk), publicKey)
+			connect.AssertEqual(t, []byte(publicSk), publicKey)
 			networkSk, _ := r.Get(ctx, provideModeSecretKeyKey(clientId, ProvideModeNetwork)).Result()
-			assert.Equal(t, []byte(networkSk), networkKey)
+			connect.AssertEqual(t, []byte(networkSk), networkKey)
 		})
 	})
 }
@@ -715,8 +715,8 @@ func TestFindActiveClientNetwork(t *testing.T) {
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 
 		foundNetworkId, err := FindActiveClientNetwork(ctx, clientId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, foundNetworkId, networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, foundNetworkId, networkId)
 
 		// removed (inactive) client: existence-only lookup still resolves,
 		// the active lookup does not
@@ -728,13 +728,13 @@ func TestFindActiveClientNetwork(t *testing.T) {
 			))
 		})
 		_, err = FindClientNetwork(ctx, clientId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, err = FindActiveClientNetwork(ctx, clientId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		// deleted client
 		_, err = FindActiveClientNetwork(ctx, server.NewId())
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
@@ -791,7 +791,7 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 		// stale auth time but currently connected: must not be marked
 		connectedClientId := newClient()
 		_, _, _, _, err := ConnectNetworkClient(ctx, connectedClientId, "127.0.0.1:20000", server.NewId())
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		setAuthTime(connectedClientId, idleAuthTime)
 
 		// recently seen
@@ -816,27 +816,27 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 
 		// only the abandoned top-level client is marked
 		exists, active, deactivateTime := clientState(idleClientId)
-		assert.Equal(t, exists, true)
-		assert.Equal(t, active, false)
-		assert.NotEqual(t, deactivateTime, nil)
+		connect.AssertEqual(t, exists, true)
+		connect.AssertEqual(t, active, false)
+		connect.AssertNotEqual(t, deactivateTime, nil)
 
 		// marking makes the refresh lookup fail (the app logs out on this)
 		_, err = FindActiveClientNetwork(ctx, idleClientId)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 
 		_, active, _ = clientState(connectedClientId)
-		assert.Equal(t, active, true)
+		connect.AssertEqual(t, active, true)
 		_, active, _ = clientState(freshClientId)
-		assert.Equal(t, active, true)
+		connect.AssertEqual(t, active, true)
 
 		// the idle child client was reaped by the child pass (auth_time based),
 		// not marked inactive
 		exists, _, _ = clientState(childClientId)
-		assert.Equal(t, exists, false)
+		connect.AssertEqual(t, exists, false)
 
 		// within the grace window the marked client is retained
 		exists, _, _ = clientState(idleClientId)
-		assert.Equal(t, exists, true)
+		connect.AssertEqual(t, exists, true)
 
 		// after the grace window it is hard deleted
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -849,7 +849,7 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 		})
 		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
 		exists, _, _ = clientState(idleClientId)
-		assert.Equal(t, exists, false)
+		connect.AssertEqual(t, exists, false)
 
 		// user removal stamps deactivate_time, so removed clients also reap 30
 		// days after removal
@@ -861,11 +861,11 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 		removeResult, err := RemoveNetworkClient(&RemoveNetworkClientArgs{
 			ClientId: removedClientId,
 		}, userSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult.Error, nil)
 		exists, active, deactivateTime = clientState(removedClientId)
-		assert.Equal(t, exists, true)
-		assert.Equal(t, active, false)
-		assert.NotEqual(t, deactivateTime, nil)
+		connect.AssertEqual(t, exists, true)
+		connect.AssertEqual(t, active, false)
+		connect.AssertNotEqual(t, deactivateTime, nil)
 	})
 }

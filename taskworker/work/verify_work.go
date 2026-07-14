@@ -139,3 +139,40 @@ func RefreshVerifyProxyEgressPost(
 	ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 	return nil
 }
+
+type RemoveOldVerifyProviderStatsArgs struct {
+}
+
+type RemoveOldVerifyProviderStatsResult struct {
+}
+
+func ScheduleRemoveOldVerifyProviderStats(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveOldVerifyProviderStats,
+		&RemoveOldVerifyProviderStatsArgs{},
+		clientSession,
+		task.RunOnce("remove_old_verify_provider_stats"),
+		task.RunAt(server.NowUtc().Add(1*time.Minute)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+func RemoveOldVerifyProviderStats(
+	removeOldVerifyProviderStats *RemoveOldVerifyProviderStatsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveOldVerifyProviderStatsResult, error) {
+	limit := 50000
+	model.RemoveOldVerifyProviderStats(clientSession.Ctx, server.NowUtc(), limit)
+	return &RemoveOldVerifyProviderStatsResult{}, nil
+}
+
+func RemoveOldVerifyProviderStatsPost(
+	removeOldVerifyProviderStats *RemoveOldVerifyProviderStatsArgs,
+	removeOldVerifyProviderStatsResult *RemoveOldVerifyProviderStatsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRemoveOldVerifyProviderStats(clientSession, tx)
+	return nil
+}

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	// "golang.org/x/exp/maps"
+	// "maps"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -31,18 +31,18 @@ func TestWalletCircleInit(t *testing.T) {
 		})
 		result, err := WalletCircleInit(session)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.UserToken, nil)
-		assert.NotEqual(t, result.ChallengeId, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.UserToken, nil)
+		connect.AssertNotEqual(t, result.ChallengeId, "")
 
 		// a second init should not create an error
 		result, err = WalletCircleInit(session)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.UserToken, nil)
-		assert.NotEqual(t, result.ChallengeId, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.UserToken, nil)
+		connect.AssertNotEqual(t, result.ChallengeId, "")
 	})
 }
 
@@ -57,10 +57,10 @@ func TestWalletValidateAddress(t *testing.T) {
 		})
 		result, err := WalletCircleInit(session)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.UserToken, nil)
-		assert.NotEqual(t, result.ChallengeId, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.UserToken, nil)
+		connect.AssertNotEqual(t, result.ChallengeId, "")
 
 		// test valid SOL address
 		validateResult, err := WalletValidateAddress(
@@ -71,8 +71,8 @@ func TestWalletValidateAddress(t *testing.T) {
 			session,
 		)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, validateResult.Valid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, validateResult.Valid, true)
 
 		// test invalid address
 		validateResult, err = WalletValidateAddress(
@@ -83,8 +83,8 @@ func TestWalletValidateAddress(t *testing.T) {
 			},
 			session,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, validateResult.Valid, false)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, validateResult.Valid, false)
 
 		// test passing USDC mint address as wallet address
 		validateResult, err = WalletValidateAddress(
@@ -94,8 +94,8 @@ func TestWalletValidateAddress(t *testing.T) {
 			},
 			session,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, validateResult.Valid, false)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, validateResult.Valid, false)
 	})
 }
 
@@ -118,15 +118,15 @@ func TestWalletBalance(t *testing.T) {
 
 		result, err := WalletBalance(session)
 
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.WalletInfo, nil)
-		assert.NotEqual(t, result.WalletInfo.WalletId, "")
-		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.WalletInfo, nil)
+		connect.AssertNotEqual(t, result.WalletInfo.WalletId, "")
+		connect.AssertNotEqual(t, result.WalletInfo.CreateDate, time.Time{})
 		// the wallet is empty so these are the defaults
-		assert.Equal(t, result.WalletInfo.Blockchain, "Polygon")
-		assert.Equal(t, result.WalletInfo.BlockchainSymbol, model.MATIC.String())
-		assert.Equal(t, result.WalletInfo.TokenId, "")
-		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
+		connect.AssertEqual(t, result.WalletInfo.Blockchain, "Polygon")
+		connect.AssertEqual(t, result.WalletInfo.BlockchainSymbol, model.MATIC.String())
+		connect.AssertEqual(t, result.WalletInfo.TokenId, "")
+		connect.AssertEqual(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(0.0))
 
 		model.SetCircleUserId(
 			ctx,
@@ -137,14 +137,14 @@ func TestWalletBalance(t *testing.T) {
 
 		result, err = WalletBalance(session)
 
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.WalletInfo, nil)
-		assert.NotEqual(t, result.WalletInfo.WalletId, "")
-		assert.NotEqual(t, result.WalletInfo.CreateDate, time.Time{})
-		assert.Equal(t, result.WalletInfo.Blockchain, model.MATIC.String())
-		assert.Equal(t, result.WalletInfo.BlockchainSymbol, "USDC")
-		assert.NotEqual(t, result.WalletInfo.TokenId, "")
-		assert.Equal(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.WalletInfo, nil)
+		connect.AssertNotEqual(t, result.WalletInfo.WalletId, "")
+		connect.AssertNotEqual(t, result.WalletInfo.CreateDate, time.Time{})
+		connect.AssertEqual(t, result.WalletInfo.Blockchain, model.MATIC.String())
+		connect.AssertEqual(t, result.WalletInfo.BlockchainSymbol, "USDC")
+		connect.AssertNotEqual(t, result.WalletInfo.TokenId, "")
+		connect.AssertEqual(t, result.WalletInfo.BalanceUsdcNanoCents, model.UsdToNanoCents(1.0))
 	})
 }
 
@@ -175,10 +175,10 @@ func TestWalletCircleTransferOut(t *testing.T) {
 			session,
 		)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result.Error, nil)
-		assert.NotEqual(t, result.UserToken, nil)
-		assert.NotEqual(t, result.ChallengeId, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertNotEqual(t, result.UserToken, nil)
+		connect.AssertNotEqual(t, result.ChallengeId, "")
 	})
 }
 
@@ -186,8 +186,8 @@ func TestCircleWalletIdParsing(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		circleWalletId := "02201362-9c27-5793-ad74-994c8bac4ccf" // this is an ID generated by Circle
 		walletId, err := server.ParseId("02201362-9c27-5793-ad74-994c8bac4ccf")
-		assert.Equal(t, err, nil)
-		assert.Equal(t, circleWalletId, walletId.String())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, circleWalletId, walletId.String())
 	})
 }
 
@@ -205,7 +205,7 @@ func TestCircleWebhookVerifySignature(t *testing.T) {
 			responseBodyBytes,
 		)
 
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 	})
 }

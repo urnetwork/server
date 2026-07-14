@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -40,8 +40,8 @@ func TestDeviceAdopt(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "devicea", "speca")
 
 		clientsResult0, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult0.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult0.Clients), 1)
 
 		result1, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{
@@ -50,10 +50,10 @@ func TestDeviceAdopt(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result1.Error, nil)
-		assert.NotEqual(t, result1.AdoptCode, "")
-		assert.NotEqual(t, result1.AdoptSecret, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result1.Error, nil)
+		connect.AssertNotEqual(t, result1.AdoptCode, "")
+		connect.AssertNotEqual(t, result1.AdoptSecret, "")
 
 		qrResult0, err := DeviceAdoptCodeQR(
 			&DeviceAdoptCodeQRArgs{
@@ -61,8 +61,8 @@ func TestDeviceAdopt(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, qrResult0.PngBytes, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, qrResult0.PngBytes, nil)
 
 		result2, err := DeviceAdd(
 			&DeviceAddArgs{
@@ -70,8 +70,8 @@ func TestDeviceAdopt(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result2.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result2.Error, nil)
 
 		result3, err := DeviceAdoptStatus(
 			&DeviceAdoptStatusArgs{
@@ -79,15 +79,15 @@ func TestDeviceAdopt(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result3.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result3.Error, nil)
 
 		// at this point there should be adopt association
 		associationResult0, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
-		assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult0.PendingAdoptionDevices), 1)
+		connect.AssertEqual(t, len(associationResult0.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult0.OutgoingSharedDevices), 0)
 
 		result4, err := DeviceConfirmAdopt(
 			&DeviceConfirmAdoptArgs{
@@ -97,27 +97,27 @@ func TestDeviceAdopt(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result4.Error, nil)
-		// assert.Equal(t, result4.AssociatedNetworkName, "a")
-		assert.NotEqual(t, result4.ByClientJwt, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result4.Error, nil)
+		// connect.AssertEqual(t, result4.AssociatedNetworkName, "a")
+		connect.AssertNotEqual(t, result4.ByClientJwt, "")
 		byJwt, err := jwt.ParseByJwt(ctx, result4.ByClientJwt)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, byJwt.NetworkId, networkIdA)
-		assert.Equal(t, byJwt.NetworkName, "a")
-		assert.Equal(t, byJwt.UserId, userIdA)
-		assert.Equal(t, byJwt.GuestMode, false)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, byJwt.NetworkId, networkIdA)
+		connect.AssertEqual(t, byJwt.NetworkName, "a")
+		connect.AssertEqual(t, byJwt.UserId, userIdA)
+		connect.AssertEqual(t, byJwt.GuestMode, false)
 
 		// at this point there should be no adopt association
 		associationResult1, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult1.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.OutgoingSharedDevices), 0)
 
 		clientResult1, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientResult1.Clients), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientResult1.Clients), 2)
 	})
 }
 
@@ -163,30 +163,30 @@ func TestDeviceConfirmAdoptWrongSecretRejected(t *testing.T) {
 			&DeviceCreateAdoptCodeArgs{DeviceName: "devicec", DeviceSpec: "specc"},
 			noAuthSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, created.Error, nil)
-		assert.NotEqual(t, created.AdoptCode, "")
-		assert.NotEqual(t, created.AdoptSecret, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, created.Error, nil)
+		connect.AssertNotEqual(t, created.AdoptCode, "")
+		connect.AssertNotEqual(t, created.AdoptSecret, "")
 
 		// Step 3: the victim adopts the (public) code.
 		added, err := DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, victimSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, added.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, added.Error, nil)
 
 		// Step 4: unauthenticated adopt-status leaks the victim's network name.
 		status, err := DeviceAdoptStatus(
 			&DeviceAdoptStatusArgs{AdoptCode: created.AdoptCode},
 			noAuthSession,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, status.Error, nil)
-		assert.Equal(t, status.AssociatedNetworkName, "a")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, status.Error, nil)
+		connect.AssertEqual(t, status.AssociatedNetworkName, "a")
 
 		// Step 5: confirm with the leaked network name but a DELIBERATELY WRONG
 		// secret. A legitimate device proves possession of adopt_secret here; an
 		// attacker who only eavesdropped the code does not have it.
 		wrongSecret := "00000000000000000000000000000000deadbeefdeadbeef"
-		assert.NotEqual(t, wrongSecret, created.AdoptSecret)
+		connect.AssertNotEqual(t, wrongSecret, created.AdoptSecret)
 
 		confirmed, err := DeviceConfirmAdopt(
 			&DeviceConfirmAdoptArgs{
@@ -196,7 +196,7 @@ func TestDeviceConfirmAdoptWrongSecretRejected(t *testing.T) {
 			},
 			noAuthSession,
 		)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// SECURE expectation: a wrong secret must not yield a client credential.
 		if confirmed != nil && confirmed.ByClientJwt != "" {
@@ -214,7 +214,7 @@ func TestDeviceConfirmAdoptWrongSecretRejected(t *testing.T) {
 		}
 
 		// After the fix, confirm affects 0 rows and returns the generic error.
-		assert.NotEqual(t, confirmed.Error, nil)
+		connect.AssertNotEqual(t, confirmed.Error, nil)
 	})
 }
 
@@ -248,8 +248,8 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "devicea", "speca")
 
 		clientsResult0, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult0.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult0.Clients), 1)
 
 		result1, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{
@@ -258,10 +258,10 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result1.Error, nil)
-		assert.NotEqual(t, result1.AdoptCode, "")
-		assert.NotEqual(t, result1.AdoptSecret, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result1.Error, nil)
+		connect.AssertNotEqual(t, result1.AdoptCode, "")
+		connect.AssertNotEqual(t, result1.AdoptSecret, "")
 
 		result2, err := DeviceAdd(
 			&DeviceAddArgs{
@@ -269,8 +269,8 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result2.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result2.Error, nil)
 
 		result3, err := DeviceAdoptStatus(
 			&DeviceAdoptStatusArgs{
@@ -278,15 +278,15 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result3.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result3.Error, nil)
 
 		// at this point there should be adopt association
 		associationResult0, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
-		assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult0.PendingAdoptionDevices), 1)
+		connect.AssertEqual(t, len(associationResult0.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult0.OutgoingSharedDevices), 0)
 
 		removeResult0, err := DeviceRemoveAdoptCode(
 			&DeviceRemoveAdoptCodeArgs{
@@ -295,14 +295,14 @@ func TestDeviceAdoptPartialOfferRemove(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult0.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult0.Error, nil)
 
 		associationResult1, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult1.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.OutgoingSharedDevices), 0)
 
 	})
 }
@@ -337,8 +337,8 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "devicea", "speca")
 
 		clientsResult0, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult0.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult0.Clients), 1)
 
 		result1, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{
@@ -347,10 +347,10 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result1.Error, nil)
-		assert.NotEqual(t, result1.AdoptCode, "")
-		assert.NotEqual(t, result1.AdoptSecret, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result1.Error, nil)
+		connect.AssertNotEqual(t, result1.AdoptCode, "")
+		connect.AssertNotEqual(t, result1.AdoptSecret, "")
 
 		result2, err := DeviceAdd(
 			&DeviceAddArgs{
@@ -358,8 +358,8 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result2.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result2.Error, nil)
 
 		result3, err := DeviceAdoptStatus(
 			&DeviceAdoptStatusArgs{
@@ -367,15 +367,15 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 			},
 			clientSessionNoAuth,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result3.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result3.Error, nil)
 
 		// at this point there should be adopt association
 		associationResult0, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 1)
-		assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult0.PendingAdoptionDevices), 1)
+		connect.AssertEqual(t, len(associationResult0.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult0.OutgoingSharedDevices), 0)
 
 		removeResult0, err := DeviceRemoveAssociation(
 			&DeviceRemoveAssociationArgs{
@@ -383,14 +383,14 @@ func TestDeviceAdoptPartialOwnerRemove(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult0.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult0.Error, nil)
 
 		associationResult1, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult1.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.OutgoingSharedDevices), 0)
 
 	})
 }
@@ -430,12 +430,12 @@ func TestDeviceShare(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdB, deviceIdB, clientIdB, "deviceb", "specb")
 
 		clientsResult0, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult0.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult0.Clients), 1)
 
 		clientsResult1, err := GetNetworkClients(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult1.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult1.Clients), 1)
 
 		result1, err := DeviceCreateShareCode(
 			&DeviceCreateShareCodeArgs{
@@ -444,18 +444,18 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result1.Error, nil)
-		assert.NotEqual(t, result1.ShareCode, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result1.Error, nil)
+		connect.AssertNotEqual(t, result1.ShareCode, "")
 
 		associationResult0, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult0.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult0.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult0.OutgoingSharedDevices), 1)
-		assert.Equal(t, associationResult0.OutgoingSharedDevices[0].Pending, true)
-		assert.Equal(t, associationResult0.OutgoingSharedDevices[0].NetworkName, "")
-		assert.Equal(t, associationResult0.OutgoingSharedDevices[0].DeviceName, "devicea")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult0.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult0.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult0.OutgoingSharedDevices), 1)
+		connect.AssertEqual(t, associationResult0.OutgoingSharedDevices[0].Pending, true)
+		connect.AssertEqual(t, associationResult0.OutgoingSharedDevices[0].NetworkName, "")
+		connect.AssertEqual(t, associationResult0.OutgoingSharedDevices[0].DeviceName, "devicea")
 
 		shareStatus1, err := DeviceShareStatus(
 			&DeviceShareStatusArgs{
@@ -463,8 +463,8 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, shareStatus1.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, shareStatus1.Error, nil)
 
 		qrResult0, err := DeviceShareCodeQR(
 			&DeviceShareCodeQRArgs{
@@ -472,8 +472,8 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, qrResult0.PngBytes, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, qrResult0.PngBytes, nil)
 
 		result2, err := DeviceAdd(
 			&DeviceAddArgs{
@@ -481,8 +481,8 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionB,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result2.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result2.Error, nil)
 
 		result3, err := DeviceShareStatus(
 			&DeviceShareStatusArgs{
@@ -490,28 +490,28 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result3.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result3.Error, nil)
 
 		// at this point there should be share association pending
 
 		associationResult1, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult1.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult1.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult1.OutgoingSharedDevices), 1)
-		assert.Equal(t, associationResult1.OutgoingSharedDevices[0].Pending, true)
-		assert.Equal(t, associationResult1.OutgoingSharedDevices[0].NetworkName, "b")
-		assert.Equal(t, associationResult1.OutgoingSharedDevices[0].DeviceName, "devicea")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult1.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult1.OutgoingSharedDevices), 1)
+		connect.AssertEqual(t, associationResult1.OutgoingSharedDevices[0].Pending, true)
+		connect.AssertEqual(t, associationResult1.OutgoingSharedDevices[0].NetworkName, "b")
+		connect.AssertEqual(t, associationResult1.OutgoingSharedDevices[0].DeviceName, "devicea")
 
 		associationResult2, err := DeviceAssociations(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult2.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult2.IncomingSharedDevices), 1)
-		assert.Equal(t, len(associationResult2.OutgoingSharedDevices), 0)
-		assert.Equal(t, associationResult2.IncomingSharedDevices[0].Pending, true)
-		assert.Equal(t, associationResult2.IncomingSharedDevices[0].NetworkName, "a")
-		assert.Equal(t, associationResult2.IncomingSharedDevices[0].DeviceName, "devicea")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult2.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult2.IncomingSharedDevices), 1)
+		connect.AssertEqual(t, len(associationResult2.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, associationResult2.IncomingSharedDevices[0].Pending, true)
+		connect.AssertEqual(t, associationResult2.IncomingSharedDevices[0].NetworkName, "a")
+		connect.AssertEqual(t, associationResult2.IncomingSharedDevices[0].DeviceName, "devicea")
 
 		result4, err := DeviceConfirmShare(
 			&DeviceConfirmShareArgs{
@@ -520,28 +520,28 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, result4.Error, nil)
-		assert.Equal(t, result4.AssociatedNetworkName, "b")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result4.Error, nil)
+		connect.AssertEqual(t, result4.AssociatedNetworkName, "b")
 
 		// at this point there should be a share association not pending, as outgoing for A, incoming for B
 		associationResult3, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult3.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult3.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult3.OutgoingSharedDevices), 1)
-		assert.Equal(t, associationResult3.OutgoingSharedDevices[0].Pending, false)
-		assert.Equal(t, associationResult3.OutgoingSharedDevices[0].NetworkName, "b")
-		assert.Equal(t, associationResult3.OutgoingSharedDevices[0].DeviceName, "devicea")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult3.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult3.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult3.OutgoingSharedDevices), 1)
+		connect.AssertEqual(t, associationResult3.OutgoingSharedDevices[0].Pending, false)
+		connect.AssertEqual(t, associationResult3.OutgoingSharedDevices[0].NetworkName, "b")
+		connect.AssertEqual(t, associationResult3.OutgoingSharedDevices[0].DeviceName, "devicea")
 
 		associationResult4, err := DeviceAssociations(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult4.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult4.IncomingSharedDevices), 1)
-		assert.Equal(t, len(associationResult4.OutgoingSharedDevices), 0)
-		assert.Equal(t, associationResult4.IncomingSharedDevices[0].Pending, false)
-		assert.Equal(t, associationResult4.IncomingSharedDevices[0].NetworkName, "a")
-		assert.Equal(t, associationResult4.IncomingSharedDevices[0].DeviceName, "devicea")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult4.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult4.IncomingSharedDevices), 1)
+		connect.AssertEqual(t, len(associationResult4.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, associationResult4.IncomingSharedDevices[0].Pending, false)
+		connect.AssertEqual(t, associationResult4.IncomingSharedDevices[0].NetworkName, "a")
+		connect.AssertEqual(t, associationResult4.IncomingSharedDevices[0].DeviceName, "devicea")
 
 		setNameResult1, err := DeviceSetAssociationName(
 			&DeviceSetAssociationNameArgs{
@@ -550,8 +550,8 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionA,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, setNameResult1.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, setNameResult1.Error, nil)
 
 		setNameResult2, err := DeviceSetAssociationName(
 			&DeviceSetAssociationNameArgs{
@@ -560,34 +560,34 @@ func TestDeviceShare(t *testing.T) {
 			},
 			clientSessionB,
 		)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, setNameResult2.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, setNameResult2.Error, nil)
 
 		associationResult5, err := DeviceAssociations(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult5.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult5.IncomingSharedDevices), 0)
-		assert.Equal(t, len(associationResult5.OutgoingSharedDevices), 1)
-		assert.Equal(t, associationResult5.OutgoingSharedDevices[0].Pending, false)
-		assert.Equal(t, associationResult5.OutgoingSharedDevices[0].NetworkName, "b")
-		assert.Equal(t, associationResult5.OutgoingSharedDevices[0].DeviceName, "That device I shared")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult5.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult5.IncomingSharedDevices), 0)
+		connect.AssertEqual(t, len(associationResult5.OutgoingSharedDevices), 1)
+		connect.AssertEqual(t, associationResult5.OutgoingSharedDevices[0].Pending, false)
+		connect.AssertEqual(t, associationResult5.OutgoingSharedDevices[0].NetworkName, "b")
+		connect.AssertEqual(t, associationResult5.OutgoingSharedDevices[0].DeviceName, "That device I shared")
 
 		associationResult6, err := DeviceAssociations(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(associationResult6.PendingAdoptionDevices), 0)
-		assert.Equal(t, len(associationResult6.IncomingSharedDevices), 1)
-		assert.Equal(t, len(associationResult6.OutgoingSharedDevices), 0)
-		assert.Equal(t, associationResult6.IncomingSharedDevices[0].Pending, false)
-		assert.Equal(t, associationResult6.IncomingSharedDevices[0].NetworkName, "a")
-		assert.Equal(t, associationResult6.IncomingSharedDevices[0].DeviceName, "My new device from friend")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(associationResult6.PendingAdoptionDevices), 0)
+		connect.AssertEqual(t, len(associationResult6.IncomingSharedDevices), 1)
+		connect.AssertEqual(t, len(associationResult6.OutgoingSharedDevices), 0)
+		connect.AssertEqual(t, associationResult6.IncomingSharedDevices[0].Pending, false)
+		connect.AssertEqual(t, associationResult6.IncomingSharedDevices[0].NetworkName, "a")
+		connect.AssertEqual(t, associationResult6.IncomingSharedDevices[0].DeviceName, "My new device from friend")
 
 		clientsResult2, err := GetNetworkClients(clientSessionA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult2.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult2.Clients), 1)
 
 		clientsResult3, err := GetNetworkClients(clientSessionB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsResult3.Clients), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsResult3.Clients), 1)
 	})
 }
 
@@ -619,11 +619,11 @@ func TestDeviceConfirmAdoptWrongNetworkNameRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		added, err := DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, victim)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, added.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, added.Error, nil)
 
 		confirmed, err := DeviceConfirmAdopt(
 			&DeviceConfirmAdoptArgs{
@@ -631,9 +631,9 @@ func TestDeviceConfirmAdoptWrongNetworkNameRejected(t *testing.T) {
 				AdoptSecret:           created.AdoptSecret,
 				AssociatedNetworkName: "some-other-network",
 			}, noAuth)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, confirmed.ByClientJwt, "")
-		assert.NotEqual(t, confirmed.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, confirmed.ByClientJwt, "")
+		connect.AssertNotEqual(t, confirmed.Error, nil)
 	})
 }
 
@@ -646,7 +646,7 @@ func TestDeviceConfirmAdoptBeforeAdoptRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		confirmed, err := DeviceConfirmAdopt(
 			&DeviceConfirmAdoptArgs{
@@ -654,9 +654,9 @@ func TestDeviceConfirmAdoptBeforeAdoptRejected(t *testing.T) {
 				AdoptSecret:           created.AdoptSecret,
 				AssociatedNetworkName: "a",
 			}, noAuth)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, confirmed.ByClientJwt, "")
-		assert.NotEqual(t, confirmed.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, confirmed.ByClientJwt, "")
+		connect.AssertNotEqual(t, confirmed.Error, nil)
 	})
 }
 
@@ -669,10 +669,10 @@ func TestDeviceConfirmAdoptReplayRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, victim)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		args := &DeviceConfirmAdoptArgs{
 			AdoptCode:             created.AdoptCode,
@@ -681,20 +681,20 @@ func TestDeviceConfirmAdoptReplayRejected(t *testing.T) {
 		}
 
 		first, err := DeviceConfirmAdopt(args, noAuth)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, first.ByClientJwt, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, first.ByClientJwt, "")
 
 		clientsAfterFirst, err := GetNetworkClients(victim)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		second, err := DeviceConfirmAdopt(args, noAuth)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, second.ByClientJwt, "")
-		assert.NotEqual(t, second.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, second.ByClientJwt, "")
+		connect.AssertNotEqual(t, second.Error, nil)
 
 		clientsAfterSecond, err := GetNetworkClients(victim)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(clientsAfterSecond.Clients), len(clientsAfterFirst.Clients))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(clientsAfterSecond.Clients), len(clientsAfterFirst.Clients))
 	})
 }
 
@@ -708,16 +708,16 @@ func TestDeviceAdoptCannotHijackAfterAdopt(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		addedA, err := DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, netA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, addedA.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, addedA.Error, nil)
 
 		// B tries to adopt the same, already-owned code.
 		addedB, err := DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, netB)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, addedB.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, addedB.Error, nil)
 
 		// The device confirms for A (the true owner); the JWT is bound to A, not B.
 		confirmed, err := DeviceConfirmAdopt(
@@ -726,11 +726,11 @@ func TestDeviceAdoptCannotHijackAfterAdopt(t *testing.T) {
 				AdoptSecret:           created.AdoptSecret,
 				AssociatedNetworkName: "a",
 			}, noAuth)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, confirmed.ByClientJwt, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, confirmed.ByClientJwt, "")
 		byJwt, err := jwt.ParseByJwt(ctx, confirmed.ByClientJwt)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, byJwt.NetworkId, networkIdA)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, byJwt.NetworkId, networkIdA)
 	})
 }
 
@@ -743,27 +743,27 @@ func TestDeviceRemoveAdoptCodeWrongSecretRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		_, err = DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, netA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// Wrong secret: must not remove.
 		wrong, err := DeviceRemoveAdoptCode(
 			&DeviceRemoveAdoptCodeArgs{AdoptCode: created.AdoptCode, AdoptSecret: "wrong-secret"}, noAuth)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, wrong.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, wrong.Error, nil)
 
 		// Still present: A still sees a pending adoption.
 		assoc, err := DeviceAssociations(netA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(assoc.PendingAdoptionDevices), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(assoc.PendingAdoptionDevices), 1)
 
 		// Correct secret: removes.
 		ok, err := DeviceRemoveAdoptCode(
 			&DeviceRemoveAdoptCodeArgs{AdoptCode: created.AdoptCode, AdoptSecret: created.AdoptSecret}, noAuth)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, ok.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, ok.Error, nil)
 	})
 }
 
@@ -781,9 +781,9 @@ func TestDeviceCreateShareCodeForeignClientRejected(t *testing.T) {
 		// A tries to share B's client.
 		result, err := DeviceCreateShareCode(
 			&DeviceCreateShareCodeArgs{ClientId: clientIdB, DeviceName: "stolen"}, netA)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
-		assert.Equal(t, result.ShareCode, "")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, result.ShareCode, "")
 	})
 }
 
@@ -799,12 +799,12 @@ func TestDeviceAddOwnShareCodeRejected(t *testing.T) {
 
 		share, err := DeviceCreateShareCode(
 			&DeviceCreateShareCodeArgs{ClientId: clientIdA, DeviceName: "devicea"}, netA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, share.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, share.Error, nil)
 
 		added, err := DeviceAdd(&DeviceAddArgs{Code: share.ShareCode}, netA)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, added.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, added.Error, nil)
 	})
 }
 
@@ -825,17 +825,17 @@ func TestDeviceConfirmShareByUnrelatedNetworkRejected(t *testing.T) {
 
 		share, err := DeviceCreateShareCode(
 			&DeviceCreateShareCodeArgs{ClientId: clientIdA, DeviceName: "devicea"}, netA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, share.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, share.Error, nil)
 
 		added, err := DeviceAdd(&DeviceAddArgs{Code: share.ShareCode}, netB)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, added.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, added.Error, nil)
 
 		// C, knowing only the share code and the guest's network name, confirms.
 		confirmed, err := DeviceConfirmShare(
 			&DeviceConfirmShareArgs{ShareCode: share.ShareCode, AssociatedNetworkName: "b"}, netC)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		if confirmed != nil && confirmed.Error == nil {
 			t.Fatalf("SECURITY (adjacent): unrelated network C (neither source nor guest) confirmed a " +
 				"device share via DeviceConfirmShare, which never checks clientSession.ByJwt.NetworkId. " +
@@ -854,20 +854,20 @@ func TestDeviceRemoveAssociationByUnrelatedNetworkRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, err = DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, netA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// C (unrelated) tries to remove A's pending adoption.
 		removed, err := DeviceRemoveAssociation(
 			&DeviceRemoveAssociationArgs{Code: created.AdoptCode}, netC)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, removed.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, removed.Error, nil)
 
 		// A still has the association.
 		assoc, err := DeviceAssociations(netA)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(assoc.PendingAdoptionDevices), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(assoc.PendingAdoptionDevices), 1)
 	})
 }
 
@@ -881,13 +881,13 @@ func TestDeviceSetAssociationNameByUnrelatedNetworkRejected(t *testing.T) {
 
 		created, err := DeviceCreateAdoptCode(
 			&DeviceCreateAdoptCodeArgs{DeviceName: "d", DeviceSpec: "s"}, noAuth)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		_, err = DeviceAdd(&DeviceAddArgs{Code: created.AdoptCode}, netA)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		result, err := DeviceSetAssociationName(
 			&DeviceSetAssociationNameArgs{Code: created.AdoptCode, DeviceName: "hacked"}, netC)
-		assert.Equal(t, err, nil)
-		assert.NotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
 	})
 }

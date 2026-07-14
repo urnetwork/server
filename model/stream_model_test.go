@@ -10,9 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
-
-	// "golang.org/x/exp/maps"
+	// "maps"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -31,8 +29,8 @@ func TestStreamKey(t *testing.T) {
 
 	sk := newStreamKey(sourceId, destinationId, intermediaryIds)
 	sk2 := newStreamKey(destinationId, sourceId, reversedIntermediaryIds)
-	assert.Equal(t, sk, sk2)
-	assert.Equal(t, sk.String(), sk2.String())
+	connect.AssertEqual(t, sk, sk2)
+	connect.AssertEqual(t, sk.String(), sk2.String())
 
 	expectedClientEdges := map[server.Id][2]*server.Id{}
 	expectedClientEdges[sourceId] = [2]*server.Id{
@@ -65,7 +63,7 @@ func TestStreamKey(t *testing.T) {
 		clientEdges[clientId] = edges
 	}
 
-	assert.Equal(t, clientEdges, expectedClientEdges)
+	connect.AssertEqual(t, clientEdges, expectedClientEdges)
 }
 
 func TestStreamHop(t *testing.T) {
@@ -80,7 +78,7 @@ func TestStreamHop(t *testing.T) {
 		DestinationId: connect.Id(destinationId),
 		StreamId:      connect.Id(streamId),
 	}
-	assert.Equal(t, hop.Path(), path)
+	connect.AssertEqual(t, hop.Path(), path)
 }
 
 func TestStream(t *testing.T) {
@@ -201,12 +199,12 @@ func TestStream(t *testing.T) {
 		for contractId, streamId := range contractStreamIds {
 			mStreamId, mStreamKey, ok := GetStream(ctx, contractId)
 			if removeContracts[contractId] {
-				assert.Equal(t, ok, false)
+				connect.AssertEqual(t, ok, false)
 			} else {
-				assert.Equal(t, ok, true)
+				connect.AssertEqual(t, ok, true)
 				streamKey := contractStreamKeys[contractId]
-				assert.Equal(t, mStreamId, streamId)
-				assert.Equal(t, mStreamKey, streamKey)
+				connect.AssertEqual(t, mStreamId, streamId)
+				connect.AssertEqual(t, mStreamKey, streamKey)
 			}
 		}
 
@@ -214,11 +212,11 @@ func TestStream(t *testing.T) {
 		case <-time.After(5 * time.Second):
 		}
 
-		assert.Equal(t, len(c.StreamIds()), len(finalStreamIds))
-		assert.Equal(t, c.StreamIds(), finalStreamIds)
+		connect.AssertEqual(t, len(c.StreamIds()), len(finalStreamIds))
+		connect.AssertEqual(t, c.StreamIds(), finalStreamIds)
 
 		_, streamHops := GetStreamHops(ctx, clientId)
-		assert.Equal(t, c.StreamHops(), streamHops)
+		connect.AssertEqual(t, c.StreamHops(), streamHops)
 
 		// creating a new listener should sync to the head state
 		var addCount atomic.Uint64
@@ -240,7 +238,7 @@ func TestStream(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		assert.Equal(t, c2.StreamIds(), finalStreamIds)
+		connect.AssertEqual(t, c2.StreamIds(), finalStreamIds)
 
 		// remove the remaining contracts
 		for contractId, remove := range removeContracts {
@@ -253,12 +251,12 @@ func TestStream(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 
-		assert.Equal(t, int(addCount.Load()), len(keepKeys))
-		assert.Equal(t, int(removeCount.Load()), len(keepKeys))
-		assert.Equal(t, c2.StreamIds(), map[server.Id]bool{})
+		connect.AssertEqual(t, int(addCount.Load()), len(keepKeys))
+		connect.AssertEqual(t, int(removeCount.Load()), len(keepKeys))
+		connect.AssertEqual(t, c2.StreamIds(), map[server.Id]bool{})
 
 		_, streamHops2 := GetStreamHops(ctx, clientId)
-		assert.Equal(t, c2.StreamHops(), streamHops2)
+		connect.AssertEqual(t, c2.StreamHops(), streamHops2)
 
 	})
 

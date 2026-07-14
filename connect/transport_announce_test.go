@@ -1,10 +1,9 @@
 package connect
 
 import (
+	"github.com/urnetwork/connect"
 	"testing"
 	"time"
-
-	"github.com/go-playground/assert/v2"
 
 	"github.com/urnetwork/server/model"
 )
@@ -26,18 +25,18 @@ func TestPassiveSpeedAndSyntheticGate(t *testing.T) {
 
 	// young connection: synthetic deferred regardless of passive speed
 	announce := newAnnounce(0)
-	assert.Equal(t, false, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, false, announce.allowSyntheticSpeedWithLock())
 
 	// aged connection without passive proof: synthetic allowed
 	announce = newAnnounce(2 * settings.SyntheticSpeedTimeout)
-	assert.Equal(t, true, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, true, announce.allowSyntheticSpeedWithLock())
 
 	// a window below the minimum byte count is not a sample
 	announce = newAnnounce(2 * settings.SyntheticSpeedTimeout)
 	announce.ReceiveMessage(settings.PassiveSpeedMinByteCount / 2)
 	announce.samplePassiveSpeed()
-	assert.Equal(t, model.ByteCount(0), announce.passiveMaxBytesPerSecond)
-	assert.Equal(t, true, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, model.ByteCount(0), announce.passiveMaxBytesPerSecond)
+	connect.AssertEqual(t, true, announce.allowSyntheticSpeedWithLock())
 
 	// a slow window samples but does not reach the synthetic threshold
 	announce.passiveWindowStartTime = time.Now().Add(-time.Second)
@@ -47,7 +46,7 @@ func TestPassiveSpeedAndSyntheticGate(t *testing.T) {
 	if slowMax <= 0 {
 		t.Fatalf("expected a passive sample, got %d", slowMax)
 	}
-	assert.Equal(t, true, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, true, announce.allowSyntheticSpeedWithLock())
 
 	// a fast window proves the connection speed and gates the synthetic test.
 	// the window rate uses the max of the send and receive directions.
@@ -61,13 +60,13 @@ func TestPassiveSpeedAndSyntheticGate(t *testing.T) {
 			settings.SyntheticSpeedBytesPerSecond,
 		)
 	}
-	assert.Equal(t, false, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, false, announce.allowSyntheticSpeedWithLock())
 
 	// the max is monotone: a later slower window does not lower it
 	provenMax := announce.passiveMaxBytesPerSecond
 	announce.passiveWindowStartTime = time.Now().Add(-time.Second)
 	announce.ReceiveMessage(settings.PassiveSpeedMinByteCount)
 	announce.samplePassiveSpeed()
-	assert.Equal(t, provenMax, announce.passiveMaxBytesPerSecond)
-	assert.Equal(t, false, announce.allowSyntheticSpeedWithLock())
+	connect.AssertEqual(t, provenMax, announce.passiveMaxBytesPerSecond)
+	connect.AssertEqual(t, false, announce.allowSyntheticSpeedWithLock())
 }

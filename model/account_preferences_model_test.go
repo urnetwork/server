@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -24,7 +24,7 @@ func TestAccountPreferences(t *testing.T) {
 
 		// no preferences set
 		preferences := AccountPreferencesGet(session)
-		assert.Equal(t, preferences, nil)
+		connect.AssertEqual(t, preferences, nil)
 
 		// set preferences
 		setPreferencesArgs := &AccountPreferencesSetArgs{
@@ -32,11 +32,11 @@ func TestAccountPreferences(t *testing.T) {
 		}
 
 		_, err := AccountPreferencesSet(setPreferencesArgs, session)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// fetched preferences should equal updated preferences
 		preferences = AccountPreferencesGet(session)
-		assert.Equal(t, preferences.ProductUpdates, true)
+		connect.AssertEqual(t, preferences.ProductUpdates, true)
 
 		// update again to false
 		setPreferencesArgs = &AccountPreferencesSetArgs{
@@ -44,11 +44,11 @@ func TestAccountPreferences(t *testing.T) {
 		}
 
 		_, err = AccountPreferencesSet(setPreferencesArgs, session)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// should pass
 		preferences = AccountPreferencesGet(session)
-		assert.Equal(t, preferences.ProductUpdates, false)
+		connect.AssertEqual(t, preferences.ProductUpdates, false)
 
 	})
 }

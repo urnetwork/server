@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server/model"
 )
@@ -119,19 +119,19 @@ func TestStClientStubSwap(t *testing.T) {
 	defer SetStClient(nil)
 
 	client := stClient()
-	assert.Equal(t, StClient(stub), client)
+	connect.AssertEqual(t, StClient(stub), client)
 
 	got, err := client.Epoch(context.Background())
-	assert.Equal(t, nil, err)
-	assert.Equal(t, state, got)
+	connect.AssertEqual(t, nil, err)
+	connect.AssertEqual(t, state, got)
 
 	// the open-epoch mirror row derives every deadline from the contract
 	// block clock: close = start + tEpoch, deadline = close + window
 	row := stEpochRowFromState(got)
-	assert.Equal(t, uint64(4), row.Epoch)
-	assert.Equal(t, uint64(10_000), row.StartBlock)
-	assert.Equal(t, uint64(10_600+1_200), row.CommitDeadlineBlock)
-	assert.Equal(t, uint64(10_600+7_200), row.TrailsDeadlineBlock)
-	assert.Equal(t, uint64(10_600+14_400), row.FinalizeBlock)
-	assert.Equal(t, model.StEpochStatusOpen, row.Status)
+	connect.AssertEqual(t, uint64(4), row.Epoch)
+	connect.AssertEqual(t, uint64(10_000), row.StartBlock)
+	connect.AssertEqual(t, uint64(10_600+1_200), row.CommitDeadlineBlock)
+	connect.AssertEqual(t, uint64(10_600+7_200), row.TrailsDeadlineBlock)
+	connect.AssertEqual(t, uint64(10_600+14_400), row.FinalizeBlock)
+	connect.AssertEqual(t, model.StEpochStatusOpen, row.Status)
 }

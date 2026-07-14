@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
 	"github.com/gorilla/websocket"
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
@@ -67,12 +67,12 @@ func TestProxyDeviceRpcEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("api listener valid dial: %v (resp=%v)", err, resp)
 		}
-		assert.Equal(t, resp.StatusCode, http.StatusSwitchingProtocols)
+		connect.AssertEqual(t, resp.StatusCode, http.StatusSwitchingProtocols)
 		ws.SetReadDeadline(time.Now().Add(15 * time.Second))
 		messageType, data, err := ws.ReadMessage()
-		assert.Equal(t, err, nil)
-		assert.Equal(t, messageType, websocket.BinaryMessage)
-		assert.Equal(t, len(data), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, messageType, websocket.BinaryMessage)
+		connect.AssertEqual(t, len(data), 0)
 		ws.Close()
 
 		// valid signed proxy id via the Authorization Bearer header (non-browser
@@ -83,24 +83,24 @@ func TestProxyDeviceRpcEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("api listener bearer dial: %v (resp=%v)", err, respBearer)
 		}
-		assert.Equal(t, respBearer.StatusCode, http.StatusSwitchingProtocols)
+		connect.AssertEqual(t, respBearer.StatusCode, http.StatusSwitchingProtocols)
 		wsBearer.Close()
 
 		// missing signed proxy id -> 401
 		_, respMissing, err := apiDial("", nil)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 		if respMissing == nil {
 			t.Fatal("api listener missing-token dial: no response")
 		}
-		assert.Equal(t, respMissing.StatusCode, http.StatusUnauthorized)
+		connect.AssertEqual(t, respMissing.StatusCode, http.StatusUnauthorized)
 
 		// malformed signed proxy id -> 401
 		_, respBad, err := apiDial("proxy=garbage", nil)
-		assert.NotEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 		if respBad == nil {
 			t.Fatal("api listener malformed-token dial: no response")
 		}
-		assert.Equal(t, respBad.StatusCode, http.StatusUnauthorized)
+		connect.AssertEqual(t, respBad.StatusCode, http.StatusUnauthorized)
 
 		// ---- concurrent DeviceRemotes controlling one hosted device ----------
 		instanceId := sdk.RequireIdFromBytes(h.pdInstanceId.Bytes())
@@ -112,7 +112,7 @@ func TestProxyDeviceRpcEndpoint(t *testing.T) {
 				h.signedProxyId,
 				instanceId,
 			)
-			assert.Equal(t, err, nil)
+			connect.AssertEqual(t, err, nil)
 			return d
 		}
 		remoteA := newRemote()
@@ -157,7 +157,7 @@ func TestProxyDeviceRpcSessionIdle(t *testing.T) {
 		defer h.cancel()
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// shrink the idle timeout so the keepalive ticker (idleTimeout/2) and the
 		// idle threshold are observable in-test. Set before attaching:
@@ -175,7 +175,7 @@ func TestProxyDeviceRpcSessionIdle(t *testing.T) {
 		// calls pd.PushDeviceRpc, which bumps activity and keeps bumping it
 		u := h.deviceRpcUrl + "/device-rpc?proxy=" + url.QueryEscape(h.signedProxyId)
 		ws, _, err := websocket.DefaultDialer.Dial(u, nil)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		// drain server frames (mux keepalives) so a server write never stalls
 		go func() {
 			for {

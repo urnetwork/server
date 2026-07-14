@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
@@ -36,27 +36,27 @@ func TestAccountWallet(t *testing.T) {
 		result, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
 			Blockchain: "BTC",
 		}, ownerSession)
-		assert.Equal(t, result, nil)
-		assert.Equal(t, err, ErrInvalidBlockchain)
+		connect.AssertEqual(t, result, nil)
+		connect.AssertEqual(t, err, ErrInvalidBlockchain)
 
 		// invalid address
 		result, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
 			Blockchain:    "SOL",
 			WalletAddress: "1234",
 		}, ownerSession)
-		assert.Equal(t, result, nil)
-		assert.Equal(t, err, ErrInvalidWalletAddress)
+		connect.AssertEqual(t, result, nil)
+		connect.AssertEqual(t, err, ErrInvalidWalletAddress)
 
 		// should have 0 wallets associated with this session
 		walletResults, err := GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 0)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 0)
 
 		// payout wallet should be nil
 		payoutWalletId := model.GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, payoutWalletId, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, payoutWalletId, nil)
 
 		// success
 		wallet := &model.CreateAccountWalletExternalArgs{
@@ -65,20 +65,20 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		_, err = CreateAccountWalletExternal(wallet, ownerSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// should have 1 wallets associated with this session
 		walletResults, err = GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 1)
 
 		firstWalletId := walletResults.Wallets[0].WalletId
 
 		// check if a payout wallet has been created too
 		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, payoutWalletId, firstWalletId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, payoutWalletId, firstWalletId)
 
 		wallet2 := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "SOL",
@@ -86,17 +86,17 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		_, err = CreateAccountWalletExternal(wallet2, ownerSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		walletResults, err = GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 2)
 
 		// payout wallet should still be the first wallet
 		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, payoutWalletId, firstWalletId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, payoutWalletId, firstWalletId)
 
 		// fail with invalid wallet id string
 		toRemoveArgs := &model.RemoveWalletArgs{
@@ -104,14 +104,14 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		removeResult, err := RemoveWallet(toRemoveArgs, ownerSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult.Success, false)
-		assert.NotEqual(t, removeResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult.Success, false)
+		connect.AssertNotEqual(t, removeResult.Error, nil)
 
 		walletResults, err = GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 2)
 
 		// fail removing another users wallet
 		toRemoveId := walletResults.Wallets[0].WalletId
@@ -120,13 +120,13 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		removeResult, err = RemoveWallet(toRemoveArgs, nonOwnerSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult.Success, false)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult.Success, false)
 
 		walletResults, err = GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 2)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 2)
 
 		// successfully remove wallet (set active = false)
 		toRemoveArgs = &model.RemoveWalletArgs{
@@ -134,14 +134,14 @@ func TestAccountWallet(t *testing.T) {
 		}
 
 		removeResult, err = RemoveWallet(toRemoveArgs, ownerSession)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, removeResult.Success, true)
-		assert.Equal(t, removeResult.Error, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removeResult.Success, true)
+		connect.AssertEqual(t, removeResult.Error, nil)
 
 		walletResults, err = GetAccountWallets(ownerSession)
 
-		assert.Equal(t, err, nil)
-		assert.Equal(t, len(walletResults.Wallets), 1)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(walletResults.Wallets), 1)
 
 	})
 }
@@ -160,44 +160,44 @@ func TestSeekerNFTVerification(t *testing.T) {
 		 * Verify Saga NFT Holder
 		 */
 		result, err := heliusSearchAssetsSaga(ctx, sagaHolderPublicKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		isHolder := isSagaNftHolder(result.Result.Items)
-		assert.Equal(t, isHolder, true)
+		connect.AssertEqual(t, isHolder, true)
 
 		/**
 		 * Verify non Saga NFT Holder
 		 */
 		result, err = heliusSearchAssetsSaga(ctx, nonHolderPublicKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		isHolder = isSagaNftHolder(result.Result.Items)
-		assert.Equal(t, isHolder, false)
+		connect.AssertEqual(t, isHolder, false)
 
 		/**
 		 * Verify Seeker Preorder NFT Holder
 		 */
 		items, err := heliusSearchAssets(ctx, seekerPreorderHolderPublicKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		isHolder = isSeekerNftHolder(items)
-		assert.Equal(t, isHolder, true)
+		connect.AssertEqual(t, isHolder, true)
 
 		/**
 		 * Verify Seeker Genesis Holder
 		 */
 		items, err = heliusSearchAssets(ctx, seekerGenesisHolderPublicKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		isHolder = isSeekerNftHolder(items)
-		assert.Equal(t, isHolder, true)
+		connect.AssertEqual(t, isHolder, true)
 
 		/**
 		 * Verify non Seeker Preorder or Genesis NFT Holder
 		 */
 
 		items, err = heliusSearchAssets(ctx, nonHolderPublicKey)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		isHolder = isSeekerNftHolder(result.Result.Items)
-		assert.Equal(t, isHolder, false)
+		connect.AssertEqual(t, isHolder, false)
 
 	})
 }

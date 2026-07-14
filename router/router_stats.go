@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -98,7 +98,7 @@ func (self *RouterStats) run() {
 		routeStats := self.currentRouteStats()
 		self.cleanupRouteStats()
 
-		routes := maps.Keys(routeStats)
+		routes := slices.Collect(maps.Keys(routeStats))
 		slices.SortFunc(routes, func(a string, b string) int {
 			statsA := routeStats[a]
 			statsB := routeStats[b]

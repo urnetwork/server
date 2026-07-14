@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	// "slices"
 	// "sync"
 	"time"
 
 	// "encoding/json"
 
-	"golang.org/x/exp/maps"
+	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -826,7 +827,7 @@ func (self *PaymentPlanner) setWallets() {
 		self.ctx,
 		self.tx,
 		"temp_payment_network_ids(network_id uuid)",
-		maps.Keys(self.networkPayments)...,
+		slices.Collect(maps.Keys(self.networkPayments))...,
 	)
 
 	// note `account_wallet.network_id` must match the payment network,

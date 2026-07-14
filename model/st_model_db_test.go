@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"testing"
 	"time"
 
@@ -183,6 +184,36 @@ func TestStEventsDedupOrderAndHighWater(t *testing.T) {
 		SetStHighWaterBlock(ctx, 150)
 		if block := GetStHighWaterBlock(ctx); block != 150 {
 			t.Fatalf("high water = %d, want 150", block)
+		}
+	})
+}
+
+// SumStDepositedRao sums the `st_event` Deposited log for one (epoch, no),
+// filtering `kind = 'Deposited'` in SQL (served by st_event_kind_block) and the
+// epoch/no in Go from data_json. Guards that the kind filter excludes
+// non-Deposited events and that only the matching (epoch, no) deposits sum.
+func TestSumStDepositedRao(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		UpsertStEvents(ctx, []*StChainEvent{
+			// two deposits for (epoch 7, no 3) -> summed (100 + 250 = 350)
+			{BlockNumber: 10, LogIndex: 0, TxHash: "0x1", Kind: "Deposited", DataJson: `{"e":"7","no_id":"3","amount":"100"}`},
+			{BlockNumber: 11, LogIndex: 0, TxHash: "0x2", Kind: "Deposited", DataJson: `{"e":"7","no_id":"3","amount":"250"}`},
+			// different no, different epoch -> excluded by the Go epoch/no match
+			{BlockNumber: 12, LogIndex: 0, TxHash: "0x3", Kind: "Deposited", DataJson: `{"e":"7","no_id":"9","amount":"999"}`},
+			{BlockNumber: 13, LogIndex: 0, TxHash: "0x4", Kind: "Deposited", DataJson: `{"e":"8","no_id":"3","amount":"500"}`},
+			// a non-Deposited event with a matching-looking payload -> must be
+			// excluded by the `kind = 'Deposited'` filter, not summed
+			{BlockNumber: 14, LogIndex: 0, TxHash: "0x5", Kind: "HeadBound", DataJson: `{"e":"7","no_id":"3","amount":"1000000"}`},
+		})
+
+		if total := SumStDepositedRao(ctx, 7, 3); total.Cmp(big.NewInt(350)) != 0 {
+			t.Fatalf("SumStDepositedRao(7, 3) = %s, want 350", total.String())
+		}
+		// no deposits for this (epoch, no) -> zero
+		if total := SumStDepositedRao(ctx, 7, 100); total.Sign() != 0 {
+			t.Fatalf("SumStDepositedRao(7, 100) = %s, want 0", total.String())
 		}
 	})
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/go-playground/assert/v2"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/apikey"
 	"github.com/urnetwork/server/jwt"
@@ -31,20 +31,20 @@ func TestFetchNetworkByApiKey(t *testing.T) {
 
 		// create some api keys
 		key, err := apikey.Testing_CreateApiKey(networkId, ctx)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// fetch api key
 		network := apikey.GetNetworkByApiKey(key.ApiKey, ctx)
-		assert.NotEqual(t, network, nil)
-		assert.Equal(t, network.NetworkId, networkId)
-		assert.Equal(t, network.UserId, userId)
-		// assert.Equal(t, key1.ApiKeyId, key1Result.Id)
+		connect.AssertNotEqual(t, network, nil)
+		connect.AssertEqual(t, network.NetworkId, networkId)
+		connect.AssertEqual(t, network.UserId, userId)
+		// connect.AssertEqual(t, key1.ApiKeyId, key1Result.Id)
 
 		err = model.DeleteApiKey(&key.Id, userSession)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// attempt fetch deleted api key
 		keyDeleted := apikey.GetNetworkByApiKey(key.ApiKey, ctx)
-		assert.Equal(t, keyDeleted, nil)
+		connect.AssertEqual(t, keyDeleted, nil)
 	})
 }
