@@ -1,0 +1,1051 @@
+{
+  "uid": "urnetwork-redis-cluster",
+  "title": "urnetwork / redis cluster",
+  "description": "Redis cluster health: per-node (redis_exporter multi-target scrape, one series set per cluster node labeled node=<port>) and app-side connection pools (urnetwork_redis_pool_* pushed by the services). Alert rules for these panels are provisioned by the warp grafana service (warp/grafana/alerting/redis-cluster.yml).",
+  "tags": [
+    "urnetwork",
+    "redis"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(redis_up, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(redis_up{env=\"$env\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "node",
+        "label": "node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(redis_up{env=\"$env\",host=~\"$host\"}, node)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "cluster status",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "nodes up",
+      "description": "Cluster nodes whose exporter target reports redis_up == 1.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(min by (host, node) (redis_up{env=\"$env\"}) == 1) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "nodes down",
+      "description": "Cluster nodes reporting redis_up == 0. A node that stops being scraped entirely drops out of 'nodes up' instead.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(min by (host, node) (redis_up{env=\"$env\"}) == 0) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "cluster state not ok",
+      "description": "Nodes reporting CLUSTER INFO cluster_state != ok (redis_cluster_state < 1). Any nonzero value means the cluster is not serving all slots from this node's view.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(min by (host, node) (redis_cluster_state{env=\"$env\"}) < 1) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "bgsaves in progress",
+      "description": "Concurrent BGSAVE forks across the cluster (sum of redis_rdb_bgsave_in_progress). Sustained high counts (fork storm) compete for memory and disk io.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(redis_rdb_bgsave_in_progress{env=\"$env\"}) or on() vector(0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "per node",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "memory fill %",
+      "description": "redis_memory_used_bytes / redis_memory_max_bytes per node. Nodes with maxmemory unset (0) are hidden. Threshold lines at the 85% warn / 92% page alert levels.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 85
+              },
+              {
+                "color": "red",
+                "value": 92
+              }
+            ]
+          },
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * max by (host, node) (redis_memory_used_bytes{env=\"$env\",host=~\"$host\",node=~\"$node\"}) / max by (host, node) (redis_memory_max_bytes{env=\"$env\",host=~\"$host\",node=~\"$node\"} > 0)",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "avg command latency",
+      "description": "Per-node average command latency: rate(redis_commands_duration_seconds_total) / rate(redis_commands_processed_total). Idle nodes (no commands) are hidden. Threshold line at the 5ms wedged-node page level.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.005
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_commands_duration_seconds_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval])) / (sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval])) > 0)",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "ops / s",
+      "description": "Commands processed per second per node.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_commands_processed_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "connected clients",
+      "description": "Connected clients per node, plus the cluster total. The per-node client spike alert warns at 20000.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, node) (redis_connected_clients{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(redis_connected_clients{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "evicted + expired keys / s",
+      "description": "Key eviction rate (maxmemory pressure; any sustained eviction warns) and key expiry rate (normal ttl churn) per node.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (rate(redis_evicted_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "evicted {{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host, node) (rate(redis_expired_keys_total{env=\"$env\",host=~\"$host\",node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "expired {{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "lazyfree pending objects",
+      "description": "Objects queued for async free (UNLINK / lazyfree) per node. A growing backlog means frees are not keeping up with deletes; the alert warns above 1M. Threshold line at 1M.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1000000
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, node) (redis_lazyfree_pending_objects{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "bgsave concurrency + latest fork duration",
+      "description": "Concurrent BGSAVEs per host (left axis) and the latest fork duration per node (right axis, from latest_fork_usec). Long forks stall the node; many concurrent bgsaves on one host is a fork storm.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host) (redis_rdb_bgsave_in_progress{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "bgsave in progress {{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (host, node) (redis_latest_fork_seconds{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "latest fork {{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "keyspace size per node",
+      "description": "Keys per node (sum of redis_db_keys over dbs). Divergence between nodes shows slot/key skew; the skew alert warns when max/median > 1.5 for 30m.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, node) (redis_db_keys{env=\"$env\",host=~\"$host\",node=~\"$node\"})",
+          "legendFormat": "{{host}} {{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "app redis pool",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "pool timeouts / s by service",
+      "description": "go-redis pool timeouts per second by service (urnetwork_redis_pool_timeouts_total, pushed by the services). Any sustained nonzero rate means the app is waiting on pool connections and warns.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "pool conns by service",
+      "description": "go-redis pool connections by service: total open and idle (urnetwork_redis_pool_total_conns / urnetwork_redis_pool_idle_conns, summed over hosts).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (urnetwork_redis_pool_total_conns{env=\"$env\"})",
+          "legendFormat": "total {{service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (service) (urnetwork_redis_pool_idle_conns{env=\"$env\"})",
+          "legendFormat": "idle {{service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    }
+  ]
+}

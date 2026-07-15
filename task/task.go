@@ -1266,12 +1266,15 @@ func (self *TaskWorker) EvalTasks(n int) (
 						releaseTime := claimTime.Add(ReleaseTimeout)
 
 						for _, task := range tasks {
+							// GREATEST: the claim set release_time to cover the task's
+							// declared max runtime; a beat must never shorten that floor,
+							// or a starved extender re-opens the duplicate-claim window
 							batch.Queue(
 								`
 									UPDATE pending_task
 									SET
 										claim_time = $2,
-										release_time = $3
+										release_time = GREATEST(release_time, $3)
 									WHERE task_id = $1
 								`,
 								task.TaskId,

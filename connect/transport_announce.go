@@ -17,8 +17,14 @@ import (
 
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
-		SyncConnectionTimeout:    model.ReliabilityBlockDuration / 2,
-		LocationRetryTimeout:     5 * time.Minute,
+		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
+		LocationRetryTimeout:  5 * time.Minute,
+		// matches ExchangeResidentTtl: the resident heartbeat refreshes the
+		// registration on the same ttl
+		PeerRegisterTtl: 300 * time.Second,
+		// 2026-07-15: network peers disabled pending pubsub throughput
+		// redesign (see FOLLOWUP.md "network peers pubsub")
+		EnableNetworkPeers:       false,
 		MaxLatencyCount:          16,
 		MinTestTimeout:           12 * time.Hour,
 		MaxTestTimeout:           24 * time.Hour,
@@ -36,9 +42,14 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 type ConnectionAnnounceSettings struct {
 	SyncConnectionTimeout time.Duration
 	LocationRetryTimeout  time.Duration
-	MaxLatencyCount       int
-	MinTestTimeout        time.Duration
-	MaxTestTimeout        time.Duration
+	// ttl for the network peer registration made at announce
+	PeerRegisterTtl time.Duration
+	// mirrors ExchangeSettings.EnableNetworkPeers (2026-07-15: disabled
+	// pending pubsub throughput redesign)
+	EnableNetworkPeers bool
+	MaxLatencyCount    int
+	MinTestTimeout     time.Duration
+	MaxTestTimeout     time.Duration
 
 	LatencySampleWindowCount int
 	SpeedSampleWindowCount   int
@@ -292,6 +303,31 @@ func (self *ConnectionAnnounce) run() {
 		self.setLatencyWithLock()
 		self.setSpeedWithLock()
 	}()
+
+	// register this client in the network peer registry, now that the
+	// connection has survived the announce window. 2026-07-15 outage:
+	// registration used to run on the resident nomination hot path, where
+	// connection churn turned per-nomination publishes into a pubsub storm
+	// (subscriber output buffers pushed redis nodes to maxmemory) and the
+	// registry write then hung new connections against those full nodes.
+	// Announce-time registration means churny connections that die before
+	// announcing never publish a peer event at all. A failure here fails the
+	// announce and tears down the connection (announce's contract) — the
+	// panic propagates to run's HandleError cancel. Proxy clients do not pass
+	// through announce and register via the resident heartbeat alone.
+	// EnableNetworkPeers: see ExchangeSettings — network peers are disabled
+	// 2026-07-15 pending a pubsub throughput redesign.
+	if self.settings.EnableNetworkPeers {
+		peerNetworkId, topLevel, peerCategory, peerProfile, peersEnabled := model.GetNetworkPeerProfile(self.ctx, self.clientId)
+		if peersEnabled && topLevel && peerCategory != model.NetworkPeerCategoryProxy && peerProfile != nil {
+			// ttl 0: read-only lookup — extending the resident record's expiry
+			// is the resident keepalive's job, not the announce's
+			if resident := model.GetResidentForClient(self.ctx, self.clientId, 0); resident != nil {
+				model.AddNetworkPeer(self.ctx, peerNetworkId, peerProfile, resident.ResidentId, self.settings.PeerRegisterTtl)
+			}
+			// no resident nominated yet: the resident heartbeat registers it
+		}
+	}
 
 	// continuously measure the passive speed of the connection.
 	// active traffic proves the connection speed without a synthetic test.

@@ -434,58 +434,54 @@ func TestLoginWithWallet(t *testing.T) {
 	})
 }
 
-// TestWalletLoginNonceSingleUse verifies the wallet-login replay fix: a server-issued
-// nonce embedded in the signed message is single-use, so replaying a captured
-// (message, signature, nonce) triple is rejected the second time.
+// TestWalletLoginNonceSingleUse verifies the wallet-login replay protection: the
+// server-issued challenge embedded in the signed message is single-use, so
+// replaying a captured (message, signature) pair is rejected the second time.
+// (The legacy freetext-nonce flow was replaced by the structured
+// wallet_auth_challenge message; see FormatWalletAuthChallengeMessage.)
 func TestWalletLoginNonceSingleUse(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		wallet := solana.NewWallet()
 
-		nonceResult, err := AuthWalletNonceCreate(clientSession)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, nonceResult.Nonce, "")
+		challenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{}, ctx)
+		connect.AssertEqual(t, challenge.Error, nil)
+		connect.AssertNotEqual(t, challenge.MessageTemplate, "")
 
-		// the client signs a message that embeds the server-issued nonce
-		message := "Welcome to URnetwork " + nonceResult.Nonce
-		sig, err := wallet.PrivateKey.Sign([]byte(message))
+		// the client signs exactly the server-issued challenge message
+		sig, err := wallet.PrivateKey.Sign([]byte(challenge.MessageTemplate))
 		connect.AssertEqual(t, err, nil)
 
 		walletAuth := &WalletAuthArgs{
 			PublicKey:  wallet.PublicKey().String(),
 			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
-			Message:    message,
+			Message:    challenge.MessageTemplate,
 			Blockchain: AuthTypeSolana,
-			Nonce:      nonceResult.Nonce,
 		}
 
-		// first use: valid signature + valid nonce -> accepted (nonce consumed)
+		// first use: valid signature + fresh challenge -> accepted (challenge consumed)
 		_, err = handleLoginWallet(walletAuth, ctx)
 		connect.AssertEqual(t, err, nil)
 
-		// replay the identical triple: the nonce is already consumed -> rejected
+		// replay the identical pair: the challenge is already used -> rejected
 		_, err = handleLoginWallet(walletAuth, ctx)
 		connect.AssertNotEqual(t, err, nil)
 	})
 }
 
-// TestWalletLoginNonceMustBindMessage verifies that a supplied nonce must actually be
-// embedded in the signed message, so an attacker cannot pair a fresh nonce with an old
-// signature over a message that never committed to it.
+// TestWalletLoginNonceMustBindMessage verifies that the signed message must be a
+// challenge the server actually issued: a well-formed look-alike message whose
+// challenge value has no wallet_auth_challenge row is rejected, so an attacker
+// cannot pair a fresh signature with a fabricated challenge message.
 func TestWalletLoginNonceMustBindMessage(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		clientSession := session.Testing_CreateClientSession(ctx, nil)
 
 		wallet := solana.NewWallet()
 
-		nonceResult, err := AuthWalletNonceCreate(clientSession)
-		connect.AssertEqual(t, err, nil)
-
-		// the signed message does NOT contain the nonce
-		message := "Welcome to URnetwork"
+		// well-formed, but the server never issued this challenge value
+		message := FormatWalletAuthChallengeMessage("fabricated-challenge", server.NowUtc().Unix())
 		sig, err := wallet.PrivateKey.Sign([]byte(message))
 		connect.AssertEqual(t, err, nil)
 
@@ -494,7 +490,6 @@ func TestWalletLoginNonceMustBindMessage(t *testing.T) {
 			Signature:  base64.StdEncoding.EncodeToString(sig[:]),
 			Message:    message,
 			Blockchain: AuthTypeSolana,
-			Nonce:      nonceResult.Nonce,
 		}, ctx)
 		connect.AssertNotEqual(t, err, nil)
 	})

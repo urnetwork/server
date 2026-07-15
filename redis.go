@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -80,10 +81,15 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			panic(err)
 		}
 
-		readTimeout := 30 * time.Second
+		// fail fast: during the 2026-07-15 single-node wedges, the previous
+		// patient values (dial 30s, pool 5min, read 30s) queued goroutines for
+		// minutes per operation while they held pg transactions and connection
+		// handshakes — one sick node became a fleet-wide pileup. Bounded
+		// waits turn a wedge into quick, retryable errors instead.
+		readTimeout := 15 * time.Second
 		writeTimeout := 15 * time.Second
-		poolTimeout := 5 * time.Minute
-		dialTimeout := 30 * time.Second
+		poolTimeout := 15 * time.Second
+		dialTimeout := 5 * time.Second
 		dialRetries := 4
 
 		dialer := &net.Dialer{
@@ -164,6 +170,13 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 	}
 	return self.client
 }
+func (self *safeRedisClient) current() redis.UniversalClient {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+
+	return self.client
+}
+
 func (self *safeRedisClient) close() {
 	self.reset()
 }
@@ -180,6 +193,43 @@ func (self *safeRedisClient) reset() {
 }
 
 var safeClient = &safeRedisClient{}
+
+// pool stats flow to grafana via the default registry (see StartStatsPusher).
+// Timeouts is the earliest caller-side signal of a wedged node or exhausted
+// pool — it fires before user-visible failures.
+func init() {
+	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
+		return func() float64 {
+			client := safeClient.current()
+			if client == nil {
+				return 0
+			}
+			return f(client.PoolStats())
+		}
+	}
+	prometheus.MustRegister(
+		prometheus.NewCounterFunc(
+			prometheus.CounterOpts{Name: "urnetwork_redis_pool_hits_total", Help: "redis pool free-connection hits"},
+			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Hits) }),
+		),
+		prometheus.NewCounterFunc(
+			prometheus.CounterOpts{Name: "urnetwork_redis_pool_misses_total", Help: "redis pool misses (new dial needed)"},
+			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Misses) }),
+		),
+		prometheus.NewCounterFunc(
+			prometheus.CounterOpts{Name: "urnetwork_redis_pool_timeouts_total", Help: "redis pool timeouts (waited PoolTimeout without a free connection)"},
+			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Timeouts) }),
+		),
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{Name: "urnetwork_redis_pool_total_conns", Help: "redis pool total connections (all nodes)"},
+			poolStat(func(s *redis.PoolStats) float64 { return float64(s.TotalConns) }),
+		),
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{Name: "urnetwork_redis_pool_idle_conns", Help: "redis pool idle connections (all nodes)"},
+			poolStat(func(s *redis.PoolStats) float64 { return float64(s.IdleConns) }),
+		),
+	)
+}
 
 // resets the connection pool
 // call this after changes to the env
@@ -203,7 +253,28 @@ func isRedisConnectionError(err error) bool {
 		return true
 	} else if strings.Contains(m, "i/o timeout") {
 		return true
+	} else if strings.Contains(m, "connection reset by peer") {
+		return true
+	} else if strings.Contains(m, "cannot assign requested address") {
+		// client ephemeral ports exhausted by a redial storm; drains in ~60s
+		return true
+	} else if strings.Contains(m, "CLUSTERDOWN") {
+		// transient during failover elections (~node-timeout); NOT an OOM or
+		// slot-moved condition, those re-panic immediately
+		return true
+	} else if strings.Contains(m, "LOADING") {
+		// node restarting and loading its rdb
+		return true
+	} else if strings.Contains(m, "READONLY") {
+		// command routed to a replica mid-failover; retry after topology settles
+		return true
 	} else {
+		// NOT retryable, deliberately: "connection pool timeout" — pool
+		// exhaustion is local backpressure; a callback rerun re-enters the
+		// pool queue and re-issues all its commands, amplifying demand into
+		// livelock (observed: TestStream under a 16-conn pool), and reruns
+		// double-apply non-idempotent commands. Fail fast; outer layers
+		// (task backoff, request retry) shed the load instead.
 		return false
 	}
 }

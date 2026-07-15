@@ -177,6 +177,17 @@ type ExchangeSettings struct {
 
 	ExchangeResidentTtl time.Duration
 
+	// 2026-07-15: network peers DISABLED pending a pubsub throughput
+	// redesign. The per-resident listener model (one dedicated pubsub
+	// connection + a poll per connected top-level client) times churn-driven
+	// publish fanout structurally exceeds cluster pubsub capacity at fleet
+	// scale: stalled consumers stop reading their sockets for up to the 60s
+	// channel-send timeout, server-side output buffers accumulate across tens
+	// of thousands of subscriber connections, and the shard-channel owner
+	// nodes are pushed to maxmemory (2026-07-15 outage). Gates registration
+	// (announce), heartbeat refresh, teardown publish, and the listener.
+	EnableNetworkPeers bool
+
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
 
@@ -242,6 +253,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
 		ExchangeResidentTtl:                300 * time.Second,
+		EnableNetworkPeers:                 false,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -420,25 +432,11 @@ func (self *Exchange) NominateLocalResident(
 		instanceId,
 		residentId,
 	)
-	if resident.peerNetworkId != nil {
-		if resident.peerCategory == model.NetworkPeerCategoryProxy {
-			// proxy clients are counted but not visible peers
-			model.AddNetworkProxyPeer(
-				self.ctx,
-				*resident.peerNetworkId,
-				clientId,
-				self.settings.ExchangeResidentTtl,
-			)
-		} else {
-			model.AddNetworkPeer(
-				self.ctx,
-				*resident.peerNetworkId,
-				resident.peerProfile,
-				residentId,
-				self.settings.ExchangeResidentTtl,
-			)
-		}
-	}
+	// note: initial peer registration happens in ConnectionAnnounce.run once
+	// the connection survives the announce window (2026-07-15: registration
+	// on the nomination hot path melted pubsub under connection churn and
+	// hung nominations against memory-full redis nodes). The heartbeat below
+	// maintains and re-adds the registration for the resident's lifetime.
 	go server.HandleError(func() {
 		defer func() {
 			cleanupCtx := context.Background()
@@ -447,7 +445,10 @@ func (self *Exchange) NominateLocalResident(
 				clientId,
 				resident.residentId,
 			)
-			if resident.peerNetworkId != nil {
+			// RemoveNetworkPeer no-ops (no publish) when this resident never
+			// registered, so churny residents that died before announcing
+			// emit nothing here
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -531,10 +532,12 @@ func (self *Exchange) NominateLocalResident(
 			// `ForwardIdleTimeout`), and without a refresh the registration
 			// expires after `ExchangeResidentTtl` and other residents prune
 			// it to a disconnect marker, bounding disconnect detection.
-			if resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
 				server.HandleError(func() {
 					if resident.peerCategory == model.NetworkPeerCategoryProxy {
-						// AddNetworkProxyPeer doubles as the heartbeat
+						// AddNetworkProxyPeer doubles as the heartbeat, and is
+						// also the initial proxy registration (proxy clients
+						// do not pass through ConnectionAnnounce)
 						model.AddNetworkProxyPeer(self.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 						return
 					}
@@ -2110,7 +2113,7 @@ func (self *Resident) Run() {
 	// The listener sends the complete list on subscribe (reset) and diffs
 	// after. Proxy clients are counted but not subscribed — a hosted device
 	// does not consume the peer list.
-	if self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
+	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,
 			*self.peerNetworkId,

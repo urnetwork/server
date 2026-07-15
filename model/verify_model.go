@@ -239,6 +239,9 @@ func verifyClientEgressKey(clientId server.Id) string {
 
 const verifyEligibleKey = "verify_eligible"
 
+// refreshed on every eligibility grant; see updateVerifyEligibleMembership
+const verifyEligibleKeyTtl = 30 * 24 * time.Hour
+
 func verifyEligibilityTokenKey(clientId server.Id) string {
 	return fmt.Sprintf("{velig_%s}", clientId)
 }
@@ -458,6 +461,12 @@ func updateVerifyEligibleMembership(
 	server.Redis(ctx, func(r server.RedisClient) {
 		if eligible {
 			r.SAdd(ctx, verifyEligibleKey, clientId.String())
+			// hygiene bound only: the whole set drops after 30d without a
+			// single eligibility grant (i.e., the system is effectively off)
+			// and rebuilds organically from announce-path re-checks. Member
+			// staleness is handled by the sampled-stale removal at sampling
+			// time; without a ttl this key is unevictable under volatile-ttl.
+			r.Expire(ctx, verifyEligibleKey, verifyEligibleKeyTtl)
 		} else {
 			r.SRem(ctx, verifyEligibleKey, clientId.String())
 		}

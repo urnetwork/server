@@ -175,6 +175,15 @@ func clientStreamHopsKey(clientId server.Id) string {
 	return fmt.Sprintf("{%s}s2_c_hops", clientId)
 }
 
+// the event id counter must outlive any live listener's memory of the last
+// event id (hops carry an 8h ttl; a counter reset while listeners hold a
+// higher id would make new events look stale). Refreshed on every touch, it
+// only expires after 24h of total silence for the client — at which point the
+// hops key is long gone and listeners resync from an empty snapshot.
+// Without a ttl these counters accumulate forever (one per client that ever
+// appeared on a stream hop) and volatile-ttl eviction cannot touch them.
+const clientEventIdTtl = 24 * time.Hour
+
 func clientEventIdKey(clientId server.Id) string {
 	return fmt.Sprintf("{%s}s2_c_eid", clientId)
 }
@@ -290,6 +299,7 @@ func AddToStream(
 					pipe.SPublish(ctx, clientStreamHopEvents(clientId), eventBytes)
 
 					pipe.Expire(ctx, streamHopsKey, ttl)
+					pipe.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
 					_, err = pipe.Exec(ctx)
 					if err != nil {
 						panic(err)
@@ -299,6 +309,7 @@ func AddToStream(
 				for clientId, _ := range streamKey.Edges() {
 					streamHopsKey := clientStreamHopsKey(clientId)
 					r.Expire(ctx, streamHopsKey, ttl)
+					r.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
 				}
 			}
 		}
@@ -407,6 +418,7 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) (streamId serve
 					eventBytes := buf.Bytes()
 					pipe.SPublish(ctx, clientStreamHopEvents(clientId), eventBytes)
 
+					pipe.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
 					_, err = pipe.Exec(ctx)
 					if err != nil {
 						panic(err)
@@ -423,8 +435,8 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) (streamId serve
 func GetStream(ctx context.Context, contractId server.Id) (streamId server.Id, key streamKey, ok bool) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
-		streamIdCmd := r.Get(ctx, contractStreamId(contractId))
-		streamKeyCmd := r.Get(ctx, contractStreamKey(contractId))
+		streamIdCmd := pipe.Get(ctx, contractStreamId(contractId))
+		streamKeyCmd := pipe.Get(ctx, contractStreamKey(contractId))
 		_, err := pipe.Exec(ctx)
 		if err == server.RedisNil {
 			return

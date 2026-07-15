@@ -831,6 +831,9 @@ func pruneNetworkPeers(ctx context.Context, r server.RedisClient, networkId serv
 				Member: member,
 			})
 		}
+		// the ZAdd above can create the disconnected key (Expire in add/refresh
+		// is a no-op on a missing key), which would otherwise live ttl-less
+		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
 		_, err := pipe.Exec(ctx)
 		if err != nil {
 			panic(err)

@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strconv"
 	"strings"
@@ -1055,26 +1056,33 @@ func StHeadBoundCkeysFromEvents(events []StHeadEvent, startBlock uint64, closeBl
 }
 
 // GetStContributingClientCkeys batch-reads the client public key (ckey) for
-// each client_id in one Redis MGET (reusing the ckey_<clientId> layout of
+// each client_id (reusing the ckey_<clientId> layout of
 // network_client_key_model.go), so the epoch-close head-tier exclusion can
 // resolve client_id -> ckey without a per-client round trip. Clients with no
 // published key, or a key that is not 32 bytes, are omitted.
+// The ckey_ keys carry no shared hash tag, so a single MGET cannot span them
+// on the cluster (CROSSSLOT); a plain pipeline auto-routes each GET per slot.
 func GetStContributingClientCkeys(ctx context.Context, clientIds []server.Id) map[server.Id][32]byte {
 	ckeys := map[server.Id][32]byte{}
 	if len(clientIds) == 0 {
 		return ckeys
 	}
-	keys := make([]string, len(clientIds))
-	for i, clientId := range clientIds {
-		keys[i] = clientPublicKeyRedisKey(clientId)
-	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		values, err := r.MGet(ctx, keys...).Result()
-		server.Raise(err)
-		for i, value := range values {
-			// go-redis returns a string on hit, nil on miss
-			raw, ok := value.(string)
-			if !ok || len(raw) != 32 {
+		cmds := make([]*redis.StringCmd, len(clientIds))
+		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for i, clientId := range clientIds {
+				cmds[i] = pipe.Get(ctx, clientPublicKeyRedisKey(clientId))
+			}
+			return nil
+		})
+		// Pipelined surfaces redis.Nil when any key is missing; misses are
+		// expected and read per command below
+		if err != nil && !errors.Is(err, redis.Nil) {
+			server.Raise(err)
+		}
+		for i, cmd := range cmds {
+			raw, err := cmd.Result()
+			if err != nil || len(raw) != 32 {
 				continue
 			}
 			var ckey [32]byte

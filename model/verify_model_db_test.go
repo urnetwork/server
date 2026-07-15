@@ -536,6 +536,10 @@ func TestSampleVerifyNextHop(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := DefaultVerifySettings() // EligibilityBurst = 2
+		// D26: the default EligibilityInterval of 0 disables the token bucket
+		// (every provider always assignable). Force the bucket ON so this test
+		// keeps covering the §5.3 burst accounting.
+		settings.EligibilityInterval = time.Minute
 
 		providerA, providerB := server.NewId(), server.NewId()
 		testVerifySetProvideModes(ctx, providerA)

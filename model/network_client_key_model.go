@@ -46,11 +46,14 @@ func SetClientPublicKey(
 	publicKey []byte,
 ) {
 	server.Redis(ctx, func(r server.RedisClient) {
+		// redis is the source of truth for ckeys (accepted posture: an
+		// unrouteable resident gets a new one nominated), so a failed publish
+		// must raise rather than silently drop the client's key
 		if 0 < len(publicKey) {
 			// expiration = 0 → never expires
-			r.Set(ctx, clientPublicKeyRedisKey(clientId), publicKey, 0)
+			server.Raise(r.Set(ctx, clientPublicKeyRedisKey(clientId), publicKey, 0).Err())
 		} else {
-			r.Del(ctx, clientPublicKeyRedisKey(clientId))
+			server.Raise(r.Del(ctx, clientPublicKeyRedisKey(clientId)).Err())
 		}
 	})
 }
