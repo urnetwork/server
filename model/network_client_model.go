@@ -27,6 +27,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 	// "github.com/urnetwork/server/ulid"
 	// "github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/connect"
@@ -702,6 +703,230 @@ func RemoveNetworkClient(
 	})
 
 	return removeClientResult, removeClientErr
+}
+
+// matches the batch size `RemoveDisconnectedNetworkClients` already uses for
+// bounded maintenance sweeps of this same table (see `markTopLevelBatchCount`
+// above): large enough to make a real dent per transaction, small enough that
+// no single transaction runs long or holds locks for long.
+const RemoveNetworkClientsBatchCount = 10000
+
+func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) {
+	_, err := tx.Exec(
+		ctx,
+		`
+			UPDATE network_client
+			SET
+				active = false,
+				deactivate_time = $3
+			WHERE
+				client_id = ANY($1) AND
+				network_id = $2
+		`,
+		clientIds,
+		networkId,
+		server.NowUtc(),
+	)
+	server.Raise(err)
+}
+
+type RemoveNetworkClientsBatchArgs struct {
+	ClientIds []server.Id `json:"client_ids"`
+}
+
+type RemoveNetworkClientsBatchResult struct{}
+
+// RemoveNetworkClientsBatch deactivates up to RemoveNetworkClientsBatchCount
+// clients in a single transaction on the regular request pool. Callers with
+// more ids than that should go through RemoveNetworkClients, which routes
+// large requests to the background task instead of calling this directly.
+// TxReadCommitted matches RemoveDisconnectedNetworkClients's isolation level
+// for this same table, avoiding serialization-failure panics under
+// concurrent overlapping updates that the pool's default isolation would risk.
+func RemoveNetworkClientsBatch(
+	removeClients *RemoveNetworkClientsBatchArgs,
+	session *session.ClientSession,
+) (*RemoveNetworkClientsBatchResult, error) {
+	server.Tx(session.Ctx, func(tx server.PgTx) {
+		removeNetworkClientsBatchExec(session.Ctx, tx, removeClients.ClientIds, session.ByJwt.NetworkId)
+	}, server.TxReadCommitted)
+	return &RemoveNetworkClientsBatchResult{}, nil
+}
+
+// outer sanity bound on a single request's payload, not a realistic
+// operating limit (the known real-world case is ~400k-1M): guards against an
+// unbounded/malformed request forcing an arbitrarily large synchronous
+// json.Marshal + single-row task args_json write in RemoveNetworkClients, and
+// against an unbounded in-memory slice being held for the life of a task.
+const MaxRemoveNetworkClientsCount = 5000000
+
+type RemoveNetworkClientsArgs struct {
+	ClientIds []server.Id `json:"client_ids"`
+}
+
+type RemoveNetworkClientsResult struct {
+	// true if the request was handed off to the background task instead of
+	// being applied synchronously; deactivation is not yet guaranteed
+	// complete when this is true
+	Scheduled bool `json:"scheduled,omitempty"`
+	// true if a background bulk-delete run for this network was already in
+	// progress, so this request's ids were NOT scheduled; the caller should
+	// wait for the in-progress run to finish and retry
+	AlreadyInProgress bool `json:"already_in_progress,omitempty"`
+}
+
+// runNetworkClientsTaskKey is the run_once key scoping "one background
+// bulk-delete run per network at a time". It's shared between the initial
+// schedule in RemoveNetworkClients and the continuation reschedule in
+// RemoveNetworkClientsTaskPost, so the key stays held for the full duration
+// of a (possibly multi-invocation) run, not just its first invocation.
+func runNetworkClientsTaskKey(networkId server.Id) *task.RunOnceOption {
+	return task.RunOnce("model.RemoveNetworkClientsTask", networkId)
+}
+
+// RemoveNetworkClients deactivates the given clients, scoped to the caller's
+// network. Small requests are applied synchronously in one transaction.
+// Requests larger than RemoveNetworkClientsBatchCount are handed off to
+// RemoveNetworkClientsTask, a background task that processes the full list in
+// bounded batches, so a single call can clear a network with hundreds of
+// thousands (or millions) of offline clients without holding a long-running
+// transaction on the request path or forcing the caller to chunk the request
+// themselves.
+func RemoveNetworkClients(
+	removeClients *RemoveNetworkClientsArgs,
+	session *session.ClientSession,
+) (*RemoveNetworkClientsResult, error) {
+	if len(removeClients.ClientIds) == 0 {
+		return &RemoveNetworkClientsResult{}, nil
+	}
+	if MaxRemoveNetworkClientsCount < len(removeClients.ClientIds) {
+		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
+	}
+
+	if len(removeClients.ClientIds) <= RemoveNetworkClientsBatchCount {
+		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
+			ClientIds: removeClients.ClientIds,
+		}, session)
+		if err != nil {
+			return nil, err
+		}
+		return &RemoveNetworkClientsResult{}, nil
+	}
+
+	// one background bulk-delete run per network at a time.
+	// ScheduleTaskInTxIfAbsent (unlike plain ScheduleTask+RunOnce) makes the
+	// "only if not already pending" check atomic with the insert -- a single
+	// `INSERT ... ON CONFLICT (run_once_key) DO NOTHING`, reporting whether
+	// the row was actually inserted. This closes the race a naive
+	// check-then-act would have: with check-then-act, two near-simultaneous
+	// requests for the same network could both pass the check, and the
+	// second's schedule call would then hit ON CONFLICT DO UPDATE -- which
+	// merges only timing/priority into the existing row, NOT args_json --
+	// silently dropping the second call's client_ids while still reporting
+	// success. The atomic insert-or-detect-conflict here means a duplicate
+	// is always rejected outright, never silently swallowed.
+	scheduled, _ := task.ScheduleTaskIfAbsent(
+		RemoveNetworkClientsTask,
+		&RemoveNetworkClientsTaskArgs{
+			ClientIds: removeClients.ClientIds,
+		},
+		session,
+		runNetworkClientsTaskKey(session.ByJwt.NetworkId),
+		// bulk cleanup must never compete with revenue/critical-path tasks
+		// (payouts, contract close) under multi-tenant load
+		task.Priority(task.TaskPrioritySlowest),
+		task.MaxTime(30*time.Minute),
+	)
+	if !scheduled {
+		return &RemoveNetworkClientsResult{AlreadyInProgress: true}, nil
+	}
+
+	return &RemoveNetworkClientsResult{Scheduled: true}, nil
+}
+
+// number of batches processed per RemoveNetworkClientsTask invocation before
+// it self-reschedules the remainder (see RemoveNetworkClientsTaskPost),
+// instead of looping over the entire list in one invocation. This bounds
+// three things: (1) a single invocation's duration stays well inside
+// MaxTime regardless of total list size, (2) if an invocation is retried
+// after a crash/timeout, it only re-attempts this bounded chunk, not the
+// entire original list, so a run makes durable checkpointed progress instead
+// of restarting from the beginning every retry, and (3) a persistently
+// failing chunk only blocks its own continuation, not the network's ability
+// to ever complete a bulk delete.
+const RemoveNetworkClientsTaskBatchLimit = 20
+
+type RemoveNetworkClientsTaskArgs struct {
+	ClientIds []server.Id `json:"client_ids"`
+}
+
+type RemoveNetworkClientsTaskResult struct {
+	// ids not yet processed by this invocation; if non-empty,
+	// RemoveNetworkClientsTaskPost reschedules them as a new task under the
+	// same run_once key
+	RemainingClientIds []server.Id `json:"remaining_client_ids,omitempty"`
+}
+
+// RemoveNetworkClientsTask is the background counterpart to
+// RemoveNetworkClients for requests larger than RemoveNetworkClientsBatchCount.
+// It runs on the taskworker service (not the live request pool) and processes
+// up to RemoveNetworkClientsTaskBatchLimit batches of
+// RemoveNetworkClientsBatchCount ids, each its own short server.MaintenanceTx
+// transaction at TxReadCommitted, mirroring the batching and isolation level
+// RemoveDisconnectedNetworkClients already uses for this table. The update is
+// idempotent, so a retried or re-run invocation is safe.
+func RemoveNetworkClientsTask(
+	removeClients *RemoveNetworkClientsTaskArgs,
+	session *session.ClientSession,
+) (*RemoveNetworkClientsTaskResult, error) {
+	clientIds := removeClients.ClientIds
+	batches := 0
+	for 0 < len(clientIds) && batches < RemoveNetworkClientsTaskBatchLimit {
+		batchCount := RemoveNetworkClientsBatchCount
+		if len(clientIds) < batchCount {
+			batchCount = len(clientIds)
+		}
+		batch := clientIds[:batchCount]
+		clientIds = clientIds[batchCount:]
+
+		server.MaintenanceTx(session.Ctx, func(tx server.PgTx) {
+			removeNetworkClientsBatchExec(session.Ctx, tx, batch, session.ByJwt.NetworkId)
+		}, server.TxReadCommitted)
+		batches += 1
+	}
+
+	return &RemoveNetworkClientsTaskResult{
+		RemainingClientIds: clientIds,
+	}, nil
+}
+
+// RemoveNetworkClientsTaskPost reschedules any remainder left by
+// RemoveNetworkClientsTask under the SAME run_once key as the original
+// request, so the "one run per network" guarantee holds for the full
+// duration of a multi-invocation run and not just its first invocation --
+// otherwise the key would free up as soon as the first chunk finished, even
+// though most of the list might still be unprocessed, and a second
+// concurrent request would incorrectly be allowed through.
+func RemoveNetworkClientsTaskPost(
+	removeClients *RemoveNetworkClientsTaskArgs,
+	result *RemoveNetworkClientsTaskResult,
+	session *session.ClientSession,
+	tx server.PgTx,
+) error {
+	if 0 < len(result.RemainingClientIds) {
+		task.ScheduleTaskInTx(
+			tx,
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{
+				ClientIds: result.RemainingClientIds,
+			},
+			session,
+			runNetworkClientsTaskKey(session.ByJwt.NetworkId),
+			task.Priority(task.TaskPrioritySlowest),
+			task.MaxTime(30*time.Minute),
+		)
+	}
+	return nil
 }
 
 type NetworkClientsResult struct {

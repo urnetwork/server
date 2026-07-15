@@ -6,6 +6,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -153,6 +154,10 @@ func InitTaskWorker(ctx context.Context) *task.TaskWorker {
 		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,
 			work.SweepOrphanNetworkClientDataPost,
+		),
+		task.NewTaskTargetWithPost(
+			model.RemoveNetworkClientsTask,
+			model.RemoveNetworkClientsTaskPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SweepOrphanContractData,

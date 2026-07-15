@@ -53,6 +53,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/auth/generate-seedphrase", handlers.AuthGenerateSeedphrase),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
+		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
