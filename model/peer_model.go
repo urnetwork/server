@@ -1033,14 +1033,6 @@ type NetworkPeersError struct {
 // network-level non-guest sessions (all peers) and top-level client sessions
 // (peers excluding self). Reads only the redis peer registry.
 func GetNetworkPeersForSession(session *session.ClientSession) (*NetworkPeersResult, error) {
-	if session.ByJwt.GuestMode {
-		return &NetworkPeersResult{
-			Error: &NetworkPeersError{
-				Message: "Not allowed.",
-			},
-		}, nil
-	}
-
 	var selfClientId *server.Id
 	if session.ByJwt.ClientId != nil {
 		// only top-level clients have peers

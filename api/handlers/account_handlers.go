@@ -39,3 +39,11 @@ func UnlinkReferralNetwork(w http.ResponseWriter, r *http.Request) {
 func GetNetworkRedeemedBalanceCodes(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetNetworkRedeemedBalanceCodes, w, r)
 }
+
+func ChangeNetworkName(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ChangeNetworkName, w, r)
+}
+
+func ClaimNetworkName(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ClaimNetworkName, w, r)
+}

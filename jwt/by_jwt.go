@@ -160,6 +160,7 @@ type ByJwt struct {
 	CreateTime  time.Time  `json:"create_time,omitempty"`
 	DeviceId    *server.Id `json:"device_id,omitempty"`
 	ClientId    *server.Id `json:"client_id,omitempty"`
+	// Deprecated: always false for new tokens. Field kept for backward compat with existing guest JWTs.
 	GuestMode   bool       `json:"guest_mode,omitempty"`
 	Pro         bool       `json:"pro,omitempty"`
 	// identity roles and principal, assigned at client or auth code creation.

@@ -889,7 +889,7 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
-		isGuestMode := (authType == AuthTypeGuest)
+		isGuestMode := false
 
 		isPro := IsPro(
 			clientSession.Ctx,

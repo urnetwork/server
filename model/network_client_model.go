@@ -197,7 +197,7 @@ func validateClientIdentityArgs(
 	session *session.ClientSession,
 ) (resolvedRoles []string, resolvedPrincipal string, message string) {
 	if 0 < len(roles) || principal != "" {
-		if session.ByJwt.GuestMode || session.ByJwt.ClientId != nil {
+		if session.ByJwt.ClientId != nil {
 			message = "Roles and principal can only be assigned by a network session."
 			return
 		}
