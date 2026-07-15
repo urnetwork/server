@@ -11,6 +11,7 @@ import (
 	// "github.com/urnetwork/glog"
 
 	goaway "github.com/TwiN/go-away"
+	bip39 "github.com/tyler-smith/go-bip39"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -81,7 +82,6 @@ type NetworkCreateArgs struct {
 	Password         *string         `json:"password,omitempty"`
 	NetworkName      string          `json:"network_name"`
 	Terms            bool            `json:"terms"`
-	GuestMode        bool            `json:"guest_mode"`
 	VerifyUseNumeric bool            `json:"verify_use_numeric"`
 	ReferralCode     *string         `json:"referral_code,omitempty"`
 	BalanceCode      *string         `json:"balance_code,omitempty"`
@@ -100,6 +100,7 @@ type UpgradeGuestArgs struct {
 type NetworkCreateResult struct {
 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
 	UserAuth             *string                          `json:"user_auth,omitempty"`
+	Seedphrase           *string                          `json:"seedphrase,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
 	IsPro                bool                             `json:"is_pro,omitempty"`
@@ -170,41 +171,51 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	// create a guest network
-	if networkCreate.GuestMode {
+	// seedphrase creation: no auth method provided
+	if networkCreate.UserAuth == nil && networkCreate.AuthJwt == nil && networkCreate.WalletAuth == nil {
 
-		resultNetworkCreate := networkCreateGuest(session.Ctx)
+		validatedNetworkName, err := generateRandomNetworkName()
+		if err != nil {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Failed to generate network name.",
+				},
+			}
+			return result, nil
+		}
+
+		resultNetworkCreate := networkCreateSeedphrase(
+			session.Ctx,
+			&networkCreate,
+			validatedNetworkName,
+		)
 
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-			// we should disable adding the guest network to name search?
-			// networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
-
 			isPro := false
-			isGuest := true
-
 			byJwt := jwt.NewByJwt(
 				resultNetworkCreate.NetworkId,
 				resultNetworkCreate.UserId,
-				networkCreate.NetworkName,
-				isGuest,
+				validatedNetworkName,
+				false,
 				isPro,
 			)
 			byJwtSigned := byJwt.Sign()
 			result := &NetworkCreateResult{
+				Seedphrase: &resultNetworkCreate.Seedphrase,
 				Network: &NetworkCreateResultNetwork{
 					ByJwt:       &byJwtSigned,
-					NetworkName: resultNetworkCreate.NetworkName,
+					NetworkName: validatedNetworkName,
 					NetworkId:   resultNetworkCreate.NetworkId,
+					IsPro:       resultNetworkCreate.IsPro,
 				},
 			}
-
 			return result, nil
 		} else {
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message: "An error occurred creating a guest network",
+					Message: "Account might already exist. Please start over.",
 				},
 			}
 			return result, nil
@@ -483,6 +494,7 @@ type networkCreateResult struct {
 	NetworkId   server.Id
 	NetworkName string
 	UserId      server.Id
+	Seedphrase  string
 	IsPro       bool
 }
 
@@ -838,6 +850,87 @@ func networkCreateUserAuth(
 		IsPro:       isPro,
 	}
 
+}
+
+/**
+ * network create seedphrase
+ */
+func networkCreateSeedphrase(
+	ctx context.Context,
+	networkCreate *NetworkCreateArgs,
+	validatedNetworkName string,
+) networkCreateResult {
+	created := false
+	var createdNetworkId server.Id
+	var createdUserId server.Id
+	var seedphrase string
+	isPro := false
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		// generate seedphrase
+		entropy, err := bip39.NewEntropy(256)
+		server.Raise(err)
+		seedphrase, err = bip39.NewMnemonic(entropy)
+		server.Raise(err)
+
+		_, err = tx.Exec(
+			ctx,
+			`INSERT INTO network_user (user_id, user_name, auth_type)
+			 VALUES ($1, $2, $3)`,
+			createdUserId, validatedNetworkName, AuthTypeSeedphrase,
+		)
+		server.Raise(err)
+
+		err = CreateSeedphraseAuthInTx(tx, ctx, createdUserId, seedphrase)
+		server.Raise(err)
+
+		// if SSO provided, bind it too
+		if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
+			authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+			if authJwt != nil {
+				err = addSsoAuthInTx(
+					tx, ctx,
+					&AddSsoAuthArgs{
+						UserId:        createdUserId,
+						AuthJwt:       *networkCreate.AuthJwt,
+						ParsedAuthJwt: *authJwt,
+						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
+					},
+				)
+				if err != nil {
+					glog.Infof("[net]seedphrase create + sso bind error: %s\n", err)
+				}
+			}
+		}
+
+		_, err = tx.Exec(
+			ctx,
+			`INSERT INTO network (network_id, network_name, admin_user_id)
+			 VALUES ($1, $2, $3)`,
+			createdNetworkId, validatedNetworkName, createdUserId,
+		)
+		server.Raise(err)
+
+		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		isPro = networkCreateRedeemBalanceCodeInTx(
+			networkCreate, createdNetworkId, ctx, tx,
+		)
+
+		created = true
+	})
+
+	return networkCreateResult{
+		Created:     created,
+		NetworkId:   createdNetworkId,
+		NetworkName: validatedNetworkName,
+		UserId:      createdUserId,
+		Seedphrase:  seedphrase,
+		IsPro:       isPro,
+	}
 }
 
 /**
