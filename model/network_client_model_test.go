@@ -898,6 +898,147 @@ func TestRemoveNetworkClientsTaskIsIdempotentOnRetry(t *testing.T) {
 	})
 }
 
+// RemoveNetworkClientsTask must fail loudly (not panic on a nil dereference
+// inside a MaintenanceTx) if it's ever run with a session that has no
+// ByJwt -- unreachable in the normal flow (always scheduled from an
+// authenticated handler), but the task can outlive the request that
+// scheduled it, so this guards against a corrupted/reconstructed session.
+func TestRemoveNetworkClientsTaskRejectsNilByJwt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: nil,
+		}
+
+		_, err := RemoveNetworkClientsTask(&RemoveNetworkClientsTaskArgs{
+			ClientIds: []server.Id{server.NewId()},
+		}, sess)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// A request of exactly RemoveNetworkClientsBatchCount ids must still take
+// the synchronous path (the boundary is "<=", not "<").
+func TestRemoveNetworkClientsExactlyAtBatchCountIsSynchronous(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount)
+		clientIds[0] = clientId
+		for i := 1; i < len(clientIds); i++ {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, false)
+
+		// already applied synchronously, not enqueued
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A request of exactly MaxRemoveNetworkClientsCount ids must be accepted
+// (the boundary is "> max is rejected", not ">="). This only exercises
+// scheduling (one INSERT), not actually running the task, since processing
+// 2M ids isn't practical inside a unit test.
+func TestRemoveNetworkClientsExactlyAtCapIsAccepted(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// zero-value ids are fine: this only tests that scheduling itself is
+		// accepted at exactly the cap, not that the ids get processed
+		clientIds := make([]server.Id, MaxRemoveNetworkClientsCount)
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+	})
+}
+
+// RemoveNetworkClientsTaskPost, tested directly and in isolation (not
+// through a full task.TaskWorker run, which the slow real-worker lifecycle
+// test above already covers end-to-end): a non-empty RemainingClientIds must
+// result in exactly one new pending task, scheduled under the same run_once
+// key as the original request; an empty RemainingClientIds must schedule
+// nothing at all.
+func TestRemoveNetworkClientsTaskPostReschedulesRemainder(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		remainingClientIds := []server.Id{server.NewId(), server.NewId()}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			err := RemoveNetworkClientsTaskPost(
+				&RemoveNetworkClientsTaskArgs{ClientIds: remainingClientIds},
+				&RemoveNetworkClientsTaskResult{RemainingClientIds: remainingClientIds},
+				sess,
+				tx,
+			)
+			assert.Equal(t, err, nil)
+		})
+
+		// the reschedule must be blocked by the run_once key (same key the
+		// original request would have used), proving the continuation was
+		// scheduled under it
+		scheduledAgain, _ := task.ScheduleTaskIfAbsent(
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+			sess,
+			runNetworkClientsTaskKey(networkId),
+		)
+		assert.Equal(t, scheduledAgain, false)
+
+		// a DIFFERENT network's key must be unaffected
+		otherNetworkId := server.NewId()
+		otherSess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: otherNetworkId},
+		}
+		scheduledOther, _ := task.ScheduleTaskIfAbsent(
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+			otherSess,
+			runNetworkClientsTaskKey(otherNetworkId),
+		)
+		assert.Equal(t, scheduledOther, true)
+	})
+}
+
 // A caller must not be able to deactivate another network's clients by
 // passing their ids in the request body: `network_id = $2` in the query
 // must be enforced server-side from the session, not trusted from input.
