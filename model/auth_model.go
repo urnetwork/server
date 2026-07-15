@@ -58,6 +58,7 @@ type AuthLoginArgs struct {
 	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
 	AuthJwt     *string         `json:"auth_jwt,omitempty"`
 	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
+	Seedphrase  *string         `json:"seedphrase,omitempty"`
 }
 
 type AuthLoginResult struct {
@@ -156,7 +157,16 @@ func AuthLogin(
 			login.WalletAuth,
 			session.Ctx,
 		)
-
+	} else if login.Seedphrase != nil && *login.Seedphrase != "" {
+		result, err := LoginWithSeedphrase(session.Ctx, *login.Seedphrase)
+		if err != nil {
+			return nil, err
+		}
+		return &AuthLoginResult{
+			Network: &AuthLoginResultNetwork{
+				ByJwt: result.ByJwt,
+			},
+		}, nil
 	}
 
 	return nil, errors.New("invalid login")
