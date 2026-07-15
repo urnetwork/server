@@ -176,6 +176,15 @@ inline comments referenced below.
   predicates (`net.Error`, `errors.Is`); `MigrateProvideMode` unbounded
   per-client goroutine fan-out (`network_client_model.go:1296`).
 
+- [ ] **API spec drift backlog**: `TestSpecConformance` logs ~30 informational
+  drift entries — impl fields absent from `connect/api/bringyour.yml`
+  (wallet_auth.wallet_nonce, stats lookback args, proxy_config initial device
+  state/location fields, error.upgrade_required, balance pro flag, device
+  association fields, ...). Not failures (spec ⊆ impl holds), but the public
+  spec lags the implementation. Sweep bringyour.yml against the drift log.
+  (The one hard mismatch — spec-only `providers[].provide_mode`, never
+  implemented — was removed from the spec 2026-07-15.)
+
 ## 3. Redis topology — second host + replicas (committed direction)
 
 Groundwork already in the tree: `cluster-announce-ip {{ redis_lan_ip }}` in
@@ -269,5 +278,12 @@ wedge/crash class that caused every CLUSTERDOWN today.
 - [ ] After ansible + grafana deploy: redis-cluster dashboard populates for
   all 32 nodes (`node` label 6380-6411), alerts visible in the "urnetwork
   alerts" folder.
-- [ ] Pre-existing test failures (not from this work): `TestWalletLoginNonceSingleUse`,
-  `TestSampleVerifyNextHop` — triage separately.
+- [x] Pre-existing test failures — ALL FIXED 2026-07-15: `TestWalletLoginNonceSingleUse`
+  + `TestWalletLoginNonceMustBindMessage` (rewritten against the structured
+  wallet_auth_challenge flow; the legacy freetext-nonce format they signed no
+  longer parses), `TestSampleVerifyNextHop` (D26 set the default
+  EligibilityInterval to 0 = token bucket off; test now forces the bucket on
+  to keep covering §5.3 burst accounting), `TestStream` (was an accidental
+  32k-key/131k-contract load test that ground for 20+ min then failed
+  fixed-1s event-propagation windows; rescaled to 1024 keys with
+  poll-cycle-covering windows, passes -race in ~95s).

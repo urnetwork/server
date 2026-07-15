@@ -86,9 +86,14 @@ func TestStream(t *testing.T) {
 	// ensure that the final state for the client id matches the state accumulated from the events
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
-		keyCount := 32 * 1024
+		// unit-test scale: the invariant (parallel add/remove converges to the
+		// state accumulated from events) is scale-independent. The earlier
+		// 32k-key/131k-contract sizing was a load test in disguise: millions
+		// of redis commands through the 16-conn local pool under -race took
+		// 20+ minutes and then failed the fixed-window event assertions.
+		keyCount := 1024
 		contractCount := 4 * keyCount
-		delayMax := 10 * time.Second
+		delayMax := 2 * time.Second
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -234,8 +239,10 @@ func TestStream(t *testing.T) {
 		l2 := NewStreamHopListener(ctx, clientId, c2.Event, 5*time.Second)
 		defer l2.Close()
 
+		// cover a full listener poll cycle (5s) so the assertion does not
+		// depend on pubsub delivery alone
 		select {
-		case <-time.After(1 * time.Second):
+		case <-time.After(6 * time.Second):
 		}
 
 		connect.AssertEqual(t, c2.StreamIds(), finalStreamIds)
@@ -248,7 +255,7 @@ func TestStream(t *testing.T) {
 		}
 
 		select {
-		case <-time.After(1 * time.Second):
+		case <-time.After(6 * time.Second):
 		}
 
 		connect.AssertEqual(t, int(addCount.Load()), len(keepKeys))
