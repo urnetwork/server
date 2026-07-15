@@ -197,16 +197,41 @@ func SetUserAuthAttemptSuccess(
 	})
 }
 
+// removeExpiredAuthAttemptsBatchSize bounds each delete pass. user_auth_attempt
+// is high-write, so an unbounded `DELETE ... WHERE attempt_time < $1` deletes the
+// whole older-than-window backlog in one long-locking statement; instead drain it
+// as a series of bounded, short-locking transactions. A var (not const) so tests
+// can drive the multi-batch drain loop with a small batch.
+var removeExpiredAuthAttemptsBatchSize = 50000
+
 func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM user_auth_attempt
-				WHERE attempt_time < $1
-			`,
-			minTime.UTC(),
-		))
-		// wallet_auth_challenge_attempt cleanup is handled by RemoveExpiredWalletAuthChallenges
-	})
+	// LIMIT-batched drain: each pass deletes at most one batch in its own tx,
+	// driven by the user_auth_attempt_attempt_time_user_auth_attempt_id index,
+	// until a pass removes fewer than the batch size (backlog drained).
+	for {
+		batchCount := int64(0)
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					DELETE FROM user_auth_attempt
+					USING (
+						SELECT user_auth_attempt_id
+						FROM user_auth_attempt
+						WHERE attempt_time < $1
+						ORDER BY attempt_time
+						LIMIT $2
+					) t
+					WHERE user_auth_attempt.user_auth_attempt_id = t.user_auth_attempt_id
+				`,
+				minTime.UTC(),
+				removeExpiredAuthAttemptsBatchSize,
+			))
+			batchCount = tag.RowsAffected()
+		})
+		if batchCount < int64(removeExpiredAuthAttemptsBatchSize) {
+			break
+		}
+	}
+	// wallet_auth_challenge_attempt cleanup is handled by RemoveExpiredWalletAuthChallenges
 }

@@ -86,15 +86,20 @@ func NewConnectionRateLimit(
 
 // *important* disconnect must always be called, even if there is a rate limit error
 func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
+	// the burst and total counters for one client ip share the per-ip hash
+	// tag so they stay in a single tx pipeline on cluster, while counters for
+	// different ips spread across slots. A previous format put every counter
+	// under one shared `{connect}` tag (a single slot/node hot spot);
+	// old-format keys carried ttls, so they expired on their own.
 	burstKey := fmt.Sprintf(
-		"{connect}burst_%s_%d",
+		"{connect_%s}burst_%d",
 		self.clientIpHashHex,
 		server.NowUtc().Unix()/int64(self.settings.BurstDuration/time.Second),
 	)
 	totalKey := fmt.Sprintf(
-		"{connect}total_%s_%s",
-		self.handlerId,
+		"{connect_%s}total_%s",
 		self.clientIpHashHex,
+		self.handlerId,
 	)
 
 	totalIncremented := false
@@ -106,7 +111,15 @@ func (self *ConnectionRateLimit) Connect() (err error, disconnect func()) {
 			var err error
 			var totalCount int64
 			server.Redis(cleanupCtx, func(r server.RedisClient) {
-				totalCount, err = r.Decr(cleanupCtx, totalKey).Result()
+				var totalCmd *redis.IntCmd
+				r.Pipelined(cleanupCtx, func(pipe redis.Pipeliner) error {
+					totalCmd = pipe.Decr(cleanupCtx, totalKey)
+					// a decr that recreates an expired key must not leave it
+					// without a ttl; nx never extends the connect-time expiry
+					pipe.ExpireNX(cleanupCtx, totalKey, self.settings.TotalExpiration)
+					return nil
+				})
+				totalCount, err = totalCmd.Result()
 			})
 			if err != nil {
 				glog.Errorf("[t][%s]total could not decrement err = %s\n", self.clientIpHashHex, err)

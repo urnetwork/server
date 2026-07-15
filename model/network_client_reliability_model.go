@@ -51,6 +51,15 @@ var ClientLookbacks = []time.Duration{
 const NetworkWindowLookback = 7 * 24 * time.Hour
 const NetworkWindowExpiration = 15 * 24 * time.Hour
 
+// networkWindowLookbackIndex is the lookback_index that keys the 7-day
+// network-window running sums (#3) in client_reliability_running /
+// client_reliability_running_window. It shares the running machinery with the
+// per-ClientLookbacks client scores (#1), which use indices
+// 0..len(ClientLookbacks)-1. 1000 is chosen so it can never collide with a
+// ClientLookbacks index -- that slice is a handful of entries and will never
+// grow anywhere near 1000.
+const networkWindowLookbackIndex = 1000
+
 const ClientLocationExpiration = 30 * 24 * time.Hour
 
 // How many disconnects a client is forgiven within one block before the block
@@ -799,7 +808,23 @@ const reliabilityDegradedMinMedian = 20
 // block health is a property of the block, not of the window being scored, so
 // the median is taken over a fixed neighborhood rather than the score window:
 // the shortest lookback (`ClientLookbacks[0]`) is only a handful of blocks
-// wide and could never establish a median of its own
+// wide and could never establish a median of its own.
+//
+// KNOWN LIMITATION (do not "fix" by lengthening this window -- it was tried at
+// 24h on 2026-07-15 and made things worse): a LOCAL median tracks gradual and
+// diurnal traffic change correctly but adapts down during a SUSTAINED collapse
+// (a multi-hour platform event ends up classifying as the new normal, so its
+// garbage blocks poison the longer lookbacks until they age out). A LONG
+// reference median resists the sustained collapse but then classifies every
+// genuinely-lower-traffic period (post-incident ramp, nightly trough) as
+// degraded: observed live -- 24h median 33.6k vs recovering traffic 23.3k
+// meant ALL current blocks were "degraded", effectiveBlockCount hit 0, and the
+// score writer froze every client score ("keeping previous scores").
+// A correct sustained-event excusal needs a two-signal design (sharp
+// synchronized-drop detection to open an event + recovery-to-baseline to close
+// it), built and tested offline. Until then: sharp events (deploys, drains)
+// are excused by this local median; sustained collapses age out of the
+// lookbacks naturally.
 const reliabilityDegradedMedianBlockCount = 60
 
 // reliabilityDegradedBlocks returns the blocks in [minBlockNumber,
@@ -920,6 +945,257 @@ func ClientReliabilityRollupSynced(ctx context.Context, now time.Time) (synced b
 	return
 }
 
+// ReliabilityRunningRecomputeBlocks is how many blocks the running window may
+// advance by rolling before the sums are re-anchored by a full recompute. The
+// rolling add-on-entry / subtract-on-exit cancels exactly except for float
+// associativity AND except when a block's degraded classification shifts after
+// it entered the window (the classification depends on a reference median that
+// evolves). With the INCLUDE-covered partition index a full recompute is cheap
+// (~10s unloaded on prod, was 23 min), so it runs once per task cycle.
+//
+// The value is deliberately sandwiched between the intra-cycle gap and the
+// task cadence: UpdateReliabilities invokes the running maintenance TWICE per
+// 30-minute cycle (once from the network-window entry point, once from the
+// client-scores entry point, minutes apart). At 20 minutes of blocks, the
+// cycle's FIRST entry point re-anchors (30m since the last anchor >= 20m) and
+// the SECOND sees a few-block delta and takes the equivalence-proven rolling
+// path instead of redoing the full pass -- under load the redundant second
+// recompute was measured at ~10 minutes per cycle. If a cycle runs so slowly
+// that the intra-cycle gap exceeds 20 minutes, the second entry point
+// recomputes too, which is the safe fallback. Drift exposure is bounded by
+// one intra-cycle rolling step (a few blocks) per cycle.
+var ReliabilityRunningRecomputeBlocks = int64(20 * time.Minute / ReliabilityBlockDuration)
+
+// reliabilityRunningLookback pairs a lookback_index with its window width.
+type reliabilityRunningLookback struct {
+	lookbackIndex int
+	lookback      time.Duration
+}
+
+// reliabilityRunningLookbacks is the unified list of running windows maintained
+// by UpdateClientReliabilityRunningInTx: the per-ClientLookbacks client-score
+// windows (#1, indices 0..len-1) plus the 7-day network window (#3,
+// networkWindowLookbackIndex). One client_reliability_running_window row is
+// kept per entry.
+func reliabilityRunningLookbacks() []reliabilityRunningLookback {
+	lookbacks := make([]reliabilityRunningLookback, 0, len(ClientLookbacks)+1)
+	for lookbackIndex, lookback := range ClientLookbacks {
+		lookbacks = append(lookbacks, reliabilityRunningLookback{lookbackIndex, lookback})
+	}
+	lookbacks = append(lookbacks, reliabilityRunningLookback{networkWindowLookbackIndex, NetworkWindowLookback})
+	return lookbacks
+}
+
+type reliabilityRunningWindow struct {
+	minBlockNumber     int64
+	maxBlockNumber     int64
+	lastRecomputeBlock int64
+	exists             bool
+}
+
+func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackIndex int) (w reliabilityRunningWindow) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT min_block_number, max_block_number, last_recompute_block
+		FROM client_reliability_running_window
+		WHERE lookback_index = $1
+		`,
+		lookbackIndex,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&w.minBlockNumber, &w.maxBlockNumber, &w.lastRecomputeBlock))
+			w.exists = true
+		}
+	})
+	return
+}
+
+func writeReliabilityRunningWindow(
+	ctx context.Context,
+	tx server.PgTx,
+	lookbackIndex int,
+	minBlockNumber int64,
+	maxBlockNumber int64,
+	lastRecomputeBlock int64,
+) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO client_reliability_running_window (
+			lookback_index, min_block_number, max_block_number, last_recompute_block
+		)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (lookback_index) DO UPDATE
+		SET
+			min_block_number = EXCLUDED.min_block_number,
+			max_block_number = EXCLUDED.max_block_number,
+			last_recompute_block = EXCLUDED.last_recompute_block
+		`,
+		lookbackIndex,
+		minBlockNumber,
+		maxBlockNumber,
+		lastRecomputeBlock,
+	))
+}
+
+// reliabilityRunningAggSql is the per-(network_id, client_id) location-INDEPENDENT
+// reliability aggregate over the block range [$1, $2) excluding degraded blocks
+// $3: ind = COUNT of the client's valid rows, rel = SUM(1/valid_client_count),
+// where valid_client_count is the number of valid clients sharing the row's
+// (block_number, client_address_hash). This is the SAME inner aggregation #1/#3
+// used to run over the full window; here it is restricted to a block set so it
+// can be applied to just the blocks entering or leaving the window.
+//
+// CORE CORRECTNESS INSIGHT: valid_client_count is block-local (COUNT(*) OVER
+// PARTITION BY block_number, client_address_hash -- within one block), and a
+// drained block's client_reliability rows are IMMUTABLE (block finality rule +
+// idempotent absolute-count drain), so a block's per-client (ind, rel)
+// contribution is deterministic and stable no matter which window it is counted
+// in. Therefore add-on-entry and subtract-on-exit of the same block cancel
+// EXACTLY (modulo float associativity, reset by the periodic full recompute).
+// Location/country is NOT accumulated here -- it is joined from
+// network_client_location_reliability at write time -- so the rolling has NO
+// semantic change vs the old query-time-location full-window query.
+//
+// The degraded slice ($3) must be non-nil ([]int64{}, never nil): a nil binds
+// as SQL NULL and `block_number = ANY(NULL)` is NULL, so `NOT (... = ANY($3))`
+// would filter out every row and wipe every provider score. reliabilityDegradedBlocks
+// already returns a non-nil empty slice for exactly this reason.
+const reliabilityRunningAggSql = `
+	SELECT
+		network_id,
+		client_id,
+		COUNT(*)::float8 AS ind,
+		SUM(1.0/valid_client_count)::float8 AS rel
+	FROM (
+		SELECT
+			network_id,
+			client_id,
+			COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
+		FROM client_reliability
+		WHERE
+			valid = true AND
+			$1 <= block_number AND
+			block_number < $2 AND
+			NOT (block_number = ANY($3::bigint[]))
+	) valid_counts
+	GROUP BY network_id, client_id
+`
+
+// UpdateClientReliabilityRunningInTx advances the running per-(client, lookback)
+// reliability sums to the window ending at maxTime, for every lookback in
+// reliabilityRunningLookbacks (the #1 client-score windows and the #3 network
+// window). Each window is either FULLY RECOMPUTED (no prior row, the ~4h
+// recompute cadence elapsed, or the window slid backward) or ROLLED forward by
+// adding the blocks that entered [prevMax, newMax) and subtracting the blocks
+// that left [prevMin, newMin). The score writers (#1/#3) read the resulting
+// sums, normalize by the effective block count, and join the query-time
+// location. Callers run this first, in the same tx as the score write.
+//
+// This is idempotent for a fixed maxTime: a second call sees prevMax==newMax and
+// prevMin==newMin, so the entering/leaving ranges are empty and nothing changes.
+func UpdateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time) {
+	// end every window at the redis-rollup high-water mark (the SAME shift the
+	// score queries use), computed once and applied to all lookbacks so they
+	// share one max block.
+	baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
+	shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
+	newMax := baseMaxBlockNumber - shift
+
+	for _, lb := range reliabilityRunningLookbacks() {
+		newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
+
+		prev := readReliabilityRunningWindow(ctx, tx, lb.lookbackIndex)
+
+		// recompute when there is nothing to roll from, the recompute cadence has
+		// elapsed, or the window moved backward (a transient the incremental diff
+		// cannot represent). Otherwise roll the window forward.
+		recompute := !prev.exists ||
+			ReliabilityRunningRecomputeBlocks <= newMax-prev.lastRecomputeBlock ||
+			newMax < prev.maxBlockNumber ||
+			newMin < prev.minBlockNumber
+
+		if recompute {
+			degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, newMin, newMax)
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM client_reliability_running WHERE lookback_index = $1`,
+				lb.lookbackIndex,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_reliability_running (
+					client_id, lookback_index, network_id, independent_sum, reliability_sum
+				)
+				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel
+				FROM (`+reliabilityRunningAggSql+`) agg
+				`,
+				newMin,
+				newMax,
+				degradedBlockNumbers,
+				lb.lookbackIndex,
+			))
+			writeReliabilityRunningWindow(ctx, tx, lb.lookbackIndex, newMin, newMax, newMax)
+		} else {
+			// ADD the blocks that entered the window: [prevMax, newMax).
+			enteringDegraded := reliabilityDegradedBlocks(ctx, tx, prev.maxBlockNumber, newMax)
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO client_reliability_running (
+					client_id, lookback_index, network_id, independent_sum, reliability_sum
+				)
+				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel
+				FROM (`+reliabilityRunningAggSql+`) agg
+				ON CONFLICT (client_id, lookback_index) DO UPDATE
+				SET
+					independent_sum = client_reliability_running.independent_sum + EXCLUDED.independent_sum,
+					reliability_sum = client_reliability_running.reliability_sum + EXCLUDED.reliability_sum,
+					network_id = EXCLUDED.network_id
+				`,
+				prev.maxBlockNumber,
+				newMax,
+				enteringDegraded,
+				lb.lookbackIndex,
+			))
+
+			// SUBTRACT the blocks that left the window: [prevMin, newMin). The
+			// UPDATE only touches existing rows, which is correct: a leaving
+			// block's clients were added when that block entered.
+			leavingDegraded := reliabilityDegradedBlocks(ctx, tx, prev.minBlockNumber, newMin)
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE client_reliability_running r
+				SET
+					independent_sum = r.independent_sum - agg.ind,
+					reliability_sum = r.reliability_sum - agg.rel
+				FROM (`+reliabilityRunningAggSql+`) agg
+				WHERE r.client_id = agg.client_id AND r.lookback_index = $4
+				`,
+				prev.minBlockNumber,
+				newMin,
+				leavingDegraded,
+				lb.lookbackIndex,
+			))
+
+			// drop clients that have fully left the window. independent_sum is a
+			// sum of integer counts carried as float, so a fully-departed client
+			// is exactly 0.0; the 0.5 epsilon guards float dust.
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM client_reliability_running WHERE lookback_index = $1 AND independent_sum < 0.5`,
+				lb.lookbackIndex,
+			))
+
+			writeReliabilityRunningWindow(ctx, tx, lb.lookbackIndex, newMin, newMax, prev.lastRecomputeBlock)
+		}
+	}
+}
+
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -928,6 +1204,12 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 			minTime := maxTime.Add(-maxLookback)
 			UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 		}
+
+		// advance the running per-(client, lookback) sums to this window, then
+		// write each client score below from the running table joined to the
+		// query-time location. This replaces the per-run full-window re-scan of
+		// client_reliability with per-block incremental maintenance.
+		UpdateClientReliabilityRunningInTx(tx, ctx, maxTime)
 
 		var shift int64
 		{
@@ -955,10 +1237,12 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 				glog.Infof("[ncr]excusing %d degraded blocks in lookback %d window [%d, %d)\n", len(degradedBlockNumbers), lookbackIndex, minBlockNumber, maxBlockNumber)
 			}
 
-			// upsert the fresh scores, then remove rows not refreshed in this
-			// round (identified by a stale max_block_number). This replaces the
-			// previous delete-all-and-reinsert, which rewrote the entire table
-			// every round and kept it permanently bloated.
+			// write scores from the running per-client sums joined to the
+			// query-time location, then remove rows not refreshed in this round
+			// (identified by a stale max_block_number). The running sums already
+			// hold SUM(1.0) (independent_sum) and SUM(1.0/valid_client_count)
+			// (reliability_sum) over the window, so this reads the small running
+			// table instead of re-scanning the full client_reliability window.
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -976,36 +1260,24 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					country_location_id
 				)
 				SELECT
-				    valid_counts.client_id,
+				    r.client_id,
 				    $3,
-				    SUM(1.0) AS independent_reliability_score,
-				    SUM(1.0) / $4::bigint AS independent_reliability_weight,
-				    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
-				    SUM(1.0/valid_counts.valid_client_count) / $4::bigint AS reliability_weight,
-				    $1 AS min_block_number,
-				    $2 AS max_block_number,
-					network_client_location_reliability.city_location_id,
-					network_client_location_reliability.region_location_id,
-					network_client_location_reliability.country_location_id
-				FROM (
-					SELECT
-						client_id,
-						COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
-					FROM client_reliability
-					WHERE
-						valid = true AND
-						$1 <= block_number AND
-						block_number < $2 AND
-						NOT (block_number = ANY($5::bigint[]))
-				) valid_counts
-				INNER JOIN network_client_location_reliability ON
-					network_client_location_reliability.client_id = valid_counts.client_id AND
-					network_client_location_reliability.valid = true
-				GROUP BY
-					valid_counts.client_id,
-					network_client_location_reliability.city_location_id,
-					network_client_location_reliability.region_location_id,
-					network_client_location_reliability.country_location_id
+				    r.independent_sum,
+				    r.independent_sum / $4::bigint,
+				    r.reliability_sum,
+				    r.reliability_sum / $4::bigint,
+				    $1,
+				    $2,
+					nclr.city_location_id,
+					nclr.region_location_id,
+					nclr.country_location_id
+				FROM client_reliability_running r
+				INNER JOIN network_client_location_reliability nclr ON
+					nclr.client_id = r.client_id AND
+					nclr.valid = true
+				WHERE
+					r.lookback_index = $3 AND
+					r.independent_sum > 0
 				ON CONFLICT (client_id, lookback_index) DO UPDATE
 				SET
 					independent_reliability_score = EXCLUDED.independent_reliability_score,
@@ -1022,7 +1294,6 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 				maxBlockNumber,
 				lookbackIndex,
 				effectiveBlockCount,
-				degradedBlockNumbers,
 			))
 
 			server.RaisePgResult(tx.Exec(
@@ -1563,27 +1834,33 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 				total_client_count
 			)
 			SELECT
-			    client_reliability.network_id,
-			    client_reliability.block_number / $3 AS bucket_number,
-			    SUM(CASE WHEN client_reliability.valid = true THEN 1.0/valid_counts.valid_client_count ELSE 0 END) / COALESCE(NULLIF(MAX(covered.covered_block_count), 0), $3) AS reliability_weight,
-			    COUNT(DISTINCT client_reliability.client_id) FILTER (WHERE client_reliability.valid = true) AS client_count,
-			    COUNT(DISTINCT client_reliability.client_id) AS total_client_count
-			FROM client_reliability
-			LEFT JOIN (
+			    valid_counts.network_id,
+			    valid_counts.block_number / $3 AS bucket_number,
+			    SUM(CASE WHEN valid_counts.valid = true THEN 1.0/valid_counts.valid_client_count ELSE 0 END) / COALESCE(NULLIF(MAX(covered.covered_block_count), 0), $3) AS reliability_weight,
+			    COUNT(DISTINCT valid_counts.client_id) FILTER (WHERE valid_counts.valid = true) AS client_count,
+			    COUNT(DISTINCT valid_counts.client_id) AS total_client_count
+			FROM (
+				-- single pass over the trailing window: the shared-IP normalizer
+				-- valid_client_count is computed with a windowed COUNT ... FILTER
+				-- over (block_number, client_address_hash) instead of self-joining
+				-- client_reliability to a GROUP BY subquery (which scanned the
+				-- window twice). Invalid rows carry the count of valid siblings in
+				-- their partition, but the reliability_weight CASE gives them 0 so
+				-- it is unused; they are kept for total_client_count.
 				SELECT
+					network_id,
 					block_number,
-					client_address_hash,
-					COUNT(*) AS valid_client_count
+					client_id,
+					valid,
+					COUNT(*) FILTER (WHERE valid = true) OVER (
+						PARTITION BY block_number, client_address_hash
+					) AS valid_client_count
 				FROM client_reliability
 				WHERE
-					valid = true AND
 					$1 <= block_number AND
 					block_number < $2 AND
 					NOT (block_number = ANY($4::bigint[]))
-				GROUP BY block_number, client_address_hash
-			) valid_counts ON
-				valid_counts.block_number = client_reliability.block_number AND
-				valid_counts.client_address_hash = client_reliability.client_address_hash
+			) valid_counts
 			LEFT JOIN (
 				SELECT
 					gs.block_number / $3 AS bucket_number,
@@ -1600,12 +1877,8 @@ func UpdateNetworkReliabilityWindow(ctx context.Context, minTime time.Time, maxT
 					NOT (gs.block_number = ANY($4::bigint[]))
 				GROUP BY gs.block_number / $3
 			) covered ON
-				covered.bucket_number = client_reliability.block_number / $3
-			WHERE
-				$1 <= client_reliability.block_number AND
-				client_reliability.block_number < $2 AND
-				NOT (client_reliability.block_number = ANY($4::bigint[]))
-			GROUP BY client_reliability.network_id, client_reliability.block_number / $3
+				covered.bucket_number = valid_counts.block_number / $3
+			GROUP BY valid_counts.network_id, valid_counts.block_number / $3
 			ON CONFLICT (network_id, bucket_number) DO UPDATE
 			SET
 				reliability_weight = EXCLUDED.reliability_weight,
@@ -1663,6 +1936,11 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		UpdateClientLocationReliabilitiesInTx(tx, ctx, minTime, maxTime)
 	}
 
+	// advance the running per-(client, network-window) sums, then aggregate the
+	// per-(network, country) window score below from the running table joined to
+	// the query-time location. Replaces the per-run 7-day full-window re-scan.
+	UpdateClientReliabilityRunningInTx(tx, ctx, maxTime)
+
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 
@@ -1682,10 +1960,13 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		return
 	}
 
-	// upsert the fresh scores, then remove rows not refreshed in this round
-	// (identified by a stale max_block_number). This replaces the previous
-	// delete-all-and-reinsert, which rewrote the entire table every round and
-	// kept it permanently bloated.
+	// aggregate the window score from the running per-client sums joined to the
+	// query-time location, then remove rows not refreshed in this round
+	// (identified by a stale max_block_number). SUM(independent_sum) over the
+	// clients in a (network, country) equals the old SUM(1.0) over that group's
+	// valid rows, and SUM(reliability_sum) equals the old
+	// SUM(1.0/valid_client_count) -- so this reads the small running table
+	// instead of re-scanning the 7-day client_reliability window.
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -1700,32 +1981,22 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 			max_block_number
 		)
 		SELECT
-		    valid_counts.network_id,
-		    network_client_location_reliability.country_location_id,
-		    SUM(1.0) AS independent_reliability_score,
-		    SUM(1.0) / $3::bigint AS independent_reliability_weight,
-		    SUM(1.0/valid_counts.valid_client_count) AS reliability_score,
-		    SUM(1.0/valid_counts.valid_client_count) / $3::bigint AS reliability_weight,
+		    r.network_id,
+		    nclr.country_location_id,
+		    SUM(r.independent_sum) AS independent_reliability_score,
+		    SUM(r.independent_sum) / $3::bigint AS independent_reliability_weight,
+		    SUM(r.reliability_sum) AS reliability_score,
+		    SUM(r.reliability_sum) / $3::bigint AS reliability_weight,
 		    $1 AS min_block_number,
 		    $2 AS max_block_number
-		FROM (
-			SELECT
-				network_id,
-				client_id,
-				COUNT(*) OVER (PARTITION BY block_number, client_address_hash) AS valid_client_count
-			FROM client_reliability
-			WHERE
-				valid = true AND
-				$1 <= block_number AND
-				block_number < $2 AND
-				NOT (block_number = ANY($4::bigint[]))
-		) valid_counts
-		INNER JOIN network_client_location_reliability ON
-			network_client_location_reliability.client_id = valid_counts.client_id AND
-			network_client_location_reliability.valid = true
+		FROM client_reliability_running r
+		INNER JOIN network_client_location_reliability nclr ON
+			nclr.client_id = r.client_id AND
+			nclr.valid = true
+		WHERE r.lookback_index = $4
 		GROUP BY
-			valid_counts.network_id,
-			network_client_location_reliability.country_location_id
+			r.network_id,
+			nclr.country_location_id
 		ON CONFLICT (network_id, country_location_id) DO UPDATE
 		SET
 			independent_reliability_score = EXCLUDED.independent_reliability_score,
@@ -1738,7 +2009,7 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 		minBlockNumber,
 		maxBlockNumber,
 		effectiveBlockCount,
-		degradedBlockNumbers,
+		networkWindowLookbackIndex,
 	))
 
 	server.RaisePgResult(tx.Exec(

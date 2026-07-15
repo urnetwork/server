@@ -260,18 +260,40 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// only an upper bound is needed: the lower edge is implicit because
 	// already-paid sweeps are excluded by the unpaid filter below. The bound is
 	// on transfer_contract.close_time — the same axis the subsidy epoch anchor
-	// is measured on — so each slice lines up with a subsidy epoch.
+	// is measured on — so each slice lines up with a subsidy epoch. In the
+	// bounded path the close-time join/bound is applied once to the union of
+	// both arms, so it filters the unpaid and canceled sweeps identically (the
+	// same single close-time join the old anti-join query used).
 	closeTimeJoin := ""
 	closeTimeBound := ""
 	closeTimeArgs := []any{}
 	if self.bounded {
 		closeTimeJoin = `
         INNER JOIN transfer_contract ON
-            transfer_contract.contract_id = transfer_escrow_sweep.contract_id`
-		closeTimeBound = "AND transfer_contract.close_time < $1"
+            transfer_contract.contract_id = u.contract_id`
+		closeTimeBound = "WHERE transfer_contract.close_time < $1"
 		closeTimeArgs = append(closeTimeArgs, self.upperBound)
 	}
 
+	// The set of sweeps that need (re)payment is the union of two disjoint,
+	// index-drivable arms, instead of a LEFT-JOIN anti-join whose
+	// `payment_id IS NULL OR canceled` post-join filter cannot push to the
+	// driver and so full-scans the whole transfer_escrow_sweep table every run:
+	//
+	//   (a) unpaid   — the sweep was never assigned a payment (payment_id IS
+	//       NULL). btree indexes NULLs, so transfer_escrow_sweep_payment_id
+	//       seeks these directly.
+	//   (b) canceled — the sweep's payment was canceled. Canceling a payment
+	//       (CancelHungAccountPayments) sets account_payment.canceled = true but
+	//       does NOT null the sweep's payment_id, so these are found by driving
+	//       from the small canceled-payment set back to the sweeps via the
+	//       indexed payment_id.
+	//
+	// The two arms are disjoint (payment_id NULL vs. a set pointing at a
+	// canceled payment), so UNION ALL reproduces the exact
+	// (contract_id, balance_id) multiset the old query selected, without the
+	// dedup cost of UNION. The canceled arm relies on a partial index
+	// `account_payment (payment_id) WHERE canceled` being added separately.
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
 		fmt.Sprintf(`
@@ -280,19 +302,28 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
         AS
 
         SELECT
-            transfer_escrow_sweep.contract_id,
-            transfer_escrow_sweep.balance_id
+            u.contract_id,
+            u.balance_id
 
-        FROM transfer_escrow_sweep
+        FROM (
+            SELECT
+                transfer_escrow_sweep.contract_id,
+                transfer_escrow_sweep.balance_id
+            FROM transfer_escrow_sweep
+            WHERE transfer_escrow_sweep.payment_id IS NULL
 
-        LEFT JOIN account_payment ON
-            account_payment.payment_id = transfer_escrow_sweep.payment_id
+            UNION ALL
+
+            SELECT
+                s.contract_id,
+                s.balance_id
+            FROM account_payment ap
+            INNER JOIN transfer_escrow_sweep s ON
+                s.payment_id = ap.payment_id
+            WHERE ap.canceled = true
+        ) u
         %s
-
-        WHERE
-            (account_payment.payment_id IS NULL OR
-            account_payment.canceled = true)
-            %s
+        %s
         `, closeTimeJoin, closeTimeBound),
 		closeTimeArgs...,
 	))

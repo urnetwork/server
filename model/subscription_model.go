@@ -9,6 +9,7 @@ import (
 	// "crypto/rand"
 	// "encoding/hex"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +45,13 @@ const StragglerContractExpiration = 90 * 24 * time.Hour
 // completed contracts are reaped this long after their payment completes
 // (reap_time = complete_time + CompletedContractExpiration, set in CompletePayment)
 const CompletedContractExpiration = 7 * 24 * time.Hour
+
+// per-call wall-clock budget for the contract reaper's assign + delete passes.
+// Bounds each RemoveCompletedContracts run so a large one-time backlog drains
+// over many 30-min runs instead of one unbounded run; steady state finishes well
+// under it. A var (not const) so tests can inject a tiny budget to exercise the
+// mid-backlog stop.
+var reaperRunBudget = 5 * time.Minute
 
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
@@ -208,10 +216,35 @@ func NewUnorderedTransferPair(a server.Id, b server.Id) TransferPair {
 //     Because redis is not atomic with Postgres, the value in the `netEscrowKey` will
 //     eventually be consistent with the real value, but may be off by some amount at any given time.
 //
-// note: net escrow counters do not have a ttl
+// The hash tag is per balance so the counters spread across cluster slots.
+// A previous format, `{escrow}net_<balanceId>`, put every counter under one
+// shared tag (a single slot/node hot spot); keys in that old format are
+// abandoned-but-finite and can be removed with a one-time scan-delete.
+//
+// Every write site also gives the counter a ttl (see `netEscrowEndTimeSlack`
+// and `netEscrowFallbackTtl`), so a counter that outlives its balance -- for
+// example when the `RemoveCompletedContracts` delete is missed -- expires on
+// its own instead of accumulating without bound. An early expiry is safe: a
+// missing counter reads as zero (fail-open, more available balance) and the
+// reconcile task re-derives the true value from postgres
+// (see `ReconcileNetEscrow`).
 func netEscrowKey(balanceId server.Id) string {
-	return fmt.Sprintf("{escrow}net_%s", balanceId)
+	return fmt.Sprintf("{escrow_%s}net", balanceId)
 }
+
+// netEscrowEndTimeSlack extends the counter ttl past the balance `end_time`
+// at the escrow-creation write, which knows the end time. The counter is only
+// meaningful while the balance is active; the slack covers contracts that
+// straddle the end of the balance window.
+const netEscrowEndTimeSlack = 30 * 24 * time.Hour
+
+// netEscrowFallbackTtl bounds counters touched at write sites that do not
+// know the balance `end_time` (the reconcile `Set`, and a `DecrBy` that
+// recreates a missing key). The reconcile task revisits every active balance
+// and refreshes this, and the escrow-creation write restores the precise
+// end-time deadline, so the fallback only has to outlast the gap between
+// those writes.
+const netEscrowFallbackTtl = 90 * 24 * time.Hour
 
 type TransferBalance struct {
 	BalanceId             server.Id `json:"balance_id"`
@@ -281,7 +314,10 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// the net escrow keys use per-balance hash tags (different slots), so
+		// use a plain pipeline, which auto-routes per slot on cluster; a tx
+		// pipeline would be cross-slot
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range transferBalances {
 				netEscrowCmds[transferBalance.BalanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.BalanceId))
 			}
@@ -332,11 +368,13 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 // true, resets them to it -- correcting accumulated drift. It returns the drift
 // it found per network either way.
 //
-// The `netEscrowKey` counter is an approximate, non-atomic mirror with no ttl
-// and no other reconciliation: a leaked `IncrBy` (a quarantined malformed
-// close, a dispute that never settled, or a settle whose redis `DecrBy` post
-// was dropped/crashed before running) stays in the counter for the life of the
-// balance. Upward drift makes `createTransferEscrowInTx` compute the available
+// The `netEscrowKey` counter is an approximate, non-atomic mirror with no
+// other reconciliation: a leaked `IncrBy` (a quarantined malformed close, a
+// dispute that never settled, or a settle whose redis `DecrBy` post was
+// dropped/crashed before running) stays in the counter for the life of the
+// balance (the key ttl only bounds a counter that outlives its balance; it
+// does not correct drift within the balance window). Upward drift makes
+// `createTransferEscrowInTx` compute the available
 // balance too low and reject contracts with "Insufficient balance" even when
 // the postgres balance is plentiful; downward drift lets a balance over-commit.
 //
@@ -541,9 +579,10 @@ func reconcileNetEscrowBatch(
 ) (drift map[server.Id]ByteCount) {
 	drift = map[server.Id]ByteCount{}
 	server.Redis(ctx, func(r server.RedisClient) {
-		// all net escrow keys share the {escrow} hash tag (one slot)
+		// the net escrow keys use per-balance hash tags (different slots), so
+		// use plain pipelines, which auto-route per slot on cluster
 		getCmds := map[server.Id]*redis.StringCmd{}
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, balanceId := range balanceIds {
 				getCmds[balanceId] = pipe.Get(ctx, netEscrowKey(balanceId))
 			}
@@ -558,10 +597,13 @@ func reconcileNetEscrowBatch(
 			return
 		}
 
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, balanceId := range balanceIds {
 				if reserved := pending[balanceId]; 0 < reserved {
-					pipe.Set(ctx, netEscrowKey(balanceId), reserved, 0)
+					// the reconcile does not know the balance end time; the
+					// fallback ttl is refreshed on every apply and the
+					// escrow-creation write restores the end-time deadline
+					pipe.Set(ctx, netEscrowKey(balanceId), reserved, netEscrowFallbackTtl)
 				} else {
 					pipe.Del(ctx, netEscrowKey(balanceId))
 				}
@@ -602,9 +644,14 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 		return
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// per-balance hash tags (different slots): plain pipeline auto-routes
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for balanceId, byteCount := range escrowed {
-				pipe.DecrBy(ctx, netEscrowKey(balanceId), byteCount)
+				key := netEscrowKey(balanceId)
+				pipe.DecrBy(ctx, key, byteCount)
+				// a decr that recreates a missing key must not leave it
+				// without a ttl; nx never shortens the end-time deadline
+				pipe.ExpireNX(ctx, key, netEscrowFallbackTtl)
 			}
 			return nil
 		})
@@ -824,11 +871,10 @@ func FindNetworksWithoutTransferBalance(ctx context.Context) (networkIds []serve
                 SELECT
                     network.network_id
                 FROM network
-
-                LEFT JOIN transfer_balance ON transfer_balance.network_id = network.network_id
-
-                GROUP BY (network.network_id)
-                HAVING COUNT(transfer_balance.balance_id) = 0
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM transfer_balance
+                    WHERE transfer_balance.network_id = network.network_id
+                )
             `,
 		)
 
@@ -945,9 +991,10 @@ func createTransferEscrowInTx(
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// the net escrow keys use per-balance hash tags (different slots), so
+		// use a plain pipeline, which auto-routes per slot on cluster
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range orderedTransferBalances {
-				// all net escrow keys share the {escrow} hash tag (one slot)
 				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
 			}
 			return nil
@@ -988,6 +1035,8 @@ func createTransferEscrowInTx(
 			balanceId:        transferBalance.balanceId,
 			paid:             transferBalance.paid,
 			balanceByteCount: escrowBalanceByteCount,
+			// carried to stamp the net escrow counter ttl in the redis post
+			endTime: transferBalance.endTime,
 		}
 		netEscrowBalanceByteCount += escrowBalanceByteCount
 		if contractTransferByteCount <= netEscrowBalanceByteCount {
@@ -1064,9 +1113,15 @@ func createTransferEscrowInTx(
 
 	posts = append(posts, func() any {
 		server.Redis(ctx, func(r server.RedisClient) {
-			r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			// per-balance hash tags (different slots): plain pipeline auto-routes
+			r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for balanceId, escrow := range balanceEscrows {
-					pipe.IncrBy(ctx, netEscrowKey(balanceId), escrow.balanceByteCount)
+					key := netEscrowKey(balanceId)
+					pipe.IncrBy(ctx, key, escrow.balanceByteCount)
+					// the counter is only meaningful while the balance is
+					// active; pin the ttl to the balance end time plus slack
+					// (non-nx, so it also corrects a shorter fallback ttl)
+					pipe.ExpireAt(ctx, key, escrow.endTime.Add(netEscrowEndTimeSlack))
 				}
 				return nil
 			})
@@ -2009,9 +2064,15 @@ func settleEscrowInTx(
 
 		posts = append(posts, func() any {
 			server.Redis(ctx, func(r server.RedisClient) {
-				r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				// per-balance hash tags (different slots): plain pipeline auto-routes
+				r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 					for balanceId, sweepPayout := range sweepPayouts {
-						pipe.DecrBy(ctx, netEscrowKey(balanceId), sweepPayout.escrowBalanceByteCount)
+						key := netEscrowKey(balanceId)
+						pipe.DecrBy(ctx, key, sweepPayout.escrowBalanceByteCount)
+						// a decr that recreates a missing key must not leave
+						// it without a ttl; nx never shortens the end-time
+						// deadline
+						pipe.ExpireNX(ctx, key, netEscrowFallbackTtl)
 					}
 					return nil
 				})
@@ -3357,7 +3418,8 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	}, server.TxReadCommitted)
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// per-balance hash tags (different slots): plain pipeline auto-routes
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, balanceId := range balanceIds {
 				pipe.Del(ctx, netEscrowKey(balanceId))
 			}
@@ -3446,13 +3508,17 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 // when more work remains. Each non-empty batch deletes its candidates (and
 // their sweeps), so the eligible set strictly shrinks and the loop terminates.
 func removeContractBatches(ctx context.Context, sql string, minTime time.Time, maxRowCount int) {
+	// Cap per call to a time budget so a large backlog of reap-due contracts
+	// (e.g. right after a mass straggler assign) drains over many bounded runs
+	// instead of one unbounded run that pegs the DB (see reaperRunBudget).
+	budgetEnd := server.NowUtc().Add(reaperRunBudget)
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(ctx, sql, minTime.UTC(), maxRowCount))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
-		if batchCount == 0 {
+		if batchCount == 0 || budgetEnd.Before(server.NowUtc()) {
 			return
 		}
 	}
@@ -3472,11 +3538,20 @@ func removeContractBatches(ctx context.Context, sql string, minTime time.Time, m
 // (from the primary key) that gets reap_time set and so leaves the partial index,
 // so the eligible set strictly shrinks and a short batch means drained.
 func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time, maxRowCount int) (assignedCount int64) {
+	// Cap the work per call to a time budget so a large one-time backlog -- e.g.
+	// a fresh deploy before `bringyourctl db backfill-contract-reap-time` has run,
+	// where reap_time IS NULL matches almost the whole table -- drains over many
+	// bounded runs instead of one unbounded run that pegs the DB. The task
+	// reschedules every 30 min, so the backlog is still worked down steadily.
+	budgetEnd := server.NowUtc().Add(reaperRunBudget)
 	for {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// UPDATE ... LIMIT is not valid Postgres; bound the batch with a CTE
 			// that picks the contract ids first, then update exactly those rows.
+			// ORDER BY create_time makes the planner take the ordered
+			// transfer_contract_reap_pending_create_time partial-index path (oldest
+			// stragglers first) rather than risking a seq scan.
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -3487,6 +3562,7 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 						transfer_contract.reap_time IS NULL AND
 						transfer_contract.close_time IS NOT NULL AND
 						transfer_contract.create_time < $1
+					ORDER BY transfer_contract.create_time
 					LIMIT $2
 				)
 				UPDATE transfer_contract
@@ -3500,7 +3576,7 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
 		assignedCount += batchCount
-		if batchCount < int64(maxRowCount) {
+		if batchCount < int64(maxRowCount) || budgetEnd.Before(server.NowUtc()) {
 			return
 		}
 	}
@@ -3510,89 +3586,224 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 // transfer_escrow_sweep rows whose transfer_contract no longer exists.
 // RemoveCompletedContracts cascades these atomically with the contract delete,
 // so this is a low-cadence safety net for orphans left by older releases or
-// interrupted statements, not the primary cleanup mechanism. Each pass deletes
-// in bounded batches (streaming NOT EXISTS scans with LIMIT, no sort) until a
-// batch comes up short.
-func SweepOrphanContractData(ctx context.Context, limit int) (removedCount int64) {
-	removedCount += sweepOrphanBatches(
+// interrupted statements, not the primary cleanup mechanism. Each table is
+// paged fully by its primary key in bounded sliceSize slices (see
+// sweepOrphanCursor), so a call never full-scans a child table even when there
+// are no orphans.
+func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount int64) {
+	// contract_close, keyed by (contract_id, party)
+	removedCount += sweepOrphanCursor(
 		ctx,
+		sliceSize,
 		`
-		DELETE FROM contract_close
-		USING (
+		WITH slice AS (
 			SELECT contract_id, party
 			FROM contract_close
-			WHERE NOT EXISTS (
-				SELECT 1 FROM transfer_contract
-				WHERE transfer_contract.contract_id = contract_close.contract_id
-			)
-			LIMIT $1
-		) t
-		WHERE
-			contract_close.contract_id = t.contract_id AND
-			contract_close.party = t.party
+			WHERE ($1 OR (contract_id, party) > ($2, $3))
+			ORDER BY contract_id, party
+			LIMIT $4
+		), del AS (
+			DELETE FROM contract_close
+			USING slice
+			WHERE
+				contract_close.contract_id = slice.contract_id AND
+				contract_close.party = slice.party AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.contract_id = contract_close.contract_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT contract_id, party
+			FROM slice
+			ORDER BY contract_id DESC, party DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.contract_id, bound.party
+		FROM bound
 		`,
-		limit,
+		func() []any { return []any{new(server.Id), new(string)} },
 	)
 
-	removedCount += sweepOrphanBatches(
+	// transfer_escrow, keyed by (contract_id, balance_id)
+	removedCount += sweepOrphanCursor(
 		ctx,
+		sliceSize,
 		`
-		DELETE FROM transfer_escrow
-		USING (
+		WITH slice AS (
 			SELECT contract_id, balance_id
 			FROM transfer_escrow
-			WHERE NOT EXISTS (
-				SELECT 1 FROM transfer_contract
-				WHERE transfer_contract.contract_id = transfer_escrow.contract_id
-			)
-			LIMIT $1
-		) t
-		WHERE
-			transfer_escrow.contract_id = t.contract_id AND
-			transfer_escrow.balance_id = t.balance_id
+			WHERE ($1 OR (contract_id, balance_id) > ($2, $3))
+			ORDER BY contract_id, balance_id
+			LIMIT $4
+		), del AS (
+			DELETE FROM transfer_escrow
+			USING slice
+			WHERE
+				transfer_escrow.contract_id = slice.contract_id AND
+				transfer_escrow.balance_id = slice.balance_id AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.contract_id = transfer_escrow.contract_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT contract_id, balance_id
+			FROM slice
+			ORDER BY contract_id DESC, balance_id DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.contract_id, bound.balance_id
+		FROM bound
 		`,
-		limit,
+		func() []any { return []any{new(server.Id), new(server.Id)} },
 	)
 
-	removedCount += sweepOrphanBatches(
+	// transfer_escrow_sweep, keyed by (contract_id, balance_id, network_id)
+	removedCount += sweepOrphanCursor(
 		ctx,
+		sliceSize,
 		`
-		DELETE FROM transfer_escrow_sweep
-		USING (
+		WITH slice AS (
 			SELECT contract_id, balance_id, network_id
 			FROM transfer_escrow_sweep
-			WHERE NOT EXISTS (
-				SELECT 1 FROM transfer_contract
-				WHERE transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-			)
-			LIMIT $1
-		) t
-		WHERE
-			transfer_escrow_sweep.contract_id = t.contract_id AND
-			transfer_escrow_sweep.balance_id = t.balance_id AND
-			transfer_escrow_sweep.network_id = t.network_id
+			WHERE ($1 OR (contract_id, balance_id, network_id) > ($2, $3, $4))
+			ORDER BY contract_id, balance_id, network_id
+			LIMIT $5
+		), del AS (
+			DELETE FROM transfer_escrow_sweep
+			USING slice
+			WHERE
+				transfer_escrow_sweep.contract_id = slice.contract_id AND
+				transfer_escrow_sweep.balance_id = slice.balance_id AND
+				transfer_escrow_sweep.network_id = slice.network_id AND
+				NOT EXISTS (
+					SELECT 1 FROM transfer_contract
+					WHERE transfer_contract.contract_id = transfer_escrow_sweep.contract_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT contract_id, balance_id, network_id
+			FROM slice
+			ORDER BY contract_id DESC, balance_id DESC, network_id DESC
+			LIMIT 1
+		)
+		SELECT
+			(SELECT count(*) FROM slice),
+			(SELECT count(*) FROM del),
+			bound.contract_id, bound.balance_id, bound.network_id
+		FROM bound
 		`,
-		limit,
+		func() []any { return []any{new(server.Id), new(server.Id), new(server.Id)} },
 	)
 
 	return
 }
 
-// sweepOrphanBatches repeatedly runs a bounded DELETE (one batch per
-// maintenance tx, so no long lock is held) until a batch deletes fewer than
-// `limit` rows, meaning the orphan set is drained.
-func sweepOrphanBatches(ctx context.Context, sql string, limit int) (removedCount int64) {
+// sweepOrphanCursor pages a child table by its primary key in fixed-size slices
+// and deletes orphan rows (parent gone) within each slice, returning the total
+// removed. Paging by the key (WHERE key > cursor ORDER BY key LIMIT sliceSize)
+// means every statement scans a BOUNDED slice of the table, even when orphans
+// are rare (steady state ~= 0). This is the fix for the incident pattern of the
+// old "DELETE ... USING (SELECT ... WHERE NOT EXISTS(parent) LIMIT n)" sweep: a
+// bare LIMIT can only stop once it has FOUND n orphans, so with no orphans it
+// scanned the entire child table every call. Each slice runs in its own
+// maintenance tx (server.MaintenanceTx), so no single statement holds a long
+// lock; a full call still pages the whole table one bounded slice at a time.
+//
+// sql must be a single statement parameterized as:
+//
+//	$1           bool, true only for the first slice (disables the lower bound)
+//	$2..$(k+1)   the cursor: the previous slice's max key columns, in key order
+//	$(k+2)       the slice size
+//
+// and it must return exactly one row when the slice is non-empty:
+//
+//	(slice row count int8, deleted row count int8, max key columns...)
+//
+// or no rows when the slice is empty (the table has been fully paged). The
+// canonical shape (single-uuid key, see the composite variants at the call
+// sites) is:
+//
+//	WITH slice AS (
+//	    SELECT pk FROM child
+//	    WHERE ($1 OR pk > $2)
+//	    ORDER BY pk LIMIT $3
+//	), del AS (
+//	    DELETE FROM child USING slice
+//	    WHERE child.pk = slice.pk
+//	      AND NOT EXISTS (SELECT 1 FROM parent WHERE parent.fk = child.fk)
+//	    RETURNING 1
+//	), bound AS (
+//	    SELECT pk FROM slice ORDER BY pk DESC LIMIT 1
+//	)
+//	SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.pk
+//	FROM bound
+//
+// bound reads slice (materialized once, pre-delete), so the cursor advances past
+// every row the slice examined — deleted or not — and no row is skipped at a
+// slice boundary. newCursorTargets returns k fresh pointers to scan the max key
+// columns into; their dereferenced values become the next slice's cursor.
+func sweepOrphanCursor(
+	ctx context.Context,
+	sliceSize int,
+	sql string,
+	newCursorTargets func() []any,
+) (removedCount int64) {
+	// seed the cursor with the zero value of each key column; the first slice
+	// passes firstSlice=true so the bound is ignored, then it advances to each
+	// slice's max key.
+	cursor := derefCursor(newCursorTargets())
+	firstSlice := true
 	for {
-		var batchCount int64
+		args := make([]any, 0, len(cursor)+2)
+		args = append(args, firstSlice)
+		args = append(args, cursor...)
+		args = append(args, sliceSize)
+
+		var sliceCount, deletedCount int64
+		targets := newCursorTargets()
+		gotRow := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			tag := server.RaisePgResult(tx.Exec(ctx, sql, limit))
-			batchCount = tag.RowsAffected()
+			// reset in case the tx is retried on a transient error
+			sliceCount = 0
+			deletedCount = 0
+			gotRow = false
+			scanTargets := make([]any, 0, len(targets)+2)
+			scanTargets = append(scanTargets, &sliceCount, &deletedCount)
+			scanTargets = append(scanTargets, targets...)
+			result, err := tx.Query(ctx, sql, args...)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(scanTargets...))
+					gotRow = true
+				}
+			})
 		}, server.TxReadCommitted)
-		removedCount += batchCount
-		if batchCount < int64(limit) {
+
+		removedCount += deletedCount
+		if !gotRow || sliceCount < int64(sliceSize) {
 			return
 		}
+		cursor = derefCursor(targets)
+		firstSlice = false
 	}
+}
+
+// derefCursor dereferences a slice of typed pointers into a slice of their
+// values, so scanned key columns can be reused as the next slice's cursor args.
+func derefCursor(ptrs []any) []any {
+	values := make([]any, len(ptrs))
+	for i, ptr := range ptrs {
+		values[i] = reflect.ValueOf(ptr).Elem().Interface()
+	}
+	return values
 }
 
 // AddSweepDestinationIdColumn adds transfer_escrow_sweep.destination_id if it is
@@ -3650,59 +3861,137 @@ func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCoun
 	}
 }
 
+// completedReapBackfillPaymentLookback bounds the completed-contract backfill to
+// recently completed payments. A contract is strictly older than its payment's
+// completion (create -> settle/sweep -> plan -> complete), so every contract of
+// a payment completed more than StragglerContractExpiration ago is itself older
+// than StragglerContractExpiration and is stamped by the straggler assign pass
+// instead (the reaper runs it every cycle; the ctl backfill runs it first). The
+// extra 7 days is slack so boundary timing between the two passes cannot leave a
+// payment uncovered.
+const completedReapBackfillPaymentLookback = StragglerContractExpiration + 7*24*time.Hour
+
 // BackfillCompletedContractReapTime seeds reap_time on existing contracts whose
 // payment already completed, so the indexed reaper can retire them on the normal
 // completed-payout window. New completions are stamped inline by CompletePayment;
-// this only touches the pre-existing set (reap_time IS NULL). It is the one-time
-// companion to the reap_time deploy and is safe to re-run.
+// this is the one-time companion to the reap_time deploy. Idempotent: stamped
+// contracts (reap_time set) are skipped, so a converged re-run writes nothing.
 //
-// The scan is driven from the sweep -> completed-payment side and bounded by
-// LIMIT, so it never walks the whole contract table. A contract can have several
-// sweeps (duplicate candidate contract_ids within a batch), and setting reap_time
-// removes the contract from the candidate set, so this drains on an EMPTY batch,
-// not a short one: a full LIMIT of sweep rows can map to fewer contract updates
-// while more contracts still remain (the same reasoning as removeContractBatches).
-func BackfillCompletedContractReapTime(ctx context.Context, limit int) (backfilledCount int64) {
-	for {
-		var batchCount int64
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			tag := server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				WITH batch AS (
-					SELECT transfer_escrow_sweep.contract_id, account_payment.complete_time
-					FROM transfer_escrow_sweep
-					INNER JOIN account_payment ON
-						account_payment.payment_id = transfer_escrow_sweep.payment_id
-					INNER JOIN transfer_contract ON
-						transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-					WHERE account_payment.completed AND transfer_contract.reap_time IS NULL
-					LIMIT $1
-				)
-				UPDATE transfer_contract
-				SET reap_time = LEAST(COALESCE(transfer_contract.reap_time, 'infinity'::timestamp), batch.complete_time + interval '7 days')
-				FROM batch
-				WHERE transfer_contract.contract_id = batch.contract_id
-				`,
-				limit,
-			))
-			batchCount = tag.RowsAffected()
-		}, server.TxReadCommitted)
-		backfilledCount += batchCount
-		if batchCount == 0 {
-			return
+// It drives from the payment side: only payments completed within
+// completedReapBackfillPaymentLookback can cover contracts that the straggler
+// assign pass does not already stamp (see the constant's invariant), and each
+// payment's contracts are reached through the transfer_escrow_sweep payment_id
+// index. This replaces two slower shapes: the original
+// `WHERE reap_time IS NULL ... LIMIT` batching (O(N^2): every batch re-read the
+// already-stamped prefix of the sweep/payment join) and a keyset-cursor page
+// over the whole sweep table (O(N), but N = every sweep ever written -- hours of
+// heap fetches at prod scale). The payment window makes the work proportional to
+// ~one straggler-expiration of payouts regardless of table history.
+//
+// A contract with several completed payments takes the first-encountered
+// payment's complete_time (the reap_time IS NULL guard, same semantics as the
+// original backfill); live CompletePayment converges new completions with LEAST.
+// Each statement stamps at most rowLimit contracts of ONE payment in its own tx
+// (a single payment can cover a huge number of contracts, so bounding by
+// payments alone produced multi-minute WAL-heavy transactions — observed live as
+// a WalWrite stall). progress, when non-nil, is called after each payment.
+func BackfillCompletedContractReapTime(ctx context.Context, rowLimit int, progress func(stampedCount int64, processedPaymentCount int, totalPaymentCount int)) (backfilledCount int64) {
+	minCompleteTime := server.NowUtc().Add(-completedReapBackfillPaymentLookback)
+
+	// the payment ids in the window; small (a payment is one network's payout
+	// for a cycle), so load once and iterate in memory
+	paymentIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT payment_id
+			FROM account_payment
+			WHERE completed AND $1 <= complete_time
+			ORDER BY complete_time
+			`,
+			minCompleteTime.UTC(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var paymentId server.Id
+				server.Raise(result.Scan(&paymentId))
+				paymentIds = append(paymentIds, paymentId)
+			}
+		})
+	})
+
+	for i, paymentId := range paymentIds {
+		// drain this payment's unstamped contracts in row-bounded batches. A
+		// batch of sweep rows can map to fewer contract updates (multi-sweep
+		// contracts), so drain on an EMPTY batch, not a short one; stamped rows
+		// leave the reap_time IS NULL set, so the loop terminates.
+		for {
+			var batchCount int64
+			server.MaintenanceTx(ctx, func(tx server.PgTx) {
+				// interval '7 days' mirrors CompletedContractExpiration
+				tag := server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					WITH batch AS (
+						SELECT
+							transfer_escrow_sweep.contract_id,
+							account_payment.complete_time
+						FROM account_payment
+						INNER JOIN transfer_escrow_sweep ON
+							transfer_escrow_sweep.payment_id = account_payment.payment_id
+						INNER JOIN transfer_contract ON
+							transfer_contract.contract_id = transfer_escrow_sweep.contract_id
+						WHERE
+							account_payment.payment_id = $1 AND
+							account_payment.completed AND
+							transfer_contract.reap_time IS NULL
+						LIMIT $2
+					)
+					UPDATE transfer_contract
+					SET reap_time = batch.complete_time + interval '7 days'
+					FROM batch
+					WHERE
+						transfer_contract.contract_id = batch.contract_id AND
+						transfer_contract.reap_time IS NULL
+					`,
+					paymentId,
+					rowLimit,
+				))
+				batchCount = tag.RowsAffected()
+			}, server.TxReadCommitted)
+			backfilledCount += batchCount
+			if batchCount == 0 {
+				break
+			}
+		}
+		if progress != nil {
+			progress(backfilledCount, i+1, len(paymentIds))
 		}
 	}
+	return
 }
 
 // BackfillStragglerContractReapTime seeds reap_time = now() on existing aged
-// closed-but-never-completed contracts (reap_time IS NULL, closed, older than
+// closed contracts (reap_time IS NULL, closed, older than
 // StragglerContractExpiration) so the indexed reaper can remove them. This is the
 // same work the reaper's assign pass performs each run; it exists as an explicit
-// one-time backfill for the deploy that introduces reap_time. Batched until
-// drained (see assignStragglerReapTimeBatches); safe to re-run.
-func BackfillStragglerContractReapTime(ctx context.Context, limit int) (backfilledCount int64) {
-	return assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), limit)
+// backfill so an operator can drain the backlog in one sitting instead of over
+// budget-sized reaper cycles. Safe to re-run. assignStragglerReapTimeBatches
+// stops at reaperRunBudget per call (it is shared with the periodic reaper);
+// this drives it to completion in budget rounds, reporting after each round when
+// progress is non-nil.
+func BackfillStragglerContractReapTime(ctx context.Context, limit int, progress func(assignedCount int64)) (backfilledCount int64) {
+	for {
+		assigned := assignStragglerReapTimeBatches(ctx, server.NowUtc().Add(-StragglerContractExpiration), limit)
+		backfilledCount += assigned
+		if assigned == 0 {
+			return
+		}
+		if progress != nil {
+			progress(backfilledCount)
+		}
+	}
 }
 
 func GetOpenTransferByteCount(

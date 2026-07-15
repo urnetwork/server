@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	mathrand "math/rand"
 	"testing"
 	"time"
@@ -133,7 +134,147 @@ func TestNetworkClientLifecycle(t *testing.T) {
 	})
 }
 
-// FIXME test GetNetworkClients, SetPendingNetworkClientConnection
+// Round trip of the pending client connection marker through the real write
+// (SetPendingNetworkClientConnection) and read (GetNetworkClients, which reads
+// the per-client keys in a plain pipeline) paths, pinning the per-client key
+// format (`{pcc_<clientId>}`) and the expiry. The test redis is standalone,
+// not a cluster, so this proves functional equivalence of the per-client-tag
+// keys and the pipelined per-key gets that replaced the cross-slot mget, not
+// slot placement.
+func TestPendingNetworkClientConnection(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+		authClientResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "test device",
+				DeviceSpec:  "test spec",
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authClientResult.Error, nil)
+		clientId := *authClientResult.ClientId
+
+		connect.AssertEqual(t, fmt.Sprintf("{pcc_%s}", clientId), pendingClientConnectionKey(clientId))
+
+		// no pending connection yet
+		clientsResult, err := GetNetworkClients(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 1, len(clientsResult.Clients))
+		connect.AssertEqual(t, 0, len(clientsResult.Clients[0].Connections))
+
+		expire := 1 * time.Second
+		SetPendingNetworkClientConnection(ctx, clientId, expire)
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl := r.TTL(ctx, pendingClientConnectionKey(clientId)).Val()
+			connect.AssertEqual(t, true, 0 < ttl && ttl <= expire)
+		})
+
+		clientsResult, err = GetNetworkClients(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 1, len(clientsResult.Clients))
+		connect.AssertEqual(t, 1, len(clientsResult.Clients[0].Connections))
+		pendingConnection := clientsResult.Clients[0].Connections[0]
+		connect.AssertEqual(t, clientId, pendingConnection.ClientId)
+		// a pending connection is marked with the client id as connection id
+		connect.AssertEqual(t, clientId, pendingConnection.ConnectionId)
+
+		// after the expiry the marker is gone (the pipelined read tolerates
+		// the missing key)
+		select {
+		case <-time.After(expire + 500*time.Millisecond):
+		}
+		clientsResult, err = GetNetworkClients(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 1, len(clientsResult.Clients))
+		connect.AssertEqual(t, 0, len(clientsResult.Clients[0].Connections))
+	})
+}
+
+// Round trip of the client error counters through ClientError, asserting the
+// four per-call increments behave exactly as before the key split (each call
+// bumps all four counters by one) and that every key carries the ttl. Pins
+// the split key formats: client-scoped `{ce_<clientId>}...` and
+// network-scoped `{cen_<networkId>}...`. The test redis is standalone, not a
+// cluster, so this proves functional equivalence of the split-tag keys and
+// the plain (auto-routing) pipeline, not slot placement.
+func TestClientErrorCounters(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		connectionId := server.NewId()
+
+		errorMessage := "test error"
+		connect.AssertEqual(t, fmt.Sprintf("{ce_%s}count", clientId), clientErrorCountKey(clientId))
+		connect.AssertEqual(t, fmt.Sprintf("{ce_%s}message_%s", clientId, errorMessage), clientErrorMessageCountKey(clientId, errorMessage))
+		connect.AssertEqual(t, fmt.Sprintf("{cen_%s}count", networkId), networkErrorCountKey(networkId))
+		connect.AssertEqual(t, fmt.Sprintf("{cen_%s}message_%s", networkId, errorMessage), networkErrorMessageCountKey(networkId, errorMessage))
+
+		ClientError(ctx, networkId, clientId, connectionId, "read", fmt.Errorf("%s", errorMessage))
+		ClientError(ctx, networkId, clientId, connectionId, "read", fmt.Errorf("%s", errorMessage))
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{
+				clientErrorCountKey(clientId),
+				clientErrorMessageCountKey(clientId, errorMessage),
+				networkErrorCountKey(networkId),
+				networkErrorMessageCountKey(networkId, errorMessage),
+			} {
+				count, err := r.Get(ctx, key).Int64()
+				connect.AssertEqual(t, nil, err)
+				connect.AssertEqual(t, int64(2), count)
+
+				ttl := r.TTL(ctx, key).Val()
+				connect.AssertEqual(t, true, 0 < ttl && ttl <= 5*time.Minute)
+			}
+		})
+	})
+}
+
+// The provide mirror keys (`{pm_<clientId>}pms`, `{pm_<clientId>}sk_<n>`,
+// `{pm_<clientId>}rp`) are caches over postgres and must carry a ttl so idle
+// clients' keys expire instead of accumulating without bound. Asserts the ttl
+// after each real cache-write path: SetProvide for the provide modes list and
+// secret keys, and the GetClientIdentity read-through refill for the identity.
+func TestProvideMirrorTtl(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		secretKey := make([]byte, 32)
+		mathrand.Read(secretKey)
+
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: secretKey,
+		})
+
+		// the identity read-through caches the (empty) identity with a ttl
+		identity := GetClientIdentity(ctx, clientId)
+		connect.AssertNotEqual(t, nil, identity)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{
+				provideModesKey(clientId),
+				provideModeSecretKeyKey(clientId, ProvideModePublic),
+				clientIdentityKey(clientId),
+			} {
+				ttl := r.TTL(ctx, key).Val()
+				connect.AssertEqual(t, true, 0 < ttl && ttl <= provideMirrorTtl)
+			}
+		})
+	})
+}
 
 func TestSetProvide(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -433,6 +574,110 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 		livePem, _, err := GetClientTlsCertificateAndSignature(ctx, liveClientId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, string(livePem), "live-pem")
+	})
+}
+
+// The bounded cursor sweep must page the network-client dependent tables across
+// many slices without skipping rows at slice boundaries. With more orphan + live
+// rows than one slice, every orphan is removed and every live row survives,
+// however the random keys interleave in primary-key order. This covers three key
+// shapes at once: the generic single-uuid path (device) and the two bespoke
+// inline cursor loops that carry pagination on a UNION sentinel row
+// (proxy_device_config, single-uuid; provide_key, composite (client_id,
+// provide_mode)). sliceSize=2 forces each table across several slices.
+func TestSweepOrphanNetworkClientDataMultiSlice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		newSecretKey := func() []byte {
+			k := make([]byte, 32)
+			mathrand.Read(k)
+			return k
+		}
+
+		// live rows: each shares a client_id with a real network_client (created by
+		// Testing_CreateDevice), so device/provide_key/proxy_device_config all have a
+		// live parent and must survive.
+		liveCount := 4
+		liveDeviceIds := []server.Id{}
+		liveProvideClientIds := []server.Id{}
+		liveProxyIds := []server.Id{}
+		for range liveCount {
+			deviceId := server.NewId()
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, server.NewId(), deviceId, clientId, "test", "test")
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{ProvideModePublic: newSecretKey()})
+			pdc := &ProxyDeviceConfig{}
+			pdc.ClientId = clientId
+			err := CreateProxyDeviceConfig(ctx, pdc)
+			connect.AssertEqual(t, err, nil)
+			liveDeviceIds = append(liveDeviceIds, deviceId)
+			liveProvideClientIds = append(liveProvideClientIds, clientId)
+			liveProxyIds = append(liveProxyIds, pdc.ProxyId)
+		}
+
+		// orphan rows: no network_client references them
+		orphanCount := 5
+		orphanDeviceIds := []server.Id{}
+		orphanProvideClientIds := []server.Id{}
+		orphanProxyIds := []server.Id{}
+		for range orphanCount {
+			deviceId := server.NewId()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO device (device_id, network_id, device_name, device_spec, create_time) VALUES ($1, $2, $3, $4, now())`,
+					deviceId,
+					server.NewId(),
+					"test",
+					"test",
+				))
+			})
+			orphanDeviceIds = append(orphanDeviceIds, deviceId)
+
+			provideClientId := server.NewId()
+			SetProvide(ctx, provideClientId, map[ProvideMode][]byte{ProvideModePublic: newSecretKey()})
+			orphanProvideClientIds = append(orphanProvideClientIds, provideClientId)
+
+			pdc := &ProxyDeviceConfig{}
+			pdc.ClientId = server.NewId()
+			err := CreateProxyDeviceConfig(ctx, pdc)
+			connect.AssertEqual(t, err, nil)
+			orphanProxyIds = append(orphanProxyIds, pdc.ProxyId)
+		}
+
+		SweepOrphanNetworkClientData(ctx, 2)
+
+		server.Db(ctx, func(conn server.PgConn) {
+			exists := func(sql string, id server.Id) bool {
+				found := false
+				result, err := conn.Query(ctx, sql, id)
+				server.WithPgResult(result, err, func() {
+					found = result.Next()
+				})
+				return found
+			}
+			// every orphan row is gone
+			for _, id := range orphanDeviceIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM device WHERE device_id = $1`, id), false)
+			}
+			for _, id := range orphanProvideClientIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM provide_key WHERE client_id = $1`, id), false)
+			}
+			for _, id := range orphanProxyIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM proxy_device_config WHERE proxy_id = $1`, id), false)
+			}
+			// every live row survives
+			for _, id := range liveDeviceIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM device WHERE device_id = $1`, id), true)
+			}
+			for _, id := range liveProvideClientIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM provide_key WHERE client_id = $1`, id), true)
+			}
+			for _, id := range liveProxyIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM proxy_device_config WHERE proxy_id = $1`, id), true)
+			}
+		})
 	})
 }
 
@@ -867,5 +1112,166 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 		connect.AssertEqual(t, exists, true)
 		connect.AssertEqual(t, active, false)
 		connect.AssertNotEqual(t, deactivateTime, nil)
+	})
+}
+
+// `ConnectNetworkClient` refreshes `network_client.auth_time` at most once per
+// `clientAuthTimeRefreshMinInterval`: auth_time keys the reap partial indexes,
+// so every refresh is a non-HOT update that maintains all of the table's
+// indexes, and its consumers are 30d/90d retention thresholds that do not
+// need sub-hour freshness.
+func TestConnectNetworkClientAuthTimeThrottle(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "test", "test")
+
+		authTime := func() time.Time {
+			var authTime time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT auth_time FROM network_client WHERE client_id = $1`,
+					clientId,
+				)
+				server.WithPgResult(result, err, func() {
+					connect.AssertEqual(t, result.Next(), true)
+					server.Raise(result.Scan(&authTime))
+				})
+			})
+			return authTime
+		}
+		setAuthTime := func(authTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`UPDATE network_client SET auth_time = $2 WHERE client_id = $1`,
+					clientId,
+					authTime,
+				))
+			})
+		}
+
+		initialAuthTime := authTime()
+
+		// a fresh auth_time is not refreshed on connect, and the throttled
+		// connect still succeeds
+		_, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.0.0.1:20000", server.NewId())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, authTime().Equal(initialAuthTime), true)
+
+		// a stale auth_time (older than `clientAuthTimeRefreshMinInterval`) is
+		// refreshed to ~now on connect
+		staleAuthTime := server.NowUtc().Add(-2 * clientAuthTimeRefreshMinInterval)
+		setAuthTime(staleAuthTime)
+		_, _, _, _, err = ConnectNetworkClient(ctx, clientId, "10.0.0.1:20001", server.NewId())
+		connect.AssertEqual(t, err, nil)
+		refreshedAuthTime := authTime()
+		connect.AssertEqual(t, staleAuthTime.Before(refreshedAuthTime), true)
+		age := server.NowUtc().Sub(refreshedAuthTime)
+		connect.AssertEqual(t, 0 <= age && age < time.Minute, true)
+	})
+}
+
+// the child reap's stale-auth_time band must not accumulate long-connected
+// children: `RemoveDisconnectedNetworkClients` bumps a connected child's
+// auth_time to now (removing it from the band for another
+// `NetworkClientReapAfterDeactivate`) instead of LEFT-JOIN probing it on
+// every run, while stale children without a connection are still reaped and
+// fresh children are untouched.
+func TestRemoveDisconnectedChildReapBumpsConnected(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+
+		newClient := func(sourceClientId *server.Id) server.Id {
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "test", "test")
+			if sourceClientId != nil {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(
+						ctx,
+						`UPDATE network_client SET source_client_id = $2 WHERE client_id = $1`,
+						clientId,
+						sourceClientId,
+					))
+				})
+			}
+			return clientId
+		}
+		setAuthTime := func(clientId server.Id, authTime time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`UPDATE network_client SET auth_time = $2 WHERE client_id = $1`,
+					clientId,
+					authTime,
+				))
+			})
+		}
+		clientAuthTime := func(clientId server.Id) (exists bool, authTime time.Time) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT auth_time FROM network_client WHERE client_id = $1`,
+					clientId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						exists = true
+						server.Raise(result.Scan(&authTime))
+					}
+				})
+			})
+			return
+		}
+
+		parentClientId := newClient(nil)
+
+		now := server.NowUtc()
+		staleAuthTime := now.Add(-NetworkClientReapAfterDeactivate - 24*time.Hour)
+
+		// stale child with a live connection: bumped out of the band, not reaped
+		connectedChildId := newClient(&parentClientId)
+		_, _, _, _, err := ConnectNetworkClient(ctx, connectedChildId, "10.0.0.2:20000", server.NewId())
+		connect.AssertEqual(t, err, nil)
+		setAuthTime(connectedChildId, staleAuthTime)
+
+		// stale child without a connection: reaped
+		staleChildId := newClient(&parentClientId)
+		setAuthTime(staleChildId, staleAuthTime)
+
+		// fresh child without a connection: untouched
+		freshChildId := newClient(&parentClientId)
+		_, freshAuthTimeBefore := clientAuthTime(freshChildId)
+
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+
+		// the connected child survives with auth_time bumped to ~now
+		exists, bumpedAuthTime := clientAuthTime(connectedChildId)
+		connect.AssertEqual(t, exists, true)
+		connect.AssertEqual(t, minClientTime.Before(bumpedAuthTime), true)
+		age := server.NowUtc().Sub(bumpedAuthTime)
+		connect.AssertEqual(t, 0 <= age && age < time.Minute, true)
+
+		// the stale disconnected child is reaped
+		exists, _ = clientAuthTime(staleChildId)
+		connect.AssertEqual(t, exists, false)
+
+		// the fresh child is untouched
+		exists, freshAuthTimeAfter := clientAuthTime(freshChildId)
+		connect.AssertEqual(t, exists, true)
+		connect.AssertEqual(t, freshAuthTimeAfter.Equal(freshAuthTimeBefore), true)
+
+		// a second run is stable: the bumped child is out of the band and stays
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		exists, _ = clientAuthTime(connectedChildId)
+		connect.AssertEqual(t, exists, true)
 	})
 }

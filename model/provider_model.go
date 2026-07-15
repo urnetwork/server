@@ -121,13 +121,11 @@ func statsProviders(
 		result, err := conn.Query(
 			clientSession.Ctx,
 			`
-			SELECT network_client.client_id
+			SELECT DISTINCT network_client.client_id
 			FROM network_client
+			INNER JOIN provide_key ON
+				provide_key.client_id = network_client.client_id
 			WHERE network_client.network_id = $1 AND network_client.active = true
-				AND EXISTS (
-					SELECT 1 FROM provide_key
-					WHERE provide_key.client_id = network_client.client_id
-				)
 			`,
 			networkId,
 		)
@@ -561,13 +559,11 @@ func StatsProvidersOverview(
 		result, err := conn.Query(
 			clientSession.Ctx,
 			`
-			SELECT network_client.client_id
+			SELECT DISTINCT network_client.client_id
 			FROM network_client
+			INNER JOIN provide_key ON
+				provide_key.client_id = network_client.client_id
 			WHERE network_client.network_id = $1 AND network_client.active = true
-				AND EXISTS (
-					SELECT 1 FROM provide_key
-					WHERE provide_key.client_id = network_client.client_id
-				)
 			`,
 			networkId,
 		)

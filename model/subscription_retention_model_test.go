@@ -349,6 +349,114 @@ func TestSweepOrphanContractData(t *testing.T) {
 	})
 }
 
+// The bounded cursor sweep must page across many slices without skipping rows at
+// slice boundaries: with more orphan + live rows than one slice, every orphan is
+// removed and every live row survives, regardless of how orphan/live rows
+// interleave in primary-key order. sliceSize is deliberately small so each table
+// spans several slices.
+func TestSweepOrphanContractDataMultiSlice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			ByteCount(1024*1024*1024),
+			365*24*time.Hour,
+			UsdToNanoCents(10.00),
+			"",
+			"",
+			"",
+		)
+		connect.AssertEqual(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
+
+		// several live contracts whose close + escrow rows must survive
+		liveCount := 4
+		liveContractIds := []server.Id{}
+		for range liveCount {
+			usedTransferByteCount := ByteCount(1024)
+			liveEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			connect.AssertEqual(t, err, nil)
+			err = CloseContract(ctx, liveEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			connect.AssertEqual(t, err, nil)
+			liveContractIds = append(liveContractIds, liveEscrow.ContractId)
+		}
+
+		// many orphan dependents of contract ids that do not exist
+		orphanCount := 10
+		orphanContractIds := []server.Id{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			for range orphanCount {
+				orphanContractId := server.NewId()
+				orphanContractIds = append(orphanContractIds, orphanContractId)
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO contract_close (contract_id, party, used_transfer_byte_count) VALUES ($1, $2, $3)`,
+					orphanContractId,
+					ContractPartySource,
+					1024,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO transfer_escrow (contract_id, balance_id, balance_byte_count) VALUES ($1, $2, $3)`,
+					orphanContractId,
+					server.NewId(),
+					1024,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, payout_byte_count, payout_net_revenue_nano_cents) VALUES ($1, $2, $3, $4, $5)`,
+					orphanContractId,
+					server.NewId(),
+					destinationNetworkId,
+					1024,
+					0,
+				))
+			}
+		})
+
+		// sliceSize=3 forces multiple slices across the interleaved live/orphan rows
+		removedCount := SweepOrphanContractData(ctx, 3)
+		// each orphan contract contributes one close + one escrow + one sweep
+		connect.AssertEqual(t, removedCount, int64(3*orphanCount))
+
+		server.Db(ctx, func(conn server.PgConn) {
+			exists := func(sql string, id server.Id) bool {
+				found := false
+				result, err := conn.Query(ctx, sql, id)
+				server.WithPgResult(result, err, func() {
+					found = result.Next()
+				})
+				return found
+			}
+			// every orphan row is gone
+			for _, id := range orphanContractIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM contract_close WHERE contract_id = $1`, id), false)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), false)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow_sweep WHERE contract_id = $1`, id), false)
+			}
+			// every live contract's close + escrow survive
+			for _, id := range liveContractIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM contract_close WHERE contract_id = $1`, id), true)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), true)
+			}
+		})
+	})
+}
+
 // A closed contract with no completed-payment sweep is a straggler: it never
 // gets a reap_time from CompletePayment, so it survives the normal completed-
 // payout cascade. Once it ages past StragglerContractExpiration the reaper's
@@ -508,8 +616,9 @@ func TestBackfillContractReapTime(t *testing.T) {
 			connect.AssertEqual(t, testingReapTime(ctx, contractId) == nil, true)
 		}
 
-		// the completed backfill re-derives reap_time = complete_time + 7d
-		backfilled := BackfillCompletedContractReapTime(ctx, 1000)
+		// the completed backfill re-derives reap_time = complete_time + 7d,
+		// driven from the recently-completed payment window
+		backfilled := BackfillCompletedContractReapTime(ctx, 3, nil)
 		connect.AssertNotEqual(t, backfilled, int64(0))
 		for _, contractId := range paidContractIds {
 			reapTime := testingReapTime(ctx, contractId)
@@ -517,6 +626,9 @@ func TestBackfillContractReapTime(t *testing.T) {
 			expected := completeTime.Add(CompletedContractExpiration)
 			connect.AssertEqual(t, reapTime.After(expected.Add(-time.Hour)) && reapTime.Before(expected.Add(time.Hour)), true)
 		}
+
+		// converged: a re-run stamps nothing (the write guard makes it a no-op)
+		connect.AssertEqual(t, BackfillCompletedContractReapTime(ctx, 3, nil), int64(0))
 
 		// a closed contract with no completed payment, aged past the straggler
 		// window, gets no reap_time until the straggler backfill assigns now()
@@ -538,12 +650,15 @@ func TestBackfillContractReapTime(t *testing.T) {
 		connect.AssertEqual(t, testingReapTime(ctx, sweeplessEscrow.ContractId) == nil, true)
 
 		before := server.NowUtc()
-		straggler := BackfillStragglerContractReapTime(ctx, 1000)
+		straggler := BackfillStragglerContractReapTime(ctx, 1000, nil)
 		connect.AssertNotEqual(t, straggler, int64(0))
 		reapTime := testingReapTime(ctx, sweeplessEscrow.ContractId)
 		connect.AssertEqual(t, reapTime != nil, true)
 		// assigned ~ now (not the aged create_time)
 		connect.AssertEqual(t, reapTime.After(before.Add(-time.Hour)) && reapTime.Before(server.NowUtc().Add(time.Hour)), true)
+
+		// converged: every straggler carries a reap_time, so a re-run assigns none
+		connect.AssertEqual(t, BackfillStragglerContractReapTime(ctx, 1000, nil), int64(0))
 	})
 }
 
@@ -734,5 +849,77 @@ func TestRemoveContractBatchesDrainsDuplicateCandidates(t *testing.T) {
 		contracts, sweeps = countRemaining()
 		connect.AssertEqual(t, contracts, 0)
 		connect.AssertEqual(t, sweeps, 0)
+	})
+}
+
+// The reaper's straggler assign pass is bounded by reaperRunBudget so a large
+// one-time backlog (e.g. a fresh deploy before `bringyourctl db
+// backfill-contract-reap-time` has run, where reap_time IS NULL matches almost
+// the whole table) drains over many bounded 30-min runs instead of one unbounded
+// run that pegs the DB. Inject a spent budget and prove the assign loop stops
+// after a single full batch with stragglers still unmarked, then finishes them
+// under a normal budget.
+func TestAssignStragglerReapTimeRespectsBudget(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		aged := server.NowUtc().Add(-StragglerContractExpiration - 24*time.Hour)
+		contractIds := []server.Id{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			for range 5 {
+				contractId := server.NewId()
+				// closed (outcome set -> open = false; close_time set) and never
+				// reaped (reap_time IS NULL), aged past the straggler window -> a
+				// straggler the assign pass targets
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO transfer_contract (
+						contract_id, source_network_id, source_id,
+						destination_network_id, destination_id,
+						transfer_byte_count, create_time, close_time, outcome
+					)
+					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5)
+					`,
+					contractId, networkId, 1024, aged, ContractOutcomeSettled,
+				))
+				contractIds = append(contractIds, contractId)
+			}
+		})
+
+		countAssigned := func() int {
+			c := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT COUNT(*) FROM transfer_contract WHERE contract_id = ANY($1) AND reap_time IS NOT NULL`,
+					contractIds,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&c))
+					}
+				})
+			})
+			return c
+		}
+
+		minCreateTime := server.NowUtc().Add(-StragglerContractExpiration)
+
+		// a spent (past) budget: one full batch runs, then the budget check stops
+		// the loop with stragglers still unmarked
+		defer func() { reaperRunBudget = 5 * time.Minute }()
+		reaperRunBudget = -1 * time.Minute
+		assigned := assignStragglerReapTimeBatches(ctx, minCreateTime, 2)
+		connect.AssertEqual(t, assigned, int64(2))
+		connect.AssertEqual(t, countAssigned(), 2)
+
+		// a normal budget drains the rest (a full batch of 2 + a short final batch
+		// of 1, which ends the loop)
+		reaperRunBudget = 5 * time.Minute
+		assigned = assignStragglerReapTimeBatches(ctx, minCreateTime, 2)
+		connect.AssertEqual(t, assigned, int64(3))
+		connect.AssertEqual(t, countAssigned(), 5)
 	})
 }

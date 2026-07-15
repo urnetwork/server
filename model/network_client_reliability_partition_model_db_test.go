@@ -63,9 +63,12 @@ func TestClientReliabilityPartitionMigrate(t *testing.T) {
 		connect.AssertNotEqual(t, len(listClientReliabilityPartitions(ctx)), 0)
 		_, oldExists := pgRelkind(ctx, clientReliabilityOldTable)
 		connect.AssertEqual(t, oldExists, true)
-		// the secondary index took the canonical name
-		_, secondaryExists := pgRelkind(ctx, "client_reliability_valid_block_number_client_address_hash")
+		// the secondary index took the canonical (desired-shape) name
+		_, secondaryExists := pgRelkind(ctx, clientReliabilitySecondaryIndexName(clientReliabilityTable))
 		connect.AssertEqual(t, secondaryExists, true)
+		drift, detail := ClientReliabilitySecondaryIndexDrift(ctx)
+		connect.AssertEqual(t, drift, false)
+		t.Logf("post-migrate index state: %s", detail)
 
 		// rerun is a no-op
 		err = MigrateClientReliabilityToPartitions(ctx, 3, false, false, t.Logf)
@@ -167,8 +170,10 @@ func TestClientReliabilityPartitionMigrateOneshot(t *testing.T) {
 		connect.AssertEqual(t, IsClientReliabilityPartitioned(ctx), true)
 		connect.AssertEqual(t, countRows(), int64(2))
 		connect.AssertNotEqual(t, len(listClientReliabilityPartitions(ctx)), 0)
-		_, secondaryExists := pgRelkind(ctx, "client_reliability_valid_block_number_client_address_hash")
+		_, secondaryExists := pgRelkind(ctx, clientReliabilitySecondaryIndexName(clientReliabilityTable))
 		connect.AssertEqual(t, secondaryExists, true)
+		drift, _ := ClientReliabilitySecondaryIndexDrift(ctx)
+		connect.AssertEqual(t, drift, false)
 
 		// the drain-style upsert works on the new partitioned table
 		AddClientReliabilityStats(ctx, networkId, clientId, clientAddressHash, now, stats)

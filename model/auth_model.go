@@ -1383,75 +1383,114 @@ func AuthCodeCreate(
 	return
 }
 
+// removeExpiredAuthCodesBatchSize / removeExpiredVerifyCodesBatchSize bound each
+// delete pass so the reap drains in bounded, short-locking transactions instead
+// of deleting the whole expired backlog under one long lock. Vars (not consts)
+// so tests can drive the multi-batch drain loop with a small batch.
+var removeExpiredAuthCodesBatchSize = 10000
+var removeExpiredVerifyCodesBatchSize = 50000
+
 func RemoveExpiredAuthCodes(ctx context.Context, minTime time.Time) (authCodeCount int) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					auth_code_id
-				FROM auth_code
-				WHERE
-					NOT active OR
-					end_time < $1
-			`,
-			minTime.UTC(),
-		)
-		authCodeIds := []server.Id{}
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var authCodeId server.Id
-				server.Raise(result.Scan(&authCodeId))
-				authCodeIds = append(authCodeIds, authCodeId)
+	// LIMIT-batched drain: each pass selects at most a batch of expired auth
+	// codes (ordered by end_time) and deletes them from auth_code + auth_code_role
+	// in its own tx, until a pass removes fewer than the batch size.
+	for {
+		batchCount := 0
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			result, err := tx.Query(
+				ctx,
+				`
+					SELECT
+						auth_code_id
+					FROM auth_code
+					WHERE
+						NOT active OR
+						end_time < $1
+					ORDER BY end_time
+					LIMIT $2
+				`,
+				minTime.UTC(),
+				removeExpiredAuthCodesBatchSize,
+			)
+			authCodeIds := []server.Id{}
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var authCodeId server.Id
+					server.Raise(result.Scan(&authCodeId))
+					authCodeIds = append(authCodeIds, authCodeId)
+				}
+			})
+
+			batchCount = len(authCodeIds)
+			if batchCount == 0 {
+				return
 			}
+
+			server.CreateTempTableInTx(ctx, tx, "temp_auth_code_id(auth_code_id uuid)", authCodeIds...)
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM auth_code
+				USING temp_auth_code_id
+				WHERE auth_code.auth_code_id = temp_auth_code_id.auth_code_id
+				`,
+			))
+
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM auth_code_role
+				USING temp_auth_code_id
+				WHERE auth_code_role.auth_code_id = temp_auth_code_id.auth_code_id
+				`,
+			))
 		})
 
-		authCodeCount = len(authCodeIds)
-		if len(authCodeIds) == 0 {
-			return
+		authCodeCount += batchCount
+		if batchCount < removeExpiredAuthCodesBatchSize {
+			break
 		}
-
-		server.CreateTempTableInTx(ctx, tx, "temp_auth_code_id(auth_code_id uuid)", authCodeIds...)
-
-		tx.Exec(
-			ctx,
-			`
-			DELETE FROM auth_code
-			USING temp_auth_code_id
-			WHERE auth_code.auth_code_id = temp_auth_code_id.auth_code_id
-			`,
-		)
-
-		tx.Exec(
-			ctx,
-			`
-			DELETE FROM auth_code_role
-			USING temp_auth_code_id
-			WHERE auth_code_role.auth_code_id = temp_auth_code_id.auth_code_id
-			`,
-		)
-	})
+	}
 
 	return
 }
 
 func RemoveExpiredVerifyCodes(ctx context.Context, minTime time.Time) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		verifyMinTime := server.NowUtc().Add(-VerifyCodeTimeout)
-		// raise on error so a silently failing cleanup cannot quietly let the
-		// table grow unbounded again (see AuthVerifyCreateCode)
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			DELETE FROM user_auth_verify
-			WHERE
-				used = true AND verify_time < $1
-				OR verify_time < $2
-			`,
-			minTime.UTC(),
-			verifyMinTime.UTC(),
-		))
-	})
+	verifyMinTime := server.NowUtc().Add(-VerifyCodeTimeout)
+	// LIMIT-batched drain (ordered by verify_time, served by the
+	// user_auth_verify_verify_time index), each pass its own tx until a pass
+	// removes fewer than the batch size. Raise on error so a silently failing
+	// cleanup cannot quietly let the table grow unbounded again (see
+	// AuthVerifyCreateCode).
+	for {
+		batchCount := int64(0)
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM user_auth_verify
+				USING (
+					SELECT user_auth_verify_id
+					FROM user_auth_verify
+					WHERE
+						(used = true AND verify_time < $1)
+						OR verify_time < $2
+					ORDER BY verify_time
+					LIMIT $3
+				) t
+				WHERE user_auth_verify.user_auth_verify_id = t.user_auth_verify_id
+				`,
+				minTime.UTC(),
+				verifyMinTime.UTC(),
+				removeExpiredVerifyCodesBatchSize,
+			))
+			batchCount = tag.RowsAffected()
+		})
+		if batchCount < int64(removeExpiredVerifyCodesBatchSize) {
+			break
+		}
+	}
 
 	return
 }

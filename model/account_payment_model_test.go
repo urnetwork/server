@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -1260,5 +1261,207 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		subsidyPayment = GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
 		connect.AssertEqual(t, subsidyPayment, nil)
 
+	})
+}
+
+// TestPlanPaymentsNeedsRepaymentSetEquivalence pins the payout planner's
+// "needs (re)payment" selection (the temp_account_payment set built at the top
+// of planPayments) to be identical under the new UNION-ALL query and the old
+// LEFT-JOIN anti-join it replaced. It seeds sweeps in every payment state and
+// asserts the selected (contract_id, balance_id) multiset is byte-for-byte the
+// same as the old query's, for both the unbounded (live) plan and the bounded
+// (backlog-slice, close_time < upperBound) plan.
+//
+// Payment states:
+//   - unpaid    (payment_id NULL)                 -> selected (unpaid arm)
+//   - canceled  (payment_id -> canceled payment)  -> selected (canceled arm)
+//   - completed (payment_id -> completed payment) -> NOT selected
+//   - active    (payment_id -> pending payment)   -> NOT selected
+//
+// Canceling a payment sets account_payment.canceled = true but does not null the
+// sweep's payment_id (see CancelHungAccountPayments), which is exactly why the
+// canceled arm joins the canceled-payment set back to its sweeps by payment_id.
+func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		planId := server.NewId()
+		now := server.NowUtc()
+
+		type sweepFixture struct {
+			contractId server.Id
+			balanceId  server.Id
+			state      string
+			closeTime  time.Time
+			eligible   bool // expected in the needs-(re)payment set
+		}
+
+		oldCloseTime := now.Add(-10 * 24 * time.Hour)
+		recentCloseTime := now.Add(-1 * 24 * time.Hour)
+
+		fixtures := []sweepFixture{
+			{server.NewId(), server.NewId(), "unpaid", oldCloseTime, true},
+			{server.NewId(), server.NewId(), "canceled", oldCloseTime, true},
+			{server.NewId(), server.NewId(), "completed", oldCloseTime, false},
+			{server.NewId(), server.NewId(), "active", oldCloseTime, false},
+			// a second unpaid + canceled pair closing recently, so the bounded
+			// (close_time < upperBound) slice excludes them while the unbounded
+			// plan includes them.
+			{server.NewId(), server.NewId(), "unpaid", recentCloseTime, true},
+			{server.NewId(), server.NewId(), "canceled", recentCloseTime, true},
+			{server.NewId(), server.NewId(), "completed", recentCloseTime, false},
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, f := range fixtures {
+				var paymentId *server.Id
+				if f.state != "unpaid" {
+					pid := server.NewId()
+					paymentId = &pid
+					server.RaisePgResult(tx.Exec(ctx,
+						`
+						INSERT INTO account_payment (
+							payment_id, payment_plan_id, wallet_id,
+							payout_byte_count, payout_nano_cents, min_sweep_time,
+							completed, canceled
+						) VALUES ($1, $2, NULL, 0, 0, $3, $4, $5)
+						`,
+						pid, planId, now,
+						f.state == "completed",
+						f.state == "canceled",
+					))
+				}
+				server.RaisePgResult(tx.Exec(ctx,
+					`
+					INSERT INTO transfer_contract (
+						contract_id, source_network_id, source_id,
+						destination_network_id, destination_id,
+						transfer_byte_count, create_time, close_time
+					) VALUES ($1, $2, $2, $3, $3, 0, $4, $5)
+					`,
+					f.contractId, server.NewId(), networkId,
+					f.closeTime.Add(-time.Hour), f.closeTime,
+				))
+				server.RaisePgResult(tx.Exec(ctx,
+					`
+					INSERT INTO transfer_escrow_sweep (
+						contract_id, balance_id, network_id,
+						payout_byte_count, payout_net_revenue_nano_cents, payment_id
+					) VALUES ($1, $2, $3, 100, 100, $4)
+					`,
+					f.contractId, f.balanceId, networkId, paymentId,
+				))
+			}
+		})
+
+		key := func(c, b server.Id) string { return c.String() + ":" + b.String() }
+
+		runSet := func(query string, args ...any) []string {
+			set := []string{}
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(ctx, query, args...)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var c, b server.Id
+						server.Raise(result.Scan(&c, &b))
+						set = append(set, key(c, b))
+					}
+				})
+			})
+			slices.Sort(set)
+			return set
+		}
+
+		// the exact pre-fix anti-join query, parameterized by the same
+		// closeTimeJoin/closeTimeBound fragments the planner substitutes.
+		oldQuery := func(closeTimeJoin, closeTimeBound string) string {
+			return fmt.Sprintf(`
+				SELECT
+					transfer_escrow_sweep.contract_id,
+					transfer_escrow_sweep.balance_id
+				FROM transfer_escrow_sweep
+				LEFT JOIN account_payment ON
+					account_payment.payment_id = transfer_escrow_sweep.payment_id
+				%s
+				WHERE
+					(account_payment.payment_id IS NULL OR
+					account_payment.canceled = true)
+					%s
+			`, closeTimeJoin, closeTimeBound)
+		}
+		// the post-fix UNION-ALL query, mirroring planPayments.
+		newQuery := func(closeTimeJoin, closeTimeBound string) string {
+			return fmt.Sprintf(`
+				SELECT
+					u.contract_id,
+					u.balance_id
+				FROM (
+					SELECT
+						transfer_escrow_sweep.contract_id,
+						transfer_escrow_sweep.balance_id
+					FROM transfer_escrow_sweep
+					WHERE transfer_escrow_sweep.payment_id IS NULL
+
+					UNION ALL
+
+					SELECT
+						s.contract_id,
+						s.balance_id
+					FROM account_payment ap
+					INNER JOIN transfer_escrow_sweep s ON
+						s.payment_id = ap.payment_id
+					WHERE ap.canceled = true
+				) u
+				%s
+				%s
+			`, closeTimeJoin, closeTimeBound)
+		}
+
+		// --- unbounded (live plan): no close-time join/bound ---
+		oldUnbounded := runSet(oldQuery("", ""))
+		newUnbounded := runSet(newQuery("", ""))
+		connect.AssertEqual(t, newUnbounded, oldUnbounded)
+
+		expectedUnbounded := []string{}
+		for _, f := range fixtures {
+			if f.eligible {
+				expectedUnbounded = append(expectedUnbounded, key(f.contractId, f.balanceId))
+			}
+		}
+		slices.Sort(expectedUnbounded)
+		connect.AssertEqual(t, newUnbounded, expectedUnbounded)
+
+		// --- bounded (backlog slice): close_time < upperBound ---
+		// upperBound includes oldCloseTime, excludes recentCloseTime.
+		upperBound := now.Add(-5 * 24 * time.Hour)
+		oldBounded := runSet(
+			oldQuery(
+				`
+				INNER JOIN transfer_contract ON
+					transfer_contract.contract_id = transfer_escrow_sweep.contract_id`,
+				"AND transfer_contract.close_time < $1",
+			),
+			upperBound,
+		)
+		newBounded := runSet(
+			newQuery(
+				`
+				INNER JOIN transfer_contract ON
+					transfer_contract.contract_id = u.contract_id`,
+				"WHERE transfer_contract.close_time < $1",
+			),
+			upperBound,
+		)
+		connect.AssertEqual(t, newBounded, oldBounded)
+
+		expectedBounded := []string{}
+		for _, f := range fixtures {
+			if f.eligible && f.closeTime.Before(upperBound) {
+				expectedBounded = append(expectedBounded, key(f.contractId, f.balanceId))
+			}
+		}
+		slices.Sort(expectedBounded)
+		connect.AssertEqual(t, newBounded, expectedBounded)
 	})
 }

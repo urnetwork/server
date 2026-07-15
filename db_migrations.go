@@ -4060,4 +4060,275 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS transfer_contract_reap_pending_create_time
         ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL
     `),
+	// Per-request wallet lookups (MarkWalletSeekerHolder: UPDATE account_wallet
+	// WHERE wallet_address = $1 AND network_id = $2) had no usable index —
+	// account_wallet's other indexes lead with wallet_id or active — so every
+	// call seq-scanned account_wallet. This composite matches both equality
+	// predicates for an index seek. account_wallet can be large: pre-create
+	// manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT EXISTS gate
+	// makes this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_wallet_wallet_address_network_id
+        ON account_wallet (wallet_address, network_id)
+    `),
+
+	// Rolling incremental reliability-score maintenance
+	// (UpdateClientReliabilityRunningInTx, model/network_client_reliability_model.go).
+	// Instead of re-scanning the whole lookback window of the
+	// ~hundreds-of-millions-row client_reliability table on every run, the score
+	// computations keep a running per-(client, lookback) sum of the
+	// location-INDEPENDENT reliability contributions and advance it by only the
+	// blocks that entered/left the window since the last run, anchored by a
+	// periodic full recompute. A drained block's client_reliability rows are
+	// immutable (block finality + idempotent absolute-count drain) and
+	// valid_client_count is block-local, so a block's per-client contribution is
+	// deterministic; add-on-entry and subtract-on-exit therefore cancel exactly
+	// (modulo float associativity, reset by the recompute). #1
+	// (client_connection_reliability_score) and #3
+	// (network_connection_reliability_window_score) are written from this table
+	// joined to network_client_location_reliability at write time, so location
+	// stays query-time (no semantic change vs the old full-window query).
+	//
+	// running per-client, location-independent sums; one row per (client, lookback)
+	newSqlMigration(`
+        CREATE TABLE client_reliability_running (
+            client_id uuid NOT NULL,
+            lookback_index int NOT NULL,
+            network_id uuid NOT NULL,
+            independent_sum double precision NOT NULL,
+            reliability_sum double precision NOT NULL,
+
+            PRIMARY KEY (client_id, lookback_index)
+        )
+    `),
+
+	// per-lookback applied window bounds + recompute marker: the prior [min, max)
+	// the rolling maintenance diffs against, and the block the last full recompute
+	// anchored the sums at.
+	newSqlMigration(`
+        CREATE TABLE client_reliability_running_window (
+            lookback_index int NOT NULL,
+            min_block_number bigint NOT NULL,
+            max_block_number bigint NOT NULL,
+            last_recompute_block bigint NOT NULL,
+
+            PRIMARY KEY (lookback_index)
+        )
+    `),
+
+	// The payout planner (planPayments) re-picks sweeps whose payment was
+	// canceled (CancelHungAccountPayments sets canceled=true but does not null the
+	// sweep's payment_id). The payout query's canceled UNION arm drives from the
+	// small canceled set joined to sweeps by payment_id; this partial index over
+	// just the canceled rows makes finding those payment_ids an index-only scan
+	// instead of a seq scan of account_payment. account_payment is large: pre-
+	// create manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT
+	// EXISTS gate makes this migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS account_payment_canceled_payment_id
+        ON account_payment (payment_id) WHERE canceled
+    `),
+
+	// Consecutive-error count for task reschedules, driving exponential backoff
+	// (task.go). Without it every task error retried within RescheduleTimeout
+	// (~2s) forever: 8k payment tasks stuck on an external 429 rate limit
+	// produced ~65 error-reschedule updates/sec, churning pending_task to ~94%
+	// dead tuples and degrading the poll query (observed at 39% of all db exec
+	// time). The count resets naturally when the task completes (row moves to
+	// finished_task and is deleted). pending_task is small, so the ADD COLUMN
+	// with default is instant.
+	newSqlMigration(`
+        ALTER TABLE pending_task ADD COLUMN reschedule_error_count int NOT NULL DEFAULT 0
+    `),
+
+	// Deliberate, targeted re-add of eager autovacuum for pending_task only,
+	// after the 2026-07-13 blanket backout of per-table autovacuum tuning
+	// (v494-502). pending_task is a small (~13k live rows) queue table churned by
+	// every task claim/reschedule; at default autovacuum it was measured at ~94%
+	// dead tuples, which degraded the poll query (ORDER BY available_block ...
+	// FOR UPDATE SKIP LOCKED) to 646ms mean = 39% of all db exec time. The
+	// reschedule backoff reduces the churn, but the queue head still needs eager
+	// vacuuming to keep the poll index clean. Same settings the table had before
+	// the backout.
+	newSqlMigration(`
+        ALTER TABLE pending_task SET (
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+
+	// Deliberate, targeted re-add of the per-table autovacuum tuning for the
+	// high-churn large tables, after the 2026-07-13 blanket backout (v494-502).
+	// Evidence from prod 2026-07-14: transfer_contract sat at 67M dead tuples
+	// (the paced reap drain's wake) with autovacuum idle, because the default
+	// scale factor (0.2) does not trigger until 122M dead on a 612M-row table --
+	// dead-tuple debt accumulates for days while every query on the table
+	// degrades. The fixed 5M-dead thresholds below (the same settings the
+	// tables had before the backout) trigger vacuum at a bounded absolute debt
+	// regardless of table size. Settings are identical to the historical
+	// migrations that were RESET.
+	newSqlMigration(`
+        ALTER TABLE contract_close SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_contract SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client_location_reliability SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 5000000,
+            autovacuum_vacuum_insert_scale_factor = 0,
+            autovacuum_vacuum_insert_threshold = 10000000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 1000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE network_client SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE provide_key SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE device SET (
+            autovacuum_vacuum_cost_delay = 0,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_analyze_scale_factor = 0.02
+        )
+    `),
+
+	// Pace the giant-table vacuums. The fixed 5M thresholds above (restored
+	// 2026-07-14) combined with cost_delay = 0 re-created the debt-clearing
+	// behavior, but during the reap-drain era the cascade giants re-qualify
+	// every couple of hours, and three concurrent full-speed vacuums of
+	// multi-hundred-GB tables evict the buffer cache under live traffic
+	// (observed: 130+ backends in BufferMapping LWLock waits). Two changes:
+	// (1) the pure cascade victims (contract_close, transfer_escrow,
+	// transfer_escrow_sweep) tolerate far more dead space than the
+	// query-critical transfer_contract, so their trigger rises to 25M dead
+	// (<1% of table) / 50M inserts; (2) all four giants get the standard
+	// autovacuum cost_delay = 2ms pacing (~80MB/s) instead of unthrottled.
+	// Small hot tables (pending_task, network_client, ...) keep delay 0.
+	newSqlMigration(`
+        ALTER TABLE contract_close SET (
+            autovacuum_vacuum_cost_delay = 2,
+            autovacuum_vacuum_threshold = 25000000,
+            autovacuum_vacuum_insert_threshold = 50000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow SET (
+            autovacuum_vacuum_cost_delay = 2,
+            autovacuum_vacuum_threshold = 25000000,
+            autovacuum_vacuum_insert_threshold = 50000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_escrow_sweep SET (
+            autovacuum_vacuum_cost_delay = 2,
+            autovacuum_vacuum_threshold = 25000000,
+            autovacuum_vacuum_insert_threshold = 50000000
+        )
+    `),
+	newSqlMigration(`
+        ALTER TABLE transfer_contract SET (
+            autovacuum_vacuum_cost_delay = 2
+        )
+    `),
+
+	// Dedicated pair-lookup index for the contract-creation hot path (the
+	// "existing open contract for this (source, destination) pair" check, ~68
+	// calls/sec): equality on the pair + ORDER BY create_time LIMIT 1 walks this
+	// index natively and stops at the first live entry. The previous plan went
+	// through the wider open_source_id index without create_time (sort over all
+	// matches), which degraded ~5x under heavy close churn as dead entries
+	// accumulated between vacuum index-cleanup cycles (observed 115ms -> 597ms =
+	// 76% of all db time). The partial predicate keeps the index tiny (only
+	// open, non-companion contracts). transfer_contract is large: PRE-CREATE
+	// MANUALLY with CREATE INDEX CONCURRENTLY out of band — a plain build here
+	// takes a SHARE lock that blocks all contract writes for the scan; the
+	// IF NOT EXISTS gate makes this migration a no-op once pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_pair_open_create_time
+        ON transfer_contract (source_id, destination_id, create_time)
+        WHERE open AND companion_contract_id IS NULL
+    `),
+
+	// Drop the never-read handler_id index from the hottest insert path.
+	// Verified on prod 2026-07-15: 349 MB, idx_scan = 0 (lifetime), while
+	// network_client_connection sustains hundreds of inserts/sec that each
+	// maintain it. Its intended consumer (the handler-crash cleanup in
+	// network_client_model.go, which deletes by handler_id via a temp-table
+	// join) planned a seq scan of this <= few-million-row table anyway, so the
+	// drop changes no read plan. Pre-drop manually with
+	// DROP INDEX CONCURRENTLY out of band (a plain drop takes a brief ACCESS
+	// EXCLUSIVE on the table and must queue behind in-flight queries); the
+	// IF EXISTS gate makes this migration a no-op once pre-dropped.
+	newSqlMigration(`
+        DROP INDEX IF EXISTS network_client_connection_handler_id
+    `),
+
+	// The open-contract lookups for a client (`WHERE open AND (source_id = $1
+	// OR destination_id = $1)`, the per-client contract-sync path at ~6 calls/s)
+	// have no open-leading destination index on prod: the destination arm
+	// bitmap-scans `transfer_contract_destination_id_close_time` with only
+	// destination_id in the index condition, reading the client's ENTIRE
+	// contract history (whales: millions of entries) and filtering `open` at
+	// the heap -- measured 72ms mean for ~1.5 rows returned. This partial index
+	// contains only open contracts, so the arm becomes a direct seek.
+	// transfer_contract is large: pre-create manually with CREATE INDEX
+	// CONCURRENTLY out of band; the IF NOT EXISTS gate makes this migration a
+	// no-op once pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS transfer_contract_open_destination_partial
+        ON transfer_contract (destination_id) WHERE open
+    `),
 }

@@ -55,6 +55,14 @@ var ReleaseTimeout = 30 * time.Second
 // the reschedule time is uniformly chosen on [0, t] so the expected mean will be t/2
 var RescheduleTimeout = 2 * BlockSizeSeconds * time.Second
 
+// cap for the exponential error-reschedule backoff. A task that keeps erroring
+// retries at RescheduleTimeout * 2^reschedule_error_count (plus the uniform
+// jitter above), capped here. Without backoff a wedged task (e.g. an external
+// 429 rate limit) retried every ~2s forever; 8k such payment tasks churned
+// pending_task to ~94% dead tuples and made the poll query 39% of all db exec
+// time. The count resets when the task completes (the pending row is deleted).
+var RescheduleBackoffMaxTimeout = 1 * time.Hour
+
 type TaskPriority = int
 
 const (
@@ -1078,10 +1086,25 @@ func (self *TaskWorker) takeTasks(n int) (map[server.Id]*Task, error) {
 		taskIds = taskIds[0:i]
 
 		claimTime := server.NowUtc()
-		releaseTime := claimTime.Add(ReleaseTimeout)
 
 		server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
 			for _, taskId := range taskIds {
+				// the initial lease covers the task's own declared max runtime,
+				// not just ReleaseTimeout: the keepalive extender re-extends the
+				// lease while the task runs, but under cpu saturation the
+				// extender can starve past ReleaseTimeout, and an expired lease
+				// lets another worker claim a DUPLICATE concurrent execution of
+				// a long task (observed on prod 2026-07-15: a 20+ minute
+				// reliability recompute was re-claimed mid-run at ~25 minute
+				// intervals, and the contending duplicates slowed each other
+				// into a pile-up). Trade-off: if a worker dies mid-run, the
+				// task is not re-claimable until its max time passes -- correct
+				// for long maintenance tasks, and the keepalive still shortens
+				// nothing here since release_time is only ever extended.
+				releaseTime := claimTime.Add(max(
+					ReleaseTimeout,
+					time.Duration(taskIdPriorities[taskId].maxTimeSeconds)*time.Second,
+				))
 				batch.Queue(
 					`
 					    UPDATE pending_task
@@ -1332,12 +1355,23 @@ func (self *TaskWorker) EvalTasks(n int) (
 			for taskId, err := range rescheduledTasks {
 				now := server.NowUtc()
 				rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
+				// exponential backoff on consecutive errors: the jittered base
+				// above plus RescheduleTimeout * 2^errorCount, capped at
+				// RescheduleBackoffMaxTimeout. The first error retries near the
+				// old fast cadence (transient blips stay fast); a wedged task
+				// (external rate limit, hard failure) converges to the cap
+				// instead of hammering pending_task and its dependency every
+				// ~2s. The exponent is clamped in SQL to keep power() bounded.
 				batch.Queue(
 					`
 						UPDATE pending_task
 						SET
 							reschedule_error = $2,
-							run_at = $3,
+							reschedule_error_count = pending_task.reschedule_error_count + 1,
+							run_at = $3::timestamp + make_interval(secs => LEAST(
+								$5::double precision * power(2::double precision, LEAST(pending_task.reschedule_error_count, 24)::double precision),
+								$6::double precision
+							)),
 							release_time = $4
 						WHERE task_id = $1
 					`,
@@ -1345,6 +1379,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 					err.Error(),
 					rescheduleTime,
 					now,
+					float64(RescheduleTimeout/time.Second),
+					float64(RescheduleBackoffMaxTimeout/time.Second),
 				)
 			}
 		})

@@ -1435,8 +1435,10 @@ type InitialClientLocations struct {
 	LocationGroups []*ClientLocationGroup
 }
 
+// the hash tag is per location so that the family spreads across cluster slots.
+// a single shared tag would concentrate the entire cache on one node.
 func clientLocationKey(locationId server.Id) string {
-	return fmt.Sprintf("{cl}_l_%s", locationId)
+	return fmt.Sprintf("{cl_%s}l", locationId)
 }
 
 func initialClientLocationsKey() string {
@@ -1649,7 +1651,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	})
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		pipe := r.TxPipeline()
+		// plain pipeline instead of tx: the sets are independent and the keys
+		// hash to different cluster slots, which multi/exec cannot span
+		pipe := r.Pipeline()
 
 		for locationId, clientLocation := range clientLocations {
 			b := bytes.NewBuffer(nil)
@@ -1691,7 +1695,8 @@ func loadClientLocations(
 		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
 			clientLocationCmds := map[server.Id]*redis.StringCmd{}
 
-			pipe := r.TxPipeline()
+			// plain pipeline instead of tx: independent gets across cluster slots
+			pipe := r.Pipeline()
 			for locationId, _ := range locationIds {
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
@@ -1798,7 +1803,8 @@ func loadLocationStables(
 	server.Redis(ctx, func(r server.RedisClient) {
 		locationFilterCmds := map[server.Id]*redis.StringCmd{}
 
-		pipe := r.TxPipeline()
+		// plain pipeline instead of tx: independent gets across cluster slots
+		pipe := r.Pipeline()
 		for _, locationId := range locationIds {
 			locationFilterCmds[locationId] = pipe.Get(
 				ctx,
@@ -2160,13 +2166,18 @@ const ClientScoreSampleCount = 200
 // the number of filtered providers to consider a location stable
 const MinStableNetReliabilityWeight = float64(4)
 
+// the client score cache keys hash tag on the (caller location, target) pair
+// so that the family spreads across cluster slots. tagging only the caller
+// location would concentrate all targets for a popular caller location
+// (e.g. us) on a single node, which can exceed the node's memory.
+// the sample index stays outside the tag.
 func clientScoreLocationCountsKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
 	fm := 0
 	if forceMinimum {
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}c_l_%s", fm, rm, callerLocationId, locationId)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}c_l", fm, rm, callerLocationId, locationId)
 }
 
 func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
@@ -2175,7 +2186,7 @@ func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}c_g_%s", fm, rm, callerLocationId, locationGroupId)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}c_g", fm, rm, callerLocationId, locationGroupId)
 }
 
 func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
@@ -2184,7 +2195,7 @@ func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}f_l_%s", fm, rm, callerLocationId, locationId)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}f_l", fm, rm, callerLocationId, locationId)
 }
 
 func clientScoreLocationGroupFilterKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
@@ -2193,7 +2204,7 @@ func clientScoreLocationGroupFilterKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}f_g_%s", fm, rm, callerLocationId, locationGroupId)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}f_g", fm, rm, callerLocationId, locationGroupId)
 }
 
 func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id, index int) string {
@@ -2202,7 +2213,7 @@ func clientScoreLocationSampleKey(forceMinimum bool, rankMode RankMode, location
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}s_l_%s_%d", fm, rm, callerLocationId, locationId, index)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}s_l_%d", fm, rm, callerLocationId, locationId, index)
 }
 
 func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id, index int) string {
@@ -2211,7 +2222,7 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 		fm = 1
 	}
 	rm, _ := utf8.DecodeRuneInString(rankMode)
-	return fmt.Sprintf("{cs_%d_%c_%s}s_g_%s_%d", fm, rm, callerLocationId, locationGroupId, index)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}s_g_%d", fm, rm, callerLocationId, locationGroupId, index)
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
@@ -2724,7 +2735,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				for _, forceMinimum := range []bool{false, true} {
 					for rankMode, _ := range performanceTargets {
 						for _, clientLocationId := range blockClientLocationIds {
-							pipe := r.TxPipeline()
+							// plain pipeline instead of tx: the sets are independent and the
+							// keys hash to different cluster slots, which multi/exec cannot span
+							pipe := r.Pipeline()
 
 							exportIndex := exportCount.Add(1)
 							glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
@@ -2809,7 +2822,8 @@ func loadClientScores(
 		locationCounts := map[server.Id]*redis.StringCmd{}
 		locationGroupCounts := map[server.Id]*redis.StringCmd{}
 
-		pipe := r.TxPipeline()
+		// plain pipeline instead of tx: independent gets across cluster slots
+		pipe := r.Pipeline()
 		for locationId, _ := range locationIds {
 			v := pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId))
 			locationCounts[locationId] = v
@@ -2864,7 +2878,7 @@ func loadClientScores(
 		samples := []*redis.StringCmd{}
 		netCount := 0
 
-		pipe = r.TxPipeline()
+		pipe = r.Pipeline()
 		for _, key := range keys {
 			if n <= netCount {
 				break

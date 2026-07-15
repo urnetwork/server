@@ -110,15 +110,30 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 		}
 	})
 	locationIds := slices.Collect(maps.Keys(locations))
+	// the re-index runs at every deploy and location names rarely change,
+	// so skip values that are already indexed with identical search strings.
+	// the skip must be decided before `RemoveInTx`, which unconditionally rewrites the index rows.
+	// one realm read here replaces a per-value read in the loop
+	storedLocationValues := search.StoredSearchValuesInTx(ctx, locationSearch(), tx)
+	locationUpToDateCount := 0
 	for i, locationId := range locationIds {
 		location := locations[locationId]
-		locationSearch().RemoveInTx(ctx, locationId, tx)
 		searchStrings := location.SearchStrings()
+		searchValues := map[int]string{}
+		for j, searchStr := range searchStrings {
+			searchValues[j] = searchStr
+		}
+		if search.SearchValuesUpToDate(locationSearch(), storedLocationValues[locationId], searchValues) {
+			locationUpToDateCount += 1
+			continue
+		}
+		locationSearch().RemoveInTx(ctx, locationId, tx)
 		for j, searchStr := range searchStrings {
 			locationSearch().AddInTx(ctx, searchStr, locationId, j, tx)
 			glog.Infof("[location]index %d/%d %d/%d: %s\n", i+1, len(locationIds), j+1, len(searchStrings), searchStr)
 		}
 	}
+	glog.Infof("[location]index %d/%d up to date\n", locationUpToDateCount, len(locationIds))
 
 	// location groups
 	locationGroupMembers := map[server.Id][]server.Id{}
@@ -163,13 +178,24 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 		}
 	})
 	locationGroupIds := slices.Collect(maps.Keys(locationGroups))
+	storedLocationGroupValues := search.StoredSearchValuesInTx(ctx, locationGroupSearch(), tx)
+	locationGroupUpToDateCount := 0
 	for i, locationGroupId := range locationGroupIds {
 		locationGroup := locationGroups[locationGroupId]
-		locationGroupSearch().RemoveInTx(ctx, locationGroupId, tx)
 		searchStrings := locationGroup.SearchStrings()
+		searchValues := map[int]string{}
+		for j, searchStr := range searchStrings {
+			searchValues[j] = searchStr
+		}
+		if search.SearchValuesUpToDate(locationGroupSearch(), storedLocationGroupValues[locationGroupId], searchValues) {
+			locationGroupUpToDateCount += 1
+			continue
+		}
+		locationGroupSearch().RemoveInTx(ctx, locationGroupId, tx)
 		for j, searchStr := range searchStrings {
 			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, j, tx)
 			glog.Infof("[location]index group %d/%d %d/%d: %s\n", i+1, len(locationGroupIds), j+1, len(searchStrings), searchStr)
 		}
 	}
+	glog.Infof("[location]index group %d/%d up to date\n", locationGroupUpToDateCount, len(locationGroupIds))
 }

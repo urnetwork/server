@@ -885,3 +885,57 @@ func TestClientReliabilityReconnectTolerated(t *testing.T) {
 		}), false)
 	})
 }
+
+// Degraded-block classification uses a LOCAL (60-block) median: a sharp
+// synchronized drop (deploy, drain hiccup) inside an otherwise-healthy
+// neighborhood is excused, while gradual/diurnal change is not. This also
+// documents the KNOWN LIMITATION (see reliabilityDegradedMedianBlockCount): a
+// SUSTAINED multi-hour collapse adapts the local median down and is NOT
+// excused -- its blocks age out of the lookbacks instead. A future two-signal
+// event detector should flip the second assertion.
+func TestClientReliabilityDegradedLocalMedian(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		base := int64(30_000_000)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+				// healthy hour, one sharp-drop block in the middle
+				for b := base - 60; b < base; b += 1 {
+					valid := int64(1000)
+					if b == base-30 {
+						valid = 300
+					}
+					batch.Queue(
+						`INSERT INTO client_reliability_block (block_number, client_count, valid_client_count) VALUES ($1, $2, $3)`,
+						b, 1200, valid,
+					)
+				}
+				// a later sustained 2h collapse
+				for b := base; b < base+120; b += 1 {
+					batch.Queue(
+						`INSERT INTO client_reliability_block (block_number, client_count, valid_client_count) VALUES ($1, $2, $3)`,
+						b, 400, 300,
+					)
+				}
+			})
+		})
+
+		// the sharp drop inside the healthy neighborhood is excused
+		var degraded []int64
+		server.Tx(ctx, func(tx server.PgTx) {
+			degraded = reliabilityDegradedBlocks(ctx, tx, base-60, base)
+		})
+		connect.AssertEqual(t, len(degraded), 1)
+		connect.AssertEqual(t, degraded[0], base-30)
+
+		// deep inside the sustained collapse the local median has adapted:
+		// nothing is excused (the documented limitation -- these blocks age out
+		// of the lookbacks rather than being excused)
+		server.Tx(ctx, func(tx server.PgTx) {
+			degraded = reliabilityDegradedBlocks(ctx, tx, base+60, base+120)
+		})
+		connect.AssertEqual(t, len(degraded), 0)
+	})
+}

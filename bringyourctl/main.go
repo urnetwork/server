@@ -40,6 +40,7 @@ Usage:
     bringyourctl db audit [--fix [--force-drop-indexes]]
     bringyourctl db backfill-sweep-destination-id [--batch=<n>]
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
+    bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -90,6 +91,7 @@ Usage:
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
+    bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
     bringyourctl st deposit [--alpha_rao=<alpha_rao>]
@@ -139,6 +141,8 @@ Options:
 			dbBackfillSweepDestinationId(opts)
 		} else if backfillReap, _ := opts.Bool("backfill-contract-reap-time"); backfillReap {
 			dbBackfillContractReapTime(opts)
+		} else if sweepOrphans, _ := opts.Bool("sweep-orphans"); sweepOrphans {
+			dbSweepOrphans(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -285,6 +289,8 @@ Options:
 			} else if clientReliabilityPartition, _ := opts.Bool("client-reliability-partition"); clientReliabilityPartition {
 				modelMigrateClientReliabilityPartition(opts)
 			}
+		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
+			modelUpgradeClientReliabilityIndex(opts)
 		}
 	} else if refreshTransferBalances_, _ := opts.Bool("refresh-transfer-balances"); refreshTransferBalances_ {
 		refreshTransferBalances(opts)
@@ -387,13 +393,10 @@ func dbAudit(opts docopt.Opts) {
 	}
 }
 
-// dbBackfillSweepDestinationId performs the transfer_escrow_sweep.destination_id
-// denormalization on a diverged prod DB, out of band (not via db migrate):
-// ensure the column, remind about the covering index, then backfill existing
-// rows in batches. Recommended rollout: (1) run this to add the column, (2)
-// deploy the new writer (api + connect) so new sweeps carry destination_id, (3)
-// pre-create the covering index CONCURRENTLY, (4) re-run this to backfill, (5)
-// deploy the new reader (taskworker). It is idempotent and safe to re-run.
+// dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
+// on existing rows so the provider payout stats see pre-deploy sweeps. The
+// column and its covering index are created by db migration; this only fills
+// historical rows. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -405,25 +408,22 @@ func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	fmt.Println("Ensuring transfer_escrow_sweep.destination_id exists ...")
 	model.AddSweepDestinationIdColumn(ctx)
 
-	fmt.Println("Ensure the covering index exists before the reader deploy (run out of band --")
-	fmt.Println("a plain build on this large table would lock writes):")
-	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_sweep_destination_id_sweep_time")
-	fmt.Println("    ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents);")
-
 	fmt.Printf("Backfilling destination_id in batches of %d ...\n", batch)
 	backfilled := model.BackfillSweepDestinationIds(ctx, batch)
 	fmt.Printf("Backfilled %d sweep(s).\n", backfilled)
 }
 
 // dbBackfillContractReapTime seeds transfer_contract.reap_time for the indexed
-// retention reaper on a diverged prod DB, out of band (not via db migrate).
-// reap_time replaced the anti-join full-scan reaper that caused a prod incident.
-// It seeds two sets: contracts whose payment already completed (reaped on the
-// completed-payout window) and aged closed-but-never-completed stragglers (reaped
-// once past StragglerContractExpiration). Recommended rollout: (1) add the column
-// (db migrate), (2) deploy the writer (CompletePayment stamps new completions),
-// (3) pre-create the two partial indexes CONCURRENTLY, (4) run this backfill, (5)
-// deploy the new reaper. It is idempotent and safe to re-run.
+// retention reaper. reap_time replaced the anti-join full-scan reaper that
+// caused a prod incident. Two passes, in order: first every aged closed contract
+// (older than StragglerContractExpiration) is assigned reap_time = now() via the
+// partial index; then contracts of recently completed payments are stamped with
+// complete_time + the completed-payout window. Older payments' contracts are
+// already covered by the first pass -- a contract is strictly older than its
+// payment's completion -- which is what keeps the second pass's work bounded to
+// ~one straggler-expiration of payouts. The column and its partial indexes are
+// created by db migration; run this once after migrating. Idempotent and safe to
+// re-run; prints progress as it goes.
 func dbBackfillContractReapTime(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -432,20 +432,43 @@ func dbBackfillContractReapTime(opts docopt.Opts) {
 		batch = n
 	}
 
-	fmt.Println("Pre-create the reap_time partial indexes before the reaper deploy (run out")
-	fmt.Println("of band -- a plain build on this large table would lock writes):")
-	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_reap_time")
-	fmt.Println("    ON transfer_contract (reap_time) WHERE reap_time IS NOT NULL;")
-	fmt.Println("  CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_reap_pending_create_time")
-	fmt.Println("    ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL;")
+	fmt.Printf("Assigning straggler reap_time in batches of %d ...\n", batch)
+	straggler := model.BackfillStragglerContractReapTime(ctx, batch, func(assignedCount int64) {
+		fmt.Printf("  assigned %d straggler contract(s) so far ...\n", assignedCount)
+	})
+	fmt.Printf("Assigned %d straggler contract(s).\n", straggler)
 
-	fmt.Printf("Backfilling completed-contract reap_time in batches of %d ...\n", batch)
-	completed := model.BackfillCompletedContractReapTime(ctx, batch)
+	fmt.Println("Stamping contracts of recently completed payments ...")
+	completed := model.BackfillCompletedContractReapTime(ctx, batch, func(stampedCount int64, processedPaymentCount int, totalPaymentCount int) {
+		if processedPaymentCount%200 == 0 || processedPaymentCount == totalPaymentCount {
+			fmt.Printf("  %d/%d payment(s), %d contract(s) stamped ...\n", processedPaymentCount, totalPaymentCount, stampedCount)
+		}
+	})
 	fmt.Printf("Backfilled %d completed contract(s).\n", completed)
+}
 
-	fmt.Printf("Backfilling straggler reap_time in batches of %d ...\n", batch)
-	straggler := model.BackfillStragglerContractReapTime(ctx, batch)
-	fmt.Printf("Backfilled %d straggler contract(s).\n", straggler)
+// dbSweepOrphans runs the bounded orphan sweeps on demand. It pages each child
+// table fully by its primary key in bounded slices (see model.sweepOrphanCursor),
+// so it never full-scans a child table the way the old "NOT EXISTS ... LIMIT"
+// sweep did (a prod incident: with orphans rare, the LIMIT could only stop after
+// scanning the whole table). The SweepOrphan* taskworkers stay disabled: a full
+// call still pages the entire table, which is fine on demand but too heavy for a
+// frequent task. This command is the manual cleanup path in the meantime.
+func dbSweepOrphans(opts docopt.Opts) {
+	ctx := context.Background()
+
+	sliceSize := 50000
+	if n, err := opts.Int("--slice"); err == nil && 0 < n {
+		sliceSize = n
+	}
+
+	fmt.Printf("Sweeping orphan network-client data in slices of %d ...\n", sliceSize)
+	networkClient := model.SweepOrphanNetworkClientData(ctx, sliceSize)
+	fmt.Printf("Removed %d orphan network-client row(s).\n", networkClient)
+
+	fmt.Printf("Sweeping orphan contract data in slices of %d ...\n", sliceSize)
+	contract := model.SweepOrphanContractData(ctx, sliceSize)
+	fmt.Printf("Removed %d orphan contract row(s).\n", contract)
 }
 
 func dbMaintenance(opts docopt.Opts) {
@@ -1648,6 +1671,38 @@ func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
 	}
 	if err := model.MigrateClientReliabilityToPartitions(ctx, parallelism, oneshot, dryRun, logf); err != nil {
 		panic(err)
+	}
+}
+
+// Upgrades the partitioned client_reliability secondary index to the desired
+// shape (INCLUDE payload so the reliability score scans are index-only)
+// without a blocking whole-table build: parent shell via CREATE INDEX ... ON
+// ONLY, per-partition CREATE INDEX CONCURRENTLY + ATTACH PARTITION, then drop
+// of the old-shape index. Prints create/attach/skip per partition.
+func modelUpgradeClientReliabilityIndex(opts docopt.Opts) {
+	ctx := context.Background()
+	logf := func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	parallel := 6
+	if n, err := opts.Int("--parallel"); err == nil && 0 < n {
+		parallel = n
+	}
+	logf("safe to interrupt and re-run at any point: completed steps are skipped and the upgrade resumes")
+	logf("building partition indexes %d at a time", parallel)
+	upgraded, err := model.UpgradeClientReliabilitySecondaryIndex(ctx, parallel, logf)
+	if err != nil {
+		panic(err)
+	}
+	if upgraded {
+		logf("upgrade complete")
+	} else {
+		logf("no work needed")
+	}
+	if drift, detail := model.ClientReliabilitySecondaryIndexDrift(ctx); drift {
+		logf("WARNING: drift still detected: %s", detail)
+	} else {
+		logf("final state: %s", detail)
 	}
 }
 

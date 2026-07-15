@@ -44,7 +44,7 @@ func TestStatsProviders(t *testing.T) {
 		recentContract := server.NewId()
 		statsInsertContract(ctx, recentContract, customerNetworkId, customerA, networkId, providerA, 2*gib, now.Add(-2*time.Hour), now.Add(-1*time.Hour))
 		statsInsertContractClose(ctx, recentContract, 2*gib, now.Add(-1*time.Hour))
-		statsInsertSweep(ctx, recentContract, networkId, 2*gib, UsdToNanoCents(3.0), now.Add(-1*time.Hour))
+		statsInsertSweep(ctx, recentContract, networkId, providerA, 2*gib, UsdToNanoCents(3.0), now.Add(-1*time.Hour))
 
 		// providerA, ~48h ago: one contract, 5 GiB settled (outside the 24h window)
 		oldContract := server.NewId()
@@ -291,21 +291,24 @@ func statsInsertContractClose(ctx context.Context, contractId server.Id, usedByt
 
 func statsInsertSweep(
 	ctx context.Context,
-	contractId, networkId server.Id,
+	contractId, networkId, destId server.Id,
 	payoutByteCount, payoutNanoCents int64,
 	sweepTime time.Time,
 ) {
+	// destination_id is denormalized onto the sweep at settle time (the provider
+	// payout stats query filters `s.destination_id = ANY($ids)`), so seed it here
+	// to mirror a real sweep — otherwise the payout for this provider is 0.
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			INSERT INTO transfer_escrow_sweep (
-				contract_id, balance_id, network_id,
+				contract_id, balance_id, network_id, destination_id,
 				payout_byte_count, payout_net_revenue_nano_cents, sweep_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			`,
-			contractId, server.NewId(), networkId, payoutByteCount, payoutNanoCents, sweepTime.UTC(),
+			contractId, server.NewId(), networkId, destId, payoutByteCount, payoutNanoCents, sweepTime.UTC(),
 		))
 	})
 }
@@ -434,5 +437,50 @@ func TestStatsProvidersProviderEnumeration(t *testing.T) {
 		connect.AssertEqual(t, seen[p2], 1)
 		connect.AssertEqual(t, seen[p3], 0)
 		connect.AssertEqual(t, seen[p4], 0)
+	})
+}
+
+// StatsProvidersOverview aggregates a network's providers into daily buckets. A
+// provider holding multiple provide_keys must be counted once, so its transfer /
+// payout / contracts are not multiplied. The overview enumeration query is a
+// DISTINCT semijoin; this is a regression guard on that single-count behavior.
+// (The overview aggregate is already dup-immune -- it filters `= ANY($ids)` and
+// GROUPs BY day, so a duplicated id matches each row once -- so this passes even
+// without the DISTINCT; it guards against a future refactor that makes the
+// overview iterate the id list the way statsProviders does.)
+func TestStatsProvidersOverviewDedupsMultiProvideKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		gib := int64(1024 * 1024 * 1024)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "overview-multikey-net", userId)
+		clientSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkId, userId, "overview-multikey-net", false, false),
+		)
+
+		// one provider client holding TWO provide_keys
+		provider := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, provider)
+		statsInsertProvideKey(ctx, provider, ProvideModePublic)
+		statsInsertProvideKey(ctx, provider, ProvideModeNetwork)
+
+		// a single settled contract in the last 24h: 2 GiB served, $3 payout
+		customerNetworkId := server.NewId()
+		customerA := server.NewId()
+		contractId := server.NewId()
+		statsInsertContract(ctx, contractId, customerNetworkId, customerA, networkId, provider, 2*gib, now.Add(-2*time.Hour), now.Add(-1*time.Hour))
+		statsInsertContractClose(ctx, contractId, 2*gib, now.Add(-1*time.Hour))
+		statsInsertSweep(ctx, contractId, networkId, provider, 2*gib, UsdToNanoCents(3.0), now.Add(-1*time.Hour))
+
+		overview, err := StatsProvidersOverview(&StatsProvidersOverviewArgs{LastN: 72}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		// exactly one contract's worth -- the two provide_keys must not multiply it
+		connect.AssertEqual(t, statsSumInt(overview.Contracts), 1)
+		connect.AssertEqual(t, statsSumFloat(overview.TransferData), float64(2))
+		connect.AssertEqual(t, statsSumFloat(overview.Payout), 3.0)
 	})
 }

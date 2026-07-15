@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -670,6 +671,45 @@ func TestInitialBalance(t *testing.T) {
 			connect.AssertEqual(t, startTime, transferBalance.StartTime)
 			connect.AssertEqual(t, endTime, transferBalance.EndTime)
 		}
+	})
+}
+
+// FindNetworksWithoutTransferBalance must return exactly the networks with no
+// transfer_balance rows: a network with zero rows is returned, and once it has
+// at least one row it is excluded. This exercises the NOT EXISTS anti-join that
+// replaced the LEFT JOIN + GROUP BY ... HAVING COUNT(...) = 0 aggregation.
+func TestFindNetworksWithoutTransferBalance(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkIdA := server.NewId()
+		userIdA := server.NewId()
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkIdA, "a", userIdA)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		// both networks have no transfer_balance rows yet
+		networkIds := FindNetworksWithoutTransferBalance(ctx)
+		connect.AssertEqual(t, true, slices.Contains(networkIds, networkIdA))
+		connect.AssertEqual(t, true, slices.Contains(networkIds, networkIdB))
+
+		// give network A a transfer_balance row
+		startTime := server.NowUtc()
+		endTime := startTime.Add(30 * 24 * time.Hour)
+		AddBasicTransferBalance(
+			ctx,
+			networkIdA,
+			ByteCount(30*1024*1024*1024),
+			startTime,
+			endTime,
+		)
+
+		// A now has >= 1 row and must be excluded; B still has zero and remains
+		networkIds = FindNetworksWithoutTransferBalance(ctx)
+		connect.AssertEqual(t, false, slices.Contains(networkIds, networkIdA))
+		connect.AssertEqual(t, true, slices.Contains(networkIds, networkIdB))
 	})
 }
 
@@ -1710,6 +1750,97 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		connect.AssertEqual(t, ByteCount(5*1024*1024), drift)
 		connect.AssertEqual(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalance-ByteCount(1024*1024), GetActiveTransferBalanceByteCount(ctx, networkId))
+	})
+}
+
+// Round trip of the net escrow counter through the real write and read paths,
+// pinning the per-balance key format (`{escrow_<balanceId>}net`) and the ttl
+// stamped at every write site:
+//   - escrow creation (IncrBy + ExpireAt balance end_time + slack)
+//   - reconcile apply (Set with the fallback ttl)
+//   - settle (DecrBy + ExpireNX when the decr recreates a missing key)
+//
+// The test redis is standalone, not a cluster, so slot spreading itself is
+// invisible here: this proves functional equivalence of the per-balance-tag
+// keys and the plain (auto-routing) pipelines, not slot placement.
+func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+
+		networkIdB := server.NewId()
+		userIdB := server.NewId()
+		clientIdB := server.NewId()
+
+		Testing_CreateNetwork(ctx, networkId, "a", userId)
+		Testing_CreateNetwork(ctx, networkIdB, "b", userIdB)
+
+		day := 24 * time.Hour
+		initialBalanceA := ByteCount(10 * 1024 * 1024 * 1024)
+		initialBalanceB := ByteCount(7 * 1024 * 1024 * 1024)
+		// two active balances so the multi-balance pipeline read visits
+		// multiple per-balance keys (one set, one missing)
+		AddBasicTransferBalance(ctx, networkId, initialBalanceA, server.NowUtc(), server.NowUtc().Add(30*day))
+		AddBasicTransferBalance(ctx, networkId, initialBalanceB, server.NowUtc(), server.NowUtc().Add(60*day))
+
+		balances := GetActiveTransferBalances(ctx, networkId)
+		connect.AssertEqual(t, 2, len(balances))
+		// the contract escrows against the earliest-ending balance
+		var balanceId server.Id
+		for _, balance := range balances {
+			if balance.StartBalanceByteCount == initialBalanceA {
+				balanceId = balance.BalanceId
+			}
+		}
+
+		key := netEscrowKey(balanceId)
+		connect.AssertEqual(t, fmt.Sprintf("{escrow_%s}net", balanceId), key)
+
+		// escrow creation mirrors the reservation and stamps the
+		// end_time-based ttl
+		contractByteCount := ByteCount(1024 * 1024)
+		contractId, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, contractByteCount)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
+		// the real read path (multi-balance pipeline) reflects the reservation
+		connect.AssertEqual(t, initialBalanceA+initialBalanceB-contractByteCount, GetActiveTransferBalanceByteCount(ctx, networkId))
+		server.Redis(ctx, func(r server.RedisClient) {
+			// end_time (now + 30d) + netEscrowEndTimeSlack (30d)
+			ttl := r.TTL(ctx, key).Val()
+			connect.AssertEqual(t, true, 59*day < ttl && ttl <= 60*day)
+		})
+
+		// reconcile apply rewrites the counter with the fallback ttl even if
+		// the ttl was lost
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Persist(ctx, key)
+			r.IncrBy(ctx, key, int64(5*1024*1024))
+		})
+		drift, balanceCount := ReconcileNetEscrowForNetwork(ctx, networkId, true)
+		connect.AssertEqual(t, 2, balanceCount)
+		connect.AssertEqual(t, ByteCount(5*1024*1024), drift)
+		connect.AssertEqual(t, contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl := r.TTL(ctx, key).Val()
+			connect.AssertEqual(t, true, 89*day < ttl && ttl <= 90*day)
+		})
+
+		// a settle decr that recreates a missing counter stamps the fallback
+		// ttl (the counter reads negative raw, zero clamped)
+		Testing_DeleteNetEscrow(ctx, balanceId)
+		err = CloseContract(ctx, contractId, clientId, 0, false)
+		connect.AssertEqual(t, nil, err)
+		err = CloseContract(ctx, contractId, clientIdB, 0, false)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, -contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
+		connect.AssertEqual(t, initialBalanceA+initialBalanceB, GetActiveTransferBalanceByteCount(ctx, networkId))
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl := r.TTL(ctx, key).Val()
+			connect.AssertEqual(t, true, 0 < ttl && ttl <= 90*day)
+		})
 	})
 }
 

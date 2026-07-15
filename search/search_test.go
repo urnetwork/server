@@ -91,6 +91,70 @@ func searchSubstring(t testing.TB, ctx context.Context, testSearch Search) {
 	connect.AssertEqual(t, resultValueIds, []server.Id{id2})
 }
 
+func TestSearchValuesUpToDate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		testSearch := NewSearchDbWithMinAliasLength("test", SearchTypePrefix, 3)
+
+		id1 := server.NewId()
+		id2 := server.NewId()
+
+		// `Add` normalizes, and `SearchValuesUpToDate` must apply the same normalization
+		testSearch.Add(ctx, "Redwood City, California", id1, 0)
+		testSearch.Add(ctx, "Redwood City (us)", id1, 1)
+		testSearch.Add(ctx, "London, England", id2, 0)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			storedValues := StoredSearchValuesInTx(ctx, testSearch, tx)
+			connect.AssertEqual(t, 2, len(storedValues))
+
+			// identical values are up to date
+			connect.AssertEqual(t, true, SearchValuesUpToDate(testSearch, storedValues[id1], map[int]string{
+				0: "Redwood City, California",
+				1: "Redwood City (us)",
+			}))
+			connect.AssertEqual(t, true, SearchValuesUpToDate(testSearch, storedValues[id2], map[int]string{
+				0: "London, England",
+			}))
+
+			// a changed value is not up to date
+			connect.AssertEqual(t, false, SearchValuesUpToDate(testSearch, storedValues[id1], map[int]string{
+				0: "Redwood City, California",
+				1: "Redwood City (usa)",
+			}))
+
+			// a missing variant is not up to date
+			connect.AssertEqual(t, false, SearchValuesUpToDate(testSearch, storedValues[id1], map[int]string{
+				0: "Redwood City, California",
+			}))
+
+			// an extra variant is not up to date
+			connect.AssertEqual(t, false, SearchValuesUpToDate(testSearch, storedValues[id1], map[int]string{
+				0: "Redwood City, California",
+				1: "Redwood City (us)",
+				2: "Redwood City",
+			}))
+
+			// a value id that was never indexed is not up to date
+			connect.AssertEqual(t, false, SearchValuesUpToDate(testSearch, storedValues[server.NewId()], map[int]string{
+				0: "Redwood City, California",
+			}))
+
+			// a value id that was never indexed with no values has nothing to write
+			connect.AssertEqual(t, true, SearchValuesUpToDate(testSearch, storedValues[server.NewId()], map[int]string{}))
+
+			// changed search settings change the alias set, which is not up to date
+			testSearchLongerAliases := NewSearchDbWithMinAliasLength("test", SearchTypePrefix, 4)
+			connect.AssertEqual(t, false, SearchValuesUpToDate(testSearchLongerAliases, storedValues[id1], map[int]string{
+				0: "Redwood City, California",
+				1: "Redwood City (us)",
+			}))
+		})
+	})
+}
+
 func TestSearchSubstringRandom(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())

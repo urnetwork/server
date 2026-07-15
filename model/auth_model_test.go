@@ -876,3 +876,182 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 		})
 	})
 }
+
+// countRows is a small helper for the reaper tests below.
+func countRows(ctx context.Context, query string, args ...any) int {
+	c := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, query, args...)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&c))
+			}
+		})
+	})
+	return c
+}
+
+// RemoveExpiredAuthAttempts must drain the whole older-than-window backlog
+// across multiple bounded batches while leaving in-window rows untouched. A
+// small batch size forces the drain loop to iterate.
+func TestRemoveExpiredAuthAttempts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		orig := removeExpiredAuthAttemptsBatchSize
+		removeExpiredAuthAttemptsBatchSize = 3
+		defer func() { removeExpiredAuthAttemptsBatchSize = orig }()
+
+		now := server.NowUtc()
+		minTime := now.Add(-24 * time.Hour)
+
+		// 10 expired (older than minTime) => must all be removed across batches;
+		// 4 in-window (newer than minTime) => must all survive.
+		expiredCount := 10
+		freshCount := 4
+		server.Tx(ctx, func(tx server.PgTx) {
+			for i := 0; i < expiredCount; i += 1 {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO user_auth_attempt (user_auth_attempt_id, success, attempt_time) VALUES ($1, false, $2)`,
+					server.NewId(), now.Add(-time.Duration(48+i)*time.Hour),
+				))
+			}
+			for i := 0; i < freshCount; i += 1 {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO user_auth_attempt (user_auth_attempt_id, success, attempt_time) VALUES ($1, false, $2)`,
+					server.NewId(), now.Add(-time.Duration(i)*time.Hour),
+				))
+			}
+		})
+
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), expiredCount+freshCount)
+
+		RemoveExpiredAuthAttempts(ctx, minTime)
+
+		// only the in-window rows remain, and none older than minTime survived
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt WHERE attempt_time < $1`, minTime.UTC()), 0)
+
+		// idempotent: a second run removes nothing more
+		RemoveExpiredAuthAttempts(ctx, minTime)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
+	})
+}
+
+// RemoveExpiredAuthCodes drains expired/inactive codes (and their auth_code_role
+// rows) across batches, keeping live codes. A small batch size forces iteration.
+func TestRemoveExpiredAuthCodesBatched(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		orig := removeExpiredAuthCodesBatchSize
+		removeExpiredAuthCodesBatchSize = 2
+		defer func() { removeExpiredAuthCodesBatchSize = orig }()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		now := server.NowUtc()
+		minTime := now.Add(-24 * time.Hour)
+
+		// seed an auth_code + a matching auth_code_role row
+		seed := func(endTime time.Time, remainingUses int) server.Id {
+			id := server.NewId()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO auth_code (
+						auth_code_id, network_id, user_id, auth_code,
+						create_time, end_time, uses, remaining_uses
+					) VALUES ($1, $2, $3, $4, $5, $6, 1, $7)`,
+					id, networkId, userId, id.String(),
+					now.Add(-48*time.Hour), endTime, remainingUses,
+				))
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO auth_code_role (auth_code_id, role) VALUES ($1, 'test')`,
+					id,
+				))
+			})
+			return id
+		}
+
+		// expired by end_time (still has uses) => removed
+		expiredIds := []server.Id{}
+		for i := 0; i < 5; i += 1 {
+			expiredIds = append(expiredIds, seed(now.Add(-48*time.Hour), 1))
+		}
+		// inactive (remaining_uses = 0), end_time in the future => removed (NOT active)
+		inactiveIds := []server.Id{}
+		for i := 0; i < 3; i += 1 {
+			inactiveIds = append(inactiveIds, seed(now.Add(48*time.Hour), 0))
+		}
+		// live: active and not yet expired => kept
+		liveId := seed(now.Add(48*time.Hour), 1)
+
+		removed := RemoveExpiredAuthCodes(ctx, minTime)
+		connect.AssertEqual(t, removed, len(expiredIds)+len(inactiveIds))
+
+		// only the live code and its role remain
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM auth_code`), 1)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM auth_code WHERE auth_code_id = $1`, liveId), 1)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM auth_code_role`), 1)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM auth_code_role WHERE auth_code_id = $1`, liveId), 1)
+
+		// idempotent
+		connect.AssertEqual(t, RemoveExpiredAuthCodes(ctx, minTime), 0)
+	})
+}
+
+// RemoveExpiredVerifyCodes preserves the predicate
+// `(used AND verify_time < minTime) OR verify_time < now-VerifyCodeTimeout`:
+// anything older than VerifyCodeTimeout is removed (used or not), while codes
+// within VerifyCodeTimeout are kept (used or not). The drain runs across
+// batches; a small batch size forces iteration.
+func TestRemoveExpiredVerifyCodesBatched(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		orig := removeExpiredVerifyCodesBatchSize
+		removeExpiredVerifyCodesBatchSize = 2
+		defer func() { removeExpiredVerifyCodesBatchSize = orig }()
+
+		userId := server.NewId()
+		now := server.NowUtc()
+		minTime := now.Add(-24 * time.Hour)
+
+		codeSeq := 0
+		seed := func(verifyTime time.Time, used bool) server.Id {
+			id := server.NewId()
+			codeSeq += 1
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx,
+					`INSERT INTO user_auth_verify (user_auth_verify_id, user_id, verify_time, verify_code, used)
+					 VALUES ($1, $2, $3, $4, $5)`,
+					id, userId, verifyTime, fmt.Sprintf("c%d", codeSeq), used,
+				))
+			})
+			return id
+		}
+
+		// older than VerifyCodeTimeout, unused => removed (verify_time < $2 arm)
+		for i := 0; i < 4; i += 1 {
+			seed(now.Add(-VerifyCodeTimeout-time.Duration(i+1)*time.Hour), false)
+		}
+		// older than VerifyCodeTimeout, used => also removed
+		for i := 0; i < 3; i += 1 {
+			seed(now.Add(-25*time.Hour), true)
+		}
+		// recent unused (within VerifyCodeTimeout) => kept
+		keptUnused := seed(now.Add(-1*time.Minute), false)
+		// used but recent (newer than minTime and within VerifyCodeTimeout) => kept
+		keptUsedRecent := seed(now.Add(-1*time.Minute), true)
+
+		RemoveExpiredVerifyCodes(ctx, minTime)
+
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_verify WHERE user_id = $1`, userId), 2)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_verify WHERE user_auth_verify_id = $1`, keptUnused), 1)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_verify WHERE user_auth_verify_id = $1`, keptUsedRecent), 1)
+
+		// idempotent
+		RemoveExpiredVerifyCodes(ctx, minTime)
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_verify WHERE user_id = $1`, userId), 2)
+	})
+}

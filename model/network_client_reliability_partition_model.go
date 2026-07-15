@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,34 @@ import (
 const clientReliabilityTable = "client_reliability"
 const clientReliabilityStagingTable = "client_reliability_new"
 const clientReliabilityOldTable = "client_reliability_old"
+
+// Desired secondary index on the partitioned table — the single source of
+// truth for its shape. The score queries' valid_counts subquery streams off
+// this index in order, and the INCLUDE payload makes those scans index-only
+// (network_id + client_id would otherwise be per-row heap fetches across the
+// whole window). The name suffix encodes the shape (bnch = valid, block_number,
+// client_address_hash; net_client = INCLUDE network_id, client_id) so an
+// old-shape index is distinguishable from the desired one by name alone.
+// An index is <table/partition name> + suffix, e.g.
+// client_reliability_valid_bnch_net_client.
+//
+// The column fragments are written exactly as pg_get_indexdef deparses them
+// (", " separators, unquoted lowercase names): they are used verbatim in
+// CREATE INDEX and matched against pg_get_indexdef by
+// readClientReliabilityIndexState.
+const clientReliabilitySecondaryIndexSuffix = "_valid_bnch_net_client"
+const clientReliabilitySecondaryIndexColumns = "(valid, block_number, client_address_hash)"
+const clientReliabilitySecondaryIndexInclude = "(network_id, client_id)"
+const clientReliabilitySecondaryIndexShape = clientReliabilitySecondaryIndexColumns + " INCLUDE " + clientReliabilitySecondaryIndexInclude
+
+// the pre-INCLUDE shape name created by the original prod cutover (and by the
+// history migrations on the pre-partition table, which must not change).
+// UpgradeClientReliabilitySecondaryIndex replaces it with the desired index.
+const clientReliabilitySecondaryIndexOldSuffix = "_valid_block_number_client_address_hash"
+
+func clientReliabilitySecondaryIndexName(table string) string {
+	return table + clientReliabilitySecondaryIndexSuffix
+}
 
 // one partition per UTC day: block_number is epoch-minutes, so day bounds are
 // [day*1440, (day+1)*1440)
@@ -246,6 +275,17 @@ func MaintainClientReliabilityPartitions(ctx context.Context, now time.Time) (cr
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		removeExpiredClientReliabilityCompanions(ctx, tx, cutoffBlock-1)
 	})
+
+	// cheap shape-drift check (pg_catalog only). Deliberately warn-only: a
+	// surprise multi-hour index build from a maintenance task is exactly the
+	// failure class the partition work fought — the operator runs the safe
+	// per-partition upgrade instead.
+	if drift, detail := ClientReliabilitySecondaryIndexDrift(ctx); drift {
+		glog.Warningf(
+			"[crp]secondary index drift: %s; run `bringyourctl model upgrade-client-reliability-index` (safe per-partition CONCURRENTLY upgrade; do not CREATE INDEX on the parent inline)\n",
+			detail,
+		)
+	}
 
 	return
 }
@@ -489,7 +529,7 @@ func clientReliabilityStagingEmpty(ctx context.Context) (empty bool) {
 // (the CREATE runs in one transaction, so it is all-or-nothing — a present index
 // is a complete one).
 func buildClientReliabilitySecondaryIndex(ctx context.Context, logf func(string, ...any)) {
-	indexName := clientReliabilityStagingTable + "_valid_block_number_client_address_hash"
+	indexName := clientReliabilitySecondaryIndexName(clientReliabilityStagingTable)
 	if _, exists := pgRelkind(ctx, indexName); exists {
 		return
 	}
@@ -502,9 +542,10 @@ func buildClientReliabilitySecondaryIndex(ctx context.Context, logf func(string,
 		// read client_reliability in a single pass (COUNT(*) OVER the valid rows) and
 		// need network_id + client_id as payload, which are otherwise heap fetches.
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-			`CREATE INDEX IF NOT EXISTS %s ON %s (valid, block_number, client_address_hash) INCLUDE (network_id, client_id)`,
+			`CREATE INDEX IF NOT EXISTS %s ON %s %s`,
 			indexName,
 			clientReliabilityStagingTable,
+			clientReliabilitySecondaryIndexShape,
 		)))
 	}, server.OptNoRetry())
 }
@@ -832,10 +873,12 @@ func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64) 
 				clientReliabilityOldTable,
 			)))
 		}
+		// the plain table's secondary index (created by the history migrations)
+		// has the old pre-INCLUDE name; move it aside with the table
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-			`ALTER INDEX IF EXISTS %s_valid_block_number_client_address_hash RENAME TO %s_valid_block_number_client_address_hash`,
-			clientReliabilityTable,
-			clientReliabilityOldTable,
+			`ALTER INDEX IF EXISTS %s RENAME TO %s`,
+			clientReliabilityTable+clientReliabilitySecondaryIndexOldSuffix,
+			clientReliabilityOldTable+clientReliabilitySecondaryIndexOldSuffix,
 		)))
 
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
@@ -852,10 +895,11 @@ func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64) 
 				clientReliabilityTable,
 			)))
 		}
+		// the staging secondary index takes the canonical desired name
 		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-			`ALTER INDEX IF EXISTS %s_valid_block_number_client_address_hash RENAME TO %s_valid_block_number_client_address_hash`,
-			clientReliabilityStagingTable,
-			clientReliabilityTable,
+			`ALTER INDEX IF EXISTS %s RENAME TO %s`,
+			clientReliabilitySecondaryIndexName(clientReliabilityStagingTable),
+			clientReliabilitySecondaryIndexName(clientReliabilityTable),
 		)))
 	}, server.OptNoRetry())
 	return nil
@@ -906,4 +950,374 @@ func FinalizeClientReliabilityPartitionMigration(
 	}, server.OptNoRetry())
 	logf("dropped %s: %s returned to the OS", clientReliabilityOldTable, oldSize)
 	return nil
+}
+
+// secondary index shape upgrade. The INCLUDE payload was added to
+// buildClientReliabilitySecondaryIndex AFTER the prod partition cutover ran:
+// the builder's fixed-name CREATE INDEX IF NOT EXISTS can never re-shape an
+// existing index, and it only runs on the (long done) fresh-cutover path — so
+// the live parent index, and every partition index inherited from it, kept the
+// old no-INCLUDE shape and the score queries cannot run index-only. A plain
+// CREATE INDEX of the new shape on the partitioned parent would build all
+// partitions inline under lock (hours, write-blocking), so the upgrade instead
+// does the postgres-sanctioned partitioned-index dance: parent shell via
+// CREATE INDEX ... ON ONLY, per-partition CREATE INDEX CONCURRENTLY + ALTER
+// INDEX ... ATTACH PARTITION, then DROP of the old parent index once the new
+// one is valid.
+
+// clientReliabilityIndexState is the pg_catalog view of one index on one
+// relation: whether it exists, whether it is valid (pg_index.indisvalid — a
+// partitioned parent index is invalid until every partition has an attached
+// child), and its deparsed definition (pg_get_indexdef).
+type clientReliabilityIndexState struct {
+	exists bool
+	valid  bool
+	def    string
+}
+
+// matchesDesiredShape reports whether the index definition ends with the
+// desired btree key + INCLUDE fragment. pg_get_indexdef deparses in canonical
+// form, so a suffix match is exact on columns, order, INCLUDE payload, and the
+// absence of a trailing WHERE clause.
+func (self *clientReliabilityIndexState) matchesDesiredShape() bool {
+	return self.exists && strings.HasSuffix(self.def, " USING btree "+clientReliabilitySecondaryIndexShape)
+}
+
+// readClientReliabilityIndexState reads the state of index `indexName` on
+// relation `table` from pg_catalog. exists=false when the index is absent or
+// belongs to a different relation.
+func readClientReliabilityIndexState(ctx context.Context, table string, indexName string) (state clientReliabilityIndexState) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT i.indisvalid, pg_get_indexdef(i.indexrelid)
+			FROM pg_index i
+			INNER JOIN pg_class ic ON ic.oid = i.indexrelid
+			WHERE i.indrelid = to_regclass($1) AND ic.relname = $2
+			`,
+			"public."+table,
+			indexName,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&state.valid, &state.def))
+				state.exists = true
+			}
+		})
+	})
+	return
+}
+
+// clientReliabilityAttachedPartitionIndex returns the child index on
+// `partition` that is attached under the partitioned index `parentIndex`
+// (pg_inherits on the index relids), if any. The child's name does not matter
+// — partitions created after the parent index exists get auto-named children.
+func clientReliabilityAttachedPartitionIndex(ctx context.Context, parentIndex string, partition string) (childIndex string, attached bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT ic.relname
+			FROM pg_inherits i
+			INNER JOIN pg_class ic ON ic.oid = i.inhrelid
+			INNER JOIN pg_index ix ON ix.indexrelid = i.inhrelid
+			WHERE i.inhparent = to_regclass($1) AND ix.indrelid = to_regclass($2)
+			`,
+			"public."+parentIndex,
+			"public."+partition,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&childIndex))
+				attached = true
+			}
+		})
+	})
+	return
+}
+
+// ClientReliabilitySecondaryIndexDrift reports whether the partitioned
+// client_reliability parent's secondary index differs from the desired shape:
+// the old pre-INCLUDE index is still present, or the desired index is missing,
+// mis-shaped, or invalid (an upgrade did not finish). detail is a short
+// human-readable reason either way. Cheap — a few pg_catalog lookups — so the
+// partition maintenance task can run it every pass. Not partitioned (the
+// pre-cutover plain table) is not drift: the cutover itself builds the desired
+// index.
+func ClientReliabilitySecondaryIndexDrift(ctx context.Context) (drift bool, detail string) {
+	if !IsClientReliabilityPartitioned(ctx) {
+		return false, "client_reliability is not partitioned"
+	}
+	newName := clientReliabilitySecondaryIndexName(clientReliabilityTable)
+	oldName := clientReliabilityTable + clientReliabilitySecondaryIndexOldSuffix
+	oldState := readClientReliabilityIndexState(ctx, clientReliabilityTable, oldName)
+	newState := readClientReliabilityIndexState(ctx, clientReliabilityTable, newName)
+	switch {
+	case oldState.exists:
+		return true, fmt.Sprintf("old-shape index %s is present", oldName)
+	case !newState.exists:
+		return true, fmt.Sprintf("desired index %s is missing", newName)
+	case !newState.matchesDesiredShape():
+		return true, fmt.Sprintf("index %s does not match the desired shape %s: %s", newName, clientReliabilitySecondaryIndexShape, newState.def)
+	case !newState.valid:
+		return true, fmt.Sprintf("index %s is not valid (an upgrade did not finish)", newName)
+	}
+	return false, fmt.Sprintf("index %s matches the desired shape %s", newName, clientReliabilitySecondaryIndexShape)
+}
+
+// UpgradeClientReliabilitySecondaryIndex upgrades the partitioned table's
+// secondary index in place to the desired shape (see
+// clientReliabilitySecondaryIndexShape) without a blocking whole-table build:
+//
+//  1. CREATE INDEX IF NOT EXISTS ... ON ONLY — an instant metadata-only parent
+//     shell, invalid until every partition has an attached child index;
+//  2. per partition: CREATE INDEX CONCURRENTLY (no write blocking; an invalid
+//     leftover from an interrupted run is dropped and rebuilt) then ALTER
+//     INDEX ... ATTACH PARTITION, skipping partitions that already have an
+//     attached child;
+//  3. once postgres marks the parent valid (automatic when all partitions are
+//     attached), DROP the old-shape parent index — cascades to its children.
+//     DROP INDEX CONCURRENTLY cannot drop a partitioned index, so this is a
+//     plain drop under a lock timeout, retried a few times if a long score
+//     query holds the lock.
+//
+// Idempotent and resumable: every step is skipped when already done, so an
+// interrupted run (or a lock-busy final drop) is finished by re-running.
+// Partitions created after step 1 inherit the new index automatically. The
+// per-partition builds run on raw maintenance-pool connections (autocommit —
+// CONCURRENTLY cannot run inside a transaction block), the same way
+// DbMaintenance runs REINDEX CONCURRENTLY. upgraded reports whether any work
+// was done.
+func UpgradeClientReliabilitySecondaryIndex(ctx context.Context, parallel int, logf func(string, ...any)) (upgraded bool, err error) {
+	if logf == nil {
+		logf = func(format string, args ...any) {
+			glog.Infof("[crp]"+format+"\n", args...)
+		}
+	}
+	// each in-flight build holds one maintenance connection and does a full
+	// scan+sort of its partition, so bound the parallelism well under the
+	// maintenance pool size
+	if parallel < 1 {
+		parallel = 1
+	} else if 16 < parallel {
+		parallel = 16
+	}
+
+	if !IsClientReliabilityPartitioned(ctx) {
+		return false, fmt.Errorf(
+			"client_reliability is not partitioned; the partition cutover (bringyourctl model migrate client-reliability-partition) builds the desired secondary index itself",
+		)
+	}
+
+	newName := clientReliabilitySecondaryIndexName(clientReliabilityTable)
+	oldName := clientReliabilityTable + clientReliabilitySecondaryIndexOldSuffix
+
+	newState := readClientReliabilityIndexState(ctx, clientReliabilityTable, newName)
+	if newState.exists && !newState.matchesDesiredShape() {
+		return false, fmt.Errorf(
+			"index %s exists but does not match the desired shape %s (%s) — inspect and drop it, then rerun",
+			newName,
+			clientReliabilitySecondaryIndexShape,
+			newState.def,
+		)
+	}
+	if newState.exists && newState.valid {
+		if oldState := readClientReliabilityIndexState(ctx, clientReliabilityTable, oldName); !oldState.exists {
+			logf("secondary index %s already matches the desired shape %s; nothing to do", newName, clientReliabilitySecondaryIndexShape)
+			return false, nil
+		}
+	}
+
+	// 1. parent shell: metadata only, so instant. CREATE INDEX takes a brief
+	// SHARE lock on the parent; time out rather than queueing behind a long
+	// score query (rerun to resume).
+	if !newState.exists {
+		logf("creating parent index shell: CREATE INDEX %s ON ONLY %s %s", newName, clientReliabilityTable, clientReliabilitySecondaryIndexShape)
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`))
+			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
+				`CREATE INDEX IF NOT EXISTS %s ON ONLY %s %s`,
+				newName,
+				clientReliabilityTable,
+				clientReliabilitySecondaryIndexShape,
+			)))
+		}, server.OptNoRetry())
+		upgraded = true
+	}
+
+	// 2. per-partition concurrent build + attach, parallelized over a bounded
+	// worker pool. Partitions are separate tables, so their CREATE INDEX
+	// CONCURRENTLY builds may run concurrently — and doing so pays the
+	// wait-for-older-snapshots phase (e.g. a long reliability recompute
+	// transaction) ONCE for the batch instead of once per partition, which is
+	// what made the serial form crawl. Attaches are serialized: each takes a
+	// brief metadata lock on the parent index.
+	partitions := listClientReliabilityPartitions(ctx)
+
+	var stateLock sync.Mutex
+	var firstErr error
+	setErr := func(e error) {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		if firstErr == nil {
+			firstErr = e
+		}
+	}
+	hasErr := func() bool {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		return firstErr != nil
+	}
+	setUpgraded := func() {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		upgraded = true
+	}
+	var attachLock sync.Mutex
+
+	upgradePartition := func(i int, partition string) (partitionErr error) {
+		// RaisePgResult panics on statement errors; convert to an error so one
+		// partition's failure stops the pool cleanly (rerun resumes)
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(error); ok {
+					partitionErr = e
+				} else {
+					partitionErr = fmt.Errorf("%v", r)
+				}
+			}
+		}()
+
+		if attachedName, attached := clientReliabilityAttachedPartitionIndex(ctx, newName, partition); attached {
+			logf("[%d/%d]%s: already attached (%s); skip", i+1, len(partitions), partition, attachedName)
+			return nil
+		}
+
+		childName := clientReliabilitySecondaryIndexName(partition)
+		childState := readClientReliabilityIndexState(ctx, partition, childName)
+		if childState.exists && !childState.valid {
+			// leftover of an interrupted CREATE INDEX CONCURRENTLY: drop and rebuild
+			logf("[%d/%d]%s: dropping invalid leftover index %s", i+1, len(partitions), partition, childName)
+			server.MaintenanceDb(ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
+					`DROP INDEX CONCURRENTLY IF EXISTS %s`,
+					childName,
+				)))
+			}, server.OptReadWrite(), server.OptNoRetry())
+			childState = readClientReliabilityIndexState(ctx, partition, childName)
+		}
+		if childState.exists {
+			logf("[%d/%d]%s: index %s already built; attaching", i+1, len(partitions), partition, childName)
+		} else {
+			logf("[%d/%d]%s: CREATE INDEX CONCURRENTLY %s %s", i+1, len(partitions), partition, childName, clientReliabilitySecondaryIndexShape)
+			// CONCURRENTLY cannot run inside a transaction block: run it as a
+			// single autocommit statement on a raw maintenance connection
+			server.MaintenanceDb(ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(ctx, `SET statement_timeout = 0`))
+				server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
+					`CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s %s`,
+					childName,
+					partition,
+					clientReliabilitySecondaryIndexShape,
+				)))
+			}, server.OptReadWrite(), server.OptNoRetry())
+		}
+
+		attachLock.Lock()
+		defer attachLock.Unlock()
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`))
+			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
+				`ALTER INDEX %s ATTACH PARTITION %s`,
+				newName,
+				childName,
+			)))
+		}, server.OptNoRetry())
+		logf("[%d/%d]%s: attached %s", i+1, len(partitions), partition, childName)
+		setUpgraded()
+		return nil
+	}
+
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < parallel; w += 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				// after a failure, drain the queue without starting new builds
+				if hasErr() || ctx.Err() != nil {
+					continue
+				}
+				if e := upgradePartition(i, partitions[i]); e != nil {
+					setErr(fmt.Errorf("%s: %w", partitions[i], e))
+				}
+			}
+		}()
+	}
+	for i := range partitions {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+	if firstErr != nil {
+		return upgraded, firstErr
+	}
+
+	// 3. postgres marks the parent valid once every partition has an attached
+	// child; only then is it safe to drop the old index out from under the
+	// score queries
+	newState = readClientReliabilityIndexState(ctx, clientReliabilityTable, newName)
+	if !newState.exists || !newState.valid {
+		return upgraded, fmt.Errorf(
+			"index %s is still not valid after attaching all %d partitions — inspect pg_index/pg_inherits, then rerun to resume",
+			newName,
+			len(partitions),
+		)
+	}
+
+	if oldState := readClientReliabilityIndexState(ctx, clientReliabilityTable, oldName); oldState.exists {
+		attempts := 5
+		for attempt := 1; ; attempt += 1 {
+			dropErr := func() (dropErr error) {
+				defer func() {
+					if r := recover(); r != nil {
+						if e, ok := r.(error); ok {
+							dropErr = e
+						} else {
+							dropErr = fmt.Errorf("drop %s: %v", oldName, r)
+						}
+					}
+				}()
+				server.MaintenanceTx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL lock_timeout = '15s'`))
+					server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
+						`DROP INDEX IF EXISTS %s`,
+						oldName,
+					)))
+				}, server.OptNoRetry())
+				return nil
+			}()
+			if dropErr == nil {
+				break
+			}
+			var pgErr *pgconn.PgError
+			if errors.As(dropErr, &pgErr) && pgErr.Code == pgerrcode.LockNotAvailable && attempt < attempts {
+				logf("DROP INDEX %s lock busy (attempt %d/%d): %s; retrying in 20s", oldName, attempt, attempts, dropErr)
+				select {
+				case <-ctx.Done():
+					return upgraded, ctx.Err()
+				case <-time.After(20 * time.Second):
+				}
+				continue
+			}
+			return upgraded, dropErr
+		}
+		logf("dropped old-shape index %s (cascaded to its partition children)", oldName)
+		upgraded = true
+	}
+
+	logf("secondary index %s matches the desired shape %s across %d partitions", newName, clientReliabilitySecondaryIndexShape, len(partitions))
+	return upgraded, nil
 }

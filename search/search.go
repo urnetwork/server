@@ -538,6 +538,89 @@ func (self *SearchDb) RemoveInTx(ctx context.Context, valueId server.Id, tx serv
 	))
 }
 
+// StoredSearchValuesInTx reads all stored `search_value` rows for the realm of `s`,
+// as value id -> value variant -> alias -> alias value.
+// Use with `SearchValuesUpToDate` to skip re-indexing values that have not changed,
+// which avoids rewriting the `search_value` and `search_projection` rows for every value on every re-index.
+func StoredSearchValuesInTx(ctx context.Context, s Search, tx server.PgTx) map[server.Id]map[int]map[int]string {
+	storedValues := map[server.Id]map[int]map[int]string{}
+
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT
+			value_id,
+			value_variant,
+			alias,
+			value
+		FROM search_value
+		WHERE
+			realm = $1
+		`,
+		s.Realm(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var valueId server.Id
+			var valueVariant int
+			var alias int
+			var value string
+			server.Raise(result.Scan(
+				&valueId,
+				&valueVariant,
+				&alias,
+				&value,
+			))
+			variantAliasValues, ok := storedValues[valueId]
+			if !ok {
+				variantAliasValues = map[int]map[int]string{}
+				storedValues[valueId] = variantAliasValues
+			}
+			aliasValues, ok := variantAliasValues[valueVariant]
+			if !ok {
+				aliasValues = map[int]string{}
+				variantAliasValues[valueVariant] = aliasValues
+			}
+			aliasValues[alias] = value
+		}
+	})
+
+	return storedValues
+}
+
+// SearchValuesUpToDate returns whether the stored rows for a single value id exactly equal
+// the rows that `AddInTx` would write for `values` (value variant -> value),
+// with no missing or extra variants or aliases.
+// `storedVariantAliasValues` is one entry of the result of `StoredSearchValuesInTx`.
+// Alias generation is deterministic for the same value and search settings,
+// and the `search_projection` rows are a pure function of the `search_value` rows,
+// so equality of the stored (variant, alias, value) tuples means a remove and re-add
+// would write back identical rows.
+// Any difference compares as not up to date,
+// including a changed alias set from changed search settings (e.g. min alias length).
+func SearchValuesUpToDate(s Search, storedVariantAliasValues map[int]map[int]string, values map[int]string) bool {
+	if len(storedVariantAliasValues) != len(values) {
+		return false
+	}
+	for valueVariant, value := range values {
+		aliasValues, ok := storedVariantAliasValues[valueVariant]
+		if !ok {
+			return false
+		}
+		searchAliases := GenerateAliases(NormalizeForSearch(value), s.SearchType(), s.MinAliasLength())
+		// aliases are unique per variant, so equal counts plus per-alias equality is set equality
+		if len(aliasValues) != len(searchAliases) {
+			return false
+		}
+		for _, searchAlias := range searchAliases {
+			if storedValue, ok := aliasValues[searchAlias.Alias]; !ok || storedValue != searchAlias.Value {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64, limit int) (updates []*SearchValueUpdate) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(

@@ -179,13 +179,20 @@ func ScheduleUpdateReliabilities(clientSession *session.ClientSession, tx server
 		},
 		clientSession,
 		task.RunOnce("update_reliabilities"),
-		// every 5 minutes: UpdateReliabilities re-aggregates the full lookback each
-		// run (7-day window score, client scores), so a lower cadence cuts that
-		// repeated work ~5x on top of the single-pass query rewrite. The scores are
-		// long-window (24h/7d) aggregates ending at now, so 5-minute staleness is
-		// immaterial, and the window buckets still fully cover the trailing hour
-		// (minTime is clamped to now-1h and buckets are upserted whole).
-		task.RunAt(server.NowUtc().Add(5*time.Minute)),
+		// every 30 minutes: the client scores (#1) and 7-day window score (#3) are
+		// now maintained incrementally by UpdateClientReliabilityRunningInTx (a
+		// running per-(client, lookback) sum advanced by only the blocks that
+		// entered/left the window since the last run, anchored by a ~4h full
+		// recompute), so a run no longer re-scans the full lookback of the ~566M-row
+		// client_reliability table -- the per-run cost dropped from the old 15-26 min
+		// full re-aggregation to a small per-block delta plus the periodic recompute.
+		// The 30-min cadence is kept: the scores are long-window (24h/7d) aggregates
+		// ending at now, so 30-minute staleness is immaterial, and the window buckets
+		// still fully cover the trailing hour (minTime is clamped to now-1h and
+		// buckets are upserted whole). NOTE: the window bucket computation
+		// (network_connection_reliability_window) still scans the trailing hour and is
+		// unchanged.
+		task.RunAt(server.NowUtc().Add(30*time.Minute)),
 		task.MaxTime(120*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
 	)
