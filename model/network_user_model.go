@@ -1165,3 +1165,75 @@ func MigrateNetworkUserChildAuths(
 
 	})
 }
+
+func countAuthMethods(ctx context.Context, userId server.Id) (int, error) {
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count, nil
+}
+
+func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
+	currentCount, err := countAuthMethods(ctx, userId)
+	if err != nil {
+		return err
+	}
+	if currentCount <= 1 {
+		return fmt.Errorf("cannot remove your last auth method")
+	}
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		switch authType {
+		case "email", "phone":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_password
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "apple", "google":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_sso
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "solana":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_wallet
+				 WHERE user_id = $1`,
+				userId,
+			))
+		case "seedphrase":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_seedphrase
+				 WHERE user_id = $1`,
+				userId,
+			))
+		default:
+			panic(fmt.Errorf("unknown auth type: %s", authType))
+		}
+	})
+
+	return nil
+}
