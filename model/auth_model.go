@@ -39,6 +39,7 @@ const (
 	AuthTypeBringYour AuthType = "bringyour"
 	AuthTypeGuest     AuthType = "guest"
 	AuthTypeSolana    AuthType = "solana"
+	AuthTypeSeedphrase AuthType = "seedphrase"
 )
 
 type WalletAuthArgs struct {
