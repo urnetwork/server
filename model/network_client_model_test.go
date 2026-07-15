@@ -760,6 +760,25 @@ func TestRemoveNetworkClientsTaskLifecycleThroughRealWorker(t *testing.T) {
 		})
 		assert.Equal(t, remainingActive, 0)
 
+		// deactivate_time must be stamped across the whole async chain, not
+		// just the first invocation -- this is the only test exercising
+		// multiple RemoveNetworkClientsTask invocations, so it's the one
+		// that would catch a continuation batch losing the stamp
+		var missingDeactivateTime int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM network_client WHERE network_id = $1 AND active = false AND deactivate_time IS NULL`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&missingDeactivateTime))
+				}
+			})
+		})
+		assert.Equal(t, missingDeactivateTime, 0)
+
 		// the run_once key must be free again now that the full chain
 		// finished, so a new large request for this network succeeds
 		afterResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{

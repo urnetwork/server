@@ -758,7 +758,11 @@ func RemoveNetworkClientsBatch(
 // unbounded/malformed request forcing an arbitrarily large synchronous
 // json.Marshal + single-row task args_json write in RemoveNetworkClients, and
 // against an unbounded in-memory slice being held for the life of a task.
-const MaxRemoveNetworkClientsCount = 5000000
+// Kept at 2x the known real-world ceiling rather than higher: at ~38 bytes
+// per id as JSON, this is already ~75MB in the worst case (a single
+// pending_task.args_json write on the request path), so the bound is sized
+// to limit that cost, not just to be a round number.
+const MaxRemoveNetworkClientsCount = 2000000
 
 type RemoveNetworkClientsArgs struct {
 	ClientIds []server.Id `json:"client_ids"`
@@ -879,6 +883,15 @@ func RemoveNetworkClientsTask(
 	removeClients *RemoveNetworkClientsTaskArgs,
 	session *session.ClientSession,
 ) (*RemoveNetworkClientsTaskResult, error) {
+	if session.ByJwt == nil {
+		// unreachable in the normal flow (always scheduled from an
+		// authenticated handler with ByJwt set), but this task can outlive
+		// the request that scheduled it -- fail loudly rather than panic on
+		// a nil dereference if a pending_task row is ever reconstructed
+		// with an empty/corrupted client_by_jwt_json
+		return nil, fmt.Errorf("Missing network for bulk client removal.")
+	}
+
 	clientIds := removeClients.ClientIds
 	batches := 0
 	for 0 < len(clientIds) && batches < RemoveNetworkClientsTaskBatchLimit {
@@ -907,6 +920,13 @@ func RemoveNetworkClientsTask(
 // otherwise the key would free up as soon as the first chunk finished, even
 // though most of the list might still be unprocessed, and a second
 // concurrent request would incorrectly be allowed through.
+//
+// This reschedules with plain ScheduleTaskInTx (ON CONFLICT DO UPDATE), not
+// ScheduleTaskInTxIfAbsent (ON CONFLICT DO NOTHING): the finishing task's own
+// pending_task row is deleted as part of this same evaluation transaction,
+// so the run_once key is guaranteed free at the point this INSERT runs --
+// there's no possible conflict with a legitimate concurrent request here,
+// only with the row this exact chain just vacated.
 func RemoveNetworkClientsTaskPost(
 	removeClients *RemoveNetworkClientsTaskArgs,
 	result *RemoveNetworkClientsTaskResult,
