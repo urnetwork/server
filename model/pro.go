@@ -229,6 +229,23 @@ func Testing_SetEnforceConcurrentClients(enforce bool) func() {
 	return func() { c.EnforceConcurrentClients = prev }
 }
 
+// Testing_SetConcurrentClientsLimit overrides the per-tier connected-top-level
+// client limits on the process's parsed config, returning a restore function.
+// Same caveats as Testing_SetEnforceConcurrentClients (mutates the shared
+// config; defer the return). For tests exercising the plan concurrent-client
+// limit and its public-provider exemption.
+func Testing_SetConcurrentClientsLimit(free int, pro int) func() {
+	c := Pro()
+	prevFree := c.Free.ConcurrentClients
+	prevPro := c.Pro.ConcurrentClients
+	c.Free.ConcurrentClients = free
+	c.Pro.ConcurrentClients = pro
+	return func() {
+		c.Free.ConcurrentClients = prevFree
+		c.Pro.ConcurrentClients = prevPro
+	}
+}
+
 // Tier returns the free or pro tier limits/features.
 func (c *ProConfig) Tier(pro bool) *ProTier {
 	if pro {

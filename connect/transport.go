@@ -136,6 +136,13 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 		transportTls = server.NewTransportTls(map[string]bool{}, server.DefaultTransportTlsSettings())
 	}
 
+	// the announce registers the peer with the SAME ttl the resident
+	// heartbeat refreshes it (ExchangeResidentTtl); disconnect detection
+	// relies on the entry expiring at that cadence once heartbeats stop, so a
+	// larger registration ttl would delay disconnect by its full duration.
+	// Derive it from the exchange so the two can never drift.
+	settings.ConnectionAnnounceSettings.PeerRegisterTtl = exchange.settings.ExchangeResidentTtl
+
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
 		cancel:                cancel,

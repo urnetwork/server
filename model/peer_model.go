@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	mathrand "math/rand"
 	"slices"
 	"strconv"
 	"sync"
@@ -18,12 +19,17 @@ import (
 
 // the network peer registry stores the set of connected top-level clients per
 // network (clients with no `source_client_id`) and identity metadata for each:
-// enabled provide modes, principal, and roles. The resident registers its
-// client on nomination, heartbeats it on the resident poll, and removes it on
-// close (residentId-guarded, like the resident registry). Listeners subscribe
-// per network and mirror the `StreamHopListener` pattern: reset on subscribe,
-// diff events with a monotonic event id, reset on an event id gap, and a poll
-// fallback.
+// enabled provide modes, principal, and roles. The connection announce
+// registers the client once it survives the announce window, the resident
+// heartbeats it on the resident poll, and the resident removes it on close
+// (residentId-guarded, like the resident registry).
+//
+// Change notification is dirty-counter + poll (PEERS2.md): every visible
+// mutation bumps the per-network version counter, and each listener polls the
+// counter at its own rate, full-reading only on a mismatch. v1's per-event
+// sharded-pubsub delivery (one subscription per connected client, fanout to
+// every device of the network per change) melted the redis cluster on
+// 2026-07-15 — see FOLLOWUP.md "Network peers pubsub" for the record.
 
 // how long a disconnected peer is reported after disconnect
 const NetworkPeerDisconnectedWindow = 5 * time.Minute
@@ -91,12 +97,10 @@ func networkPeerConnectedProxyKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}connected_proxy", networkId)
 }
 
+// the per-network version counter (PEERS2.md): INCR'd on every visible
+// registry change, polled by readers. There is no events channel in v2.
 func networkPeerEventIdKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}eid", networkId)
-}
-
-func networkPeerEventsKey(networkId server.Id) string {
-	return fmt.Sprintf("{np_%s}events", networkId)
 }
 
 func loadNetworkPeerMeta(metaBytes []byte) (*networkPeerMeta, error) {
@@ -136,37 +140,21 @@ type NetworkPeerEvent struct {
 	Peers []*NetworkPeer
 }
 
-func publishNetworkPeerEvent(
+// bumpNetworkPeerVersion marks the network's peer registry as changed
+// (PEERS2.md): readers poll this per-network counter at their own rate and
+// full-read on any mismatch. v1 published the change over sharded pubsub
+// here; per-event delivery to every device of the network is exactly the
+// fanout that melted the cluster on 2026-07-15, so v2 delivers nothing —
+// a change costs one INCR, and read cost is demand-driven at the readers.
+func bumpNetworkPeerVersion(
 	ctx context.Context,
 	r server.RedisClient,
 	networkId server.Id,
-	eventType NetworkPeerEventType,
-	peers []*NetworkPeer,
 ) {
-	if len(peers) == 0 {
-		return
-	}
-
-	eventId, err := r.Incr(ctx, networkPeerEventIdKey(networkId)).Result()
-	if err != nil {
-		panic(err)
-	}
-
-	event := &NetworkPeerEvent{
-		EventId:              eventId,
-		NetworkPeerEventType: eventType,
-		Peers:                peers,
-	}
-	buf := bytes.NewBuffer(nil)
-	err = gob.NewEncoder(buf).Encode(event)
-	if err != nil {
-		panic(err)
-	}
-
 	pipe := r.TxPipeline()
-	pipe.SPublish(ctx, networkPeerEventsKey(networkId), buf.Bytes())
+	pipe.Incr(ctx, networkPeerEventIdKey(networkId))
 	pipe.Expire(ctx, networkPeerEventIdKey(networkId), networkPeerKeyTtl)
-	_, err = pipe.Exec(ctx)
+	_, err := pipe.Exec(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -438,7 +426,7 @@ func AddNetworkPeer(
 			panic(err)
 		}
 
-		publishNetworkPeerEvent(ctx, r, networkId, NetworkPeerEventTypeUpdated, []*NetworkPeer{peer})
+		bumpNetworkPeerVersion(ctx, r, networkId)
 
 		pruneNetworkPeers(ctx, r, networkId)
 	})
@@ -516,9 +504,7 @@ func RemoveNetworkPeer(
 			panic(err)
 		}
 
-		publishNetworkPeerEvent(ctx, r, networkId, NetworkPeerEventTypeRemoved, []*NetworkPeer{
-			networkPeerDisconnectMarker(clientId, disconnectTime),
-		})
+		bumpNetworkPeerVersion(ctx, r, networkId)
 	})
 }
 
@@ -788,7 +774,7 @@ func UpdateNetworkPeerProvideModes(
 			panic(err)
 		}
 
-		publishNetworkPeerEvent(ctx, r, *networkId, NetworkPeerEventTypeUpdated, []*NetworkPeer{meta.Peer})
+		bumpNetworkPeerVersion(ctx, r, *networkId)
 	})
 }
 
@@ -839,7 +825,7 @@ func pruneNetworkPeers(ctx context.Context, r server.RedisClient, networkId serv
 			panic(err)
 		}
 
-		publishNetworkPeerEvent(ctx, r, networkId, NetworkPeerEventTypeRemoved, markers)
+		bumpNetworkPeerVersion(ctx, r, networkId)
 	}
 
 	// age out old disconnect markers
@@ -931,27 +917,36 @@ func GetNetworkPeerEventId(ctx context.Context, networkId server.Id) (eventId in
 }
 
 type NetworkPeerListener struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	networkId   server.Id
-	callback    func(*NetworkPeerEvent)
-	pollTimeout time.Duration
+	ctx           context.Context
+	cancel        context.CancelFunc
+	networkId     server.Id
+	callback      func(*NetworkPeerEvent)
+	pollInterval  time.Duration
+	fullReadEvery int
 }
 
+// NewNetworkPeerListener polls the network's peer version counter every
+// `pollInterval` (jittered ±20%) and emits a Reset event with the full peer
+// list whenever the counter moved (PEERS2.md). Every `fullReadEvery`-th tick
+// full-reads unconditionally as insurance against a missed bump. There are
+// no subscriptions and no standing connections: the reader polls at its own
+// rate, and a slow or failing reader accumulates no state anywhere.
 func NewNetworkPeerListener(
 	ctx context.Context,
 	networkId server.Id,
 	callback func(*NetworkPeerEvent),
-	pollTimeout time.Duration,
+	pollInterval time.Duration,
+	fullReadEvery int,
 ) *NetworkPeerListener {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	npl := &NetworkPeerListener{
-		ctx:         cancelCtx,
-		cancel:      cancel,
-		networkId:   networkId,
-		callback:    callback,
-		pollTimeout: pollTimeout,
+		ctx:           cancelCtx,
+		cancel:        cancel,
+		networkId:     networkId,
+		callback:      callback,
+		pollInterval:  pollInterval,
+		fullReadEvery: fullReadEvery,
 	}
 	go server.HandleError(npl.run)
 	return npl
@@ -960,17 +955,19 @@ func NewNetworkPeerListener(
 func (self *NetworkPeerListener) run() {
 	defer self.cancel()
 
-	messages, unsub := server.Subscribe(self.ctx, networkPeerEventsKey(self.networkId))
-	defer unsub()
-
-	// the last processed event id. Event ids start at 1 and only move
-	// backward when the registry is flushed and rebuilt, which resyncs below.
+	// the last synced version. `!=` (never `<`): the counter moves backward
+	// when the registry is flushed, ttl-expires, or is rebuilt — any mismatch
+	// resyncs from a full read.
 	var eventId int64
 	synced := false
 
-	reset := func() {
+	// full-read and deliver the current snapshot. `force` delivers even when
+	// the version matches the last synced value — used by the insurance tick,
+	// which must self-heal drift the version comparison cannot see (a missed
+	// bump, or a flushed counter that restarts at a value already synced).
+	reset := func(force bool) {
 		resetEventId, resetPeers := GetNetworkPeers(self.ctx, self.networkId)
-		if !synced || resetEventId != eventId {
+		if !synced || force || resetEventId != eventId {
 			synced = true
 			eventId = resetEventId
 
@@ -983,40 +980,33 @@ func (self *NetworkPeerListener) run() {
 		}
 	}
 
-	for {
+	consecutiveErrors := 0
+	for tick := 0; ; tick += 1 {
+		// ±20% jitter spreads fleet polls; error backoff (up to 4x) keeps a
+		// sick slot from being hammered
+		interval := self.pollInterval + time.Duration((mathrand.Float64()*0.4-0.2)*float64(self.pollInterval))
+		interval <<= consecutiveErrors
+
 		select {
 		case <-self.ctx.Done():
 			return
-		case m := <-messages:
-			switch v := m.(type) {
-			case server.RedisSubscription:
-				switch v.Kind {
-				case "subscribe", "ssubscribe":
-					reset()
-				}
-			case server.RedisMessage:
-				buf := bytes.NewBuffer([]byte(v.Payload))
-				decoder := gob.NewDecoder(buf)
-				var event NetworkPeerEvent
-				err := decoder.Decode(&event)
-				if err == nil {
-					if eventId+1 == event.EventId {
-						eventId = event.EventId
-						self.callback(&event)
-					} else {
-						// a gap in delivery, or an event id at or below the
-						// last processed (the counter moved backward, e.g. a
-						// flushed registry): resync
-						reset()
-					}
-				}
+		case <-time.After(interval):
+		}
+
+		// contain redis panics to the tick: a failed poll must never kill the
+		// listener (2026-07-15: panicked listeners died permanently and their
+		// clients silently stopped receiving peer updates)
+		if r := server.HandleError(func() {
+			insurance := 0 < self.fullReadEvery && tick%self.fullReadEvery == 0
+			if !synced || insurance {
+				reset(true)
+			} else if GetNetworkPeerEventId(self.ctx, self.networkId) != eventId {
+				reset(false)
 			}
-		case <-time.After(self.pollTimeout):
-			// no event, poll in case events are not being delivered
-			// or the counter moved backward
-			if GetNetworkPeerEventId(self.ctx, self.networkId) != eventId {
-				reset()
-			}
+		}); r != nil {
+			consecutiveErrors = min(consecutiveErrors+1, 2)
+		} else {
+			consecutiveErrors = 0
 		}
 	}
 }

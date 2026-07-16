@@ -91,7 +91,10 @@ inline comments referenced below.
     for add-event churn gating, but listener conns/polls and
     established-connection fanout remained; (4) kill switch (shipped).
 
-  **Redesign directions (write the design doc off-incident, then pick):**
+  **→ REDESIGN CHOSEN 2026-07-15: dirty-counter + poll (direction 1), full
+  architecture in PEERS2.md — targeted for this release.**
+
+  **Redesign directions considered (record):**
   1. Poll-only + epoch counter: no subscriptions; listeners poll
      `GET {np_}eid` (one cheap GET, jittered interval), full read only on
      change. Removes all subscriber conns and fanout. Simplest; likely

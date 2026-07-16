@@ -19,11 +19,11 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
 		LocationRetryTimeout:  5 * time.Minute,
-		// matches ExchangeResidentTtl: the resident heartbeat refreshes the
-		// registration on the same ttl
+		// PeerRegisterTtl is derived from ExchangeResidentTtl in
+		// NewConnectHandler (must equal the heartbeat refresh ttl or
+		// disconnect detection is delayed); this default is a placeholder.
 		PeerRegisterTtl: 300 * time.Second,
-		// 2026-07-15: network peers disabled pending pubsub throughput
-		// redesign (see FOLLOWUP.md "network peers pubsub")
+		// 2026-07-15: network peers disabled pending the PEERS2 poll rollout
 		EnableNetworkPeers:       false,
 		MaxLatencyCount:          16,
 		MinTestTimeout:           12 * time.Hour,

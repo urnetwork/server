@@ -345,3 +345,119 @@ func TestTaskRescheduleErrorBackoff(t *testing.T) {
 		connect.AssertEqual(t, delay <= RescheduleBackoffMaxTimeout+RescheduleTimeout+10*time.Second, true)
 	})
 }
+
+// lease-test work: signals when it starts and blocks until released, so the
+// test can inspect the claimed task's release_time while a keepalive beat
+// fires mid-run.
+type LeaseWorkArgs struct{}
+type LeaseWorkResult struct{}
+
+var leaseWorkStarted = make(chan struct{}, 1)
+var leaseWorkRelease = make(chan struct{})
+
+func LeaseWork(
+	args *LeaseWorkArgs,
+	clientSession *session.ClientSession,
+) (*LeaseWorkResult, error) {
+	select {
+	case leaseWorkStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-leaseWorkRelease:
+	case <-clientSession.Ctx.Done():
+		return nil, errors.New("cancelled")
+	}
+	return &LeaseWorkResult{}, nil
+}
+
+// TestTaskLeaseNotShortenedByKeepalive guards the duplicate-execution fix: the
+// initial claim sets release_time to cover the task's declared max runtime,
+// and a keepalive beat must never SHORTEN that lease (it uses
+// GREATEST(release_time, now+ReleaseTimeout)). 2026-07-15: a plain
+// release_time = now+ReleaseTimeout let a starved extender lapse a long task's
+// lease, and another worker claimed a duplicate concurrent execution.
+func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// small ReleaseTimeout so keepalive beats (every ReleaseTimeout/3)
+		// fire quickly during the blocked run
+		prevRelease := ReleaseTimeout
+		ReleaseTimeout = 300 * time.Millisecond
+		defer func() { ReleaseTimeout = prevRelease }()
+
+		// fresh channels each run (the retry harness may re-enter)
+		leaseWorkStarted = make(chan struct{}, 1)
+		leaseWorkRelease = make(chan struct{})
+
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+
+		const maxTime = 60 * time.Second
+		taskId := ScheduleTask(LeaseWork, &LeaseWorkArgs{}, clientSession, MaxTime(maxTime))
+
+		taskWorker := NewTaskWorkerWithDefaults(ctx)
+		taskWorker.AddTargets(NewTaskTarget(LeaseWork))
+
+		// loop EvalTasks until the task becomes claimable (a single pass can
+		// race the available-block boundary). Once it claims the task,
+		// EvalTasks blocks running the (blocked) work while keepalive beats
+		// fire, which is what this test inspects.
+		stopEval := make(chan struct{})
+		evalDone := make(chan struct{})
+		go func() {
+			defer close(evalDone)
+			for {
+				select {
+				case <-stopEval:
+					return
+				default:
+				}
+				_, _, _, err := taskWorker.EvalTasks(1)
+				connect.AssertEqual(t, err, nil)
+				select {
+				case <-stopEval:
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		}()
+
+		// wait for the claim + work start
+		select {
+		case <-leaseWorkStarted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("lease work never started")
+		}
+
+		// let several keepalive beats fire while the work is still blocked
+		select {
+		case <-time.After(1500 * time.Millisecond):
+		}
+
+		// the lease still covers the declared max runtime — the beats did not
+		// shorten it toward ReleaseTimeout (300ms). Without the GREATEST fix,
+		// release_time would be ~now+300ms, well under now+30s.
+		var releaseTime time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, "SELECT release_time FROM pending_task WHERE task_id = $1", taskId)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&releaseTime))
+				}
+			})
+		})
+		if !releaseTime.After(server.NowUtc().Add(30 * time.Second)) {
+			t.Fatalf("lease was shortened: release_time=%s is not > now+30s (keepalive beat reduced the claim lease)", releaseTime)
+		}
+
+		// release the work and stop the eval loop cleanly
+		close(leaseWorkRelease)
+		close(stopEval)
+		select {
+		case <-evalDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("eval did not finish")
+		}
+	})
+}

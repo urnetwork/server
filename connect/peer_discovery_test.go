@@ -47,6 +47,11 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 
 	exchangeSettings := DefaultExchangeSettings()
 	exchangeSettings.ExchangeResidentTtl = 5 * time.Second
+	// network peers default off (PEERS2.md rollout); this suite tests them.
+	// Poll-only delivery: fast ticks so the test's wait windows catch changes.
+	exchangeSettings.EnableNetworkPeers = true
+	exchangeSettings.NetworkPeersPollInterval = 200 * time.Millisecond
+	exchangeSettings.StreamHopsPollInterval = 200 * time.Millisecond
 	hostToServicePorts := map[int]int{servicePort: servicePort}
 	exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, exchangeSettings)
 
@@ -57,8 +62,19 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 	handlerSettings.TransportTlsSettings.EnableSelfSign = true
 	handlerSettings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
 	handlerSettings.ConnectionAnnounceTimeout = 0
+	handlerSettings.ConnectionAnnounceSettings.EnableNetworkPeers = true
 	handlerSettings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 	connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, handlerSettings)
+
+	// NewConnectHandler must derive the announce registration ttl from the
+	// exchange resident ttl: disconnect detection relies on the registration
+	// expiring at the heartbeat cadence, and an independent knob here caused
+	// a 5-minute disconnect-detection delay (found 2026-07-15). Assert the
+	// derivation so a reintroduced knob fails fast with an exact message.
+	if handlerSettings.ConnectionAnnounceSettings.PeerRegisterTtl != exchangeSettings.ExchangeResidentTtl {
+		t.Fatalf("announce PeerRegisterTtl (%s) != ExchangeResidentTtl (%s) — disconnect detection will be delayed by the difference",
+			handlerSettings.ConnectionAnnounceSettings.PeerRegisterTtl, exchangeSettings.ExchangeResidentTtl)
+	}
 
 	httpRoutes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),

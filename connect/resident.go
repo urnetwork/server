@@ -177,16 +177,20 @@ type ExchangeSettings struct {
 
 	ExchangeResidentTtl time.Duration
 
-	// 2026-07-15: network peers DISABLED pending a pubsub throughput
-	// redesign. The per-resident listener model (one dedicated pubsub
-	// connection + a poll per connected top-level client) times churn-driven
-	// publish fanout structurally exceeds cluster pubsub capacity at fleet
-	// scale: stalled consumers stop reading their sockets for up to the 60s
-	// channel-send timeout, server-side output buffers accumulate across tens
-	// of thousands of subscriber connections, and the shard-channel owner
-	// nodes are pushed to maxmemory (2026-07-15 outage). Gates registration
-	// (announce), heartbeat refresh, teardown publish, and the listener.
+	// 2026-07-15: network peers disabled during the pubsub outage; the v2
+	// dirty-counter + poll architecture (PEERS2.md) replaces pubsub delivery
+	// entirely — re-enable rides the PEERS2 canary rollout. Gates
+	// registration (announce), heartbeat refresh, teardown publish, and the
+	// listener.
 	EnableNetworkPeers bool
+
+	// dirty-counter poll cadence for the per-resident listeners (PEERS2.md):
+	// each tick is one GET on the entity's slot (jittered ±20%), with a full
+	// read only on version mismatch or every ListenerFullReadEvery-th tick
+	// (insurance against a missed bump)
+	NetworkPeersPollInterval time.Duration
+	StreamHopsPollInterval   time.Duration
+	ListenerFullReadEvery    int
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -254,6 +258,9 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
 		ExchangeResidentTtl:                300 * time.Second,
 		EnableNetworkPeers:                 false,
+		NetworkPeersPollInterval:           5 * time.Second,
+		StreamHopsPollInterval:             5 * time.Second,
+		ListenerFullReadEvery:              10,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -2105,20 +2112,22 @@ func (self *Resident) Run() {
 				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
 			},
 		).Event,
-		self.exchange.settings.StreamPollTimeout,
+		self.exchange.settings.StreamHopsPollInterval,
+		self.exchange.settings.ListenerFullReadEvery,
 	)
 	defer streamHopListener.Close()
 
 	// only top-level client-category peers get network peer updates.
-	// The listener sends the complete list on subscribe (reset) and diffs
-	// after. Proxy clients are counted but not subscribed — a hosted device
-	// does not consume the peer list.
+	// The listener polls the per-network version counter and sends the
+	// complete list on any change (PEERS2.md). Proxy clients are counted but
+	// get no listener — a hosted device does not consume the peer list.
 	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,
 			*self.peerNetworkId,
 			self.handleNetworkPeerEvent,
-			self.exchange.settings.StreamPollTimeout,
+			self.exchange.settings.NetworkPeersPollInterval,
+			self.exchange.settings.ListenerFullReadEvery,
 		)
 		defer networkPeerListener.Close()
 	}
