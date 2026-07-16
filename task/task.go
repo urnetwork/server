@@ -293,6 +293,9 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 	runOnce *RunOnceOption,
 	opts ...any,
 ) (scheduled bool, taskId server.Id) {
+	if runOnce == nil {
+		panic("ScheduleTaskInTxIfAbsent requires a non-nil runOnce key")
+	}
 	p := prepareTask(taskFunction, args, clientSession, append(opts, runOnce)...)
 
 	claimTime := time.Time{}
