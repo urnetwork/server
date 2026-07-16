@@ -49,6 +49,16 @@ func changeNetworkName(
 	session *session.ClientSession,
 	reclaimCooldown bool,
 ) (*ChangeNetworkNameResult, error) {
+	// Seedphrase users must have email/phone or SSO bound to claim/change name
+	// (wallet doesn't count — need a way to verify identity)
+	if err := requireEmailOrSsoBound(session.Ctx, session.ByJwt.UserId); err != nil {
+		return &ChangeNetworkNameResult{
+			Error: &ChangeNetworkNameError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
 	// Accept either network_name or new_name field
 	name := args.NetworkName
 	if name == "" {
@@ -184,4 +194,38 @@ func isNetworkNameAvailableForUser(
 	}
 
 	return available, nil
+}
+
+// requireEmailOrSsoBound checks that the user has at least one email/phone
+// password auth or SSO auth bound. Seedphrase-only users (or seedphrase + wallet
+// only) can't claim/change names — they need a verified identity method.
+func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
+	var hasBoundAuth bool
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1 FROM network_user_auth_password
+					WHERE user_id = $1
+					UNION ALL
+					SELECT 1 FROM network_user_auth_sso
+					WHERE user_id = $1
+				) AS has_bound_auth
+			`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&hasBoundAuth))
+			}
+		})
+	})
+
+	if !hasBoundAuth {
+		return fmt.Errorf("You must bind an email or social login before changing your network name.")
+	}
+
+	return nil
 }
