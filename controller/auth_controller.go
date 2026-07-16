@@ -322,12 +322,21 @@ type RemoveAuthArgs struct {
 }
 
 type RemoveAuthResult struct {
+	Error *RemoveAuthError `json:"error,omitempty"`
+}
+
+type RemoveAuthError struct {
+	Message string `json:"message"`
 }
 
 func RemoveAuth(args RemoveAuthArgs, session *session.ClientSession) (*RemoveAuthResult, error) {
 	err := model.RemoveAuth(session.Ctx, session.ByJwt.UserId, args.AuthType)
 	if err != nil {
-		return nil, err
+		return &RemoveAuthResult{
+			Error: &RemoveAuthError{
+				Message: err.Error(),
+			},
+		}, nil
 	}
 	return &RemoveAuthResult{}, nil
 }

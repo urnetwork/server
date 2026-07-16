@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"fmt"
-
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -11,14 +9,24 @@ type RegenerateSeedphraseArgs struct {
 }
 
 type RegenerateSeedphraseResult struct {
-	Seedphrase string `json:"seedphrase"`
+	Seedphrase string                     `json:"seedphrase"`
+	Error      *RegenerateSeedphraseError `json:"error,omitempty"`
+}
+
+type RegenerateSeedphraseError struct {
+	Message string `json:"message"`
 }
 
 type GenerateSeedphraseArgs struct {
 }
 
 type GenerateSeedphraseResult struct {
-	Seedphrase string `json:"seedphrase"`
+	Seedphrase string                   `json:"seedphrase"`
+	Error      *GenerateSeedphraseError `json:"error,omitempty"`
+}
+
+type GenerateSeedphraseError struct {
+	Message string `json:"message"`
 }
 
 func RegenerateSeedphrase(
@@ -30,7 +38,11 @@ func RegenerateSeedphrase(
 		return nil, err
 	}
 	if !hasSeedphrase {
-		return nil, fmt.Errorf("No seedphrase auth found.")
+		return &RegenerateSeedphraseResult{
+			Error: &RegenerateSeedphraseError{
+				Message: "No seedphrase auth found.",
+			},
+		}, nil
 	}
 
 	seedphrase, err := model.RegenerateSeedphrase(session.Ctx, session.ByJwt.UserId)
@@ -52,7 +64,11 @@ func GenerateSeedphrase(
 		return nil, err
 	}
 	if hasSeedphrase {
-		return nil, fmt.Errorf("Seedphrase auth already exists.")
+		return &GenerateSeedphraseResult{
+			Error: &GenerateSeedphraseError{
+				Message: "Seedphrase already exists, use regenerate instead.",
+			},
+		}, nil
 	}
 
 	seedphrase, err := model.GenerateSeedphrase(session.Ctx, session.ByJwt.UserId)

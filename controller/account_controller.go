@@ -14,6 +14,7 @@ const networkNameReclaimCooldown = 24 * time.Hour
 
 type ChangeNetworkNameArgs struct {
 	NetworkName string `json:"network_name"`
+	NewName     string `json:"new_name"`
 }
 
 type ChangeNetworkNameError struct {
@@ -21,7 +22,8 @@ type ChangeNetworkNameError struct {
 }
 
 type ChangeNetworkNameResult struct {
-	Error *ChangeNetworkNameError `json:"error,omitempty"`
+	NetworkName string                  `json:"network_name"`
+	Error       *ChangeNetworkNameError `json:"error,omitempty"`
 }
 
 type ClaimNetworkNameArgs = ChangeNetworkNameArgs
@@ -47,7 +49,12 @@ func changeNetworkName(
 	session *session.ClientSession,
 	reclaimCooldown bool,
 ) (*ChangeNetworkNameResult, error) {
-	normalizedName, err := model.ValidateNetworkName(args.NetworkName)
+	// Accept either network_name or new_name field
+	name := args.NetworkName
+	if name == "" {
+		name = args.NewName
+	}
+	normalizedName, err := model.ValidateNetworkName(name)
 	if err != nil {
 		return &ChangeNetworkNameResult{
 			Error: &ChangeNetworkNameError{
@@ -115,7 +122,9 @@ func changeNetworkName(
 		))
 	})
 
-	return &ChangeNetworkNameResult{}, nil
+	return &ChangeNetworkNameResult{
+		NetworkName: normalizedName,
+	}, nil
 }
 
 func isNetworkNameAvailableForUser(

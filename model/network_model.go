@@ -147,22 +147,22 @@ func NetworkCreate(
 ) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
 
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
-	if !allow {
-		return nil, maxUserAuthAttemptsError()
-	}
-
-	if !networkCreate.Terms {
-		result := &NetworkCreateResult{
-			Error: &NetworkCreateResultError{
-				Message: AgreeToTerms,
-			},
-		}
-		return result, nil
-	}
-
-	// seedphrase creation: no auth method provided
+	// seedphrase path: no auth method provided
 	if networkCreate.UserAuth == nil && networkCreate.AuthJwt == nil && networkCreate.WalletAuth == nil {
+
+		if !networkCreate.Terms {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: AgreeToTerms,
+				},
+			}
+			return result, nil
+		}
+
+		// rate limit: max 5 seedphrase accounts per IP per day
+		if err := CheckNetworkCreateRateLimit(session.Ctx, session); err != nil {
+			return nil, err
+		}
 
 		validatedNetworkName, err := generateRandomNetworkName()
 		if err != nil {
@@ -210,6 +210,21 @@ func NetworkCreate(
 			}
 			return result, nil
 		}
+	}
+
+	// email/SSO/wallet paths use the existing auth rate limit
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	if !allow {
+		return nil, maxUserAuthAttemptsError()
+	}
+
+	if !networkCreate.Terms {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: AgreeToTerms,
+			},
+		}
+		return result, nil
 	}
 
 	validatedNetworkName, error := ValidateNetworkName(networkCreate.NetworkName)

@@ -160,7 +160,11 @@ func AuthLogin(
 	} else if login.Seedphrase != nil && *login.Seedphrase != "" {
 		result, err := LoginWithSeedphrase(session.Ctx, *login.Seedphrase)
 		if err != nil {
-			return nil, err
+			return &AuthLoginResult{
+				Error: &AuthLoginResultError{
+					Message: err.Error(),
+				},
+			}, nil
 		}
 		return &AuthLoginResult{
 			Network: &AuthLoginResultNetwork{
@@ -169,7 +173,11 @@ func AuthLogin(
 		}, nil
 	}
 
-	return nil, errors.New("invalid login")
+	return &AuthLoginResult{
+		Error: &AuthLoginResultError{
+			Message: "Invalid login credentials.",
+		},
+	}, nil
 }
 
 /**
