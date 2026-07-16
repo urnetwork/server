@@ -1088,41 +1088,6 @@ func NetworkUpdate(
 	return networkCreateResult, nil
 }
 
-type UpgradeGuestNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
-}
-
-type UpgradeGuestResultVerification struct {
-	UserAuth string `json:"user_auth"`
-}
-
-type UpgradeGuestError struct {
-	Message string `json:"message"`
-}
-
-/**
- * Upgrade guest with existing account
- */
-type UpgradeGuestExistingError struct {
-	Message string `json:"message"`
-}
-
-type UpgradeGuestExistingResult struct {
-	Error                *UpgradeGuestExistingError                `json:"error,omitempty"`
-	VerificationRequired *UpgradeGuestExistingVerificationRequired `json:"verification_required,omitempty"`
-	Network              *UpgradeGuestExistingResultNetwork        `json:"network,omitempty"`
-	// Error                *AuthLoginWithPasswordResultError        `json:"error,omitempty"`
-}
-
-type UpgradeGuestExistingVerificationRequired struct {
-	UserAuth string `json:"user_auth"`
-}
-
-type UpgradeGuestExistingResultNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
-	// NetworkName *string `json:"name,omitempty"`
-}
-
 type Network struct {
 	NetworkId             *server.Id `json:"network_id"`
 	NetworkName           string     `json:"network_name"`
