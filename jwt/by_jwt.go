@@ -161,8 +161,8 @@ type ByJwt struct {
 	DeviceId    *server.Id `json:"device_id,omitempty"`
 	ClientId    *server.Id `json:"client_id,omitempty"`
 	// Deprecated: always false for new tokens. Field kept for backward compat with existing guest JWTs.
-	GuestMode   bool       `json:"guest_mode,omitempty"`
-	Pro         bool       `json:"pro,omitempty"`
+	GuestMode bool `json:"guest_mode,omitempty"`
+	Pro       bool `json:"pro,omitempty"`
 	// identity roles and principal, assigned at client or auth code creation.
 	// The values have no meaning to the network.
 	Roles     []string `json:"roles,omitempty"`

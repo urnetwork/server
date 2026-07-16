@@ -33,12 +33,12 @@ const VerifyCodeTimeout = 4 * time.Hour
 type AuthType = string
 
 const (
-	AuthTypePassword  AuthType = "password"
-	AuthTypeApple     AuthType = "apple"
-	AuthTypeGoogle    AuthType = "google"
-	AuthTypeBringYour AuthType = "bringyour"
-	AuthTypeGuest     AuthType = "guest"
-	AuthTypeSolana    AuthType = "solana"
+	AuthTypePassword   AuthType = "password"
+	AuthTypeApple      AuthType = "apple"
+	AuthTypeGoogle     AuthType = "google"
+	AuthTypeBringYour  AuthType = "bringyour"
+	AuthTypeGuest      AuthType = "guest"
+	AuthTypeSolana     AuthType = "solana"
 	AuthTypeSeedphrase AuthType = "seedphrase"
 )
 
