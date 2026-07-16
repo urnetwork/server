@@ -330,6 +330,9 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 		claimTime,
 	))
 	scheduled = 0 < tag.RowsAffected()
+	if !scheduled {
+		return scheduled, server.Id{}
+	}
 	return scheduled, p.taskId
 }
 

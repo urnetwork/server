@@ -758,11 +758,10 @@ func RemoveNetworkClientsBatch(
 // unbounded/malformed request forcing an arbitrarily large synchronous
 // json.Marshal + single-row task args_json write in RemoveNetworkClients, and
 // against an unbounded in-memory slice being held for the life of a task.
-// Kept at 2x the known real-world ceiling rather than higher: at ~38 bytes
-// per id as JSON, this is already ~75MB in the worst case (a single
-// pending_task.args_json write on the request path), so the bound is sized
-// to limit that cost, not just to be a round number.
-const MaxRemoveNetworkClientsCount = 2000000
+// At 1M ids (~38 bytes per id as JSON ≈ 38MB in pending_task.args_json) this
+// is already well into the large-payload range; the previous 2M cap was
+// lowered because ~75MB per row was too costly for the task queue.
+const MaxRemoveNetworkClientsCount = 1000000
 
 type RemoveNetworkClientsArgs struct {
 	ClientIds []server.Id `json:"client_ids"`
@@ -803,13 +802,25 @@ func RemoveNetworkClients(
 	if len(removeClients.ClientIds) == 0 {
 		return &RemoveNetworkClientsResult{}, nil
 	}
-	if MaxRemoveNetworkClientsCount < len(removeClients.ClientIds) {
+
+	// deduplicate client ids in the input — duplicates in the same request
+	// would otherwise cause repeated updates on the same row in one batch
+	clientIds := make([]server.Id, 0, len(removeClients.ClientIds))
+	seen := make(map[server.Id]struct{}, len(removeClients.ClientIds))
+	for _, id := range removeClients.ClientIds {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			clientIds = append(clientIds, id)
+		}
+	}
+
+	if MaxRemoveNetworkClientsCount < len(clientIds) {
 		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
 	}
 
-	if len(removeClients.ClientIds) <= RemoveNetworkClientsBatchCount {
+	if len(clientIds) <= RemoveNetworkClientsBatchCount {
 		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
-			ClientIds: removeClients.ClientIds,
+			ClientIds: clientIds,
 		}, session)
 		if err != nil {
 			return nil, err
@@ -832,7 +843,7 @@ func RemoveNetworkClients(
 	scheduled, _ := task.ScheduleTaskIfAbsent(
 		RemoveNetworkClientsTask,
 		&RemoveNetworkClientsTaskArgs{
-			ClientIds: removeClients.ClientIds,
+			ClientIds: clientIds,
 		},
 		session,
 		runNetworkClientsTaskKey(session.ByJwt.NetworkId),
@@ -933,6 +944,12 @@ func RemoveNetworkClientsTaskPost(
 	session *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if session.ByJwt == nil {
+		// unreachable in the normal flow, but same rationale as the guard in
+		// RemoveNetworkClientsTask: if a corrupted/empty client_by_jwt_json
+		// row reaches the post phase, fail loudly rather than nil-deref.
+		return fmt.Errorf("Missing network for bulk client removal post.")
+	}
 	if 0 < len(result.RemainingClientIds) {
 		task.ScheduleTaskInTx(
 			tx,

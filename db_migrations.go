@@ -4367,4 +4367,17 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS network_create_attempt_hash_time
             ON network_create_attempt (client_address_hash, create_time)
     `),
+
+	// Index for bulk client deactivation via `client_id = ANY($1) AND network_id = $2`.
+	// Both the synchronous batch path (RemoveNetworkClientsBatch, ≤10k ids) and the
+	// background task path (RemoveNetworkClientsTask, 200k ids per invocation) use
+	// this predicate. Without this index the query planner must scan for each batch;
+	// at 200k IDs across 20 batches that can cause long lock times on large tables.
+	// On the large existing network_client table this must be built manually with
+	// CREATE INDEX CONCURRENTLY out of band — the IF NOT EXISTS gate makes this
+	// migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_network_id_client_id
+        ON network_client (network_id, client_id)
+    `),
 }
