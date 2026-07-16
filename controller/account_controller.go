@@ -196,7 +196,7 @@ func isNetworkNameAvailableForUser(
 	return available, nil
 }
 
-// requireEmailOrSsoBound checks that the user has at least one email/phone
+// requireEmailOrSsoBound checks that the user has at least one verified email/phone
 // password auth or SSO auth bound. Seedphrase-only users (or seedphrase + wallet
 // only) can't claim/change names — they need a verified identity method.
 func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
@@ -208,11 +208,11 @@ func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
 			`
 				SELECT EXISTS (
 					SELECT 1 FROM network_user_auth_password
-					WHERE user_id = $1
+					WHERE user_id = $1 AND verified = true
 					UNION ALL
 					SELECT 1 FROM network_user_auth_sso
 					WHERE user_id = $1
-				) AS has_bound_auth
+				)
 			`,
 			userId,
 		)
@@ -224,7 +224,7 @@ func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
 	})
 
 	if !hasBoundAuth {
-		return fmt.Errorf("You must bind an email or social login before changing your network name.")
+		return fmt.Errorf("You must verify an email or bind a social login before changing your network name.")
 	}
 
 	return nil
