@@ -1244,6 +1244,15 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 WHERE user_id = $1`,
 				userId,
 			))
+			// Also clear wallet fields on network_user so the wallet can
+			// be reused to create a fresh account
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_user
+				 SET wallet_address = NULL, wallet_blockchain = NULL
+				 WHERE user_id = $1`,
+				userId,
+			))
 		case "seedphrase":
 			server.RaisePgResult(tx.Exec(
 				ctx,
