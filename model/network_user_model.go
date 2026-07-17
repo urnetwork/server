@@ -159,7 +159,7 @@ func AddAuth(
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*authArgs.Password), passwordSalt)
 
-		addUserAuth(
+		err := addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       session.ByJwt.UserId,
 				UserAuth:     authArgs.UserAuth,
@@ -168,6 +168,13 @@ func AddAuth(
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
@@ -191,7 +198,7 @@ func AddAuth(
 			}, nil
 		}
 
-		addSsoAuth(
+		err = addSsoAuth(
 			&AddSsoAuthArgs{
 				ParsedAuthJwt: *parsedAuthJwt,
 				AuthJwtType:   SsoAuthType(*authArgs.AuthJwtType),
@@ -200,17 +207,31 @@ func AddAuth(
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.WalletAuth != nil {
 		// user is adding a wallet auth method
-		addWalletAuth(
+		err := addWalletAuth(
 			&AddWalletAuthArgs{
 				WalletAuth: authArgs.WalletAuth,
 				UserId:     session.ByJwt.UserId,
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 		return &AddAuthMethodResult{}, nil
 	}
 
