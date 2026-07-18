@@ -892,25 +892,6 @@ func networkCreateSeedphrase(
 		err = CreateSeedphraseAuthInTx(tx, ctx, createdUserId, seedphrase)
 		server.Raise(err)
 
-		// if SSO provided, bind it too
-		if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
-			authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
-			if authJwt != nil {
-				err = addSsoAuthInTx(
-					tx, ctx,
-					&AddSsoAuthArgs{
-						UserId:        createdUserId,
-						AuthJwt:       *networkCreate.AuthJwt,
-						ParsedAuthJwt: *authJwt,
-						AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
-					},
-				)
-				if err != nil {
-					glog.Infof("[net]seedphrase create + sso bind error: %s\n", err)
-				}
-			}
-		}
-
 		_, err = tx.Exec(
 			ctx,
 			`INSERT INTO network (network_id, network_name, admin_user_id)
