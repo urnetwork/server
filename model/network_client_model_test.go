@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -655,9 +656,13 @@ func TestRemoveNetworkClientsRejectsOversizedRequest(t *testing.T) {
 			},
 		}
 
-		// zero-value ids are fine here: the request must be rejected on
-		// length alone, before any id is ever read
+		// distinct ids are required here: RemoveNetworkClients deduplicates
+		// before checking the length cap, so identical (e.g. zero-value)
+		// ids would collapse to a single entry and never exercise the cap.
 		clientIds := make([]server.Id, MaxRemoveNetworkClientsCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
 
 		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
 			ClientIds: clientIds,
@@ -970,9 +975,12 @@ func TestRemoveNetworkClientsExactlyAtCapIsAccepted(t *testing.T) {
 			},
 		}
 
-		// zero-value ids are fine: this only tests that scheduling itself is
-		// accepted at exactly the cap, not that the ids get processed
+		// distinct ids are required here too: identical ids would dedup
+		// below the cap and this test would no longer be "exactly at cap".
 		clientIds := make([]server.Id, MaxRemoveNetworkClientsCount)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
 
 		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
 			ClientIds: clientIds,
