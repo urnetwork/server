@@ -1244,8 +1244,8 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				 WHERE user_id = $1`,
 				userId,
 			))
-			// Also clear wallet fields on network_user so the wallet can
-			// be reused to create a fresh account
+			// Clear wallet fields on network_user so the wallet
+			// can be reused to create a fresh account
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`UPDATE network_user
@@ -1263,6 +1263,24 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 		default:
 			panic(fmt.Errorf("unknown auth type: %s", authType))
 		}
+
+		// Update network_user.auth_type to match what's actually left.
+		// The app reads this field to show available sign-in methods,
+		// so it must reflect reality after removal.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user
+			 SET auth_type = COALESCE(
+				 (SELECT auth_type FROM network_user_auth_password  WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'apple'   FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'apple'  LIMIT 1),
+				 (SELECT 'google'  FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'google' LIMIT 1),
+				 (SELECT 'solana'  FROM network_user_auth_wallet    WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'seedphrase' FROM network_user_auth_seedphrase WHERE user_id = $1 LIMIT 1),
+				 auth_type
+			 )
+			 WHERE user_id = $1`,
+			userId,
+		))
 	})
 
 	return nil
