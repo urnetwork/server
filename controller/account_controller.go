@@ -105,7 +105,7 @@ func changeNetworkName(
 	})
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		if reclaimCooldown && oldName != nil {
+		if reclaimCooldown && oldName != nil && *oldName != normalizedName {
 			coolDownUntil := server.NowUtc().Add(networkNameReclaimCooldown)
 			server.RaisePgResult(tx.Exec(
 				session.Ctx,
