@@ -142,6 +142,10 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 	// larger registration ttl would delay disconnect by its full duration.
 	// Derive it from the exchange so the two can never drift.
 	settings.ConnectionAnnounceSettings.PeerRegisterTtl = exchange.settings.ExchangeResidentTtl
+	// The exchange flag is the single network-peers switch: propagate it into the
+	// announce settings so enabling peers in one place gates both the announce-time
+	// registration and the exchange-side listener/heartbeat/teardown.
+	settings.ConnectionAnnounceSettings.EnableNetworkPeers = exchange.settings.EnableNetworkPeers
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,

@@ -1246,7 +1246,7 @@ func UpgradeGuest(
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
 				isGuest := false
-				isPro := IsPro(
+				isPro := IsProFresh(
 					session.Ctx,
 					&session.ByJwt.NetworkId,
 				)
@@ -1341,7 +1341,7 @@ func UpgradeGuest(
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
 			isGuest := false
-			isPro := IsPro(
+			isPro := IsProFresh(
 				session.Ctx,
 				&session.ByJwt.NetworkId,
 			)

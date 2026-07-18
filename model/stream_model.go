@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"slices"
+	"strings"
+	"sync/atomic"
 	// "encoding/json"
 	"fmt"
 	"iter"
@@ -172,6 +174,34 @@ func streamContractsKey(streamKey []byte) string {
 
 func clientStreamHopsKey(clientId server.Id) string {
 	return fmt.Sprintf("{%s}s2_c_hops", clientId)
+}
+
+// StreamHopsKeyEventPattern is the psubscribe pattern for the keyspace
+// channels of all client hop-set keys on a db (PEERSSTREAMS2.md). Hop sets
+// are tiny, so key events act as a dirty signal and the read is the existing
+// full read — no per-member restructure.
+func StreamHopsKeyEventPattern(db int) string {
+	return fmt.Sprintf("__keyspace@%d__:{*}s2_c_hops", db)
+}
+
+// ParseStreamHopsKeyEvent extracts the client id from a keyspace channel
+// name matching `StreamHopsKeyEventPattern`.
+func ParseStreamHopsKeyEvent(channel string) (clientId server.Id, ok bool) {
+	i := strings.Index(channel, ":{")
+	if i < 0 {
+		return
+	}
+	rest := channel[i+len(":{"):]
+	j := strings.Index(rest, "}s2_c_hops")
+	if j < 0 || j != len(rest)-len("}s2_c_hops") {
+		return
+	}
+	clientId, err := server.ParseId(rest[:j])
+	if err != nil {
+		return
+	}
+	ok = true
+	return
 }
 
 // the event id counter must outlive any live listener's memory of the last
@@ -503,6 +533,13 @@ type StreamHopListener struct {
 	callback      func(*StreamHopEvent)
 	pollInterval  time.Duration
 	fullReadEvery int
+
+	// key-event inputs (PEERSSTREAMS2.md): `kick` wakes the loop for an
+	// immediate counter check (every hop add/remove bumps the counter, so
+	// the normal tick body delivers the change); `forceResync` additionally
+	// discards the synced state (dropped events, subscriber (re)connect)
+	kick        chan struct{}
+	forceResync atomic.Bool
 }
 
 // NewStreamHopListener polls the client's hops version counter every
@@ -520,9 +557,27 @@ func NewStreamHopListener(ctx context.Context, clientId server.Id, callback func
 		callback:      callback,
 		pollInterval:  pollInterval,
 		fullReadEvery: fullReadEvery,
+		kick:          make(chan struct{}, 1),
 	}
 	go server.HandleError(shl.run)
 	return shl
+}
+
+// Kick wakes the loop for an immediate counter check (a hop-set key event
+// arrived). Non-blocking, coalescing. Safe from the subscriber's demux
+// goroutine.
+func (self *StreamHopListener) Kick() {
+	select {
+	case self.kick <- struct{}{}:
+	default:
+	}
+}
+
+// Resync forces the next wake-up to full-read regardless of the version
+// counter (events may have been dropped). Non-blocking, coalescing.
+func (self *StreamHopListener) Resync() {
+	self.forceResync.Store(true)
+	self.Kick()
 }
 
 func (self *StreamHopListener) run() {
@@ -535,14 +590,16 @@ func (self *StreamHopListener) run() {
 	var eventId int64
 	synced := false
 
-	// full-read and deliver the current snapshot. `force` delivers even when
-	// the version matches the last synced value — used by the insurance tick,
-	// which must self-heal drift the version comparison cannot see (a missed
-	// bump, or a counter that ttl-expires and restarts at a value already
-	// synced).
-	reset := func(force bool) {
+	// full-read and deliver the snapshot when the version moved. `!=` (never
+	// `<`): the counter moves backward when it ttl-expires or the db is
+	// flushed. A flush-and-rebuild is not atomic in production (hops
+	// repopulate over time), so a poll observes the intermediate state and
+	// the version diverges — the comparison catches every realistic case
+	// without re-delivering on a static hop set. (The v1 `<` comparison could
+	// go permanently stale across a counter reset.)
+	reset := func() {
 		resetEventId, resetStreamHops := GetStreamHops(self.ctx, self.clientId)
-		if !synced || force || resetEventId != eventId {
+		if !synced || resetEventId != eventId {
 			synced = true
 			eventId = resetEventId
 
@@ -555,31 +612,50 @@ func (self *StreamHopListener) run() {
 		}
 	}
 
-	consecutiveErrors := 0
-	for tick := 0; ; tick += 1 {
+	jitterInterval := func(consecutiveErrors int) time.Duration {
 		// ±20% jitter spreads fleet polls; error backoff (up to 4x) keeps a
 		// sick slot from being hammered
 		interval := self.pollInterval + time.Duration((mathrand.Float64()*0.4-0.2)*float64(self.pollInterval))
-		interval <<= consecutiveErrors
+		return interval << consecutiveErrors
+	}
 
+	consecutiveErrors := 0
+	tick := 0
+	// the poll deadline is absolute so a stream of kicks cannot starve the
+	// corrective poll (PEERSSTREAMS2.md §5.4)
+	nextPollTime := time.Now().Add(jitterInterval(0))
+	for {
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(interval):
+		case <-self.kick:
+		case <-time.After(time.Until(nextPollTime)):
+			nextPollTime = time.Now().Add(jitterInterval(consecutiveErrors))
 		}
 
+		tick += 1
+		force := self.forceResync.Swap(false)
 		// contain redis panics to the tick: a failed poll must never kill the
 		// listener (2026-07-15: panicked listeners died permanently and their
-		// clients silently stopped receiving updates)
+		// clients silently stopped receiving updates). The periodic full read
+		// (fullReadEvery) re-reads as a cheap hygiene check; it still only
+		// delivers on a version change. A forced resync (dropped key events,
+		// subscriber (re)connect) always full-reads.
 		if r := server.HandleError(func() {
-			insurance := 0 < self.fullReadEvery && tick%self.fullReadEvery == 0
-			if !synced || insurance {
-				reset(true)
-			} else if GetStreamEventId(self.ctx, self.clientId) != eventId {
-				reset(false)
+			if force {
+				synced = false
+			}
+			if !synced ||
+				(0 < self.fullReadEvery && tick%self.fullReadEvery == 0) ||
+				GetStreamEventId(self.ctx, self.clientId) != eventId {
+				reset()
 			}
 		}); r != nil {
 			consecutiveErrors = min(consecutiveErrors+1, 2)
+			if force {
+				// the resync did not complete; keep it pending
+				self.forceResync.Store(true)
+			}
 		} else {
 			consecutiveErrors = 0
 		}

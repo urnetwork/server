@@ -23,7 +23,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		// NewConnectHandler (must equal the heartbeat refresh ttl or
 		// disconnect detection is delayed); this default is a placeholder.
 		PeerRegisterTtl: 300 * time.Second,
-		// 2026-07-15: network peers disabled pending the PEERS2 poll rollout
+		// overridden in NewConnectHandler from ExchangeSettings.EnableNetworkPeers
+		// (the single source of truth); this default is only the pre-wiring value.
 		EnableNetworkPeers:       false,
 		MaxLatencyCount:          16,
 		MinTestTimeout:           12 * time.Hour,
@@ -44,8 +45,8 @@ type ConnectionAnnounceSettings struct {
 	LocationRetryTimeout  time.Duration
 	// ttl for the network peer registration made at announce
 	PeerRegisterTtl time.Duration
-	// mirrors ExchangeSettings.EnableNetworkPeers (2026-07-15: disabled
-	// pending pubsub throughput redesign)
+	// set from ExchangeSettings.EnableNetworkPeers in NewConnectHandler (the
+	// single network-peers switch); gates the announce-time peer registration
 	EnableNetworkPeers bool
 	MaxLatencyCount    int
 	MinTestTimeout     time.Duration

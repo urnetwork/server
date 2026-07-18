@@ -139,6 +139,21 @@ func UpdateProNetworks(ctx context.Context, networkIds ...server.Id) {
 	}
 }
 
+// IsProNetworkFresh reads the entitlement from the source of truth (the db), bypassing
+// the read-through local/redis cache, and refreshes the cache with the result. It returns
+// the same value UpdateProNetwork does.
+//
+// Use this — NOT IsProNetwork — whenever the result is baked into a durable artifact,
+// above all a ByJwt (which lasts expiryDuration = 30 days). IsProNetwork is a self-healing
+// read-through cache: a stale `false` (e.g. a node whose entry predates the upgrade) is
+// harmless for an ephemeral feature check because it corrects within the ttl. But stamping
+// that stale `false` into a 30-day token freezes it for the token's whole lifetime — the
+// network silently loses Pro until the next refresh re-issues the token. A token is not
+// ephemeral, so it must read the source of truth.
+func IsProNetworkFresh(ctx context.Context, networkId server.Id) bool {
+	return UpdateProNetwork(ctx, networkId)
+}
+
 // InvalidateProNetwork drops the cached entitlement from BOTH tiers so the next read
 // reloads it from the db.
 func InvalidateProNetwork(ctx context.Context, networkId server.Id) {

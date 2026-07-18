@@ -3200,6 +3200,19 @@ func IsPro(
 	return IsProNetwork(ctx, *networkId)
 }
 
+// IsProFresh is IsPro read from the source of truth (see IsProNetworkFresh) — use it when
+// the value is stamped into a durable ByJwt, so a stale cache entry can't freeze a wrong
+// Pro into a 30-day token.
+func IsProFresh(
+	ctx context.Context,
+	networkId *server.Id,
+) bool {
+	if networkId == nil {
+		return false
+	}
+	return IsProNetworkFresh(ctx, *networkId)
+}
+
 // AddProTransferBalanceToAllNetworks grants the Pro data allowance to every network
 // with an active supporter subscription, for the window [startTime, endTime).
 //

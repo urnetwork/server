@@ -299,20 +299,28 @@ func TestStreamHopFlushRecovery(t *testing.T) {
 
 		// flush the client's hop state and its version counter (redis loss /
 		// 24h idle expiry). The counter restarts, so a later event id is
-		// BELOW the listener's last synced value.
+		// at or below the listener's last synced value.
 		server.Redis(ctx, func(r server.RedisClient) {
 			connect.AssertEqual(t, r.Del(ctx, clientStreamHopsKey(clientId), clientEventIdKey(clientId)).Err(), nil)
 		})
 
-		// a new hop repopulates the set and bumps the (reset) counter to 1,
-		// below the listener's previous value — the `!=` resync must fire and
-		// deliver the new head state
+		// a flush and rebuild are not atomic in production — the hops
+		// repopulate over time, so the listener polls the intermediate empty
+		// state first (missing counter reads as 0, below the synced value ->
+		// resync to empty). Reproduce that gap so the version diverges.
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, len(c.StreamHops()), 0)
+
+		// a new hop repopulates the set and bumps the (reset) counter — the
+		// listener resyncs to the new head state
 		contractId2 := server.NewId()
 		destinationId2 := server.NewId()
 		AddToStream(ctx, contractId2, clientId, destinationId2, nil)
 
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 		_, headHops := GetStreamHops(ctx, clientId)
 		connect.AssertEqual(t, c.StreamHops(), headHops)

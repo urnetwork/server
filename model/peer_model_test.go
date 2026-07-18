@@ -640,26 +640,29 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		})
 
 		// the registration is lost: the heartbeat refresh reports not
-		// registered, and the caller re-adds (the resident recovery branch).
-		// Recover to a DIFFERENT peer with exactly one add: the restarted
-		// counter lands on the same value the listener already synced (1), so
-		// the version comparison cannot see the change — only the forced
-		// insurance full-read delivers it. (Recovering to the same peer would
-		// let stale accumulator state mask a suppressed delivery.)
+		// registered. A flush and rebuild are not atomic in production (the
+		// heartbeat re-adds over seconds), so the listener first polls the
+		// intermediate empty state (missing counter reads as 0, below the
+		// synced value -> resync to empty), then the re-add diverges the
+		// version again.
 		connect.AssertEqual(t, RefreshNetworkPeer(ctx, networkId, clientId, residentId, ttl), false)
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, len(c.Connected()), 0)
+
+		// the resident recovery branch re-adds (a different peer here to show
+		// the resync carries fresh data, not stale accumulator state)
 		clientId2 := server.NewId()
 		residentId2 := server.NewId()
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId2, Principal: "svc-b"}, residentId2, ttl)
 
-		// the registry recovered, with the counter back at an already-synced value
-		recoveredEventId, peers := GetNetworkPeers(ctx, networkId)
-		connect.AssertEqual(t, recoveredEventId, int64(1))
+		_, peers := GetNetworkPeers(ctx, networkId)
 		connected, _ := splitNetworkPeers(peers)
 		connect.AssertEqual(t, len(connected), 1)
 		connect.AssertEqual(t, connected[clientId2].Principal, "svc-b")
 
-		// the already-subscribed listener re-delivers via the insurance
-		// full-read despite the matching version, rather than staying stale
+		// the already-subscribed listener resyncs to the rebuilt state
 		select {
 		case <-time.After(3 * time.Second):
 		}
@@ -1074,9 +1077,14 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 // while the concurrent-client limit is DISABLED (dark by default in prod), a
 // network must be able to connect MORE than LimitTopLevelClientIdsPerNetwork
 // top-level clients — a network with a large provider fleet must never have a
-// provider refused. Every admission gate is dark in this state:
+// provider refused. The connection/creation gates are all dark in this state:
 // AuthNetworkClient (creation), NetworkConcurrentClientsExceeded (plan), and
 // CanConnectNetworkPeer (connection activation).
+//
+// The peer-feature valve (NetworkPeersEnabled), however, is enforced
+// INDEPENDENTLY of enforce_concurrent_clients (the 2026-07-17 fix): an
+// over-limit network connects normally but gets peersEnabled=false, so its
+// O(size^2) peer full-read fan-out never lands on a single redis shard.
 func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1115,15 +1123,23 @@ func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
 
 		// the plan gates report no limit while disabled, at a count over the cap
 		connect.AssertEqual(t, NetworkConcurrentClientsExceeded(ctx, networkId), false)
-		// and an over-limit network still gets peer registrations (poll
-		// architecture handles any size; PEERS2.md)
-		connect.AssertEqual(t, NetworkPeersEnabled(ctx, networkId), true)
-		// every client may connect — the activation gate is dark
+		// every client may connect — the connection activation gate is dark
 		for i, clientId := range clientIds {
 			if !CanConnectNetworkPeer(ctx, clientId) {
 				t.Fatalf("provider %d (%s) cannot connect while limit disabled", i, clientId)
 			}
 		}
+		// BUT the peer valve is enforced independently of
+		// enforce_concurrent_clients: an over-limit network gets NO peer
+		// registrations/subscriptions even while disabled, so its O(size^2)
+		// full-read fan-out never lands on redis (2026-07-17 fix).
+		connect.AssertEqual(t, NetworkPeersEnabled(ctx, networkId), false)
+		// the per-client profile resolves the same peers-off decision while
+		// still reporting the client as a valid top-level client
+		_, topLevel, _, profile, peersEnabled := GetNetworkPeerProfile(ctx, clientIds[0])
+		connect.AssertEqual(t, topLevel, true)
+		connect.AssertNotEqual(t, profile, nil)
+		connect.AssertEqual(t, peersEnabled, false)
 	})
 }
 

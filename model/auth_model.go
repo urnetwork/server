@@ -428,7 +428,7 @@ func handleLoginParsedAuthJwt(
 
 	isGuestMode := false
 
-	isPro := IsPro(
+	isPro := IsProFresh(
 		ctx,
 		&networkId,
 	)
@@ -536,7 +536,7 @@ func handleLoginWallet(
 
 	if found {
 
-		pro := IsPro(
+		pro := IsProFresh(
 			ctx,
 			&networkId,
 		)
@@ -735,7 +735,7 @@ func AuthLoginWithPassword(
 
 			isGuestMode := false
 
-			pro := IsPro(
+			pro := IsProFresh(
 				session.Ctx,
 				&networkId,
 			)
@@ -894,7 +894,7 @@ func AuthVerify(
 
 	isGuestMode := false
 
-	isPro := IsPro(
+	isPro := IsProFresh(
 		session.Ctx,
 		&networkId,
 	)
@@ -1623,7 +1623,7 @@ func AuthCodeLogin(
 
 		isGuestMode := false
 
-		isPro := IsPro(
+		isPro := IsProFresh(
 			session.Ctx,
 			&networkId,
 		)

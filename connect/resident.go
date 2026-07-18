@@ -177,11 +177,12 @@ type ExchangeSettings struct {
 
 	ExchangeResidentTtl time.Duration
 
-	// 2026-07-15: network peers disabled during the pubsub outage; the v2
-	// dirty-counter + poll architecture (PEERS2.md) replaces pubsub delivery
-	// entirely — re-enable rides the PEERS2 canary rollout. Gates
-	// registration (announce), heartbeat refresh, teardown publish, and the
-	// listener.
+	// Master switch for network peers, on the PEERS2 dirty-counter + poll
+	// architecture (PEERS2.md) — the v1 pubsub delivery that caused the
+	// 2026-07-15 outage is gone. Gates registration (announce), heartbeat
+	// refresh, teardown bump, and the per-resident poll listener.
+	// NewConnectHandler propagates this into ConnectionAnnounceSettings, so
+	// this is the single switch for both.
 	EnableNetworkPeers bool
 
 	// dirty-counter poll cadence for the per-resident listeners (PEERS2.md):
@@ -191,6 +192,10 @@ type ExchangeSettings struct {
 	NetworkPeersPollInterval time.Duration
 	StreamHopsPollInterval   time.Duration
 	ListenerFullReadEvery    int
+
+	// redis key-event delta delivery for the peers + stream-hops listeners
+	// (PEERSSTREAMS2.md). Off -> pure PEERS2 poll behavior above.
+	KeyEventDelivery KeyEventDeliverySettings
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -257,10 +262,28 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeWriteHeaderTimeout:         exchangeResidentWaitTimeout,
 		ExchangeReconnectAfterErrorTimeout: 1 * time.Second,
 		ExchangeResidentTtl:                300 * time.Second,
-		EnableNetworkPeers:                 false,
-		NetworkPeersPollInterval:           5 * time.Second,
-		StreamHopsPollInterval:             5 * time.Second,
-		ListenerFullReadEvery:              10,
+		// network peers re-enabled on the PEERS2 poll architecture (PEERS2.md) —
+		// the pubsub delivery that caused the 2026-07-15 outage is gone (no
+		// standing connections, no fanout; readers poll a per-network counter).
+		// This is the single source of truth: NewConnectHandler propagates it
+		// into ConnectionAnnounceSettings so one flag gates both. Canary by
+		// deploying to one connect block first (PEERS2.md §6).
+		EnableNetworkPeers:       true,
+		NetworkPeersPollInterval: 5 * time.Second,
+		StreamHopsPollInterval:   5 * time.Second,
+		ListenerFullReadEvery:    10,
+		KeyEventDelivery: KeyEventDeliverySettings{
+			// ON (2026-07-18). PREREQUISITE: `notify-keyspace-events "Kg$sx"`
+			// must be live on every data node BEFORE this build deploys (xops
+			// redis.conf.j2 + redis-set-notify-keyspace-events.sh) — with
+			// generation off, peer/hop delivery silently degrades to the
+			// corrective poll cadence below (minutes, vs seconds on v2).
+			Enabled:                 true,
+			CorrectivePollInterval:  5 * time.Minute,
+			ResubscribeTimeout:      5 * time.Second,
+			TopologyRefreshInterval: 60 * time.Second,
+			ResyncSpreadTimeout:     30 * time.Second,
+		},
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -291,6 +314,27 @@ func DefaultExchangeChaosSettings() *ExchangeChaosSettings {
 // residents live in the exchange
 // a resident for a client id can be nominated to live in the exchange with `NominateLocalResident`
 // any time a resident is not reachable by a transport, the transport should nominate a local resident
+// KeyEventDeliverySettings configures the redis key-event delta transport
+// (PEERSSTREAMS2.md). All tunables live here — no global constants.
+type KeyEventDeliverySettings struct {
+	// master switch. When enabled the exchange runs one shared key-event
+	// subscriber, residents' listeners consume per-key deltas, and the poll
+	// becomes the corrective backstop at `CorrectivePollInterval` with the
+	// unconditional insurance read disabled. Off -> pure PEERS2 poll.
+	Enabled bool
+	// corrective poll cadence while events are enabled (±20% jitter). This
+	// bounds the staleness of any dropped event.
+	CorrectivePollInterval time.Duration
+	// backoff between failed (re)subscribes
+	ResubscribeTimeout time.Duration
+	// how often the subscriber re-checks the cluster master set (a moved
+	// slot emits events on the new owner)
+	TopologyRefreshInterval time.Duration
+	// a (re)subscribe resyncs every registration; the resyncs are trickled
+	// over this window so they do not stampede the registry
+	ResyncSpreadTimeout time.Duration
+}
+
 type Exchange struct {
 	// cleanupCtx context.Context
 	ctx    context.Context
@@ -306,6 +350,10 @@ type Exchange struct {
 	routes             map[string]string
 
 	settings *ExchangeSettings
+
+	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
+	// KeyEventDelivery.Enabled
+	keyEventSubscriber *keyEventSubscriber
 
 	stateLock sync.Mutex
 	// client id -> resident
@@ -337,6 +385,12 @@ func NewExchange(
 		settings:           settings,
 		residents:          map[server.Id]*Resident{},
 		connections:        map[server.Id]map[server.Id]context.CancelFunc{},
+	}
+
+	if settings.KeyEventDelivery.Enabled {
+		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
+		// residents register their listeners with it in `Resident.Run`
+		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
 	}
 
 	go server.HandleError(exchange.Run, cancel)
@@ -1046,7 +1100,34 @@ func (self *Exchange) Drain() {
 	}
 }
 
+// the listener poll cadences, retimed when key-event delivery is on: the
+// poll becomes the corrective backstop and the unconditional insurance read
+// is disabled (PEERSSTREAMS2.md §5.4)
+func (self *Exchange) networkPeersPollInterval() time.Duration {
+	if self.settings.KeyEventDelivery.Enabled {
+		return self.settings.KeyEventDelivery.CorrectivePollInterval
+	}
+	return self.settings.NetworkPeersPollInterval
+}
+
+func (self *Exchange) streamHopsPollInterval() time.Duration {
+	if self.settings.KeyEventDelivery.Enabled {
+		return self.settings.KeyEventDelivery.CorrectivePollInterval
+	}
+	return self.settings.StreamHopsPollInterval
+}
+
+func (self *Exchange) listenerFullReadEvery() int {
+	if self.settings.KeyEventDelivery.Enabled {
+		return 0
+	}
+	return self.settings.ListenerFullReadEvery
+}
+
 func (self *Exchange) Close() {
+	if self.keyEventSubscriber != nil {
+		self.keyEventSubscriber.Close()
+	}
 	self.cancel()
 }
 
@@ -2112,10 +2193,18 @@ func (self *Resident) Run() {
 				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
 			},
 		).Event,
-		self.exchange.settings.StreamHopsPollInterval,
-		self.exchange.settings.ListenerFullReadEvery,
+		self.exchange.streamHopsPollInterval(),
+		self.exchange.listenerFullReadEvery(),
 	)
 	defer streamHopListener.Close()
+	if self.exchange.keyEventSubscriber != nil {
+		// key events are the live delivery; the poll above is the corrective
+		// backstop (PEERSSTREAMS2.md). The corrective cadence is minutes, so
+		// registration forces the initial full read immediately.
+		removeHopListener := self.exchange.keyEventSubscriber.AddHopListener(self.clientId, streamHopListener)
+		defer removeHopListener()
+		streamHopListener.Resync()
+	}
 
 	// only top-level client-category peers get network peer updates.
 	// The listener polls the per-network version counter and sends the
@@ -2126,10 +2215,18 @@ func (self *Resident) Run() {
 			self.ctx,
 			*self.peerNetworkId,
 			self.handleNetworkPeerEvent,
-			self.exchange.settings.NetworkPeersPollInterval,
-			self.exchange.settings.ListenerFullReadEvery,
+			self.exchange.networkPeersPollInterval(),
+			self.exchange.listenerFullReadEvery(),
 		)
 		defer networkPeerListener.Close()
+		if self.exchange.keyEventSubscriber != nil {
+			// key events deliver per-peer deltas; the poll above is the
+			// corrective backstop (PEERSSTREAMS2.md). The corrective cadence is
+			// minutes, so registration forces the initial full read immediately.
+			removePeerListener := self.exchange.keyEventSubscriber.AddPeerListener(*self.peerNetworkId, networkPeerListener)
+			defer removePeerListener()
+			networkPeerListener.Resync()
+		}
 	}
 
 	select {

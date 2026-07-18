@@ -4331,4 +4331,25 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS transfer_contract_open_destination_partial
         ON transfer_contract (destination_id) WHERE open
     `),
+
+	// Defuse the 2026-07-17 planner-stats landmine (monitor/SIGNALS.md 2.3/5.8): at
+	// steady state only ~10-50k of 530M rows have open=true (~6e-5), so the
+	// default ANALYZE sample (300 x 100 = 30k rows) can miss every one.
+	// pg_stats then records n_distinct=1 / MCV {f}@1.0, the planner estimates
+	// `open = true` as ~0 rows, and the pair lookups flip to walking the whole
+	// open=true range of an unrelated index (O(open-set) per call) — latent at
+	// 30k open, a 96-core CPU wall at 700k (observed 7-18s/call). Target 10000
+	// samples 300 x 10000 = 3M rows: even at 5k open the expected sample hits
+	// ~28 (P(miss) ~ 1e-12), so both values stay in the MCV list and the pair
+	// indexes keep winning. Trade-off: each ANALYZE of this table now reads
+	// ~3M pages instead of 30k — still concurrent (SHARE UPDATE EXCLUSIVE,
+	// cost-throttled for autoanalyze), just slower. Takes effect at the next
+	// ANALYZE (nightly pass or the 1M-mod reloption threshold). The ALTER is
+	// an instant catalog update and idempotent: APPLY MANUALLY on prod ahead
+	// of the next nightly analyze (each analyze at the default target has a
+	// meaningful chance of re-arming the mine) — re-running it here is then a
+	// no-op-equivalent.
+	newSqlMigration(`
+        ALTER TABLE transfer_contract ALTER COLUMN open SET STATISTICS 10000
+    `),
 }

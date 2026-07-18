@@ -460,6 +460,13 @@ func NewProxyDevice(
 	deviceLocalSettings := sdk.DefaultDeviceLocalSettings()
 	// embedded devices must be silent: this host runs thousands of clients
 	deviceLocalSettings.DisableLogging = true
+	// hosted devices must never route traffic locally or provide: local egress
+	// would leave the proxy host's real interface (datacenter LAN, loopback,
+	// metadata endpoint). This hard-guards route-local/provide setters on the
+	// device and, together with the connectBlockActionOverrides strip, makes a
+	// local route override impossible — defense in depth alongside the rpc-layer
+	// DisableHostedIncompatible guard installed by StartHostedRpc.
+	deviceLocalSettings.HostedIncompatible = true
 	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,

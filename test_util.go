@@ -276,6 +276,17 @@ cluster: %t`,
 		Warmup()
 	}
 
+	// PEERSSTREAMS2: key-event delivery defaults on, so make the test redis
+	// generate keyspace notifications — event-mode listeners are otherwise
+	// non-deterministic (silent degradation to the minutes-scale corrective
+	// poll). Best-effort: a test env without a live redis skips it.
+	func() {
+		defer func() {
+			recover()
+		}()
+		Testing_EnableKeyspaceNotifications(ctx)
+	}()
+
 	return func() {
 		Reset()
 

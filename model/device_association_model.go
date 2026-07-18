@@ -891,7 +891,7 @@ func DeviceConfirmAdopt(
 
 		isGuestMode := (authType == AuthTypeGuest)
 
-		isPro := IsPro(
+		isPro := IsProFresh(
 			clientSession.Ctx,
 			&networkId,
 		)

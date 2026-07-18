@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	mathrand "math/rand"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -103,6 +106,69 @@ func networkPeerEventIdKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}eid", networkId)
 }
 
+// PEERSSTREAMS2.md: per-member peer key. Each registered peer gets its own
+// string key carrying the gob meta, TTL'd to the registration ttl, so redis
+// keyspace notifications announce add / metadata change (`set`), clean remove
+// (`del`), and silent death (`expired`) per peer. Heartbeat refresh extends
+// the TTL with EXPIRE, whose `expire` notification readers ignore — a
+// refresh is not a visible change. The meta hash and zsets remain the
+// read/index model; these keys exist for the notification stream.
+func networkPeerMemberKey(networkId server.Id, clientId server.Id) string {
+	return fmt.Sprintf("{np_%s}p:%s", networkId, clientId)
+}
+
+// NetworkPeerKeyEventPattern is the psubscribe pattern for the keyspace
+// channels of ALL per-member peer keys on a db. One broad pattern per
+// subscriber connection keeps the redis-side pattern-match cost O(1) per
+// event; routing by network happens in-process (PEERSSTREAMS2.md §5.1).
+func NetworkPeerKeyEventPattern(db int) string {
+	return fmt.Sprintf("__keyspace@%d__:{np_*}p:*", db)
+}
+
+// ParseNetworkPeerKeyEvent extracts the network and client ids from a
+// keyspace channel name matching `NetworkPeerKeyEventPattern`.
+func ParseNetworkPeerKeyEvent(channel string) (networkId server.Id, clientId server.Id, ok bool) {
+	i := strings.Index(channel, ":{np_")
+	if i < 0 {
+		return
+	}
+	rest := channel[i+len(":{np_"):]
+	j := strings.Index(rest, "}p:")
+	if j < 0 {
+		return
+	}
+	networkId, err := server.ParseId(rest[:j])
+	if err != nil {
+		return
+	}
+	clientId, err = server.ParseId(rest[j+len("}p:"):])
+	if err != nil {
+		return
+	}
+	ok = true
+	return
+}
+
+// GetNetworkPeerMember reads one peer's registration (the key-event delta
+// read): the peer when registered, else nil.
+func GetNetworkPeerMember(ctx context.Context, networkId server.Id, clientId server.Id) (peer *NetworkPeer) {
+	member := string(clientId.Bytes())
+	server.Redis(ctx, func(r server.RedisClient) {
+		metaBytes, err := r.HGet(ctx, networkPeerMetaKey(networkId), member).Bytes()
+		if err == server.RedisNil {
+			return
+		}
+		if err != nil {
+			panic(err)
+		}
+		meta, _ := loadNetworkPeerMeta(metaBytes)
+		if meta != nil {
+			peer = meta.Peer
+		}
+	})
+	return
+}
+
 func loadNetworkPeerMeta(metaBytes []byte) (*networkPeerMeta, error) {
 	if len(metaBytes) == 0 {
 		return nil, nil
@@ -162,10 +228,12 @@ func bumpNetworkPeerVersion(
 
 // how long a `NetworkPeersEnabled` decision is cached per network. The
 // decision is derived from the active top-level client count, which changes
-// only on client create and remove — and create cannot push a network over
-// the limit (`AuthNetworkClient` rejects at the limit) — so the only
-// transition a stale entry can delay is an over-limit network gaining peers
-// after shrinking under the limit.
+// only on client create and remove. While the creation cap is dark
+// (enforce_concurrent_clients = false) a network can cross the limit in either
+// direction, so a stale entry can delay a transition by up to the ttl: an
+// under-limit network keeps peers for up to ttl after growing past the limit
+// (bounded extra fan-out on the network's shard), and an over-limit network
+// gains peers up to ttl after shrinking below it. Both are benign.
 const networkPeersEnabledTtl = 5 * time.Minute
 
 type networkPeersEnabledEntry struct {
@@ -233,21 +301,24 @@ func Testing_ClearNetworkPeersEnabledCache() {
 }
 
 // NetworkPeersEnabled returns whether the network is within the top-level
-// client limit. Networks above the limit (created before the limit) do not
-// get peer registrations or subscriptions, since the peer replay and event
-// fan-out scale with the number of connected top-level clients.
-// The decision is cached per network for `networkPeersEnabledTtl`, and the
-// count scan is bounded at the limit since only the threshold matters.
+// client limit (LimitTopLevelClientIdsPerNetwork). Networks above the limit
+// (grandfathered fleets, or any network that grew past it while the creation
+// cap is dark) get NO peer registrations or subscriptions: the v2 poll
+// architecture has each connected top-level client full-read the network's
+// connected/disconnected zsets + meta hash on every change, all on the single
+// shard that owns the hash-tagged `{np_<networkId>}` keys, so the per-shard
+// cost scales with the connected top-level client count — unbounded, it is
+// O(size^2) fan-out on one shard (2026-07-17: an ~8,900-client network drove
+// its shard to ~1,700 full-reads/sec and starved every other key on it).
 //
-// Gated by enforce_concurrent_clients: while the concurrent-client rollout is
-// dark this always returns true (every network gets peer registrations,
-// regardless of size) with no db lookup -- the cap is not enforced (see
-// pro.yml). Pro() is parsed once, so the gate cannot change under the cache
-// within a process.
+// This valve is enforced INDEPENDENTLY of enforce_concurrent_clients: it only
+// removes the peer feature. The connection and creation caps
+// (NetworkConcurrentClientsExceeded, CanConnectNetworkPeer, AuthNetworkClient)
+// stay separately gated by enforce_concurrent_clients, so an over-limit network
+// still connects and carries traffic exactly as before — it just polls no peer
+// list. The decision is cached per network for `networkPeersEnabledTtl`, and
+// the count scan is bounded at the limit since only the threshold matters.
 func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
-	if !Pro().EnforceConcurrentClients {
-		return true
-	}
 	if enabled, ok := networkPeersEnabledCache.Get(networkId); ok {
 		return enabled
 	}
@@ -413,6 +484,9 @@ func AddNetworkPeer(
 	server.Redis(ctx, func(r server.RedisClient) {
 		pipe := r.TxPipeline()
 		pipe.HSet(ctx, networkPeerMetaKey(networkId), member, meta.Bytes())
+		// the per-member key: `set` announces the (re-)registration to key-event
+		// listeners (PEERSSTREAMS2.md)
+		pipe.Set(ctx, networkPeerMemberKey(networkId, peer.ClientId), meta.Bytes(), ttl)
 		pipe.ZAdd(ctx, networkPeerConnectedKey(networkId), redis.Z{
 			Score:  float64(expiryMs),
 			Member: member,
@@ -457,12 +531,25 @@ func RefreshNetworkPeer(
 			Score:  float64(expiryMs),
 			Member: member,
 		})
+		// extend the member key's ttl WITHOUT rewriting it: a refresh is not a
+		// visible change, and EXPIRE's `expire` notification is ignored by
+		// key-event listeners (PEERSSTREAMS2.md). Restore below if it vanished.
+		memberExpireCmd := pipe.Expire(ctx, networkPeerMemberKey(networkId, clientId), ttl)
 		pipe.Expire(ctx, networkPeerMetaKey(networkId), networkPeerKeyTtl)
 		pipe.Expire(ctx, networkPeerConnectedKey(networkId), networkPeerKeyTtl)
 		pipe.Expire(ctx, networkPeerDisconnectedKey(networkId), networkPeerKeyTtl)
 		_, err := pipe.Exec(ctx)
 		if err != nil {
 			panic(err)
+		}
+		if !memberExpireCmd.Val() {
+			// the member key expired (e.g. missed refreshes through a redis
+			// hiccup) while the registration survived: restore it. The `set`
+			// notification re-announces the peer, which is correct here.
+			err := r.Set(ctx, networkPeerMemberKey(networkId, clientId), metaBytes, ttl).Err()
+			if err != nil {
+				panic(err)
+			}
 		}
 		ok = true
 
@@ -493,6 +580,8 @@ func RemoveNetworkPeer(
 		disconnectTime := server.NowUtc()
 		pipe := r.TxPipeline()
 		pipe.HDel(ctx, networkPeerMetaKey(networkId), member)
+		// `del` announces the clean disconnect to key-event listeners
+		pipe.Del(ctx, networkPeerMemberKey(networkId, clientId))
 		pipe.ZRem(ctx, networkPeerConnectedKey(networkId), member)
 		pipe.ZAdd(ctx, networkPeerDisconnectedKey(networkId), redis.Z{
 			Score:  float64(disconnectTime.UnixMilli()),
@@ -769,7 +858,12 @@ func UpdateNetworkPeerProvideModes(
 		}
 
 		meta.Peer.ProvideModes = provideModesList
-		err := r.HSet(ctx, networkPeerMetaKey(*networkId), member, meta.Bytes()).Err()
+		pipe := r.TxPipeline()
+		pipe.HSet(ctx, networkPeerMetaKey(*networkId), member, meta.Bytes())
+		// rewrite the member key preserving the registration ttl: the `set`
+		// notification is the provide-change delta for key-event listeners
+		pipe.SetArgs(ctx, networkPeerMemberKey(*networkId, clientId), meta.Bytes(), redis.SetArgs{KeepTTL: true})
+		_, err := pipe.Exec(ctx)
 		if err != nil {
 			panic(err)
 		}
@@ -811,6 +905,9 @@ func pruneNetworkPeers(ctx context.Context, r server.RedisClient, networkId serv
 			expiryTime := time.UnixMilli(int64(z.Score))
 			markers = append(markers, networkPeerDisconnectMarker(clientId, expiryTime))
 			pipe.HDel(ctx, networkPeerMetaKey(networkId), member)
+			// align the key-event disconnect (`del`, or the earlier `expired` if
+			// the key already lapsed) with the marker
+			pipe.Del(ctx, networkPeerMemberKey(networkId, clientId))
 			pipe.ZRem(ctx, networkPeerConnectedKey(networkId), member)
 			pipe.ZAdd(ctx, networkPeerDisconnectedKey(networkId), redis.Z{
 				Score:  z.Score,
@@ -916,6 +1013,21 @@ func GetNetworkPeerEventId(ctx context.Context, networkId server.Id) (eventId in
 	return
 }
 
+var networkPeerListenerResets = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_network_peer_listener_resets_total",
+	Help: "peer listener full-read deliveries (poll mode: normal change delivery; key-event mode: registrations + resyncs + corrective repairs)",
+})
+
+func init() {
+	prometheus.MustRegister(networkPeerListenerResets)
+}
+
+type networkPeerKeyEventDelta struct {
+	clientId server.Id
+	// "set" | "del" | "expired" (see NetworkPeerListener.Delta)
+	event string
+}
+
 type NetworkPeerListener struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -923,6 +1035,14 @@ type NetworkPeerListener struct {
 	callback      func(*NetworkPeerEvent)
 	pollInterval  time.Duration
 	fullReadEvery int
+
+	// key-event inputs (PEERSSTREAMS2.md). `deltas` carries per-peer key
+	// events; `resync` forces the next tick to full-read. Both are fed
+	// non-blocking by the exchange's key-event subscriber; a full delta
+	// buffer degrades to a resync, never to a lost change.
+	deltas      chan *networkPeerKeyEventDelta
+	resync      chan struct{}
+	forceResync atomic.Bool
 }
 
 // NewNetworkPeerListener polls the network's peer version counter every
@@ -947,9 +1067,33 @@ func NewNetworkPeerListener(
 		callback:      callback,
 		pollInterval:  pollInterval,
 		fullReadEvery: fullReadEvery,
+		deltas:        make(chan *networkPeerKeyEventDelta, 32),
+		resync:        make(chan struct{}, 1),
 	}
 	go server.HandleError(npl.run)
 	return npl
+}
+
+// Delta feeds one per-peer key event ("set" = registered/changed, "del" or
+// "expired" = disconnected). Non-blocking: when the buffer is full the
+// listener degrades to a resync — a delayed full read, never a lost change.
+// Safe to call from the subscriber's demux goroutine.
+func (self *NetworkPeerListener) Delta(clientId server.Id, event string) {
+	select {
+	case self.deltas <- &networkPeerKeyEventDelta{clientId: clientId, event: event}:
+	default:
+		self.Resync()
+	}
+}
+
+// Resync forces the next wake-up to full-read regardless of the version
+// counter (events may have been dropped). Non-blocking, coalescing.
+func (self *NetworkPeerListener) Resync() {
+	self.forceResync.Store(true)
+	select {
+	case self.resync <- struct{}{}:
+	default:
+	}
 }
 
 func (self *NetworkPeerListener) run() {
@@ -961,13 +1105,19 @@ func (self *NetworkPeerListener) run() {
 	var eventId int64
 	synced := false
 
-	// full-read and deliver the current snapshot. `force` delivers even when
-	// the version matches the last synced value — used by the insurance tick,
-	// which must self-heal drift the version comparison cannot see (a missed
-	// bump, or a flushed counter that restarts at a value already synced).
-	reset := func(force bool) {
+	// full-read and deliver the snapshot when the version moved. `!=` (never
+	// `<`): the counter moves backward on flush / ttl-expiry / eviction, and
+	// any mismatch resyncs. A flush-and-rebuild is not atomic in production
+	// (heartbeats repopulate over seconds), so a poll observes the
+	// intermediate empty state and the version diverges — the comparison
+	// catches every realistic case without re-delivering on a static registry.
+	reset := func() {
 		resetEventId, resetPeers := GetNetworkPeers(self.ctx, self.networkId)
-		if !synced || force || resetEventId != eventId {
+		if !synced || resetEventId != eventId {
+			// in key-event mode (long corrective poll) this counts corrective
+			// deliveries — expected near zero beyond registrations/resyncs; a
+			// sustained rate means events are being dropped (PEERSSTREAMS2.md)
+			networkPeerListenerResets.Inc()
 			synced = true
 			eventId = resetEventId
 
@@ -980,34 +1130,88 @@ func (self *NetworkPeerListener) run() {
 		}
 	}
 
-	consecutiveErrors := 0
-	for tick := 0; ; tick += 1 {
+	// handleDelta applies one per-peer key event (PEERSSTREAMS2.md): `set`
+	// reads the single member and delivers an Updated event; `del`/`expired`
+	// delivers a disconnect marker. No version movement — the corrective poll
+	// reconciles the counter on its own cadence.
+	handleDelta := func(delta *networkPeerKeyEventDelta) {
+		switch delta.event {
+		case "set":
+			if peer := GetNetworkPeerMember(self.ctx, self.networkId, delta.clientId); peer != nil {
+				self.callback(&NetworkPeerEvent{
+					NetworkPeerEventType: NetworkPeerEventTypeUpdated,
+					EventId:              eventId,
+					Peers:                []*NetworkPeer{peer},
+				})
+				return
+			}
+			// the registration raced a remove; fall through to the marker
+			fallthrough
+		case "del", "expired":
+			self.callback(&NetworkPeerEvent{
+				NetworkPeerEventType: NetworkPeerEventTypeRemoved,
+				EventId:              eventId,
+				Peers:                []*NetworkPeer{networkPeerDisconnectMarker(delta.clientId, server.NowUtc())},
+			})
+		}
+	}
+
+	jitterInterval := func(consecutiveErrors int) time.Duration {
 		// ±20% jitter spreads fleet polls; error backoff (up to 4x) keeps a
 		// sick slot from being hammered
 		interval := self.pollInterval + time.Duration((mathrand.Float64()*0.4-0.2)*float64(self.pollInterval))
-		interval <<= consecutiveErrors
+		return interval << consecutiveErrors
+	}
 
+	consecutiveErrors := 0
+	tick := 0
+	// the poll deadline is absolute so a stream of deltas cannot starve the
+	// corrective poll (PEERSSTREAMS2.md §5.4)
+	nextPollTime := time.Now().Add(jitterInterval(0))
+	for {
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(interval):
+		case delta := <-self.deltas:
+			// contain redis panics to the delta; a failed delta read degrades
+			// to a forced resync, never a lost change
+			if r := server.HandleError(func() {
+				handleDelta(delta)
+			}); r != nil {
+				self.forceResync.Store(true)
+			}
+			continue
+		case <-self.resync:
+		case <-time.After(time.Until(nextPollTime)):
 		}
 
+		tick += 1
+		force := self.forceResync.Swap(false)
 		// contain redis panics to the tick: a failed poll must never kill the
 		// listener (2026-07-15: panicked listeners died permanently and their
-		// clients silently stopped receiving peer updates)
+		// clients silently stopped receiving peer updates). The periodic full
+		// read (fullReadEvery) re-reads the snapshot as a cheap hygiene check;
+		// it still only delivers on a version change. A forced resync (dropped
+		// or failed key events, subscriber (re)connect) always full-reads.
 		if r := server.HandleError(func() {
-			insurance := 0 < self.fullReadEvery && tick%self.fullReadEvery == 0
-			if !synced || insurance {
-				reset(true)
-			} else if GetNetworkPeerEventId(self.ctx, self.networkId) != eventId {
-				reset(false)
+			if force {
+				synced = false
+			}
+			if !synced ||
+				(0 < self.fullReadEvery && tick%self.fullReadEvery == 0) ||
+				GetNetworkPeerEventId(self.ctx, self.networkId) != eventId {
+				reset()
 			}
 		}); r != nil {
 			consecutiveErrors = min(consecutiveErrors+1, 2)
+			if force {
+				// the resync did not complete; keep it pending
+				self.forceResync.Store(true)
+			}
 		} else {
 			consecutiveErrors = 0
 		}
+		nextPollTime = time.Now().Add(jitterInterval(consecutiveErrors))
 	}
 }
 

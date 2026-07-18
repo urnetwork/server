@@ -26,9 +26,9 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
 	// "github.com/urnetwork/server/ulid"
-	// "github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/connect"
 )
 
@@ -405,7 +405,19 @@ func AuthNetworkClient(
 				})
 			}
 
-			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId)
+			// re-derive Pro from the source of truth rather than copying the caller's
+			// (possibly stale) jwt claim: a network that turned Pro after the caller's
+			// token was minted would otherwise get a client token stamped Pro=false for
+			// its 30-day lifetime. (The concurrent-client gate above already reads Pro
+			// live for the same reason.)
+			isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+			byJwtWithClientId := jwt.NewByJwt(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				session.ByJwt.NetworkName,
+				session.ByJwt.GuestMode,
+				isPro,
+			).Client(deviceId, clientId)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byClientJwtSigned := byJwtWithClientId.Sign()
@@ -638,7 +650,16 @@ func AuthNetworkClient(
 				}
 			})
 
-			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId)
+			// re-derive Pro from the source of truth rather than copying the caller's
+			// (possibly stale) jwt claim — see the new-client branch above.
+			isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+			byJwtWithClientId := jwt.NewByJwt(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				session.ByJwt.NetworkName,
+				session.ByJwt.GuestMode,
+				isPro,
+			).Client(*deviceId, *authClient.ClientId)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byClientJwtSigned := byJwtWithClientId.Sign()
