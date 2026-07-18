@@ -47,12 +47,12 @@ func TestNetworkUser(t *testing.T) {
 
 		networkUser = GetNetworkUser(ctx, secondUserId)
 
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, networkUser.UserId, secondUserId)
-		connect.AssertEqual(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", secondNetworkId))
-		connect.AssertEqual(t, networkUser.Verified, true)
-		connect.AssertEqual(t, networkUser.AuthType, AuthTypePassword)
-		connect.AssertEqual(t, networkUser.NetworkName, secondNetworkName)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, networkUser.UserId, secondUserId)
+		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", secondNetworkId))
+		assert.Equal(t, networkUser.Verified, true)
+		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		assert.Equal(t, networkUser.NetworkName, secondNetworkName)
 
 	})
 }
