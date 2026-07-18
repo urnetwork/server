@@ -742,7 +742,22 @@ func addWalletAuth(
 			)
 
 			err = dbErr
+			return
 		}
+
+		// Mirror onto network_user's top-level wallet columns, symmetric
+		// with RemoveAuth's solana branch which clears them. Without this,
+		// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
+		// nil even though network_user_auth_wallet has the wallet bound.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user
+			 SET wallet_address = $2, wallet_blockchain = $3
+			 WHERE user_id = $1`,
+			addWalletAuth.UserId,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		))
 	})
 
 	return
@@ -1256,10 +1271,23 @@ func MigrateNetworkUserChildAuths(
 	})
 }
 
-func countAuthMethods(ctx context.Context, userId server.Id) (int, error) {
-	count := 0
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
+	var validationErr error
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Lock the user row for the duration of this tx so a concurrent
+		// RemoveAuth call blocks (and retries via server.Tx's serialization
+		// handling) instead of both calls reading the same stale auth-method
+		// count and both committing, which can leave the account with zero
+		// remaining auth methods.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT 1 FROM network_user WHERE user_id = $1 FOR UPDATE`,
+			userId,
+		))
+
+		currentCount := 0
+		countResult, err := tx.Query(
 			ctx,
 			`SELECT COUNT(*) FROM (
 				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
@@ -1272,25 +1300,16 @@ func countAuthMethods(ctx context.Context, userId server.Id) (int, error) {
 			) AS auth_counts`,
 			userId,
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
+		server.WithPgResult(countResult, err, func() {
+			if countResult.Next() {
+				server.Raise(countResult.Scan(&currentCount))
 			}
 		})
-	})
-	return count, nil
-}
+		if currentCount <= 1 {
+			validationErr = fmt.Errorf("cannot remove your last auth method")
+			return
+		}
 
-func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
-	currentCount, err := countAuthMethods(ctx, userId)
-	if err != nil {
-		return err
-	}
-	if currentCount <= 1 {
-		return fmt.Errorf("cannot remove your last auth method")
-	}
-
-	server.Tx(ctx, func(tx server.PgTx) {
 		switch authType {
 		case "email", "phone":
 			server.RaisePgResult(tx.Exec(
@@ -1330,7 +1349,8 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId,
 			))
 		default:
-			panic(fmt.Errorf("unknown auth type: %s", authType))
+			validationErr = fmt.Errorf("unknown auth type: %s", authType)
+			return
 		}
 
 		// Update network_user.auth_type to match what's actually left.
@@ -1352,5 +1372,5 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 		))
 	})
 
-	return nil
+	return validationErr
 }
