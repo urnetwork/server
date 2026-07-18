@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -11,15 +12,17 @@ import (
 )
 
 type NetworkUser struct {
-	UserId        server.Id               `json:"user_id"`
-	UserAuth      *string                 `json:"user_auth,omitempty"`
-	Verified      bool                    `json:"verified"`
-	AuthType      string                  `json:"auth_type"`
-	NetworkName   string                  `json:"network_name"`
-	WalletAddress *string                 `json:"wallet_address,omitempty"`
-	UserAuths     []NetworkUserUserAuth   `json:"user_auths,omitempty"`
-	SsoAuths      []NetworkUserSsoAuth    `json:"sso_auths,omitempty"`
-	WalletAuths   []NetworkUserWalletAuth `json:"wallet_auths,omitempty"`
+	UserId           server.Id                    `json:"user_id"`
+	UserAuth         *string                      `json:"user_auth,omitempty"`
+	Verified         bool                         `json:"verified"`
+	AuthType         string                       `json:"auth_type"`
+	NetworkName      string                       `json:"network_name"`
+	WalletAddress    *string                      `json:"wallet_address,omitempty"`
+	UserAuths        []NetworkUserUserAuth        `json:"user_auths,omitempty"`
+	SsoAuths         []NetworkUserSsoAuth         `json:"sso_auths,omitempty"`
+	WalletAuths      []NetworkUserWalletAuth      `json:"wallet_auths,omitempty"`
+	SeedphraseAuths  []NetworkUserSeedphraseAuth  `json:"seedphrase_auths,omitempty"`
+	AuthTypes        []string                     `json:"auth_types"`
 }
 
 type NetworkUserUserAuth struct {
@@ -40,6 +43,11 @@ type NetworkUserWalletAuth struct {
 	UserId        *server.Id `json:"user_id,omitempty"`
 	WalletAddress *string    `json:"wallet_address,omitempty"`
 	Blockchain    string     `json:"blockchain"`
+}
+
+type NetworkUserSeedphraseAuth struct {
+	Seedphrase string    `json:"-"`
+	CreateTime time.Time `json:"create_time"`
 }
 
 func GetNetworkUser(
@@ -110,6 +118,29 @@ func GetNetworkUser(
 		walletAuths, err := getWalletAuths(ctx, userId)
 		server.Raise(err)
 		networkUser.WalletAuths = walletAuths
+
+		/**
+		 * Get seedphrase auths for the user
+		 */
+		seedphraseAuths, err := getSeedphraseAuths(ctx, userId)
+		server.Raise(err)
+		networkUser.SeedphraseAuths = seedphraseAuths
+
+		/**
+		 * Build composite auth_types list
+		 */
+		for _, a := range userAuths {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+		}
+		for _, a := range ssoAuths {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+		}
+		if len(walletAuths) > 0 {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, "solana")
+		}
+		if len(seedphraseAuths) > 0 {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
+		}
 
 	})
 
@@ -755,6 +786,44 @@ func getWalletAuths(
 	})
 
 	return walletAuths, nil
+}
+
+func getSeedphraseAuths(
+	ctx context.Context,
+	userId server.Id,
+) ([]NetworkUserSeedphraseAuth, error) {
+
+	var seedphraseAuths []NetworkUserSeedphraseAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				create_time
+			FROM network_user_auth_seedphrase
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				sa := NetworkUserSeedphraseAuth{}
+				server.Raise(result.Scan(
+					&sa.CreateTime,
+				))
+				seedphraseAuths = append(seedphraseAuths, sa)
+			}
+		})
+
+	})
+
+	return seedphraseAuths, nil
 }
 
 func getWalletAuthsByAddress(
