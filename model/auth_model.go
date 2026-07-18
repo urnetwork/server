@@ -153,10 +153,18 @@ func AuthLogin(
 		}
 	} else if login.WalletAuth != nil {
 
-		return handleLoginWallet(
+		result, err := handleLoginWallet(
 			login.WalletAuth,
 			session.Ctx,
 		)
+		// Only wallet logins that resolve to an existing user (a JWT-bearing
+		// result) count as a successful attempt -- a "new wallet user"
+		// result still requires registration, matching how the SSO branch
+		// above only marks success once it returns a Network result.
+		if err == nil && result != nil && result.Network != nil {
+			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+		}
+		return result, err
 	} else if login.Seedphrase != nil && *login.Seedphrase != "" {
 		result, err := LoginWithSeedphrase(session.Ctx, *login.Seedphrase)
 		if err != nil {
@@ -166,6 +174,7 @@ func AuthLogin(
 				},
 			}, nil
 		}
+		SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 		return &AuthLoginResult{
 			Network: &AuthLoginResultNetwork{
 				ByJwt: result.ByJwt,
