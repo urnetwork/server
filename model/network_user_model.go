@@ -749,7 +749,16 @@ func addWalletAuth(
 		// with RemoveAuth's solana branch which clears them. Without this,
 		// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
 		// nil even though network_user_auth_wallet has the wallet bound.
-		server.RaisePgResult(tx.Exec(
+		//
+		// network_user.wallet_address has a global (not per-user) unique
+		// index, so this can legitimately conflict -- e.g. a legacy account
+		// whose network_user.wallet_address was set before
+		// network_user_auth_wallet existed and was never cleared. Handle
+		// that the same way the INSERT above does (return a clean error)
+		// instead of panicking, which would otherwise surface as an
+		// uncaught 500 after server.Tx's transient-error retry loop burns
+		// up to a minute on a permanent constraint violation.
+		_, dbErr = tx.Exec(
 			ctx,
 			`UPDATE network_user
 			 SET wallet_address = $2, wallet_blockchain = $3
@@ -757,7 +766,20 @@ func addWalletAuth(
 			addWalletAuth.UserId,
 			walletAuth.PublicKey,
 			walletAuth.Blockchain,
-		))
+		)
+		if dbErr != nil {
+
+			glog.Infof(
+				"Error mirroring wallet auth onto network_user: %s user_id=%s wallet_address=%s blockchain=%s",
+				dbErr.Error(),
+				addWalletAuth.UserId,
+				walletAuth.PublicKey,
+				walletAuth.Blockchain,
+			)
+
+			err = dbErr
+			return
+		}
 	})
 
 	return
