@@ -102,6 +102,15 @@ func LoginWithSeedphrase(
 		})
 	})
 
+	if networkId == (server.Id{}) {
+		// The seedphrase auth row outlived its network_user (e.g. the
+		// network was deleted but the auth row wasn't cleaned up by some
+		// other path). jwt.NewByJwt panics on a zero network id, so fail
+		// cleanly here instead of turning an orphaned-row edge case into
+		// a 500.
+		return nil, errors.New("unknown seedphrase")
+	}
+
 	isPro := IsPro(ctx, &networkId)
 
 	byJwt := jwt.NewByJwt(networkId, userId, networkName, false, isPro)
