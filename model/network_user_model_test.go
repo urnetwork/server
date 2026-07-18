@@ -38,21 +38,21 @@ func TestNetworkUser(t *testing.T) {
 		networkUser = GetNetworkUser(ctx, userId)
 		assert.Equal(t, networkUser, nil)
 
-		// create guest network
-		guestNetworkId := server.NewId()
-		guestUserId := server.NewId()
-		guestNetworkName := "guest_hello_world"
+		// a second, independent network+user via the same helper
+		secondNetworkId := server.NewId()
+		secondUserId := server.NewId()
+		secondNetworkName := "second_hello_world"
 
-		Testing_CreateNetwork(ctx, guestNetworkId, guestNetworkName, guestUserId)
+		Testing_CreateNetwork(ctx, secondNetworkId, secondNetworkName, secondUserId)
 
-		networkUser = GetNetworkUser(ctx, guestUserId)
+		networkUser = GetNetworkUser(ctx, secondUserId)
 
-		assert.NotEqual(t, networkUser, nil)
-		assert.Equal(t, networkUser.UserId, guestUserId)
-		assert.Equal(t, networkUser.UserAuth, nil)
-		assert.Equal(t, networkUser.Verified, false)
-		assert.Equal(t, networkUser.AuthType, AuthTypeSeedphrase)
-		assert.Equal(t, networkUser.NetworkName, guestNetworkName)
+		connect.AssertNotEqual(t, networkUser, nil)
+		connect.AssertEqual(t, networkUser.UserId, secondUserId)
+		connect.AssertEqual(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", secondNetworkId))
+		connect.AssertEqual(t, networkUser.Verified, true)
+		connect.AssertEqual(t, networkUser.AuthType, AuthTypePassword)
+		connect.AssertEqual(t, networkUser.NetworkName, secondNetworkName)
 
 	})
 }
