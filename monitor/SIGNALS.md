@@ -888,16 +888,33 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
   `Removal In Progress`/`Exited` while the new image's container is `Up`.
 
 ### 10.2 Drain health signals
+- **`urnetwork_drain_residents_remaining`** (gauge, per service; CONNECTDRAIN2
+  §3.5) is the drain ETA WITHOUT ssh-ing to find the stop-child: nonzero and
+  falling = draining; 0 = drain complete. Replaces reading the stop-child
+  `etime` for progress (that recipe is §10.1, still valid when scraping is
+  down). A gauge that plateaus nonzero for minutes = a stuck drain (the sweep
+  found residents it cannot evict); the hard `DrainAllTimeout` bounds it.
+- **`urnetwork_connect_drain_excuses_written` − `urnetwork_connect_drain_excuses_consumed`**
+  (two counters): markers minted at drain/migrate vs redeemed at reconnect. A
+  large sustained written-minus-consumed gap = clients that did NOT come back
+  (real capacity loss), not a deploy artifact.
 - **Both groups of a host draining at once** (`edge4_draining=2` = the g1 AND g4
   stop-children both live) halves the host's serving capacity during the window
-  and double-bounces clients — flag it; drain should stagger one group/host at a
-  time (CONNECTDRAIN2 §3.4). Watch: count of concurrent `container stop` children
-  per host.
-- **Drain wall-time** (the stop-child `etime`): a fixed 200ms/resident walk plus
-  the blind `-t 3600` ceiling produced a 28+ MINUTE drain in the incident. A drain
-  running longer than a few minutes with residents remaining is stuck — check
-  `[c]drain in progress (at least N remaining)` in the connect log (logged every
-  100 evictions, `resident.go`).
+  and double-bounces clients — flag it. Track B stagger (CONNECTDRAIN2 §3.4,
+  shipped) serializes one group/host at a time via a host-wide flock
+  (`warpctl-host-drain.lock` under WARP_HOME), so concurrent stop-children per
+  host should be 1; `>1` means the stagger was bypassed (lock-acquire timeout,
+  or `WARPCTL_STAGGER_HOST_DRAIN=0`). Watch: count of concurrent `container
+  stop` children per host.
+- **Drain wall-time** (the stop-child `etime`): the pre-CONNECTDRAIN2 fixed
+  200ms/resident walk plus the blind `-t 3600` ceiling produced a 28+ MINUTE
+  drain in the incident. Track A replaced the fixed walk with an adaptive pace
+  over `DrainStragglerSweepTimeout` and an enforced `DrainAllTimeout`, and the
+  admission gate (503 on new connects while draining) stops the refill loop, so
+  the process exits promptly. A drain running longer than a few minutes with
+  residents remaining is stuck — check `[c]drain in progress (at least N
+  remaining)` / `[c]drain deadline with at least N remaining` in the connect
+  log (`resident.go`).
 - **Peer registry frozen during drain:** the affected network's
   `{np_<net>}eid` stops advancing and its `{np_<net>}connected` set empties while
   the old build drains and clients haven't re-registered on the new one — devices
@@ -905,15 +922,24 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
   post-drain: `redis-cli -c -p 6379 zrange '{np_<net>}connected' 0 -1` on the
   redis host repopulates and `eid` advances.
 
-### 10.3 Reliability fallout of a drain (until CONNECTDRAIN2 Track A ships)
-- A drain-reconnect writes `ConnectionNewCount` which invalidates the provider's
-  60s reliability block (`transport_announce.go`); only ONE reconnect/block is
-  forgiven (`ReliabilityAllowDisconnectCountPerBlock=1`), so a double-bounce
-  (two groups draining) invalidates. The re-announce also sets
-  `ProvideChangedCount` (independent invalidation). Expect a reliability-score
-  dip on the affected providers correlated with the deploy — deploy-correlated,
-  NOT a provider fault (§8.4 annotate-don't-alert applies). Once Track A ships,
-  this shows as `connection_new{excused="true"}` instead of a score dip.
+### 10.3 Reliability fallout of a drain (CONNECTDRAIN2 Track A shipped)
+- Pre-Track-A, a drain-reconnect wrote `ConnectionNewCount`, which invalidates
+  the provider's 60s reliability block (`transport_announce.go`); only ONE
+  reconnect/block is forgiven (`ReliabilityAllowDisconnectCountPerBlock=1`), so a
+  double-bounce (two groups draining) invalidated. The re-announce also set
+  `ProvideChangedCount` (independent invalidation).
+- **With Track A**, a drain-caused reconnect consumes a `drain_excuse_<clientId>`
+  marker and is recorded as `connection_excused_new_count` (a non-invalidating
+  counter — it never enters `client_reliability_valid`), and the mechanical
+  provide re-announce is suppressed for the drain window. So a deploy shows as
+  **`urnetwork_connect_connection_new{excused="true"}`** instead of a score dip.
+  The split is the tell: `excused="true"` spiking on a deploy is benign;
+  `excused="false"` spiking is organic churn worth investigating.
+- **What to still expect:** the excusal fixes the reconnect/provide-change
+  invalidation, NOT the missing-blocks gap (§2.3 of CONNECTDRAIN2) — that is
+  removed by Track B make-before-break (migrate → no gap). A residual score dip
+  on a deploy that runs Track A but not Track B migration (old SDKs, SIGKILL,
+  clients that could not migrate) is the gap, not the reconnect penalty.
 
 ### 10.4 Access recipe (this env)
 `ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.

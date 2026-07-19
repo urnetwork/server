@@ -203,18 +203,42 @@ the natural place to hang the new-vs-old service coordination.
    coordination) last — the largest change, gated so an old SDK falls back to
    Track A cleanly.
 
-## 6. Decisions needed
+## 6. Decisions (RESOLVED — implemented 2026-07-19)
 
-1. `ConnectionExcusedNewCount` (new counter, observable) vs recording excused
-   reconnects as `ConnectionEstablishedCount` (simpler, invisible). Recommend
-   the counter.
-2. `DrainExcuseTtl` default and whether it derives from the drain window
-   setting (recommend derive: `DrainExcuseTtl = DrainAllTimeout` clamped to
-   [1min, 10min]).
-3. Whether Track B make-before-break is worth the SDK coordination now, or
-   Track A + stagger/pacing is enough for the current fleet (revisit at scale).
-4. All new tunables live in `ExchangeSettings` (no globals — same rule as
-   PEERSSTREAMS2 §10.5).
+1. **`ConnectionExcusedNewCount` (new counter).** Chosen. It is recorded
+   *instead of* `ConnectionNewCount`, so it never enters
+   `client_reliability_valid` — **the validity SQL is unchanged (still 6-arg),
+   no arity bump.** New pg column `connection_excused_new_count` (nullable
+   default-0 ALTER, no rewrite) + redis counter index 8 (append-only; an older
+   rollup drops the unknown index with a log, fail-safe). **Deploy the
+   taskworker (rollup) with or before connect.**
+2. **`DrainExcuseTtl = 5min`, fixed** (not derived). `DrainAllTimeout` is 60min
+   in prod, so the doc's derive-and-clamp always hit the 10min cap; a plain 5min
+   setting matches the intent and the consume lag (redial + announce + first
+   sync ≈ 2–3min). A companion `drain_excuse_pc_<clientId>` marker
+   (`DrainProvideChangeExcuseTtl = 2 blocks` past the excuse ttl) suppresses the
+   mechanical provide re-announce for **every** announce of the client — needed
+   because a make-before-break overlap has the old and new connections syncing
+   concurrently, and either may carry the re-announce.
+3. **Track B make-before-break: implemented now.** `ResidentMigrate` control
+   frame (proto msg type 28) + SDK `deviceLocalProvider` make-before-break +
+   server migrate broadcast in `Drain()`. Old SDKs ignore the unknown frame and
+   fall back to Track A. The `StreamReset` is now a **reconcile** (relisted
+   streams keep their sequences/p2p transports; unlisted cancel) so streams
+   survive the handoff — split into two independently-compatible halves (client
+   reset handler + resident reset-from-hops), each degrades to the old
+   cancel-all behavior against an old counterpart.
+4. **Admission gate + hard deadline added** (beyond the original doc): a
+   draining exchange 503s new connections and declines nominations
+   (`EnableDrainCoordination`), so evicted clients land on a sibling via the lb
+   instead of bouncing; `Drain()` enforces `DrainAllTimeout` and paces the
+   straggler sweep over `DrainStragglerSweepTimeout`. Without the gate the drain
+   never converged (refill loop).
+5. All new tunables live in `ExchangeSettings` (`EnableDrainExcuse`,
+   `EnableDrainCoordination`, `DrainExcuseTtl`, `DrainMigrateWindow`,
+   `DrainMigrateSendTimeout`, `DrainStragglerSweepTimeout`) — no globals. warpctl
+   stagger is a host-wide flock gated by `WARPCTL_STAGGER_HOST_DRAIN` (default
+   on).
 
 ## 7. Implementation inventory (files)
 

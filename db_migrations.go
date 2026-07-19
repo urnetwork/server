@@ -4352,4 +4352,14 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE transfer_contract ALTER COLUMN open SET STATISTICS 10000
     `),
+
+	// drain-excused reconnects (CONNECTDRAIN2.md §3.1): a reconnect caused by
+	// a server drain / migrate is recorded here instead of
+	// `connection_new_count`, so it never enters `client_reliability_valid`
+	// and cannot invalidate the block — non-invalidating by construction, no
+	// change to the validity function. Metadata-only ALTER (default, no
+	// rewrite).
+	newSqlMigration(`
+        ALTER TABLE client_reliability ADD COLUMN connection_excused_new_count bigint NOT NULL DEFAULT 0
+    `),
 }

@@ -146,6 +146,9 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 	// announce settings so enabling peers in one place gates both the announce-time
 	// registration and the exchange-side listener/heartbeat/teardown.
 	settings.ConnectionAnnounceSettings.EnableNetworkPeers = exchange.settings.EnableNetworkPeers
+	// The exchange flag is the single drain-excuse switch: the exchange side
+	// writes the markers on drain, the announce side consumes them.
+	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
@@ -178,6 +181,13 @@ func (self *ConnectHandler) run() {
 }
 
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	// a draining service refuses new connections, so a redialing client fails
+	// fast and lands on a sibling service via the lb (CONNECTDRAIN2.md §3.3)
+	if self.exchange.settings.EnableDrainCoordination && self.exchange.IsDraining() {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	// handleCancel := func() {
 	// 	defer handleCancel_()

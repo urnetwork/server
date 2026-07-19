@@ -88,6 +88,10 @@ type ClientReliabilityStats struct {
 	ProvideChangedCount        uint64
 	ConnectionEstablishedCount uint64
 	ConnectionNewCount         uint64
+	// a reconnect caused by a server drain / migrate (consumed a drain excuse
+	// marker). Non-invalidating by construction: it is recorded instead of
+	// `ConnectionNewCount` and never enters `client_reliability_valid`
+	ConnectionExcusedNewCount uint64
 }
 
 // AddClientReliabilityStats writes stats directly to pg. This is the
@@ -135,10 +139,11 @@ func AddClientReliabilityStatsRange(
 				        receive_byte_count,
 				        send_message_count,
 				        send_byte_count,
+				        connection_excused_new_count,
 				        valid
 					) VALUES (
-						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-						client_reliability_valid($5, $6, $7, $8, $9, $13)
+						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+						client_reliability_valid($5, $6, $7, $8, $9, $14)
 					)
 					ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
 					SET
@@ -150,13 +155,14 @@ func AddClientReliabilityStatsRange(
 						receive_byte_count = client_reliability.receive_byte_count + $10,
 						send_message_count = client_reliability.send_message_count + $11,
 						send_byte_count = client_reliability.send_byte_count + $12,
+						connection_excused_new_count = client_reliability.connection_excused_new_count + $13,
 						valid = client_reliability_valid(
 							client_reliability.connection_new_count + $5,
 							client_reliability.connection_established_count + $6,
 							client_reliability.provide_enabled_count + $7,
 							client_reliability.provide_changed_count + $8,
 							client_reliability.receive_message_count + $9,
-							$13
+							$14
 						)
 					`,
 					blockNumber,
@@ -171,6 +177,7 @@ func AddClientReliabilityStatsRange(
 					stats.ReceiveByteCount,
 					stats.SendMessageCount,
 					stats.SendByteCount,
+					stats.ConnectionExcusedNewCount,
 					ReliabilityAllowDisconnectCountPerBlock,
 				)
 			}
@@ -237,9 +244,11 @@ const clientReliabilityBlocksKey = "client_reliability_stats_blocks"
 // deletes a block's hash within ~2 blocks + one rollup period
 const clientReliabilityStatsRedisTtl = 15 * time.Minute
 
-const clientReliabilityCounterCount = 8
+const clientReliabilityCounterCount = 9
 
-// index order of the packed counters; must match the drain insert below
+// index order of the packed counters; must match the drain insert below.
+// only append new counters: the index is the wire format of the redis fields,
+// and a rollup from an older build drops unknown indexes with a log
 const (
 	reliabilityCounterConnectionNew         = 0
 	reliabilityCounterConnectionEstablished = 1
@@ -249,6 +258,7 @@ const (
 	reliabilityCounterReceiveByte           = 5
 	reliabilityCounterSendMessage           = 6
 	reliabilityCounterSendByte              = 7
+	reliabilityCounterConnectionExcusedNew  = 8
 )
 
 func (self *ClientReliabilityStats) counters() [clientReliabilityCounterCount]int64 {
@@ -261,6 +271,7 @@ func (self *ClientReliabilityStats) counters() [clientReliabilityCounterCount]in
 		reliabilityCounterReceiveByte:           int64(self.ReceiveByteCount),
 		reliabilityCounterSendMessage:           int64(self.SendMessageCount),
 		reliabilityCounterSendByte:              int64(self.SendByteCount),
+		reliabilityCounterConnectionExcusedNew:  int64(self.ConnectionExcusedNewCount),
 	}
 }
 
@@ -578,6 +589,7 @@ func upsertClientReliabilityStatsBlock(
 					receive_byte_count,
 					send_message_count,
 					send_byte_count,
+					connection_excused_new_count,
 					valid
 				)
 				SELECT
@@ -593,13 +605,14 @@ func upsertClientReliabilityStatsBlock(
 					t.receive_byte_count,
 					t.send_message_count,
 					t.send_byte_count,
+					t.connection_excused_new_count,
 					client_reliability_valid(
 						t.connection_new_count,
 						t.connection_established_count,
 						t.provide_enabled_count,
 						t.provide_changed_count,
 						t.receive_message_count,
-						$13
+						$14
 					)
 				FROM unnest(
 					$2::bytea[],
@@ -612,7 +625,8 @@ func upsertClientReliabilityStatsBlock(
 					$9::bigint[],
 					$10::bigint[],
 					$11::bigint[],
-					$12::bigint[]
+					$12::bigint[],
+					$13::bigint[]
 				) AS t(
 					client_address_hash,
 					network_id,
@@ -624,7 +638,8 @@ func upsertClientReliabilityStatsBlock(
 					receive_message_count,
 					receive_byte_count,
 					send_message_count,
-					send_byte_count
+					send_byte_count,
+					connection_excused_new_count
 				)
 				ON CONFLICT (block_number, client_address_hash, client_id) DO UPDATE
 				SET
@@ -637,6 +652,7 @@ func upsertClientReliabilityStatsBlock(
 					receive_byte_count = EXCLUDED.receive_byte_count,
 					send_message_count = EXCLUDED.send_message_count,
 					send_byte_count = EXCLUDED.send_byte_count,
+					connection_excused_new_count = EXCLUDED.connection_excused_new_count,
 					valid = EXCLUDED.valid
 				`,
 				blockNumber,
@@ -651,6 +667,7 @@ func upsertClientReliabilityStatsBlock(
 				counterColumns[reliabilityCounterReceiveByte],
 				counterColumns[reliabilityCounterSendMessage],
 				counterColumns[reliabilityCounterSendByte],
+				counterColumns[reliabilityCounterConnectionExcusedNew],
 				ReliabilityAllowDisconnectCountPerBlock,
 			))
 		})

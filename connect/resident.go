@@ -108,11 +108,36 @@ var residentClientsGauge = prometheus.NewGauge(
 	},
 )
 
+// drainResidentsRemainingGauge is the drain progress without ssh-ing to find
+// the `docker stop` child: the remaining resident/connection count while the
+// service drains, 0 once the drain completes (CONNECTDRAIN2.md §3.5)
+var drainResidentsRemainingGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_residents_remaining",
+		Help:      "Residents/connections remaining to evict while the service drains; 0 when the drain completes",
+	},
+)
+
+// drainExcusesWrittenCounter minus drain_excuses_consumed is the clients that
+// did not return after a drain (real capacity loss, not a deploy artifact)
+var drainExcusesWrittenCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_excuses_written",
+		Help:      "Drain excuse markers written for drained or migrated residents",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(forwardDroppedCounter)
 	prometheus.MustRegister(forwardReceiveDroppedCounter)
 	prometheus.MustRegister(abuseDroppedCounter)
 	prometheus.MustRegister(residentClientsGauge)
+	prometheus.MustRegister(drainResidentsRemainingGauge)
+	prometheus.MustRegister(drainExcusesWrittenCounter)
 }
 
 // use 0 for deadlock testing
@@ -206,6 +231,27 @@ type ExchangeSettings struct {
 	DrainOneTimeout             time.Duration
 	DrainAllTimeout             time.Duration
 
+	// drain coordination (CONNECTDRAIN2.md). `EnableDrainExcuse` gates the
+	// excuse markers written at drain / migrate and their consumption in the
+	// announce new-connection branch. `EnableDrainCoordination` gates the
+	// admission gate (new connections are refused while draining) and the
+	// migrate broadcast, so evicted clients land on a sibling instead of
+	// bouncing on the draining service.
+	EnableDrainExcuse       bool
+	EnableDrainCoordination bool
+	// ttl for the drain excuse markers; bounds a stale marker to one excuse
+	// window. Must cover redial + announce delay + the first sync (~2-3 min)
+	DrainExcuseTtl time.Duration
+	// the window over which migrate times are jittered across the drained
+	// clients; the straggler sweep starts after the window
+	DrainMigrateWindow time.Duration
+	// bound on enqueueing one migrate frame during the broadcast, so a
+	// wedged client cannot stall the drain
+	DrainMigrateSendTimeout time.Duration
+	// target duration for the straggler sweep; the per-resident pace adapts
+	// to the remaining count within this budget, capped by `DrainOneTimeout`
+	DrainStragglerSweepTimeout time.Duration
+
 	IngressSecurityPolicyGenerator func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	EgressSecurityPolicyGenerator  func(*connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 
@@ -295,6 +341,13 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		// this is set by warp
 		DrainAllTimeout: 60 * time.Minute,
 
+		EnableDrainExcuse:          true,
+		EnableDrainCoordination:    true,
+		DrainExcuseTtl:             5 * time.Minute,
+		DrainMigrateWindow:         2 * time.Minute,
+		DrainMigrateSendTimeout:    1 * time.Second,
+		DrainStragglerSweepTimeout: 60 * time.Second,
+
 		ContractManagerCheckTimeout: 5 * time.Second,
 
 		StreamPollTimeout: 60 * time.Second,
@@ -355,12 +408,22 @@ type Exchange struct {
 	// KeyEventDelivery.Enabled
 	keyEventSubscriber *keyEventSubscriber
 
+	// set once `Drain` starts. While draining, new connections are refused
+	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
+	// evicted clients land on a sibling service instead of bouncing on this
+	// one (CONNECTDRAIN2.md §3.3)
+	draining atomic.Bool
+
 	stateLock sync.Mutex
 	// client id -> resident
 	residents map[server.Id]*Resident
 
 	// client id -> connection id -> cancel func
 	connections map[server.Id]map[server.Id]context.CancelFunc
+}
+
+func (self *Exchange) IsDraining() bool {
+	return self.draining.Load()
 }
 
 func NewExchange(
@@ -452,6 +515,13 @@ func (self *Exchange) NominateLocalResident(
 	residentIdToReplace *server.Id,
 ) bool {
 	// Connection-activation gate for the plan's concurrent connected-client limit.
+	// a draining exchange refuses new residents, so a redialing client fails
+	// fast here and lands on a sibling service via the lb
+	if self.settings.EnableDrainCoordination && self.draining.Load() {
+		glog.Infof("[exchange]nominate refused: draining\n")
+		return false
+	}
+
 	// Refuse to nominate a resident for a client that would push the network past
 	// its limit, which keeps the client from becoming active. Public providers are
 	// exempt and a re-nomination of an already-connected client is not a new
@@ -508,8 +578,12 @@ func (self *Exchange) NominateLocalResident(
 			)
 			// RemoveNetworkPeer no-ops (no publish) when this resident never
 			// registered, so churny residents that died before announcing
-			// emit nothing here
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil {
+			// emit nothing here.
+			// a drained teardown skips the disconnect marker entirely: the
+			// member registration ttl converts a non-returning client to a
+			// disconnect anyway, and a returning client refreshes the entry
+			// with no visible blip (CONNECTDRAIN2.md §3.2)
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -1055,12 +1129,141 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 	}
 }
 
+// markDrained marks the resident's teardown as drain-caused and writes its
+// excuse marker, exactly once per resident (CONNECTDRAIN2.md §3.1, §3.2)
+func (self *Exchange) markDrained(resident *Resident) {
+	if resident.drained.Swap(true) {
+		return
+	}
+	if self.settings.EnableDrainExcuse {
+		model.SetDrainExcuse(
+			self.ctx,
+			resident.clientId,
+			resident.residentId,
+			self.settings.DrainExcuseTtl,
+		)
+		drainExcusesWrittenCounter.Inc()
+	}
+}
+
+// sendResidentMigrate asks the resident's client to establish a replacement
+// transport (make-before-break) and redial at `migrateTime`
+// (CONNECTDRAIN2.md §3.3). Returns false when the migrate frame was not sent.
+// An older client ignores the unknown message type and falls back to the
+// eviction plus excuse path.
+func (self *Exchange) sendResidentMigrate(resident *Resident, migrateTime time.Time) bool {
+	frame, err := connect.ToFrame(&protocol.ResidentMigrate{
+		MigrateTime: uint64(migrateTime.UnixMilli()),
+	}, connect.DefaultProtocolVersion)
+	if err != nil {
+		return false
+	}
+	return resident.client.SendWithTimeout(
+		frame,
+		connect.DestinationId(connect.Id(resident.clientId)),
+		nil,
+		self.settings.DrainMigrateSendTimeout,
+	)
+}
+
+// migrateResidents broadcasts migrate frames with migrate times jittered
+// across `DrainMigrateWindow`, then waits for the clients to move themselves:
+// a migrated client closes its old transport once its replacement is up, so
+// the wait watches the connection count. Returns when the connections are
+// gone or the migrate window (bounded by the drain deadline) elapses;
+// whatever remains falls to the straggler sweep.
+func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.Time) {
+	if len(residents) == 0 {
+		return
+	}
+
+	sentCount := 0
+	for _, resident := range residents {
+		migrateTime := time.Now().Add(time.Duration(rand.Int63n(int64(self.settings.DrainMigrateWindow))))
+		if self.sendResidentMigrate(resident, migrateTime) {
+			sentCount += 1
+		}
+	}
+	if sentCount == 0 {
+		return
+	}
+	glog.Infof("[c]drain migrate broadcast to %d residents\n", sentCount)
+
+	migrateEndTime := time.Now().Add(self.settings.DrainMigrateWindow)
+	if drainEndTime.Before(migrateEndTime) {
+		migrateEndTime = drainEndTime
+	}
+	for {
+		if migrateEndTime.Before(time.Now()) {
+			return
+		}
+		remainingCount := func() int {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			return len(self.connections)
+		}()
+		drainResidentsRemainingGauge.Set(float64(remainingCount))
+		if remainingCount == 0 {
+			return
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
+// Drain sheds this exchange's residents for shutdown (CONNECTDRAIN2.md):
+//  1. flip the admission gate, so evicted clients redial to a sibling service
+//     instead of bouncing on this one
+//  2. mark and excuse every current resident up front, so the reconnect is
+//     excused no matter when the client redials
+//  3. broadcast migrate frames with jittered migrate times and wait for
+//     clients to move themselves (make-before-break, when coordination is on)
+//  4. evict the stragglers, paced to finish within
+//     `DrainStragglerSweepTimeout`
+//
+// The whole drain is bounded by `DrainAllTimeout`.
 func (self *Exchange) Drain() {
+	self.draining.Store(true)
+	drainEndTime := time.Now().Add(self.settings.DrainAllTimeout)
+
+	residents := func() []*Resident {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return slices.Collect(maps.Values(self.residents))
+	}()
+	for _, resident := range residents {
+		self.markDrained(resident)
+	}
+
+	if self.settings.EnableDrainCoordination {
+		self.migrateResidents(residents, drainEndTime)
+	}
+
+	// straggler sweep: evict whatever remains, adapting the pace so the sweep
+	// finishes within the sweep budget (never slower than `DrainOneTimeout`
+	// per resident)
+	sweepEndTime := time.Now().Add(self.settings.DrainStragglerSweepTimeout)
+	if drainEndTime.Before(sweepEndTime) {
+		sweepEndTime = drainEndTime
+	}
 	for i := 0; ; i += 1 {
 		select {
 		case <-self.ctx.Done():
 			return
 		default:
+		}
+		if drainEndTime.Before(time.Now()) {
+			remainingCount := func() int {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				return max(len(self.connections), len(self.residents))
+			}()
+			drainResidentsRemainingGauge.Set(float64(remainingCount))
+			glog.Infof("[c]drain deadline with at least %d remaining\n", remainingCount)
+			break
 		}
 		resident, handleCancels, remainingCount, ok := func() (*Resident, []context.CancelFunc, int, bool) {
 			self.stateLock.Lock()
@@ -1080,22 +1283,35 @@ func (self *Exchange) Drain() {
 			return nil, nil, 0, false
 		}()
 		if !ok {
+			drainResidentsRemainingGauge.Set(0)
 			glog.Infof("[c]drain complete\n")
 			break
 		}
+		drainResidentsRemainingGauge.Set(float64(remainingCount))
 		if i%100 == 0 {
 			glog.Infof("[c][%d]drain in progress (at least %d remaining)\n", i, remainingCount)
 		}
 		if resident != nil {
+			self.markDrained(resident)
 			resident.Close()
 		}
 		for _, handleCancel := range handleCancels {
 			handleCancel()
 		}
+		pace := self.settings.DrainOneTimeout
+		if 0 < remainingCount {
+			if p := time.Until(sweepEndTime) / time.Duration(remainingCount); p < pace {
+				pace = p
+			}
+		}
+		if pace < time.Millisecond {
+			// sweep budget exhausted: evict as fast as possible without spinning
+			pace = time.Millisecond
+		}
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.settings.DrainOneTimeout):
+		case <-time.After(pace):
 		}
 	}
 }
@@ -2031,6 +2247,13 @@ type Resident struct {
 	// lock-free on the per-frame inbound and forward paths
 	lastActivityNanos atomic.Int64
 
+	// set when the teardown is caused by a server drain / migrate rather than
+	// a client disconnect. The cleanup then skips the peer disconnect marker:
+	// the member registration ttl converts a non-returning client to a
+	// disconnect anyway, and a returning client refreshes the entry with no
+	// visible blip (CONNECTDRAIN2.md §3.2)
+	drained atomic.Bool
+
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
 
@@ -2158,41 +2381,76 @@ func (self *Resident) chaos() {
 	}
 }
 
+// streamHopToProtocol converts a model stream hop to the client's
+// `StreamOpen` form (nil source/destination stay unset)
+func streamHopToProtocol(hop model.StreamHop) *protocol.StreamOpen {
+	streamOpen := &protocol.StreamOpen{
+		StreamId: hop.StreamId().Bytes(),
+	}
+	if sourceId := hop.SourceId(); sourceId != nil {
+		streamOpen.SourceId = sourceId.Bytes()
+	}
+	if destinationId := hop.DestinationId(); destinationId != nil {
+		streamOpen.DestinationId = destinationId.Bytes()
+	}
+	return streamOpen
+}
+
+// streamHopsToReset builds the authoritative stream snapshot for a client: a
+// `StreamReset` listing the current hops. A reconcile-style client keeps the
+// relisted streams alive; an older client cancels-and-reopens
+func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
+	streams := []*protocol.StreamOpen{}
+	for _, hop := range hops {
+		streams = append(streams, streamHopToProtocol(hop))
+	}
+	return &protocol.StreamReset{
+		Streams: streams,
+	}
+}
+
 func (self *Resident) Run() {
 	defer self.cancel()
 
-	self.client.Send(
-		connect.RequireToFrameWithDefaultProtocolVersion(&protocol.StreamReset{}),
-		connect.DestinationId(connect.Id(self.clientId)),
-		nil,
+	// the initial stream state is sent as a `StreamReset` with the full hop
+	// snapshot from the listener's first read (below), NOT an eager empty
+	// reset: a client with a reconcile-style reset handler keeps its relisted
+	// streams (and their p2p transports) alive across a resident migration
+	// (CONNECTDRAIN2.md §3.3). An older client cancels-and-reopens on the
+	// reset, which matches the previous empty-reset behavior.
+	// Subsequent hop changes are sent incrementally (open/close), identical
+	// for both client generations.
+	streamHopAccumulator := model.NewStreamHopAccumulator(
+		func(hop model.StreamHop) {
+			// added
+			streamOpen := streamHopToProtocol(hop)
+			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
+			self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+		},
+		func(hop model.StreamHop) {
+			// removed
+			streamClose := &protocol.StreamClose{
+				StreamId: hop.StreamId().Bytes(),
+			}
+			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
+			self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+		},
 	)
+	// the listener callback runs on the single listener goroutine
+	initialHopSync := true
 	streamHopListener := model.NewStreamHopListener(
 		self.ctx,
 		self.clientId,
-		model.NewStreamHopAccumulator(
-			func(hop model.StreamHop) {
-				// added
-				streamOpen := &protocol.StreamOpen{
-					StreamId: hop.StreamId().Bytes(),
-				}
-				if sourceId := hop.SourceId(); sourceId != nil {
-					streamOpen.SourceId = sourceId.Bytes()
-				}
-				if destinationId := hop.DestinationId(); destinationId != nil {
-					streamOpen.DestinationId = destinationId.Bytes()
-				}
-				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
+		func(event *model.StreamHopEvent) {
+			if initialHopSync {
+				initialHopSync = false
+				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamHopsToReset(event.StreamHops))
 				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
-			},
-			func(hop model.StreamHop) {
-				// removed
-				streamClose := &protocol.StreamClose{
-					StreamId: hop.StreamId().Bytes(),
-				}
-				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
-				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
-			},
-		).Event,
+			}
+			// the accumulator emits adds for the first snapshot too; the
+			// client's open is idempotent for streams kept by the reset
+			streamHopAccumulator.Event(event)
+		},
 		self.exchange.streamHopsPollInterval(),
 		self.exchange.listenerFullReadEvery(),
 	)

@@ -38,6 +38,10 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 }
 
 func testing_newPeerDiscoveryEnvWithSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings)) *peerDiscoveryEnv {
+	return testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, port, servicePort, mutateExchangeSettings, nil)
+}
+
+func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings), mutateHandlerSettings func(*ConnectHandlerSettings)) *peerDiscoveryEnv {
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
@@ -74,6 +78,9 @@ func testing_newPeerDiscoveryEnvWithSettings(ctx context.Context, t testing.TB, 
 	handlerSettings.ConnectionAnnounceTimeout = 0
 	handlerSettings.ConnectionAnnounceSettings.EnableNetworkPeers = true
 	handlerSettings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
+	if mutateHandlerSettings != nil {
+		mutateHandlerSettings(handlerSettings)
+	}
 	connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, handlerSettings)
 
 	// NewConnectHandler must derive the announce registration ttl from the

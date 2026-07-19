@@ -255,6 +255,7 @@ func testingGetClientReliabilityRow(
 				receive_byte_count,
 				send_message_count,
 				send_byte_count,
+				connection_excused_new_count,
 				valid
 			FROM client_reliability
 			WHERE
@@ -271,6 +272,7 @@ func testingGetClientReliabilityRow(
 				counters = map[string]int64{}
 				var connectionNew, connectionEstablished, provideEnabled, provideChanged int64
 				var receiveMessage, receiveByte, sendMessage, sendByte int64
+				var connectionExcusedNew int64
 				server.Raise(result.Scan(
 					&connectionNew,
 					&connectionEstablished,
@@ -280,6 +282,7 @@ func testingGetClientReliabilityRow(
 					&receiveByte,
 					&sendMessage,
 					&sendByte,
+					&connectionExcusedNew,
 					&valid,
 				))
 				counters["connection_new_count"] = connectionNew
@@ -290,6 +293,7 @@ func testingGetClientReliabilityRow(
 				counters["receive_byte_count"] = receiveByte
 				counters["send_message_count"] = sendMessage
 				counters["send_byte_count"] = sendByte
+				counters["connection_excused_new_count"] = connectionExcusedNew
 				ok = true
 			}
 		})
@@ -937,5 +941,81 @@ func TestClientReliabilityDegradedLocalMedian(t *testing.T) {
 			degraded = reliabilityDegradedBlocks(ctx, tx, base+60, base+120)
 		})
 		connect.AssertEqual(t, len(degraded), 0)
+	})
+}
+
+// A drain-excused reconnect is recorded as `connection_excused_new_count`
+// instead of `connection_new_count`, so it never enters
+// `client_reliability_valid` and cannot invalidate the block
+// (CONNECTDRAIN2.md §3.1).
+func TestClientReliabilityExcusedNewValid(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		ip := netip.MustParseAddr("10.11.12.14")
+		clientAddressHash := server.ClientIpHashForAddr(ip)
+
+		now := server.NowUtc()
+		blockNumber := reliabilityBlockNumber(now)
+
+		establishedStats := &ClientReliabilityStats{
+			ConnectionEstablishedCount: 1,
+			ProvideEnabledCount:        1,
+			ReceiveMessageCount:        1,
+		}
+
+		// an excused reconnect plus an established sync in the same block
+		// keeps the block valid
+		excusedClientId := server.NewId()
+		RecordClientReliabilityStatsRange(ctx, networkId, excusedClientId, clientAddressHash, now, now, &ClientReliabilityStats{
+			ConnectionExcusedNewCount: 1,
+		})
+		RecordClientReliabilityStatsRange(ctx, networkId, excusedClientId, clientAddressHash, now, now, establishedStats)
+
+		// an organic reconnect within the forgiveness keeps the block valid
+		organicClientId := server.NewId()
+		RecordClientReliabilityStatsRange(ctx, networkId, organicClientId, clientAddressHash, now, now, &ClientReliabilityStats{
+			ConnectionNewCount: 1,
+		})
+		RecordClientReliabilityStatsRange(ctx, networkId, organicClientId, clientAddressHash, now, now, establishedStats)
+
+		// a flapping client past the forgiveness invalidates the block
+		flappingClientId := server.NewId()
+		RecordClientReliabilityStatsRange(ctx, networkId, flappingClientId, clientAddressHash, now, now, &ClientReliabilityStats{
+			ConnectionNewCount: 2,
+		})
+		RecordClientReliabilityStatsRange(ctx, networkId, flappingClientId, clientAddressHash, now, now, establishedStats)
+
+		later := now.Add(3 * ReliabilityBlockDuration)
+		RollupClientReliabilityStats(ctx, later)
+
+		counters, valid, ok := testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, excusedClientId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, counters["connection_excused_new_count"], int64(1))
+		connect.AssertEqual(t, counters["connection_new_count"], int64(0))
+		connect.AssertEqual(t, valid, true)
+
+		_, valid, ok = testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, organicClientId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, valid, true)
+
+		_, valid, ok = testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, flappingClientId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, valid, false)
+
+		// the direct pg fixture path carries the excused counter too
+		fixtureClientId := server.NewId()
+		AddClientReliabilityStats(ctx, networkId, fixtureClientId, clientAddressHash, now, &ClientReliabilityStats{
+			ConnectionExcusedNewCount:  1,
+			ConnectionEstablishedCount: 1,
+			ProvideEnabledCount:        1,
+			ReceiveMessageCount:        1,
+		})
+		counters, valid, ok = testingGetClientReliabilityRow(ctx, blockNumber, clientAddressHash, fixtureClientId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, counters["connection_excused_new_count"], int64(1))
+		connect.AssertEqual(t, valid, true)
 	})
 }
