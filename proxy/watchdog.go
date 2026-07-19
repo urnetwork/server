@@ -48,6 +48,20 @@ func (self *watchdog) run() {
 			testCtx, testCancel := context.WithCancel(self.ctx)
 			defer testCancel()
 
+			// The teardown below MUST run on a context independent of self.ctx.
+			// On a graceful shutdown self.ctx — and therefore testCtx — is already
+			// canceled by the time these deferred removals run, so a testCtx-based
+			// delete fails immediately and leaks the just-created top-level client
+			// as active. The proxy redeploys often and a single poll can take
+			// minutes (120s x up to 5 attempts), so SIGTERM lands mid-poll
+			// routinely; that leak is what accumulated thousands of "proxy
+			// watchdog" clients in the test network and tripped the peer valve
+			// (model.NetworkPeersEnabled). context.Background keeps teardown alive
+			// through shutdown; the timeout bounds it so a stuck delete can't hang
+			// the process.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+
 			testSession := &session.ClientSession{
 				Ctx:           testCtx,
 				Cancel:        testCancel,
@@ -71,11 +85,20 @@ func (self *watchdog) run() {
 			}
 
 			clientId := *result.ClientId
+			cleanupSession := &session.ClientSession{
+				Ctx:           cleanupCtx,
+				ClientAddress: "0.0.0.0:0",
+				Header:        map[string][]string{},
+				ByJwt: &jwt.ByJwt{
+					NetworkId: testNetworkId,
+					UserId:    testUserId,
+				},
+			}
 			defer model.RemoveNetworkClient(
 				&model.RemoveNetworkClientArgs{
 					ClientId: clientId,
 				},
-				testSession,
+				cleanupSession,
 			)
 
 			proxyDeviceConfig := &model.ProxyDeviceConfig{
@@ -85,7 +108,7 @@ func (self *watchdog) run() {
 			}
 			proxyDeviceConfig.ClientId = clientId
 			model.CreateProxyDeviceConfig(self.ctx, proxyDeviceConfig)
-			defer model.RemoveProxyDeviceConfig(testCtx, proxyDeviceConfig.ProxyId)
+			defer model.RemoveProxyDeviceConfig(cleanupCtx, proxyDeviceConfig.ProxyId)
 			signedProxyId := model.SignProxyId(proxyDeviceConfig.ProxyId)
 
 			listenIpv4, _, listenPort := server.RequireListenIpPort(self.port)

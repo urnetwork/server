@@ -198,11 +198,37 @@ func AddClientReliabilityStatsRange(
 // recorder (>1 block behind) drops that sync's stats with a log line rather
 // than corrupting a drained block.
 
-// one redis hash per block: field = <hash hex>:<network_id>:<client_id>:<counter index>,
+// the per-block counters are sharded across
+// `clientReliabilityStatsShardCount` hashes by client id, so a block's
+// fleet-wide write load spreads across cluster slots instead of concentrating
+// on the single node owning one key (observed 2026-07-17: ~7,500 HINCRBY/s on
+// one node, and 200-290ms whole-hash HGETALLs holding its event loop —
+// RELIABILITY2.md). One client's counters always land in one shard, so
+// per-client aggregation at drain is unaffected.
+const clientReliabilityStatsShardCount = 32
+
+// one redis hash per (block, shard): field = packed
+// <client address hash (32B)><network id (16B)><client id (16B)><counter index (1B)>
+// (`clientReliabilityPackedFieldLength` bytes; the drain also accepts the
+// legacy ascii `<hash hex>:<network_id>:<client_id>:<counter index>` form),
 // value = accumulated counter
-func clientReliabilityStatsKey(blockNumber int64) string {
+func clientReliabilityStatsKey(blockNumber int64, shard int) string {
+	return fmt.Sprintf("client_reliability_stats.%d.%d", blockNumber, shard)
+}
+
+// the unsharded pre-RELIABILITY2 key. Writers on older builds fill it during
+// a rolling deploy, so the drain reads it alongside the shards; remove once
+// no deployed build writes it.
+func clientReliabilityStatsLegacyKey(blockNumber int64) string {
 	return fmt.Sprintf("client_reliability_stats.%d", blockNumber)
 }
+
+func clientReliabilityStatsShard(clientId server.Id) int {
+	idBytes := clientId.Bytes()
+	return int(idBytes[len(idBytes)-1]) % clientReliabilityStatsShardCount
+}
+
+const clientReliabilityPackedFieldLength = 32 + 16 + 16 + 1
 
 // redis SET of block numbers that have pending (un-drained) counters
 const clientReliabilityBlocksKey = "client_reliability_stats_blocks"
@@ -277,23 +303,22 @@ func RecordClientReliabilityStatsRange(
 		}
 
 		counters := stats.counters()
-		fieldPrefix := fmt.Sprintf(
-			"%s:%s:%s",
-			hex.EncodeToString(clientAddressHash[:]),
-			networkId,
-			clientId,
-		)
+		// packed binary field prefix (32B hash + 16B network id + 16B client
+		// id): under half the bytes of the legacy ascii form, repeated up to
+		// 8x per client per block
+		fieldPrefix := string(clientAddressHash[:]) + string(networkId.Bytes()) + string(clientId.Bytes())
+		shard := clientReliabilityStatsShard(clientId)
 
 		server.Redis(ctx, func(r server.RedisClient) {
 			blockNumberStrs := []interface{}{}
 			for blockNumber := startBlockNumber; blockNumber <= endBlockNumber; blockNumber += 1 {
-				statsKey := clientReliabilityStatsKey(blockNumber)
+				statsKey := clientReliabilityStatsKey(blockNumber, shard)
 				// every command targets the same hash key (one slot), so
 				// batching in a transaction is cluster-safe
 				r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 					for i, count := range counters {
 						if count != 0 {
-							pipe.HIncrBy(ctx, statsKey, fmt.Sprintf("%s:%d", fieldPrefix, i), count)
+							pipe.HIncrBy(ctx, statsKey, fieldPrefix+string([]byte{byte(i)}), count)
 						}
 					}
 					// backstop ttl only — the rollup normally deletes the
@@ -352,30 +377,58 @@ func RollupClientReliabilityStats(ctx context.Context, now time.Time) {
 	// ascending so pg fills in block order
 	slices.Sort(blockNumbers)
 
-	for _, blockNumber := range blockNumbers {
-		statsKey := clientReliabilityStatsKey(blockNumber)
-
-		// raise on error: an empty read would delete the bucket below and
-		// silently drop the block's stats
-		var fields map[string]string
-		server.Redis(ctx, func(r server.RedisClient) {
-			var err error
-			fields, err = r.HGetAll(ctx, statsKey).Result()
+	// chunked hscan instead of a whole-hash hgetall: a drained block is final
+	// (no writers), so the scan is a consistent read, and no single command
+	// holds the owning node's event loop for the whole hash (the unsharded
+	// hgetall ran 200-290ms against every co-located key — RELIABILITY2.md)
+	hscanAll := func(r server.RedisClient, key string, fields map[string]string) {
+		var cursor uint64
+		for {
+			kvs, nextCursor, err := r.HScan(ctx, key, cursor, "", 5000).Result()
 			server.Raise(err)
+			for i := 0; i+1 < len(kvs); i += 2 {
+				fields[kvs[i]] = kvs[i+1]
+			}
+			if nextCursor == 0 {
+				return
+			}
+			cursor = nextCursor
+		}
+	}
+
+	for _, blockNumber := range blockNumbers {
+		statsKeys := []string{
+			// written by pre-shard builds during a rolling deploy
+			clientReliabilityStatsLegacyKey(blockNumber),
+		}
+		for shard := 0; shard < clientReliabilityStatsShardCount; shard += 1 {
+			statsKeys = append(statsKeys, clientReliabilityStatsKey(blockNumber, shard))
+		}
+
+		// raise on error (inside hscanAll): an empty read would delete the
+		// buckets below and silently drop the block's stats
+		fields := map[string]string{}
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, statsKey := range statsKeys {
+				hscanAll(r, statsKey, fields)
+			}
 		})
 
 		upsertClientReliabilityStatsBlock(ctx, blockNumber, fields)
 
-		// record coverage before dropping the redis bucket, so a crash
-		// in between re-drains and re-covers the unchanged bucket
+		// record coverage before dropping the redis buckets, so a crash
+		// in between re-drains and re-covers the unchanged buckets
 		coverClientReliabilityBlock(ctx, blockNumber)
 		recordClientReliabilityBlockHealth(ctx, blockNumber)
 
-		// the block is fully in pg; drop the redis bucket.
-		// a crash between the upsert and here re-drains the unchanged bucket
+		// the block is fully in pg; drop the redis buckets.
+		// a crash between the upsert and here re-drains the unchanged buckets
 		// on the next run, which overwrites the same values.
 		server.Redis(ctx, func(r server.RedisClient) {
-			r.Del(ctx, statsKey)
+			// per-key deletes: the keys hash to different slots
+			for _, statsKey := range statsKeys {
+				r.Del(ctx, statsKey)
+			}
 			r.SRem(ctx, clientReliabilityBlocksKey, strconv.FormatInt(blockNumber, 10))
 		})
 	}
@@ -416,25 +469,46 @@ func upsertClientReliabilityStatsBlock(
 	}
 	rows := map[rowKey]*[clientReliabilityCounterCount]int64{}
 	for field, countStr := range fields {
-		parts := strings.Split(field, ":")
-		if len(parts) != 4 {
-			glog.Infof("[ncr]rollup drop malformed field %s\n", field)
-			continue
-		}
-		counterIndex, err := strconv.Atoi(parts[3])
-		if err != nil || counterIndex < 0 || clientReliabilityCounterCount <= counterIndex {
-			glog.Infof("[ncr]rollup drop malformed field %s\n", field)
-			continue
+		var key rowKey
+		var counterIndex int
+		if len(field) == clientReliabilityPackedFieldLength {
+			// packed binary form: 32B address hash + 16B network id +
+			// 16B client id + 1B counter index
+			counterIndex = int(field[64])
+			networkId, networkIdErr := server.IdFromBytes([]byte(field[32:48]))
+			clientId, clientIdErr := server.IdFromBytes([]byte(field[48:64]))
+			if clientReliabilityCounterCount <= counterIndex || networkIdErr != nil || clientIdErr != nil {
+				glog.Infof("[ncr]rollup drop malformed packed field %s\n", hex.EncodeToString([]byte(field)))
+				continue
+			}
+			key = rowKey{
+				clientAddressHashHex: hex.EncodeToString([]byte(field[:32])),
+				networkIdStr:         networkId.String(),
+				clientIdStr:          clientId.String(),
+			}
+		} else {
+			// legacy ascii form, written by pre-RELIABILITY2 builds
+			parts := strings.Split(field, ":")
+			if len(parts) != 4 {
+				glog.Infof("[ncr]rollup drop malformed field %s\n", field)
+				continue
+			}
+			var err error
+			counterIndex, err = strconv.Atoi(parts[3])
+			if err != nil || counterIndex < 0 || clientReliabilityCounterCount <= counterIndex {
+				glog.Infof("[ncr]rollup drop malformed field %s\n", field)
+				continue
+			}
+			key = rowKey{
+				clientAddressHashHex: parts[0],
+				networkIdStr:         parts[1],
+				clientIdStr:          parts[2],
+			}
 		}
 		count, err := strconv.ParseInt(countStr, 10, 64)
 		if err != nil {
 			glog.Infof("[ncr]rollup drop malformed count %s=%s\n", field, countStr)
 			continue
-		}
-		key := rowKey{
-			clientAddressHashHex: parts[0],
-			networkIdStr:         parts[1],
-			clientIdStr:          parts[2],
 		}
 		counters, ok := rows[key]
 		if !ok {

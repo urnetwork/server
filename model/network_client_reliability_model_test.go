@@ -376,7 +376,7 @@ func TestRecordClientReliabilityStatsRollup(t *testing.T) {
 		server.Redis(ctx, func(r server.RedisClient) {
 			members, _ := r.SMembers(ctx, clientReliabilityBlocksKey).Result()
 			connect.AssertEqual(t, len(members), 0)
-			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(blockNumber)).Result()
+			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(blockNumber, clientReliabilityStatsShard(clientId))).Result()
 			connect.AssertEqual(t, len(fields), 0)
 		})
 
@@ -396,7 +396,7 @@ func TestRecordClientReliabilityStatsRollup(t *testing.T) {
 		staleTime := server.NowUtc().Add(-3 * ReliabilityBlockDuration)
 		RecordClientReliabilityStatsRange(ctx, networkId, clientId, clientAddressHash, staleTime, staleTime, stats)
 		server.Redis(ctx, func(r server.RedisClient) {
-			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(reliabilityBlockNumber(staleTime))).Result()
+			fields, _ := r.HGetAll(ctx, clientReliabilityStatsKey(reliabilityBlockNumber(staleTime), clientReliabilityStatsShard(clientId))).Result()
 			connect.AssertEqual(t, len(fields), 0)
 		})
 	})

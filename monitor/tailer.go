@@ -76,6 +76,11 @@ var logClasses = []logClass{
 	{name: "missing-origin-contract", re: regexp.MustCompile(`Missing origin contract for companion`),
 		rateThreshold: 500, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "companion contract creation cannot find its origin contract — a spike = companion-path regression (origin closed early or client sequence bug)"},
+	// decoded from the taskworker novel class 2026-07-18: the payout wallet is
+	// out of funds — a finance action, not an api bug
+	{name: "payout-wallet-insufficient", re: regexp.MustCompile(`asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet`),
+		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning: "the payout wallet balance cannot cover pending payouts (usdc) — fund the wallet or pause payouts; retries park AdvancePayment tasks until funded"},
 }
 
 // errorShaped marks lines that count toward the novel class when no taxonomy

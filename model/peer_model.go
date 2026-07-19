@@ -300,24 +300,47 @@ func Testing_ClearNetworkPeersEnabledCache() {
 	networkPeersEnabledCache.Clear()
 }
 
-// NetworkPeersEnabled returns whether the network is within the top-level
-// client limit (LimitTopLevelClientIdsPerNetwork). Networks above the limit
-// (grandfathered fleets, or any network that grew past it while the creation
-// cap is dark) get NO peer registrations or subscriptions: the v2 poll
-// architecture has each connected top-level client full-read the network's
-// connected/disconnected zsets + meta hash on every change, all on the single
-// shard that owns the hash-tagged `{np_<networkId>}` keys, so the per-shard
-// cost scales with the connected top-level client count — unbounded, it is
-// O(size^2) fan-out on one shard (2026-07-17: an ~8,900-client network drove
-// its shard to ~1,700 full-reads/sec and starved every other key on it).
+// networkPeersRecentAuthWindow bounds the NetworkPeersEnabled count to the
+// network's recently-active top-level clients. auth_time refreshes on both auth
+// AND connect (see ConnectNetworkClient), so "authed within the window" is the
+// set of clients that have recently connected and could be polling the peer
+// zsets — the set that actually drives the shard fan-out. It deliberately
+// EXCLUDES dormant-but-active clients: a top-level client is retained up to
+// TopLevelClientIdleExpiration (30 days) after its last auth/connect before the
+// reaper marks it inactive, so a network can carry thousands of active rows that
+// have not connected in months (identity churn — a fresh device_id per login —
+// or leaked proxy-watchdog clients) while only a handful are live. Those dormant
+// rows register no peers and drive no cost, so they must not trip the valve.
+const networkPeersRecentAuthWindow = 14 * 24 * time.Hour
+
+// NetworkPeersEnabled returns whether the network is within the top-level client
+// limit (LimitTopLevelClientIdsPerNetwork), counting only RECENTLY-ACTIVE
+// top-level clients (auth_time within networkPeersRecentAuthWindow). Networks
+// above the limit (genuinely large concurrent fleets) get NO peer registrations
+// or subscriptions: the v2 poll architecture has each connected top-level client
+// full-read the network's connected/disconnected zsets + meta hash on every
+// change, all on the single shard that owns the hash-tagged `{np_<networkId>}`
+// keys, so the per-shard cost scales with the connected top-level client count —
+// unbounded, it is O(size^2) fan-out on one shard (2026-07-17: an ~8,900-client
+// network drove its shard to ~1,700 full-reads/sec and starved every other key
+// on it).
+//
+// Counting ALL active top-level clients (the original valve) wrongly disabled
+// the feature for any network that merely ACCUMULATED dormant top-level clients
+// under the 30-day retention window, even when only two devices were ever
+// connected. Bounding to the recent-auth working set fixes that without
+// deactivating anything: dormant rows stay valid clients, they just no longer
+// count against the peer valve. The window is a conservative over-count of the
+// truly-connected set (it also includes clients that disconnected within the
+// window), so it still errs toward disabling for genuinely busy networks.
 //
 // This valve is enforced INDEPENDENTLY of enforce_concurrent_clients: it only
 // removes the peer feature. The connection and creation caps
 // (NetworkConcurrentClientsExceeded, CanConnectNetworkPeer, AuthNetworkClient)
 // stay separately gated by enforce_concurrent_clients, so an over-limit network
 // still connects and carries traffic exactly as before — it just polls no peer
-// list. The decision is cached per network for `networkPeersEnabledTtl`, and
-// the count scan is bounded at the limit since only the threshold matters.
+// list. The decision is cached per network for `networkPeersEnabledTtl`, and the
+// count scan is bounded at the limit since only the threshold matters.
 func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 	if enabled, ok := networkPeersEnabledCache.Get(networkId); ok {
 		return enabled
@@ -327,25 +350,27 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT COUNT(*) AS top_level_client_count
+				SELECT COUNT(*) AS recent_top_level_client_count
 				FROM (
 					SELECT 1
 					FROM network_client
 					WHERE
 						network_id = $1 AND
 						active = true AND
-						source_client_id IS NULL
+						source_client_id IS NULL AND
+						auth_time > $3
 					LIMIT $2
 				) t
 			`,
 			networkId,
 			LimitTopLevelClientIdsPerNetwork+1,
+			server.NowUtc().Add(-networkPeersRecentAuthWindow),
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				topLevelClientCount := 0
-				server.Raise(result.Scan(&topLevelClientCount))
-				enabled = topLevelClientCount <= LimitTopLevelClientIdsPerNetwork
+				recentTopLevelClientCount := 0
+				server.Raise(result.Scan(&recentTopLevelClientCount))
+				enabled = recentTopLevelClientCount <= LimitTopLevelClientIdsPerNetwork
 			}
 		})
 	})

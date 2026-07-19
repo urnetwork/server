@@ -232,6 +232,128 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 	})
 }
 
+// TestCreateContractCompanionStreamId verifies that a companion contract is
+// marked with the origin flow's active stream id — the receive sequence on
+// the other side inspects the contract to know the stream is active — even
+// when the escrow-linked (earliest) origin contract is not the one carrying
+// the stream. Also guards the stream-version gate: a version-0 request must
+// not get a stream id.
+func TestCreateContractCompanionStreamId(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		streamKey := []byte("test-provide-secret-key-stream00")
+
+		newClient := func(networkId server.Id) server.Id {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+			return clientId
+		}
+
+		newFundedNetwork := func() server.Id {
+			networkId := server.NewId()
+			userId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+			balanceCode, err := model.CreateBalanceCode(
+				ctx,
+				model.ByteCount(1024*1024*1024*1024),
+				365*24*time.Hour,
+				model.UsdToNanoCents(10.00),
+				server.NewId().String(), "", "",
+			)
+			connect.AssertEqual(t, err, nil)
+			_, err = model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+				Secret:    balanceCode.Secret,
+				NetworkId: networkId,
+			}, ctx)
+			connect.AssertEqual(t, err, nil)
+			return networkId
+		}
+
+		createCompanionContract := func(source server.Id, destination server.Id, streamVersion *uint32) *protocol.CreateContractResult {
+			frames, err := CreateContract(ctx, source, &protocol.CreateContract{
+				DestinationId:     destination.Bytes(),
+				TransferByteCount: uint64(1024 * 1024),
+				Companion:         true,
+				StreamVersion:     streamVersion,
+			}, connect.DefaultContractManagerSettings())
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(frames), 1)
+			message, err := connect.FromFrame(frames[0])
+			connect.AssertEqual(t, err, nil)
+			result, ok := message.(*protocol.CreateContractResult)
+			connect.AssertEqual(t, ok, true)
+			return result
+		}
+
+		storedContract := func(result *protocol.CreateContractResult) *protocol.StoredContract {
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
+			stored := &protocol.StoredContract{}
+			connect.AssertEqual(t, proto.Unmarshal(result.Contract.StoredContractBytes, stored), nil)
+			return stored
+		}
+
+		streamVersion1 := uint32(1)
+
+		// the consumer advertises only Stream so the companion request settles
+		// as a companion Stream contract (no network normalization)
+		networkId := newFundedNetwork()
+		provider := newClient(networkId)
+		consumer := newClient(networkId)
+		model.SetProvide(ctx, consumer, map[model.ProvideMode][]byte{
+			model.ProvideModeStream: streamKey,
+		})
+
+		// the earliest origin (consumer -> provider) has NO stream; a newer
+		// origin carries the active stream. The companion escrow links to the
+		// earliest, and the marking must still resolve the stream.
+		_, err := model.CreateContractNoEscrow(ctx, networkId, consumer, networkId, provider, model.ByteCount(1024*1024))
+		connect.AssertEqual(t, err, nil)
+		streamedOriginContractId, err := model.CreateContractNoEscrow(ctx, networkId, consumer, networkId, provider, model.ByteCount(1024*1024))
+		connect.AssertEqual(t, err, nil)
+		intermediaryId := server.NewId()
+		streamId := model.AddToStream(ctx, streamedOriginContractId, consumer, provider, []server.Id{intermediaryId})
+
+		result := createCompanionContract(provider, consumer, &streamVersion1)
+		stored := storedContract(result)
+		connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Stream)
+		connect.AssertEqual(t, len(stored.StreamId) == 0, false)
+		connect.AssertEqual(t, server.Id(stored.StreamId), streamId)
+
+		// the companion joined the stream: it resolves the stream itself, and
+		// keeps it alive when the streamed origin closes out
+		companionContractId := server.Id(stored.ContractId)
+		memberStreamId, _, ok := model.GetStream(ctx, companionContractId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, memberStreamId, streamId)
+		model.RemoveFromStream(ctx, streamedOriginContractId)
+		_, _, ok = model.GetStream(ctx, companionContractId)
+		connect.AssertEqual(t, ok, true)
+
+		// a stream-version-0 request never gets a stream id, even with the
+		// stream active
+		resultV0 := createCompanionContract(provider, consumer, nil)
+		storedV0 := storedContract(resultV0)
+		connect.AssertEqual(t, len(storedV0.StreamId), 0)
+
+		// with no active stream for the flow, the companion stays unmarked
+		model.RemoveFromStream(ctx, companionContractId)
+		networkId2 := newFundedNetwork()
+		provider2 := newClient(networkId2)
+		consumer2 := newClient(networkId2)
+		model.SetProvide(ctx, consumer2, map[model.ProvideMode][]byte{
+			model.ProvideModeStream: streamKey,
+		})
+		_, err = model.CreateContractNoEscrow(ctx, networkId2, consumer2, networkId2, provider2, model.ByteCount(1024*1024))
+		connect.AssertEqual(t, err, nil)
+		result2 := createCompanionContract(provider2, consumer2, &streamVersion1)
+		stored2 := storedContract(result2)
+		connect.AssertEqual(t, len(stored2.StreamId), 0)
+	})
+}
+
 // TestCreateContractCompanionNetworkNormalization guards the boundaries of the
 // companion -> network normalization: a companion request between same-network
 // peers where the destination advertises the network mode settles as a

@@ -1,8 +1,22 @@
 # RELIABILITY2 — client reliability stats: redis hot-path optimization plan
 
-Plan only — nothing here is implemented (a first pass was drafted and backed
-out 2026-07-18 at the user's direction; the validated implementation notes
-from that pass are in §6).
+STATUS 2026-07-18: §3.1–3.3 IMPLEMENTED in
+model/network_client_reliability_model.go (uncommitted) — sharded keys,
+hscan drain with the §4 legacy-key transition read, packed binary fields
+with a dual-form parser. Tests: TestClientReliabilityStatsShardedDrain
+(multi-shard record → merge-drain → absolute pg rows → keys removed),
+TestClientReliabilityStatsLegacyDrain (rolling-deploy mix of legacy ascii +
+sharded packed fields in one block, distinct clients),
+TestClientReliabilityStatsDeployMixedDrain (the full deploy timeline: a
+pre-deploy legacy-only block, then a mid-deploy block where ONE client's
+syncs land on both an old-build and a new-build process — overlapping
+counter indexes SUM across forms into a single pg row, disjoint indexes
+coexist — plus legacy-only and new-only clients, re-drain idempotency, and
+removal of every key form of every block),
+TestClientReliabilityStatsShardFunction, plus the full pre-existing
+Reliability suite — all passing under -race.
+§3.4 (per-process coalescing) remains a follow-up per its own sequencing:
+land + measure 3.1–3.3 first. §3.5 unchanged (leave cadence alone).
 
 ## 1. Why
 
@@ -93,6 +107,25 @@ keys, merged before the upsert, and DELs all of them. Same pattern covers
 3.3's mixed field encodings (parser accepts both). The legacy read can be
 removed once no deployed build writes the old key. No flag day, no data
 loss, re-drains stay idempotent.
+
+Deploy ORDER: the drain lives in taskworker, the writers in connect. An OLD
+taskworker cannot see shard keys, so until the new taskworker lands, sharded
+counters ride the 15-min ttl backstop (bounded stats loss). Roll taskworker
+first or concurrently with connect.
+
+DRAIN COMPLETE ~14:25 UTC 2026-07-18: old connect generation fully retired
+fleet-wide, newest-block legacy field count 0 with shards carrying 100% of
+the volume (shard0 alone 6,703 fields), blocks set at 2 (minimal). The
+legacy-key read in the drain (§4) is now dead code on prod — schedule its
+removal in a future build once this deploy is considered settled.
+
+Rolled out 2026-07-18 (~13:36–13:45 UTC): cutover verified live — sharded
+fields grew as new connect took traffic, legacy volume tracked the draining
+old generation (non-monotonic across blocks; see monitor/SIGNALS.md 3.7
+rollout observations for the verification discipline), the new taskworker
+landed ~3 min in and drained mixed blocks cleanly (blocks set steady at ~3),
+and per-node hincrby deltas showed the concentration dissolve (top sampled
+node 7,014/s → 165/s). Canary and tier-0 held throughout.
 
 ## 5. Verification
 

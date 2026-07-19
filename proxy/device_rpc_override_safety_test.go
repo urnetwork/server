@@ -100,6 +100,103 @@ func TestProxyDeviceRpcLocalRouteOverrideNeutralized(t *testing.T) {
 	})
 }
 
+// A hosted (cloud proxy) device must block every hosted-incompatible parameter
+// pushed over the device rpc: provide (in any form), local routing, tunnel
+// stop/start, vpn-interface-while-offline, and direct mode in the performance
+// profile. Direct mode would leak that the proxy client is hosted, and where it
+// is hosted, via the host addresses in the direct connection setup; the others
+// would egress or provide from the proxy host's real interface.
+//
+// Each blocked parameter is pushed from a DeviceRemote (as the browser would)
+// with a value that differs from the hosted baseline. The performance profile —
+// an allowed rpc whose AllowDirect field is hard-limited — is pushed last and
+// used as the sync barrier. The hosted device's stored state must be unchanged
+// for every blocked parameter, and the stored profile must have direct mode
+// forced off with the rest of the profile preserved.
+//
+// Complements TestProxyDeviceRpcLocalRouteOverrideNeutralized (block action
+// overrides) and the sdk-level hosted guard unit tests
+// (TestHostedSafePerformanceProfile, TestHostedSafeBlockActionOverride) and the
+// multi client hard limit (connect TestMultiClientNeverAllowDirect).
+func TestProxyDeviceRpcHostedIncompatibleBlocked(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		opts := defaultProxyTestOptions()
+		opts.enableDeviceRpc = true
+		opts.disableSecurityPolicies = true
+		h := setupProxyTestWithOptions(t, opts)
+		defer h.cancel()
+
+		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		connect.AssertEqual(t, err, nil)
+		hosted := pd.deviceLocal
+
+		instanceId := sdk.RequireIdFromBytes(h.pdInstanceId.Bytes())
+		remote, err := sdk.NewPlatformDeviceRemote(
+			h.networkSpace,
+			h.pdByClientJwt,
+			h.deviceRpcUrl,
+			h.signedProxyId,
+			instanceId,
+		)
+		connect.AssertEqual(t, err, nil)
+		defer remote.Close()
+
+		waitFor(t, 60*time.Second, "remote connected", remote.GetRemoteConnected)
+
+		baselineTunnelStarted := hosted.GetTunnelStarted()
+		baselineRouteLocal := hosted.GetRouteLocal()
+		baselineProvideMode := hosted.GetProvideMode()
+		baselineProvidePaused := hosted.GetProvidePaused()
+		baselineProvideControlMode := hosted.GetProvideControlMode()
+		baselineProvideNetworkMode := hosted.GetProvideNetworkMode()
+		baselineVpnInterfaceWhileOffline := hosted.GetVpnInterfaceWhileOffline()
+
+		// each pushed value must differ from the baseline,
+		// so an accepted push would be visible
+		connect.AssertEqual(t, false, baselineRouteLocal)
+		connect.AssertEqual(t, true, baselineProvideMode != sdk.ProvideModePublic)
+		connect.AssertEqual(t, true, baselineProvideControlMode != sdk.ProvideControlModeAlways)
+		connect.AssertEqual(t, true, baselineProvideNetworkMode != sdk.ProvideNetworkModeAll)
+
+		// push hosted-incompatible parameters
+		remote.SetTunnelStarted(!baselineTunnelStarted)
+		remote.SetRouteLocal(true)
+		remote.SetProvideMode(sdk.ProvideModePublic)
+		remote.SetProvidePaused(!baselineProvidePaused)
+		remote.SetProvideControlMode(sdk.ProvideControlModeAlways)
+		remote.SetProvideNetworkMode(sdk.ProvideNetworkModeAll)
+		remote.SetVpnInterfaceWhileOffline(!baselineVpnInterfaceWhileOffline)
+
+		// the performance profile is an allowed rpc; direct mode is hard-limited
+		remote.SetPerformanceProfile(&sdk.PerformanceProfile{
+			WindowType:  sdk.WindowTypeQuality,
+			AllowDirect: true,
+		})
+		waitFor(t, 30*time.Second, "performance profile synced to hosted device", func() bool {
+			return hosted.GetPerformanceProfile() != nil
+		})
+
+		// direct mode is forced off; the rest of the profile is preserved
+		performanceProfile := hosted.GetPerformanceProfile()
+		if performanceProfile.AllowDirect {
+			t.Fatal("hosted device holds AllowDirect: direct mode must be impossible")
+		}
+		connect.AssertEqual(t, sdk.WindowTypeQuality, performanceProfile.WindowType)
+
+		// every blocked parameter is unchanged on the hosted device
+		connect.AssertEqual(t, baselineTunnelStarted, hosted.GetTunnelStarted())
+		connect.AssertEqual(t, baselineRouteLocal, hosted.GetRouteLocal())
+		connect.AssertEqual(t, baselineProvideMode, hosted.GetProvideMode())
+		connect.AssertEqual(t, baselineProvidePaused, hosted.GetProvidePaused())
+		connect.AssertEqual(t, baselineProvideControlMode, hosted.GetProvideControlMode())
+		connect.AssertEqual(t, baselineProvideNetworkMode, hosted.GetProvideNetworkMode())
+		connect.AssertEqual(t, baselineVpnInterfaceWhileOffline, hosted.GetVpnInterfaceWhileOffline())
+	})
+}
+
 // assertNoLocalRoute fails if any override on the hosted device routes locally.
 func assertNoLocalRoute(t testing.TB, overrides *sdk.BlockActionOverrideList) {
 	for i := 0; i < overrides.Len(); i += 1 {

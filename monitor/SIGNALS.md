@@ -365,7 +365,33 @@ fullest node daily + on any skew alert, and diff family counts week-over-week
 The reliability pipeline is the standing top redis load: announce-path
 `HINCRBY client_reliability_stats.<block>` (observed ~7,500/s on one node)
 plus block-drain and score-rebuild `HGETALL`s of those giant hashes (200–290ms
-per call in slowlog). Two or three nodes hot at 5–10x fleet ops with this
+per call in slowlog). (Key shape after RELIABILITY2 shipped 2026-07-18:
+`client_reliability_stats.<block>.<shard>` — 32-way sharded by client id,
+drained with chunked HSCAN. Post-deploy the single-node concentration and
+the 200-290ms HGETALL slowlog class should DISAPPEAR; their reappearance =
+regression.)
+
+Rollout observations (2026-07-18, the live cutover):
+- The legacy unsharded field count is NON-MONOTONIC during a fleet roll: it
+  tracks the remaining old-build announce volume per block and bounces
+  (273k → 16.7k → 162k observed) as edges drain at different paces. Judge
+  cutover progress by which build generations remain in `docker ps` (8.2),
+  not by the legacy count falling smoothly.
+- The legacy hot spot ROTATES per block (the block number is in the key
+  name → a new slot each minute), so "which node is hot" moves even while
+  the sharded portion is already spread. Verify the spread with short
+  per-node `hincrby` DELTAS (e.g. two commandstats snapshots 10s apart on
+  several nodes) — lifetime counters dilute the change and a single-node
+  instantaneous read can land on the rotating legacy slot. Observed: top
+  sampled node fell 7,014/s → 165/s as the fleet cut over.
+- `SCARD client_reliability_stats_blocks` ≈ 3 (current + previous + one
+  pending) = the drain is healthy through the transition; a growing set =
+  the drain is not keeping up or cannot see the keys (wrong build order).
+- Deploy order matters: the drain lives in TASKWORKER, the writers in
+  CONNECT. Until the new taskworker lands, sharded counters are invisible
+  to the old drain (bounded stats loss via the 15-min ttl backstop). Roll
+  taskworker first or concurrently — on 2026-07-18 the new taskworker
+  landed ~3 min after new connect took traffic; loss window was minimal. Two or three nodes hot at 5–10x fleet ops with this
 exact command mix is this pipeline, not an incident — attribute before
 alarming:
 ```bash
@@ -403,6 +429,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `[contract][error] ... Insufficient balance` | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | Watch the RATE: a step-change up = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. |
+| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, circle payment path) | The payout wallet cannot cover pending payouts (usdc on solana — mint EPjFWdd5...Dt1v in the error text). NOT an api failure: every AdvancePayment retry 400s until the wallet is funded, parking the tasks on backoff (decoded 2026-07-18 from the novel class — the full error text names the wallet id, its balance, and the required amount). | Finance/ops: fund the payout wallet (or pause payouts). Task-side symptoms clear on their own once funded and the backoff run_at arrives. |
 | `[contract][error] ... Missing origin contract for companion` | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` lines mean NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | A sustained step-change = clients being pointed at non-contractable destinations: stale provider selection (2.8, playbook 5.9) or an announce/provide-key regression. Sample failing pairs and check the dest's `{pm_<clientId>}sk_*` keys. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
@@ -837,3 +864,58 @@ Reading discipline: slot-striped staleness → per-node config; global
 staleness with healthy config → subscriber presence; healthy both with
 climbing resets → delivery drops. Do not raise the corrective poll interval
 while any of these is unexplained.
+
+## 10. Connect drain (deploy / rebalance)
+
+Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
+(2026-07-18). Design + fixes: CONNECTDRAIN2.md.
+
+### 10.1 Is a connect group actually draining?
+- **The systemd unit uptime is NOT the signal.** `warp-main-connect-g<N>` is a
+  warpctl ORCHESTRATOR; it stays up for weeks while the connect BUILD runs in a
+  docker container underneath. On the incident host the unit showed 29h uptime
+  while the container was mid-deploy — reading unit uptime as "not deployed yet"
+  was wrong. Check the container, not the unit.
+- **Drain-in-progress = the orchestrator has a live `docker container stop`
+  child.** `pid=$(systemctl show warp-main-connect-g<N> -p MainPID --value)` then
+  `ps --ppid $pid -o etime,cmd` shows e.g. `14:39  sudo docker container stop
+  -t 3600 <container>`. Presence of that child = that group is draining; its
+  `etime` = how long. `-t 3600` = up to a 1-HOUR SIGKILL grace, so a stuck drain
+  can hang ~an hour blind.
+- **The running build = the container image tag**, not the unit. `sudo docker ps
+  --format '{{.Image}} {{.Status}}'` (needs root; on these hosts `by` sudo
+  password is `by-pass`, feed via `sudo -S`). A drain shows the old container in
+  `Removal In Progress`/`Exited` while the new image's container is `Up`.
+
+### 10.2 Drain health signals
+- **Both groups of a host draining at once** (`edge4_draining=2` = the g1 AND g4
+  stop-children both live) halves the host's serving capacity during the window
+  and double-bounces clients — flag it; drain should stagger one group/host at a
+  time (CONNECTDRAIN2 §3.4). Watch: count of concurrent `container stop` children
+  per host.
+- **Drain wall-time** (the stop-child `etime`): a fixed 200ms/resident walk plus
+  the blind `-t 3600` ceiling produced a 28+ MINUTE drain in the incident. A drain
+  running longer than a few minutes with residents remaining is stuck — check
+  `[c]drain in progress (at least N remaining)` in the connect log (logged every
+  100 evictions, `resident.go`).
+- **Peer registry frozen during drain:** the affected network's
+  `{np_<net>}eid` stops advancing and its `{np_<net>}connected` set empties while
+  the old build drains and clients haven't re-registered on the new one — devices
+  see each other as offline for the whole window. Confirm registration resumes
+  post-drain: `redis-cli -c -p 6379 zrange '{np_<net>}connected' 0 -1` on the
+  redis host repopulates and `eid` advances.
+
+### 10.3 Reliability fallout of a drain (until CONNECTDRAIN2 Track A ships)
+- A drain-reconnect writes `ConnectionNewCount` which invalidates the provider's
+  60s reliability block (`transport_announce.go`); only ONE reconnect/block is
+  forgiven (`ReliabilityAllowDisconnectCountPerBlock=1`), so a double-bounce
+  (two groups draining) invalidates. The re-announce also sets
+  `ProvideChangedCount` (independent invalidation). Expect a reliability-score
+  dip on the affected providers correlated with the deploy — deploy-correlated,
+  NOT a provider fault (§8.4 annotate-don't-alert applies). Once Track A ships,
+  this shows as `connection_new{excused="true"}` instead of a score dip.
+
+### 10.4 Access recipe (this env)
+`ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.
+Docker (root): `echo by-pass | sudo -S docker ps`. Redis registry lives on
+edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.

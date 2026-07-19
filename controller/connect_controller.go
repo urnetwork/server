@@ -543,8 +543,18 @@ func newContract(
 		case 0:
 			// companion stream is not supported
 		default:
-			companionContractId := *escrow.CompanionContractId
-			streamId_, _, ok := model.GetStream(ctx, companionContractId)
+			// when the origin flow has an active stream, the companion must
+			// carry the stream id — the receive sequence on the other side
+			// inspects the contract to know the stream is active — and join
+			// the stream so it stays open while the reply is in flight
+			originContractId := *escrow.CompanionContractId
+			streamId_, ok := model.AddCompanionContractToStream(
+				ctx,
+				contractId,
+				originContractId,
+				sourceId,
+				destinationId,
+			)
 			if ok {
 				streamId = &streamId_
 			}

@@ -16,6 +16,8 @@ import (
 
 	"maps"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
@@ -225,6 +227,21 @@ func contractStreamId(contractId server.Id) string {
 	return fmt.Sprintf("{%s}s2_ct_sid", contractId)
 }
 
+// the pair marker is the set of a pair's active stream keys, maintained
+// best-effort by add/join/remove. It lets the companion path resolve the
+// origin flow's streams with one redis read instead of scanning the pair's
+// open contracts — pairs that never stream (the common case) stop at an
+// empty read. Members can be stale (redis loss, expiry races, streams
+// created before this marker deployed converge as their contracts renew);
+// readers must re-check stream liveness and prune
+func pairStreamsKey(clientIdA server.Id, clientIdB server.Id) string {
+	// normalize like `newStreamKey` so both directions map to one key
+	if 0 < clientIdA.Cmp(clientIdB) {
+		clientIdA, clientIdB = clientIdB, clientIdA
+	}
+	return fmt.Sprintf("{%s.%s}s2_pk", clientIdA, clientIdB)
+}
+
 // returns a stream id to use for the contract
 // if stream count changes from 0, associate the stream id with each hop on the stream
 func AddToStream(
@@ -295,6 +312,14 @@ func AddToStream(
 				panic(err)
 			}
 
+			// the pair marker key is in its own slot: plain pipeline
+			r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				pairKey := pairStreamsKey(streamKey.SourceId(), streamKey.DestinationId())
+				pipe.SAdd(ctx, pairKey, streamKey.Bytes())
+				pipe.Expire(ctx, pairKey, ttl)
+				return nil
+			})
+
 			if initialSize == 0 {
 				for clientId, edges := range streamKey.Edges() {
 					// bump the per-client hops version (PEERS2.md
@@ -320,6 +345,135 @@ func AddToStream(
 				}
 			}
 		}
+	})
+	return
+}
+
+// AddCompanionContractToStream marks a companion contract with the active
+// stream of its origin flow and joins it to the stream's membership. Without
+// the membership the receive sequence on the other side cannot see that the
+// stream is active when it inspects the contract, and the stream would be
+// torn down when the last origin contract closes even though the companion
+// reply is still open (`RemoveFromStream` on close applies to the companion
+// like any stream contract once joined).
+// The escrow-linked origin alone cannot carry the stream marking: the
+// earliest-origin linkage may predate the stream or may have already closed
+// out of it while newer origin contracts keep the stream active. On a miss,
+// resolve candidates through the pair marker and join the first active
+// stream found.
+func AddCompanionContractToStream(
+	ctx context.Context,
+	contractId server.Id,
+	originContractId server.Id,
+	sourceId server.Id,
+	destinationId server.Id,
+) (streamId server.Id, ok bool) {
+	if _, key, found := GetStream(ctx, originContractId); found {
+		streamId, ok = joinStream(ctx, contractId, key)
+		if ok {
+			return
+		}
+	}
+
+	pairKey := pairStreamsKey(sourceId, destinationId)
+	var candidateKeys []streamKey
+	server.Redis(ctx, func(r server.RedisClient) {
+		members, err := r.SMembers(ctx, pairKey).Result()
+		if err != nil {
+			panic(err)
+		}
+		for _, member := range members {
+			candidateKeys = append(candidateKeys, streamKey([]byte(member)))
+		}
+	})
+	for _, key := range candidateKeys {
+		streamId, ok = joinStream(ctx, contractId, key)
+		if ok {
+			return
+		}
+		// the stream is gone; prune the stale marker member
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.SRem(ctx, pairKey, key.Bytes())
+		})
+	}
+	return
+}
+
+// joinStream adds `contractId` to the stream at `key`, if that stream is
+// still active
+func joinStream(
+	ctx context.Context,
+	contractId server.Id,
+	key streamKey,
+) (streamId server.Id, ok bool) {
+
+	ttl := 8 * time.Hour
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		// note the keys in eval have to be in the same hash slot.
+		// re-check liveness inside the eval: the stream can be removed
+		// between the member lookup and the join, and a join must not
+		// resurrect a dead stream (its hops are already torn down)
+		result := r.Eval(
+			ctx,
+			`
+			local stream_id_key = KEYS[1]
+			local stream_contracts_key = KEYS[2]
+			local contract_id = ARGV[1]
+			local ttl = ARGV[2]
+
+			local stream_id = redis.call('GET', stream_id_key)
+			if stream_id == false then
+				return false
+			end
+
+			redis.call('SADD', stream_contracts_key, contract_id)
+			redis.call('EXPIRE', stream_id_key, ttl)
+			redis.call('EXPIRE', stream_contracts_key, ttl)
+
+			return stream_id
+			`,
+			[]string{
+				streamIdKey(key),
+				streamContractsKey(key),
+			},
+			contractId.Bytes(),
+			ttl,
+		)
+		streamIdBytes, err := result.Text()
+		if err == server.RedisNil {
+			return
+		}
+		if err != nil {
+			panic(err)
+		}
+		streamId = server.Id([]byte(streamIdBytes))
+
+		pipe := r.TxPipeline()
+		pipe.Set(ctx, contractStreamKey(contractId), key.Bytes(), ttl)
+		pipe.Set(ctx, contractStreamId(contractId), streamId.Bytes(), ttl)
+		_, err = pipe.Exec(ctx)
+		if err != nil {
+			panic(err)
+		}
+
+		// the pair marker key is in its own slot: plain pipeline
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			pairKey := pairStreamsKey(key.SourceId(), key.DestinationId())
+			pipe.SAdd(ctx, pairKey, key.Bytes())
+			pipe.Expire(ctx, pairKey, ttl)
+			return nil
+		})
+
+		// joining an existing stream never changes hop membership;
+		// refresh the hop key ttls like a same-stream add
+		for clientId, _ := range key.Edges() {
+			streamHopsKey := clientStreamHopsKey(clientId)
+			r.Expire(ctx, streamHopsKey, ttl)
+			r.Expire(ctx, clientEventIdKey(clientId), clientEventIdTtl)
+		}
+
+		ok = true
 	})
 	return
 }
@@ -398,6 +552,8 @@ func RemoveFromStream(ctx context.Context, contractId server.Id) (streamId serve
 			}
 
 			if finalSize == 0 {
+				r.SRem(ctx, pairStreamsKey(streamKey.SourceId(), streamKey.DestinationId()), streamKey.Bytes())
+
 				for clientId, edges := range streamKey.Edges() {
 					// bump the per-client hops version (PEERS2.md
 					// dirty-counter + poll; no pubsub delivery)

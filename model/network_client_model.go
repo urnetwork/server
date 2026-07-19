@@ -1692,7 +1692,7 @@ func IsIpConnectedToNetwork(
 // non-HOT update that maintains all of network_client's ~10 indexes -- and the
 // per-connection refresh is the highest-frequency write on the table. Its
 // consumers are coarse retention thresholds (`TopLevelClientIdleExpiration`
-// 90d, `NetworkClientReapAfterDeactivate` 30d), so sub-hour freshness buys
+// 30d, `NetworkClientReapAfterDeactivate` 30d), so sub-hour freshness buys
 // nothing: skip the write entirely while auth_time is fresh.
 const clientAuthTimeRefreshMinInterval = time.Hour
 
@@ -1842,7 +1842,19 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // FindActiveClientNetwork), and the reap hard deletes it
 // `NetworkClientReapAfterDeactivate` later. A returning user logs in again
 // with a fresh client id.
-const TopLevelClientIdleExpiration = 90 * 24 * time.Hour
+//
+// Tightened 90d -> 30d (2026-07-18). A top-level client stays active for this
+// whole window, so under identity churn (a fresh device_id per login) or a
+// leaking client a network accumulates a large dormant-but-active fleet. At 90d
+// that reached ~8.2M active top-level clients fleet-wide (~78% idle >30d) and,
+// before the recent-auth peer valve (NetworkPeersEnabled), disabled peer
+// discovery for >5,000 networks. 30d ages the dormant backlog out sooner while
+// still letting a monthly-active user re-login rather than stranding a session.
+// Tradeoff: a device idle longer than this is logged out on its next jwt
+// refresh; raise the constant to be gentler. NOTE: the first reaper run after a
+// decrease deactivates the entire newly-eligible band, in bounded 10k batches
+// (a large one-time pass).
+const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.
