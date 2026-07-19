@@ -297,10 +297,32 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		&networkId,
 	)
 
+	// Re-read the current network name from the DB rather than carrying
+	// forward session.ByJwt.NetworkName -- that's just whatever name was
+	// baked into the JWT being refreshed, so a rename via
+	// change-name/claim-name would never show up in the client until it
+	// happened to get a truly fresh JWT (e.g. by logging out and back in).
+	networkName := session.ByJwt.NetworkName
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			session.Ctx,
+			`
+				SELECT network_name FROM network
+				WHERE admin_user_id = $1
+			`,
+			session.ByJwt.UserId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkName))
+			}
+		})
+	})
+
 	byJwt := jwt.NewByJwt(
 		networkId,
 		session.ByJwt.UserId,
-		session.ByJwt.NetworkName,
+		networkName,
 		false,
 		isPro,
 	)

@@ -715,6 +715,40 @@ func addWalletAuth(
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
+		// Check for an existing binding of this wallet to a different user
+		// before attempting the INSERT below, mirroring the
+		// validateUserAuthAvailability pre-check addUserAuthInTx does for
+		// email/phone auth. A raw unique-constraint violation from the
+		// INSERT would abort this transaction; server.Tx's default retry
+		// options blindly retry the subsequent failed COMMIT for up to 60s
+		// regardless of whether the underlying cause is actually
+		// retryable, so on the ordinary (non-racing) "wallet already taken"
+		// path this would otherwise stall the request for up to a minute
+		// with no error ever reaching the client instead of failing fast.
+		var conflictUserId *server.Id
+		result, queryErr := tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user_auth_wallet
+				WHERE wallet_address = $1 AND blockchain = $2
+			`,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		)
+		if queryErr != nil {
+			err = queryErr
+			return
+		}
+		server.WithPgResult(result, queryErr, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&conflictUserId))
+			}
+		})
+		if conflictUserId != nil && *conflictUserId != addWalletAuth.UserId {
+			err = errors.New("This wallet is already linked to another account.")
+			return
+		}
+
 		_, dbErr := tx.Exec(
 			ctx,
 			`
