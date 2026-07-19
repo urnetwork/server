@@ -49,9 +49,10 @@ func changeNetworkName(
 	session *session.ClientSession,
 	reclaimCooldown bool,
 ) (*ChangeNetworkNameResult, error) {
-	// Seedphrase users must have email/phone or SSO bound to claim/change name
-	// (wallet doesn't count — need a way to verify identity)
-	if err := requireEmailOrSsoBound(session.Ctx, session.ByJwt.UserId); err != nil {
+	// Seedphrase users must have email/phone, SSO, or a wallet bound to
+	// claim/change name — a signed wallet challenge is itself proof the
+	// user controls that identity, same as a verified email or SSO login.
+	if err := requireVerifiedIdentityBound(session.Ctx, session.ByJwt.UserId); err != nil {
 		return &ChangeNetworkNameResult{
 			Error: &ChangeNetworkNameError{
 				Message: err.Error(),
@@ -196,10 +197,10 @@ func isNetworkNameAvailableForUser(
 	return available, nil
 }
 
-// requireEmailOrSsoBound checks that the user has at least one verified email/phone
-// password auth or SSO auth bound. Seedphrase-only users (or seedphrase + wallet
-// only) can't claim/change names — they need a verified identity method.
-func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
+// requireVerifiedIdentityBound checks that the user has at least one verified
+// email/phone password auth, SSO auth, or wallet bound. Seedphrase-only users
+// can't claim/change names — they need a verifiable identity method.
+func requireVerifiedIdentityBound(ctx context.Context, userId server.Id) error {
 	var hasBoundAuth bool
 
 	server.Db(ctx, func(conn server.PgConn) {
@@ -211,6 +212,9 @@ func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
 					WHERE user_id = $1 AND verified = true
 					UNION ALL
 					SELECT 1 FROM network_user_auth_sso
+					WHERE user_id = $1
+					UNION ALL
+					SELECT 1 FROM network_user_auth_wallet
 					WHERE user_id = $1
 				)
 			`,
@@ -224,7 +228,7 @@ func requireEmailOrSsoBound(ctx context.Context, userId server.Id) error {
 	})
 
 	if !hasBoundAuth {
-		return fmt.Errorf("You must verify an email or bind a social login before changing your network name.")
+		return fmt.Errorf("You must verify an email, bind a social login, or connect a wallet before changing your network name.")
 	}
 
 	return nil
